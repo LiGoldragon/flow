@@ -1,4 +1,5 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
+pub mod claude;
 pub mod codex;
 pub mod store;
 
@@ -93,12 +94,17 @@ impl Dispatches for RunningNexus {
                     .record_restarted(token)
                     .unwrap_or(Response::RestartRejected(RestartRejection::ResumeRefused))
             }
-            Query::ResolveRecipient(flow_id) => self
-                .store
-                .apply(Query::ResolveRecipient(flow_id))
-                .unwrap_or(Response::RecipientResolutionRejected(
-                    signal_flow::RecipientResolutionRejection::FlowUnavailable,
-                )),
+            Query::ResolveRecipient(flow_id) => {
+                match self.store.apply(Query::ResolveRecipient(flow_id)) {
+                    Ok(Response::RecipientResolved(node)) => {
+                        Response::RecipientResolved(claude::refresh_readiness(node))
+                    }
+                    Ok(response) => response,
+                    Err(_) => Response::RecipientResolutionRejected(
+                        signal_flow::RecipientResolutionRejection::FlowUnavailable,
+                    ),
+                }
+            }
         }
     }
 

@@ -38,19 +38,31 @@ impl ParsesMetaCommand for FlowMetaClient {
                 let harness = operation.expect("matched operation");
                 let Some(flow_id) = arguments.next() else { return Err(Self::registration_usage()) };
                 let Some(session_id) = arguments.next() else { return Err(Self::registration_usage()) };
+                let endpoint = arguments.next();
                 if arguments.next().is_some() { return Err(Self::registration_usage()) }
                 let harness_kind = if harness == "register-codex" {
                     signal_flow::HarnessKind::Codex
                 } else {
                     signal_flow::HarnessKind::Claude
                 };
-                let endpoint_selection = if harness_kind == signal_flow::HarnessKind::Codex {
-                    signal_flow::EndpointSelection::Available(signal_flow::Available_Data {
-                        endpoint_path: "/home/li/.codex/app-server-control/app-server-control.sock".into(),
-                        route_readiness: signal_flow::RouteReadiness::Ready,
-                    })
-                } else {
+                let endpoint_path = endpoint.unwrap_or_else(|| {
+                    if harness_kind == signal_flow::HarnessKind::Codex {
+                        "/home/li/.codex/app-server-control/app-server-control.sock".into()
+                    } else {
+                        String::new()
+                    }
+                });
+                let endpoint_selection = if endpoint_path.is_empty() {
                     signal_flow::EndpointSelection::Unavailable
+                } else {
+                    signal_flow::EndpointSelection::Available(signal_flow::Available_Data {
+                        endpoint_path,
+                        route_readiness: if harness_kind == signal_flow::HarnessKind::Codex {
+                            signal_flow::RouteReadiness::Ready
+                        } else {
+                            signal_flow::RouteReadiness::Parked
+                        },
+                    })
                 };
                 Ok(Query::RegisterFlow(signal_flow::FlowNode {
                     flow_id: flow_id.clone(),
@@ -77,14 +89,14 @@ impl ParsesMetaCommand for FlowMetaClient {
                 }
                 Ok(Query::Configure(Configuration { ordinary_socket_path, meta_socket_path }))
             }
-            _ => Err("usage: flow-meta reset <idempotency-key> [credit-id] | flow-meta register-codex|register-claude <flow-id> <session-id> | flow-meta configure <ordinary-socket> <meta-socket>".into()),
+            _ => Err("usage: flow-meta reset <idempotency-key> [credit-id] | flow-meta register-codex|register-claude <flow-id> <session-id> [endpoint] | flow-meta configure <ordinary-socket> <meta-socket>".into()),
         }
     }
 }
 
 impl FlowMetaClient {
     fn registration_usage() -> String {
-        "usage: flow-meta register-codex|register-claude <flow-id> <session-id>".into()
+        "usage: flow-meta register-codex|register-claude <flow-id> <session-id> [endpoint]".into()
     }
 }
 

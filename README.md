@@ -32,13 +32,18 @@ operations:
 
 ```sh
 flow-meta register-codex <flow-id> <thread-id>
-flow-meta register-claude <flow-id> <session-id>
+flow-meta register-claude <flow-id> <session-id> <daemon-control-socket>
 ```
 
 The two sockets are mode `0600`. The meta edge separates ordinary Flow
 operations from administrative operations within the owning Unix user's
 processes; it is not a security boundary between processes running as that
 same user.
+
+Claude resolution rechecks the job state, daemon roster, rendezvous socket,
+control socket, and worker process on every request. It reports `Parked` when
+that evidence no longer matches, when a permission wait is recorded, or when
+the lifecycle is terminal. An ordinary `blocked` lifecycle remains routable.
 
 By default the Nexus uses:
 

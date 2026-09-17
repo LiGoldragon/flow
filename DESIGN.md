@@ -44,6 +44,10 @@ second identity registry.
 `RegisterFlow` is a meta Signal for importing sessions created before Flow
 Nexus. It preserves the same `FlowNode` shape used by resolution, so imported
 and Nexus-launched identities share one registry and one read contract.
+For Claude records, the stored endpoint is only a candidate: every resolution
+revalidates the full session against `state.json`, the daemon roster,
+rendezvous and control sockets, process liveness, permission fields, and
+terminal lifecycle states before returning `Ready`.
 
 Fresh stores persist default sockets. Meta `Configure` writes the same store
 and reports `NexusRestartRequired`, since rebinding live sockets is deferred

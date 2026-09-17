@@ -8,11 +8,15 @@ use std::{
     collections::HashMap,
     fs,
     io::{Read, Write},
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::{
+        fs::PermissionsExt,
+        net::{UnixListener, UnixStream},
+    },
     path::Path,
 };
 use store::{
-    AuthorizesFlowRestart, FlowStore, OpensFlowStore, RecordsRestartedFlow, RecordsStartedFlow,
+    AuthorizesFlowRestart, ConfiguresFlowStore, FlowStore, OpensFlowStore, RecordsRestartedFlow,
+    RecordsStartedFlow,
 };
 pub trait Applies {
     fn apply(&mut self, query: Query) -> Response;
@@ -109,10 +113,35 @@ impl ServesOrdinary for RunningNexus {
     fn serve_ordinary(&self, socket: &Path) -> Result<(), String> {
         let _ = fs::remove_file(socket);
         let listener = UnixListener::bind(socket).map_err(|e| e.to_string())?;
+        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
         loop {
             let (mut peer, _) = listener.accept().map_err(|e| e.to_string())?;
             let reply = self.dispatch(Frame::read_query(&mut peer)?);
             Frame::write_response(&mut peer, &reply)?
+        }
+    }
+}
+pub trait ServesMeta {
+    fn serve_meta(&self, socket: &Path) -> Result<(), String>;
+}
+impl ServesMeta for RunningNexus {
+    fn serve_meta(&self, socket: &Path) -> Result<(), String> {
+        let _ = fs::remove_file(socket);
+        let listener = UnixListener::bind(socket).map_err(|e| e.to_string())?;
+        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+        loop {
+            let (mut peer, _) = listener.accept().map_err(|e| e.to_string())?;
+            let query = Frame::read_meta_query(&mut peer)?;
+            let meta_signal_flow::Query::Configure(configuration) = query;
+            self.store
+                .configure(configuration.clone())
+                .map_err(|e| e.to_string())?;
+            Frame::write_meta_response(
+                &mut peer,
+                &meta_signal_flow::Response::Configured(configuration),
+            )?
         }
     }
 }
@@ -218,6 +247,19 @@ impl Frame {
     pub fn read_response(peer: &mut UnixStream) -> Result<Response, String> {
         rkyv::from_bytes::<Response, rkyv::rancor::Error>(&Self::read_bytes(peer)?)
             .map_err(|e| e.to_string())
+    }
+    pub fn read_meta_query(peer: &mut UnixStream) -> Result<meta_signal_flow::Query, String> {
+        rkyv::from_bytes::<meta_signal_flow::Query, rkyv::rancor::Error>(&Self::read_bytes(peer)?)
+            .map_err(|e| e.to_string())
+    }
+    pub fn write_meta_response(
+        peer: &mut UnixStream,
+        value: &meta_signal_flow::Response,
+    ) -> Result<(), String> {
+        Self::write_bytes(
+            peer,
+            &rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?,
+        )
     }
 }
 

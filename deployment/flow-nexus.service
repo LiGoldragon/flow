@@ -1,0 +1,13 @@
+[Unit]
+Description=Flow Nexus
+After=codex-remote-control.service
+Requires=codex-remote-control.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/flow-nexus
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

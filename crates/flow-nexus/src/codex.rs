@@ -441,9 +441,30 @@ impl StartsCodex for CodexAdapter {
         let result = (|| {
             session.request(1, "initialize", serde_json::json!({ "clientInfo": { "name": "flow-nexus", "version": env!("CARGO_PKG_VERSION") } }), self.timeout)?;
             session.notify("initialized", serde_json::Value::Null)?;
-            let cwd = std::env::current_dir()
+            let flow_directory = if cfg!(test) {
+                format!("/tmp/flow-nexus-test-{flow_id}")
+            } else {
+                format!("/home/li/primary/flows/{flow_id}")
+            };
+            std::fs::create_dir_all(&flow_directory)
                 .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
-            let started = session.request(2, "thread/start", serde_json::json!({ "cwd": cwd, "model": self.model, "sandbox": "danger-full-access", "approvalPolicy": "never", "ephemeral": false, "threadSource": "flow-nexus" }), self.timeout)?;
+            let started = session.request(
+                2,
+                "thread/start",
+                serde_json::json!({
+                    "cwd": "/home/li/primary",
+                    "model": self.model,
+                    "sandbox": "danger-full-access",
+                    "approvalPolicy": "never",
+                    "ephemeral": false,
+                    "threadSource": "flow-nexus",
+                    "config": { "shell_environment_policy": { "inherit": "core", "set": {
+                        "FLOW_ID": flow_id,
+                        "FLOW_DIRECTORY": flow_directory
+                    }}}
+                }),
+                self.timeout,
+            )?;
             let thread_id = started
                 .pointer("/thread/id")
                 .and_then(serde_json::Value::as_str)
@@ -475,9 +496,30 @@ impl CodexAdapter {
         let result = (|| {
             session.request(1,"initialize",serde_json::json!({"clientInfo":{"name":"flow-nexus","version":env!("CARGO_PKG_VERSION")}}),self.timeout)?;
             session.notify("initialized", serde_json::Value::Null)?;
-            let cwd = std::env::current_dir()
+            let flow_directory = if cfg!(test) {
+                format!("/tmp/flow-nexus-test-{flow_id}")
+            } else {
+                format!("/home/li/primary/flows/{flow_id}")
+            };
+            std::fs::create_dir_all(&flow_directory)
                 .map_err(|e| CodexAdapterUnavailable::Protocol(e.to_string()))?;
-            let started=session.request(2,"thread/start",serde_json::json!({"cwd":cwd,"model":self.model,"sandbox":"danger-full-access","approvalPolicy":"never","ephemeral":false,"threadSource":"flow-nexus"}),self.timeout)?;
+            let started = session.request(
+                2,
+                "thread/start",
+                serde_json::json!({
+                    "cwd":"/home/li/primary",
+                    "model":self.model,
+                    "sandbox":"danger-full-access",
+                    "approvalPolicy":"never",
+                    "ephemeral":false,
+                    "threadSource":"flow-nexus",
+                    "config": { "shell_environment_policy": { "inherit": "core", "set": {
+                        "FLOW_ID": flow_id,
+                        "FLOW_DIRECTORY": flow_directory
+                    }}}
+                }),
+                self.timeout,
+            )?;
             let thread = started
                 .pointer("/thread/id")
                 .and_then(serde_json::Value::as_str)

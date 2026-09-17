@@ -29,26 +29,22 @@ trait TextualizesFlowReply {
 
 impl ReadsCallerOrigin for FlowClient {
     fn caller_origin(&self) -> Result<OriginClue, String> {
-        let flow_session = env::var("CODEX_SESSION_ID")
-            .or_else(|_| env::var("CLAUDE_SESSION_ID"))
-            .map_err(|_| "origin flow session unavailable".to_string())?;
+        let inferred_flow_id = env::var("CODEX_SESSION_ID")
+            .ok()
+            .and_then(|session| codex_flow_id(&session))
+            .or_else(|| {
+                env::var("CLAUDE_SESSION_ID")
+                    .ok()
+                    .and_then(|session| claude_flow_id(&session))
+            });
         let session_id = env::var("CODEX_THREAD_ID")
             .or_else(|_| env::var("CODEX_SESSION_ID"))
             .or_else(|_| env::var("CLAUDE_SESSION_ID"))
             .map_err(|_| "origin session unavailable".to_string())?;
-        let flow_id = env::var("FLOW_ID").unwrap_or_else(|_| {
-            flow_session
-                .rsplit('-')
-                .next()
-                .and_then(|tail| {
-                    tail.get(tail.len().saturating_sub(9)..tail.len().saturating_sub(3))
-                })
-                .unwrap_or("unknown")
-                .to_owned()
-        });
-        if flow_id == "unknown" {
-            return Err("origin flow unavailable".into());
-        }
+        let flow_id = env::var("FLOW_ID")
+            .ok()
+            .or(inferred_flow_id)
+            .ok_or_else(|| "origin flow unavailable".to_string())?;
         let turn_id = env::var("TURN_ID").unwrap_or_else(|_| "unavailable".into());
         Ok(OriginClue {
             flow_id,
@@ -56,6 +52,16 @@ impl ReadsCallerOrigin for FlowClient {
             turn_id,
         })
     }
+}
+
+fn codex_flow_id(session: &str) -> Option<String> {
+    let tail = session.rsplit('-').next()?;
+    tail.get(tail.len().checked_sub(9)?..tail.len().checked_sub(3)?)
+        .map(ToOwned::to_owned)
+}
+
+fn claude_flow_id(session: &str) -> Option<String> {
+    session.split('-').next()?.get(..6).map(ToOwned::to_owned)
 }
 
 impl ParsesFlowCommand for FlowClient {
@@ -68,8 +74,8 @@ impl ParsesFlowCommand for FlowClient {
             (Some("restart"), Some(flow_id), None) => {
                 let origin = self.caller_origin()?;
                 Ok(Query::Restart(RestartRequest {
-                    first_flow_id: flow_id,
-                    second_flow_id: origin.flow_id,
+                    flow_id,
+                    origin_clue: origin,
                 }))
             }
             (Some("resolve"), Some(flow_id), None) => Ok(Query::ResolveRecipient(flow_id)),
@@ -87,7 +93,11 @@ impl CallsFlowNexus for FlowClient {
         peer.write_all(&bytes).map_err(|e| e.to_string())?;
         let mut length = [0; 4];
         peer.read_exact(&mut length).map_err(|e| e.to_string())?;
-        let mut reply = vec![0; u32::from_be_bytes(length) as usize];
+        let length = u32::from_be_bytes(length) as usize;
+        if length > 1024 * 1024 {
+            return Err("Signal frame exceeds 1 MiB".into());
+        }
+        let mut reply = vec![0; length];
         peer.read_exact(&mut reply).map_err(|e| e.to_string())?;
         rkyv::from_bytes::<Response, rkyv::rancor::Error>(&reply).map_err(|e| e.to_string())
     }
@@ -117,7 +127,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlowClient, ParsesFlowCommand};
+    use super::{FlowClient, ParsesFlowCommand, claude_flow_id, codex_flow_id};
     use signal_flow::Query;
 
     #[test]
@@ -130,6 +140,18 @@ mod tests {
                 .parse_command(["resolve".into(), "fac697".into()].into_iter())
                 .unwrap(),
             Query::ResolveRecipient("fac697".into())
+        );
+    }
+
+    #[test]
+    fn harness_session_conventions_recover_flow_identity() {
+        assert_eq!(
+            codex_flow_id("01a0aacb-ac84-71a1-88a0-05ed9961ca9d").as_deref(),
+            Some("d9961c")
+        );
+        assert_eq!(
+            claude_flow_id("da1e3f9d-857f-49ab-8c6f-3aa0a9db826b").as_deref(),
+            Some("da1e3f")
         );
     }
 }

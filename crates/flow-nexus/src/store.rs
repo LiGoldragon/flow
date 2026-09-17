@@ -32,6 +32,8 @@ struct FlowRecord {
     flow_type: String,
     origin: OriginClue,
     thread_id: Option<String>,
+    harness_kind: HarnessKind,
+    endpoint_selection: EndpointSelection,
     lifecycle: FlowLifecycle,
     generation: u64,
 }
@@ -153,6 +155,10 @@ pub trait ConfiguresFlowStore {
     fn configure(&self, configuration: Configuration) -> Result<(), StoreError>;
 }
 
+pub trait RegistersFlowIdentity {
+    fn register_flow(&self, flow_node: FlowNode) -> Result<FlowNode, StoreError>;
+}
+
 trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
@@ -178,7 +184,7 @@ impl OpensFlowStore for FlowStore {
         let flows = engine.register_table(TableDescriptor::new(
             FLOW_TABLE_NAME,
             FamilyName::new("flow-nexus-flow"),
-            SchemaHash::for_label("flow-nexus-flow-v4"),
+            SchemaHash::for_label("flow-nexus-flow-v5"),
         ))?;
         let state = engine.register_table(TableDescriptor::new(
             FLOW_STATE_TABLE_NAME,
@@ -316,6 +322,38 @@ impl ConfiguresFlowStore for FlowStore {
     }
 }
 
+impl RegistersFlowIdentity for FlowStore {
+    fn register_flow(&self, flow_node: FlowNode) -> Result<FlowNode, StoreError> {
+        let lifecycle = match flow_node.flow_lifecycle {
+            SignalFlowLifecycle::Pending => FlowLifecycle::Pending,
+            SignalFlowLifecycle::Active => FlowLifecycle::Active,
+        };
+        let record = FlowRecord {
+            flow_id: flow_node.flow_id.clone(),
+            flow_type: match flow_node.harness_kind {
+                HarnessKind::Codex => "codex-registered".into(),
+                HarnessKind::Claude => "claude-registered".into(),
+            },
+            origin: flow_node.origin_clue.clone(),
+            thread_id: Some(flow_node.session_id.clone()),
+            harness_kind: flow_node.harness_kind.clone(),
+            endpoint_selection: flow_node.endpoint_selection.clone(),
+            lifecycle,
+            generation: 1,
+        };
+        if self.flow(&flow_node.flow_id)?.is_some() {
+            self.engine.mutate_keyed(KeyedMutation::new(
+                self.flows,
+                RecordKey::new(flow_node.flow_id.clone()),
+                record,
+            ))?;
+        } else {
+            self.engine.assert(Assertion::new(self.flows, record))?;
+        }
+        Ok(flow_node)
+    }
+}
+
 impl ReadsFlowStore for FlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError> {
         let records = self
@@ -371,14 +409,8 @@ impl ReadsFlowStore for FlowStore {
         Ok(Response::RecipientResolved(FlowNode {
             flow_id: flow.flow_id,
             session_id,
-            harness_kind: HarnessKind::Codex,
-            endpoint_selection: EndpointSelection::Available(signal_flow::Available_Data {
-                endpoint_path: "/home/li/.codex/app-server-control/app-server-control.sock".into(),
-                route_readiness: match flow.lifecycle {
-                    FlowLifecycle::Active => RouteReadiness::Ready,
-                    FlowLifecycle::Pending => RouteReadiness::Parked,
-                },
-            }),
+            harness_kind: flow.harness_kind.clone(),
+            endpoint_selection: flow.endpoint_selection.clone(),
             origin_clue: flow.origin,
             flow_lifecycle: match flow.lifecycle {
                 FlowLifecycle::Active => SignalFlowLifecycle::Active,
@@ -406,6 +438,15 @@ impl WritesFlowStore for FlowStore {
                         flow_type,
                         origin: origin.clone(),
                         thread_id: None,
+                        harness_kind: HarnessKind::Codex,
+                        endpoint_selection: EndpointSelection::Available(
+                            signal_flow::Available_Data {
+                                endpoint_path:
+                                    "/home/li/.codex/app-server-control/app-server-control.sock"
+                                        .into(),
+                                route_readiness: RouteReadiness::Parked,
+                            },
+                        ),
                         lifecycle: FlowLifecycle::Pending,
                         generation: 0,
                     },
@@ -452,6 +493,10 @@ impl WritesFlowStore for FlowStore {
         }
         flow.lifecycle = FlowLifecycle::Active;
         flow.generation = 1;
+        flow.endpoint_selection = EndpointSelection::Available(signal_flow::Available_Data {
+            endpoint_path: "/home/li/.codex/app-server-control/app-server-control.sock".into(),
+            route_readiness: RouteReadiness::Ready,
+        });
         let origin_clue = flow.origin.clone();
         let session_id = flow.thread_id.clone().expect("checked thread identity");
         self.engine.mutate_keyed(KeyedMutation::new(
@@ -498,7 +543,7 @@ mod tests {
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow,
         FlowStore, OpensFlowStore, RecordsPendingThread, RecordsRestartedFlow,
-        ReservesPendingStart,
+        RegistersFlowIdentity, ReservesPendingStart,
     };
     use meta_signal_flow::Configuration;
     use signal_flow::{OriginClue, Query, Response, Restarted, StartRequest};
@@ -712,5 +757,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn registered_existing_flow_resolves_without_a_new_launch() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let node = signal_flow::FlowNode {
+            flow_id: "da1e3f".into(),
+            session_id: "claude-session".into(),
+            harness_kind: signal_flow::HarnessKind::Claude,
+            endpoint_selection: signal_flow::EndpointSelection::Unavailable,
+            origin_clue: signal_flow::OriginClue {
+                flow_id: "da1e3f".into(),
+                session_id: "claude-session".into(),
+                turn_id: "unavailable".into(),
+            },
+            flow_lifecycle: signal_flow::FlowLifecycle::Active,
+        };
+        store
+            .register_flow(node.clone())
+            .expect("registration persists");
+        assert_eq!(
+            store
+                .apply(Query::ResolveRecipient("da1e3f".into()))
+                .unwrap(),
+            Response::RecipientResolved(node)
+        );
     }
 }

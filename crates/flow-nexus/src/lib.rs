@@ -15,7 +15,8 @@ use std::{
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, RecordsPendingThread, RecordsRestartedFlow, ReservesPendingStart,
+    OpensFlowStore, RecordsPendingThread, RecordsRestartedFlow, RegistersFlowIdentity,
+    ReservesPendingStart,
 };
 
 pub struct RunningNexus {
@@ -69,10 +70,13 @@ impl Dispatches for RunningNexus {
             Query::Restart(request) => {
                 let authorization = self
                     .store
-                    .authorize_restart(&request.first_flow_id, &request.second_flow_id);
+                    .authorize_restart(&request.flow_id, &request.origin_clue.flow_id);
                 let Ok(Some(token)) = authorization else {
                     return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
                 };
+                if request.origin_clue.session_id != token.thread_id {
+                    return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
+                }
                 let origin = signal_flow::OriginClue {
                     flow_id: token.authority_flow_id.clone(),
                     session_id: token.thread_id.clone(),
@@ -117,6 +121,13 @@ impl Dispatches for RunningNexus {
                 .map(meta_signal_flow::Response::ResetConsumed)
                 .unwrap_or(meta_signal_flow::Response::ResetRejected(
                     meta_signal_flow::ResetRejection::AdapterUnavailable,
+                )),
+            meta_signal_flow::Query::RegisterFlow(flow_node) => self
+                .store
+                .register_flow(flow_node)
+                .map(meta_signal_flow::Response::FlowRegistered)
+                .unwrap_or(meta_signal_flow::Response::FlowRegistrationRejected(
+                    meta_signal_flow::FlowRegistrationRejection::StoreRefused,
                 )),
         }
     }
@@ -199,7 +210,11 @@ impl Frame {
     fn read_bytes(peer: &mut UnixStream) -> Result<Vec<u8>, String> {
         let mut length = [0; 4];
         peer.read_exact(&mut length).map_err(|e| e.to_string())?;
-        let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+        let length = u32::from_be_bytes(length) as usize;
+        if length > 1024 * 1024 {
+            return Err("Signal frame exceeds 1 MiB".into());
+        }
+        let mut bytes = vec![0; length];
         peer.read_exact(&mut bytes).map_err(|e| e.to_string())?;
         Ok(bytes)
     }

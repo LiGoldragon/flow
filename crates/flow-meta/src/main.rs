@@ -5,7 +5,6 @@ use std::{
     env,
     io::{Read, Write},
     os::unix::net::UnixStream,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 struct FlowMetaClient {
@@ -15,7 +14,6 @@ struct FlowMetaClient {
 trait ParsesMetaCommand {
     fn parse_command(&self, arguments: impl Iterator<Item = String>) -> Result<Query, String>;
 }
-
 trait CallsMetaNexus {
     fn call(&self, query: &Query) -> Result<Response, String>;
 }
@@ -25,17 +23,46 @@ impl ParsesMetaCommand for FlowMetaClient {
         let operation = arguments.next();
         match operation.as_deref() {
             Some("reset") => {
+                let Some(idempotency_key) = arguments.next() else {
+                    return Err("usage: flow-meta reset <idempotency-key> [credit-id]".into());
+                };
                 let credit_selection = arguments.next()
                     .map(CreditSelection::Specific)
                     .unwrap_or(CreditSelection::Next);
                 if arguments.next().is_some() {
-                    return Err("usage: flow-meta reset [credit-id]".into());
+                    return Err("usage: flow-meta reset <idempotency-key> [credit-id]".into());
                 }
-                let nonce = SystemTime::now().duration_since(UNIX_EPOCH)
-                    .map_err(|error| error.to_string())?.as_nanos();
-                Ok(Query::ConsumeReset(ResetRequest {
-                    idempotency_key: format!("flow-meta-{nonce}"),
-                    credit_selection,
+                Ok(Query::ConsumeReset(ResetRequest { idempotency_key, credit_selection }))
+            }
+            Some("register-codex") | Some("register-claude") => {
+                let harness = operation.expect("matched operation");
+                let Some(flow_id) = arguments.next() else { return Err(Self::registration_usage()) };
+                let Some(session_id) = arguments.next() else { return Err(Self::registration_usage()) };
+                if arguments.next().is_some() { return Err(Self::registration_usage()) }
+                let harness_kind = if harness == "register-codex" {
+                    signal_flow::HarnessKind::Codex
+                } else {
+                    signal_flow::HarnessKind::Claude
+                };
+                let endpoint_selection = if harness_kind == signal_flow::HarnessKind::Codex {
+                    signal_flow::EndpointSelection::Available(signal_flow::Available_Data {
+                        endpoint_path: "/home/li/.codex/app-server-control/app-server-control.sock".into(),
+                        route_readiness: signal_flow::RouteReadiness::Ready,
+                    })
+                } else {
+                    signal_flow::EndpointSelection::Unavailable
+                };
+                Ok(Query::RegisterFlow(signal_flow::FlowNode {
+                    flow_id: flow_id.clone(),
+                    session_id: session_id.clone(),
+                    harness_kind,
+                    endpoint_selection,
+                    origin_clue: signal_flow::OriginClue {
+                        flow_id,
+                        session_id,
+                        turn_id: "unavailable".into(),
+                    },
+                    flow_lifecycle: signal_flow::FlowLifecycle::Active,
                 }))
             }
             Some("configure") => {
@@ -50,8 +77,14 @@ impl ParsesMetaCommand for FlowMetaClient {
                 }
                 Ok(Query::Configure(Configuration { ordinary_socket_path, meta_socket_path }))
             }
-            _ => Err("usage: flow-meta reset [credit-id] | flow-meta configure <ordinary-socket> <meta-socket>".into()),
+            _ => Err("usage: flow-meta reset <idempotency-key> [credit-id] | flow-meta register-codex|register-claude <flow-id> <session-id> | flow-meta configure <ordinary-socket> <meta-socket>".into()),
         }
+    }
+}
+
+impl FlowMetaClient {
+    fn registration_usage() -> String {
+        "usage: flow-meta register-codex|register-claude <flow-id> <session-id>".into()
     }
 }
 
@@ -64,7 +97,11 @@ impl CallsMetaNexus for FlowMetaClient {
         peer.write_all(&bytes).map_err(|e| e.to_string())?;
         let mut length = [0; 4];
         peer.read_exact(&mut length).map_err(|e| e.to_string())?;
-        let mut reply = vec![0; u32::from_be_bytes(length) as usize];
+        let length = u32::from_be_bytes(length) as usize;
+        if length > 1024 * 1024 {
+            return Err("Signal frame exceeds 1 MiB".into());
+        }
+        let mut reply = vec![0; length];
         peer.read_exact(&mut reply).map_err(|e| e.to_string())?;
         rkyv::from_bytes::<Response, rkyv::rancor::Error>(&reply).map_err(|e| e.to_string())
     }
@@ -93,16 +130,17 @@ mod tests {
     use meta_signal_flow::{CreditSelection, Query};
 
     #[test]
-    fn reset_selects_the_next_credit_by_default() {
+    fn reset_keeps_the_callers_retry_key() {
         let client = FlowMetaClient {
             socket: "unused".into(),
         };
         let Query::ConsumeReset(request) = client
-            .parse_command(["reset".into()].into_iter())
+            .parse_command(["reset".into(), "attempt-1".into()].into_iter())
             .expect("reset command")
         else {
             panic!("reset query")
         };
         assert_eq!(request.credit_selection, CreditSelection::Next);
+        assert_eq!(request.idempotency_key, "attempt-1");
     }
 }

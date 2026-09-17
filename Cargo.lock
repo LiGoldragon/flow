@@ -250,6 +250,7 @@ dependencies = [
  "meta-signal-flow",
  "protos 0.31.0",
  "rkyv",
+ "signal-flow",
 ]
 
 [[package]]
@@ -365,14 +366,15 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "1.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=409f6c6c85e9cba6a21cc0c540d25a41fca9efb2#409f6c6c85e9cba6a21cc0c540d25a41fca9efb2"
+version = "1.1.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=8ba99d5ff8dc384f5786231956a6f77d07be69b9#8ba99d5ff8dc384f5786231956a6f77d07be69b9"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",
  "protos 0.31.0",
  "rkyv",
  "signal",
+ "signal-flow",
 ]
 
 [[package]]
@@ -641,8 +643,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "1.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=f3a0780be0d3f870bc0035857f657668ec0cf3a7#f3a0780be0d3f870bc0035857f657668ec0cf3a7"
+version = "1.1.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=5334763fe61513f4cd8d58160e411c9e8315d1b9#5334763fe61513f4cd8d58160e411c9e8315d1b9"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",

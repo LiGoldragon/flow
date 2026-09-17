@@ -21,10 +21,24 @@ flow restart <flow-id>
 flow resolve <flow-id>
 ```
 
-`flow-meta reset` asks the Codex app-server to consume the next eligible reset
-credit. `flow-meta reset <credit-id>` selects a specific credit. It sends the
+`flow-meta reset <idempotency-key>` asks the Codex app-server to consume the
+next eligible reset credit. `flow-meta reset <idempotency-key> <credit-id>`
+selects a specific credit. Reusing the key makes a retry stable. It sends the
 privileged request through the meta socket; the command never talks to Codex
 directly.
+
+Existing daemon sessions enter the authoritative registry through typed meta
+operations:
+
+```sh
+flow-meta register-codex <flow-id> <thread-id>
+flow-meta register-claude <flow-id> <session-id>
+```
+
+The two sockets are mode `0600`. The meta edge separates ordinary Flow
+operations from administrative operations within the owning Unix user's
+processes; it is not a security boundary between processes running as that
+same user.
 
 By default the Nexus uses:
 
@@ -37,8 +51,16 @@ By default the Nexus uses:
 The Codex adapter opens `codex app-server proxy`, then sends `initialize`,
 `thread/start`, and `turn/start`. The returned thread is owned by the running
 app-server and remains visible to remote-control clients. Restart resumes that
-thread and starts its next turn only when the caller's provenance Flow ID
-equals the target Flow ID.
+thread and starts its next turn only when the caller's provenance Flow ID and
+harness session equal the registered target. The daemon injects `FLOW_ID` and
+`FLOW_DIRECTORY` into every Codex child and creates its workspace at
+`/home/li/primary/flows/<flow-id>`.
+
+For a user service installation, build the workspace in release mode, install
+the three binaries into `~/.local/bin`, copy
+`deployment/flow-nexus.service` into `~/.config/systemd/user`, then enable
+`flow-nexus.service`. Declarative environments should package the same unit
+and binaries instead of retaining this local copy.
 
 Run `cargo test --workspace` for the durable contract, store, command, proxy,
 failure, timeout, identity-resolution, and reset-adapter witnesses.

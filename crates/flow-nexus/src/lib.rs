@@ -2,6 +2,7 @@
 //! carry rkyv archives; JSON below is only the external Codex app-server RPC.
 pub mod codex;
 pub mod store;
+use codex::{CodexAdapter, ResumesCodex, StartsCodex};
 use signal_flow::{Query, Response};
 use std::{
     collections::HashMap,
@@ -10,8 +11,110 @@ use std::{
     os::unix::net::{UnixListener, UnixStream},
     path::Path,
 };
+use store::{
+    AuthorizesFlowRestart, FlowStore, OpensFlowStore, RecordsRestartedFlow, RecordsStartedFlow,
+};
 pub trait Applies {
     fn apply(&mut self, query: Query) -> Response;
+}
+pub struct RunningNexus {
+    pub store: FlowStore,
+    pub codex: CodexAdapter,
+}
+pub trait Dispatches {
+    fn dispatch(&self, query: Query) -> Response;
+}
+impl Dispatches for RunningNexus {
+    fn dispatch(&self, query: Query) -> Response {
+        match query {
+            Query::Start {
+                flow_type,
+                goal,
+                origin,
+            } => {
+                let request = Query::Start {
+                    flow_type,
+                    goal,
+                    origin,
+                };
+                let Query::Start { goal, origin, .. } = &request else {
+                    unreachable!()
+                };
+                match self.codex.start_codex(goal, origin) {
+                    Ok(thread) => self
+                        .store
+                        .record_started(request, thread)
+                        .unwrap_or(Response::StartRejected),
+                    Err(_) => Response::StartRejected,
+                }
+            }
+            Query::Restart {
+                flow_id,
+                authority_flow_id,
+            } => match self.store.authorize_restart(&flow_id, &authority_flow_id) {
+                Ok(Some(token)) => {
+                    let origin = signal_flow::Origin {
+                        parent_flow_id: token.authority_flow_id.clone(),
+                        session: token.thread_id.clone(),
+                        turn: "restart".into(),
+                    };
+                    if self
+                        .codex
+                        .resume_codex(&token.thread_id, "Resume this Flow.", &origin)
+                        .is_ok()
+                    {
+                        self.store
+                            .record_restarted(token)
+                            .unwrap_or(Response::RestartRejected)
+                    } else {
+                        Response::RestartRejected
+                    }
+                }
+                _ => Response::RestartRejected,
+            },
+        }
+    }
+}
+pub trait OpensRunningNexus {
+    fn open(
+        store: &Path,
+        socket: String,
+        model: String,
+        timeout: std::time::Duration,
+    ) -> Result<Self, store::StoreError>
+    where
+        Self: Sized;
+}
+impl OpensRunningNexus for RunningNexus {
+    fn open(
+        store: &Path,
+        socket: String,
+        model: String,
+        timeout: std::time::Duration,
+    ) -> Result<Self, store::StoreError> {
+        Ok(Self {
+            store: FlowStore::open(store)?,
+            codex: CodexAdapter {
+                socket,
+                model,
+                timeout,
+            },
+        })
+    }
+}
+pub trait ServesOrdinary {
+    fn serve_ordinary(&self, socket: &Path) -> Result<(), String>;
+}
+impl ServesOrdinary for RunningNexus {
+    fn serve_ordinary(&self, socket: &Path) -> Result<(), String> {
+        let _ = fs::remove_file(socket);
+        let listener = UnixListener::bind(socket).map_err(|e| e.to_string())?;
+        loop {
+            let (mut peer, _) = listener.accept().map_err(|e| e.to_string())?;
+            let reply = self.dispatch(Frame::read_query(&mut peer)?);
+            Frame::write_response(&mut peer, &reply)?
+        }
+    }
 }
 #[derive(Default)]
 pub struct NexusCore {

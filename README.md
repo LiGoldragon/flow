@@ -12,7 +12,7 @@ frame, and connects only to its own Unix socket.
 | `FLOW_ORDINARY_SOCKET` | `/tmp/flow-nexus.sock` | ordinary socket; client override: `FLOW_SOCKET` |
 | `FLOW_META_SOCKET` | `/tmp/flow-nexus-meta.sock` | privileged socket; client override: `FLOW_META_SOCKET` |
 | `CODEX_APP_SERVER_SOCKET` | `/home/li/.codex/app-server-control/app-server-control.sock` | Codex control socket |
-| `FLOW_MODEL` | `gpt-5.4` | configured model |
+| `FLOW_MODEL` | `gpt-5.6-terra` | configured model |
 | `FLOW_EFFORT` | `medium` | Codex turn effort |
 
 Build the five-crate workspace, then run the no-argument Nexus from
@@ -52,15 +52,18 @@ It saves policy but leaves current listeners unchanged until the Nexus restarts.
 
 A live no-argument Nexus smoke created a daemon-owned Codex thread through the
 installed `codex app-server proxy`, then returned
-`Started.{ flow-0000000000000001 { flow-self session-smoke turn-smoke } }`.
-It rejected the parent (`Restart.{ flow-0000000000000001 flow-self }`) and
-accepted the child (`Restart.{ flow-0000000000000001 flow-0000000000000001 }`)
-as generation 2. The daemon's `thread/list` independently included the first
-smoke thread with `/home/li/primary/flow`, `openai/gpt-5.4`, and `medium`.
-That first thread reported `systemError`, so this is evidence of daemon
-ownership and accepted RPCs, not a completed model turn. Earlier isolated
-proxy probes were silent; their cause is not established. The adapter uses
-`codex app-server proxy`, a WebSocket upgrade, `initialize`, `thread/start`,
-and `turn/start`; it never invokes `codex exec`.
+`Started.{ flow-0000000000000001 { flow-self session-success turn-success } }`.
+The daemon independently listed it as idle and direct-input capable with
+`/home/li/primary/flow`, `gpt-5.6-terra`, and `medium`; its one turn completed
+in 5.644 seconds with the exact final message `FLOW_SMOKE_OK`. Its initial
+brief contained the assigned `FLOW_ID`, `FLOW_DIRECTORY`, and the origin clue.
+A separate smoke rejected the parent
+(`Restart.{ flow-0000000000000001 flow-self }`) and accepted the child
+(`Restart.{ flow-0000000000000001 flow-0000000000000001 }`) as generation 2.
+Earlier `gpt-5.4` smoke threads failed because that model is unsupported for
+this ChatGPT account. Earlier isolated proxy probes were silent; their cause
+is not established. The adapter uses `codex app-server proxy`, a WebSocket
+upgrade, `initialize`, `thread/start`, and `turn/start`; it never invokes
+`codex exec`.
 
 See [DESIGN.md](DESIGN.md) for the lifecycle and component boundaries.

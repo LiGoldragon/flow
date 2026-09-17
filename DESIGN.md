@@ -39,6 +39,7 @@ and reports `NexusRestartRequired`, since rebinding live sockets is deferred
 to a Nexus restart. The adapter is outside the Signal wire boundary: the
 Codex app-server conversation is WebSocket/JSON-RPC through
 `CODEX_APP_SERVER_SOCKET`. Its protocol tests cover framing, refusal, timeout, and the assigned-flow
-brief. A live smoke did create and list a daemon-owned thread, although its
-first observed thread status was `systemError`; a completed model turn is not
-claimed.
+brief. A live smoke created a daemon-owned, list-visible `gpt-5.6-terra`
+thread at `medium`; its bounded turn completed with `FLOW_SMOKE_OK`. Earlier
+pre-fix `gpt-5.4` threads failed because that model is unavailable to this
+ChatGPT account.

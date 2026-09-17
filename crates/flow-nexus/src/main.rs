@@ -7,7 +7,7 @@ fn main() {
     let nexus = RunningNexus::open(
         Path::new("/home/li/primary/flow/flow.sema"),
         "/home/li/.codex/app-server-control/app-server-control.sock".into(),
-        "gpt-5.4".into(),
+        "gpt-5.6-terra".into(),
         Duration::from_secs(10),
     )
     .unwrap_or_else(|error| panic!("Flow Nexus store: {error}"));

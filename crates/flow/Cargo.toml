@@ -6,3 +6,5 @@ edition.workspace = true
 name = "flow"
 path = "src/main.rs"
 [dependencies]
+rkyv.workspace = true
+signal-flow = { path = "../signal-flow" }

@@ -1,20 +1,34 @@
 //! Flow Nexus owns dispatch and identity. Its ordinary and meta transports
 //! carry rkyv archives; JSON below is only the external Codex app-server RPC.
+pub mod codex;
+pub mod store;
 use signal_flow::{Query, Response};
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Write},
-    process::{Command, Stdio},
+    fs,
+    io::{Read, Write},
+    os::unix::net::{UnixListener, UnixStream},
+    path::Path,
 };
 pub trait Applies {
     fn apply(&mut self, query: Query) -> Response;
 }
-pub trait StartsCodex {
-    fn start_codex(&self, goal: &str) -> Result<String, String>;
-}
 #[derive(Default)]
 pub struct NexusCore {
     flows: HashMap<String, (String, u64)>,
+}
+pub trait Persists {
+    fn persist(&self, path: &Path) -> std::io::Result<()>;
+}
+impl Persists for NexusCore {
+    fn persist(&self, path: &Path) -> std::io::Result<()> {
+        let entries = self
+            .flows
+            .iter()
+            .map(|(id, (owner, g))| format!("{id}\t{owner}\t{g}\n"))
+            .collect::<String>();
+        fs::write(path, entries)
+    }
 }
 impl Applies for NexusCore {
     fn apply(&mut self, query: Query) -> Response {
@@ -49,33 +63,126 @@ impl Applies for NexusCore {
         }
     }
 }
-pub struct CodexAdapter {
-    pub socket: String,
-    pub model: String,
+pub trait ServesSignal {
+    fn serve_once(&mut self, socket: &Path) -> Result<(), String>;
+    fn serve(&mut self, socket: &Path) -> Result<(), String>;
 }
-impl StartsCodex for CodexAdapter {
-    fn start_codex(&self, goal: &str) -> Result<String, String> {
-        let mut child = Command::new("codex")
-            .args(["app-server", "proxy", "--sock", &self.socket])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
+impl ServesSignal for NexusCore {
+    fn serve_once(&mut self, socket: &Path) -> Result<(), String> {
+        let _ = fs::remove_file(socket);
+        let listener = UnixListener::bind(socket).map_err(|e| e.to_string())?;
+        let (mut peer, _) = listener.accept().map_err(|e| e.to_string())?;
+        let query = Frame::read_query(&mut peer)?;
+        let response = self.apply(query);
+        Frame::write_response(&mut peer, &response)
+    }
+    fn serve(&mut self, socket: &Path) -> Result<(), String> {
+        loop {
+            self.serve_once(socket)?;
+        }
+    }
+}
+pub struct Frame;
+impl Frame {
+    fn write_bytes(peer: &mut UnixStream, bytes: &[u8]) -> Result<(), String> {
+        peer.write_all(&(bytes.len() as u32).to_be_bytes())
             .map_err(|e| e.to_string())?;
-        let mut output = BufReader::new(child.stdout.take().ok_or("proxy stdout unavailable")?);
-        let input = child.stdin.as_mut().ok_or("proxy stdin unavailable")?;
-        writeln!(input,"{{\"id\":1,\"method\":\"initialize\",\"params\":{{\"clientInfo\":{{\"name\":\"flow-nexus\",\"version\":\"0.1.0\"}}}}}}") .map_err(|e|e.to_string())?;
-        let mut line = String::new();
-        output.read_line(&mut line).map_err(|e| e.to_string())?;
-        writeln!(input,"{{\"method\":\"initialized\"}}\n{{\"id\":2,\"method\":\"thread/start\",\"params\":{{\"cwd\":\"/home/li/primary\",\"model\":{:?},\"modelProvider\":\"openai\",\"sandbox\":\"danger-full-access\",\"approvalPolicy\":\"never\",\"ephemeral\":false,\"threadSource\":\"flow-nexus\"}}}}",self.model).map_err(|e|e.to_string())?;
-        line.clear();
-        output.read_line(&mut line).map_err(|e| e.to_string())?;
-        let thread =
-            serde_json::from_str::<serde_json::Value>(&line).map_err(|e| e.to_string())?["result"]
-                ["thread"]["id"]
-                .as_str()
-                .ok_or("thread/start returned no thread id")?
-                .to_owned();
-        writeln!(input,"{{\"id\":3,\"method\":\"turn/start\",\"params\":{{\"threadId\":{:?},\"input\":[{{\"type\":\"text\",\"text\":{:?}}}],\"model\":{:?},\"effort\":\"medium\",\"turnTrigger\":\"flow-nexus\"}}}}",thread,goal,self.model).map_err(|e|e.to_string())?;
-        Ok(thread)
+        peer.write_all(&bytes).map_err(|e| e.to_string())
+    }
+    fn read_bytes(peer: &mut UnixStream) -> Result<Vec<u8>, String> {
+        let mut length = [0; 4];
+        peer.read_exact(&mut length).map_err(|e| e.to_string())?;
+        let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+        peer.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+        Ok(bytes)
+    }
+    pub fn write_query(peer: &mut UnixStream, value: &Query) -> Result<(), String> {
+        Self::write_bytes(
+            peer,
+            &rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?,
+        )
+    }
+    pub fn read_query(peer: &mut UnixStream) -> Result<Query, String> {
+        rkyv::from_bytes::<Query, rkyv::rancor::Error>(&Self::read_bytes(peer)?)
+            .map_err(|e| e.to_string())
+    }
+    pub fn write_response(peer: &mut UnixStream, value: &Response) -> Result<(), String> {
+        Self::write_bytes(
+            peer,
+            &rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?,
+        )
+    }
+    pub fn read_response(peer: &mut UnixStream) -> Result<Response, String> {
+        rkyv::from_bytes::<Response, rkyv::rancor::Error>(&Self::read_bytes(peer)?)
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use signal_flow::Origin;
+    use std::{thread, time::Duration};
+    #[test]
+    fn matching_flow_id_restarts() {
+        let mut core = NexusCore::default();
+        let started = core.apply(Query::Start {
+            flow_type: "codex-medium".into(),
+            goal: "g".into(),
+            origin: Origin {
+                parent_flow_id: "owner".into(),
+                session: "s".into(),
+                turn: "t".into(),
+            },
+        });
+        let Response::Started { flow_id, .. } = started else {
+            panic!()
+        };
+        assert!(matches!(
+            core.apply(Query::Restart {
+                flow_id: flow_id.clone(),
+                authority_flow_id: "other".into()
+            }),
+            Response::RestartRejected
+        ));
+        assert!(matches!(
+            core.apply(Query::Restart {
+                flow_id,
+                authority_flow_id: "owner".into()
+            }),
+            Response::Restarted { generation: 2, .. }
+        ));
+    }
+    #[test]
+    fn socket_frames_typed_query() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("ordinary.sock");
+        let serving = socket.clone();
+        let worker = thread::spawn(move || {
+            let mut core = NexusCore::default();
+            core.serve_once(&serving).unwrap();
+        });
+        while !socket.exists() {
+            thread::sleep(Duration::from_millis(2))
+        }
+        let mut peer = UnixStream::connect(&socket).unwrap();
+        Frame::write_query(
+            &mut peer,
+            &Query::Start {
+                flow_type: "codex-medium".into(),
+                goal: "g".into(),
+                origin: Origin {
+                    parent_flow_id: "owner".into(),
+                    session: "s".into(),
+                    turn: "t".into(),
+                },
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            Frame::read_response(&mut peer).unwrap(),
+            Response::Started { .. }
+        ));
+        worker.join().unwrap();
     }
 }

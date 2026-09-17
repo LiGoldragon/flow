@@ -27,7 +27,6 @@ struct FlowRecord {
     flow_id: String,
     flow_type: String,
     goal: String,
-    owner_flow_id: String,
     origin: Origin,
     thread_id: Option<String>,
     lifecycle: FlowLifecycle,
@@ -177,7 +176,7 @@ impl OpensFlowStore for FlowStore {
         let flows = engine.register_table(TableDescriptor::new(
             FLOW_TABLE_NAME,
             FamilyName::new("flow-nexus-flow"),
-            SchemaHash::for_label("flow-nexus-flow-v2"),
+            SchemaHash::for_label("flow-nexus-flow-v3"),
         ))?;
         let state = engine.register_table(TableDescriptor::new(
             FLOW_STATE_TABLE_NAME,
@@ -280,7 +279,7 @@ impl AuthorizesFlowRestart for FlowStore {
         let Some(flow) = self.flow(flow_id)? else {
             return Ok(None);
         };
-        if flow.owner_flow_id != authority_flow_id {
+        if flow.flow_id != authority_flow_id {
             return Ok(None);
         }
         let Some(thread_id) = flow.thread_id else {
@@ -378,7 +377,6 @@ impl WritesFlowStore for FlowStore {
                         flow_id: flow_id.clone(),
                         flow_type,
                         goal: goal.clone(),
-                        owner_flow_id: origin.parent_flow_id.clone(),
                         origin: origin.clone(),
                         thread_id: None,
                         lifecycle: FlowLifecycle::Pending,
@@ -448,7 +446,7 @@ impl WritesFlowStore for FlowStore {
         let Some(mut flow) = self.flow(&authorization.flow_id)? else {
             return Ok(Response::RestartRejected);
         };
-        if flow.owner_flow_id != authorization.authority_flow_id
+        if flow.flow_id != authorization.authority_flow_id
             || flow.thread_id.as_deref() != Some(&authorization.thread_id)
         {
             return Ok(Response::RestartRejected);
@@ -542,7 +540,7 @@ mod tests {
             reopened
                 .record_restarted(
                     reopened
-                        .authorize_restart(&flow_id, "9fc62b")
+                        .authorize_restart(&flow_id, &flow_id)
                         .expect("authorization reads")
                         .expect("owner is authorized"),
                 )
@@ -561,13 +559,19 @@ mod tests {
         let flow_id = fixture.start(&store);
         assert_eq!(
             store
+                .authorize_restart(&flow_id, "9fc62b")
+                .expect("parent authority evaluates"),
+            None
+        );
+        assert_eq!(
+            store
                 .authorize_restart(&flow_id, "another-flow")
                 .expect("authorization evaluates"),
             None
         );
         assert_eq!(
             store
-                .authorize_restart("flow-unknown", "9fc62b")
+                .authorize_restart("flow-unknown", "flow-unknown")
                 .expect("unknown flow evaluates"),
             None
         );
@@ -597,10 +601,16 @@ mod tests {
         drop(store);
         let recovered = fixture.store();
         let authorization = recovered
-            .authorize_restart(&pending.flow_id, "9fc62b")
+            .authorize_restart(&pending.flow_id, &pending.flow_id)
             .expect("pending thread reads")
             .expect("known pending thread is resumable");
         assert_eq!(authorization.thread_id, "thread-pending");
+        assert_eq!(
+            recovered
+                .authorize_restart(&pending.flow_id, "9fc62b")
+                .expect("parent authority evaluates"),
+            None
+        );
         assert_eq!(
             recovered
                 .record_restarted(authorization)
@@ -630,7 +640,7 @@ mod tests {
             .expect("accepted flow type");
         assert_eq!(
             store
-                .authorize_restart(&pending.flow_id, "9fc62b")
+                .authorize_restart(&pending.flow_id, &pending.flow_id)
                 .expect("authorization evaluates"),
             None
         );

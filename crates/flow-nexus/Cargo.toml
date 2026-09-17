@@ -1,0 +1,12 @@
+[package]
+name = "flow-nexus"
+version.workspace = true
+edition.workspace = true
+[[bin]]
+name = "flow-nexus"
+path = "src/main.rs"
+[dependencies]
+meta-signal-flow = { path = "../meta-signal-flow" }
+serde_json.workspace = true
+signal-flow = { path = "../signal-flow" }
+thiserror.workspace = true

@@ -1,0 +1,8 @@
+[package]
+name = "flow"
+version.workspace = true
+edition.workspace = true
+[[bin]]
+name = "flow"
+path = "src/main.rs"
+[dependencies]

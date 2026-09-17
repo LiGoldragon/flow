@@ -1,0 +1,7 @@
+[package]
+name = "flow-meta"
+version.workspace = true
+edition.workspace = true
+[[bin]]
+name = "flow-meta"
+path = "src/main.rs"

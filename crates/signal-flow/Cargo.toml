@@ -1,0 +1,6 @@
+[package]
+name = "signal-flow"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+rkyv.workspace = true

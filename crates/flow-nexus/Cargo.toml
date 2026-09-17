@@ -6,10 +6,12 @@ edition.workspace = true
 name = "flow-nexus"
 path = "src/main.rs"
 [dependencies]
+base64 = "0.22"
 meta-signal-flow = { path = "../meta-signal-flow" }
 rkyv.workspace = true
 sema-engine = { path = "/home/li/primary/repos/sema-engine" }
 serde_json.workspace = true
+sha1 = "0.10"
 signal-flow = { path = "../signal-flow" }
 thiserror.workspace = true
 [dev-dependencies]

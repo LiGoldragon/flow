@@ -2,7 +2,7 @@
 //! carry rkyv archives; JSON below is only the external Codex app-server RPC.
 pub mod codex;
 pub mod store;
-use codex::{CodexAdapter, ResumesCodex, StartsCodex};
+use codex::{CodexAdapter, ResumesCodex};
 use signal_flow::{Query, Response};
 use std::{
     collections::HashMap,
@@ -15,8 +15,8 @@ use std::{
     path::Path,
 };
 use store::{
-    AuthorizesFlowRestart, ConfiguresFlowStore, FlowStore, OpensFlowStore, RecordsRestartedFlow,
-    RecordsStartedFlow,
+    AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore, OpensFlowStore,
+    RecordsPendingThread, RecordsRestartedFlow, ReservesPendingStart,
 };
 pub trait Applies {
     fn apply(&mut self, query: Query) -> Response;
@@ -44,12 +44,29 @@ impl Dispatches for RunningNexus {
                 let Query::Start { goal, origin, .. } = &request else {
                     unreachable!()
                 };
-                match self.codex.start_codex(goal, origin) {
-                    Ok(thread) => self
+                let goal = goal.clone();
+                let origin = origin.clone();
+                let Ok(Some(pending)) = self.store.reserve_pending_start(request) else {
+                    return Response::StartRejected;
+                };
+                match self.codex.start_codex_observed(&goal, &origin, |thread| {
+                    if self
                         .store
-                        .record_started(request, thread)
+                        .record_pending_thread(&pending, thread.into())
+                        .unwrap_or(false)
+                    {
+                        Ok(())
+                    } else {
+                        Err(codex::CodexAdapterUnavailable::Protocol(
+                            "pending thread persistence failed".into(),
+                        ))
+                    }
+                }) {
+                    Ok(_thread) => self
+                        .store
+                        .confirm_started(&pending.flow_id)
                         .unwrap_or(Response::StartRejected),
-                    Err(_) => Response::StartRejected,
+                    _ => Response::StartRejected,
                 }
             }
             Query::Restart {
@@ -140,7 +157,10 @@ impl ServesMeta for RunningNexus {
                 .map_err(|e| e.to_string())?;
             Frame::write_meta_response(
                 &mut peer,
-                &meta_signal_flow::Response::Configured(configuration),
+                &meta_signal_flow::Response::Configured {
+                    configuration,
+                    activation: meta_signal_flow::ConfigurationActivation::NexusRestartRequired,
+                },
             )?
         }
     }

@@ -2,13 +2,15 @@
 //! The proxy is a byte bridge, so this module owns its bounded WebSocket and
 //! JSON-RPC conversation; it never falls back to a direct Unix-socket client.
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use sha1::{Digest, Sha1};
 use signal_flow::Origin;
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 
@@ -104,10 +106,26 @@ impl OpensCodexProxy for CodexAdapter {
             .stdout
             .take()
             .ok_or_else(|| CodexAdapterUnavailable::Proxy("proxy stdout was unavailable".into()))?;
+        #[cfg(test)]
+        let nonce = *b"the sample nonce";
+        #[cfg(not(test))]
+        let nonce = {
+            let mut nonce = [0; 16];
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut source| source.read_exact(&mut nonce))
+                .map_err(|error| CodexAdapterUnavailable::Proxy(error.to_string()))?;
+            nonce
+        };
+        let key = STANDARD.encode(nonce);
+        let mut digest = Sha1::new();
+        digest.update(key.as_bytes());
+        digest.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        let accept = STANDARD.encode(digest.finalize());
+        let upgrade = format!(
+            "GET / HTTP/1.1\r\nHost: flow-nexus\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
         input
-            .write_all(
-                b"GET / HTTP/1.1\r\nHost: flow-nexus\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: Zmxvdy1uZXh1cy1wcmlvcg==\r\nSec-WebSocket-Version: 13\r\n\r\n",
-            )
+            .write_all(upgrade.as_bytes())
             .and_then(|_| input.flush())
             .map_err(|error| CodexAdapterUnavailable::Proxy(error.to_string()))?;
         let (sender, replies) = mpsc::channel();
@@ -116,7 +134,7 @@ impl OpensCodexProxy for CodexAdapter {
             let outcome = ProxySessionReader {
                 output: &mut output,
             }
-            .read_upgrade();
+            .read_upgrade(&accept);
             if let Err(error) = outcome {
                 let _ = sender.send(ProxyEvent::Reply(Err(error)));
                 return;
@@ -165,12 +183,12 @@ struct ProxySessionReader<'a, R: BufRead> {
 }
 
 trait ReadsCodexProxy {
-    fn read_upgrade(&mut self) -> Result<(), CodexAdapterUnavailable>;
+    fn read_upgrade(&mut self, accept: &str) -> Result<(), CodexAdapterUnavailable>;
     fn read_message(&mut self) -> Result<serde_json::Value, CodexAdapterUnavailable>;
 }
 
 impl<R: BufRead> ReadsCodexProxy for ProxySessionReader<'_, R> {
-    fn read_upgrade(&mut self) -> Result<(), CodexAdapterUnavailable> {
+    fn read_upgrade(&mut self, accept: &str) -> Result<(), CodexAdapterUnavailable> {
         let mut header = Vec::new();
         loop {
             let mut line = Vec::new();
@@ -203,6 +221,18 @@ impl<R: BufRead> ReadsCodexProxy for ProxySessionReader<'_, R> {
         {
             return Err(CodexAdapterUnavailable::Upgrade(
                 "missing Upgrade: websocket".into(),
+            ));
+        }
+        if !text
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("connection: upgrade"))
+            || !text.lines().any(|line| {
+                line.trim()
+                    .eq_ignore_ascii_case(&format!("sec-websocket-accept: {accept}"))
+            })
+        {
+            return Err(CodexAdapterUnavailable::Upgrade(
+                "invalid WebSocket upgrade authentication".into(),
             ));
         }
         Ok(())
@@ -288,10 +318,14 @@ impl ExchangesCodexRpc for ProxySession {
         timeout: Duration,
     ) -> Result<serde_json::Value, CodexAdapterUnavailable> {
         self.write_json(serde_json::json!({ "id": id, "method": method, "params": params }))?;
+        let deadline = Instant::now() + timeout;
         loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(CodexAdapterUnavailable::TimedOut)?;
             let ProxyEvent::Reply(reply) = self
                 .replies
-                .recv_timeout(timeout)
+                .recv_timeout(remaining)
                 .map_err(|_| CodexAdapterUnavailable::TimedOut)?
             else {
                 return Err(CodexAdapterUnavailable::Protocol(
@@ -335,7 +369,10 @@ impl WritesCodexProxy for ProxySession {
             frame.push(0x80 | 126);
             frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
         }
-        let mask = [0x46, 0x6c, 0x6f, 0x77];
+        let mut mask = [0; 4];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut mask))
+            .map_err(|error| CodexAdapterUnavailable::Proxy(error.to_string()))?;
         frame.extend_from_slice(&mask);
         frame.extend(
             payload
@@ -392,6 +429,40 @@ impl StartsCodex for CodexAdapter {
                 self.timeout,
             )?;
             Ok(thread_id)
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+impl CodexAdapter {
+    pub fn start_codex_observed(
+        &self,
+        goal: &str,
+        origin: &Origin,
+        observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
+    ) -> Result<String, CodexAdapterUnavailable> {
+        let mut session = self.open_proxy()?;
+        let result = (|| {
+            session.request(1,"initialize",serde_json::json!({"clientInfo":{"name":"flow-nexus","version":env!("CARGO_PKG_VERSION")}}),self.timeout)?;
+            session.notify("initialized", serde_json::Value::Null)?;
+            let cwd = std::env::current_dir()
+                .map_err(|e| CodexAdapterUnavailable::Protocol(e.to_string()))?;
+            let started=session.request(2,"thread/start",serde_json::json!({"cwd":cwd,"model":self.model,"sandbox":"danger-full-access","approvalPolicy":"never","ephemeral":false,"threadSource":"flow-nexus"}),self.timeout)?;
+            let thread = started
+                .pointer("/thread/id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    CodexAdapterUnavailable::Protocol("thread/start returned no thread id".into())
+                })?
+                .to_owned();
+            observer(&thread)?;
+            session.request(
+                3,
+                "turn/start",
+                self.turn_params(&thread, goal, origin),
+                self.timeout,
+            )?;
+            Ok(thread)
         })();
         session.stop_proxy();
         result
@@ -454,7 +525,7 @@ mod tests {
 
         fn executable(&self, frames: &[String]) -> String {
             format!(
-                "#!/bin/sh\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\n\\r\\n'\nprintf '%b' '{}'\nsleep 2\n",
+                "#!/bin/sh\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nprintf '%b' '{}'\nsleep 2\n",
                 frames.join("")
             )
         }

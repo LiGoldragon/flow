@@ -40,7 +40,12 @@ pub enum CodexAdapterUnavailable {
 }
 
 pub trait StartsCodex {
-    fn start_codex(&self, goal: &str, origin: &Origin) -> Result<String, CodexAdapterUnavailable>;
+    fn start_codex(
+        &self,
+        flow_id: &str,
+        goal: &str,
+        origin: &Origin,
+    ) -> Result<String, CodexAdapterUnavailable>;
 }
 
 pub trait ResumesCodex {
@@ -87,7 +92,13 @@ trait StopsCodexProxy {
 }
 
 trait BuildsCodexTurn {
-    fn turn_params(&self, thread_id: &str, goal: &str, origin: &Origin) -> serde_json::Value;
+    fn turn_params(
+        &self,
+        thread_id: &str,
+        flow_id: &str,
+        goal: &str,
+        origin: &Origin,
+    ) -> serde_json::Value;
 }
 
 impl OpensCodexProxy for CodexAdapter {
@@ -395,10 +406,16 @@ impl StopsCodexProxy for ProxySession {
 }
 
 impl BuildsCodexTurn for CodexAdapter {
-    fn turn_params(&self, thread_id: &str, goal: &str, origin: &Origin) -> serde_json::Value {
+    fn turn_params(
+        &self,
+        thread_id: &str,
+        flow_id: &str,
+        goal: &str,
+        origin: &Origin,
+    ) -> serde_json::Value {
         serde_json::json!({
             "threadId": thread_id,
-            "input": [{ "type": "text", "text": format!("{goal}\n\nOrigin clue:\nflow: {}\nsession: {}\nturn: {}", origin.parent_flow_id, origin.session, origin.turn) }],
+            "input": [{ "type": "text", "text": format!("{goal}\n\nFlow identity:\nFLOW_ID={flow_id}\nFLOW_DIRECTORY=/home/li/primary/flows/{flow_id}\n\nOrigin clue:\nflow: {}\nsession: {}\nturn: {}", origin.parent_flow_id, origin.session, origin.turn) }],
             "model": self.model,
             "effort": "medium",
             "turnTrigger": "flow-nexus"
@@ -407,7 +424,12 @@ impl BuildsCodexTurn for CodexAdapter {
 }
 
 impl StartsCodex for CodexAdapter {
-    fn start_codex(&self, goal: &str, origin: &Origin) -> Result<String, CodexAdapterUnavailable> {
+    fn start_codex(
+        &self,
+        flow_id: &str,
+        goal: &str,
+        origin: &Origin,
+    ) -> Result<String, CodexAdapterUnavailable> {
         let mut session = self.open_proxy()?;
         let result = (|| {
             session.request(1, "initialize", serde_json::json!({ "clientInfo": { "name": "flow-nexus", "version": env!("CARGO_PKG_VERSION") } }), self.timeout)?;
@@ -425,7 +447,7 @@ impl StartsCodex for CodexAdapter {
             session.request(
                 3,
                 "turn/start",
-                self.turn_params(&thread_id, goal, origin),
+                self.turn_params(&thread_id, flow_id, goal, origin),
                 self.timeout,
             )?;
             Ok(thread_id)
@@ -437,6 +459,7 @@ impl StartsCodex for CodexAdapter {
 impl CodexAdapter {
     pub fn start_codex_observed(
         &self,
+        flow_id: &str,
         goal: &str,
         origin: &Origin,
         observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
@@ -459,7 +482,7 @@ impl CodexAdapter {
             session.request(
                 3,
                 "turn/start",
-                self.turn_params(&thread, goal, origin),
+                self.turn_params(&thread, flow_id, goal, origin),
                 self.timeout,
             )?;
             Ok(thread)
@@ -489,7 +512,7 @@ impl ResumesCodex for CodexAdapter {
             session.request(
                 3,
                 "turn/start",
-                self.turn_params(thread_id, goal, origin),
+                self.turn_params(thread_id, origin.parent_flow_id.as_str(), goal, origin),
                 self.timeout,
             )?;
             Ok(())
@@ -589,6 +612,19 @@ mod tests {
     }
 
     #[test]
+    fn turn_brief_carries_assigned_flow_identity_and_origin() {
+        let origin = origin();
+        let params = adapter().turn_params("thread-1", "flow-0000000000000001", "start", &origin);
+        let brief = params
+            .pointer("/input/0/text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(brief.contains("FLOW_ID=flow-0000000000000001"));
+        assert!(brief.contains("FLOW_DIRECTORY=/home/li/primary/flows/flow-0000000000000001"));
+        assert!(brief.contains("flow: parent-flow\nsession: session-1\nturn: turn-1"));
+    }
+
+    #[test]
     fn fake_proxy_starts_a_thread_after_turn_start_is_accepted() {
         let _guard = fake_proxy_lock()
             .lock()
@@ -601,7 +637,9 @@ mod tests {
         ];
         let (_directory, _path) = fake.install(&frames);
         assert_eq!(
-            adapter().start_codex("start", &origin()).unwrap(),
+            adapter()
+                .start_codex("flow-test", "start", &origin())
+                .unwrap(),
             "thread-1"
         );
     }
@@ -618,7 +656,7 @@ mod tests {
         ];
         let (_directory, _path) = fake.install(&frames);
         assert!(matches!(
-            adapter().start_codex("start", &origin()),
+            adapter().start_codex("flow-test", "start", &origin()),
             Err(CodexAdapterUnavailable::Refused { method, .. }) if method == "thread/start"
         ));
     }
@@ -632,7 +670,7 @@ mod tests {
         let frames = [fake.websocket_frame(r#"{"id":1,"result":{}}"#)];
         let (_directory, _path) = fake.install(&frames);
         assert!(matches!(
-            adapter().start_codex("start", &origin()),
+            adapter().start_codex("flow-test", "start", &origin()),
             Err(CodexAdapterUnavailable::TimedOut)
         ));
     }

@@ -49,19 +49,21 @@ impl Dispatches for RunningNexus {
                 let Ok(Some(pending)) = self.store.reserve_pending_start(request) else {
                     return Response::StartRejected;
                 };
-                match self.codex.start_codex_observed(&goal, &origin, |thread| {
-                    if self
-                        .store
-                        .record_pending_thread(&pending, thread.into())
-                        .unwrap_or(false)
-                    {
-                        Ok(())
-                    } else {
-                        Err(codex::CodexAdapterUnavailable::Protocol(
-                            "pending thread persistence failed".into(),
-                        ))
-                    }
-                }) {
+                match self
+                    .codex
+                    .start_codex_observed(&pending.flow_id, &goal, &origin, |thread| {
+                        if self
+                            .store
+                            .record_pending_thread(&pending, thread.into())
+                            .unwrap_or(false)
+                        {
+                            Ok(())
+                        } else {
+                            Err(codex::CodexAdapterUnavailable::Protocol(
+                                "pending thread persistence failed".into(),
+                            ))
+                        }
+                    }) {
                     Ok(_thread) => self
                         .store
                         .confirm_started(&pending.flow_id)
@@ -191,8 +193,7 @@ impl Applies for NexusCore {
                 origin,
             } if flow_type == "codex-medium" => {
                 let id = format!("flow-{:x}", self.flows.len() + 1);
-                self.flows
-                    .insert(id.clone(), (origin.parent_flow_id.clone(), 1));
+                self.flows.insert(id.clone(), (id.clone(), 1));
                 Response::Started {
                     flow_id: id,
                     origin,
@@ -312,8 +313,8 @@ mod tests {
         ));
         assert!(matches!(
             core.apply(Query::Restart {
-                flow_id,
-                authority_flow_id: "owner".into()
+                flow_id: flow_id.clone(),
+                authority_flow_id: flow_id.clone()
             }),
             Response::Restarted { generation: 2, .. }
         ));

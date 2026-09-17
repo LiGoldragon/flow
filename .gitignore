@@ -1,1 +1,3 @@
 /target/
+# Runtime Sema database and recovery sidecars.
+flow.sema*

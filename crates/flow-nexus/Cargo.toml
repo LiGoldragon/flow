@@ -7,12 +7,12 @@ name = "flow-nexus"
 path = "src/main.rs"
 [dependencies]
 base64 = "0.22"
-meta-signal-flow = { path = "../meta-signal-flow" }
+meta-signal-flow.workspace = true
 rkyv.workspace = true
 sema-engine = { path = "/home/li/primary/repos/sema-engine" }
 serde_json.workspace = true
 sha1 = "0.10"
-signal-flow = { path = "../signal-flow" }
+signal-flow.workspace = true
 thiserror.workspace = true
 [dev-dependencies]
 tempfile = "3"

@@ -1,5 +1,0 @@
-Signal
-[]
-[ Start.StartRequest Restart.RestartRequest ]
-[ Started.Started Restarted.Restarted StartRejected.StartRejection RestartRejected.RestartRejection ]
-[ FlowId.String FlowType.String Goal.String Origin.{ FlowId String String } StartRequest.{ FlowType Goal Origin } RestartRequest.{ FlowId FlowId } Started.{ FlowId Origin } Restarted.{ FlowId Integer } StartRejection.[ UnknownFlowType ] RestartRejection.[ AuthorityMismatch UnknownFlow ] ]

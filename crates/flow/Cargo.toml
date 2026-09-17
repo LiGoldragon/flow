@@ -9,4 +9,4 @@ path = "src/main.rs"
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "1febca7836bf8d5f5973a302fdd50aa9c84c159b" }
 rkyv.workspace = true
-signal-flow = { path = "../signal-flow", features = ["datom"] }
+signal-flow = { workspace = true, features = ["datom"] }

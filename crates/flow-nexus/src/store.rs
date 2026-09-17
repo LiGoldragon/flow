@@ -12,22 +12,25 @@ use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey,
     SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
 };
-use signal_flow::{Origin, Query, Response};
+use signal_flow::{
+    EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, OriginClue,
+    Query, RecipientResolutionRejection, Response, RestartRejection, Restarted, RouteReadiness,
+    StartRejection, Started,
+};
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
 const FLOW_STATE_TABLE_NAME: TableName = TableName::new("flow_nexus_state");
 const FLOW_CONFIGURATION_TABLE_NAME: TableName = TableName::new("flow_nexus_configuration");
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
-const DEFAULT_ORDINARY_SOCKET: &str = "/tmp/flow-nexus.sock";
-const DEFAULT_META_SOCKET: &str = "/tmp/flow-nexus-meta.sock";
+const DEFAULT_ORDINARY_SOCKET: &str = "/run/user/1001/flow/flow.sock";
+const DEFAULT_META_SOCKET: &str = "/run/user/1001/flow/flow-meta.sock";
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct FlowRecord {
     flow_id: String,
     flow_type: String,
-    goal: String,
-    origin: Origin,
+    origin: OriginClue,
     thread_id: Option<String>,
     lifecycle: FlowLifecycle,
     generation: u64,
@@ -94,8 +97,7 @@ pub struct RestartAuthorization {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingLaunch {
     pub flow_id: String,
-    pub goal: String,
-    pub origin: Origin,
+    pub origin: OriginClue,
 }
 
 /// The constructor is a trait operation so the Nexus's storage boundary is
@@ -155,14 +157,14 @@ trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
     fn stored_configuration(&self) -> Result<FlowStoreConfiguration, StoreError>;
+    fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError>;
 }
 
 trait WritesFlowStore {
     fn reserve_start(
         &self,
         flow_type: String,
-        goal: String,
-        origin: Origin,
+        origin: OriginClue,
     ) -> Result<PendingLaunch, StoreError>;
     fn record_thread(&self, pending: &PendingLaunch, thread_id: String)
     -> Result<bool, StoreError>;
@@ -176,7 +178,7 @@ impl OpensFlowStore for FlowStore {
         let flows = engine.register_table(TableDescriptor::new(
             FLOW_TABLE_NAME,
             FamilyName::new("flow-nexus-flow"),
-            SchemaHash::for_label("flow-nexus-flow-v3"),
+            SchemaHash::for_label("flow-nexus-flow-v4"),
         ))?;
         let state = engine.register_table(TableDescriptor::new(
             FLOW_STATE_TABLE_NAME,
@@ -220,8 +222,8 @@ impl OpensFlowStore for FlowStore {
                 store.configuration,
                 FlowStoreConfiguration {
                     configuration: Configuration {
-                        ordinary_socket: DEFAULT_ORDINARY_SOCKET.into(),
-                        meta_socket: DEFAULT_META_SOCKET.into(),
+                        ordinary_socket_path: DEFAULT_ORDINARY_SOCKET.into(),
+                        meta_socket_path: DEFAULT_META_SOCKET.into(),
                     },
                 },
             ))?;
@@ -233,8 +235,9 @@ impl OpensFlowStore for FlowStore {
 impl AppliesFlowQuery for FlowStore {
     fn apply(&self, query: Query) -> Result<Response, StoreError> {
         match query {
-            Query::Start { .. } => Ok(Response::StartRejected),
-            Query::Restart { .. } => Ok(Response::RestartRejected),
+            Query::Start(_) => Ok(Response::StartRejected(StartRejection::LaunchRefused)),
+            Query::Restart(_) => Ok(Response::RestartRejected(RestartRejection::ResumeRefused)),
+            Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
         }
     }
 }
@@ -242,14 +245,10 @@ impl AppliesFlowQuery for FlowStore {
 impl ReservesPendingStart for FlowStore {
     fn reserve_pending_start(&self, query: Query) -> Result<Option<PendingLaunch>, StoreError> {
         match query {
-            Query::Start {
-                flow_type,
-                goal,
-                origin,
-            } if flow_type == "codex-medium" => {
-                self.reserve_start(flow_type, goal, origin).map(Some)
-            }
-            Query::Start { .. } | Query::Restart { .. } => Ok(None),
+            Query::Start(request) if request.flow_type == "codex-medium" => self
+                .reserve_start(request.flow_type, request.origin_clue)
+                .map(Some),
+            Query::Start(_) | Query::Restart(_) | Query::ResolveRecipient(_) => Ok(None),
         }
     }
 }
@@ -357,14 +356,43 @@ impl ReadsFlowStore for FlowStore {
             _ => Err(StoreError::StateInvariant),
         }
     }
+
+    fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError> {
+        let Some(flow) = self.flow(flow_id)? else {
+            return Ok(Response::RecipientResolutionRejected(
+                RecipientResolutionRejection::UnknownFlow,
+            ));
+        };
+        let Some(session_id) = flow.thread_id else {
+            return Ok(Response::RecipientResolutionRejected(
+                RecipientResolutionRejection::FlowUnavailable,
+            ));
+        };
+        Ok(Response::RecipientResolved(FlowNode {
+            flow_id: flow.flow_id,
+            session_id,
+            harness_kind: HarnessKind::Codex,
+            endpoint_selection: EndpointSelection::Available(signal_flow::Available_Data {
+                endpoint_path: "/home/li/.codex/app-server-control/app-server-control.sock".into(),
+                route_readiness: match flow.lifecycle {
+                    FlowLifecycle::Active => RouteReadiness::Ready,
+                    FlowLifecycle::Pending => RouteReadiness::Parked,
+                },
+            }),
+            origin_clue: flow.origin,
+            flow_lifecycle: match flow.lifecycle {
+                FlowLifecycle::Active => SignalFlowLifecycle::Active,
+                FlowLifecycle::Pending => SignalFlowLifecycle::Pending,
+            },
+        }))
+    }
 }
 
 impl WritesFlowStore for FlowStore {
     fn reserve_start(
         &self,
         flow_type: String,
-        goal: String,
-        origin: Origin,
+        origin: OriginClue,
     ) -> Result<PendingLaunch, StoreError> {
         let state = self.state()?;
         let flow_id = format!("flow-{:016x}", state.next_flow_number);
@@ -376,7 +404,6 @@ impl WritesFlowStore for FlowStore {
                     FlowRecord {
                         flow_id: flow_id.clone(),
                         flow_type,
-                        goal: goal.clone(),
                         origin: origin.clone(),
                         thread_id: None,
                         lifecycle: FlowLifecycle::Pending,
@@ -390,11 +417,7 @@ impl WritesFlowStore for FlowStore {
                     },
                 ),
         )?;
-        Ok(PendingLaunch {
-            flow_id,
-            goal,
-            origin,
-        })
+        Ok(PendingLaunch { flow_id, origin })
     }
 
     fn record_thread(
@@ -405,8 +428,7 @@ impl WritesFlowStore for FlowStore {
         let Some(mut flow) = self.flow(&pending.flow_id)? else {
             return Ok(false);
         };
-        if flow.goal != pending.goal
-            || flow.origin != pending.origin
+        if flow.origin != pending.origin
             || flow.lifecycle != FlowLifecycle::Pending
             || flow.thread_id.is_some()
         {
@@ -423,33 +445,37 @@ impl WritesFlowStore for FlowStore {
 
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError> {
         let Some(mut flow) = self.flow(flow_id)? else {
-            return Ok(Response::StartRejected);
+            return Ok(Response::StartRejected(StartRejection::LaunchRefused));
         };
         if flow.lifecycle != FlowLifecycle::Pending || flow.thread_id.is_none() {
-            return Ok(Response::StartRejected);
+            return Ok(Response::StartRejected(StartRejection::LaunchRefused));
         }
         flow.lifecycle = FlowLifecycle::Active;
         flow.generation = 1;
-        let origin = flow.origin.clone();
+        let origin_clue = flow.origin.clone();
+        let session_id = flow.thread_id.clone().expect("checked thread identity");
         self.engine.mutate_keyed(KeyedMutation::new(
             self.flows,
             RecordKey::new(flow_id),
             flow,
         ))?;
-        Ok(Response::Started {
+        Ok(Response::Started(Started {
             flow_id: flow_id.into(),
-            origin,
-        })
+            session_id,
+            origin_clue,
+        }))
     }
 
     fn restart(&self, authorization: RestartAuthorization) -> Result<Response, StoreError> {
         let Some(mut flow) = self.flow(&authorization.flow_id)? else {
-            return Ok(Response::RestartRejected);
+            return Ok(Response::RestartRejected(RestartRejection::UnknownFlow));
         };
         if flow.flow_id != authorization.authority_flow_id
             || flow.thread_id.as_deref() != Some(&authorization.thread_id)
         {
-            return Ok(Response::RestartRejected);
+            return Ok(Response::RestartRejected(
+                RestartRejection::ProvenanceMismatch,
+            ));
         }
         flow.lifecycle = FlowLifecycle::Active;
         flow.generation += 1;
@@ -459,21 +485,23 @@ impl WritesFlowStore for FlowStore {
             RecordKey::new(authorization.flow_id.clone()),
             flow,
         ))?;
-        Ok(Response::Restarted {
+        Ok(Response::Restarted(Restarted {
             flow_id: authorization.flow_id,
-            generation,
-        })
+            session_id: authorization.thread_id,
+            generation: generation as i64,
+        }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore, OpensFlowStore,
-        RecordsPendingThread, RecordsRestartedFlow, ReservesPendingStart,
+        AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow,
+        FlowStore, OpensFlowStore, RecordsPendingThread, RecordsRestartedFlow,
+        ReservesPendingStart,
     };
     use meta_signal_flow::Configuration;
-    use signal_flow::{Origin, Query, Response};
+    use signal_flow::{OriginClue, Query, Response, Restarted, StartRequest};
 
     struct StoreFixture {
         directory: tempfile::TempDir,
@@ -505,15 +533,14 @@ mod tests {
     impl StartsFixtureFlow for StoreFixture {
         fn start(&self, store: &FlowStore) -> String {
             let pending = store
-                .reserve_pending_start(Query::Start {
+                .reserve_pending_start(Query::Start(StartRequest {
                     flow_type: "codex-medium".into(),
-                    goal: "persist this origin".into(),
-                    origin: Origin {
-                        parent_flow_id: "9fc62b".into(),
-                        session: "session-1".into(),
-                        turn: "turn-7".into(),
+                    origin_clue: OriginClue {
+                        flow_id: "9fc62b".into(),
+                        session_id: "session-1".into(),
+                        turn_id: "turn-7".into(),
                     },
-                })
+                }))
                 .expect("start reserves")
                 .expect("flow type is accepted");
             assert!(
@@ -524,10 +551,10 @@ mod tests {
             let response = store
                 .confirm_started(&pending.flow_id)
                 .expect("start confirms");
-            let Response::Started { flow_id, .. } = response else {
+            let Response::Started(started) = response else {
                 panic!("start must be accepted")
             };
-            flow_id
+            started.flow_id
         }
     }
 
@@ -545,10 +572,11 @@ mod tests {
                         .expect("owner is authorized"),
                 )
                 .expect("restart persists"),
-            Response::Restarted {
+            Response::Restarted(Restarted {
                 flow_id,
+                session_id: "thread-1".into(),
                 generation: 2,
-            }
+            })
         );
     }
 
@@ -582,15 +610,14 @@ mod tests {
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let pending = store
-            .reserve_pending_start(Query::Start {
+            .reserve_pending_start(Query::Start(StartRequest {
                 flow_type: "codex-medium".into(),
-                goal: "recover the accepted thread".into(),
-                origin: Origin {
-                    parent_flow_id: "9fc62b".into(),
-                    session: "session-2".into(),
-                    turn: "turn-3".into(),
+                origin_clue: OriginClue {
+                    flow_id: "9fc62b".into(),
+                    session_id: "session-2".into(),
+                    turn_id: "turn-3".into(),
                 },
-            })
+            }))
             .expect("reserve")
             .expect("accepted flow type");
         assert!(
@@ -615,10 +642,11 @@ mod tests {
             recovered
                 .record_restarted(authorization)
                 .expect("accepted resume activates pending flow"),
-            Response::Restarted {
+            Response::Restarted(Restarted {
                 flow_id: pending.flow_id,
+                session_id: "thread-pending".into(),
                 generation: 1,
-            }
+            })
         );
     }
 
@@ -627,15 +655,14 @@ mod tests {
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let pending = store
-            .reserve_pending_start(Query::Start {
+            .reserve_pending_start(Query::Start(StartRequest {
                 flow_type: "codex-medium".into(),
-                goal: "do not launch twice".into(),
-                origin: Origin {
-                    parent_flow_id: "9fc62b".into(),
-                    session: "session-3".into(),
-                    turn: "turn-4".into(),
+                origin_clue: OriginClue {
+                    flow_id: "9fc62b".into(),
+                    session_id: "session-3".into(),
+                    turn_id: "turn-4".into(),
                 },
-            })
+            }))
             .expect("reserve")
             .expect("accepted flow type");
         assert_eq!(
@@ -651,8 +678,8 @@ mod tests {
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let configuration = Configuration {
-            ordinary_socket: "/tmp/ordinary-test.sock".into(),
-            meta_socket: "/tmp/meta-test.sock".into(),
+            ordinary_socket_path: "/tmp/ordinary-test.sock".into(),
+            meta_socket_path: "/tmp/meta-test.sock".into(),
         };
         store
             .configure(configuration.clone())
@@ -662,5 +689,28 @@ mod tests {
             fixture.store().configuration().expect("policy recovers"),
             configuration
         );
+    }
+
+    #[test]
+    fn active_flow_resolves_to_its_daemon_owned_codex_session() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let flow_id = fixture.start(&store);
+        let Response::RecipientResolved(node) = store
+            .apply(Query::ResolveRecipient(flow_id.clone()))
+            .expect("identity resolves")
+        else {
+            panic!("active flow must resolve")
+        };
+        assert_eq!(node.flow_id, flow_id);
+        assert_eq!(node.session_id, "thread-1");
+        assert_eq!(node.harness_kind, signal_flow::HarnessKind::Codex);
+        assert!(matches!(
+            node.endpoint_selection,
+            signal_flow::EndpointSelection::Available(signal_flow::Available_Data {
+                route_readiness: signal_flow::RouteReadiness::Ready,
+                ..
+            })
+        ));
     }
 }

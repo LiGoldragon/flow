@@ -1,69 +1,44 @@
 # Flow Nexus
 
-`flow-nexus` owns Flow dispatch, identity, recovery, and policy. `flow` is the
-ordinary CLI; `flow-meta` is the privileged configuration CLI. Each accepts
-exactly one inline Datom value, encodes typed Signal as a length-prefixed rkyv
-frame, and connects only to its own Unix socket.
+Flow Nexus starts, restarts, and resolves flows. `flow-nexus` is the
+no-argument long-running process, `flow` is its ordinary client, and
+`flow-meta` is its privileged client. The Nexus persists Flow identity and
+policy in one Sema store, and its sockets carry only length-prefixed rkyv
+Signal archives.
 
-| Variable | Current value | Purpose |
-| --- | --- | --- |
-| `FLOW_WORKSPACE` | `/home/li/primary/flow` | repository and Nexus working directory |
-| `FLOW_NEXUS_STORE` | `/home/li/primary/flow/flow.sema` | Nexus-owned Sema store |
-| `FLOW_ORDINARY_SOCKET` | `/tmp/flow-nexus.sock` | ordinary socket; client override: `FLOW_SOCKET` |
-| `FLOW_META_SOCKET` | `/tmp/flow-nexus-meta.sock` | privileged socket; client override: `FLOW_META_SOCKET` |
-| `CODEX_APP_SERVER_SOCKET` | `/home/li/.codex/app-server-control/app-server-control.sock` | Codex control socket |
-| `FLOW_MODEL` | `gpt-5.6-terra` | configured model |
-| `FLOW_EFFORT` | `medium` | Codex turn effort |
+The wire contracts are independent repositories:
 
-Build the five-crate workspace, then run the no-argument Nexus from
-`FLOW_WORKSPACE`:
+- `signal-flow` defines `Start`, provenance-authorized `Restart`, and
+  `ResolveRecipient` for Message Nexus routing.
+- `meta-signal-flow` defines `Configure` and reset-credit consumption.
+
+The command boundary stamps the caller's Flow and Codex session into every
+start request. The ordinary hot paths are intentionally short:
 
 ```sh
-cargo build --workspace
-target/debug/flow-nexus
+flow start codex-medium
+flow restart <flow-id>
+flow resolve <flow-id>
 ```
 
-It opens `FLOW_NEXUS_STORE`, resumes saved configuration, and serves the two
-default sockets. The contracts use `rkyv`; their Datom edge uses
-`datom-codec` and `protos`; the store uses the local `sema-engine` checkout
-configured in the Nexus manifest.
+`flow-meta reset` asks the Codex app-server to consume the next eligible reset
+credit. `flow-meta reset <credit-id>` selects a specific credit. It sends the
+privileged request through the meta socket; the command never talks to Codex
+directly.
 
-Use one quoted Datom argument. These are tested contract forms:
+By default the Nexus uses:
 
-```sh
-FLOW_SOCKET="$FLOW_ORDINARY_SOCKET" target/debug/flow \
-  'Start.{ codex-medium «map the store» { parent session turn } }'
-FLOW_SOCKET="$FLOW_ORDINARY_SOCKET" target/debug/flow \
-  'Restart.{ flow-0000000000000001 flow-0000000000000001 }'
-FLOW_META_SOCKET="$FLOW_META_SOCKET" target/debug/flow-meta \
-  'Configure.{ /tmp/flow.sock /tmp/flow-meta.sock }'
-```
+- store: `/home/li/.local/state/flow/flow.sema`
+- ordinary socket: `/run/user/1001/flow/flow.sock`
+- meta socket: `/run/user/1001/flow/flow-meta.sock`
+- Codex control socket:
+  `/home/li/.codex/app-server-control/app-server-control.sock`
 
-`Start` accepts predefined `codex-medium` and returns
-`Started.{ <flow-id> { <parent> <session> <turn> } }` only after its thread
-and first turn are accepted. A restart requires its second ID to equal the
-target child Flow ID, returning `Restarted.{ <flow-id> <generation> }`.
-Unknown or non-self authority returns `RestartRejected`; an unsupported type
-returns `StartRejected`.
+The Codex adapter opens `codex app-server proxy`, then sends `initialize`,
+`thread/start`, and `turn/start`. The returned thread is owned by the running
+app-server and remains visible to remote-control clients. Restart resumes that
+thread and starts its next turn only when the caller's provenance Flow ID
+equals the target Flow ID.
 
-`Configure` replies
-`Configured.{ { <ordinary-socket> <meta-socket> } NexusRestartRequired }`.
-It saves policy but leaves current listeners unchanged until the Nexus restarts.
-
-A live no-argument Nexus smoke created a daemon-owned Codex thread through the
-installed `codex app-server proxy`, then returned
-`Started.{ flow-0000000000000001 { flow-self session-success turn-success } }`.
-The daemon independently listed it as idle and direct-input capable with
-`/home/li/primary/flow`, `gpt-5.6-terra`, and `medium`; its one turn completed
-in 5.644 seconds with the exact final message `FLOW_SMOKE_OK`. Its initial
-brief contained the assigned `FLOW_ID`, `FLOW_DIRECTORY`, and the origin clue.
-A separate smoke rejected the parent
-(`Restart.{ flow-0000000000000001 flow-self }`) and accepted the child
-(`Restart.{ flow-0000000000000001 flow-0000000000000001 }`) as generation 2.
-Earlier `gpt-5.4` smoke threads failed because that model is unsupported for
-this ChatGPT account. Earlier isolated proxy probes were silent; their cause
-is not established. The adapter uses `codex app-server proxy`, a WebSocket
-upgrade, `initialize`, `thread/start`, and `turn/start`; it never invokes
-`codex exec`.
-
-See [DESIGN.md](DESIGN.md) for the lifecycle and component boundaries.
+Run `cargo test --workspace` for the durable contract, store, command, proxy,
+failure, timeout, identity-resolution, and reset-adapter witnesses.

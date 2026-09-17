@@ -4,7 +4,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
-use signal_flow::Origin;
+use signal_flow::OriginClue;
 use std::{
     io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, Command, Stdio},
@@ -44,7 +44,7 @@ pub trait StartsCodex {
         &self,
         flow_id: &str,
         goal: &str,
-        origin: &Origin,
+        origin: &OriginClue,
     ) -> Result<String, CodexAdapterUnavailable>;
 }
 
@@ -53,8 +53,15 @@ pub trait ResumesCodex {
         &self,
         thread_id: &str,
         goal: &str,
-        origin: &Origin,
+        origin: &OriginClue,
     ) -> Result<(), CodexAdapterUnavailable>;
+}
+
+pub trait ConsumesResetCredit {
+    fn consume_reset_credit(
+        &self,
+        request: &meta_signal_flow::ResetRequest,
+    ) -> Result<meta_signal_flow::ResetOutcome, CodexAdapterUnavailable>;
 }
 
 struct ProxySession {
@@ -97,7 +104,7 @@ trait BuildsCodexTurn {
         thread_id: &str,
         flow_id: &str,
         goal: &str,
-        origin: &Origin,
+        origin: &OriginClue,
     ) -> serde_json::Value;
 }
 
@@ -411,11 +418,11 @@ impl BuildsCodexTurn for CodexAdapter {
         thread_id: &str,
         flow_id: &str,
         goal: &str,
-        origin: &Origin,
+        origin: &OriginClue,
     ) -> serde_json::Value {
         serde_json::json!({
             "threadId": thread_id,
-            "input": [{ "type": "text", "text": format!("{goal}\n\nFlow identity:\nFLOW_ID={flow_id}\nFLOW_DIRECTORY=/home/li/primary/flows/{flow_id}\n\nOrigin clue:\nflow: {}\nsession: {}\nturn: {}", origin.parent_flow_id, origin.session, origin.turn) }],
+            "input": [{ "type": "text", "text": format!("{goal}\n\nFlow identity:\nFLOW_ID={flow_id}\nFLOW_DIRECTORY=/home/li/primary/flows/{flow_id}\n\nOrigin clue:\nflow: {}\nsession: {}\nturn: {}", origin.flow_id, origin.session_id, origin.turn_id) }],
             "model": self.model,
             "effort": "medium",
             "turnTrigger": "flow-nexus"
@@ -428,7 +435,7 @@ impl StartsCodex for CodexAdapter {
         &self,
         flow_id: &str,
         goal: &str,
-        origin: &Origin,
+        origin: &OriginClue,
     ) -> Result<String, CodexAdapterUnavailable> {
         let mut session = self.open_proxy()?;
         let result = (|| {
@@ -461,7 +468,7 @@ impl CodexAdapter {
         &self,
         flow_id: &str,
         goal: &str,
-        origin: &Origin,
+        origin: &OriginClue,
         observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
     ) -> Result<String, CodexAdapterUnavailable> {
         let mut session = self.open_proxy()?;
@@ -497,7 +504,7 @@ impl ResumesCodex for CodexAdapter {
         &self,
         thread_id: &str,
         goal: &str,
-        origin: &Origin,
+        origin: &OriginClue,
     ) -> Result<(), CodexAdapterUnavailable> {
         let mut session = self.open_proxy()?;
         let result = (|| {
@@ -512,10 +519,56 @@ impl ResumesCodex for CodexAdapter {
             session.request(
                 3,
                 "turn/start",
-                self.turn_params(thread_id, origin.parent_flow_id.as_str(), goal, origin),
+                self.turn_params(thread_id, origin.flow_id.as_str(), goal, origin),
                 self.timeout,
             )?;
             Ok(())
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+
+impl ConsumesResetCredit for CodexAdapter {
+    fn consume_reset_credit(
+        &self,
+        request: &meta_signal_flow::ResetRequest,
+    ) -> Result<meta_signal_flow::ResetOutcome, CodexAdapterUnavailable> {
+        let mut session = self.open_proxy()?;
+        let result = (|| {
+            session.request(
+                1,
+                "initialize",
+                serde_json::json!({
+                    "clientInfo": { "name": "flow-nexus", "version": env!("CARGO_PKG_VERSION") }
+                }),
+                self.timeout,
+            )?;
+            session.notify("initialized", serde_json::Value::Null)?;
+            let credit_id = match &request.credit_selection {
+                meta_signal_flow::CreditSelection::Next => serde_json::Value::Null,
+                meta_signal_flow::CreditSelection::Specific(value) => {
+                    serde_json::Value::String(value.clone())
+                }
+            };
+            let response = session.request(
+                2,
+                "account/rateLimitResetCredit/consume",
+                serde_json::json!({
+                    "idempotencyKey": request.idempotency_key,
+                    "creditId": credit_id,
+                }),
+                self.timeout,
+            )?;
+            match response.get("outcome").and_then(serde_json::Value::as_str) {
+                Some("reset") => Ok(meta_signal_flow::ResetOutcome::Reset),
+                Some("nothingToReset") => Ok(meta_signal_flow::ResetOutcome::NothingToReset),
+                Some("noCredit") => Ok(meta_signal_flow::ResetOutcome::NoCredit),
+                Some("alreadyRedeemed") => Ok(meta_signal_flow::ResetOutcome::AlreadyRedeemed),
+                _ => Err(CodexAdapterUnavailable::Protocol(
+                    "reset-credit response has an unknown outcome".into(),
+                )),
+            }
         })();
         session.stop_proxy();
         result
@@ -595,11 +648,11 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn origin() -> Origin {
-        Origin {
-            parent_flow_id: "parent-flow".into(),
-            session: "session-1".into(),
-            turn: "turn-1".into(),
+    fn origin() -> OriginClue {
+        OriginClue {
+            flow_id: "parent-flow".into(),
+            session_id: "session-1".into(),
+            turn_id: "turn-1".into(),
         }
     }
 
@@ -673,5 +726,27 @@ mod tests {
             adapter().start_codex("flow-test", "start", &origin()),
             Err(CodexAdapterUnavailable::TimedOut)
         ));
+    }
+
+    #[test]
+    fn fake_proxy_consumes_a_reset_credit_as_a_typed_outcome() {
+        let _guard = fake_proxy_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(r#"{"id":2,"result":{"outcome":"nothingToReset"}}"#),
+        ];
+        let (_directory, _path) = fake.install(&frames);
+        assert_eq!(
+            adapter()
+                .consume_reset_credit(&meta_signal_flow::ResetRequest {
+                    idempotency_key: "attempt-1".into(),
+                    credit_selection: meta_signal_flow::CreditSelection::Next,
+                })
+                .unwrap(),
+            meta_signal_flow::ResetOutcome::NothingToReset
+        );
     }
 }

@@ -1,10 +1,11 @@
 # Flow Nexus design
 
-The ordinary and meta sockets are separate Signal edges. Datom ends at a CLI:
-the client parses text, sends an rkyv frame, and later textualizes the typed
-reply. `signal-flow` owns `Start` and `Restart`; `meta-signal-flow` owns
-`Configure`. Each contract owns its `WIRE_VERSION`. `RunningNexus` dispatches;
-`FlowStore` owns working state and policy in `FLOW_NEXUS_STORE`.
+The ordinary and meta sockets are separate Signal edges. Text ends at a CLI:
+the client turns a short command into a typed request, sends an rkyv frame,
+and textualizes the typed reply as Datom. The standalone `signal-flow` repo
+owns `Start`, `Restart`, and `ResolveRecipient`; `meta-signal-flow` owns
+`Configure` and `ConsumeReset`. Each contract versions its own wire.
+`RunningNexus` dispatches; `FlowStore` owns working state and policy.
 
 ```mermaid
 sequenceDiagram
@@ -34,12 +35,15 @@ keeps the known thread. A later child-self restart resumes it rather than
 launching a second thread. A thread-start failure leaves a non-resumable
 pending reservation. Both conditions recover from `FLOW_NEXUS_STORE`.
 
+`ResolveRecipient` projects a durable Flow record into a `FlowNode`: Flow ID,
+daemon session ID, harness kind, route readiness, endpoint, origin clue, and
+lifecycle. Message Nexus consumes that typed reply instead of maintaining a
+second identity registry.
+
 Fresh stores persist default sockets. Meta `Configure` writes the same store
 and reports `NexusRestartRequired`, since rebinding live sockets is deferred
 to a Nexus restart. The adapter is outside the Signal wire boundary: the
-Codex app-server conversation is WebSocket/JSON-RPC through
-`CODEX_APP_SERVER_SOCKET`. Its protocol tests cover framing, refusal, timeout, and the assigned-flow
-brief. A live smoke created a daemon-owned, list-visible `gpt-5.6-terra`
-thread at `medium`; its bounded turn completed with `FLOW_SMOKE_OK`. Earlier
-pre-fix `gpt-5.4` threads failed because that model is unavailable to this
-ChatGPT account.
+Codex app-server conversation is WebSocket/JSON-RPC through the configured
+control socket. `ConsumeReset` uses the same adapter but is reachable only
+through the meta socket. Protocol tests cover framing, refusal, timeout,
+assigned-flow context, and the reset outcome mapping.

@@ -2,7 +2,9 @@
 
 use std::{fs, path::PathBuf, process::Command};
 
-use signal_flow::{FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection};
+use signal_flow::{
+    EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, RouteReadiness,
+};
 
 /// Reads Herdr's documented session snapshot and validates one complete route.
 pub trait ReadsHerdrRoster {
@@ -63,8 +65,15 @@ impl HerdrCli {
     }
 
     pub fn refresh_route(&self, mut node: FlowNode) -> FlowNode {
-        if !self.route_is_available(&node) {
+        let had_persisted_route = matches!(
+            node.herdr_route_selection,
+            HerdrRouteSelection::Available(_)
+        );
+        if had_persisted_route && !self.route_is_available(&node) {
             node.herdr_route_selection = HerdrRouteSelection::Unavailable;
+            if let EndpointSelection::Available(endpoint) = &mut node.endpoint_selection {
+                endpoint.route_readiness = RouteReadiness::Parked;
+            }
         }
         node
     }
@@ -324,5 +333,50 @@ mod tests {
         assert!(herdr.identity_is_claimed(&node));
         node.flow_id = "unknown".into();
         assert!(!herdr.identity_is_claimed(&node));
+    }
+
+    #[test]
+    fn stale_persisted_route_parks_native_fallback_but_native_only_rows_are_unchanged() {
+        let herdr = HerdrCli::at(
+            PathBuf::from("missing-herdr-fixture"),
+            PathBuf::from("/missing-flows-fixture"),
+        );
+        let mut node = FlowNode {
+            flow_id: "1ac573".into(),
+            session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
+            harness_kind: HarnessKind::Claude,
+            endpoint_selection: EndpointSelection::Available(signal_flow::Available_Data {
+                endpoint_path: "/tmp/native-fallback.sock".into(),
+                route_readiness: signal_flow::RouteReadiness::Ready,
+            }),
+            herdr_route_selection: HerdrRouteSelection::Available(route()),
+            origin_clue: OriginClue {
+                flow_id: "1ac573".into(),
+                session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
+                turn_id: "unavailable".into(),
+            },
+            flow_lifecycle: FlowLifecycle::Active,
+        };
+        let stale = herdr.refresh_route(node.clone());
+        assert_eq!(
+            stale.herdr_route_selection,
+            HerdrRouteSelection::Unavailable
+        );
+        assert!(matches!(
+            stale.endpoint_selection,
+            EndpointSelection::Available(signal_flow::Available_Data {
+                route_readiness: signal_flow::RouteReadiness::Parked,
+                ..
+            })
+        ));
+
+        node.herdr_route_selection = HerdrRouteSelection::Unavailable;
+        assert!(matches!(
+            herdr.refresh_route(node).endpoint_selection,
+            EndpointSelection::Available(signal_flow::Available_Data {
+                route_readiness: signal_flow::RouteReadiness::Ready,
+                ..
+            })
+        ));
     }
 }

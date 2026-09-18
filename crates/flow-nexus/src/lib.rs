@@ -305,8 +305,8 @@ mod tests {
             let flows_root = directory.path().join("flows");
             fs::create_dir(&flows_root).expect("fixture flows root");
             fs::write(
-                flows_root.join(".1ac573.flow-id"),
-                "version=1\nharness=claude\nidentity=1ac573e8952240aba04c317ab1790728\nalias=1ac573\nuuid-version=uuid-v4\n",
+                flows_root.join(".908786.flow-id"),
+                "version=1\nharness=codex\nidentity=01a0b22ce24f7452994064490878680f\nalias=908786\n",
             )
             .expect("fixture flow claim");
             let snapshot_program = directory.path().join("herdr-fixture");
@@ -328,19 +328,22 @@ mod tests {
 
         fn node(&self) -> FlowNode {
             FlowNode {
-                flow_id: "1ac573".into(),
-                session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
-                harness_kind: HarnessKind::Claude,
-                endpoint_selection: EndpointSelection::Unavailable,
+                flow_id: "908786".into(),
+                session_id: "01a0b22c-e24f-7452-9940-64490878680f".into(),
+                harness_kind: HarnessKind::Codex,
+                endpoint_selection: EndpointSelection::Available(signal_flow::Available_Data {
+                    endpoint_path: "/tmp/native-fallback.sock".into(),
+                    route_readiness: signal_flow::RouteReadiness::Ready,
+                }),
                 herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
                     herdr_session_name: "messaging-build".into(),
-                    herdr_agent_name: "psyche-opus-successor".into(),
-                    herdr_pane_id: "w1:p2".into(),
-                    herdr_terminal_id: "term_65bb617b145522".into(),
+                    herdr_agent_name: "psyche-mind-astra".into(),
+                    herdr_pane_id: "w1:p3".into(),
+                    herdr_terminal_id: "term_65bb7f87270cb3".into(),
                 }),
                 origin_clue: OriginClue {
-                    flow_id: "1ac573".into(),
-                    session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
+                    flow_id: "908786".into(),
+                    session_id: "01a0b22c-e24f-7452-9940-64490878680f".into(),
                     turn_id: "unavailable".into(),
                 },
                 flow_lifecycle: FlowLifecycle::Active,
@@ -349,20 +352,20 @@ mod tests {
 
         fn current_agent(&self) -> serde_json::Value {
             serde_json::json!({
-                "agent":"claude",
+                "agent":"codex",
                 "agent_status":"working",
                 "cwd":"/home/li/primary",
                 "focused":false,
                 "foreground_cwd":"/home/li/primary",
                 "interactive_ready":true,
-                "name":"psyche-opus-successor",
-                "pane_id":"w1:p2",
+                "name":"psyche-mind-astra",
+                "pane_id":"w1:p3",
                 "revision":4,
                 "state_change_seq":85,
                 "tab_id":"w1:t1",
-                "terminal_id":"term_65bb617b145522",
-                "terminal_title":"primary Psyche opus",
-                "terminal_title_stripped":"primary Psyche opus",
+                "terminal_id":"term_65bb7f87270cb3",
+                "terminal_title":"primary",
+                "terminal_title_stripped":"primary",
                 "workspace_id":"w1"
             })
         }
@@ -409,7 +412,7 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch(Query::ResolveRecipient("1ac573".into())),
+                .dispatch(Query::ResolveRecipient("908786".into())),
             Response::RecipientResolved(node)
         );
     }
@@ -431,14 +434,14 @@ mod tests {
             match changed_field {
                 "terminal" => agent["terminal_id"] = "term_replaced".into(),
                 "name" => agent["name"] = "another-agent".into(),
-                "harness" => agent["agent"] = "codex".into(),
+                "harness" => agent["agent"] = "claude".into(),
                 "interactive" => agent["interactive_ready"] = false.into(),
                 _ => unreachable!("closed fixture variants"),
             }
             fixture.set_agents(vec![agent]);
             let Response::RecipientResolved(resolved) = fixture
                 .nexus
-                .dispatch(Query::ResolveRecipient("1ac573".into()))
+                .dispatch(Query::ResolveRecipient("908786".into()))
             else {
                 panic!("registered recipient resolves")
             };
@@ -447,6 +450,13 @@ mod tests {
                 HerdrRouteSelection::Unavailable,
                 "stale {changed_field} must not remain routable"
             );
+            assert!(matches!(
+                resolved.endpoint_selection,
+                EndpointSelection::Available(signal_flow::Available_Data {
+                    route_readiness: signal_flow::RouteReadiness::Parked,
+                    ..
+                })
+            ));
         }
     }
 
@@ -485,7 +495,7 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch(Query::ResolveRecipient("1ac573".into())),
+                .dispatch(Query::ResolveRecipient("908786".into())),
             Response::RecipientResolved(node)
         );
         assert!(fixture.directory.path().join("flow.sema").exists());

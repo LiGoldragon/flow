@@ -38,6 +38,10 @@ impl ParsesMetaCommand for FlowMetaClient {
                 let harness = operation.expect("matched operation");
                 let Some(flow_id) = arguments.next() else { return Err(Self::registration_usage()) };
                 let Some(session_id) = arguments.next() else { return Err(Self::registration_usage()) };
+                let Some(herdr_session_name) = arguments.next() else { return Err(Self::registration_usage()) };
+                let Some(herdr_agent_name) = arguments.next() else { return Err(Self::registration_usage()) };
+                let Some(herdr_pane_id) = arguments.next() else { return Err(Self::registration_usage()) };
+                let Some(herdr_terminal_id) = arguments.next() else { return Err(Self::registration_usage()) };
                 let endpoint = arguments.next();
                 if arguments.next().is_some() { return Err(Self::registration_usage()) }
                 let harness_kind = if harness == "register-codex" {
@@ -69,6 +73,14 @@ impl ParsesMetaCommand for FlowMetaClient {
                     session_id: session_id.clone(),
                     harness_kind,
                     endpoint_selection,
+                    herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
+                        signal_flow::HerdrRoute {
+                            herdr_session_name,
+                            herdr_agent_name,
+                            herdr_pane_id,
+                            herdr_terminal_id,
+                        },
+                    ),
                     origin_clue: signal_flow::OriginClue {
                         flow_id,
                         session_id,
@@ -89,14 +101,14 @@ impl ParsesMetaCommand for FlowMetaClient {
                 }
                 Ok(Query::Configure(Configuration { ordinary_socket_path, meta_socket_path }))
             }
-            _ => Err("usage: flow-meta reset <idempotency-key> [credit-id] | flow-meta register-codex|register-claude <flow-id> <session-id> [endpoint] | flow-meta configure <ordinary-socket> <meta-socket>".into()),
+            _ => Err("usage: flow-meta reset <idempotency-key> [credit-id] | flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint] | flow-meta configure <ordinary-socket> <meta-socket>".into()),
         }
     }
 }
 
 impl FlowMetaClient {
     fn registration_usage() -> String {
-        "usage: flow-meta register-codex|register-claude <flow-id> <session-id> [endpoint]".into()
+        "usage: flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint]".into()
     }
 }
 
@@ -154,5 +166,39 @@ mod tests {
         };
         assert_eq!(request.credit_selection, CreditSelection::Next);
         assert_eq!(request.idempotency_key, "attempt-1");
+    }
+
+    #[test]
+    fn registration_carries_the_complete_herdr_binding() {
+        let client = FlowMetaClient {
+            socket: "unused".into(),
+        };
+        let Query::RegisterFlow(node) = client
+            .parse_command(
+                [
+                    "register-claude",
+                    "da1e3f",
+                    "da1e3f9d-full",
+                    "messaging-build",
+                    "recipient",
+                    "w1:p2",
+                    "term-current",
+                ]
+                .map(String::from)
+                .into_iter(),
+            )
+            .expect("registration query")
+        else {
+            panic!("registration query")
+        };
+        assert_eq!(
+            node.herdr_route_selection,
+            signal_flow::HerdrRouteSelection::Available(signal_flow::HerdrRoute {
+                herdr_session_name: "messaging-build".into(),
+                herdr_agent_name: "recipient".into(),
+                herdr_pane_id: "w1:p2".into(),
+                herdr_terminal_id: "term-current".into(),
+            })
+        );
     }
 }

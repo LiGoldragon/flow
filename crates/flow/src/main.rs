@@ -127,8 +127,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlowClient, ParsesFlowCommand, claude_flow_id, codex_flow_id};
-    use signal_flow::Query;
+    use super::{
+        FlowClient, ParsesFlowCommand, TextualizesFlowReply, claude_flow_id, codex_flow_id,
+    };
+    use signal_flow::{Query, Response};
 
     #[test]
     fn resolve_is_nearly_argumentless_and_typed() {
@@ -152,6 +154,37 @@ mod tests {
         assert_eq!(
             claude_flow_id("da1e3f9d-857f-49ab-8c6f-3aa0a9db826b").as_deref(),
             Some("da1e3f")
+        );
+    }
+
+    #[test]
+    fn native_resolution_serialization_matches_the_signal_contract() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        let reply = Response::RecipientResolved(signal_flow::FlowNode {
+            flow_id: "da1e3f".into(),
+            session_id: "da1e3f9d-full".into(),
+            harness_kind: signal_flow::HarnessKind::Claude,
+            endpoint_selection: signal_flow::EndpointSelection::Unavailable,
+            herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
+                signal_flow::HerdrRoute {
+                    herdr_session_name: "messaging-build".into(),
+                    herdr_agent_name: "recipient".into(),
+                    herdr_pane_id: "w1:p2".into(),
+                    herdr_terminal_id: "term-current".into(),
+                },
+            ),
+            origin_clue: signal_flow::OriginClue {
+                flow_id: "da1e3f".into(),
+                session_id: "da1e3f9d-full".into(),
+                turn_id: "unavailable".into(),
+            },
+            flow_lifecycle: signal_flow::FlowLifecycle::Active,
+        });
+        assert_eq!(
+            client.textualize_reply(&reply),
+            "RecipientResolved.{ da1e3f da1e3f9d-full Claude Unavailable Available.{ messaging-build recipient w1:p2 term-current } { da1e3f da1e3f9d-full unavailable } Active }"
         );
     }
 }

@@ -137,6 +137,7 @@ mod tests {
                 endpoint_path: daemon.join("control.sock").display().to_string(),
                 route_readiness: RouteReadiness::Ready,
             }),
+            herdr_route_selection: signal_flow::HerdrRouteSelection::Unavailable,
             origin_clue: OriginClue {
                 flow_id: "da1e3f".into(),
                 session_id: "da1e3f9d-full".into(),

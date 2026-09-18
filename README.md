@@ -31,8 +31,8 @@ Existing daemon sessions enter the authoritative registry through typed meta
 operations:
 
 ```sh
-flow-meta register-codex <flow-id> <thread-id>
-flow-meta register-claude <flow-id> <session-id> <daemon-control-socket>
+flow-meta register-codex <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [control-socket]
+flow-meta register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [daemon-control-socket]
 ```
 
 The two sockets are mode `0600`. The meta edge separates ordinary Flow
@@ -44,6 +44,20 @@ Claude resolution rechecks the job state, daemon roster, rendezvous socket,
 control socket, and worker process on every request. It reports `Parked` when
 that evidence no longer matches, when a permission wait is recorded, or when
 the lifecycle is terminal. An ordinary `blocked` lifecycle remains routable.
+
+Herdr routes live in a separate table in the same Flow Sema store, keyed by
+Flow ID, so the existing v5 Flow rows retain their exact layout. Registration
+requires a valid `flow-id` claim marker for the Flow ID and harness, then binds
+the current native session to the exact Herdr agent, pane, terminal, and
+harness. This keeps imported native sessions valid without inferring identity
+from a UUID substring. A repeated registration cannot replace either the
+native harness session or the Herdr binding.
+Resolution rechecks that binding against `herdr api snapshot`; it returns the
+route as available while the exact agent is idle or working and
+`interactive_ready`, and otherwise returns `HerdrRouteSelection::Unavailable`.
+The Message consumer owns its harness-specific blank-composer guard before it
+submits input. Rows written before the route table was added also resolve with
+an unavailable Herdr route.
 
 By default the Nexus uses:
 
@@ -68,4 +82,9 @@ the three binaries into `~/.local/bin`, copy
 and binaries instead of retaining this local copy.
 
 Run `cargo test --workspace` for the durable contract, store, command, proxy,
-failure, timeout, identity-resolution, and reset-adapter witnesses.
+failure, timeout, identity-resolution, and reset-adapter witnesses. Nix exposes
+the full `checks.<system>.default` gate plus focused
+`flow-v5-row-preservation`, `flow-herdr-route-durability`,
+`flow-stale-route-unavailable`, `flow-conflicting-registration-refusal`,
+`flow-herdr-registration-binding`, and
+`flow-native-resolution-serialization` checks.

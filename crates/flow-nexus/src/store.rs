@@ -13,14 +13,15 @@ use sema_engine::{
     SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::{
-    EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, OriginClue,
-    Query, RecipientResolutionRejection, Response, RestartRejection, Restarted, RouteReadiness,
-    StartRejection, Started,
+    EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
+    HerdrRouteSelection, OriginClue, Query, RecipientResolutionRejection, Response,
+    RestartRejection, Restarted, RouteReadiness, StartRejection, Started,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
 const FLOW_STATE_TABLE_NAME: TableName = TableName::new("flow_nexus_state");
 const FLOW_CONFIGURATION_TABLE_NAME: TableName = TableName::new("flow_nexus_configuration");
+const FLOW_HERDR_ROUTE_TABLE_NAME: TableName = TableName::new("flow_nexus_herdr_routes");
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const DEFAULT_ORDINARY_SOCKET: &str = "/run/user/1001/flow/flow.sock";
@@ -46,6 +47,18 @@ enum FlowLifecycle {
 }
 
 impl EngineRecord for FlowRecord {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct FlowHerdrRouteRecord {
+    flow_id: String,
+    route: HerdrRoute,
+}
+
+impl EngineRecord for FlowHerdrRouteRecord {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.flow_id.clone())
     }
@@ -87,6 +100,7 @@ pub struct FlowStore {
     flows: TableReference<FlowRecord>,
     state: TableReference<FlowStoreState>,
     configuration: TableReference<FlowStoreConfiguration>,
+    herdr_routes: TableReference<FlowHerdrRouteRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +114,12 @@ pub struct RestartAuthorization {
 pub struct PendingLaunch {
     pub flow_id: String,
     pub origin: OriginClue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowRegistration {
+    Registered(Box<FlowNode>),
+    ConflictingBinding,
 }
 
 /// The constructor is a trait operation so the Nexus's storage boundary is
@@ -156,12 +176,13 @@ pub trait ConfiguresFlowStore {
 }
 
 pub trait RegistersFlowIdentity {
-    fn register_flow(&self, flow_node: FlowNode) -> Result<FlowNode, StoreError>;
+    fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError>;
 }
 
 trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
+    fn herdr_route(&self, flow_id: &str) -> Result<Option<FlowHerdrRouteRecord>, StoreError>;
     fn stored_configuration(&self) -> Result<FlowStoreConfiguration, StoreError>;
     fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError>;
 }
@@ -196,11 +217,17 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-configuration"),
             SchemaHash::for_label("flow-nexus-configuration-v1"),
         ))?;
+        let herdr_routes = engine.register_table(TableDescriptor::new(
+            FLOW_HERDR_ROUTE_TABLE_NAME,
+            FamilyName::new("flow-nexus-herdr-route"),
+            SchemaHash::for_label("flow-nexus-herdr-route-v1"),
+        ))?;
         let store = Self {
             engine,
             flows,
             state,
             configuration,
+            herdr_routes,
         };
         if store
             .engine
@@ -323,7 +350,33 @@ impl ConfiguresFlowStore for FlowStore {
 }
 
 impl RegistersFlowIdentity for FlowStore {
-    fn register_flow(&self, flow_node: FlowNode) -> Result<FlowNode, StoreError> {
+    fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError> {
+        let HerdrRouteSelection::Available(route) = flow_node.herdr_route_selection.clone() else {
+            return Ok(FlowRegistration::ConflictingBinding);
+        };
+        if let Some(flow) = self.flow(&flow_node.flow_id)? {
+            if flow.thread_id.as_deref() != Some(flow_node.session_id.as_str())
+                || flow.harness_kind != flow_node.harness_kind
+            {
+                return Ok(FlowRegistration::ConflictingBinding);
+            }
+            match self.herdr_route(&flow_node.flow_id)? {
+                Some(existing) if existing.route != route => {
+                    return Ok(FlowRegistration::ConflictingBinding);
+                }
+                Some(_) => return Ok(FlowRegistration::Registered(Box::new(flow_node))),
+                None => {
+                    self.engine.assert(Assertion::new(
+                        self.herdr_routes,
+                        FlowHerdrRouteRecord {
+                            flow_id: flow_node.flow_id.clone(),
+                            route,
+                        },
+                    ))?;
+                    return Ok(FlowRegistration::Registered(Box::new(flow_node)));
+                }
+            }
+        }
         let lifecycle = match flow_node.flow_lifecycle {
             SignalFlowLifecycle::Pending => FlowLifecycle::Pending,
             SignalFlowLifecycle::Active => FlowLifecycle::Active,
@@ -341,16 +394,19 @@ impl RegistersFlowIdentity for FlowStore {
             lifecycle,
             generation: 1,
         };
-        if self.flow(&flow_node.flow_id)?.is_some() {
-            self.engine.mutate_keyed(KeyedMutation::new(
-                self.flows,
-                RecordKey::new(flow_node.flow_id.clone()),
-                record,
-            ))?;
-        } else {
-            self.engine.assert(Assertion::new(self.flows, record))?;
-        }
-        Ok(flow_node)
+        self.engine.commit_atomic(
+            self.engine
+                .begin_atomic_commit()
+                .assert(self.flows, record)
+                .assert(
+                    self.herdr_routes,
+                    FlowHerdrRouteRecord {
+                        flow_id: flow_node.flow_id.clone(),
+                        route,
+                    },
+                ),
+        )?;
+        Ok(FlowRegistration::Registered(Box::new(flow_node)))
     }
 }
 
@@ -376,6 +432,19 @@ impl ReadsFlowStore for FlowStore {
         match records.as_slice() {
             [] => Ok(None),
             [flow] => Ok(Some(flow.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn herdr_route(&self, flow_id: &str) -> Result<Option<FlowHerdrRouteRecord>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(self.herdr_routes, RecordKey::new(flow_id)))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [route] => Ok(Some(route.clone())),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -411,6 +480,10 @@ impl ReadsFlowStore for FlowStore {
             session_id,
             harness_kind: flow.harness_kind.clone(),
             endpoint_selection: flow.endpoint_selection.clone(),
+            herdr_route_selection: self
+                .herdr_route(flow_id)?
+                .map(|record| HerdrRouteSelection::Available(record.route))
+                .unwrap_or(HerdrRouteSelection::Unavailable),
             origin_clue: flow.origin,
             flow_lifecycle: match flow.lifecycle {
                 FlowLifecycle::Active => SignalFlowLifecycle::Active,
@@ -542,7 +615,7 @@ impl WritesFlowStore for FlowStore {
 mod tests {
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow,
-        FlowStore, OpensFlowStore, RecordsPendingThread, RecordsRestartedFlow,
+        FlowStore, OpensFlowStore, ReadsFlowStore, RecordsPendingThread, RecordsRestartedFlow,
         RegistersFlowIdentity, ReservesPendingStart,
     };
     use meta_signal_flow::Configuration;
@@ -757,6 +830,10 @@ mod tests {
                 ..
             })
         ));
+        assert_eq!(
+            node.herdr_route_selection,
+            signal_flow::HerdrRouteSelection::Unavailable
+        );
     }
 
     #[test]
@@ -768,6 +845,14 @@ mod tests {
             session_id: "claude-session".into(),
             harness_kind: signal_flow::HarnessKind::Claude,
             endpoint_selection: signal_flow::EndpointSelection::Unavailable,
+            herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
+                signal_flow::HerdrRoute {
+                    herdr_session_name: "messaging-build".into(),
+                    herdr_agent_name: "recipient".into(),
+                    herdr_pane_id: "w1:p2".into(),
+                    herdr_terminal_id: "term-current".into(),
+                },
+            ),
             origin_clue: signal_flow::OriginClue {
                 flow_id: "da1e3f".into(),
                 session_id: "claude-session".into(),
@@ -778,11 +863,97 @@ mod tests {
         store
             .register_flow(node.clone())
             .expect("registration persists");
+        drop(store);
         assert_eq!(
-            store
+            fixture
+                .store()
                 .apply(Query::ResolveRecipient("da1e3f".into()))
                 .unwrap(),
             Response::RecipientResolved(node)
+        );
+    }
+
+    #[test]
+    fn conflicting_session_or_route_cannot_replace_a_binding() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let node = signal_flow::FlowNode {
+            flow_id: "da1e3f".into(),
+            session_id: "da1e3f9d-full".into(),
+            harness_kind: signal_flow::HarnessKind::Claude,
+            endpoint_selection: signal_flow::EndpointSelection::Unavailable,
+            herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
+                signal_flow::HerdrRoute {
+                    herdr_session_name: "messaging-build".into(),
+                    herdr_agent_name: "recipient".into(),
+                    herdr_pane_id: "w1:p2".into(),
+                    herdr_terminal_id: "term-current".into(),
+                },
+            ),
+            origin_clue: signal_flow::OriginClue {
+                flow_id: "da1e3f".into(),
+                session_id: "da1e3f9d-full".into(),
+                turn_id: "unavailable".into(),
+            },
+            flow_lifecycle: signal_flow::FlowLifecycle::Active,
+        };
+        assert!(matches!(
+            store.register_flow(node.clone()).unwrap(),
+            super::FlowRegistration::Registered(_)
+        ));
+        let mut conflicting_session = node.clone();
+        conflicting_session.session_id = "da1e3f9d-replaced".into();
+        assert_eq!(
+            store.register_flow(conflicting_session).unwrap(),
+            super::FlowRegistration::ConflictingBinding
+        );
+        let mut conflicting_route = node;
+        let signal_flow::HerdrRouteSelection::Available(route) =
+            &mut conflicting_route.herdr_route_selection
+        else {
+            panic!("fixture route")
+        };
+        route.herdr_terminal_id = "term-replaced".into();
+        assert_eq!(
+            store.register_flow(conflicting_route).unwrap(),
+            super::FlowRegistration::ConflictingBinding
+        );
+    }
+
+    #[test]
+    fn an_existing_v5_row_reopens_unchanged_and_defaults_to_unavailable_route() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let old_row = super::FlowRecord {
+            flow_id: "old-v5".into(),
+            flow_type: "claude-registered".into(),
+            origin: signal_flow::OriginClue {
+                flow_id: "old-v5".into(),
+                session_id: "old-v5-session".into(),
+                turn_id: "unavailable".into(),
+            },
+            thread_id: Some("old-v5-session".into()),
+            harness_kind: signal_flow::HarnessKind::Claude,
+            endpoint_selection: signal_flow::EndpointSelection::Unavailable,
+            lifecycle: super::FlowLifecycle::Active,
+            generation: 7,
+        };
+        store
+            .engine
+            .assert(sema_engine::Assertion::new(store.flows, old_row.clone()))
+            .expect("v5 fixture row persists");
+        drop(store);
+        let reopened = fixture.store();
+        assert_eq!(reopened.flow("old-v5").unwrap(), Some(old_row));
+        let Response::RecipientResolved(node) = reopened
+            .apply(Query::ResolveRecipient("old-v5".into()))
+            .unwrap()
+        else {
+            panic!("old active flow resolves")
+        };
+        assert_eq!(
+            node.herdr_route_selection,
+            signal_flow::HerdrRouteSelection::Unavailable
         );
     }
 }

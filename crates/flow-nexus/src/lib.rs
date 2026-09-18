@@ -1,6 +1,7 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
 pub mod claude;
 pub mod codex;
+pub mod herdr;
 pub mod store;
 
 use codex::{CodexAdapter, ConsumesResetCredit, ResumesCodex};
@@ -23,6 +24,7 @@ use store::{
 pub struct RunningNexus {
     pub store: FlowStore,
     pub codex: CodexAdapter,
+    pub herdr: herdr::HerdrCli,
 }
 
 pub trait Dispatches {
@@ -96,9 +98,9 @@ impl Dispatches for RunningNexus {
             }
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
-                    Ok(Response::RecipientResolved(node)) => {
-                        Response::RecipientResolved(claude::refresh_readiness(node))
-                    }
+                    Ok(Response::RecipientResolved(node)) => Response::RecipientResolved(
+                        self.herdr.refresh_route(claude::refresh_readiness(node)),
+                    ),
                     Ok(response) => response,
                     Err(_) => Response::RecipientResolutionRejected(
                         signal_flow::RecipientResolutionRejection::FlowUnavailable,
@@ -128,13 +130,26 @@ impl Dispatches for RunningNexus {
                 .unwrap_or(meta_signal_flow::Response::ResetRejected(
                     meta_signal_flow::ResetRejection::AdapterUnavailable,
                 )),
-            meta_signal_flow::Query::RegisterFlow(flow_node) => self
-                .store
-                .register_flow(flow_node)
-                .map(meta_signal_flow::Response::FlowRegistered)
-                .unwrap_or(meta_signal_flow::Response::FlowRegistrationRejected(
-                    meta_signal_flow::FlowRegistrationRejection::StoreRefused,
-                )),
+            meta_signal_flow::Query::RegisterFlow(flow_node) => {
+                if !self.herdr.validate_registration(&flow_node) {
+                    return meta_signal_flow::Response::FlowRegistrationRejected(
+                        meta_signal_flow::FlowRegistrationRejection::UnknownOrUnclaimedIdentity,
+                    );
+                }
+                match self.store.register_flow(flow_node) {
+                    Ok(store::FlowRegistration::Registered(node)) => {
+                        meta_signal_flow::Response::FlowRegistered(*node)
+                    }
+                    Ok(store::FlowRegistration::ConflictingBinding) => {
+                        meta_signal_flow::Response::FlowRegistrationRejected(
+                            meta_signal_flow::FlowRegistrationRejection::ConflictingBinding,
+                        )
+                    }
+                    Err(_) => meta_signal_flow::Response::FlowRegistrationRejected(
+                        meta_signal_flow::FlowRegistrationRejection::StoreRefused,
+                    ),
+                }
+            }
         }
     }
 }
@@ -164,6 +179,7 @@ impl OpensRunningNexus for RunningNexus {
                 model,
                 timeout,
             },
+            herdr: herdr::HerdrCli::default(),
         })
     }
 }
@@ -256,5 +272,222 @@ impl Frame {
             peer,
             &rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Dispatches, RunningNexus};
+    use crate::{
+        codex::CodexAdapter,
+        herdr::HerdrCli,
+        store::{FlowStore, OpensFlowStore},
+    };
+    use signal_flow::{
+        EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
+        OriginClue, Query, Response,
+    };
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+
+    struct NexusFixture {
+        directory: tempfile::TempDir,
+        nexus: RunningNexus,
+        snapshot_program: PathBuf,
+    }
+
+    trait ControlsHerdrSnapshot {
+        fn set_agents(&self, agents: Vec<serde_json::Value>);
+    }
+
+    impl NexusFixture {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().expect("temporary nexus fixture");
+            let flows_root = directory.path().join("flows");
+            fs::create_dir(&flows_root).expect("fixture flows root");
+            fs::write(
+                flows_root.join(".1ac573.flow-id"),
+                "version=1\nharness=claude\nidentity=1ac573e8952240aba04c317ab1790728\nalias=1ac573\nuuid-version=uuid-v4\n",
+            )
+            .expect("fixture flow claim");
+            let snapshot_program = directory.path().join("herdr-fixture");
+            let nexus = RunningNexus {
+                store: FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store"),
+                codex: CodexAdapter {
+                    socket: "unused".into(),
+                    model: "unused".into(),
+                    timeout: Duration::from_secs(1),
+                },
+                herdr: HerdrCli::at(snapshot_program.clone(), flows_root),
+            };
+            Self {
+                directory,
+                nexus,
+                snapshot_program,
+            }
+        }
+
+        fn node(&self) -> FlowNode {
+            FlowNode {
+                flow_id: "1ac573".into(),
+                session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
+                harness_kind: HarnessKind::Claude,
+                endpoint_selection: EndpointSelection::Unavailable,
+                herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                    herdr_session_name: "messaging-build".into(),
+                    herdr_agent_name: "psyche-opus-successor".into(),
+                    herdr_pane_id: "w1:p2".into(),
+                    herdr_terminal_id: "term_65bb617b145522".into(),
+                }),
+                origin_clue: OriginClue {
+                    flow_id: "1ac573".into(),
+                    session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
+                    turn_id: "unavailable".into(),
+                },
+                flow_lifecycle: FlowLifecycle::Active,
+            }
+        }
+
+        fn current_agent(&self) -> serde_json::Value {
+            serde_json::json!({
+                "agent":"claude",
+                "agent_status":"working",
+                "cwd":"/home/li/primary",
+                "focused":false,
+                "foreground_cwd":"/home/li/primary",
+                "interactive_ready":true,
+                "name":"psyche-opus-successor",
+                "pane_id":"w1:p2",
+                "revision":4,
+                "state_change_seq":85,
+                "tab_id":"w1:t1",
+                "terminal_id":"term_65bb617b145522",
+                "terminal_title":"primary Psyche opus",
+                "terminal_title_stripped":"primary Psyche opus",
+                "workspace_id":"w1"
+            })
+        }
+    }
+
+    impl ControlsHerdrSnapshot for NexusFixture {
+        fn set_agents(&self, agents: Vec<serde_json::Value>) {
+            let snapshot = serde_json::json!({
+                "id":"cli:api:snapshot",
+                "result":{
+                    "snapshot":{
+                        "agents":agents,
+                        "protocol":20,
+                        "version":"0.8.2"
+                    },
+                    "type":"session_snapshot"
+                }
+            });
+            let body = format!(
+                "#!/bin/sh\n[ \"$1\" = \"--session\" ] && [ \"$3\" = \"api\" ] && [ \"$4\" = \"snapshot\" ] || exit 64\nprintf '%s\\n' '{}'\n",
+                snapshot
+            );
+            fs::write(&self.snapshot_program, body).expect("snapshot subprocess fixture");
+            let mut permissions = fs::metadata(&self.snapshot_program)
+                .expect("snapshot fixture metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(&self.snapshot_program, permissions)
+                .expect("snapshot fixture executable");
+        }
+    }
+
+    #[test]
+    fn running_nexus_parses_actual_working_interactive_snapshot() {
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        let node = fixture.node();
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node.clone())),
+            meta_signal_flow::Response::FlowRegistered(node.clone())
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("1ac573".into())),
+            Response::RecipientResolved(node)
+        );
+    }
+
+    #[test]
+    fn running_nexus_marks_stale_or_noninteractive_snapshots_unavailable() {
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        let node = fixture.node();
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node.clone())),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        for changed_field in ["terminal", "name", "harness", "interactive"] {
+            let mut agent = fixture.current_agent();
+            match changed_field {
+                "terminal" => agent["terminal_id"] = "term_replaced".into(),
+                "name" => agent["name"] = "another-agent".into(),
+                "harness" => agent["agent"] = "codex".into(),
+                "interactive" => agent["interactive_ready"] = false.into(),
+                _ => unreachable!("closed fixture variants"),
+            }
+            fixture.set_agents(vec![agent]);
+            let Response::RecipientResolved(resolved) = fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("1ac573".into()))
+            else {
+                panic!("registered recipient resolves")
+            };
+            assert_eq!(
+                resolved.herdr_route_selection,
+                HerdrRouteSelection::Unavailable,
+                "stale {changed_field} must not remain routable"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_registration_is_idempotent_and_conflict_has_no_partial_mutation() {
+        let fixture = NexusFixture::new();
+        let mut second_agent = fixture.current_agent();
+        second_agent["terminal_id"] = "term_conflicting".into();
+        fixture.set_agents(vec![fixture.current_agent(), second_agent]);
+        let node = fixture.node();
+        let registration = meta_signal_flow::Query::RegisterFlow(node.clone());
+        assert!(matches!(
+            fixture.nexus.dispatch_meta(registration.clone()),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+        assert!(matches!(
+            fixture.nexus.dispatch_meta(registration),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        let mut conflict = node.clone();
+        let HerdrRouteSelection::Available(route) = &mut conflict.herdr_route_selection else {
+            panic!("fixture route")
+        };
+        route.herdr_terminal_id = "term_conflicting".into();
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(conflict)),
+            meta_signal_flow::Response::FlowRegistrationRejected(
+                meta_signal_flow::FlowRegistrationRejection::ConflictingBinding
+            )
+        );
+
+        fixture.set_agents(vec![fixture.current_agent()]);
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("1ac573".into())),
+            Response::RecipientResolved(node)
+        );
+        assert!(fixture.directory.path().join("flow.sema").exists());
     }
 }

@@ -90,7 +90,7 @@
               cargoTestExtraArgs = "--workspace";
             }
           );
-          fmt = context.craneLib.cargoFmt { inherit (context.commonArgs) src; };
+          fmt = context.craneLib.cargoFmt context.commonArgs;
           clippy = context.craneLib.cargoClippy (
             context.commonArgs
             // {

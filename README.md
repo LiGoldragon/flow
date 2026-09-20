@@ -12,14 +12,19 @@ The wire contracts are independent repositories:
   `ResolveRecipient` for Message Nexus routing.
 - `meta-signal-flow` defines `Configure` and reset-credit consumption.
 
-The command boundary stamps the caller's Flow and Codex session into every
-start request. The ordinary hot paths are intentionally short:
+The ordinary client accepts exactly one inline Datom `Query`; it does not
+accept subcommands, flags, stdin, or positional fallback. For example:
 
 ```sh
-flow start codex-medium
-flow restart <flow-id>
-flow resolve <flow-id>
+flow 'Start.{ codex-medium { f72ab7 01a0bca2 turn-1 } }'
+flow 'Restart.{ f72ab7 { f72ab7 01a0bca2 turn-2 } }'
+flow 'ResolveRecipient.f72ab7'
 ```
+
+The caller supplies the complete typed query at the text boundary. Flow Nexus
+receives its Signal archive only. A convenience operation that stamps caller
+identity or implements duplicate guarding belongs in the typed contract and
+Nexus, not as an alternate CLI grammar.
 
 `flow-meta reset <idempotency-key>` asks the Codex app-server to consume the
 next eligible reset credit. `flow-meta reset <idempotency-key> <credit-id>`

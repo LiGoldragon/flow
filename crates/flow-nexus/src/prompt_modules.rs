@@ -71,6 +71,7 @@ pub(crate) struct AcceptedPromptModules {
     power: Option<NativePromptModule>,
     programming: Option<NativePromptModule>,
     launch: Option<NativePromptModule>,
+    testing_role: Option<SelectedTestingRole>,
 }
 
 impl AcceptedPromptModules {
@@ -82,6 +83,7 @@ impl AcceptedPromptModules {
             power: None,
             programming: None,
             launch: None,
+            testing_role: None,
         }
     }
 
@@ -117,11 +119,19 @@ impl AcceptedPromptModules {
             power: Some(power),
             programming: Some(programming),
             launch: Some(launch),
+            testing_role: None,
         })
     }
 
+    /// Medium's selector supplies an already accepted role. The adapter does
+    /// not resolve aliases or read Curriculum files.
+    pub(crate) fn with_selected_testing_role(mut self, role: SelectedTestingRole) -> Self {
+        self.testing_role = Some(role);
+        self
+    }
+
     pub(crate) fn native_inputs(&self) -> Vec<serde_json::Value> {
-        [
+        let mut inputs: Vec<_> = [
             self.universal_spirit.as_ref(),
             self.universal_intent.as_ref(),
             self.aspect.as_ref(),
@@ -132,7 +142,11 @@ impl AcceptedPromptModules {
         .into_iter()
         .flatten()
         .filter_map(|module| module.native_input().ok())
-        .collect()
+        .collect();
+        if let Some(role) = &self.testing_role {
+            inputs.extend(role.native_inputs());
+        }
+        inputs
     }
 }
 
@@ -721,6 +735,7 @@ pub(crate) struct SelectedTestingRole {
     revision: ImmutableRevision,
     authority: TestingAuthorityLimit,
     acceptance: TestingAcceptanceContract,
+    authored_skill_modules: Vec<NativePromptModule>,
 }
 
 macro_rules! testing_text {
@@ -762,8 +777,16 @@ impl SelectedTestingRole {
         revision: ImmutableRevision,
         authority: TestingAuthorityLimit,
         acceptance: TestingAcceptanceContract,
-    ) -> Self {
-        Self {
+        authored_skill_modules: Vec<NativePromptModule>,
+    ) -> Result<Self, TestingRoleError> {
+        if authored_skill_modules.is_empty()
+            || authored_skill_modules
+                .iter()
+                .any(|module| !matches!(module, NativePromptModule::Skill { .. }))
+        {
+            return Err(TestingRoleError::MissingAuthoredSkillModules);
+        }
+        Ok(Self {
             procedure,
             oracle,
             negatives,
@@ -771,7 +794,8 @@ impl SelectedTestingRole {
             revision,
             authority,
             acceptance,
-        }
+            authored_skill_modules,
+        })
     }
 
     /// Produces the bounded worker context. The invoker contributes only the
@@ -787,6 +811,13 @@ impl SelectedTestingRole {
             authority: self.authority.clone(),
             acceptance: self.acceptance.clone(),
         }
+    }
+
+    fn native_inputs(&self) -> Vec<serde_json::Value> {
+        self.authored_skill_modules
+            .iter()
+            .filter_map(|module| module.native_input().ok())
+            .collect()
     }
 }
 
@@ -817,6 +848,8 @@ pub(crate) enum TestingRoleError {
     MissingAuthorityLimit,
     #[error("testing acceptance contract is required")]
     MissingAcceptanceContract,
+    #[error("selected testing roles require authored native skill modules")]
+    MissingAuthoredSkillModules,
 }
 
 #[cfg(test)]
@@ -1005,8 +1038,21 @@ mod binding_tests {
             ImmutableRevision::parse("abc123").expect("fixture revision"),
             TestingAuthorityLimit::parse("read-only").expect("fixture authority"),
             TestingAcceptanceContract::parse("return witness").expect("fixture acceptance"),
-        );
+            vec![NativePromptModule::Skill {
+                id: ModuleId::parse("testing-worker").expect("fixture skill id"),
+                name: "testing-worker".into(),
+                path: "/skills/testing-worker/SKILL.md".into(),
+            }],
+        )
+        .expect("selected role");
         assert!(AcceptedPromptModules::empty().native_inputs().is_empty());
         assert_eq!(role.worker_context().revision.as_str(), "abc123");
+        assert_eq!(
+            AcceptedPromptModules::empty()
+                .with_selected_testing_role(role)
+                .native_inputs()
+                .len(),
+            1
+        );
     }
 }

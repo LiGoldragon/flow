@@ -25,9 +25,101 @@ use std::{
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, RecordsPendingThread, RecordsRestartedFlow, RegistersFlowIdentity,
-    ReservesPendingStart,
+    ManagesDeliveryPermits, OpensFlowStore, RecordsPendingThread, RecordsRestartedFlow,
+    RegistersFlowIdentity, ReservesPendingStart,
 };
+
+fn store_binding(binding: signal_flow::DeliveryBinding) -> store::DeliveryBinding {
+    store::DeliveryBinding {
+        native_thread: binding.native_thread,
+        harness_session: binding.harness_session,
+        route_identity: binding.route_identity,
+        endpoint_identity: binding.endpoint_identity,
+        process_pid: binding.process_id,
+        process_start_time: binding.process_start_time,
+    }
+}
+
+fn wire_binding(binding: store::DeliveryBinding) -> signal_flow::DeliveryBinding {
+    signal_flow::DeliveryBinding {
+        native_thread: binding.native_thread,
+        harness_session: binding.harness_session,
+        route_identity: binding.route_identity,
+        endpoint_identity: binding.endpoint_identity,
+        process_id: binding.process_pid,
+        process_start_time: binding.process_start_time,
+    }
+}
+
+fn store_generation(
+    generation: signal_flow::BindingGeneration,
+) -> Result<u64, signal_flow::DeliveryRejection> {
+    generation
+        .try_into()
+        .map_err(|_| signal_flow::DeliveryRejection::GenerationOverflow)
+}
+
+fn wire_generation(
+    generation: u64,
+) -> Result<signal_flow::BindingGeneration, signal_flow::DeliveryRejection> {
+    generation
+        .try_into()
+        .map_err(|_| signal_flow::DeliveryRejection::GenerationOverflow)
+}
+
+fn wire_permit(
+    permit: store::DeliveryPermit,
+) -> Result<signal_flow::DeliveryPermit, signal_flow::DeliveryRejection> {
+    Ok(signal_flow::DeliveryPermit {
+        attempt_id: permit.attempt_id,
+        source_event_identifier: permit.source_event_identifier,
+        delivery_token: permit.token,
+        binding_generation: wire_generation(permit.binding_generation)?,
+        delivery_binding: wire_binding(permit.binding),
+    })
+}
+
+fn wire_rejection(rejection: store::DeliveryRejection) -> signal_flow::DeliveryRejection {
+    use signal_flow::DeliveryRejection as Wire;
+    use store::DeliveryRejection as Store;
+    match rejection {
+        Store::UnknownFlow => Wire::UnknownFlow,
+        Store::MissingState => Wire::MissingState,
+        Store::BindingUnavailable => Wire::BindingUnavailable,
+        Store::StaleBinding => Wire::StaleBinding,
+        Store::StaleGeneration => Wire::StaleGeneration,
+        Store::RefreshHeld => Wire::RefreshHeld(signal_flow::RefreshHeld {
+            delivery_permit_option: None,
+        }),
+        Store::Busy => Wire::Busy,
+        Store::AttemptConflict => Wire::AttemptConflict,
+        Store::StalePermit => Wire::StalePermit,
+        Store::TransitionConflict => Wire::TransitionConflict,
+        Store::ActivePermit => Wire::ActivePermit,
+        Store::CorruptState => Wire::CorruptState,
+        Store::GenerationOverflow => Wire::GenerationOverflow,
+        Store::CapacityExhausted => Wire::CapacityExhausted,
+    }
+}
+
+fn wire_state(
+    state: store::BindingState,
+) -> Result<signal_flow::DeliveryState, signal_flow::DeliveryRejection> {
+    Ok(signal_flow::DeliveryState {
+        delivery_binding: wire_binding(state.binding),
+        binding_generation: wire_generation(state.binding_generation)?,
+        lifecycle_generation: wire_generation(state.lifecycle_generation)?,
+        admission_gate: match state.admission {
+            store::AdmissionGate::Open => signal_flow::AdmissionGate::Open,
+            store::AdmissionGate::RefreshHeld { transition_id } => {
+                signal_flow::AdmissionGate::RefreshHeld(signal_flow::RefreshHeld_Data {
+                    transition_id,
+                })
+            }
+        },
+        delivery_permit_option: state.permit.map(wire_permit).transpose()?,
+    })
+}
 
 pub struct RunningNexus {
     pub store: FlowStore,
@@ -115,6 +207,176 @@ impl Dispatches for RunningNexus {
                     ),
                 }
             }
+            Query::AcquireDelivery(request) => {
+                let Ok(expected_binding_generation) = store_generation(request.binding_generation)
+                else {
+                    return Response::DeliveryAcquireRejected(
+                        signal_flow::DeliveryRejection::GenerationOverflow,
+                    );
+                };
+                match self.store.acquire_delivery(store::AcquireDelivery {
+                    flow_id: request.flow_id,
+                    expected_binding: store_binding(request.delivery_binding),
+                    expected_binding_generation,
+                    attempt_id: request.attempt_id,
+                    source_event_identifier: request.source_event_identifier,
+                }) {
+                    Ok(store::AcquireDeliveryOutcome::Granted(permit)) => match wire_permit(permit)
+                    {
+                        Ok(permit) => Response::DeliveryGranted(permit),
+                        Err(rejection) => Response::DeliveryAcquireRejected(rejection),
+                    },
+                    Ok(store::AcquireDeliveryOutcome::AlreadyGranted(permit)) => {
+                        match wire_permit(permit) {
+                            Ok(permit) => Response::DeliveryAlreadyGranted(permit),
+                            Err(rejection) => Response::DeliveryAcquireRejected(rejection),
+                        }
+                    }
+                    Ok(store::AcquireDeliveryOutcome::Rejected(rejection)) => {
+                        Response::DeliveryAcquireRejected(wire_rejection(rejection))
+                    }
+                    Err(_) => Response::DeliveryAcquireRejected(
+                        signal_flow::DeliveryRejection::StoreRefused,
+                    ),
+                }
+            }
+            Query::BeginRefresh(request) => {
+                let Ok(expected_binding_generation) = store_generation(request.binding_generation)
+                else {
+                    return Response::RefreshRejected(
+                        signal_flow::DeliveryRejection::GenerationOverflow,
+                    );
+                };
+                match self.store.begin_refresh(store::BeginRefresh {
+                    flow_id: request.flow_id,
+                    expected_binding_generation,
+                    transition_id: request.transition_id,
+                }) {
+                    Ok(store::BeginRefreshOutcome::Held { active_permit }) => {
+                        match active_permit.map(wire_permit).transpose() {
+                            Ok(delivery_permit_option) => {
+                                Response::RefreshHeld(signal_flow::RefreshHeld {
+                                    delivery_permit_option,
+                                })
+                            }
+                            Err(rejection) => Response::RefreshRejected(rejection),
+                        }
+                    }
+                    Ok(store::BeginRefreshOutcome::AlreadyHeld { active_permit }) => {
+                        match active_permit.map(wire_permit).transpose() {
+                            Ok(delivery_permit_option) => {
+                                Response::RefreshAlreadyHeld(signal_flow::RefreshHeld {
+                                    delivery_permit_option,
+                                })
+                            }
+                            Err(rejection) => Response::RefreshRejected(rejection),
+                        }
+                    }
+                    Ok(store::BeginRefreshOutcome::Rejected(rejection)) => {
+                        Response::RefreshRejected(wire_rejection(rejection))
+                    }
+                    Err(_) => {
+                        Response::RefreshRejected(signal_flow::DeliveryRejection::StoreRefused)
+                    }
+                }
+            }
+            Query::ReleaseConfirmed(request) => {
+                let Ok(expected_binding_generation) = store_generation(request.binding_generation)
+                else {
+                    return Response::DeliveryReleaseRejected(
+                        signal_flow::DeliveryRejection::GenerationOverflow,
+                    );
+                };
+                let receipt = signal_flow::ReleaseReceipt {
+                    attempt_id: request.attempt_id.clone(),
+                    transport_receipt_id: request.transport_receipt_id.clone(),
+                };
+                match self.store.release_confirmed(store::ReleaseConfirmed {
+                    flow_id: request.flow_id,
+                    attempt_id: request.attempt_id,
+                    token: request.delivery_token,
+                    binding: store_binding(request.delivery_binding),
+                    expected_binding_generation,
+                    transport_receipt_id: request.transport_receipt_id,
+                }) {
+                    Ok(store::ReleaseConfirmedOutcome::Released) => {
+                        Response::DeliveryReleased(receipt)
+                    }
+                    Ok(store::ReleaseConfirmedOutcome::AlreadyReleased) => {
+                        Response::DeliveryAlreadyReleased(receipt)
+                    }
+                    Ok(store::ReleaseConfirmedOutcome::Rejected(rejection)) => {
+                        Response::DeliveryReleaseRejected(wire_rejection(rejection))
+                    }
+                    Err(_) => Response::DeliveryReleaseRejected(
+                        signal_flow::DeliveryRejection::StoreRefused,
+                    ),
+                }
+            }
+            Query::ReadyReattach(request) => {
+                let Ok(expected_old_binding_generation) =
+                    store_generation(request.expected_old_binding_generation.binding_generation)
+                else {
+                    return Response::DeliveryReattachRejected(
+                        signal_flow::DeliveryRejection::GenerationOverflow,
+                    );
+                };
+                match self.store.ready_reattach(store::ReadyReattach {
+                    flow_id: request.flow_id,
+                    transition_id: request.transition_id,
+                    expected_old_binding: store::DeliveryBinding {
+                        native_thread: request.expected_old_binding.native_thread,
+                        harness_session: request.expected_old_binding.harness_session,
+                        route_identity: request.expected_old_binding.route_identity,
+                        endpoint_identity: request.expected_old_binding.endpoint_identity,
+                        process_pid: request.expected_old_binding.process_id,
+                        process_start_time: request.expected_old_binding.process_start_time,
+                    },
+                    expected_old_binding_generation,
+                    registration_id: request.registration_id,
+                }) {
+                    Ok(store::ReadyReattachOutcome::Opened { binding_generation }) => {
+                        match wire_generation(binding_generation) {
+                            Ok(binding_generation) => {
+                                Response::DeliveryReattached(signal_flow::ReattachReceipt {
+                                    binding_generation,
+                                })
+                            }
+                            Err(rejection) => Response::DeliveryReattachRejected(rejection),
+                        }
+                    }
+                    Ok(store::ReadyReattachOutcome::AlreadyOpened { binding_generation }) => {
+                        match wire_generation(binding_generation) {
+                            Ok(binding_generation) => {
+                                Response::DeliveryAlreadyReattached(signal_flow::ReattachReceipt {
+                                    binding_generation,
+                                })
+                            }
+                            Err(rejection) => Response::DeliveryReattachRejected(rejection),
+                        }
+                    }
+                    Ok(store::ReadyReattachOutcome::Rejected(rejection)) => {
+                        Response::DeliveryReattachRejected(wire_rejection(rejection))
+                    }
+                    Err(_) => Response::DeliveryReattachRejected(
+                        signal_flow::DeliveryRejection::StoreRefused,
+                    ),
+                }
+            }
+            Query::ReadDeliveryState(request) => {
+                match self.store.read_delivery_state(&request.flow_id) {
+                    Ok(store::ReadDeliveryStateOutcome::State(state)) => match wire_state(state) {
+                        Ok(state) => Response::DeliveryStateRead(state),
+                        Err(rejection) => Response::DeliveryStateRejected(rejection),
+                    },
+                    Ok(store::ReadDeliveryStateOutcome::Rejected(rejection)) => {
+                        Response::DeliveryStateRejected(wire_rejection(rejection))
+                    }
+                    Err(_) => Response::DeliveryStateRejected(
+                        signal_flow::DeliveryRejection::StoreRefused,
+                    ),
+                }
+            }
         }
     }
 
@@ -157,6 +419,11 @@ impl Dispatches for RunningNexus {
                         meta_signal_flow::FlowRegistrationRejection::StoreRefused,
                     ),
                 }
+            }
+            meta_signal_flow::Query::SubmitBindingRegistration(_) => {
+                meta_signal_flow::Response::BindingRegistrationRejected(
+                    meta_signal_flow::BindingRegistrationRejection::VerifierUnavailable,
+                )
             }
         }
     }
@@ -285,7 +552,7 @@ impl Frame {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dispatches, RunningNexus};
+    use super::{store_generation, wire_generation, wire_rejection, Dispatches, RunningNexus};
     use crate::{
         codex::CodexAdapter,
         herdr::HerdrCli,
@@ -507,5 +774,51 @@ mod tests {
             Response::RecipientResolved(node)
         );
         assert!(fixture.directory.path().join("flow.sema").exists());
+    }
+
+    #[test]
+    fn direct_binding_registration_without_a_validator_is_refused() {
+        let fixture = NexusFixture::new();
+        let submission = meta_signal_flow::BindingRegistrationSubmission {
+            flow_node: fixture.node(),
+            registration_id: "registration-raw".into(),
+            binding_registration_phase: meta_signal_flow::BindingRegistrationPhase::Bootstrap,
+            readiness_receipt_id: "receipt-raw".into(),
+            proof_digest: "digest-raw".into(),
+        };
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::SubmitBindingRegistration(
+                    submission
+                )),
+            meta_signal_flow::Response::BindingRegistrationRejected(
+                meta_signal_flow::BindingRegistrationRejection::VerifierUnavailable
+            )
+        );
+    }
+
+    #[test]
+    fn delivery_generation_conversion_refuses_negative_and_unrepresentable_values() {
+        assert_eq!(
+            store_generation(-1),
+            Err(signal_flow::DeliveryRejection::GenerationOverflow)
+        );
+        assert_eq!(
+            wire_generation(u64::MAX),
+            Err(signal_flow::DeliveryRejection::GenerationOverflow)
+        );
+    }
+
+    #[test]
+    fn delivery_rejection_keeps_capacity_and_missing_state_typed() {
+        assert_eq!(
+            wire_rejection(crate::store::DeliveryRejection::CapacityExhausted),
+            signal_flow::DeliveryRejection::CapacityExhausted
+        );
+        assert_eq!(
+            wire_rejection(crate::store::DeliveryRejection::MissingState),
+            signal_flow::DeliveryRejection::MissingState
+        );
     }
 }

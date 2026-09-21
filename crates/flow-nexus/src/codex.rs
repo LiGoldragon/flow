@@ -2,6 +2,7 @@
 //! The proxy is a byte bridge, so this module owns its bounded WebSocket and
 //! JSON-RPC conversation; it never falls back to a direct Unix-socket client.
 
+#[path = "prompt_modules.rs"]
 mod prompt_modules;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};

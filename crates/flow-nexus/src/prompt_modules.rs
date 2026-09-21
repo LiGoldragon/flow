@@ -220,30 +220,27 @@ opaque_identity!(ProofDigest);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProcessIncarnation {
     pid: u32,
-    start_identity: String,
+    start_time: i64,
 }
 
 impl ProcessIncarnation {
-    pub(super) fn new(
-        pid: u32,
-        start_identity: impl Into<String>,
-    ) -> Result<Self, BindingHandoffError> {
-        let start_identity = start_identity.into();
-        if pid == 0 || start_identity.trim().is_empty() {
+    /// Converts the authoritative unsigned native observation to the i64
+    /// representation used by Flow's persisted delivery binding.
+    pub(super) fn from_observed(pid: u32, start_time: u64) -> Result<Self, BindingHandoffError> {
+        if pid == 0 {
             return Err(BindingHandoffError::InvalidProcessIncarnation);
         }
-        Ok(Self {
-            pid,
-            start_identity,
-        })
+        let start_time =
+            i64::try_from(start_time).map_err(|_| BindingHandoffError::ProcessStartOutOfRange)?;
+        Ok(Self { pid, start_time })
     }
 
     pub(crate) fn pid(&self) -> u32 {
         self.pid
     }
 
-    pub(crate) fn start_identity(&self) -> &str {
-        &self.start_identity
+    pub(crate) fn start_time(&self) -> i64 {
+        self.start_time
     }
 }
 
@@ -251,7 +248,7 @@ impl ProcessIncarnation {
 /// Flow. This stays private to the adapter module: callers can receive only a
 /// `VerifiedNativeBindingHandoff`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ObservedNativeBinding {
+struct CurrentNativeBindingEvidence {
     correlation: BindingCorrelation,
     native_thread: NativeThreadIdentity,
     harness_session: HarnessSessionIdentity,
@@ -264,23 +261,10 @@ struct ObservedNativeBinding {
     proof_digest: ProofDigest,
 }
 
-/// The adapter-owned validator is the only constructor for a verified
-/// handoff. Its expected correlation is supplied from Flow's launch attempt;
-/// the adapter must also have independently observed every native field.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct NativeBindingValidator {
-    expected: BindingCorrelation,
-}
-
-impl NativeBindingValidator {
-    pub(super) fn for_correlation(expected: BindingCorrelation) -> Self {
-        Self { expected }
-    }
-
+impl CurrentNativeBindingEvidence {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn validate(
-        &self,
-        observed_correlation: BindingCorrelation,
+    pub(super) fn observed(
+        correlation: BindingCorrelation,
         native_thread: NativeThreadIdentity,
         harness_session: HarnessSessionIdentity,
         route: RouteIdentity,
@@ -290,12 +274,9 @@ impl NativeBindingValidator {
         context_receipt: ContextReceiptIdentity,
         readiness_receipt: ReadinessReceiptIdentity,
         proof_digest: ProofDigest,
-    ) -> Result<VerifiedNativeBindingHandoff, BindingHandoffError> {
-        if observed_correlation != self.expected {
-            return Err(BindingHandoffError::CorrelationMismatch);
-        }
-        let observed = ObservedNativeBinding {
-            correlation: observed_correlation,
+    ) -> Self {
+        Self {
+            correlation,
             native_thread,
             harness_session,
             route,
@@ -305,8 +286,73 @@ impl NativeBindingValidator {
             context_receipt,
             readiness_receipt,
             proof_digest,
-        };
-        Ok(VerifiedNativeBindingHandoff { observed })
+        }
+    }
+}
+
+/// Implemented by the adapter's native/Herdr receipt reader. Source-shaped
+/// data cannot satisfy this trait by itself: every method is a current,
+/// independent observation of the supplied evidence.
+pub(super) trait VerifiesCurrentNativeBinding {
+    fn native_thread_is_current(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
+    fn harness_session_is_current(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
+    fn route_is_current(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
+    fn endpoint_is_current(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
+    fn process_is_current(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
+    fn profile_is_accepted(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
+    fn context_is_verified(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
+    fn readiness_is_current(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
+    fn proof_is_verified(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
+}
+
+/// The adapter-owned validator is the only constructor for a verified
+/// handoff. Its expected correlation is supplied from Flow's launch attempt;
+/// the adapter must also have independently observed every native field.
+pub(crate) struct NativeBindingValidator<V> {
+    expected: BindingCorrelation,
+    verifier: V,
+}
+
+impl<V: VerifiesCurrentNativeBinding> NativeBindingValidator<V> {
+    pub(super) fn for_correlation(expected: BindingCorrelation, verifier: V) -> Self {
+        Self { expected, verifier }
+    }
+
+    pub(super) fn validate(
+        &self,
+        evidence: CurrentNativeBindingEvidence,
+    ) -> Result<VerifiedNativeBindingHandoff, BindingHandoffError> {
+        if evidence.correlation != self.expected {
+            return Err(BindingHandoffError::CorrelationMismatch);
+        }
+        if !self.verifier.native_thread_is_current(&evidence) {
+            return Err(BindingHandoffError::NativeThreadNotCurrent);
+        }
+        if !self.verifier.harness_session_is_current(&evidence) {
+            return Err(BindingHandoffError::HarnessSessionNotCurrent);
+        }
+        if !self.verifier.route_is_current(&evidence) {
+            return Err(BindingHandoffError::RouteNotCurrent);
+        }
+        if !self.verifier.endpoint_is_current(&evidence) {
+            return Err(BindingHandoffError::EndpointNotCurrent);
+        }
+        if !self.verifier.process_is_current(&evidence) {
+            return Err(BindingHandoffError::ProcessNotCurrent);
+        }
+        if !self.verifier.profile_is_accepted(&evidence) {
+            return Err(BindingHandoffError::ProfileNotAccepted);
+        }
+        if !self.verifier.context_is_verified(&evidence) {
+            return Err(BindingHandoffError::ContextNotVerified);
+        }
+        if !self.verifier.readiness_is_current(&evidence) {
+            return Err(BindingHandoffError::ReadinessNotCurrent);
+        }
+        if !self.verifier.proof_is_verified(&evidence) {
+            return Err(BindingHandoffError::ProofNotVerified);
+        }
+        Ok(VerifiedNativeBindingHandoff { evidence })
     }
 }
 
@@ -314,48 +360,48 @@ impl NativeBindingValidator {
 /// `FlowNode` before it records a verified binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VerifiedNativeBindingHandoff {
-    observed: ObservedNativeBinding,
+    evidence: CurrentNativeBindingEvidence,
 }
 
 impl VerifiedNativeBindingHandoff {
     pub(crate) fn correlation(&self) -> &BindingCorrelation {
-        &self.observed.correlation
+        &self.evidence.correlation
     }
 
     pub(crate) fn native_thread(&self) -> &NativeThreadIdentity {
-        &self.observed.native_thread
+        &self.evidence.native_thread
     }
 
     pub(crate) fn harness_session(&self) -> &HarnessSessionIdentity {
-        &self.observed.harness_session
+        &self.evidence.harness_session
     }
 
     pub(crate) fn route(&self) -> &RouteIdentity {
-        &self.observed.route
+        &self.evidence.route
     }
 
     pub(crate) fn endpoint(&self) -> &EndpointIdentity {
-        &self.observed.endpoint
+        &self.evidence.endpoint
     }
 
     pub(crate) fn process(&self) -> &ProcessIncarnation {
-        &self.observed.process
+        &self.evidence.process
     }
 
     pub(crate) fn accepted_profile(&self) -> &AcceptedProfileIdentity {
-        &self.observed.accepted_profile
+        &self.evidence.accepted_profile
     }
 
     pub(crate) fn context_receipt(&self) -> &ContextReceiptIdentity {
-        &self.observed.context_receipt
+        &self.evidence.context_receipt
     }
 
     pub(crate) fn readiness_receipt(&self) -> &ReadinessReceiptIdentity {
-        &self.observed.readiness_receipt
+        &self.evidence.readiness_receipt
     }
 
     pub(crate) fn proof_digest(&self) -> &ProofDigest {
-        &self.observed.proof_digest
+        &self.evidence.proof_digest
     }
 }
 
@@ -365,6 +411,90 @@ pub(crate) enum BindingHandoffError {
     EmptyIdentity,
     #[error("a process incarnation requires a nonzero PID and start identity")]
     InvalidProcessIncarnation,
+    #[error("the observed process start time does not fit Flow's i64 binding field")]
+    ProcessStartOutOfRange,
     #[error("adapter observations do not match the Flow launch correlation")]
     CorrelationMismatch,
+    #[error("native thread is not current")]
+    NativeThreadNotCurrent,
+    #[error("harness session is not current")]
+    HarnessSessionNotCurrent,
+    #[error("Herdr route is not current")]
+    RouteNotCurrent,
+    #[error("endpoint is not current")]
+    EndpointNotCurrent,
+    #[error("PID/start incarnation is not current")]
+    ProcessNotCurrent,
+    #[error("profile is not accepted")]
+    ProfileNotAccepted,
+    #[error("native context is not verified")]
+    ContextNotVerified,
+    #[error("native readiness receipt is not current")]
+    ReadinessNotCurrent,
+    #[error("native proof digest is not verified")]
+    ProofNotVerified,
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    struct StaleReadiness;
+
+    impl VerifiesCurrentNativeBinding for StaleReadiness {
+        fn native_thread_is_current(&self, _: &CurrentNativeBindingEvidence) -> bool {
+            true
+        }
+        fn harness_session_is_current(&self, _: &CurrentNativeBindingEvidence) -> bool {
+            true
+        }
+        fn route_is_current(&self, _: &CurrentNativeBindingEvidence) -> bool {
+            true
+        }
+        fn endpoint_is_current(&self, _: &CurrentNativeBindingEvidence) -> bool {
+            true
+        }
+        fn process_is_current(&self, _: &CurrentNativeBindingEvidence) -> bool {
+            true
+        }
+        fn profile_is_accepted(&self, _: &CurrentNativeBindingEvidence) -> bool {
+            true
+        }
+        fn context_is_verified(&self, _: &CurrentNativeBindingEvidence) -> bool {
+            true
+        }
+        fn readiness_is_current(&self, _: &CurrentNativeBindingEvidence) -> bool {
+            false
+        }
+        fn proof_is_verified(&self, _: &CurrentNativeBindingEvidence) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn stale_readiness_receipt_cannot_construct_a_verified_handoff() {
+        let correlation = BindingCorrelation::new(
+            FlowIdentity::parse("flow").expect("fixture flow"),
+            RegistrationIdentity::parse("registration").expect("fixture registration"),
+            None,
+        );
+        let evidence = CurrentNativeBindingEvidence::observed(
+            correlation.clone(),
+            NativeThreadIdentity::parse("thread").expect("fixture thread"),
+            HarnessSessionIdentity::parse("session").expect("fixture session"),
+            RouteIdentity::parse("route").expect("fixture route"),
+            EndpointIdentity::parse("endpoint").expect("fixture endpoint"),
+            ProcessIncarnation::from_observed(42, 1_700_000_000).expect("fixture process"),
+            AcceptedProfileIdentity::parse("profile").expect("fixture profile"),
+            ContextReceiptIdentity::parse("context").expect("fixture context"),
+            ReadinessReceiptIdentity::parse("readiness").expect("fixture readiness"),
+            ProofDigest::parse("digest").expect("fixture digest"),
+        );
+        let result =
+            NativeBindingValidator::for_correlation(correlation, StaleReadiness).validate(evidence);
+        assert_eq!(
+            result.unwrap_err(),
+            BindingHandoffError::ReadinessNotCurrent
+        );
+    }
 }

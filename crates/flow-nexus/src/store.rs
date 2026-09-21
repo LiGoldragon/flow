@@ -128,6 +128,7 @@ struct VerifiedBindingRecord {
     readiness_receipt_id: String,
     proof_digest: String,
     consumed: bool,
+    retired_registration_ids: Vec<String>,
 }
 
 impl EngineRecord for VerifiedBindingRecord {
@@ -264,6 +265,7 @@ pub struct ReadyReattach {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedBindingRegistration {
     pub flow_id: String,
+    pub registration_id: String,
     pub refresh_transition_id: Option<String>,
     pub binding: DeliveryBinding,
     pub lifecycle_generation: u64,
@@ -293,6 +295,7 @@ pub enum DeliveryRejection {
     ActivePermit,
     CorruptState,
     GenerationOverflow,
+    CapacityExhausted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -731,13 +734,55 @@ impl ManagesDeliveryPermits for FlowStore {
             readiness_receipt_id: request.readiness_receipt_id,
             proof_digest: request.proof_digest,
             consumed: false,
+            retired_registration_ids: Vec::new(),
         };
         if let Some(existing) = self.verified_binding(&request.flow_id)? {
-            return Ok(if existing == candidate {
-                VerifiedBindingOutcome::AlreadyRecorded
-            } else {
-                VerifiedBindingOutcome::Rejected(DeliveryRejection::TransitionConflict)
-            });
+            if existing == candidate {
+                return Ok(VerifiedBindingOutcome::AlreadyRecorded);
+            }
+            if !existing.consumed {
+                return Ok(VerifiedBindingOutcome::Rejected(
+                    DeliveryRejection::TransitionConflict,
+                ));
+            }
+            if candidate.registration_id == existing.registration_id
+                || existing
+                    .retired_registration_ids
+                    .iter()
+                    .any(|id| id == &candidate.registration_id)
+            {
+                return Ok(VerifiedBindingOutcome::Rejected(
+                    DeliveryRejection::TransitionConflict,
+                ));
+            }
+            // A consumed record is replay history. A successor may replace it
+            // only while the current state proves the requested generation and
+            // refresh transition; never overwrite a live candidate.
+            let Some(state) = self.delivery_binding(&request.flow_id)? else {
+                return Ok(VerifiedBindingOutcome::Rejected(
+                    DeliveryRejection::MissingState,
+                ));
+            };
+            if candidate.expected_binding_generation != Some(state.binding_generation)
+                || candidate.transition_id.is_empty()
+                || !matches!(&state.admission, AdmissionGate::RefreshHeld { transition_id } if transition_id == &candidate.transition_id)
+            {
+                return Ok(VerifiedBindingOutcome::Rejected(
+                    DeliveryRejection::TransitionConflict,
+                ));
+            }
+            candidate
+                .retired_registration_ids
+                .extend(existing.retired_registration_ids);
+            candidate
+                .retired_registration_ids
+                .push(existing.registration_id);
+            self.engine.mutate_keyed(KeyedMutation::new(
+                self.verified_bindings,
+                RecordKey::new(candidate.flow_id.clone()),
+                candidate,
+            ))?;
+            return Ok(VerifiedBindingOutcome::Recorded);
         }
         self.engine
             .assert(Assertion::new(self.verified_bindings, candidate))?;
@@ -757,15 +802,19 @@ impl ManagesDeliveryPermits for FlowStore {
                 self.missing_delivery_rejection(&request.flow_id)?,
             ));
         };
+        if let Some(existing) = self.delivery_binding(&request.flow_id)? {
+            return Ok(
+                if candidate.registration_id == request.registration_id && candidate.consumed {
+                    BootstrapBindingOutcome::AlreadyInitialized(binding_state(existing))
+                } else {
+                    BootstrapBindingOutcome::Rejected(DeliveryRejection::BindingUnavailable)
+                },
+            );
+        }
         if candidate.registration_id != request.registration_id || candidate.consumed {
             return Ok(BootstrapBindingOutcome::Rejected(
                 DeliveryRejection::BindingUnavailable,
             ));
-        }
-        if let Some(existing) = self.delivery_binding(&request.flow_id)? {
-            return Ok(BootstrapBindingOutcome::AlreadyInitialized(binding_state(
-                existing,
-            )));
         }
         if candidate.expected_binding_generation.is_some() || !candidate.transition_id.is_empty() {
             return Ok(BootstrapBindingOutcome::Rejected(
@@ -774,7 +823,7 @@ impl ManagesDeliveryPermits for FlowStore {
         }
         let record = FlowDeliveryBindingRecord {
             flow_id: request.flow_id,
-            binding: candidate.binding,
+            binding: candidate.binding.clone(),
             binding_generation: 1,
             lifecycle_generation: candidate.lifecycle_generation,
             admission: AdmissionGate::Open,
@@ -844,7 +893,7 @@ impl ManagesDeliveryPermits for FlowStore {
         }
         if state.completed_attempts.len() >= MAX_COMPLETED_DELIVERY_ATTEMPTS {
             return Ok(AcquireDeliveryOutcome::Rejected(
-                DeliveryRejection::CorruptState,
+                DeliveryRejection::CapacityExhausted,
             ));
         }
         if request.attempt_id.is_empty() || request.source_event_identifier.is_empty() {
@@ -1381,13 +1430,23 @@ impl WritesFlowStore for FlowStore {
             ));
         }
         flow.lifecycle = FlowLifecycle::Active;
-        flow.generation += 1;
+        let Some(next_generation) = flow.generation.checked_add(1) else {
+            return Ok(Response::RestartRejected(RestartRejection::ResumeRefused));
+        };
+        flow.generation = next_generation;
         let generation = flow.generation;
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.flows,
-            RecordKey::new(authorization.flow_id.clone()),
-            flow,
-        ))?;
+        let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        if let Some(mut candidate) = self.verified_binding(&authorization.flow_id)? {
+            if !candidate.consumed {
+                candidate.consumed = true;
+                self.engine
+                    .commit_atomic(commit.mutate(self.verified_bindings, candidate))?;
+            } else {
+                self.engine.commit_atomic(commit)?;
+            }
+        } else {
+            self.engine.commit_atomic(commit)?;
+        }
         Ok(Response::Restarted(Restarted {
             flow_id: authorization.flow_id,
             session_id: authorization.thread_id,

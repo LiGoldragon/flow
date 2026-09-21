@@ -108,6 +108,7 @@ pub struct CompletionRecord {
 #[rkyv(derive(Debug))]
 struct ReattachCompletion {
     transition_id: String,
+    registration_id: String,
     old_binding: DeliveryBinding,
     old_binding_generation: u64,
     new_binding: DeliveryBinding,
@@ -988,6 +989,7 @@ impl ManagesDeliveryPermits for FlowStore {
         };
         if let Some(last) = &state.last_reattach {
             if last.transition_id == request.transition_id
+                && last.registration_id == request.registration_id
                 && last.old_binding == request.expected_old_binding
                 && last.old_binding_generation == request.expected_old_binding_generation
             {
@@ -1047,6 +1049,7 @@ impl ManagesDeliveryPermits for FlowStore {
         state.admission = AdmissionGate::Open;
         state.last_reattach = Some(ReattachCompletion {
             transition_id: request.transition_id,
+            registration_id: request.registration_id,
             old_binding: request.expected_old_binding,
             old_binding_generation: request.expected_old_binding_generation,
             new_binding: state.binding.clone(),

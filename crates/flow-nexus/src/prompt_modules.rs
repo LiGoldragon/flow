@@ -3,6 +3,7 @@
 //! Curriculum remains the source of module data. This module neither reads
 //! Curriculum files nor assigns aspect, power, programming, or model tiers.
 
+use signal_flow::HerdrRoute;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -208,7 +209,6 @@ opaque_identity!(RegistrationIdentity);
 opaque_identity!(RefreshTransitionIdentity);
 opaque_identity!(NativeThreadIdentity);
 opaque_identity!(HarnessSessionIdentity);
-opaque_identity!(RouteIdentity);
 opaque_identity!(EndpointIdentity);
 opaque_identity!(AcceptedProfileIdentity);
 opaque_identity!(ContextReceiptIdentity);
@@ -244,15 +244,31 @@ impl ProcessIncarnation {
     }
 }
 
+/// The durable Flow lifecycle generation supplied by the registered candidate.
+/// The evidence verifier must independently confirm it is still current.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LifecycleGeneration(u64);
+
+impl LifecycleGeneration {
+    pub(super) fn from_observed(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn value(self) -> u64 {
+        self.0
+    }
+}
+
 /// Observations collected by the adapter before it presents a candidate to
 /// Flow. This stays private to the adapter module: callers can receive only a
 /// `VerifiedNativeBindingHandoff`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CurrentNativeBindingEvidence {
     correlation: BindingCorrelation,
+    lifecycle_generation: LifecycleGeneration,
     native_thread: NativeThreadIdentity,
     harness_session: HarnessSessionIdentity,
-    route: RouteIdentity,
+    route: HerdrRoute,
     endpoint: EndpointIdentity,
     process: ProcessIncarnation,
     accepted_profile: AcceptedProfileIdentity,
@@ -265,9 +281,10 @@ impl CurrentNativeBindingEvidence {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observed(
         correlation: BindingCorrelation,
+        lifecycle_generation: LifecycleGeneration,
         native_thread: NativeThreadIdentity,
         harness_session: HarnessSessionIdentity,
-        route: RouteIdentity,
+        route: HerdrRoute,
         endpoint: EndpointIdentity,
         process: ProcessIncarnation,
         accepted_profile: AcceptedProfileIdentity,
@@ -277,6 +294,7 @@ impl CurrentNativeBindingEvidence {
     ) -> Self {
         Self {
             correlation,
+            lifecycle_generation,
             native_thread,
             harness_session,
             route,
@@ -294,6 +312,7 @@ impl CurrentNativeBindingEvidence {
 /// data cannot satisfy this trait by itself: every method is a current,
 /// independent observation of the supplied evidence.
 pub(super) trait VerifiesCurrentNativeBinding {
+    fn lifecycle_generation_is_current(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
     fn native_thread_is_current(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
     fn harness_session_is_current(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
     fn route_is_current(&self, evidence: &CurrentNativeBindingEvidence) -> bool;
@@ -324,6 +343,9 @@ impl<V: VerifiesCurrentNativeBinding> NativeBindingValidator<V> {
     ) -> Result<VerifiedNativeBindingHandoff, BindingHandoffError> {
         if evidence.correlation != self.expected {
             return Err(BindingHandoffError::CorrelationMismatch);
+        }
+        if !self.verifier.lifecycle_generation_is_current(&evidence) {
+            return Err(BindingHandoffError::LifecycleGenerationNotCurrent);
         }
         if !self.verifier.native_thread_is_current(&evidence) {
             return Err(BindingHandoffError::NativeThreadNotCurrent);
@@ -368,6 +390,10 @@ impl VerifiedNativeBindingHandoff {
         &self.evidence.correlation
     }
 
+    pub(crate) fn lifecycle_generation(&self) -> LifecycleGeneration {
+        self.evidence.lifecycle_generation
+    }
+
     pub(crate) fn native_thread(&self) -> &NativeThreadIdentity {
         &self.evidence.native_thread
     }
@@ -376,7 +402,7 @@ impl VerifiedNativeBindingHandoff {
         &self.evidence.harness_session
     }
 
-    pub(crate) fn route(&self) -> &RouteIdentity {
+    pub(crate) fn route(&self) -> &HerdrRoute {
         &self.evidence.route
     }
 
@@ -415,6 +441,8 @@ pub(crate) enum BindingHandoffError {
     ProcessStartOutOfRange,
     #[error("adapter observations do not match the Flow launch correlation")]
     CorrelationMismatch,
+    #[error("lifecycle generation is not current")]
+    LifecycleGenerationNotCurrent,
     #[error("native thread is not current")]
     NativeThreadNotCurrent,
     #[error("harness session is not current")]
@@ -442,6 +470,9 @@ mod binding_tests {
     struct StaleReadiness;
 
     impl VerifiesCurrentNativeBinding for StaleReadiness {
+        fn lifecycle_generation_is_current(&self, _: &CurrentNativeBindingEvidence) -> bool {
+            true
+        }
         fn native_thread_is_current(&self, _: &CurrentNativeBindingEvidence) -> bool {
             true
         }
@@ -480,9 +511,15 @@ mod binding_tests {
         );
         let evidence = CurrentNativeBindingEvidence::observed(
             correlation.clone(),
+            LifecycleGeneration::from_observed(7),
             NativeThreadIdentity::parse("thread").expect("fixture thread"),
             HarnessSessionIdentity::parse("session").expect("fixture session"),
-            RouteIdentity::parse("route").expect("fixture route"),
+            HerdrRoute {
+                herdr_session_name: "session".into(),
+                herdr_agent_name: "agent".into(),
+                herdr_pane_id: "pane".into(),
+                herdr_terminal_id: "terminal".into(),
+            },
             EndpointIdentity::parse("endpoint").expect("fixture endpoint"),
             ProcessIncarnation::from_observed(42, 1_700_000_000).expect("fixture process"),
             AcceptedProfileIdentity::parse("profile").expect("fixture profile"),

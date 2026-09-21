@@ -4,7 +4,7 @@
 //! owns its single `.sema` store and lowers a closed `signal_flow::Query`
 //! into its typed, durable records.
 
-use std::path::Path;
+use std::{io::Read, path::Path, sync::Mutex};
 
 use meta_signal_flow::Configuration;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -22,6 +22,10 @@ const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
 const FLOW_STATE_TABLE_NAME: TableName = TableName::new("flow_nexus_state");
 const FLOW_CONFIGURATION_TABLE_NAME: TableName = TableName::new("flow_nexus_configuration");
 const FLOW_HERDR_ROUTE_TABLE_NAME: TableName = TableName::new("flow_nexus_herdr_routes");
+const FLOW_DELIVERY_BINDING_TABLE_NAME: TableName = TableName::new("flow_nexus_delivery_bindings");
+const FLOW_VERIFIED_BINDING_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_verified_delivery_bindings");
+const MAX_COMPLETED_DELIVERY_ATTEMPTS: usize = 1024;
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const DEFAULT_ORDINARY_SOCKET: &str = "/run/user/1001/flow/flow.sock";
@@ -56,6 +60,99 @@ impl EngineRecord for FlowRecord {
 struct FlowHerdrRouteRecord {
     flow_id: String,
     route: HerdrRoute,
+}
+
+/// The immutable identity of an endpoint admitted to receive a delivery.
+/// Every field is supplied by the registration authority; missing evidence is
+/// rejected rather than synthesized from local process state.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct DeliveryBinding {
+    pub native_thread: String,
+    pub harness_session: String,
+    pub route_identity: String,
+    pub endpoint_identity: String,
+    pub process_pid: i64,
+    pub process_start_time: i64,
+}
+
+/// Admission is independent from an already-issued delivery permit.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub enum AdmissionGate {
+    Open,
+    RefreshHeld { transition_id: String },
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct DeliveryPermit {
+    pub attempt_id: String,
+    pub source_event_identifier: String,
+    pub token: String,
+    pub binding_generation: u64,
+    pub binding: DeliveryBinding,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct CompletionRecord {
+    pub attempt_id: String,
+    pub token: String,
+    pub binding: DeliveryBinding,
+    pub binding_generation: u64,
+    pub transport_receipt_id: String,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+struct ReattachCompletion {
+    transition_id: String,
+    old_binding: DeliveryBinding,
+    old_binding_generation: u64,
+    new_binding: DeliveryBinding,
+    new_binding_generation: u64,
+    new_lifecycle_generation: u64,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+struct VerifiedBindingRecord {
+    flow_id: String,
+    registration_id: String,
+    transition_id: String,
+    binding: DeliveryBinding,
+    lifecycle_generation: u64,
+    expected_binding_generation: Option<u64>,
+    readiness_receipt_id: String,
+    proof_digest: String,
+    consumed: bool,
+}
+
+impl EngineRecord for VerifiedBindingRecord {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+struct FlowDeliveryBindingRecord {
+    flow_id: String,
+    binding: DeliveryBinding,
+    binding_generation: u64,
+    lifecycle_generation: u64,
+    admission: AdmissionGate,
+    permit: Option<DeliveryPermit>,
+    last_completion: Option<CompletionRecord>,
+    completed_attempts: Vec<String>,
+    last_reattach: Option<ReattachCompletion>,
+}
+
+impl EngineRecord for FlowDeliveryBindingRecord {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
 }
 
 impl EngineRecord for FlowHerdrRouteRecord {
@@ -93,6 +190,8 @@ pub enum StoreError {
     Engine(#[from] sema_engine::Error),
     #[error("flow nexus state record is absent or duplicated")]
     StateInvariant,
+    #[error("secure delivery token source failed: {0}")]
+    TokenSource(String),
 }
 
 pub struct FlowStore {
@@ -101,6 +200,156 @@ pub struct FlowStore {
     state: TableReference<FlowStoreState>,
     configuration: TableReference<FlowStoreConfiguration>,
     herdr_routes: TableReference<FlowHerdrRouteRecord>,
+    delivery_bindings: TableReference<FlowDeliveryBindingRecord>,
+    verified_bindings: TableReference<VerifiedBindingRecord>,
+    delivery_guard: Mutex<()>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingState {
+    pub binding: DeliveryBinding,
+    pub binding_generation: u64,
+    pub lifecycle_generation: u64,
+    pub admission: AdmissionGate,
+    pub permit: Option<DeliveryPermit>,
+    pub last_completion: Option<CompletionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitializeDeliveryBinding {
+    pub flow_id: String,
+    pub binding: DeliveryBinding,
+    pub lifecycle_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcquireDelivery {
+    pub flow_id: String,
+    pub expected_binding: DeliveryBinding,
+    pub expected_binding_generation: u64,
+    pub attempt_id: String,
+    pub source_event_identifier: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeginRefresh {
+    pub flow_id: String,
+    pub expected_binding_generation: u64,
+    pub transition_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseConfirmed {
+    pub flow_id: String,
+    pub attempt_id: String,
+    pub token: String,
+    pub binding: DeliveryBinding,
+    pub expected_binding_generation: u64,
+    pub transport_receipt_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyReattach {
+    pub flow_id: String,
+    pub transition_id: String,
+    pub expected_old_binding: DeliveryBinding,
+    pub expected_old_binding_generation: u64,
+    pub registration_id: String,
+}
+
+/// The Flow handler writes this only after validating the replacement against
+/// native registration and readiness evidence. Store-only code cannot invent
+/// the six binding fields from a legacy `FlowNode`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedBindingRegistration {
+    pub flow_id: String,
+    pub refresh_transition_id: Option<String>,
+    pub binding: DeliveryBinding,
+    pub lifecycle_generation: u64,
+    pub expected_binding_generation: Option<u64>,
+    pub readiness_receipt_id: String,
+    pub proof_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapBinding {
+    pub flow_id: String,
+    pub registration_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryRejection {
+    UnknownFlow,
+    MissingState,
+    BindingUnavailable,
+    StaleBinding,
+    StaleGeneration,
+    RefreshHeld,
+    Busy,
+    AttemptConflict,
+    StalePermit,
+    TransitionConflict,
+    ActivePermit,
+    CorruptState,
+    GenerationOverflow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitializeDeliveryOutcome {
+    Initialized(BindingState),
+    Rejected(DeliveryRejection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcquireDeliveryOutcome {
+    Granted(DeliveryPermit),
+    AlreadyGranted(DeliveryPermit),
+    Rejected(DeliveryRejection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeginRefreshOutcome {
+    Held {
+        active_permit: Option<DeliveryPermit>,
+    },
+    AlreadyHeld {
+        active_permit: Option<DeliveryPermit>,
+    },
+    Rejected(DeliveryRejection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseConfirmedOutcome {
+    Released,
+    AlreadyReleased,
+    Rejected(DeliveryRejection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadyReattachOutcome {
+    Opened { binding_generation: u64 },
+    AlreadyOpened { binding_generation: u64 },
+    Rejected(DeliveryRejection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifiedBindingOutcome {
+    Recorded,
+    AlreadyRecorded,
+    Rejected(DeliveryRejection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootstrapBindingOutcome {
+    Initialized(BindingState),
+    AlreadyInitialized(BindingState),
+    Rejected(DeliveryRejection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadDeliveryStateOutcome {
+    State(BindingState),
+    Rejected(DeliveryRejection),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,7 +415,7 @@ pub trait AuthorizesFlowRestart {
 /// Advances the generation after the adapter has accepted the resume turn.
 pub trait RecordsRestartedFlow {
     fn record_restarted(&self, authorization: RestartAuthorization)
-    -> Result<Response, StoreError>;
+        -> Result<Response, StoreError>;
 }
 
 /// Configuration is durable policy and shares the Nexus's sole `.sema` store.
@@ -177,6 +426,30 @@ pub trait ConfiguresFlowStore {
 
 pub trait RegistersFlowIdentity {
     fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError>;
+}
+
+/// Flow owns this state machine. Its Signal-facing adapter is deliberately
+/// outside this module, so Message cannot impersonate an admission decision.
+pub trait ManagesDeliveryPermits {
+    fn record_verified_binding(
+        &self,
+        request: VerifiedBindingRegistration,
+    ) -> Result<VerifiedBindingOutcome, StoreError>;
+    fn bootstrap_delivery_binding(
+        &self,
+        request: BootstrapBinding,
+    ) -> Result<BootstrapBindingOutcome, StoreError>;
+    fn acquire_delivery(
+        &self,
+        request: AcquireDelivery,
+    ) -> Result<AcquireDeliveryOutcome, StoreError>;
+    fn begin_refresh(&self, request: BeginRefresh) -> Result<BeginRefreshOutcome, StoreError>;
+    fn release_confirmed(
+        &self,
+        request: ReleaseConfirmed,
+    ) -> Result<ReleaseConfirmedOutcome, StoreError>;
+    fn ready_reattach(&self, request: ReadyReattach) -> Result<ReadyReattachOutcome, StoreError>;
+    fn read_delivery_state(&self, flow_id: &str) -> Result<ReadDeliveryStateOutcome, StoreError>;
 }
 
 trait ReadsFlowStore {
@@ -194,7 +467,7 @@ trait WritesFlowStore {
         origin: OriginClue,
     ) -> Result<PendingLaunch, StoreError>;
     fn record_thread(&self, pending: &PendingLaunch, thread_id: String)
-    -> Result<bool, StoreError>;
+        -> Result<bool, StoreError>;
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError>;
     fn restart(&self, authorization: RestartAuthorization) -> Result<Response, StoreError>;
 }
@@ -222,12 +495,25 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-herdr-route"),
             SchemaHash::for_label("flow-nexus-herdr-route-v1"),
         ))?;
+        let delivery_bindings = engine.register_table(TableDescriptor::new(
+            FLOW_DELIVERY_BINDING_TABLE_NAME,
+            FamilyName::new("flow-nexus-delivery-binding"),
+            SchemaHash::for_label("flow-nexus-delivery-binding-v1"),
+        ))?;
+        let verified_bindings = engine.register_table(TableDescriptor::new(
+            FLOW_VERIFIED_BINDING_TABLE_NAME,
+            FamilyName::new("flow-nexus-verified-delivery-binding"),
+            SchemaHash::for_label("flow-nexus-verified-delivery-binding-v1"),
+        ))?;
         let store = Self {
             engine,
             flows,
             state,
             configuration,
             herdr_routes,
+            delivery_bindings,
+            verified_bindings,
+            delivery_guard: Mutex::new(()),
         };
         if store
             .engine
@@ -370,7 +656,7 @@ impl RegistersFlowIdentity for FlowStore {
                         self.herdr_routes,
                         FlowHerdrRouteRecord {
                             flow_id: flow_node.flow_id.clone(),
-                            route,
+                            route: route.clone(),
                         },
                     ))?;
                     return Ok(FlowRegistration::Registered(Box::new(flow_node)));
@@ -408,6 +694,502 @@ impl RegistersFlowIdentity for FlowStore {
         )?;
         Ok(FlowRegistration::Registered(Box::new(flow_node)))
     }
+}
+
+impl ManagesDeliveryPermits for FlowStore {
+    fn record_verified_binding(
+        &self,
+        request: VerifiedBindingRegistration,
+    ) -> Result<VerifiedBindingOutcome, StoreError> {
+        let _guard = self
+            .delivery_guard
+            .lock()
+            .map_err(|_| StoreError::StateInvariant)?;
+        if self.flow(&request.flow_id)?.is_none() {
+            return Ok(VerifiedBindingOutcome::Rejected(
+                DeliveryRejection::UnknownFlow,
+            ));
+        }
+        if !binding_is_complete(&request.binding)
+            || request.lifecycle_generation == 0
+            || request.registration_id.is_empty()
+            || request.readiness_receipt_id.is_empty()
+            || request.proof_digest.is_empty()
+        {
+            return Ok(VerifiedBindingOutcome::Rejected(
+                DeliveryRejection::BindingUnavailable,
+            ));
+        }
+        let candidate = VerifiedBindingRecord {
+            flow_id: request.flow_id.clone(),
+            registration_id: request.registration_id,
+            binding: request.binding,
+            lifecycle_generation: request.lifecycle_generation,
+            expected_binding_generation: request.expected_binding_generation,
+            transition_id: request.refresh_transition_id.unwrap_or_default(),
+            readiness_receipt_id: request.readiness_receipt_id,
+            proof_digest: request.proof_digest,
+            consumed: false,
+        };
+        if let Some(existing) = self.verified_binding(&request.flow_id)? {
+            return Ok(if existing == candidate {
+                VerifiedBindingOutcome::AlreadyRecorded
+            } else {
+                VerifiedBindingOutcome::Rejected(DeliveryRejection::TransitionConflict)
+            });
+        }
+        self.engine
+            .assert(Assertion::new(self.verified_bindings, candidate))?;
+        Ok(VerifiedBindingOutcome::Recorded)
+    }
+
+    fn bootstrap_delivery_binding(
+        &self,
+        request: BootstrapBinding,
+    ) -> Result<BootstrapBindingOutcome, StoreError> {
+        let _guard = self
+            .delivery_guard
+            .lock()
+            .map_err(|_| StoreError::StateInvariant)?;
+        let Some(candidate) = self.verified_binding(&request.flow_id)? else {
+            return Ok(BootstrapBindingOutcome::Rejected(
+                self.missing_delivery_rejection(&request.flow_id)?,
+            ));
+        };
+        if candidate.registration_id != request.registration_id || candidate.consumed {
+            return Ok(BootstrapBindingOutcome::Rejected(
+                DeliveryRejection::BindingUnavailable,
+            ));
+        }
+        if let Some(existing) = self.delivery_binding(&request.flow_id)? {
+            return Ok(BootstrapBindingOutcome::AlreadyInitialized(binding_state(
+                existing,
+            )));
+        }
+        if candidate.expected_binding_generation.is_some() || !candidate.transition_id.is_empty() {
+            return Ok(BootstrapBindingOutcome::Rejected(
+                DeliveryRejection::TransitionConflict,
+            ));
+        }
+        let record = FlowDeliveryBindingRecord {
+            flow_id: request.flow_id,
+            binding: candidate.binding,
+            binding_generation: 1,
+            lifecycle_generation: candidate.lifecycle_generation,
+            admission: AdmissionGate::Open,
+            permit: None,
+            last_completion: None,
+            completed_attempts: Vec::new(),
+            last_reattach: None,
+        };
+        let mut consumed = candidate;
+        consumed.consumed = true;
+        self.engine.commit_atomic(
+            self.engine
+                .begin_atomic_commit()
+                .assert(self.delivery_bindings, record.clone())
+                .mutate(self.verified_bindings, consumed),
+        )?;
+        Ok(BootstrapBindingOutcome::Initialized(binding_state(record)))
+    }
+
+    fn acquire_delivery(
+        &self,
+        request: AcquireDelivery,
+    ) -> Result<AcquireDeliveryOutcome, StoreError> {
+        let _guard = self
+            .delivery_guard
+            .lock()
+            .map_err(|_| StoreError::StateInvariant)?;
+        let Some(mut state) = self.checked_delivery_state(
+            &request.flow_id,
+            &request.expected_binding,
+            request.expected_binding_generation,
+        )?
+        else {
+            return Ok(AcquireDeliveryOutcome::Rejected(
+                self.delivery_state_rejection(
+                    &request.flow_id,
+                    &request.expected_binding,
+                    request.expected_binding_generation,
+                )?,
+            ));
+        };
+        if state
+            .completed_attempts
+            .iter()
+            .any(|id| id == &request.attempt_id)
+        {
+            return Ok(AcquireDeliveryOutcome::Rejected(
+                DeliveryRejection::AttemptConflict,
+            ));
+        }
+        if let Some(permit) = state.permit.clone() {
+            return Ok(
+                if permit.attempt_id == request.attempt_id
+                    && permit.source_event_identifier == request.source_event_identifier
+                    && permit.binding == request.expected_binding
+                {
+                    AcquireDeliveryOutcome::AlreadyGranted(permit)
+                } else {
+                    AcquireDeliveryOutcome::Rejected(DeliveryRejection::Busy)
+                },
+            );
+        }
+        if matches!(state.admission, AdmissionGate::RefreshHeld { .. }) {
+            return Ok(AcquireDeliveryOutcome::Rejected(
+                DeliveryRejection::RefreshHeld,
+            ));
+        }
+        if state.completed_attempts.len() >= MAX_COMPLETED_DELIVERY_ATTEMPTS {
+            return Ok(AcquireDeliveryOutcome::Rejected(
+                DeliveryRejection::CorruptState,
+            ));
+        }
+        if request.attempt_id.is_empty() || request.source_event_identifier.is_empty() {
+            return Ok(AcquireDeliveryOutcome::Rejected(
+                DeliveryRejection::CorruptState,
+            ));
+        }
+        let permit = DeliveryPermit {
+            attempt_id: request.attempt_id,
+            source_event_identifier: request.source_event_identifier,
+            token: secure_token()?,
+            binding_generation: state.binding_generation,
+            binding: state.binding.clone(),
+        };
+        state.permit = Some(permit.clone());
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.delivery_bindings,
+            RecordKey::new(state.flow_id.clone()),
+            state,
+        ))?;
+        Ok(AcquireDeliveryOutcome::Granted(permit))
+    }
+
+    fn begin_refresh(&self, request: BeginRefresh) -> Result<BeginRefreshOutcome, StoreError> {
+        let _guard = self
+            .delivery_guard
+            .lock()
+            .map_err(|_| StoreError::StateInvariant)?;
+        let Some(mut state) = self.delivery_binding(&request.flow_id)? else {
+            return Ok(BeginRefreshOutcome::Rejected(
+                self.missing_delivery_rejection(&request.flow_id)?,
+            ));
+        };
+        if state.binding_generation != request.expected_binding_generation {
+            return Ok(BeginRefreshOutcome::Rejected(
+                DeliveryRejection::StaleGeneration,
+            ));
+        }
+        if request.transition_id.is_empty() {
+            return Ok(BeginRefreshOutcome::Rejected(
+                DeliveryRejection::TransitionConflict,
+            ));
+        }
+        match &state.admission {
+            AdmissionGate::RefreshHeld { transition_id }
+                if transition_id == &request.transition_id =>
+            {
+                Ok(BeginRefreshOutcome::AlreadyHeld {
+                    active_permit: state.permit,
+                })
+            }
+            AdmissionGate::RefreshHeld { .. } => Ok(BeginRefreshOutcome::Rejected(
+                DeliveryRejection::TransitionConflict,
+            )),
+            AdmissionGate::Open => {
+                state.admission = AdmissionGate::RefreshHeld {
+                    transition_id: request.transition_id,
+                };
+                let active_permit = state.permit.clone();
+                self.engine.mutate_keyed(KeyedMutation::new(
+                    self.delivery_bindings,
+                    RecordKey::new(state.flow_id.clone()),
+                    state,
+                ))?;
+                Ok(BeginRefreshOutcome::Held { active_permit })
+            }
+        }
+    }
+
+    fn release_confirmed(
+        &self,
+        request: ReleaseConfirmed,
+    ) -> Result<ReleaseConfirmedOutcome, StoreError> {
+        let _guard = self
+            .delivery_guard
+            .lock()
+            .map_err(|_| StoreError::StateInvariant)?;
+        let Some(mut state) = self.delivery_binding(&request.flow_id)? else {
+            return Ok(ReleaseConfirmedOutcome::Rejected(
+                self.missing_delivery_rejection(&request.flow_id)?,
+            ));
+        };
+        if state.binding_generation != request.expected_binding_generation {
+            return Ok(ReleaseConfirmedOutcome::Rejected(
+                DeliveryRejection::StaleGeneration,
+            ));
+        }
+        if state.binding != request.binding {
+            return Ok(ReleaseConfirmedOutcome::Rejected(
+                DeliveryRejection::StaleBinding,
+            ));
+        }
+        if let Some(last) = &state.last_completion {
+            if last.attempt_id == request.attempt_id
+                && last.token == request.token
+                && last.transport_receipt_id == request.transport_receipt_id
+            {
+                return Ok(ReleaseConfirmedOutcome::AlreadyReleased);
+            }
+        }
+        let Some(permit) = state.permit.clone() else {
+            return Ok(ReleaseConfirmedOutcome::Rejected(
+                DeliveryRejection::StalePermit,
+            ));
+        };
+        if permit.attempt_id != request.attempt_id
+            || permit.token != request.token
+            || permit.binding != request.binding
+            || permit.binding_generation != request.expected_binding_generation
+            || request.transport_receipt_id.is_empty()
+        {
+            return Ok(ReleaseConfirmedOutcome::Rejected(
+                DeliveryRejection::StalePermit,
+            ));
+        }
+        state.last_completion = Some(CompletionRecord {
+            attempt_id: request.attempt_id.clone(),
+            token: request.token,
+            binding: request.binding,
+            binding_generation: request.expected_binding_generation,
+            transport_receipt_id: request.transport_receipt_id,
+        });
+        state.completed_attempts.push(request.attempt_id);
+        state.permit = None;
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.delivery_bindings,
+            RecordKey::new(state.flow_id.clone()),
+            state,
+        ))?;
+        Ok(ReleaseConfirmedOutcome::Released)
+    }
+
+    fn ready_reattach(&self, request: ReadyReattach) -> Result<ReadyReattachOutcome, StoreError> {
+        let _guard = self
+            .delivery_guard
+            .lock()
+            .map_err(|_| StoreError::StateInvariant)?;
+        let Some(mut state) = self.delivery_binding(&request.flow_id)? else {
+            return Ok(ReadyReattachOutcome::Rejected(
+                self.missing_delivery_rejection(&request.flow_id)?,
+            ));
+        };
+        if let Some(last) = &state.last_reattach {
+            if last.transition_id == request.transition_id
+                && last.old_binding == request.expected_old_binding
+                && last.old_binding_generation == request.expected_old_binding_generation
+            {
+                return Ok(ReadyReattachOutcome::AlreadyOpened {
+                    binding_generation: last.new_binding_generation,
+                });
+            }
+        }
+        if state.binding != request.expected_old_binding {
+            return Ok(ReadyReattachOutcome::Rejected(
+                DeliveryRejection::StaleBinding,
+            ));
+        }
+        if state.binding_generation != request.expected_old_binding_generation {
+            return Ok(ReadyReattachOutcome::Rejected(
+                DeliveryRejection::StaleGeneration,
+            ));
+        }
+        let Some(candidate) = self.verified_binding(&request.flow_id)? else {
+            return Ok(ReadyReattachOutcome::Rejected(
+                DeliveryRejection::BindingUnavailable,
+            ));
+        };
+        if candidate.registration_id != request.registration_id
+            || candidate.consumed
+            || candidate.expected_binding_generation
+                != Some(request.expected_old_binding_generation)
+            || candidate.transition_id != request.transition_id
+        {
+            return Ok(ReadyReattachOutcome::Rejected(
+                DeliveryRejection::BindingUnavailable,
+            ));
+        }
+        let AdmissionGate::RefreshHeld { transition_id } = &state.admission else {
+            return Ok(ReadyReattachOutcome::Rejected(
+                DeliveryRejection::TransitionConflict,
+            ));
+        };
+        if transition_id != &request.transition_id {
+            return Ok(ReadyReattachOutcome::Rejected(
+                DeliveryRejection::TransitionConflict,
+            ));
+        }
+        if state.permit.is_some() {
+            return Ok(ReadyReattachOutcome::Rejected(
+                DeliveryRejection::ActivePermit,
+            ));
+        }
+        let Some(next_generation) = state.binding_generation.checked_add(1) else {
+            return Ok(ReadyReattachOutcome::Rejected(
+                DeliveryRejection::GenerationOverflow,
+            ));
+        };
+        state.binding = candidate.binding.clone();
+        state.binding_generation = next_generation;
+        state.lifecycle_generation = candidate.lifecycle_generation;
+        state.admission = AdmissionGate::Open;
+        state.last_reattach = Some(ReattachCompletion {
+            transition_id: request.transition_id,
+            old_binding: request.expected_old_binding,
+            old_binding_generation: request.expected_old_binding_generation,
+            new_binding: state.binding.clone(),
+            new_binding_generation: next_generation,
+            new_lifecycle_generation: state.lifecycle_generation,
+        });
+        let mut consumed = candidate;
+        consumed.consumed = true;
+        self.engine.commit_atomic(
+            self.engine
+                .begin_atomic_commit()
+                .mutate(self.delivery_bindings, state)
+                .mutate(self.verified_bindings, consumed),
+        )?;
+        Ok(ReadyReattachOutcome::Opened {
+            binding_generation: next_generation,
+        })
+    }
+
+    fn read_delivery_state(&self, flow_id: &str) -> Result<ReadDeliveryStateOutcome, StoreError> {
+        let _guard = self
+            .delivery_guard
+            .lock()
+            .map_err(|_| StoreError::StateInvariant)?;
+        let Some(state) = self.delivery_binding(flow_id)? else {
+            return Ok(ReadDeliveryStateOutcome::Rejected(
+                self.missing_delivery_rejection(flow_id)?,
+            ));
+        };
+        Ok(ReadDeliveryStateOutcome::State(binding_state(state)))
+    }
+}
+
+impl FlowStore {
+    fn verified_binding(&self, flow_id: &str) -> Result<Option<VerifiedBindingRecord>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.verified_bindings,
+                RecordKey::new(flow_id),
+            ))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [record] if binding_is_complete(&record.binding) => Ok(Some(record.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn delivery_binding(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<FlowDeliveryBindingRecord>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.delivery_bindings,
+                RecordKey::new(flow_id),
+            ))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [record] if binding_is_complete(&record.binding) && record.binding_generation > 0 => {
+                Ok(Some(record.clone()))
+            }
+            [_] => Err(StoreError::StateInvariant),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn missing_delivery_rejection(&self, flow_id: &str) -> Result<DeliveryRejection, StoreError> {
+        Ok(if self.flow(flow_id)?.is_some() {
+            DeliveryRejection::MissingState
+        } else {
+            DeliveryRejection::UnknownFlow
+        })
+    }
+
+    fn delivery_state_rejection(
+        &self,
+        flow_id: &str,
+        expected_binding: &DeliveryBinding,
+        expected_generation: u64,
+    ) -> Result<DeliveryRejection, StoreError> {
+        let Some(state) = self.delivery_binding(flow_id)? else {
+            return self.missing_delivery_rejection(flow_id);
+        };
+        Ok(if state.binding != *expected_binding {
+            DeliveryRejection::StaleBinding
+        } else if state.binding_generation != expected_generation {
+            DeliveryRejection::StaleGeneration
+        } else {
+            DeliveryRejection::CorruptState
+        })
+    }
+
+    fn checked_delivery_state(
+        &self,
+        flow_id: &str,
+        expected_binding: &DeliveryBinding,
+        expected_generation: u64,
+    ) -> Result<Option<FlowDeliveryBindingRecord>, StoreError> {
+        let Some(state) = self.delivery_binding(flow_id)? else {
+            return Ok(None);
+        };
+        Ok(
+            (state.binding == *expected_binding && state.binding_generation == expected_generation)
+                .then_some(state),
+        )
+    }
+}
+
+fn binding_is_complete(binding: &DeliveryBinding) -> bool {
+    !binding.native_thread.is_empty()
+        && !binding.harness_session.is_empty()
+        && !binding.route_identity.is_empty()
+        && !binding.endpoint_identity.is_empty()
+        && binding.process_pid > 0
+        && binding.process_start_time > 0
+}
+
+fn binding_state(record: FlowDeliveryBindingRecord) -> BindingState {
+    BindingState {
+        binding: record.binding,
+        binding_generation: record.binding_generation,
+        lifecycle_generation: record.lifecycle_generation,
+        admission: record.admission,
+        permit: record.permit,
+        last_completion: record.last_completion,
+    }
+}
+
+fn secure_token() -> Result<String, StoreError> {
+    let mut bytes = [0_u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .map_err(|error| StoreError::TokenSource(error.to_string()))?;
+    Ok(base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        bytes,
+    ))
 }
 
 impl ReadsFlowStore for FlowStore {
@@ -614,9 +1396,14 @@ impl WritesFlowStore for FlowStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow,
-        FlowStore, OpensFlowStore, ReadsFlowStore, RecordsPendingThread, RecordsRestartedFlow,
-        RegistersFlowIdentity, ReservesPendingStart,
+        AcquireDelivery, AcquireDeliveryOutcome, AdmissionGate, AppliesFlowQuery,
+        AuthorizesFlowRestart, BeginRefresh, BeginRefreshOutcome, BootstrapBinding,
+        BootstrapBindingOutcome, ConfiguresFlowStore, ConfirmsStartedFlow, DeliveryBinding,
+        DeliveryRejection, FlowStore, ManagesDeliveryPermits, OpensFlowStore,
+        ReadDeliveryStateOutcome, ReadsFlowStore, ReadyReattach, ReadyReattachOutcome,
+        RecordsPendingThread, RecordsRestartedFlow, RegistersFlowIdentity, ReleaseConfirmed,
+        ReleaseConfirmedOutcome, ReservesPendingStart, VerifiedBindingOutcome,
+        VerifiedBindingRegistration,
     };
     use meta_signal_flow::Configuration;
     use signal_flow::{OriginClue, Query, Response, Restarted, StartRequest};
@@ -661,11 +1448,9 @@ mod tests {
                 }))
                 .expect("start reserves")
                 .expect("flow type is accepted");
-            assert!(
-                store
-                    .record_pending_thread(&pending, "thread-1".into())
-                    .expect("thread persists")
-            );
+            assert!(store
+                .record_pending_thread(&pending, "thread-1".into())
+                .expect("thread persists"));
             let response = store
                 .confirm_started(&pending.flow_id)
                 .expect("start confirms");
@@ -674,6 +1459,357 @@ mod tests {
             };
             started.flow_id
         }
+    }
+
+    trait InitializesFixtureDelivery {
+        fn registered_delivery(&self, store: &FlowStore, flow_id: &str) -> DeliveryBinding;
+    }
+
+    impl InitializesFixtureDelivery for StoreFixture {
+        fn registered_delivery(&self, store: &FlowStore, flow_id: &str) -> DeliveryBinding {
+            let node = signal_flow::FlowNode {
+                flow_id: flow_id.into(),
+                session_id: format!("session-{flow_id}"),
+                harness_kind: signal_flow::HarnessKind::Codex,
+                endpoint_selection: signal_flow::EndpointSelection::Available(
+                    signal_flow::Available_Data {
+                        endpoint_path: format!("/tmp/{flow_id}.sock"),
+                        route_readiness: signal_flow::RouteReadiness::Ready,
+                    },
+                ),
+                herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
+                    signal_flow::HerdrRoute {
+                        herdr_session_name: format!("session-{flow_id}"),
+                        herdr_agent_name: "recipient".into(),
+                        herdr_pane_id: "w1:p2".into(),
+                        herdr_terminal_id: format!("terminal-{flow_id}"),
+                    },
+                ),
+                origin_clue: signal_flow::OriginClue {
+                    flow_id: flow_id.into(),
+                    session_id: format!("session-{flow_id}"),
+                    turn_id: "turn-registration".into(),
+                },
+                flow_lifecycle: signal_flow::FlowLifecycle::Active,
+            };
+            store
+                .register_flow(node)
+                .expect("flow registration persists");
+            let binding = DeliveryBinding {
+                native_thread: format!("thread-{flow_id}"),
+                harness_session: format!("session-{flow_id}"),
+                route_identity: format!("route-{flow_id}"),
+                endpoint_identity: format!("endpoint-{flow_id}"),
+                process_pid: 42,
+                process_start_time: 7,
+            };
+            assert_eq!(
+                store
+                    .record_verified_binding(VerifiedBindingRegistration {
+                        flow_id: flow_id.into(),
+                        registration_id: format!("registration-{flow_id}"),
+                        binding: binding.clone(),
+                        lifecycle_generation: 1,
+                        expected_binding_generation: None,
+                        refresh_transition_id: None,
+                        readiness_receipt_id: format!("ready-{flow_id}"),
+                        proof_digest: format!("digest-{flow_id}"),
+                    })
+                    .expect("binding registration persists"),
+                VerifiedBindingOutcome::Recorded
+            );
+            assert_eq!(
+                store
+                    .bootstrap_delivery_binding(BootstrapBinding {
+                        flow_id: flow_id.into(),
+                        registration_id: format!("registration-{flow_id}"),
+                    })
+                    .expect("binding initialization persists"),
+                BootstrapBindingOutcome::Initialized(super::BindingState {
+                    binding: binding.clone(),
+                    binding_generation: 1,
+                    lifecycle_generation: 1,
+                    admission: AdmissionGate::Open,
+                    permit: None,
+                    last_completion: None,
+                })
+            );
+            binding
+        }
+    }
+
+    fn acquire(flow_id: &str, binding: DeliveryBinding, attempt_id: &str) -> AcquireDelivery {
+        AcquireDelivery {
+            flow_id: flow_id.into(),
+            expected_binding: binding,
+            expected_binding_generation: 1,
+            attempt_id: attempt_id.into(),
+            source_event_identifier: format!("source-{attempt_id}"),
+        }
+    }
+
+    #[test]
+    fn missing_delivery_state_fails_closed_until_explicit_initialization() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let binding = fixture.registered_delivery(&store, "delivery-missing");
+        // The helper initializes it; a different registered flow has no delivery state.
+        store
+            .register_flow(signal_flow::FlowNode {
+                flow_id: "uninitialized".into(),
+                session_id: "session-uninitialized".into(),
+                harness_kind: signal_flow::HarnessKind::Codex,
+                endpoint_selection: signal_flow::EndpointSelection::Unavailable,
+                herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
+                    signal_flow::HerdrRoute {
+                        herdr_session_name: "uninitialized".into(),
+                        herdr_agent_name: "recipient".into(),
+                        herdr_pane_id: "w1:p9".into(),
+                        herdr_terminal_id: "terminal-uninitialized".into(),
+                    },
+                ),
+                origin_clue: signal_flow::OriginClue {
+                    flow_id: "uninitialized".into(),
+                    session_id: "session-uninitialized".into(),
+                    turn_id: "turn-registration".into(),
+                },
+                flow_lifecycle: signal_flow::FlowLifecycle::Active,
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .acquire_delivery(acquire("uninitialized", binding, "attempt-1"))
+                .unwrap(),
+            AcquireDeliveryOutcome::Rejected(DeliveryRejection::MissingState)
+        );
+    }
+
+    #[test]
+    fn acquire_before_refresh_may_finish_but_release_does_not_open_admission() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let binding = fixture.registered_delivery(&store, "delivery-order");
+        let permit = match store
+            .acquire_delivery(acquire("delivery-order", binding.clone(), "attempt-1"))
+            .unwrap()
+        {
+            AcquireDeliveryOutcome::Granted(permit) => permit,
+            outcome => panic!("expected permit, got {outcome:?}"),
+        };
+        assert_eq!(
+            store
+                .begin_refresh(BeginRefresh {
+                    flow_id: "delivery-order".into(),
+                    expected_binding_generation: 1,
+                    transition_id: "refresh-1".into(),
+                })
+                .unwrap(),
+            BeginRefreshOutcome::Held {
+                active_permit: Some(permit.clone())
+            }
+        );
+        assert_eq!(
+            store
+                .release_confirmed(ReleaseConfirmed {
+                    flow_id: "delivery-order".into(),
+                    attempt_id: permit.attempt_id.clone(),
+                    token: permit.token.clone(),
+                    binding: binding.clone(),
+                    expected_binding_generation: 1,
+                    transport_receipt_id: "submitted-1".into(),
+                })
+                .unwrap(),
+            ReleaseConfirmedOutcome::Released
+        );
+        assert_eq!(
+            store
+                .acquire_delivery(acquire("delivery-order", binding, "attempt-2"))
+                .unwrap(),
+            AcquireDeliveryOutcome::Rejected(DeliveryRejection::RefreshHeld)
+        );
+    }
+
+    #[test]
+    fn refresh_before_acquire_blocks_new_admission() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let binding = fixture.registered_delivery(&store, "delivery-refresh-first");
+        assert!(matches!(
+            store
+                .begin_refresh(BeginRefresh {
+                    flow_id: "delivery-refresh-first".into(),
+                    expected_binding_generation: 1,
+                    transition_id: "refresh-1".into(),
+                })
+                .unwrap(),
+            BeginRefreshOutcome::Held {
+                active_permit: None
+            }
+        ));
+        assert_eq!(
+            store
+                .acquire_delivery(acquire("delivery-refresh-first", binding, "attempt-1"))
+                .unwrap(),
+            AcquireDeliveryOutcome::Rejected(DeliveryRejection::RefreshHeld)
+        );
+    }
+
+    #[test]
+    fn same_attempt_is_idempotent_without_a_second_send_authority() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let binding = fixture.registered_delivery(&store, "delivery-idempotent");
+        let first = store
+            .acquire_delivery(acquire("delivery-idempotent", binding.clone(), "attempt-1"))
+            .unwrap();
+        let second = store
+            .acquire_delivery(acquire("delivery-idempotent", binding, "attempt-1"))
+            .unwrap();
+        let AcquireDeliveryOutcome::Granted(permit) = first else {
+            panic!("first permit")
+        };
+        assert_eq!(second, AcquireDeliveryOutcome::AlreadyGranted(permit));
+    }
+
+    #[test]
+    fn restart_retains_refresh_gate_and_ambiguous_permit() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let binding = fixture.registered_delivery(&store, "delivery-restart");
+        let permit = match store
+            .acquire_delivery(acquire("delivery-restart", binding, "attempt-1"))
+            .unwrap()
+        {
+            AcquireDeliveryOutcome::Granted(permit) => permit,
+            outcome => panic!("expected permit, got {outcome:?}"),
+        };
+        store
+            .begin_refresh(BeginRefresh {
+                flow_id: "delivery-restart".into(),
+                expected_binding_generation: 1,
+                transition_id: "refresh-1".into(),
+            })
+            .unwrap();
+        drop(store);
+        let reopened = fixture.store();
+        let ReadDeliveryStateOutcome::State(state) =
+            reopened.read_delivery_state("delivery-restart").unwrap()
+        else {
+            panic!("state persists")
+        };
+        assert_eq!(
+            state.admission,
+            AdmissionGate::RefreshHeld {
+                transition_id: "refresh-1".into()
+            }
+        );
+        assert_eq!(state.permit, Some(permit));
+    }
+
+    #[test]
+    fn ready_reattach_refuses_an_active_permit() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let binding = fixture.registered_delivery(&store, "delivery-active");
+        store
+            .acquire_delivery(acquire("delivery-active", binding.clone(), "attempt-1"))
+            .unwrap();
+        store
+            .begin_refresh(BeginRefresh {
+                flow_id: "delivery-active".into(),
+                expected_binding_generation: 1,
+                transition_id: "refresh-1".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .ready_reattach(ReadyReattach {
+                    flow_id: "delivery-active".into(),
+                    transition_id: "refresh-1".into(),
+                    expected_old_binding: binding.clone(),
+                    expected_old_binding_generation: 1,
+                    registration_id: "registration-new".into(),
+                })
+                .unwrap(),
+            ReadyReattachOutcome::Rejected(DeliveryRejection::ActivePermit)
+        );
+    }
+
+    #[test]
+    fn exact_ready_reattach_advances_once_and_replays_idempotently() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let binding = fixture.registered_delivery(&store, "delivery-ready");
+        store
+            .begin_refresh(BeginRefresh {
+                flow_id: "delivery-ready".into(),
+                expected_binding_generation: 1,
+                transition_id: "refresh-1".into(),
+            })
+            .unwrap();
+        let request = ReadyReattach {
+            flow_id: "delivery-ready".into(),
+            transition_id: "refresh-1".into(),
+            expected_old_binding: binding.clone(),
+            expected_old_binding_generation: 1,
+            registration_id: "registration-new".into(),
+        };
+        assert_eq!(
+            store
+                .record_verified_binding(VerifiedBindingRegistration {
+                    flow_id: "delivery-ready".into(),
+                    registration_id: "registration-new".into(),
+                    binding: DeliveryBinding {
+                        native_thread: "thread-new".into(),
+                        ..binding
+                    },
+                    lifecycle_generation: 2,
+                    expected_binding_generation: Some(1),
+                    refresh_transition_id: Some("refresh-1".into()),
+                    readiness_receipt_id: "ready-new".into(),
+                    proof_digest: "digest-new".into(),
+                })
+                .unwrap(),
+            VerifiedBindingOutcome::Recorded
+        );
+        assert_eq!(
+            store.ready_reattach(request.clone()).unwrap(),
+            ReadyReattachOutcome::Opened {
+                binding_generation: 2
+            }
+        );
+        assert_eq!(
+            store.ready_reattach(request).unwrap(),
+            ReadyReattachOutcome::AlreadyOpened {
+                binding_generation: 2
+            }
+        );
+    }
+
+    #[test]
+    fn ready_reattach_rejects_an_unregistered_foreign_endpoint() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let binding = fixture.registered_delivery(&store, "delivery-foreign");
+        store
+            .begin_refresh(BeginRefresh {
+                flow_id: "delivery-foreign".into(),
+                expected_binding_generation: 1,
+                transition_id: "refresh-1".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .ready_reattach(ReadyReattach {
+                    flow_id: "delivery-foreign".into(),
+                    transition_id: "refresh-1".into(),
+                    expected_old_binding: binding.clone(),
+                    expected_old_binding_generation: 1,
+                    registration_id: "foreign-registration".into(),
+                })
+                .unwrap(),
+            ReadyReattachOutcome::Rejected(DeliveryRejection::BindingUnavailable)
+        );
     }
 
     #[test]
@@ -738,11 +1874,9 @@ mod tests {
             }))
             .expect("reserve")
             .expect("accepted flow type");
-        assert!(
-            store
-                .record_pending_thread(&pending, "thread-pending".into())
-                .expect("thread persists")
-        );
+        assert!(store
+            .record_pending_thread(&pending, "thread-pending".into())
+            .expect("thread persists"));
         drop(store);
         let recovered = fixture.store();
         let authorization = recovered

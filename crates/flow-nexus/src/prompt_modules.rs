@@ -146,3 +146,225 @@ pub(crate) enum PromptModuleError {
     #[error("each accepted prompt module must have a distinct ID")]
     DuplicateModuleId,
 }
+
+/// A correlation chosen by Flow before native launch. Every observation used
+/// to make a binding handoff must carry this exact value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BindingCorrelation {
+    flow_id: FlowIdentity,
+    registration_id: RegistrationIdentity,
+    refresh_transition: Option<RefreshTransitionIdentity>,
+}
+
+impl BindingCorrelation {
+    pub(super) fn new(
+        flow_id: FlowIdentity,
+        registration_id: RegistrationIdentity,
+        refresh_transition: Option<RefreshTransitionIdentity>,
+    ) -> Self {
+        Self {
+            flow_id,
+            registration_id,
+            refresh_transition,
+        }
+    }
+
+    pub(crate) fn flow_id(&self) -> &FlowIdentity {
+        &self.flow_id
+    }
+
+    pub(crate) fn registration_id(&self) -> &RegistrationIdentity {
+        &self.registration_id
+    }
+
+    pub(crate) fn refresh_transition(&self) -> Option<&RefreshTransitionIdentity> {
+        self.refresh_transition.as_ref()
+    }
+}
+
+macro_rules! opaque_identity {
+    ($name:ident) => {
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        pub(crate) struct $name(String);
+
+        impl $name {
+            pub(super) fn parse(value: impl Into<String>) -> Result<Self, BindingHandoffError> {
+                let value = value.into();
+                if value.trim().is_empty() {
+                    return Err(BindingHandoffError::EmptyIdentity);
+                }
+                Ok(Self(value))
+            }
+
+            pub(crate) fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    };
+}
+
+opaque_identity!(FlowIdentity);
+opaque_identity!(RegistrationIdentity);
+opaque_identity!(RefreshTransitionIdentity);
+opaque_identity!(NativeThreadIdentity);
+opaque_identity!(HarnessSessionIdentity);
+opaque_identity!(RouteIdentity);
+opaque_identity!(EndpointIdentity);
+opaque_identity!(AcceptedProfileIdentity);
+opaque_identity!(ContextReceiptIdentity);
+opaque_identity!(ReadinessReceiptIdentity);
+opaque_identity!(ProofDigest);
+
+/// PID and start identity travel together so a reused PID is not accepted as
+/// the native process observed by the adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessIncarnation {
+    pid: u32,
+    start_identity: String,
+}
+
+impl ProcessIncarnation {
+    pub(super) fn new(
+        pid: u32,
+        start_identity: impl Into<String>,
+    ) -> Result<Self, BindingHandoffError> {
+        let start_identity = start_identity.into();
+        if pid == 0 || start_identity.trim().is_empty() {
+            return Err(BindingHandoffError::InvalidProcessIncarnation);
+        }
+        Ok(Self {
+            pid,
+            start_identity,
+        })
+    }
+
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub(crate) fn start_identity(&self) -> &str {
+        &self.start_identity
+    }
+}
+
+/// Observations collected by the adapter before it presents a candidate to
+/// Flow. This stays private to the adapter module: callers can receive only a
+/// `VerifiedNativeBindingHandoff`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedNativeBinding {
+    correlation: BindingCorrelation,
+    native_thread: NativeThreadIdentity,
+    harness_session: HarnessSessionIdentity,
+    route: RouteIdentity,
+    endpoint: EndpointIdentity,
+    process: ProcessIncarnation,
+    accepted_profile: AcceptedProfileIdentity,
+    context_receipt: ContextReceiptIdentity,
+    readiness_receipt: ReadinessReceiptIdentity,
+    proof_digest: ProofDigest,
+}
+
+/// The adapter-owned validator is the only constructor for a verified
+/// handoff. Its expected correlation is supplied from Flow's launch attempt;
+/// the adapter must also have independently observed every native field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeBindingValidator {
+    expected: BindingCorrelation,
+}
+
+impl NativeBindingValidator {
+    pub(super) fn for_correlation(expected: BindingCorrelation) -> Self {
+        Self { expected }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn validate(
+        &self,
+        observed_correlation: BindingCorrelation,
+        native_thread: NativeThreadIdentity,
+        harness_session: HarnessSessionIdentity,
+        route: RouteIdentity,
+        endpoint: EndpointIdentity,
+        process: ProcessIncarnation,
+        accepted_profile: AcceptedProfileIdentity,
+        context_receipt: ContextReceiptIdentity,
+        readiness_receipt: ReadinessReceiptIdentity,
+        proof_digest: ProofDigest,
+    ) -> Result<VerifiedNativeBindingHandoff, BindingHandoffError> {
+        if observed_correlation != self.expected {
+            return Err(BindingHandoffError::CorrelationMismatch);
+        }
+        let observed = ObservedNativeBinding {
+            correlation: observed_correlation,
+            native_thread,
+            harness_session,
+            route,
+            endpoint,
+            process,
+            accepted_profile,
+            context_receipt,
+            readiness_receipt,
+            proof_digest,
+        };
+        Ok(VerifiedNativeBindingHandoff { observed })
+    }
+}
+
+/// Private typed producer value for Flow's independent cross-check against
+/// `FlowNode` before it records a verified binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct VerifiedNativeBindingHandoff {
+    observed: ObservedNativeBinding,
+}
+
+impl VerifiedNativeBindingHandoff {
+    pub(crate) fn correlation(&self) -> &BindingCorrelation {
+        &self.observed.correlation
+    }
+
+    pub(crate) fn native_thread(&self) -> &NativeThreadIdentity {
+        &self.observed.native_thread
+    }
+
+    pub(crate) fn harness_session(&self) -> &HarnessSessionIdentity {
+        &self.observed.harness_session
+    }
+
+    pub(crate) fn route(&self) -> &RouteIdentity {
+        &self.observed.route
+    }
+
+    pub(crate) fn endpoint(&self) -> &EndpointIdentity {
+        &self.observed.endpoint
+    }
+
+    pub(crate) fn process(&self) -> &ProcessIncarnation {
+        &self.observed.process
+    }
+
+    pub(crate) fn accepted_profile(&self) -> &AcceptedProfileIdentity {
+        &self.observed.accepted_profile
+    }
+
+    pub(crate) fn context_receipt(&self) -> &ContextReceiptIdentity {
+        &self.observed.context_receipt
+    }
+
+    pub(crate) fn readiness_receipt(&self) -> &ReadinessReceiptIdentity {
+        &self.observed.readiness_receipt
+    }
+
+    pub(crate) fn proof_digest(&self) -> &ProofDigest {
+        &self.observed.proof_digest
+    }
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub(crate) enum BindingHandoffError {
+    #[error("a binding identity must not be empty")]
+    EmptyIdentity,
+    #[error("a process incarnation requires a nonzero PID and start identity")]
+    InvalidProcessIncarnation,
+    #[error("adapter observations do not match the Flow launch correlation")]
+    CorrelationMismatch,
+}

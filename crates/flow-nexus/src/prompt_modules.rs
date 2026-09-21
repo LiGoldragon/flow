@@ -463,6 +463,252 @@ pub(crate) enum BindingHandoffError {
     ProofNotVerified,
 }
 
+/// A Flow registration token accepted only from the server-side registry.
+/// Requesters cannot supply transcript text, paths, or process IDs to this
+/// normalization boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RegisteredOpaqueIdentity(String);
+
+impl RegisteredOpaqueIdentity {
+    pub(super) fn from_registry(value: impl Into<String>) -> Result<Self, ObserveSessionsError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(ObserveSessionsError::UnknownRegistration);
+        }
+        Ok(Self(value))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedNativeIdentity {
+    registration: RegisteredOpaqueIdentity,
+    lifecycle_generation: LifecycleGeneration,
+}
+
+/// The task state is derived only from an independent native event reader.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TaskActivity {
+    Busy,
+    Idle,
+    Unknown,
+}
+
+/// Bounded collectors classify task activity from native events only. A status
+/// line, last input, cache, or quota is context and cannot produce Busy/Idle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeTaskEvent {
+    MatchedActiveTask,
+    ObservedCompletion,
+    NoCurrentEvent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EvidenceQuality {
+    IndependentNativeEvent,
+    Incomplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EvidenceStatus {
+    Observed,
+    Unavailable,
+    VerifierUnavailable,
+    Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EvidenceSource {
+    CodexAppServer,
+    HerdrSnapshot,
+    NativeReceipt,
+    FullwindowClauseStatusLine,
+    CodexLastInputProxy,
+}
+
+/// Every observed metric retains its observation boundary and freshness.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EvidenceMetric<T> {
+    value: T,
+    quality: EvidenceQuality,
+    status: EvidenceStatus,
+    source: EvidenceSource,
+    observed_at: i64,
+    fresh_until: i64,
+}
+
+impl<T> EvidenceMetric<T> {
+    pub(super) fn observed(
+        value: T,
+        quality: EvidenceQuality,
+        source: EvidenceSource,
+        observed_at: i64,
+        fresh_until: i64,
+    ) -> Result<Self, ObserveSessionsError> {
+        if fresh_until < observed_at {
+            return Err(ObserveSessionsError::InvalidFreshness);
+        }
+        Ok(Self {
+            value,
+            quality,
+            status: EvidenceStatus::Observed,
+            source,
+            observed_at,
+            fresh_until,
+        })
+    }
+
+    pub(crate) fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub(crate) fn quality(&self) -> EvidenceQuality {
+        self.quality
+    }
+
+    pub(crate) fn status(&self) -> EvidenceStatus {
+        self.status
+    }
+
+    pub(crate) fn source(&self) -> EvidenceSource {
+        self.source
+    }
+
+    pub(crate) fn observed_at(&self) -> i64 {
+        self.observed_at
+    }
+
+    pub(crate) fn fresh_until(&self) -> i64 {
+        self.fresh_until
+    }
+}
+
+impl EvidenceMetric<TaskActivity> {
+    pub(super) fn from_native_task_event(
+        event: NativeTaskEvent,
+        source: EvidenceSource,
+        observed_at: i64,
+        fresh_until: i64,
+    ) -> Result<Self, ObserveSessionsError> {
+        let value = match event {
+            NativeTaskEvent::MatchedActiveTask => TaskActivity::Busy,
+            NativeTaskEvent::ObservedCompletion => TaskActivity::Idle,
+            NativeTaskEvent::NoCurrentEvent => TaskActivity::Unknown,
+        };
+        Self::observed(
+            value,
+            EvidenceQuality::IndependentNativeEvent,
+            source,
+            observed_at,
+            fresh_until,
+        )
+    }
+}
+
+/// Context facts are distinct metrics, never evidence of task activity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionContextEvidence {
+    pub(crate) turn: EvidenceMetric<Option<String>>,
+    pub(crate) session: EvidenceMetric<Option<String>>,
+    pub(crate) cache: EvidenceMetric<Option<String>>,
+    pub(crate) quota: EvidenceMetric<Option<String>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObservedSession {
+    pub(crate) binding_generation: LifecycleGeneration,
+    pub(crate) task: EvidenceMetric<TaskActivity>,
+    pub(crate) delivery_gate_busy: EvidenceMetric<DeliveryGateActivity>,
+    pub(crate) duty: EvidenceMetric<DutyActivity>,
+    pub(crate) availability: EvidenceMetric<Availability>,
+    pub(crate) context: SessionContextEvidence,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeliveryGateActivity {
+    Busy,
+    Clear,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DutyActivity {
+    OnDuty,
+    OffDuty,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Availability {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+pub(super) trait ResolvesRegisteredIdentity {
+    fn resolve(&self, identity: &RegisteredOpaqueIdentity) -> Option<ResolvedNativeIdentity>;
+}
+
+pub(super) trait ReadsIndependentNativeEvents {
+    fn task_activity(&self, identity: &ResolvedNativeIdentity) -> EvidenceMetric<TaskActivity>;
+    fn delivery_gate_busy(
+        &self,
+        identity: &ResolvedNativeIdentity,
+    ) -> EvidenceMetric<DeliveryGateActivity>;
+    fn duty(&self, identity: &ResolvedNativeIdentity) -> EvidenceMetric<DutyActivity>;
+    fn availability(&self, identity: &ResolvedNativeIdentity) -> EvidenceMetric<Availability>;
+    fn context(&self, identity: &ResolvedNativeIdentity) -> SessionContextEvidence;
+}
+
+/// Callable seam for `Flow lib.rs`: resolve a registered identity first, then
+/// normalize only independent native evidence. The requester never supplies a
+/// native transcript, path, or PID.
+pub(crate) struct ObserveSessionsNormalizer<R, E> {
+    resolver: R,
+    events: E,
+}
+
+impl<R: ResolvesRegisteredIdentity, E: ReadsIndependentNativeEvents>
+    ObserveSessionsNormalizer<R, E>
+{
+    pub(super) fn new(resolver: R, events: E) -> Self {
+        Self { resolver, events }
+    }
+
+    pub(super) fn observe(
+        &self,
+        registration: &RegisteredOpaqueIdentity,
+        now: i64,
+    ) -> Result<ObservedSession, ObserveSessionsError> {
+        let identity = self
+            .resolver
+            .resolve(registration)
+            .ok_or(ObserveSessionsError::UnknownRegistration)?;
+        let mut task = self.events.task_activity(&identity);
+        if task.quality != EvidenceQuality::IndependentNativeEvent
+            || task.status != EvidenceStatus::Observed
+            || task.fresh_until < now
+        {
+            task.value = TaskActivity::Unknown;
+        }
+        Ok(ObservedSession {
+            binding_generation: identity.lifecycle_generation,
+            task,
+            delivery_gate_busy: self.events.delivery_gate_busy(&identity),
+            duty: self.events.duty(&identity),
+            availability: self.events.availability(&identity),
+            context: self.events.context(&identity),
+        })
+    }
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub(crate) enum ObserveSessionsError {
+    #[error("registered identity is unknown")]
+    UnknownRegistration,
+    #[error("metric freshness precedes its observation")]
+    InvalidFreshness,
+}
+
 #[cfg(test)]
 mod binding_tests {
     use super::*;
@@ -533,5 +779,109 @@ mod binding_tests {
             result.unwrap_err(),
             BindingHandoffError::ReadinessNotCurrent
         );
+    }
+
+    struct Registry;
+
+    impl ResolvesRegisteredIdentity for Registry {
+        fn resolve(&self, identity: &RegisteredOpaqueIdentity) -> Option<ResolvedNativeIdentity> {
+            Some(ResolvedNativeIdentity {
+                registration: identity.clone(),
+                lifecycle_generation: LifecycleGeneration::from_observed(7),
+            })
+        }
+    }
+
+    struct StaleNativeEvent;
+
+    impl ReadsIndependentNativeEvents for StaleNativeEvent {
+        fn task_activity(&self, _: &ResolvedNativeIdentity) -> EvidenceMetric<TaskActivity> {
+            EvidenceMetric::observed(
+                TaskActivity::Busy,
+                EvidenceQuality::IndependentNativeEvent,
+                EvidenceSource::CodexAppServer,
+                10,
+                11,
+            )
+            .expect("fixture task")
+        }
+
+        fn delivery_gate_busy(
+            &self,
+            _: &ResolvedNativeIdentity,
+        ) -> EvidenceMetric<DeliveryGateActivity> {
+            EvidenceMetric::observed(
+                DeliveryGateActivity::Busy,
+                EvidenceQuality::IndependentNativeEvent,
+                EvidenceSource::HerdrSnapshot,
+                10,
+                11,
+            )
+            .expect("fixture gate")
+        }
+
+        fn duty(&self, _: &ResolvedNativeIdentity) -> EvidenceMetric<DutyActivity> {
+            EvidenceMetric::observed(
+                DutyActivity::OnDuty,
+                EvidenceQuality::IndependentNativeEvent,
+                EvidenceSource::HerdrSnapshot,
+                10,
+                11,
+            )
+            .expect("fixture duty")
+        }
+
+        fn availability(&self, _: &ResolvedNativeIdentity) -> EvidenceMetric<Availability> {
+            EvidenceMetric::observed(
+                Availability::Available,
+                EvidenceQuality::IndependentNativeEvent,
+                EvidenceSource::HerdrSnapshot,
+                10,
+                11,
+            )
+            .expect("fixture availability")
+        }
+
+        fn context(&self, _: &ResolvedNativeIdentity) -> SessionContextEvidence {
+            let metric = || {
+                EvidenceMetric::observed(
+                    None,
+                    EvidenceQuality::Incomplete,
+                    EvidenceSource::NativeReceipt,
+                    10,
+                    11,
+                )
+                .expect("fixture context")
+            };
+            SessionContextEvidence {
+                turn: metric(),
+                session: metric(),
+                cache: metric(),
+                quota: metric(),
+            }
+        }
+    }
+
+    #[test]
+    fn stale_native_activity_normalizes_to_unknown_without_using_context() {
+        let registration =
+            RegisteredOpaqueIdentity::from_registry("registered").expect("fixture registration");
+        let observed = ObserveSessionsNormalizer::new(Registry, StaleNativeEvent)
+            .observe(&registration, 12)
+            .expect("normalized observation");
+        assert_eq!(*observed.task.value(), TaskActivity::Unknown);
+        assert_eq!(observed.context.turn.status(), EvidenceStatus::Observed);
+    }
+
+    #[test]
+    fn context_and_missing_events_cannot_promote_task_activity() {
+        let task = EvidenceMetric::from_native_task_event(
+            NativeTaskEvent::NoCurrentEvent,
+            EvidenceSource::CodexLastInputProxy,
+            10,
+            11,
+        )
+        .expect("fixture task");
+        assert_eq!(*task.value(), TaskActivity::Unknown);
     }
 }

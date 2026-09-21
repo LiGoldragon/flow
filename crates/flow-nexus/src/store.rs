@@ -724,7 +724,7 @@ impl ManagesDeliveryPermits for FlowStore {
                 DeliveryRejection::BindingUnavailable,
             ));
         }
-        let candidate = VerifiedBindingRecord {
+        let mut candidate = VerifiedBindingRecord {
             flow_id: request.flow_id.clone(),
             registration_id: request.registration_id,
             binding: request.binding,

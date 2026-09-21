@@ -709,6 +709,116 @@ pub(crate) enum ObserveSessionsError {
     InvalidFreshness,
 }
 
+/// A testing role is selected by the Flow consumer for one bounded worker.
+/// It is intentionally absent from `AcceptedPromptModules::empty()` and from
+/// universal module assembly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SelectedTestingRole {
+    procedure: TestingProcedureWitness,
+    oracle: IndependentOracleWitness,
+    negatives: NegativeCaseWitness,
+    invocation: InvokerBoundTarget,
+    revision: ImmutableRevision,
+    authority: TestingAuthorityLimit,
+    acceptance: TestingAcceptanceContract,
+}
+
+macro_rules! testing_text {
+    ($name:ident, $error:ident) => {
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        pub(crate) struct $name(String);
+
+        impl $name {
+            pub(crate) fn parse(value: impl Into<String>) -> Result<Self, TestingRoleError> {
+                let value = value.into();
+                if value.trim().is_empty() {
+                    return Err(TestingRoleError::$error);
+                }
+                Ok(Self(value))
+            }
+
+            pub(crate) fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    };
+}
+
+testing_text!(TestingProcedureWitness, MissingProcedure);
+testing_text!(IndependentOracleWitness, MissingIndependentOracle);
+testing_text!(NegativeCaseWitness, MissingNegativeCases);
+testing_text!(InvokerBoundTarget, MissingInvokerTarget);
+testing_text!(ImmutableRevision, MissingImmutableRevision);
+testing_text!(TestingAuthorityLimit, MissingAuthorityLimit);
+testing_text!(TestingAcceptanceContract, MissingAcceptanceContract);
+
+impl SelectedTestingRole {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn selected(
+        procedure: TestingProcedureWitness,
+        oracle: IndependentOracleWitness,
+        negatives: NegativeCaseWitness,
+        invocation: InvokerBoundTarget,
+        revision: ImmutableRevision,
+        authority: TestingAuthorityLimit,
+        acceptance: TestingAcceptanceContract,
+    ) -> Self {
+        Self {
+            procedure,
+            oracle,
+            negatives,
+            invocation,
+            revision,
+            authority,
+            acceptance,
+        }
+    }
+
+    /// Produces the bounded worker context. The invoker contributes only the
+    /// target/contract invocation; procedure, oracle, and negative cases are
+    /// selected role evidence and cannot be supplied as ad-hoc assertions.
+    pub(crate) fn worker_context(&self) -> TestingWorkerContext {
+        TestingWorkerContext {
+            procedure: self.procedure.clone(),
+            oracle: self.oracle.clone(),
+            negatives: self.negatives.clone(),
+            invocation: self.invocation.clone(),
+            revision: self.revision.clone(),
+            authority: self.authority.clone(),
+            acceptance: self.acceptance.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TestingWorkerContext {
+    pub(crate) procedure: TestingProcedureWitness,
+    pub(crate) oracle: IndependentOracleWitness,
+    pub(crate) negatives: NegativeCaseWitness,
+    pub(crate) invocation: InvokerBoundTarget,
+    pub(crate) revision: ImmutableRevision,
+    pub(crate) authority: TestingAuthorityLimit,
+    pub(crate) acceptance: TestingAcceptanceContract,
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub(crate) enum TestingRoleError {
+    #[error("testing procedure witness is required")]
+    MissingProcedure,
+    #[error("an independent oracle witness is required")]
+    MissingIndependentOracle,
+    #[error("negative-case witness is required")]
+    MissingNegativeCases,
+    #[error("invoker bounded target/contract is required")]
+    MissingInvokerTarget,
+    #[error("immutable revision is required")]
+    MissingImmutableRevision,
+    #[error("testing authority limit is required")]
+    MissingAuthorityLimit,
+    #[error("testing acceptance contract is required")]
+    MissingAcceptanceContract,
+}
+
 #[cfg(test)]
 mod binding_tests {
     use super::*;
@@ -883,5 +993,20 @@ mod binding_tests {
         )
         .expect("fixture task");
         assert_eq!(*task.value(), TaskActivity::Unknown);
+    }
+
+    #[test]
+    fn selected_testing_role_stays_out_of_universal_prompt_assembly() {
+        let role = SelectedTestingRole::selected(
+            TestingProcedureWitness::parse("procedure").expect("fixture procedure"),
+            IndependentOracleWitness::parse("oracle").expect("fixture oracle"),
+            NegativeCaseWitness::parse("negative").expect("fixture negatives"),
+            InvokerBoundTarget::parse("target@revision contract").expect("fixture target"),
+            ImmutableRevision::parse("abc123").expect("fixture revision"),
+            TestingAuthorityLimit::parse("read-only").expect("fixture authority"),
+            TestingAcceptanceContract::parse("return witness").expect("fixture acceptance"),
+        );
+        assert!(AcceptedPromptModules::empty().native_inputs().is_empty());
+        assert_eq!(role.worker_context().revision.as_str(), "abc123");
     }
 }

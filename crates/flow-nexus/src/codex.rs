@@ -5,6 +5,13 @@
 #[path = "prompt_modules.rs"]
 mod prompt_modules;
 
+pub(crate) use prompt_modules::{
+    Availability, DeliveryGateActivity, DutyActivity, EvidenceMetric, EvidenceQuality,
+    EvidenceSource, EvidenceStatus, ObserveSessionsError, ObserveSessionsNormalizer,
+    ObservedSession, ReadsIndependentNativeEvents, RegisteredOpaqueIdentity,
+    ResolvedNativeIdentity, ResolvesRegisteredIdentity, SessionContextEvidence, TaskActivity,
+};
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use sha1::{Digest, Sha1};
 use signal_flow::OriginClue;

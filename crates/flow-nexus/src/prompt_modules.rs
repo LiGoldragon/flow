@@ -480,7 +480,7 @@ impl RegisteredOpaqueIdentity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ResolvedNativeIdentity {
+pub(crate) struct ResolvedNativeIdentity {
     registration: RegisteredOpaqueIdentity,
     lifecycle_generation: LifecycleGeneration,
 }
@@ -644,11 +644,11 @@ pub(crate) enum Availability {
     Unknown,
 }
 
-pub(super) trait ResolvesRegisteredIdentity {
+pub(crate) trait ResolvesRegisteredIdentity {
     fn resolve(&self, identity: &RegisteredOpaqueIdentity) -> Option<ResolvedNativeIdentity>;
 }
 
-pub(super) trait ReadsIndependentNativeEvents {
+pub(crate) trait ReadsIndependentNativeEvents {
     fn task_activity(&self, identity: &ResolvedNativeIdentity) -> EvidenceMetric<TaskActivity>;
     fn delivery_gate_busy(
         &self,
@@ -670,11 +670,11 @@ pub(crate) struct ObserveSessionsNormalizer<R, E> {
 impl<R: ResolvesRegisteredIdentity, E: ReadsIndependentNativeEvents>
     ObserveSessionsNormalizer<R, E>
 {
-    pub(super) fn new(resolver: R, events: E) -> Self {
+    pub(crate) fn new(resolver: R, events: E) -> Self {
         Self { resolver, events }
     }
 
-    pub(super) fn observe(
+    pub(crate) fn observe(
         &self,
         registration: &RegisteredOpaqueIdentity,
         now: i64,

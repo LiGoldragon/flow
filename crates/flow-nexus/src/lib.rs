@@ -5,6 +5,14 @@ pub mod herdr;
 pub mod store;
 
 use codex::{CodexAdapter, ConsumesResetCredit, ResumesCodex};
+// The adapter owns construction from registered evidence.  The Nexus exposes
+// only its crate-visible observation vocabulary to the ordinary handler.
+pub(crate) use codex::{
+    Availability, DeliveryGateActivity, DutyActivity, EvidenceMetric, EvidenceQuality,
+    EvidenceSource, EvidenceStatus, ObserveSessionsError, ObserveSessionsNormalizer,
+    ObservedSession, ReadsIndependentNativeEvents, RegisteredOpaqueIdentity,
+    ResolvedNativeIdentity, ResolvesRegisteredIdentity, SessionContextEvidence, TaskActivity,
+};
 use signal_flow::{Query, Response, RestartRejection, StartRejection};
 use std::{
     fs,

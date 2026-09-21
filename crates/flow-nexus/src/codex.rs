@@ -2,7 +2,9 @@
 //! The proxy is a byte bridge, so this module owns its bounded WebSocket and
 //! JSON-RPC conversation; it never falls back to a direct Unix-socket client.
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+mod prompt_modules;
+
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use sha1::{Digest, Sha1};
 use signal_flow::OriginClue;
 use std::{
@@ -420,9 +422,39 @@ impl BuildsCodexTurn for CodexAdapter {
         goal: &str,
         origin: &OriginClue,
     ) -> serde_json::Value {
+        self.turn_params_with_modules(
+            thread_id,
+            flow_id,
+            goal,
+            origin,
+            &prompt_modules::AcceptedPromptModules::empty(),
+        )
+    }
+}
+
+impl CodexAdapter {
+    /// Builds a native turn from modules that an upstream policy has already
+    /// accepted. This adapter deliberately does not select Curriculum module
+    /// IDs, profiles, or programming variants.
+    pub(crate) fn turn_params_with_modules(
+        &self,
+        thread_id: &str,
+        flow_id: &str,
+        goal: &str,
+        origin: &OriginClue,
+        modules: &prompt_modules::AcceptedPromptModules,
+    ) -> serde_json::Value {
+        let mut input = modules.native_inputs();
+        input.push(serde_json::json!({
+            "type": "text",
+            "text": format!(
+                "{goal}\n\nFlow identity:\nFLOW_ID={flow_id}\nFLOW_DIRECTORY=/home/li/primary/flows/{flow_id}\n\nOrigin clue:\nflow: {}\nsession: {}\nturn: {}",
+                origin.flow_id, origin.session_id, origin.turn_id
+            )
+        }));
         serde_json::json!({
             "threadId": thread_id,
-            "input": [{ "type": "text", "text": format!("{goal}\n\nFlow identity:\nFLOW_ID={flow_id}\nFLOW_DIRECTORY=/home/li/primary/flows/{flow_id}\n\nOrigin clue:\nflow: {}\nsession: {}\nturn: {}", origin.flow_id, origin.session_id, origin.turn_id) }],
+            "input": input,
             "model": self.model,
             "effort": "medium",
             "turnTrigger": "flow-nexus"

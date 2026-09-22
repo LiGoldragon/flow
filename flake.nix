@@ -38,6 +38,9 @@
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          resolveCargoLock = import ./nix/resolve-cargo-lock.nix {
+            inherit pkgs src;
+          };
           exactTest =
             package: testName:
             craneLib.cargoTest (
@@ -56,6 +59,7 @@
             commonArgs
             cargoArtifacts
             exactTest
+            resolveCargoLock
             ;
         };
     in
@@ -91,6 +95,7 @@
             }
           );
           fmt = context.craneLib.cargoFmt context.commonArgs;
+          resolve-cargo-lock = context.resolveCargoLock;
           clippy = context.craneLib.cargoClippy (
             context.commonArgs
             // {

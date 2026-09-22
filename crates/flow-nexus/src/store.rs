@@ -1457,6 +1457,12 @@ impl WritesFlowStore for FlowStore {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        process::Command,
+        time::{Duration, Instant},
+    };
+
     use super::{
         AcquireDelivery, AcquireDeliveryOutcome, AdmissionGate, AppliesFlowQuery,
         AuthorizesFlowRestart, BeginRefresh, BeginRefreshOutcome, BootstrapBinding,
@@ -1976,6 +1982,47 @@ mod tests {
             sema_engine::SchemaVersion::new(1),
         ))
         .expect("raw engine opens after store drops");
+    }
+
+    #[test]
+    fn child_holds_store_for_crash_fixture() {
+        let Ok(path) = std::env::var("FLOW_STORE_CRASH_FIXTURE_PATH") else {
+            return;
+        };
+        let _store = <FlowStore as OpensFlowStore>::open(std::path::Path::new(&path))
+            .expect("child store opens");
+        fs::write(format!("{path}.ready"), b"ready").expect("child signals readiness");
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn process_death_releases_store_ownership_only_after_child_is_reaped() {
+        let fixture = StoreFixture::new();
+        let path = fixture.directory.path().join("flow.sema");
+        let ready = format!("{}.ready", path.display());
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "store::tests::child_holds_store_for_crash_fixture",
+                "--nocapture",
+            ])
+            .env("FLOW_STORE_CRASH_FIXTURE_PATH", &path)
+            .spawn()
+            .expect("child test starts");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::path::Path::new(&ready).exists() {
+            assert!(Instant::now() < deadline, "child did not acquire the store");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(
+            <FlowStore as OpensFlowStore>::open(&path),
+            Err(StoreError::Engine(_))
+        ));
+        child.kill().expect("terminate child holder");
+        child.wait().expect("reap child holder");
+        <FlowStore as OpensFlowStore>::open(&path).expect("reopen after child death");
     }
 
     #[test]

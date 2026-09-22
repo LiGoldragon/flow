@@ -4,6 +4,98 @@ pub mod codex;
 pub mod herdr;
 pub mod store;
 
+/// The Curriculum `tester` alias selects its authored `testing` skill only
+/// for that role. The catalog is supplied by the server's installed source
+/// resolver; request payloads cannot supply skill paths or bodies.
+mod tester_selection {
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) struct AuthoredSkill<'a> {
+        pub id: &'a str,
+        pub path: &'a str,
+        pub body: &'a str,
+        pub source_revision: &'a str,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) enum SelectionError {
+        UnsupportedRole,
+        MissingTestingSkill,
+        AmbiguousTestingSkill,
+        IncompleteTestingSkill,
+    }
+
+    pub(crate) fn select_tester<'a>(
+        role_alias: &str,
+        installed: &'a [AuthoredSkill<'a>],
+    ) -> Result<&'a AuthoredSkill<'a>, SelectionError> {
+        if role_alias != "tester" {
+            return Err(SelectionError::UnsupportedRole);
+        }
+        let mut matching = installed.iter().filter(|skill| skill.id == "testing");
+        let skill = matching.next().ok_or(SelectionError::MissingTestingSkill)?;
+        if matching.next().is_some() {
+            return Err(SelectionError::AmbiguousTestingSkill);
+        }
+        if skill.path.trim().is_empty()
+            || skill.body.trim().is_empty()
+            || skill.source_revision.trim().is_empty()
+        {
+            return Err(SelectionError::IncompleteTestingSkill);
+        }
+        Ok(skill)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const TESTING: AuthoredSkill<'static> = AuthoredSkill {
+            id: "testing",
+            path: "/generated/testing/SKILL.md",
+            body: "Choose a procedure, independent oracle, and negative cases.",
+            source_revision: "c9c39549",
+        };
+
+        #[test]
+        fn tester_selects_one_authored_testing_skill_only() {
+            let other = AuthoredSkill {
+                id: "messaging",
+                ..TESTING
+            };
+            let installed = [other, TESTING];
+            assert_eq!(select_tester("tester", &installed), Ok(&installed[1]));
+            assert_eq!(
+                select_tester("default", &installed),
+                Err(SelectionError::UnsupportedRole)
+            );
+        }
+
+        #[test]
+        fn missing_or_ambiguous_testing_id_refuses() {
+            assert_eq!(
+                select_tester("tester", &[]),
+                Err(SelectionError::MissingTestingSkill)
+            );
+            assert_eq!(
+                select_tester("tester", &[TESTING, TESTING]),
+                Err(SelectionError::AmbiguousTestingSkill)
+            );
+        }
+
+        #[test]
+        fn incomplete_installed_skill_refuses() {
+            let missing_body = AuthoredSkill {
+                body: "",
+                ..TESTING
+            };
+            assert_eq!(
+                select_tester("tester", &[missing_body]),
+                Err(SelectionError::IncompleteTestingSkill)
+            );
+        }
+    }
+}
+
 use codex::{CodexAdapter, ConsumesResetCredit, ResumesCodex};
 // The adapter owns construction from registered evidence.  The Nexus exposes
 // only its crate-visible observation vocabulary to the ordinary handler.

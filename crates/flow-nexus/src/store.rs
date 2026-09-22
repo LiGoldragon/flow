@@ -1897,6 +1897,19 @@ mod tests {
     }
 
     #[test]
+    fn second_live_store_open_is_refused_and_drop_allows_reopen() {
+        let fixture = StoreFixture::new();
+        let path = fixture.directory.path().join("flow.sema");
+        let first = <FlowStore as OpensFlowStore>::open(&path).expect("first store opens");
+        assert!(matches!(
+            <FlowStore as OpensFlowStore>::open(&path),
+            Err(StoreError::Engine(_))
+        ));
+        drop(first);
+        <FlowStore as OpensFlowStore>::open(&path).expect("dropped store reopens");
+    }
+
+    #[test]
     fn mismatching_or_unknown_authority_is_rejected() {
         let fixture = StoreFixture::new();
         let store = fixture.store();

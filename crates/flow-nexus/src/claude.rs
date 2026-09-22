@@ -1,12 +1,106 @@
 //! Dynamic readiness projection for daemon-owned Claude sessions.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use serde_json::Value;
 use signal_flow::{EndpointSelection, FlowNode, HarnessKind, RouteReadiness};
 
 const JOBS: &str = "/home/li/.claude/jobs";
 const ROSTER: &str = "/home/li/.claude/daemon/roster.json";
+
+/// The complete, inspectable native invocation for one Claude Start.
+///
+/// Claude's system-prompt file replaces the vendor instruction body, so this
+/// plan deliberately carries a caller-supplied bundle rather than pretending
+/// the stock prompt remains in effect. The startup text remains one argument:
+/// skill commands followed by exactly one bundle read command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaudeStartPlan {
+    pub system_prompt_file: PathBuf,
+    pub startup_skills: Vec<String>,
+    pub startup_bundle_file: PathBuf,
+}
+
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum ClaudeStartPlanError {
+    #[error("a Claude Start requires at least one startup skill command")]
+    MissingStartupSkill,
+    #[error("a Claude startup skill command must be one line")]
+    MultilineStartupSkill,
+    #[error("the Claude system-prompt path must not be empty")]
+    MissingSystemPrompt,
+    #[error("the Claude startup bundle path must not be empty")]
+    MissingStartupBundle,
+}
+
+impl ClaudeStartPlan {
+    pub fn startup_argument(&self) -> Result<String, ClaudeStartPlanError> {
+        if self.system_prompt_file.as_os_str().is_empty() {
+            return Err(ClaudeStartPlanError::MissingSystemPrompt);
+        }
+        if self.startup_bundle_file.as_os_str().is_empty() {
+            return Err(ClaudeStartPlanError::MissingStartupBundle);
+        }
+        if self.startup_skills.is_empty() {
+            return Err(ClaudeStartPlanError::MissingStartupSkill);
+        }
+        if self
+            .startup_skills
+            .iter()
+            .any(|skill| skill.contains(['\n', '\r']))
+        {
+            return Err(ClaudeStartPlanError::MultilineStartupSkill);
+        }
+        let mut lines = self.startup_skills.clone();
+        lines.push(format!("read {}", self.startup_bundle_file.display()));
+        Ok(lines.join("\n"))
+    }
+
+    pub fn argv(&self) -> Result<Vec<String>, ClaudeStartPlanError> {
+        Ok(vec![
+            "claude".into(),
+            "--bg".into(),
+            "--remote-control".into(),
+            "--system-prompt-file".into(),
+            self.system_prompt_file.display().to_string(),
+            "--dangerously-skip-permissions".into(),
+            "--".into(),
+            self.startup_argument()?,
+        ])
+    }
+
+    /// Builds the process with inherited child-session state removed. Callers
+    /// must complete their startup readiness checks before claiming identity
+    /// or setting the thread title.
+    pub fn command(&self) -> Result<Command, ClaudeStartPlanError> {
+        let argv = self.argv()?;
+        let mut command = Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        command.env_remove("CLAUDE_CODE_CHILD_SESSION");
+        Ok(command)
+    }
+}
+
+/// Identity publication is intentionally downstream of native readiness.
+pub trait FinalizesClaudeStart {
+    type Error;
+
+    fn startup_is_ready(&mut self) -> Result<(), Self::Error>;
+    fn claim_flow_id(&mut self) -> Result<(), Self::Error>;
+    fn set_flow_title(&mut self) -> Result<(), Self::Error>;
+}
+
+pub fn finalize_claude_start_after_readiness<T: FinalizesClaudeStart>(
+    start: &mut T,
+) -> Result<(), T::Error> {
+    start.startup_is_ready()?;
+    start.claim_flow_id()?;
+    start.set_flow_title()
+}
 
 pub fn refresh_readiness(mut node: FlowNode) -> FlowNode {
     if node.harness_kind != HarnessKind::Claude {

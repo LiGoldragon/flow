@@ -8,10 +8,20 @@ pub mod store;
 /// for that role. The catalog is supplied by the server's installed source
 /// resolver; request payloads cannot supply skill paths or bodies.
 mod tester_selection {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum SkillNamespace {
+        Project,
+        Vision,
+    }
+
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(crate) struct AuthoredSkill<'a> {
         pub id: &'a str,
+        pub namespace: SkillNamespace,
+        /// Discovery metadata: why a skill should be selected.
+        pub description: &'a str,
         pub path: &'a str,
+        /// Guidance expanded by the native skill loader after selection.
         pub body: &'a str,
         pub source_revision: &'a str,
     }
@@ -22,6 +32,14 @@ mod tester_selection {
         MissingTestingSkill,
         AmbiguousTestingSkill,
         IncompleteTestingSkill,
+        WrongNamespace,
+    }
+
+    fn valid_namespace(skill: &AuthoredSkill<'_>) -> bool {
+        match skill.namespace {
+            SkillNamespace::Project => !skill.id.starts_with("vision-"),
+            SkillNamespace::Vision => skill.id.starts_with("vision-"),
+        }
     }
 
     pub(crate) fn select_tester<'a>(
@@ -36,7 +54,11 @@ mod tester_selection {
         if matching.next().is_some() {
             return Err(SelectionError::AmbiguousTestingSkill);
         }
-        if skill.path.trim().is_empty()
+        if skill.namespace != SkillNamespace::Project || !valid_namespace(skill) {
+            return Err(SelectionError::WrongNamespace);
+        }
+        if skill.description.trim().is_empty()
+            || skill.path.trim().is_empty()
             || skill.body.trim().is_empty()
             || skill.source_revision.trim().is_empty()
         {
@@ -51,6 +73,8 @@ mod tester_selection {
 
         const TESTING: AuthoredSkill<'static> = AuthoredSkill {
             id: "testing",
+            namespace: SkillNamespace::Project,
+            description: "A change needs proof it works.",
             path: "/generated/testing/SKILL.md",
             body: "Choose a procedure, independent oracle, and negative cases.",
             source_revision: "c9c39549",
@@ -90,6 +114,40 @@ mod tester_selection {
             };
             assert_eq!(
                 select_tester("tester", &[missing_body]),
+                Err(SelectionError::IncompleteTestingSkill)
+            );
+        }
+
+        #[test]
+        fn vision_ids_stay_in_the_vision_namespace() {
+            let misplaced = AuthoredSkill {
+                namespace: SkillNamespace::Vision,
+                ..TESTING
+            };
+            assert_eq!(
+                select_tester("tester", &[misplaced]),
+                Err(SelectionError::WrongNamespace)
+            );
+            let vision = AuthoredSkill {
+                id: "vision-example",
+                namespace: SkillNamespace::Vision,
+                ..TESTING
+            };
+            assert!(valid_namespace(&vision));
+            assert!(!valid_namespace(&AuthoredSkill {
+                namespace: SkillNamespace::Project,
+                ..vision
+            }));
+        }
+
+        #[test]
+        fn description_is_required_as_selection_metadata() {
+            let without_description = AuthoredSkill {
+                description: "",
+                ..TESTING
+            };
+            assert_eq!(
+                select_tester("tester", &[without_description]),
                 Err(SelectionError::IncompleteTestingSkill)
             );
         }

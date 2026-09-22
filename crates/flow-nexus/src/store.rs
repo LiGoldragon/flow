@@ -1734,6 +1734,39 @@ mod tests {
     }
 
     #[test]
+    fn definitively_released_attempt_is_tombstoned_and_cannot_be_reacquired() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let binding = fixture.registered_delivery(&store, "delivery-tombstone");
+        let permit = match store
+            .acquire_delivery(acquire("delivery-tombstone", binding.clone(), "attempt-a"))
+            .unwrap()
+        {
+            AcquireDeliveryOutcome::Granted(permit) => permit,
+            outcome => panic!("expected permit, got {outcome:?}"),
+        };
+        assert_eq!(
+            store
+                .release_confirmed(ReleaseConfirmed {
+                    flow_id: "delivery-tombstone".into(),
+                    attempt_id: permit.attempt_id.clone(),
+                    token: permit.token.clone(),
+                    binding: binding.clone(),
+                    expected_binding_generation: 1,
+                    transport_receipt_id: "submitted-a".into(),
+                })
+                .unwrap(),
+            ReleaseConfirmedOutcome::Released
+        );
+        assert_eq!(
+            store
+                .acquire_delivery(acquire("delivery-tombstone", binding, "attempt-a"))
+                .unwrap(),
+            AcquireDeliveryOutcome::Rejected(DeliveryRejection::AttemptConflict)
+        );
+    }
+
+    #[test]
     fn restart_retains_refresh_gate_and_ambiguous_permit() {
         let fixture = StoreFixture::new();
         let store = fixture.store();

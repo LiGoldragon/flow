@@ -1909,6 +1909,42 @@ mod tests {
         <FlowStore as OpensFlowStore>::open(&path).expect("dropped store reopens");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlink_alias_cannot_bypass_live_store_ownership() {
+        let fixture = StoreFixture::new();
+        let path = fixture.directory.path().join("flow.sema");
+        let alias = fixture.directory.path().join("flow-alias.sema");
+        let first = <FlowStore as OpensFlowStore>::open(&path).expect("first store opens");
+        std::os::unix::fs::symlink(&path, &alias).expect("symlink creates");
+
+        assert!(matches!(
+            <FlowStore as OpensFlowStore>::open(&alias),
+            Err(StoreError::Engine(_))
+        ));
+        drop(first);
+        <FlowStore as OpensFlowStore>::open(&alias).expect("alias opens after owner drops");
+    }
+
+    #[test]
+    fn raw_sema_engine_open_is_refused_while_flow_store_is_live() {
+        let fixture = StoreFixture::new();
+        let path = fixture.directory.path().join("flow.sema");
+        let first = <FlowStore as OpensFlowStore>::open(&path).expect("first store opens");
+
+        assert!(sema_engine::Engine::open(sema_engine::EngineOpen::new(
+            &path,
+            sema_engine::SchemaVersion::new(1),
+        ))
+        .is_err());
+        drop(first);
+        sema_engine::Engine::open(sema_engine::EngineOpen::new(
+            &path,
+            sema_engine::SchemaVersion::new(1),
+        ))
+        .expect("raw engine opens after store drops");
+    }
+
     #[test]
     fn mismatching_or_unknown_authority_is_rejected() {
         let fixture = StoreFixture::new();

@@ -28,6 +28,7 @@ use store::{
     ManagesDeliveryPermits, OpensFlowStore, RecordsPendingThread, RecordsRestartedFlow,
     RegistersFlowIdentity, ReservesPendingStart,
 };
+use triad_runtime::ConnectionContext;
 
 fn store_binding(binding: signal_flow::DeliveryBinding) -> store::DeliveryBinding {
     store::DeliveryBinding {
@@ -121,10 +122,133 @@ fn wire_state(
     })
 }
 
+/// The exact, server-resolved facts a Message component must authorize before
+/// Flow changes a delivery gate. This is assembled from the producer-owned
+/// request after Flow has accepted the Unix connection; it has no caller
+/// identity or native-binding constructor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PreAcquireScope {
+    pub flow_id: signal_flow::FlowId,
+    pub expected_binding: signal_flow::DeliveryBinding,
+    pub expected_binding_generation: signal_flow::BindingGeneration,
+    pub source_event_identifier: signal_flow::SourceEventIdentifier,
+    pub attempt_id: signal_flow::AttemptId,
+}
+
+impl From<&signal_flow::AcquireDelivery> for PreAcquireScope {
+    fn from(request: &signal_flow::AcquireDelivery) -> Self {
+        Self {
+            flow_id: request.flow_id.clone(),
+            expected_binding: request.delivery_binding.clone(),
+            expected_binding_generation: request.binding_generation,
+            source_event_identifier: request.source_event_identifier.clone(),
+            attempt_id: request.attempt_id.clone(),
+        }
+    }
+}
+
+/// An opaque grant produced only by a trusted, registered local component
+/// verifier. Its fields remain private so a Signal caller cannot manufacture
+/// authority from a UID, PID, or native-binding-shaped payload.
+#[derive(Debug)]
+pub(crate) struct VerifiedPreAcquire {
+    _private: (),
+}
+
+impl VerifiedPreAcquire {
+    /// Only a validator which has already matched the accepted kernel peer to
+    /// the registered Message component may mint this internal marker. It is
+    /// intentionally unavailable to the Signal codec and carries no claimed
+    /// sender identity.
+    pub(crate) fn from_verified_component() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// A refusal deliberately has no public Signal representation yet. The
+/// existing Flow delivery vocabulary has no authorization rejection, so the
+/// ordinary socket maps it to its existing fail-closed StoreRefused reply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DelegationRefusal {
+    VerifierUnavailable,
+    MessageComponentUnregistered,
+    CapabilityGenerationMismatch,
+    ScopeRejected,
+}
+
+/// Verifies a pre-acquire authority record against the kernel-vouched peer of
+/// the accepted Flow Unix connection. Implementations must resolve the
+/// registered Message component and its current capability generation; they
+/// must not trust query fields as sender identity.
+pub(crate) trait FlowLockedDelegationVerifier {
+    fn verify_pre_acquire(
+        &self,
+        connection: &ConnectionContext,
+        scope: PreAcquireScope,
+    ) -> Result<VerifiedPreAcquire, DelegationRefusal>;
+}
+
+struct UnavailableDelegationVerifier;
+
+impl FlowLockedDelegationVerifier for UnavailableDelegationVerifier {
+    fn verify_pre_acquire(
+        &self,
+        _: &ConnectionContext,
+        _: PreAcquireScope,
+    ) -> Result<VerifiedPreAcquire, DelegationRefusal> {
+        Err(DelegationRefusal::VerifierUnavailable)
+    }
+}
+
 pub struct RunningNexus {
     pub store: FlowStore,
     pub codex: CodexAdapter,
     pub herdr: herdr::HerdrCli,
+}
+
+impl RunningNexus {
+    /// Dispatch one ordinary request from an accepted Flow socket. Delivery
+    /// acquisition is the identity-sensitive edge: no verifier means no
+    /// permit. Direct in-process dispatch remains available for Flow's own
+    /// lifecycle work and fixtures, but never substitutes for socket peer
+    /// verification.
+    pub(crate) fn dispatch_ordinary_peer<V: FlowLockedDelegationVerifier>(
+        &self,
+        connection: &ConnectionContext,
+        verifier: &V,
+        query: Query,
+    ) -> Response {
+        if let Query::AcquireDelivery(request) = &query {
+            if verifier
+                .verify_pre_acquire(connection, PreAcquireScope::from(request))
+                .is_err()
+            {
+                return Response::DeliveryAcquireRejected(
+                    signal_flow::DeliveryRejection::StoreRefused,
+                );
+            }
+        }
+        self.dispatch(query)
+    }
+
+    pub(crate) fn serve_ordinary_with_delegation_verifier<V: FlowLockedDelegationVerifier>(
+        &self,
+        socket: &Path,
+        verifier: &V,
+    ) -> Result<(), String> {
+        let _ = fs::remove_file(socket);
+        let listener = UnixListener::bind(socket).map_err(|error| error.to_string())?;
+        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+        loop {
+            let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
+            let connection =
+                ConnectionContext::from_stream(&peer).map_err(|error| error.to_string())?;
+            let query = Frame::read_query(&mut peer)?;
+            let response = self.dispatch_ordinary_peer(&connection, verifier, query);
+            Frame::write_response(&mut peer, &response)?;
+        }
+    }
 }
 
 pub trait Dispatches {
@@ -465,16 +589,7 @@ pub trait ServesOrdinary {
 
 impl ServesOrdinary for RunningNexus {
     fn serve_ordinary(&self, socket: &Path) -> Result<(), String> {
-        let _ = fs::remove_file(socket);
-        let listener = UnixListener::bind(socket).map_err(|error| error.to_string())?;
-        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-        loop {
-            let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
-            let query = Frame::read_query(&mut peer)?;
-            let response = self.dispatch(query);
-            Frame::write_response(&mut peer, &response)?;
-        }
+        self.serve_ordinary_with_delegation_verifier(socket, &UnavailableDelegationVerifier)
     }
 }
 
@@ -819,6 +934,107 @@ mod tests {
         assert_eq!(
             wire_rejection(crate::store::DeliveryRejection::MissingState),
             signal_flow::DeliveryRejection::MissingState
+        );
+    }
+
+    #[test]
+    fn ordinary_peer_without_registered_component_verifier_cannot_acquire_delivery() {
+        let fixture = NexusFixture::new();
+        let request = signal_flow::AcquireDelivery {
+            flow_id: "flow-locked".into(),
+            delivery_binding: signal_flow::DeliveryBinding {
+                native_thread: "native".into(),
+                harness_session: "session".into(),
+                route_identity: "route".into(),
+                endpoint_identity: "endpoint".into(),
+                process_id: 42,
+                process_start_time: 7,
+            },
+            binding_generation: 1,
+            attempt_id: "attempt".into(),
+            source_event_identifier: "event".into(),
+        };
+        let connection =
+            ConnectionContext::from(triad_runtime::UnixCredentials::new(1000, 1000, 44));
+
+        assert_eq!(
+            fixture.nexus.dispatch_ordinary_peer(
+                &connection,
+                &UnavailableDelegationVerifier,
+                Query::AcquireDelivery(request),
+            ),
+            Response::DeliveryAcquireRejected(signal_flow::DeliveryRejection::StoreRefused),
+        );
+    }
+
+    #[test]
+    fn preacquire_scope_binds_every_permit_key_before_verification() {
+        let request = signal_flow::AcquireDelivery {
+            flow_id: "recipient".into(),
+            delivery_binding: signal_flow::DeliveryBinding {
+                native_thread: "native".into(),
+                harness_session: "session".into(),
+                route_identity: "route".into(),
+                endpoint_identity: "endpoint".into(),
+                process_id: 99,
+                process_start_time: 12,
+            },
+            binding_generation: 3,
+            attempt_id: "attempt-3".into(),
+            source_event_identifier: "event-3".into(),
+        };
+        assert_eq!(
+            PreAcquireScope::from(&request),
+            PreAcquireScope {
+                flow_id: "recipient".into(),
+                expected_binding: request.delivery_binding,
+                expected_binding_generation: 3,
+                source_event_identifier: "event-3".into(),
+                attempt_id: "attempt-3".into(),
+            }
+        );
+        let _ = VerifiedPreAcquire::from_verified_component();
+    }
+
+    struct PermittingVerifier;
+
+    impl FlowLockedDelegationVerifier for PermittingVerifier {
+        fn verify_pre_acquire(
+            &self,
+            _: &ConnectionContext,
+            _: PreAcquireScope,
+        ) -> Result<VerifiedPreAcquire, DelegationRefusal> {
+            Ok(VerifiedPreAcquire::from_verified_component())
+        }
+    }
+
+    #[test]
+    fn a_verified_component_reaches_the_store_instead_of_the_fail_closed_gate() {
+        let fixture = NexusFixture::new();
+        let request = signal_flow::AcquireDelivery {
+            flow_id: "unregistered".into(),
+            delivery_binding: signal_flow::DeliveryBinding {
+                native_thread: "native".into(),
+                harness_session: "session".into(),
+                route_identity: "route".into(),
+                endpoint_identity: "endpoint".into(),
+                process_id: 42,
+                process_start_time: 7,
+            },
+            binding_generation: 1,
+            attempt_id: "attempt".into(),
+            source_event_identifier: "event".into(),
+        };
+        let connection =
+            ConnectionContext::from(triad_runtime::UnixCredentials::new(1000, 1000, 44));
+
+        assert_eq!(
+            fixture.nexus.dispatch_ordinary_peer(
+                &connection,
+                &PermittingVerifier,
+                Query::AcquireDelivery(request),
+            ),
+            Response::DeliveryAcquireRejected(signal_flow::DeliveryRejection::UnknownFlow),
         );
     }
 }

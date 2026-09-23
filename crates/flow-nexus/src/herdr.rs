@@ -16,14 +16,29 @@ pub trait ReadsHerdrRoster {
 /// The production Herdr roster reader.
 pub struct HerdrCli {
     executable: PathBuf,
+    flow_id_executable: PathBuf,
     flows_root: PathBuf,
+    codex_transcript_root: PathBuf,
+    claude_transcript_root: PathBuf,
 }
 
 impl Default for HerdrCli {
     fn default() -> Self {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/home/li"));
+        let codex_home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
+        let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".claude"));
         Self {
             executable: PathBuf::from("herdr"),
+            flow_id_executable: PathBuf::from("flow-id"),
             flows_root: PathBuf::from("/home/li/primary/flows"),
+            codex_transcript_root: codex_home.join("sessions"),
+            claude_transcript_root: claude_home.join("projects"),
         }
     }
 }
@@ -50,9 +65,16 @@ impl ReadsHerdrRoster for HerdrCli {
 impl HerdrCli {
     #[cfg(test)]
     pub(crate) fn at(executable: PathBuf, flows_root: PathBuf) -> Self {
+        let fixture_root = flows_root
+            .parent()
+            .expect("fixture flows root has a parent")
+            .join("native-transcripts");
         Self {
             executable,
+            flow_id_executable: fixture_root.join("flow-id"),
             flows_root,
+            codex_transcript_root: fixture_root.join("codex"),
+            claude_transcript_root: fixture_root.join("claude"),
         }
     }
 

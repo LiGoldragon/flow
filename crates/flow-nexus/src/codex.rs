@@ -2,6 +2,7 @@
 //! The proxy is a byte bridge, so this module owns its bounded WebSocket and
 //! JSON-RPC conversation; it never falls back to a direct Unix-socket client.
 
+use crate::composition::ValidatesComposedPrompt;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -688,7 +689,8 @@ impl SubmitsBoundCodexFirstTurn for CodexAdapter {
         launch: &ComposedLaunch,
         intent: &PromptDeliveryIntent,
     ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable> {
-        if launch.launch_profile.harness_kind != HarnessKind::Codex
+        if !launch.has_canonical_first_prompt()
+            || launch.launch_profile.harness_kind != HarnessKind::Codex
             || intent.harness_kind != HarnessKind::Codex
             || intent.launch_request_id != launch.launch_profile.launch_request_id
             || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
@@ -1018,6 +1020,63 @@ mod tests {
         }
     }
 
+    fn malformed_bound_launch() -> (ComposedLaunch, PromptDeliveryIntent) {
+        let pane = signal_flow::HerdrPaneBinding {
+            launch_request_id: "launch-malformed".into(),
+            herdr_session_name: "session".into(),
+            herdr_agent_name: "codex-agent".into(),
+            herdr_workspace_id: "workspace".into(),
+            herdr_pane_id: "pane".into(),
+            herdr_terminal_id: "terminal".into(),
+        };
+        let prompt_sha256 = "230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5";
+        let launch = ComposedLaunch {
+            launch_profile: signal_flow::LaunchProfile {
+                launch_request_id: "launch-malformed".into(),
+                launch_source_vector: vec![],
+                skill_name_vector: vec![],
+                flow_aspect: signal_flow::FlowAspect::Field,
+                power_level: signal_flow::PowerLevel::Medium,
+                harness_kind: HarnessKind::Codex,
+                model_name: "gpt-5.6".into(),
+                effort: "medium".into(),
+                flow_id_option: None,
+                remembered_flow_vector: vec![],
+                herdr_session_name: "session".into(),
+                instruction_prompt: "body".into(),
+            },
+            first_prompt_payload: signal_flow::FirstPromptPayload {
+                first_prompt_body: "body".into(),
+                prompt_sha256: prompt_sha256.into(),
+                first_prompt_text: "body with a malformed footer".into(),
+            },
+            target_receipt_request: signal_flow::TargetReceiptRequest {
+                launch_request_id: "launch-malformed".into(),
+                prompt_sha256: prompt_sha256.into(),
+            },
+        };
+        let intent = PromptDeliveryIntent {
+            launch_request_id: "launch-malformed".into(),
+            prompt_sha256: prompt_sha256.into(),
+            flow_id: "123456".into(),
+            native_session_id: "native-thread".into(),
+            harness_kind: HarnessKind::Codex,
+            model_name: "gpt-5.6".into(),
+            effort: "medium".into(),
+            native_skill_selection_vector: vec![],
+            herdr_pane_binding: pane,
+            native_transcript_boundary: signal_flow::NativeTranscriptBoundary::Absent(
+                signal_flow::NativeTranscriptAbsence {
+                    native_session_id: "native-thread".into(),
+                    harness_kind: HarnessKind::Codex,
+                    transcript_root_device: "1".into(),
+                    transcript_root_inode: "2".into(),
+                },
+            ),
+        };
+        (launch, intent)
+    }
+
     #[test]
     fn turn_brief_carries_assigned_flow_identity_and_origin() {
         let origin = origin();
@@ -1029,6 +1088,16 @@ mod tests {
         assert!(brief.contains("FLOW_ID=flow-0000000000000001"));
         assert!(brief.contains("FLOW_DIRECTORY=/home/li/primary/flows/flow-0000000000000001"));
         assert!(brief.contains("flow: parent-flow\nsession: session-1\nturn: turn-1"));
+    }
+
+    #[test]
+    fn malformed_full_prompt_is_rejected_before_codex_proxy_open() {
+        let (launch, intent) = malformed_bound_launch();
+        assert!(matches!(
+            adapter().submit_bound_codex_first_turn(&launch, &intent),
+            Err(CodexAdapterUnavailable::Protocol(detail))
+                if detail.contains("does not match the composed launch")
+        ));
     }
 
     #[test]

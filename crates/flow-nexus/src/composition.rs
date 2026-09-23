@@ -49,6 +49,12 @@ pub trait ComposesLaunch {
     fn compose(&self, profile: &LaunchProfile) -> Result<ComposedLaunch, CompositionError>;
 }
 
+/// Verifies the exact body digest and the deterministic receipt footer before
+/// a composed prompt crosses either native harness boundary.
+pub trait ValidatesComposedPrompt {
+    fn has_canonical_first_prompt(&self) -> bool;
+}
+
 trait ValidatesLaunchProfile {
     fn validate(&self, profile: &LaunchProfile) -> Result<(), CompositionError>;
 }
@@ -81,6 +87,29 @@ impl OpensLaunchComposer for LaunchComposer {
 impl HashesPromptBody for LaunchComposer {
     fn sha256(&self, bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
+    }
+}
+
+impl ValidatesComposedPrompt for ComposedLaunch {
+    fn has_canonical_first_prompt(&self) -> bool {
+        let body_hash = format!(
+            "{:x}",
+            Sha256::digest(self.first_prompt_payload.first_prompt_body.as_bytes())
+        );
+        if body_hash != self.first_prompt_payload.prompt_sha256
+            || self.target_receipt_request.launch_request_id
+                != self.launch_profile.launch_request_id
+            || self.target_receipt_request.prompt_sha256 != body_hash
+        {
+            return false;
+        }
+        let footer = format!(
+            "\n\n## Target receipt request\n\nReply once with exactly this single line and no trailing newline:\nFLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
+            self.target_receipt_request.launch_request_id,
+            self.target_receipt_request.prompt_sha256
+        );
+        self.first_prompt_payload.first_prompt_text
+            == format!("{}{}", self.first_prompt_payload.first_prompt_body, footer)
     }
 }
 
@@ -294,7 +323,10 @@ impl ComposesLaunch for LaunchComposer {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComposesLaunch, CompositionError, LaunchComposer, OpensLaunchComposer};
+    use super::{
+        ComposesLaunch, CompositionError, LaunchComposer, OpensLaunchComposer,
+        ValidatesComposedPrompt,
+    };
     use signal_flow::{
         FlowAspect, HarnessKind, LaunchProfile, LaunchSource, PowerLevel, RememberedFlow,
     };
@@ -387,6 +419,23 @@ mod tests {
             composed.target_receipt_request.prompt_sha256,
             composed.first_prompt_payload.prompt_sha256
         );
+        assert!(composed.has_canonical_first_prompt());
+    }
+
+    #[test]
+    fn malformed_full_text_is_not_canonical_when_body_hash_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let mut composed = LaunchComposer::at(root.path())
+            .compose(&root.profile(vec![]))
+            .unwrap();
+        let unchanged_body_hash = composed.first_prompt_payload.prompt_sha256.clone();
+        composed.first_prompt_payload.first_prompt_text.push('x');
+
+        assert_eq!(
+            composed.first_prompt_payload.prompt_sha256,
+            unchanged_body_hash
+        );
+        assert!(!composed.has_canonical_first_prompt());
     }
 
     #[test]

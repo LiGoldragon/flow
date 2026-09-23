@@ -9,12 +9,14 @@ use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     ComposedLaunch, HarnessKind, HerdrPaneBinding, NativeLaunchBinding, NativeTargetReceipt,
+    NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor,
     PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
 };
 use std::{
-    fs,
-    io::{BufRead, BufReader},
-    path::Path,
+    fs::{self, File, Metadata},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -151,10 +153,24 @@ impl HerdrCli {
         Self::binding_matches_launch(launch, &intent.herdr_pane_binding)?;
         if intent.launch_request_id != launch.launch_profile.launch_request_id
             || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
+            || intent.harness_kind != launch.launch_profile.harness_kind
+            || !Self::boundary_matches_intent(intent)
         {
             return Err("durable prompt intent does not belong to this composed launch".into());
         }
         Ok(())
+    }
+
+    fn boundary_matches_intent(intent: &PromptDeliveryIntent) -> bool {
+        let (native_session_id, harness_kind) = match &intent.native_transcript_boundary {
+            NativeTranscriptBoundary::Existing(cursor) => {
+                (&cursor.native_session_id, &cursor.harness_kind)
+            }
+            NativeTranscriptBoundary::Absent(absence) => {
+                (&absence.native_session_id, &absence.harness_kind)
+            }
+        };
+        native_session_id == &intent.native_session_id && harness_kind == &intent.harness_kind
     }
 
     fn claimed_native_identity(
@@ -220,11 +236,12 @@ impl HerdrCli {
         Ok(flow_id.into())
     }
 
-    fn native_harness_for_intent(
+    fn verify_native_target(
         &self,
-        intent: &PromptDeliveryIntent,
-    ) -> Result<HarnessKind, String> {
-        let pane = &intent.herdr_pane_binding;
+        pane: &HerdrPaneBinding,
+        native_session_id: &str,
+        harness: &HarnessKind,
+    ) -> Result<(), String> {
         let response = self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -251,22 +268,17 @@ impl HerdrCli {
         let session = agent
             .get("agent_session")
             .ok_or_else(|| "receipt target has no official native session".to_owned())?;
-        let harness = match agent.get("agent").and_then(serde_json::Value::as_str) {
-            Some("codex") => HarnessKind::Codex,
-            Some("claude") => HarnessKind::Claude,
-            _ => return Err("receipt target has an unsupported native harness".into()),
-        };
-        let expected_harness = Self::expected_harness(&harness);
-        if session.get("source").and_then(serde_json::Value::as_str)
-            != Some(format!("herdr:{expected_harness}").as_str())
+        let expected_harness = Self::expected_harness(harness);
+        if agent.get("agent").and_then(serde_json::Value::as_str) != Some(expected_harness)
+            || session.get("source").and_then(serde_json::Value::as_str)
+                != Some(format!("herdr:{expected_harness}").as_str())
             || session.get("agent").and_then(serde_json::Value::as_str) != Some(expected_harness)
             || session.get("kind").and_then(serde_json::Value::as_str) != Some("id")
-            || session.get("value").and_then(serde_json::Value::as_str)
-                != Some(intent.native_session_id.as_str())
+            || session.get("value").and_then(serde_json::Value::as_str) != Some(native_session_id)
         {
             return Err("receipt target native identity is no longer exact".into());
         }
-        Ok(harness)
+        Ok(())
     }
 
     fn collect_native_transcripts(
@@ -274,7 +286,7 @@ impl HerdrCli {
         native_session_id: &str,
         harness: &HarnessKind,
         depth: usize,
-        found: &mut Vec<std::path::PathBuf>,
+        found: &mut Vec<PathBuf>,
     ) -> Result<(), String> {
         if depth > 8 || found.len() > 1 {
             return Ok(());
@@ -314,11 +326,13 @@ impl HerdrCli {
         Ok(())
     }
 
-    fn resolve_native_transcript(
+    fn transcript_candidates(
         &self,
-        intent: &PromptDeliveryIntent,
-    ) -> Result<std::path::PathBuf, String> {
-        let harness = self.native_harness_for_intent(intent)?;
+        pane: &HerdrPaneBinding,
+        native_session_id: &str,
+        harness: &HarnessKind,
+    ) -> Result<(PathBuf, Metadata, Vec<PathBuf>), String> {
+        self.verify_native_target(pane, native_session_id, harness)?;
         let root = match harness {
             HarnessKind::Codex => &self.codex_transcript_root,
             HarnessKind::Claude => &self.claude_transcript_root,
@@ -326,26 +340,176 @@ impl HerdrCli {
         let canonical_root = root.canonicalize().map_err(|error| {
             format!("configured native transcript root is unavailable: {error}")
         })?;
+        let root_before = fs::metadata(&canonical_root)
+            .map_err(|error| format!("native transcript root metadata failed: {error}"))?;
+        if !root_before.is_dir() {
+            return Err("configured native transcript root is not a directory".into());
+        }
         let mut found = Vec::new();
         Self::collect_native_transcripts(
             &canonical_root,
-            &intent.native_session_id,
-            &harness,
+            native_session_id,
+            harness,
             0,
             &mut found,
         )?;
+        let root_after = fs::metadata(&canonical_root)
+            .map_err(|error| format!("native transcript root metadata failed: {error}"))?;
+        if root_before.dev() != root_after.dev() || root_before.ino() != root_after.ino() {
+            return Err("configured native transcript root changed during observation".into());
+        }
+        Ok((canonical_root, root_after, found))
+    }
+
+    fn one_resolved_transcript(root: &Path, found: Vec<PathBuf>) -> Result<PathBuf, String> {
         if found.len() != 1 {
             return Err("native transcript identity did not resolve to exactly one file".into());
         }
         let resolved = found
-            .pop()
+            .into_iter()
+            .next()
             .expect("one native transcript")
             .canonicalize()
             .map_err(|error| format!("native transcript could not be resolved: {error}"))?;
-        if !resolved.starts_with(&canonical_root) {
-            return Err("native transcript resolved outside its configured root".into());
+        resolved
+            .starts_with(root)
+            .then_some(resolved)
+            .ok_or_else(|| "native transcript resolved outside its configured root".into())
+    }
+
+    fn hash_prefix(file: &mut File, length: u64) -> Result<(String, Option<u8>), String> {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| format!("native transcript seek failed: {error}"))?;
+        let mut remaining = length;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut last_byte = None;
+        while remaining > 0 {
+            let wanted =
+                usize::try_from(remaining.min(buffer.len() as u64)).expect("bounded buffer length");
+            let read = file
+                .read(&mut buffer[..wanted])
+                .map_err(|error| format!("native transcript prefix read failed: {error}"))?;
+            if read == 0 {
+                return Err("native transcript was truncated during prefix observation".into());
+            }
+            hasher.update(&buffer[..read]);
+            last_byte = Some(buffer[read - 1]);
+            remaining -= read as u64;
         }
-        Ok(resolved)
+        Ok((format!("{:x}", hasher.finalize()), last_byte))
+    }
+
+    fn capture_transcript_boundary(
+        &self,
+        binding: &NativeLaunchBinding,
+    ) -> Result<NativeTranscriptBoundary, String> {
+        let (root, root_metadata, found) = self.transcript_candidates(
+            &binding.herdr_pane_binding,
+            &binding.native_session_id,
+            &binding.harness_kind,
+        )?;
+        if found.is_empty() {
+            return Ok(NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
+                native_session_id: binding.native_session_id.clone(),
+                harness_kind: binding.harness_kind.clone(),
+                transcript_root_device: root_metadata.dev().to_string(),
+                transcript_root_inode: root_metadata.ino().to_string(),
+            }));
+        }
+        let transcript = Self::one_resolved_transcript(&root, found)?;
+        let mut file = File::open(&transcript)
+            .map_err(|error| format!("native transcript is unreadable: {error}"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("native transcript metadata failed: {error}"))?;
+        let byte_offset = metadata.len();
+        let (prefix_sha256, last_byte) = Self::hash_prefix(&mut file, byte_offset)?;
+        if last_byte.is_some_and(|byte| byte != b'\n') {
+            return Err("native transcript boundary is not a complete JSONL record".into());
+        }
+        let metadata_after = file
+            .metadata()
+            .map_err(|error| format!("native transcript metadata failed: {error}"))?;
+        if metadata.dev() != metadata_after.dev()
+            || metadata.ino() != metadata_after.ino()
+            || metadata_after.len() < byte_offset
+        {
+            return Err("native transcript changed during boundary observation".into());
+        }
+        Ok(NativeTranscriptBoundary::Existing(NativeTranscriptCursor {
+            native_session_id: binding.native_session_id.clone(),
+            harness_kind: binding.harness_kind.clone(),
+            transcript_device: metadata.dev().to_string(),
+            transcript_inode: metadata.ino().to_string(),
+            transcript_byte_offset: i64::try_from(byte_offset)
+                .map_err(|_| "native transcript boundary exceeds i64".to_owned())?,
+            transcript_prefix_sha256: prefix_sha256,
+        }))
+    }
+
+    fn decimal_identity(value: &str, label: &str) -> Result<u64, String> {
+        let parsed = value
+            .parse::<u64>()
+            .map_err(|_| format!("native transcript {label} is invalid"))?;
+        if parsed.to_string() != value {
+            return Err(format!("native transcript {label} is not canonical"));
+        }
+        Ok(parsed)
+    }
+
+    fn receipt_input(&self, intent: &PromptDeliveryIntent) -> Result<Option<File>, String> {
+        if !Self::boundary_matches_intent(intent) {
+            return Err("native transcript boundary does not match prompt intent".into());
+        }
+        let (root, root_metadata, found) = self.transcript_candidates(
+            &intent.herdr_pane_binding,
+            &intent.native_session_id,
+            &intent.harness_kind,
+        )?;
+        match &intent.native_transcript_boundary {
+            NativeTranscriptBoundary::Absent(absence) => {
+                let expected_device =
+                    Self::decimal_identity(&absence.transcript_root_device, "root device")?;
+                let expected_inode =
+                    Self::decimal_identity(&absence.transcript_root_inode, "root inode")?;
+                if root_metadata.dev() != expected_device || root_metadata.ino() != expected_inode {
+                    return Err("configured native transcript root was replaced".into());
+                }
+                if found.is_empty() {
+                    return Ok(None);
+                }
+                let transcript = Self::one_resolved_transcript(&root, found)?;
+                File::open(transcript)
+                    .map(Some)
+                    .map_err(|error| format!("native transcript is unreadable: {error}"))
+            }
+            NativeTranscriptBoundary::Existing(cursor) => {
+                let transcript = Self::one_resolved_transcript(&root, found)?;
+                let mut file = File::open(transcript)
+                    .map_err(|error| format!("native transcript is unreadable: {error}"))?;
+                let metadata = file
+                    .metadata()
+                    .map_err(|error| format!("native transcript metadata failed: {error}"))?;
+                let expected_device = Self::decimal_identity(&cursor.transcript_device, "device")?;
+                let expected_inode = Self::decimal_identity(&cursor.transcript_inode, "inode")?;
+                let byte_offset = u64::try_from(cursor.transcript_byte_offset)
+                    .map_err(|_| "native transcript boundary is negative".to_owned())?;
+                if metadata.dev() != expected_device || metadata.ino() != expected_inode {
+                    return Err("native transcript file was replaced".into());
+                }
+                if metadata.len() < byte_offset {
+                    return Err("native transcript file was truncated".into());
+                }
+                let (prefix_sha256, _) = Self::hash_prefix(&mut file, byte_offset)?;
+                if prefix_sha256 != cursor.transcript_prefix_sha256 {
+                    return Err("native transcript prefix changed after intent persistence".into());
+                }
+                file.seek(SeekFrom::Start(byte_offset))
+                    .map_err(|error| format!("native transcript seek failed: {error}"))?;
+                Ok(Some(file))
+            }
+        }
     }
 
     fn assistant_receipt(
@@ -565,19 +729,23 @@ impl AcceptsLaunchRegistration for HerdrCli {
         acknowledgement: &RegistrationAcknowledgement,
     ) -> Result<PromptDeliveryIntent, String> {
         Self::binding_matches_launch(launch, &binding.herdr_pane_binding)?;
-        if acknowledgement.launch_request_id != binding.launch_request_id
+        if binding.harness_kind != launch.launch_profile.harness_kind
+            || acknowledgement.launch_request_id != binding.launch_request_id
             || acknowledgement.flow_id != binding.flow_id
             || acknowledgement.native_session_id != binding.native_session_id
             || acknowledgement.herdr_pane_binding != binding.herdr_pane_binding
         {
             return Err("registration acknowledgement does not match native binding".into());
         }
+        let native_transcript_boundary = self.capture_transcript_boundary(binding)?;
         Ok(PromptDeliveryIntent {
             launch_request_id: binding.launch_request_id.clone(),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
             flow_id: binding.flow_id.clone(),
             native_session_id: binding.native_session_id.clone(),
             herdr_pane_binding: binding.herdr_pane_binding.clone(),
+            harness_kind: binding.harness_kind.clone(),
+            native_transcript_boundary,
         })
     }
 }
@@ -610,13 +778,23 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             "FLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
             durable_intent.launch_request_id, durable_intent.prompt_sha256
         );
-        let transcript = self.resolve_native_transcript(durable_intent)?;
-        let input = fs::File::open(transcript)
-            .map_err(|error| format!("native transcript is unreadable: {error}"))?;
+        let Some(input) = self.receipt_input(durable_intent)? else {
+            return Ok(PromptDeliveryResult::Ambiguous(durable_intent.clone()));
+        };
         let mut observed_turn = None;
-        for line in BufReader::new(input).lines() {
-            let line = line.map_err(|error| format!("native transcript read failed: {error}"))?;
-            let Ok(row) = serde_json::from_str::<serde_json::Value>(&line) else {
+        let mut reader = BufReader::new(input);
+        loop {
+            let mut record = Vec::new();
+            let read = reader
+                .read_until(b'\n', &mut record)
+                .map_err(|error| format!("native transcript read failed: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            if record.last() != Some(&b'\n') {
+                break;
+            }
+            let Ok(row) = serde_json::from_slice::<serde_json::Value>(&record) else {
                 continue;
             };
             match Self::assistant_receipt(&row, &durable_intent.native_session_id, &expected) {
@@ -651,8 +829,9 @@ mod tests {
     use crate::herdr::HerdrCli;
     use signal_flow::{
         ComposedLaunch, Effort, FirstPromptPayload, FlowAspect, HarnessKind, LaunchProfile,
-        ModelName, NativeTargetReceipt, PowerLevel, PromptDeliveryResult,
-        RegistrationAcknowledgement, TargetReceiptRequest,
+        ModelName, NativeLaunchBinding, NativeTargetReceipt, NativeTranscriptBoundary, PowerLevel,
+        PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
+        TargetReceiptRequest,
     };
     use std::{fs, os::unix::fs::PermissionsExt};
 
@@ -695,18 +874,21 @@ mod tests {
         let root = tempfile::tempdir().expect("fixture root");
         let executable = root.path().join("herdr");
         let calls = root.path().join("calls");
+        let reported_harness = root.path().join("reported-harness");
+        fs::write(&reported_harness, harness).expect("reported harness");
         let script = format!(
             r##"#!/bin/sh
 printf '%s\n' "$*" >> '{calls}'
 case "$*" in
   *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
   *"agent start"*) printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
-  *"agent get"*) printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}","agent":"{harness}","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"agent_session":{{"source":"herdr:{harness}","agent":"{harness}","kind":"id","value":"{native_session}"}}}}}}}}' ;;
+  *"agent get"*) reported_harness=$(cat '{reported_harness}'); printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$reported_harness" "$reported_harness" ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *) exit 8 ;;
 esac
 "##,
-            calls = calls.display()
+            calls = calls.display(),
+            reported_harness = reported_harness.display(),
         );
         fs::write(&executable, script).expect("fixture executable");
         fs::File::open(&executable)
@@ -750,6 +932,30 @@ printf '%s\n' 123456
         fs::set_permissions(&flow_id, flow_id_permissions).expect("flow-id fixture permissions");
         let adapter = HerdrCli::at(executable, flows);
         (root, adapter)
+    }
+
+    fn registered_intent(
+        adapter: &HerdrCli,
+        launch: &ComposedLaunch,
+        pane: signal_flow::HerdrPaneBinding,
+        native_session: &str,
+    ) -> PromptDeliveryIntent {
+        let binding = NativeLaunchBinding {
+            launch_request_id: launch.launch_profile.launch_request_id.clone(),
+            flow_id: "123456".into(),
+            native_session_id: native_session.into(),
+            harness_kind: launch.launch_profile.harness_kind.clone(),
+            herdr_pane_binding: pane.clone(),
+        };
+        let acknowledgement = RegistrationAcknowledgement {
+            launch_request_id: binding.launch_request_id.clone(),
+            flow_id: binding.flow_id.clone(),
+            native_session_id: binding.native_session_id.clone(),
+            herdr_pane_binding: pane,
+        };
+        adapter
+            .accept_registration(launch, &binding, &acknowledgement)
+            .expect("registered prompt intent")
     }
 
     #[test]
@@ -800,6 +1006,10 @@ printf '%s\n' 123456
         let intent = adapter
             .accept_registration(&launch, &binding, &acknowledgement)
             .expect("registered intent");
+        assert!(matches!(
+            &intent.native_transcript_boundary,
+            NativeTranscriptBoundary::Absent(_)
+        ));
         assert_eq!(
             adapter
                 .submit_first_prompt_once(&launch, &intent)
@@ -875,7 +1085,7 @@ printf '%s\n' 123456
     }
 
     #[test]
-    fn only_exact_assistant_native_receipt_promotes_ambiguous_delivery() {
+    fn old_exact_receipt_before_cursor_is_rejected_and_new_receipt_is_observed() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Codex);
         let agent_name = HerdrCli::launch_agent_name(&launch);
@@ -886,27 +1096,39 @@ printf '%s\n' 123456
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
-        let intent = signal_flow::PromptDeliveryIntent {
-            launch_request_id: "launch-42".into(),
-            prompt_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .into(),
-            flow_id: "123456".into(),
-            native_session_id: native_session.into(),
-            herdr_pane_binding: pane,
-        };
         let marker = "FLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let transcript = root
             .path()
             .join("native-transcripts/codex")
             .join(format!("rollout-{native_session}.jsonl"));
+        let stale_receipt = serde_json::json!({"type":"event_msg","payload":{
+            "thread_id":native_session,"turn_id":"turn-stale",
+            "item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}});
+        fs::write(&transcript, format!("{}\n", stale_receipt)).expect("stale transcript");
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        assert!(matches!(
+            &intent.native_transcript_boundary,
+            NativeTranscriptBoundary::Existing(_)
+        ));
+        assert_eq!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .expect("stale receipt is ignored"),
+            PromptDeliveryResult::Ambiguous(intent.clone())
+        );
         let wrong_role = serde_json::json!({"type":"event_msg","payload":{
             "thread_id":native_session,"turn_id":"turn-user",
             "item":{"type":"UserMessage","content":[{"text":marker}]}}});
         let receipt = serde_json::json!({"type":"event_msg","payload":{
-            "thread_id":native_session,"turn_id":"turn-native",
+            "thread_id":native_session,"turn_id":"turn-new",
             "item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}});
-        fs::write(&transcript, format!("{}\n{}\n", wrong_role, receipt))
-            .expect("native transcript");
+        use std::io::Write;
+        let mut append = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .expect("append transcript");
+        writeln!(append, "{wrong_role}").expect("append wrong role");
+        writeln!(append, "{receipt}").expect("append fresh receipt");
         let result = adapter
             .observe_native_target_receipt(&intent)
             .expect("observed transcript receipt");
@@ -918,7 +1140,7 @@ printf '%s\n' 123456
         else {
             panic!("receipt remained ambiguous");
         };
-        assert_eq!(native_turn_id, "turn-native");
+        assert_eq!(native_turn_id, "turn-new");
         assert_eq!(receipt_sha256.len(), 64);
     }
 
@@ -934,25 +1156,22 @@ printf '%s\n' 123456
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
-        let intent = signal_flow::PromptDeliveryIntent {
-            launch_request_id: "launch-42".into(),
-            prompt_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .into(),
-            flow_id: "123456".into(),
-            native_session_id: native_session.into(),
-            herdr_pane_binding: pane,
-        };
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        assert!(matches!(
+            &intent.native_transcript_boundary,
+            NativeTranscriptBoundary::Absent(_)
+        ));
         let untrusted_transcript = root.path().join("caller-selected.jsonl");
         let marker = "FLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let untrusted_row = serde_json::json!({"type":"assistant","sessionId":native_session,
             "uuid":"untrusted-turn","message":{"content":[{"type":"text","text":marker}]}});
         fs::write(&untrusted_transcript, format!("{}\n", untrusted_row))
             .expect("untrusted transcript");
-        assert!(
+        assert_eq!(
             adapter
                 .observe_native_target_receipt(&intent)
-                .unwrap_err()
-                .contains("exactly one file")
+                .expect("caller-selected transcript is ignored"),
+            PromptDeliveryResult::Ambiguous(intent.clone())
         );
         let transcript = root
             .path()
@@ -973,6 +1192,74 @@ printf '%s\n' 123456
                 .observe_native_target_receipt(&intent)
                 .unwrap_err()
                 .contains("duplicate")
+        );
+    }
+
+    #[test]
+    fn registered_harness_change_with_same_native_id_is_rejected() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        fs::write(root.path().join("reported-harness"), "codex").expect("changed harness");
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("native identity is no longer exact")
+        );
+    }
+
+    #[test]
+    fn persisted_cursor_rejects_truncation_prefix_change_and_replacement() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Codex);
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "codex",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let transcript = root
+            .path()
+            .join("native-transcripts/codex")
+            .join(format!("rollout-{native_session}.jsonl"));
+        fs::write(&transcript, "{\"type\":\"user\"}\n").expect("initial transcript");
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+
+        fs::write(&transcript, "").expect("truncate transcript");
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("truncated")
+        );
+
+        fs::write(&transcript, "{\"type\":\"xxxx\"}\n").expect("rewrite transcript prefix");
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("prefix changed")
+        );
+
+        let replacement = root.path().join("replacement.jsonl");
+        fs::write(&replacement, "{\"type\":\"user\"}\n").expect("replacement transcript");
+        fs::rename(&replacement, &transcript).expect("replace transcript inode");
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("file was replaced")
         );
     }
 }

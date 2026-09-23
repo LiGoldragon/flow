@@ -1248,7 +1248,8 @@ impl ObservesNativeTargetReceipt for HerdrCli {
 mod tests {
     use super::{
         AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
-        ObservesNativeTargetReceipt, StartsNativeHerdrHarness, SubmitsFirstPromptOnce,
+        ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
+        SubmitsFirstPromptOnce,
     };
     use crate::herdr::HerdrCli;
     use signal_flow::{
@@ -1377,8 +1378,14 @@ printf '%s\n' 123456
             native_session_id: binding.native_session_id.clone(),
             herdr_pane_binding: pane,
         };
+        let skills = match launch.launch_profile.harness_kind {
+            HarnessKind::Claude => adapter
+                .resolve_claude_native_skills(launch, &binding)
+                .expect("resolved Claude skills"),
+            HarnessKind::Codex => vec![],
+        };
         adapter
-            .accept_registration(launch, &binding, &acknowledgement)
+            .accept_registration(launch, &binding, &acknowledgement, skills)
             .expect("registered prompt intent")
     }
 
@@ -1428,7 +1435,7 @@ printf '%s\n' 123456
             herdr_pane_binding: binding.herdr_pane_binding.clone(),
         };
         let intent = adapter
-            .accept_registration(&launch, &binding, &acknowledgement)
+            .accept_registration(&launch, &binding, &acknowledgement, vec![])
             .expect("registered intent");
         assert!(matches!(
             &intent.native_transcript_boundary,
@@ -1546,12 +1553,19 @@ printf '%s\n' 123456
         let receipt = serde_json::json!({"type":"event_msg","payload":{
             "thread_id":native_session,"turn_id":"turn-new",
             "item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}});
+        let context = serde_json::json!({"type":"turn_context","payload":{
+            "turn_id":"turn-new","model":"model-current","effort":"high"}});
+        let input = serde_json::json!({"type":"event_msg","payload":{
+            "thread_id":native_session,"turn_id":"turn-new",
+            "item":{"type":"UserMessage","content":[{"type":"text","text":"composed"}]}}});
         use std::io::Write;
         let mut append = fs::OpenOptions::new()
             .append(true)
             .open(&transcript)
             .expect("append transcript");
         writeln!(append, "{wrong_role}").expect("append wrong role");
+        writeln!(append, "{context}").expect("append turn context");
+        writeln!(append, "{input}").expect("append native input");
         writeln!(append, "{receipt}").expect("append fresh receipt");
         let result = adapter
             .observe_native_target_receipt(&intent)
@@ -1613,7 +1627,8 @@ printf '%s\n' 123456
             NativeTranscriptBoundary::Existing(_)
         ));
         let row = serde_json::json!({"type":"assistant","sessionId":native_session,
-            "uuid":"turn-claude","message":{"content":[{"type":"text","text":marker}]}});
+            "uuid":"turn-claude","effort":"high","message":{"model":"model-current",
+            "content":[{"type":"text","text":marker}]}});
         use std::io::Write;
         let mut append = fs::OpenOptions::new()
             .append(true)

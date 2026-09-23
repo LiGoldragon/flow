@@ -1014,6 +1014,7 @@ mod tests {
             socket: "/tmp/fake-codex.sock".into(),
             model: "gpt-5.6".into(),
             timeout: Duration::from_millis(100),
+            workspace_root: std::env::current_dir().unwrap(),
         }
     }
 

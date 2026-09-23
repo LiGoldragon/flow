@@ -13,15 +13,18 @@ use sema_engine::{
     SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::{
-    EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
-    HerdrRouteSelection, OriginClue, Query, RecipientResolutionRejection, Response,
-    RestartRejection, Restarted, RouteReadiness, StartRejection, Started,
+    ComposedLaunch, EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind,
+    HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
+    NativeLaunchBinding, NativeLaunchIntent, OriginClue, PromptDeliveryIntent,
+    PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
+    Response, RestartRejection, Restarted, RouteReadiness, StartRejection, Started,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
 const FLOW_STATE_TABLE_NAME: TableName = TableName::new("flow_nexus_state");
 const FLOW_CONFIGURATION_TABLE_NAME: TableName = TableName::new("flow_nexus_configuration");
 const FLOW_HERDR_ROUTE_TABLE_NAME: TableName = TableName::new("flow_nexus_herdr_routes");
+const FLOW_LAUNCH_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_attempts");
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const DEFAULT_ORDINARY_SOCKET: &str = "/run/user/1001/flow/flow.sock";
@@ -87,6 +90,17 @@ impl EngineRecord for FlowStoreConfiguration {
     }
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchAttempt {
+    attempt: LaunchAttempt,
+}
+
+impl EngineRecord for StoredLaunchAttempt {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.attempt.launch_request_id.clone())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sema-engine operation failed: {0}")]
@@ -101,6 +115,7 @@ pub struct FlowStore {
     state: TableReference<FlowStoreState>,
     configuration: TableReference<FlowStoreConfiguration>,
     herdr_routes: TableReference<FlowHerdrRouteRecord>,
+    launch_attempts: TableReference<StoredLaunchAttempt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,11 +194,67 @@ pub trait RegistersFlowIdentity {
     fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError>;
 }
 
+/// Reserves one correlation ID and its exact composed-prompt fingerprint.
+pub trait ReservesLaunchAttempt {
+    fn reserve_launch_attempt(
+        &self,
+        launch: &ComposedLaunch,
+        origin: OriginClue,
+    ) -> Result<LaunchAttemptReservation, StoreError>;
+}
+
+/// Journals the intent to create an external native seat before any pane write.
+pub trait RecordsNativeLaunchIntent {
+    fn record_native_launch_intent(&self, intent: NativeLaunchIntent)
+    -> Result<bool, StoreError>;
+}
+
+/// Journals the exact native/Herdr tuple observed after the external launch.
+pub trait RecordsNativeLaunchBinding {
+    fn record_native_launch_binding(
+        &self,
+        binding: NativeLaunchBinding,
+    ) -> Result<bool, StoreError>;
+}
+
+/// Journals the registration acknowledgement only when it exactly matches the binding.
+pub trait RecordsRegistrationAcknowledgement {
+    fn record_registration_acknowledgement(
+        &self,
+        acknowledgement: RegistrationAcknowledgement,
+    ) -> Result<bool, StoreError>;
+}
+
+/// Persists the one-shot prompt intent before the adapter may write the prompt.
+pub trait RecordsPromptDeliveryIntent {
+    fn record_prompt_delivery_intent(
+        &self,
+        intent: PromptDeliveryIntent,
+    ) -> Result<bool, StoreError>;
+}
+
+/// Persists either the authentic observed receipt or durable ambiguity.
+pub trait RecordsPromptDeliveryResult {
+    fn record_prompt_delivery_result(
+        &self,
+        result: PromptDeliveryResult,
+    ) -> Result<bool, StoreError>;
+}
+
+pub trait ReadsLaunchAttempt {
+    fn launch_attempt(&self, launch_request_id: &str)
+    -> Result<Option<LaunchAttempt>, StoreError>;
+}
+
 trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
     fn herdr_route(&self, flow_id: &str) -> Result<Option<FlowHerdrRouteRecord>, StoreError>;
     fn stored_configuration(&self) -> Result<FlowStoreConfiguration, StoreError>;
+    fn stored_launch_attempt(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<StoredLaunchAttempt>, StoreError>;
     fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError>;
 }
 
@@ -197,6 +268,7 @@ trait WritesFlowStore {
     -> Result<bool, StoreError>;
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError>;
     fn restart(&self, authorization: RestartAuthorization) -> Result<Response, StoreError>;
+    fn mutate_launch_attempt(&self, attempt: LaunchAttempt) -> Result<(), StoreError>;
 }
 
 impl OpensFlowStore for FlowStore {
@@ -222,12 +294,18 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-herdr-route"),
             SchemaHash::for_label("flow-nexus-herdr-route-v1"),
         ))?;
+        let launch_attempts = engine.register_table(TableDescriptor::new(
+            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-attempt"),
+            SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
+        ))?;
         let store = Self {
             engine,
             flows,
             state,
             configuration,
             herdr_routes,
+            launch_attempts,
         };
         if store
             .engine
@@ -410,6 +488,208 @@ impl RegistersFlowIdentity for FlowStore {
     }
 }
 
+impl ReservesLaunchAttempt for FlowStore {
+    fn reserve_launch_attempt(
+        &self,
+        launch: &ComposedLaunch,
+        origin: OriginClue,
+    ) -> Result<LaunchAttemptReservation, StoreError> {
+        let launch_request_id = launch.launch_profile.launch_request_id.clone();
+        let prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
+        if let Some(existing) = self.stored_launch_attempt(&launch_request_id)? {
+            return Ok(if existing.attempt.prompt_sha256 == prompt_sha256
+                && existing.attempt.origin_clue == origin
+            {
+                LaunchAttemptReservation::Existing(existing.attempt)
+            } else {
+                LaunchAttemptReservation::Conflict
+            });
+        }
+        let attempt = LaunchAttempt {
+            launch_request_id,
+            prompt_sha256,
+            origin_clue: origin,
+            launch_attempt_phase: LaunchAttemptPhase::Reserved,
+            native_launch_intent_option: None,
+            native_launch_binding_option: None,
+            registration_acknowledgement_option: None,
+            prompt_delivery_intent_option: None,
+            prompt_delivery_result_option: None,
+        };
+        self.engine.assert(Assertion::new(
+            self.launch_attempts,
+            StoredLaunchAttempt {
+                attempt: attempt.clone(),
+            },
+        ))?;
+        Ok(LaunchAttemptReservation::Reserved(attempt))
+    }
+}
+
+impl RecordsNativeLaunchIntent for FlowStore {
+    fn record_native_launch_intent(
+        &self,
+        intent: NativeLaunchIntent,
+    ) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
+            return Ok(false);
+        };
+        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::Reserved
+            || stored.attempt.prompt_sha256 != intent.prompt_sha256
+            || stored.attempt.native_launch_intent_option.is_some()
+        {
+            return Ok(false);
+        }
+        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::NativeLaunchIntentRecorded;
+        stored.attempt.native_launch_intent_option = Some(intent);
+        self.mutate_launch_attempt(stored.attempt)?;
+        Ok(true)
+    }
+}
+
+impl RecordsNativeLaunchBinding for FlowStore {
+    fn record_native_launch_binding(
+        &self,
+        binding: NativeLaunchBinding,
+    ) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_launch_attempt(&binding.launch_request_id)? else {
+            return Ok(false);
+        };
+        let Some(intent) = stored.attempt.native_launch_intent_option.as_ref() else {
+            return Ok(false);
+        };
+        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::NativeLaunchIntentRecorded
+            || intent.launch_request_id != binding.launch_request_id
+            || intent.harness_kind != binding.harness_kind
+            || binding.herdr_pane_binding.launch_request_id != binding.launch_request_id
+            || stored.attempt.native_launch_binding_option.is_some()
+        {
+            return Ok(false);
+        }
+        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::NativeBound;
+        stored.attempt.native_launch_binding_option = Some(binding);
+        self.mutate_launch_attempt(stored.attempt)?;
+        Ok(true)
+    }
+}
+
+impl RecordsRegistrationAcknowledgement for FlowStore {
+    fn record_registration_acknowledgement(
+        &self,
+        acknowledgement: RegistrationAcknowledgement,
+    ) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_launch_attempt(&acknowledgement.launch_request_id)?
+        else {
+            return Ok(false);
+        };
+        let Some(binding) = stored.attempt.native_launch_binding_option.as_ref() else {
+            return Ok(false);
+        };
+        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::NativeBound
+            || acknowledgement.launch_request_id != binding.launch_request_id
+            || acknowledgement.flow_id != binding.flow_id
+            || acknowledgement.native_session_id != binding.native_session_id
+            || acknowledgement.herdr_pane_binding != binding.herdr_pane_binding
+            || stored
+                .attempt
+                .registration_acknowledgement_option
+                .is_some()
+        {
+            return Ok(false);
+        }
+        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::RegistrationAcknowledged;
+        stored.attempt.registration_acknowledgement_option = Some(acknowledgement);
+        self.mutate_launch_attempt(stored.attempt)?;
+        Ok(true)
+    }
+}
+
+impl RecordsPromptDeliveryIntent for FlowStore {
+    fn record_prompt_delivery_intent(
+        &self,
+        intent: PromptDeliveryIntent,
+    ) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
+            return Ok(false);
+        };
+        let Some(acknowledgement) = stored
+            .attempt
+            .registration_acknowledgement_option
+            .as_ref()
+        else {
+            return Ok(false);
+        };
+        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::RegistrationAcknowledged
+            || intent.prompt_sha256 != stored.attempt.prompt_sha256
+            || intent.launch_request_id != acknowledgement.launch_request_id
+            || intent.flow_id != acknowledgement.flow_id
+            || intent.native_session_id != acknowledgement.native_session_id
+            || intent.herdr_pane_binding != acknowledgement.herdr_pane_binding
+            || stored.attempt.prompt_delivery_intent_option.is_some()
+        {
+            return Ok(false);
+        }
+        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::PromptIntentRecorded;
+        stored.attempt.prompt_delivery_intent_option = Some(intent);
+        self.mutate_launch_attempt(stored.attempt)?;
+        Ok(true)
+    }
+}
+
+impl RecordsPromptDeliveryResult for FlowStore {
+    fn record_prompt_delivery_result(
+        &self,
+        result: PromptDeliveryResult,
+    ) -> Result<bool, StoreError> {
+        let launch_request_id = match &result {
+            PromptDeliveryResult::Observed(receipt) => &receipt.launch_request_id,
+            PromptDeliveryResult::Ambiguous(intent) => &intent.launch_request_id,
+        };
+        let Some(mut stored) = self.stored_launch_attempt(launch_request_id)? else {
+            return Ok(false);
+        };
+        let Some(intent) = stored.attempt.prompt_delivery_intent_option.as_ref() else {
+            return Ok(false);
+        };
+        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::PromptIntentRecorded
+            || stored.attempt.prompt_delivery_result_option.is_some()
+        {
+            return Ok(false);
+        }
+        let phase = match &result {
+            PromptDeliveryResult::Ambiguous(observed_intent) if observed_intent == intent => {
+                LaunchAttemptPhase::PromptAmbiguous
+            }
+            PromptDeliveryResult::Observed(receipt)
+                if receipt.launch_request_id == intent.launch_request_id
+                    && receipt.prompt_sha256 == intent.prompt_sha256
+                    && receipt.flow_id == intent.flow_id
+                    && receipt.native_session_id == intent.native_session_id =>
+            {
+                LaunchAttemptPhase::PromptObserved
+            }
+            PromptDeliveryResult::Observed(_) | PromptDeliveryResult::Ambiguous(_) => {
+                return Ok(false);
+            }
+        };
+        stored.attempt.launch_attempt_phase = phase;
+        stored.attempt.prompt_delivery_result_option = Some(result);
+        self.mutate_launch_attempt(stored.attempt)?;
+        Ok(true)
+    }
+}
+
+impl ReadsLaunchAttempt for FlowStore {
+    fn launch_attempt(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<LaunchAttempt>, StoreError> {
+        Ok(self
+            .stored_launch_attempt(launch_request_id)?
+            .map(|stored| stored.attempt))
+    }
+}
+
 impl ReadsFlowStore for FlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError> {
         let records = self
@@ -464,6 +744,25 @@ impl ReadsFlowStore for FlowStore {
         }
     }
 
+    fn stored_launch_attempt(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<StoredLaunchAttempt>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.launch_attempts,
+                RecordKey::new(launch_request_id),
+            ))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [attempt] => Ok(Some(attempt.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
     fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError> {
         let Some(flow) = self.flow(flow_id)? else {
             return Ok(Response::RecipientResolutionRejected(
@@ -494,6 +793,15 @@ impl ReadsFlowStore for FlowStore {
 }
 
 impl WritesFlowStore for FlowStore {
+    fn mutate_launch_attempt(&self, attempt: LaunchAttempt) -> Result<(), StoreError> {
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.launch_attempts,
+            RecordKey::new(attempt.launch_request_id.clone()),
+            StoredLaunchAttempt { attempt },
+        ))?;
+        Ok(())
+    }
+
     fn reserve_start(
         &self,
         flow_type: String,

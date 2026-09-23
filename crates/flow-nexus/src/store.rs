@@ -205,8 +205,7 @@ pub trait ReservesLaunchAttempt {
 
 /// Journals the intent to create an external native seat before any pane write.
 pub trait RecordsNativeLaunchIntent {
-    fn record_native_launch_intent(&self, intent: NativeLaunchIntent)
-    -> Result<bool, StoreError>;
+    fn record_native_launch_intent(&self, intent: NativeLaunchIntent) -> Result<bool, StoreError>;
 }
 
 /// Journals the exact native/Herdr tuple observed after the external launch.
@@ -242,8 +241,7 @@ pub trait RecordsPromptDeliveryResult {
 }
 
 pub trait ReadsLaunchAttempt {
-    fn launch_attempt(&self, launch_request_id: &str)
-    -> Result<Option<LaunchAttempt>, StoreError>;
+    fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError>;
 }
 
 trait ReadsFlowStore {
@@ -346,7 +344,7 @@ impl OpensFlowStore for FlowStore {
 impl AppliesFlowQuery for FlowStore {
     fn apply(&self, query: Query) -> Result<Response, StoreError> {
         match query {
-            Query::Start(_) => Ok(Response::StartRejected(StartRejection::LaunchRefused)),
+            Query::Start(_) => Ok(Response::StartRejected(StartRejection::NativeLaunchRefused)),
             Query::Restart(_) => Ok(Response::RestartRejected(RestartRejection::ResumeRefused)),
             Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
         }
@@ -356,10 +354,10 @@ impl AppliesFlowQuery for FlowStore {
 impl ReservesPendingStart for FlowStore {
     fn reserve_pending_start(&self, query: Query) -> Result<Option<PendingLaunch>, StoreError> {
         match query {
-            Query::Start(request) if request.flow_type == "codex-medium" => self
-                .reserve_start(request.flow_type, request.origin_clue)
+            Query::Start(request) => self
+                .reserve_start("legacy-test-start".into(), request.origin_clue)
                 .map(Some),
-            Query::Start(_) | Query::Restart(_) | Query::ResolveRecipient(_) => Ok(None),
+            Query::Restart(_) | Query::ResolveRecipient(_) => Ok(None),
         }
     }
 }
@@ -497,13 +495,15 @@ impl ReservesLaunchAttempt for FlowStore {
         let launch_request_id = launch.launch_profile.launch_request_id.clone();
         let prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
         if let Some(existing) = self.stored_launch_attempt(&launch_request_id)? {
-            return Ok(if existing.attempt.prompt_sha256 == prompt_sha256
-                && existing.attempt.origin_clue == origin
-            {
-                LaunchAttemptReservation::Existing(existing.attempt)
-            } else {
-                LaunchAttemptReservation::Conflict
-            });
+            return Ok(
+                if existing.attempt.prompt_sha256 == prompt_sha256
+                    && existing.attempt.origin_clue == origin
+                {
+                    LaunchAttemptReservation::Existing(existing.attempt)
+                } else {
+                    LaunchAttemptReservation::Conflict
+                },
+            );
         }
         let attempt = LaunchAttempt {
             launch_request_id,
@@ -527,10 +527,7 @@ impl ReservesLaunchAttempt for FlowStore {
 }
 
 impl RecordsNativeLaunchIntent for FlowStore {
-    fn record_native_launch_intent(
-        &self,
-        intent: NativeLaunchIntent,
-    ) -> Result<bool, StoreError> {
+    fn record_native_launch_intent(&self, intent: NativeLaunchIntent) -> Result<bool, StoreError> {
         let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
             return Ok(false);
         };
@@ -590,10 +587,7 @@ impl RecordsRegistrationAcknowledgement for FlowStore {
             || acknowledgement.flow_id != binding.flow_id
             || acknowledgement.native_session_id != binding.native_session_id
             || acknowledgement.herdr_pane_binding != binding.herdr_pane_binding
-            || stored
-                .attempt
-                .registration_acknowledgement_option
-                .is_some()
+            || stored.attempt.registration_acknowledgement_option.is_some()
         {
             return Ok(false);
         }
@@ -612,19 +606,57 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
             return Ok(false);
         };
-        let Some(acknowledgement) = stored
-            .attempt
-            .registration_acknowledgement_option
-            .as_ref()
+        let Some(acknowledgement) = stored.attempt.registration_acknowledgement_option.as_ref()
         else {
             return Ok(false);
+        };
+        let Some(binding) = stored.attempt.native_launch_binding_option.as_ref() else {
+            return Ok(false);
+        };
+        let valid_boundary = match &intent.native_transcript_boundary {
+            signal_flow::NativeTranscriptBoundary::Existing(cursor) => {
+                cursor.native_session_id == intent.native_session_id
+                    && cursor.harness_kind == intent.harness_kind
+                    && cursor.transcript_byte_offset >= 0
+                    && !cursor.transcript_device.is_empty()
+                    && cursor
+                        .transcript_device
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit())
+                    && !cursor.transcript_inode.is_empty()
+                    && cursor
+                        .transcript_inode
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit())
+                    && cursor.transcript_prefix_sha256.len() == 64
+                    && cursor
+                        .transcript_prefix_sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }
+            signal_flow::NativeTranscriptBoundary::Absent(absence) => {
+                absence.native_session_id == intent.native_session_id
+                    && absence.harness_kind == intent.harness_kind
+                    && !absence.transcript_root_device.is_empty()
+                    && absence
+                        .transcript_root_device
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit())
+                    && !absence.transcript_root_inode.is_empty()
+                    && absence
+                        .transcript_root_inode
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit())
+            }
         };
         if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::RegistrationAcknowledged
             || intent.prompt_sha256 != stored.attempt.prompt_sha256
             || intent.launch_request_id != acknowledgement.launch_request_id
             || intent.flow_id != acknowledgement.flow_id
             || intent.native_session_id != acknowledgement.native_session_id
+            || intent.harness_kind != binding.harness_kind
             || intent.herdr_pane_binding != acknowledgement.herdr_pane_binding
+            || !valid_boundary
             || stored.attempt.prompt_delivery_intent_option.is_some()
         {
             return Ok(false);
@@ -651,9 +683,17 @@ impl RecordsPromptDeliveryResult for FlowStore {
         let Some(intent) = stored.attempt.prompt_delivery_intent_option.as_ref() else {
             return Ok(false);
         };
-        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::PromptIntentRecorded
-            || stored.attempt.prompt_delivery_result_option.is_some()
-        {
+        let first_result = stored.attempt.launch_attempt_phase
+            == LaunchAttemptPhase::PromptIntentRecorded
+            && stored.attempt.prompt_delivery_result_option.is_none();
+        let ambiguity_promotion = stored.attempt.launch_attempt_phase
+            == LaunchAttemptPhase::PromptAmbiguous
+            && matches!(
+                stored.attempt.prompt_delivery_result_option,
+                Some(PromptDeliveryResult::Ambiguous(_))
+            )
+            && matches!(&result, PromptDeliveryResult::Observed(_));
+        if !first_result && !ambiguity_promotion {
             return Ok(false);
         }
         let phase = match &result {
@@ -680,10 +720,7 @@ impl RecordsPromptDeliveryResult for FlowStore {
 }
 
 impl ReadsLaunchAttempt for FlowStore {
-    fn launch_attempt(
-        &self,
-        launch_request_id: &str,
-    ) -> Result<Option<LaunchAttempt>, StoreError> {
+    fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError> {
         Ok(self
             .stored_launch_attempt(launch_request_id)?
             .map(|stored| stored.attempt))
@@ -867,17 +904,13 @@ impl WritesFlowStore for FlowStore {
 
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError> {
         let Some(mut flow) = self.flow(flow_id)? else {
-            return Ok(Response::StartRejected(StartRejection::LaunchRefused));
+            return Ok(Response::StartRejected(StartRejection::NativeLaunchRefused));
         };
         if flow.lifecycle != FlowLifecycle::Pending || flow.thread_id.is_none() {
-            return Ok(Response::StartRejected(StartRejection::LaunchRefused));
+            return Ok(Response::StartRejected(StartRejection::NativeLaunchRefused));
         }
         flow.lifecycle = FlowLifecycle::Active;
         flow.generation = 1;
-        flow.endpoint_selection = EndpointSelection::Available(signal_flow::Available_Data {
-            endpoint_path: "/home/li/.codex/app-server-control/app-server-control.sock".into(),
-            route_readiness: RouteReadiness::Ready,
-        });
         let origin_clue = flow.origin.clone();
         let session_id = flow.thread_id.clone().expect("checked thread identity");
         self.engine.mutate_keyed(KeyedMutation::new(
@@ -923,11 +956,19 @@ impl WritesFlowStore for FlowStore {
 mod tests {
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow,
-        FlowStore, OpensFlowStore, ReadsFlowStore, RecordsPendingThread, RecordsRestartedFlow,
-        RegistersFlowIdentity, ReservesPendingStart,
+        FlowStore, OpensFlowStore, ReadsFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding,
+        RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
+        RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsRestartedFlow,
+        RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
     };
     use meta_signal_flow::Configuration;
-    use signal_flow::{OriginClue, Query, Response, Restarted, StartRequest};
+    use signal_flow::{
+        ComposedLaunch, FirstPromptPayload, FlowAspect, HarnessKind, HerdrPaneBinding,
+        LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, NativeLaunchBinding,
+        NativeLaunchIntent, NativeTargetReceipt, NativeTranscriptAbsence, NativeTranscriptBoundary,
+        OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query,
+        RegistrationAcknowledgement, Response, Restarted, StartRequest, TargetReceiptRequest,
+    };
 
     struct StoreFixture {
         directory: tempfile::TempDir,
@@ -943,6 +984,213 @@ mod tests {
                 directory: tempfile::tempdir().expect("temporary store directory"),
             }
         }
+
+        fn launch_profile(&self, launch_request_id: &str) -> LaunchProfile {
+            LaunchProfile {
+                launch_request_id: launch_request_id.into(),
+                launch_source_vector: Vec::new(),
+                skill_name_vector: Vec::new(),
+                flow_aspect: FlowAspect::Field,
+                power_level: PowerLevel::High,
+                harness_kind: HarnessKind::Codex,
+                model_name: "fixture-model".into(),
+                effort: "medium".into(),
+                flow_id_option: None,
+                remembered_flow_vector: Vec::new(),
+                herdr_session_name: "fixture-session".into(),
+                instruction_prompt: "fixture instruction".into(),
+            }
+        }
+
+        fn composed_launch(&self, launch_request_id: &str, prompt_sha256: &str) -> ComposedLaunch {
+            ComposedLaunch {
+                launch_profile: self.launch_profile(launch_request_id),
+                first_prompt_payload: FirstPromptPayload {
+                    first_prompt_body: "fixture prompt".into(),
+                    prompt_sha256: prompt_sha256.into(),
+                    first_prompt_text: "fixture prompt\nreceipt request".into(),
+                },
+                target_receipt_request: TargetReceiptRequest {
+                    launch_request_id: launch_request_id.into(),
+                    prompt_sha256: prompt_sha256.into(),
+                },
+            }
+        }
+
+        fn origin(&self) -> OriginClue {
+            OriginClue {
+                flow_id: "9fc62b".into(),
+                session_id: "caller-session".into(),
+                turn_id: "caller-turn".into(),
+            }
+        }
+
+        fn pane(&self, launch_request_id: &str) -> HerdrPaneBinding {
+            HerdrPaneBinding {
+                launch_request_id: launch_request_id.into(),
+                herdr_session_name: "fixture-session".into(),
+                herdr_agent_name: "fixture-agent".into(),
+                herdr_workspace_id: "fixture-workspace".into(),
+                herdr_pane_id: "w1:p1".into(),
+                herdr_terminal_id: "fixture-terminal".into(),
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_launch_request_returns_the_durable_attempt_and_changed_fingerprint_conflicts() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let launch = fixture.composed_launch(
+            "request-once",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let origin = fixture.origin();
+        assert!(matches!(
+            store
+                .reserve_launch_attempt(&launch, origin.clone())
+                .expect("first reservation persists"),
+            LaunchAttemptReservation::Reserved(_)
+        ));
+        let intent = NativeLaunchIntent {
+            launch_request_id: "request-once".into(),
+            prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+            harness_kind: HarnessKind::Codex,
+        };
+        assert!(
+            store
+                .record_native_launch_intent(intent.clone())
+                .expect("first external intent persists")
+        );
+        assert!(
+            !store
+                .record_native_launch_intent(intent)
+                .expect("a repeated external intent is refused")
+        );
+        assert!(matches!(
+            store
+                .reserve_launch_attempt(&launch, origin.clone())
+                .expect("identical duplicate reads"),
+            LaunchAttemptReservation::Existing(attempt)
+                if attempt.launch_attempt_phase == LaunchAttemptPhase::NativeLaunchIntentRecorded
+        ));
+        let changed = fixture.composed_launch(
+            "request-once",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        );
+        assert_eq!(
+            store
+                .reserve_launch_attempt(&changed, origin)
+                .expect("changed duplicate evaluates"),
+            LaunchAttemptReservation::Conflict
+        );
+    }
+
+    #[test]
+    fn prompt_intent_requires_exact_registration_and_authenticated_pre_send_boundary() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let launch = fixture.composed_launch(
+            "request-boundary",
+            "3333333333333333333333333333333333333333333333333333333333333333",
+        );
+        store
+            .reserve_launch_attempt(&launch, fixture.origin())
+            .expect("reservation persists");
+        assert!(
+            store
+                .record_native_launch_intent(NativeLaunchIntent {
+                    launch_request_id: "request-boundary".into(),
+                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                    harness_kind: HarnessKind::Claude,
+                })
+                .unwrap()
+        );
+        let pane = fixture.pane("request-boundary");
+        let binding = NativeLaunchBinding {
+            launch_request_id: "request-boundary".into(),
+            flow_id: "native-flow".into(),
+            native_session_id: "native-session".into(),
+            harness_kind: HarnessKind::Claude,
+            herdr_pane_binding: pane.clone(),
+        };
+        assert!(store.record_native_launch_binding(binding).unwrap());
+        assert!(
+            store
+                .record_registration_acknowledgement(RegistrationAcknowledgement {
+                    launch_request_id: "request-boundary".into(),
+                    flow_id: "native-flow".into(),
+                    native_session_id: "native-session".into(),
+                    herdr_pane_binding: pane.clone(),
+                })
+                .unwrap()
+        );
+        let intent = PromptDeliveryIntent {
+            launch_request_id: "request-boundary".into(),
+            prompt_sha256: launch.first_prompt_payload.prompt_sha256,
+            flow_id: "native-flow".into(),
+            native_session_id: "native-session".into(),
+            harness_kind: HarnessKind::Claude,
+            herdr_pane_binding: pane,
+            native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
+                native_session_id: "different-session".into(),
+                harness_kind: HarnessKind::Claude,
+                transcript_root_device: "2049".into(),
+                transcript_root_inode: "99143".into(),
+            }),
+        };
+        assert!(
+            !store
+                .record_prompt_delivery_intent(intent.clone())
+                .expect("mismatching boundary is refused")
+        );
+        let mut exact = intent;
+        let NativeTranscriptBoundary::Absent(absence) = &mut exact.native_transcript_boundary
+        else {
+            panic!("absence fixture")
+        };
+        absence.native_session_id = "native-session".into();
+        assert!(
+            store
+                .record_prompt_delivery_intent(exact.clone())
+                .expect("exact pre-send evidence persists")
+        );
+        assert!(
+            !store
+                .record_prompt_delivery_intent(exact.clone())
+                .expect("one-shot prompt intent cannot be replayed")
+        );
+        drop(store);
+        let reopened = fixture.store();
+        assert_eq!(
+            reopened
+                .launch_attempt("request-boundary")
+                .unwrap()
+                .expect("journal recovers")
+                .prompt_delivery_intent_option,
+            Some(exact.clone())
+        );
+        assert!(
+            reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(exact.clone()))
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Observed(
+                    NativeTargetReceipt {
+                        launch_request_id: exact.launch_request_id,
+                        prompt_sha256: exact.prompt_sha256,
+                        flow_id: exact.flow_id,
+                        native_session_id: exact.native_session_id,
+                        native_turn_id: "native-turn".into(),
+                        receipt_sha256:
+                            "4444444444444444444444444444444444444444444444444444444444444444"
+                                .into(),
+                    }
+                ))
+                .expect("authentic receipt promotes ambiguity")
+        );
     }
 
     impl OpensFixtureStore for StoreFixture {
@@ -960,7 +1208,7 @@ mod tests {
         fn start(&self, store: &FlowStore) -> String {
             let pending = store
                 .reserve_pending_start(Query::Start(StartRequest {
-                    flow_type: "codex-medium".into(),
+                    launch_profile: self.launch_profile("legacy-start-1"),
                     origin_clue: OriginClue {
                         flow_id: "9fc62b".into(),
                         session_id: "session-1".into(),
@@ -1037,7 +1285,7 @@ mod tests {
         let store = fixture.store();
         let pending = store
             .reserve_pending_start(Query::Start(StartRequest {
-                flow_type: "codex-medium".into(),
+                launch_profile: fixture.launch_profile("legacy-start-2"),
                 origin_clue: OriginClue {
                     flow_id: "9fc62b".into(),
                     session_id: "session-2".into(),
@@ -1082,7 +1330,7 @@ mod tests {
         let store = fixture.store();
         let pending = store
             .reserve_pending_start(Query::Start(StartRequest {
-                flow_type: "codex-medium".into(),
+                launch_profile: fixture.launch_profile("legacy-start-3"),
                 origin_clue: OriginClue {
                     flow_id: "9fc62b".into(),
                     session_id: "session-3".into(),

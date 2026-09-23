@@ -6,7 +6,16 @@ pub mod herdr;
 pub mod store;
 
 use codex::{CodexAdapter, ConsumesResetCredit, ResumesCodex};
-use signal_flow::{Query, Response, RestartRejection, StartRejection};
+use composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer};
+use herdr::launch::{
+    AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
+    ObservesNativeTargetReceipt, StartsNativeHerdrHarness, SubmitsFirstPromptOnce,
+};
+use signal_flow::{
+    EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection,
+    LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchIntent, PromptDeliveryResult, Query,
+    RegistrationAcknowledgement, Response, RestartRejection, StartRejection,
+};
 use std::{
     fs,
     io::{Read, Write},
@@ -14,18 +23,20 @@ use std::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
     },
-    path::Path,
+    path::{Path, PathBuf},
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, RecordsPendingThread, RecordsRestartedFlow, RegistersFlowIdentity,
-    ReservesPendingStart,
+    OpensFlowStore, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
+    RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement,
+    RecordsRestartedFlow, RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 
 pub struct RunningNexus {
     pub store: FlowStore,
     pub codex: CodexAdapter,
     pub herdr: herdr::HerdrCli,
+    pub composer: LaunchComposer,
 }
 
 pub trait Dispatches {
@@ -38,37 +49,177 @@ impl Dispatches for RunningNexus {
         match query {
             Query::Start(request) => {
                 let origin = request.origin_clue.clone();
-                let goal = match request.flow_type.as_str() {
-                    "codex-medium" => {
-                        "Follow the predefined Codex medium flow procedure. Read the origin clue first, recover the caller's goal from its transcript, then carry the work to completion."
+                let launch = match self.composer.compose(&request.launch_profile) {
+                    Ok(launch) => launch,
+                    Err(_) => return Response::StartRejected(StartRejection::CompositionRefused),
+                };
+                match self.store.reserve_launch_attempt(&launch, origin.clone()) {
+                    Ok(LaunchAttemptReservation::Reserved(_)) => {}
+                    Ok(LaunchAttemptReservation::Existing(attempt)) => {
+                        if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
+                            return Response::LaunchPending(attempt);
+                        }
+                        let (Some(intent), Some(binding)) = (
+                            attempt.prompt_delivery_intent_option,
+                            attempt.native_launch_binding_option,
+                        ) else {
+                            return Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            );
+                        };
+                        let observed = self
+                            .herdr
+                            .observe_native_target_receipt(&intent)
+                            .unwrap_or_else(|_| PromptDeliveryResult::Ambiguous(intent.clone()));
+                        let PromptDeliveryResult::Observed(receipt) = observed else {
+                            return Response::StartAmbiguous(intent);
+                        };
+                        if !self
+                            .store
+                            .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt))
+                            .unwrap_or(false)
+                        {
+                            return Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            );
+                        }
+                        return self.store.confirm_started(&binding.flow_id).unwrap_or(
+                            Response::StartRejected(StartRejection::LaunchPersistenceRefused),
+                        );
                     }
-                    _ => return Response::StartRejected(StartRejection::UnknownFlowType),
+                    Ok(LaunchAttemptReservation::Conflict) => {
+                        return Response::StartRejected(StartRejection::LaunchRequestConflict);
+                    }
+                    Err(_) => {
+                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                    }
+                }
+                let native_intent = NativeLaunchIntent {
+                    launch_request_id: launch.launch_profile.launch_request_id.clone(),
+                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                    harness_kind: launch.launch_profile.harness_kind.clone(),
                 };
-                let Ok(Some(pending)) = self.store.reserve_pending_start(Query::Start(request))
-                else {
-                    return Response::StartRejected(StartRejection::LaunchRefused);
+                if !self
+                    .store
+                    .record_native_launch_intent(native_intent)
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                let pane = match self.herdr.create_launch_pane(&launch) {
+                    Ok(pane) => pane,
+                    Err(_) => {
+                        return Response::StartRejected(StartRejection::NativeLaunchRefused);
+                    }
                 };
-                let launched =
-                    self.codex
-                        .start_codex_observed(&pending.flow_id, goal, &origin, |thread| {
-                            if self
-                                .store
-                                .record_pending_thread(&pending, thread.into())
-                                .unwrap_or(false)
-                            {
-                                Ok(())
-                            } else {
-                                Err(codex::CodexAdapterUnavailable::Protocol(
-                                    "pending thread persistence failed".into(),
-                                ))
-                            }
-                        });
-                match launched {
-                    Ok(_) => self
-                        .store
-                        .confirm_started(&pending.flow_id)
-                        .unwrap_or(Response::StartRejected(StartRejection::LaunchRefused)),
-                    Err(_) => Response::StartRejected(StartRejection::LaunchRefused),
+                if self.herdr.start_native_harness(&launch, &pane).is_err() {
+                    return Response::StartRejected(StartRejection::NativeLaunchRefused);
+                }
+                let binding = match self.herdr.observe_native_binding(&launch, &pane) {
+                    Ok(binding) => binding,
+                    Err(_) => return Response::StartRejected(StartRejection::BindingRefused),
+                };
+                if !self
+                    .store
+                    .record_native_launch_binding(binding.clone())
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                let node = FlowNode {
+                    flow_id: binding.flow_id.clone(),
+                    session_id: binding.native_session_id.clone(),
+                    harness_kind: binding.harness_kind.clone(),
+                    endpoint_selection: EndpointSelection::Unavailable,
+                    herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                        herdr_session_name: binding.herdr_pane_binding.herdr_session_name.clone(),
+                        herdr_agent_name: binding.herdr_pane_binding.herdr_agent_name.clone(),
+                        herdr_pane_id: binding.herdr_pane_binding.herdr_pane_id.clone(),
+                        herdr_terminal_id: binding.herdr_pane_binding.herdr_terminal_id.clone(),
+                    }),
+                    origin_clue: origin,
+                    flow_lifecycle: FlowLifecycle::Pending,
+                };
+                if !self.herdr.validate_registration(&node) {
+                    return Response::StartRejected(StartRejection::RegistrationRefused);
+                }
+                let registered = match self.store.register_flow(node) {
+                    Ok(store::FlowRegistration::Registered(node)) => node,
+                    Ok(store::FlowRegistration::ConflictingBinding) | Err(_) => {
+                        return Response::StartRejected(StartRejection::RegistrationRefused);
+                    }
+                };
+                let acknowledgement = RegistrationAcknowledgement {
+                    launch_request_id: binding.launch_request_id.clone(),
+                    flow_id: registered.flow_id.clone(),
+                    native_session_id: registered.session_id.clone(),
+                    herdr_pane_binding: binding.herdr_pane_binding.clone(),
+                };
+                if !self
+                    .store
+                    .record_registration_acknowledgement(acknowledgement.clone())
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                let delivery_intent =
+                    match self
+                        .herdr
+                        .accept_registration(&launch, &binding, &acknowledgement)
+                    {
+                        Ok(intent) => intent,
+                        Err(_) => {
+                            return Response::StartRejected(StartRejection::RegistrationRefused);
+                        }
+                    };
+                if !self
+                    .store
+                    .record_prompt_delivery_intent(delivery_intent.clone())
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::IntentPersistenceRefused);
+                }
+                let initial = match self
+                    .herdr
+                    .submit_first_prompt_once(&launch, &delivery_intent)
+                {
+                    Ok(result) => result,
+                    Err(_) => PromptDeliveryResult::Ambiguous(delivery_intent.clone()),
+                };
+                if !self
+                    .store
+                    .record_prompt_delivery_result(initial.clone())
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                let result = match initial {
+                    PromptDeliveryResult::Observed(receipt) => {
+                        PromptDeliveryResult::Observed(receipt)
+                    }
+                    PromptDeliveryResult::Ambiguous(_) => self
+                        .herdr
+                        .observe_native_target_receipt(&delivery_intent)
+                        .unwrap_or_else(|_| {
+                            PromptDeliveryResult::Ambiguous(delivery_intent.clone())
+                        }),
+                };
+                match result {
+                    PromptDeliveryResult::Ambiguous(intent) => Response::StartAmbiguous(intent),
+                    PromptDeliveryResult::Observed(receipt) => {
+                        if !self
+                            .store
+                            .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt))
+                            .unwrap_or(false)
+                        {
+                            return Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            );
+                        }
+                        self.store.confirm_started(&binding.flow_id).unwrap_or(
+                            Response::StartRejected(StartRejection::LaunchPersistenceRefused),
+                        )
+                    }
                 }
             }
             Query::Restart(request) => {
@@ -161,6 +312,7 @@ pub trait OpensRunningNexus {
         socket: String,
         model: String,
         timeout: std::time::Duration,
+        source_root: PathBuf,
     ) -> Result<Self, store::StoreError>
     where
         Self: Sized;
@@ -172,6 +324,7 @@ impl OpensRunningNexus for RunningNexus {
         socket: String,
         model: String,
         timeout: std::time::Duration,
+        source_root: PathBuf,
     ) -> Result<Self, store::StoreError> {
         Ok(Self {
             store: FlowStore::open(store)?,
@@ -181,6 +334,7 @@ impl OpensRunningNexus for RunningNexus {
                 timeout,
             },
             herdr: herdr::HerdrCli::default(),
+            composer: LaunchComposer::at(source_root),
         })
     }
 }
@@ -319,6 +473,7 @@ mod tests {
                     timeout: Duration::from_secs(1),
                 },
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root),
+                composer: LaunchComposer::at(directory.path().to_path_buf()),
             };
             Self {
                 directory,

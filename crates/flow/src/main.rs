@@ -103,6 +103,28 @@ mod tests {
     }
 
     #[test]
+    fn start_accepts_one_inline_typed_launch_profile() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        let Query::Start(request) = client
+            .parse_command([
+                "Start.{ { request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ spirit main-flow ] Field High Codex gpt-6-astra medium Some.836818 [ { 1b8ac0 1 } ] messaging-build «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into(),
+            ]
+            .into_iter())
+            .expect("typed Start parses")
+        else {
+            panic!("Start fixture must remain a Start query")
+        };
+        assert_eq!(request.launch_profile.launch_request_id, "request-7");
+        assert_eq!(request.launch_profile.launch_source_vector.len(), 1);
+        assert_eq!(
+            request.launch_profile.skill_name_vector,
+            ["spirit", "main-flow"]
+        );
+    }
+
+    #[test]
     fn command_refuses_more_than_one_inline_value() {
         let client = FlowClient {
             socket: "unused".into(),

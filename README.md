@@ -12,14 +12,21 @@ The wire contracts are independent repositories:
   `ResolveRecipient` for Message Nexus routing.
 - `meta-signal-flow` defines `Configure` and reset-credit consumption.
 
-The command boundary stamps the caller's Flow and Codex session into every
-start request. The ordinary hot paths are intentionally short:
+The ordinary client accepts exactly one inline `Query` Datom from the
+`signal-flow` contract:
 
 ```sh
-flow start codex-medium
-flow restart <flow-id>
-flow resolve <flow-id>
+flow '<one inline Query datom>'
 ```
+
+`Start` carries a typed `LaunchProfile` plus an `OriginClue`. The origin is a
+caller claim; its text does not authenticate the caller. A profile names its
+ordered source descriptors and exact SHA-256 values, ordered native skill
+names, aspect, power, harness, model, effort, predecessor, remembered flows,
+Herdr target session, and first instruction. Profile producers should use the
+generated `signal-flow` Datom types rather than assembling positional text.
+The old `flow start ...`, `flow restart ...`, and `flow resolve ...` argument
+forms are rejected.
 
 `flow-meta reset <idempotency-key>` asks the Codex app-server to consume the
 next eligible reset credit. `flow-meta reset <idempotency-key> <credit-id>`
@@ -59,7 +66,7 @@ The Message consumer owns its harness-specific blank-composer guard before it
 submits input. Rows written before the route table was added also resolve with
 an unavailable Herdr route.
 
-By default the Nexus uses:
+The current binary uses these store and socket defaults:
 
 - store: `/home/li/.local/state/flow/flow.sema`
 - ordinary socket: `/run/user/1001/flow/flow.sock`
@@ -67,13 +74,30 @@ By default the Nexus uses:
 - Codex control socket:
   `/home/li/.codex/app-server-control/app-server-control.sock`
 
+`FLOW_SOURCE_ROOT` is required when starting `flow-nexus`. It selects the
+bounded source root used for exact-byte composition, the Codex native skill
+catalog working directory, the Flow workspace root, and the project Claude
+skill catalog. `CODEX_HOME` and `CLAUDE_CONFIG_DIR` select native transcript
+and personal-skill roots. `CLAUDE_ENTERPRISE_SKILLS_DIR` optionally adds the
+highest-precedence Claude skill catalog. The ordinary client uses
+`FLOW_SOCKET` when set.
+
+For Codex, the Nexus resolves every ordered skill name through the bound
+app-server's `skills/list`, journals the selected absolute path and exact
+source hash, then sends the typed skill inputs and first text in one
+`turn/start` on the empty Herdr-bound thread. For Claude, it resolves the
+ordered enterprise, personal, and project catalogs, journals the same typed
+selection, and requires native Skill tool calls, successful results, and
+native expansion evidence before accepting the target receipt. Skill bodies
+are not pasted into the composed first prompt.
+
 The Codex adapter opens `codex app-server proxy`, then sends `initialize`,
 `thread/start`, and `turn/start`. The returned thread is owned by the running
 app-server and remains visible to remote-control clients. Restart resumes that
 thread and starts its next turn only when the caller's provenance Flow ID and
-harness session equal the registered target. The daemon injects `FLOW_ID` and
-`FLOW_DIRECTORY` into every Codex child and creates its workspace at
-`/home/li/primary/flows/<flow-id>`.
+harness session equal the registered target. The legacy direct Codex starter
+injects `FLOW_ID` and `FLOW_DIRECTORY`; typed launches derive their workspace
+from the configured source root.
 
 For a user service installation, build the workspace in release mode, install
 the three binaries into `~/.local/bin`, copy
@@ -81,8 +105,9 @@ the three binaries into `~/.local/bin`, copy
 `flow-nexus.service`. Declarative environments should package the same unit
 and binaries instead of retaining this local copy.
 
-Run `cargo test --workspace` for the durable contract, store, command, proxy,
-failure, timeout, identity-resolution, and reset-adapter witnesses. Nix exposes
+This branch is source-published and is not an installed or live-accepted
+deployment. Its final compilation and test gate must run on the configured
+remote Nix builder; local fallback is not an acceptance path. Nix exposes
 the full `checks.<system>.default` gate plus focused
 `flow-v5-row-preservation`, `flow-herdr-route-durability`,
 `flow-stale-route-unavailable`, `flow-conflicting-registration-refusal`,

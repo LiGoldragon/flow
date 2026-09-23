@@ -28,29 +28,30 @@ impl Default for HerdrCli {
     fn default() -> Self {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/home/li"));
+            .unwrap_or_else(|| panic!("HOME must name the configured user root"));
         let codex_home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
         let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".claude"));
-        let flows_root = PathBuf::from("/home/li/primary/flows");
-        let workspace_root = flows_root
-            .parent()
-            .expect("default Flow root has a workspace parent")
-            .to_path_buf();
+        let workspace_root = std::env::var_os("FLOW_SOURCE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| panic!("FLOW_SOURCE_ROOT must name the configured workspace root"));
+        let flows_root = workspace_root.join("flows");
+        let mut claude_skill_roots = Vec::new();
+        if let Some(enterprise) = std::env::var_os("CLAUDE_ENTERPRISE_SKILLS_DIR") {
+            claude_skill_roots.push(PathBuf::from(enterprise));
+        }
+        claude_skill_roots.push(claude_home.join("skills"));
+        claude_skill_roots.push(workspace_root.join(".claude/skills"));
         Self {
             executable: PathBuf::from("herdr"),
             flow_id_executable: PathBuf::from("flow-id"),
             flows_root,
             codex_transcript_root: codex_home.join("sessions"),
             claude_transcript_root: claude_home.join("projects"),
-            claude_skill_roots: vec![
-                PathBuf::from("/etc/claude-code/.claude/skills"),
-                claude_home.join("skills"),
-                workspace_root.join(".claude/skills"),
-            ],
+            claude_skill_roots,
         }
     }
 }

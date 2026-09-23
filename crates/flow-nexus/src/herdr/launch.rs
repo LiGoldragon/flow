@@ -1009,7 +1009,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             match durable_intent.harness_kind {
                 HarnessKind::Codex => {
                     if row.get("type").and_then(serde_json::Value::as_str) == Some("turn_context") {
-                        let payload = row.get("payload").unwrap_or(&serde_json::Value::Null);
+                        let payload = row
+                            .get("payload")
+                            .ok_or_else(|| "native Codex turn context has no payload".to_owned())?;
                         if payload.get("model").and_then(serde_json::Value::as_str)
                             != Some(durable_intent.model_name.as_str())
                             || payload.get("effort").and_then(serde_json::Value::as_str)

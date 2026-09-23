@@ -1,6 +1,7 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
 pub mod claude;
 pub mod codex;
+pub mod composition;
 pub mod herdr;
 pub mod store;
 

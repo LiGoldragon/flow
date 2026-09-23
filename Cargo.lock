@@ -263,6 +263,7 @@ dependencies = [
  "sema-engine",
  "serde_json",
  "sha1",
+ "sha2",
  "signal-flow",
  "tempfile",
  "thiserror",
@@ -366,8 +367,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "1.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=aa6104012e1d9c9b9650590e502c51fbea902e81#aa6104012e1d9c9b9650590e502c51fbea902e81"
+version = "1.1.1"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=465577e2fd327fbf0950849e7a16322a436818a3#465577e2fd327fbf0950849e7a16322a436818a3"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",
@@ -625,6 +626,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -644,8 +656,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "1.1.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=968ae3b00a64ebcb1ef05e21a0a55cee55ad015c#968ae3b00a64ebcb1ef05e21a0a55cee55ad015c"
+version = "1.2.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=8e821aff47650f55d7190a1ce43aa9e0b37d947e#8e821aff47650f55d7190a1ce43aa9e0b37d947e"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",

@@ -503,6 +503,31 @@ impl HerdrCli {
         }))
     }
 
+    fn capture_transcript_start_boundary(
+        &self,
+        binding: &NativeLaunchBinding,
+    ) -> Result<NativeTranscriptBoundary, String> {
+        let (root, _, found) = self.transcript_candidates(
+            &binding.herdr_pane_binding,
+            &binding.native_session_id,
+            &binding.harness_kind,
+        )?;
+        let transcript = Self::one_resolved_transcript(&root, found)?;
+        let file = File::open(transcript)
+            .map_err(|error| format!("native transcript is unreadable: {error}"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("native transcript metadata failed: {error}"))?;
+        Ok(NativeTranscriptBoundary::Existing(NativeTranscriptCursor {
+            native_session_id: binding.native_session_id.clone(),
+            harness_kind: binding.harness_kind.clone(),
+            transcript_device: metadata.dev().to_string(),
+            transcript_inode: metadata.ino().to_string(),
+            transcript_byte_offset: 0,
+            transcript_prefix_sha256: format!("{:x}", Sha256::digest([])),
+        }))
+    }
+
     fn decimal_identity(value: &str, label: &str) -> Result<u64, String> {
         let parsed = value
             .parse::<u64>()
@@ -656,6 +681,16 @@ impl HerdrCli {
             "<skill>\n<name>{}</name>\n<path>{}</path>\n{}\n</skill>",
             selection.skill_name, selection.native_skill_path, source
         ))
+    }
+
+    fn prompt_text_matches_intent(text: &str, intent: &PromptDeliveryIntent) -> bool {
+        let footer = format!(
+            "\n\n## Target receipt request\n\nReply once with exactly this single line and no trailing newline:\nFLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
+            intent.launch_request_id, intent.prompt_sha256
+        );
+        text.strip_suffix(&footer).is_some_and(|body| {
+            format!("{:x}", Sha256::digest(body.as_bytes())) == intent.prompt_sha256
+        })
     }
 }
 
@@ -1029,8 +1064,15 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                         }
                         if content.last().and_then(|value| value.get("type"))
                             != Some(&serde_json::json!("text"))
+                            || !content
+                                .last()
+                                .and_then(|value| value.get("text"))
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|text| {
+                                    Self::prompt_text_matches_intent(text, durable_intent)
+                                })
                         {
-                            return Err("native Codex first-turn text is absent".into());
+                            return Err("native Codex first-turn text differs from intent".into());
                         }
                         input_verified = true;
                     }
@@ -1109,6 +1151,19 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                     if exact_session
                         && row.get("type").and_then(serde_json::Value::as_str) == Some("user")
                     {
+                        if let Some(text) = row
+                            .pointer("/message/content")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            if input_verified
+                                || !Self::prompt_text_matches_intent(text, durable_intent)
+                            {
+                                return Err(
+                                    "native Claude first-turn text differs from intent".into()
+                                );
+                            }
+                            input_verified = true;
+                        }
                         if let Some(tool_id) = pending_claude_tool.as_deref() {
                             let matching_result = row
                                 .pointer("/message/content")
@@ -1194,6 +1249,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                 if skill_index != durable_intent.native_skill_selection_vector.len()
                     || matches!(durable_intent.harness_kind, HarnessKind::Codex)
                         && (!input_verified || native_turn.as_deref() != Some(turn.as_str()))
+                    || matches!(durable_intent.harness_kind, HarnessKind::Claude) && !input_verified
                 {
                     return Err("target receipt preceded native skill confirmation".into());
                 }
@@ -1219,7 +1275,11 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                     harness_kind: durable_intent.harness_kind.clone(),
                     herdr_pane_binding: durable_intent.herdr_pane_binding.clone(),
                 };
-                let boundary = self.capture_transcript_boundary(&binding)?;
+                // Preserve the observed inode but rescan the first turn from
+                // byte zero on reconciliation. Advancing to EOF here would
+                // discard native input and skill evidence emitted before the
+                // assistant receipt.
+                let boundary = self.capture_transcript_start_boundary(&binding)?;
                 if !matches!(boundary, NativeTranscriptBoundary::Existing(_)) {
                     return Err("new native transcript disappeared during adoption".into());
                 }
@@ -1260,6 +1320,8 @@ mod tests {
     };
     use std::{fs, os::unix::fs::PermissionsExt};
 
+    const PROMPT_HASH: &str = "0cb26cfe0a554e4780aa5af20cafbe3ae3259f823438576026a4ffff58371a67";
+
     fn launch(harness_kind: HarnessKind) -> ComposedLaunch {
         ComposedLaunch {
             launch_profile: LaunchProfile {
@@ -1278,14 +1340,14 @@ mod tests {
             },
             first_prompt_payload: FirstPromptPayload {
                 first_prompt_body: "composed body".into(),
-                prompt_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .into(),
-                first_prompt_text: "composed body\n\nreceipt footer".into(),
+                prompt_sha256: PROMPT_HASH.into(),
+                first_prompt_text: format!(
+                    "composed body\n\n## Target receipt request\n\nReply once with exactly this single line and no trailing newline:\nFLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256={PROMPT_HASH}"
+                ),
             },
             target_receipt_request: TargetReceiptRequest {
                 launch_request_id: "launch-42".into(),
-                prompt_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .into(),
+                prompt_sha256: PROMPT_HASH.into(),
             },
         }
     }
@@ -1527,7 +1589,9 @@ printf '%s\n' 123456
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
-        let marker = "FLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let marker = format!(
+            "FLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256={PROMPT_HASH}"
+        );
         let transcript = root
             .path()
             .join("native-transcripts/codex")
@@ -1557,7 +1621,7 @@ printf '%s\n' 123456
             "turn_id":"turn-new","model":"model-current","effort":"high"}});
         let input = serde_json::json!({"type":"event_msg","payload":{
             "thread_id":native_session,"turn_id":"turn-new",
-            "item":{"type":"UserMessage","content":[{"type":"text","text":"composed"}]}}});
+            "item":{"type":"UserMessage","content":[{"type":"text","text":launch.first_prompt_payload.first_prompt_text}]}}});
         use std::io::Write;
         let mut append = fs::OpenOptions::new()
             .append(true)
@@ -1583,6 +1647,53 @@ printf '%s\n' 123456
     }
 
     #[test]
+    fn codex_receipt_rejects_wrong_first_text_with_matching_skills_and_marker() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Codex);
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "codex",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let transcript = root
+            .path()
+            .join("native-transcripts/codex")
+            .join(format!("rollout-{native_session}.jsonl"));
+        fs::write(&transcript, "{\"type\":\"session_meta\"}\n").expect("initial transcript");
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        let marker = format!(
+            "FLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256={PROMPT_HASH}"
+        );
+        let rows = [
+            serde_json::json!({"type":"turn_context","payload":{
+                "turn_id":"turn-wrong","model":"model-current","effort":"high"}}),
+            serde_json::json!({"type":"event_msg","payload":{
+                "thread_id":native_session,"turn_id":"turn-wrong",
+                "item":{"type":"UserMessage","content":[{"type":"text","text":"wrong body with no authenticated footer"}]}}}),
+            serde_json::json!({"type":"event_msg","payload":{
+                "thread_id":native_session,"turn_id":"turn-wrong",
+                "item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}}),
+        ];
+        use std::io::Write;
+        let mut append = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .expect("append transcript");
+        for row in rows {
+            writeln!(append, "{row}").expect("append receipt row");
+        }
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("first-turn text differs")
+        );
+    }
+
+    #[test]
     fn absent_or_duplicate_native_receipt_is_never_retried_or_invented() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
@@ -1600,7 +1711,9 @@ printf '%s\n' 123456
             NativeTranscriptBoundary::Absent(_)
         ));
         let untrusted_transcript = root.path().join("caller-selected.jsonl");
-        let marker = "FLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let marker = format!(
+            "FLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256={PROMPT_HASH}"
+        );
         let untrusted_row = serde_json::json!({"type":"assistant","sessionId":native_session,
             "uuid":"untrusted-turn","message":{"content":[{"type":"text","text":marker}]}});
         fs::write(&untrusted_transcript, format!("{}\n", untrusted_row))
@@ -1615,7 +1728,9 @@ printf '%s\n' 123456
             .path()
             .join("native-transcripts/claude")
             .join(format!("{native_session}.jsonl"));
-        fs::write(&transcript, "{\"type\":\"user\"}\n").expect("empty receipt transcript");
+        let first_input = serde_json::json!({"type":"user","sessionId":native_session,
+            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_text}});
+        fs::write(&transcript, format!("{first_input}\n")).expect("empty receipt transcript");
         let PromptDeliveryResult::Ambiguous(adopted_intent) = adapter
             .observe_native_target_receipt(&intent)
             .expect("absence is ambiguous and adopts the new transcript")

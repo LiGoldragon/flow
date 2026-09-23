@@ -67,7 +67,10 @@ pub trait SubmitsFirstPromptOnce {
 }
 
 /// Promotes an ambiguous delivery only from an exact assistant record in the
-/// native transcript for the bound session and turn.
+/// native transcript for the bound session and turn. If a transcript was
+/// absent at submission and later appears without a receipt, the returned
+/// ambiguous intent contains its adopted cursor and must replace the stored
+/// absence boundary before another observation.
 pub trait ObservesNativeTargetReceipt {
     fn observe_native_target_receipt(
         &self,
@@ -458,7 +461,7 @@ impl HerdrCli {
         Ok(parsed)
     }
 
-    fn receipt_input(&self, intent: &PromptDeliveryIntent) -> Result<Option<File>, String> {
+    fn receipt_input(&self, intent: &PromptDeliveryIntent) -> Result<Option<(File, bool)>, String> {
         if !Self::boundary_matches_intent(intent) {
             return Err("native transcript boundary does not match prompt intent".into());
         }
@@ -481,7 +484,7 @@ impl HerdrCli {
                 }
                 let transcript = Self::one_resolved_transcript(&root, found)?;
                 File::open(transcript)
-                    .map(Some)
+                    .map(|file| Some((file, true)))
                     .map_err(|error| format!("native transcript is unreadable: {error}"))
             }
             NativeTranscriptBoundary::Existing(cursor) => {
@@ -507,7 +510,7 @@ impl HerdrCli {
                 }
                 file.seek(SeekFrom::Start(byte_offset))
                     .map_err(|error| format!("native transcript seek failed: {error}"))?;
-                Ok(Some(file))
+                Ok(Some((file, false)))
             }
         }
     }
@@ -778,7 +781,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             "FLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
             durable_intent.launch_request_id, durable_intent.prompt_sha256
         );
-        let Some(input) = self.receipt_input(durable_intent)? else {
+        let Some((input, adopted_after_absence)) = self.receipt_input(durable_intent)? else {
             return Ok(PromptDeliveryResult::Ambiguous(durable_intent.clone()));
         };
         let mut observed_turn = None;
@@ -806,6 +809,22 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             }
         }
         let Some(native_turn_id) = observed_turn else {
+            if adopted_after_absence {
+                let binding = NativeLaunchBinding {
+                    launch_request_id: durable_intent.launch_request_id.clone(),
+                    flow_id: durable_intent.flow_id.clone(),
+                    native_session_id: durable_intent.native_session_id.clone(),
+                    harness_kind: durable_intent.harness_kind.clone(),
+                    herdr_pane_binding: durable_intent.herdr_pane_binding.clone(),
+                };
+                let boundary = self.capture_transcript_boundary(&binding)?;
+                if !matches!(boundary, NativeTranscriptBoundary::Existing(_)) {
+                    return Err("new native transcript disappeared during adoption".into());
+                }
+                let mut updated_intent = durable_intent.clone();
+                updated_intent.native_transcript_boundary = boundary;
+                return Ok(PromptDeliveryResult::Ambiguous(updated_intent));
+            }
             return Ok(PromptDeliveryResult::Ambiguous(durable_intent.clone()));
         };
         let receipt_sha256 = format!("{:x}", Sha256::digest(expected.as_bytes()));
@@ -1178,18 +1197,28 @@ printf '%s\n' 123456
             .join("native-transcripts/claude")
             .join(format!("{native_session}.jsonl"));
         fs::write(&transcript, "{\"type\":\"user\"}\n").expect("empty receipt transcript");
-        assert_eq!(
-            adapter
-                .observe_native_target_receipt(&intent)
-                .expect("absence is ambiguous"),
-            PromptDeliveryResult::Ambiguous(intent.clone())
-        );
+        let PromptDeliveryResult::Ambiguous(adopted_intent) = adapter
+            .observe_native_target_receipt(&intent)
+            .expect("absence is ambiguous and adopts the new transcript")
+        else {
+            panic!("receipt was invented");
+        };
+        assert!(matches!(
+            &adopted_intent.native_transcript_boundary,
+            NativeTranscriptBoundary::Existing(_)
+        ));
         let row = serde_json::json!({"type":"assistant","sessionId":native_session,
             "uuid":"turn-claude","message":{"content":[{"type":"text","text":marker}]}});
-        fs::write(&transcript, format!("{}\n{}\n", row, row)).expect("duplicate receipts");
+        use std::io::Write;
+        let mut append = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .expect("append duplicate receipts");
+        writeln!(append, "{row}").expect("first receipt");
+        writeln!(append, "{row}").expect("second receipt");
         assert!(
             adapter
-                .observe_native_target_receipt(&intent)
+                .observe_native_target_receipt(&adopted_intent)
                 .unwrap_err()
                 .contains("duplicate")
         );

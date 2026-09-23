@@ -4,9 +4,15 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
-use signal_flow::OriginClue;
+use sha2::Sha256;
+use signal_flow::{
+    ComposedLaunch, HarnessKind, NativeLaunchBinding, NativeSkillSelection, OriginClue,
+    PromptDeliveryIntent, PromptDeliveryResult,
+};
 use std::{
+    fs,
     io::{BufRead, BufReader, Read, Write},
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -21,6 +27,8 @@ pub struct CodexAdapter {
     pub socket: String,
     pub model: String,
     pub timeout: Duration,
+    /// Exact cwd whose native Codex skill catalog is valid for this launch.
+    pub workspace_root: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -62,6 +70,27 @@ pub trait ConsumesResetCredit {
         &self,
         request: &meta_signal_flow::ResetRequest,
     ) -> Result<meta_signal_flow::ResetOutcome, CodexAdapterUnavailable>;
+}
+
+/// Resolves skills through the native app-server catalog only after proving
+/// that the exact Herdr-bound thread exists and still has no turns.
+pub trait ResolvesBoundCodexSkills {
+    fn resolve_bound_codex_skills(
+        &self,
+        launch: &ComposedLaunch,
+        binding: &NativeLaunchBinding,
+    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable>;
+}
+
+/// Submits one typed skill vector and the composed text as one first native
+/// turn. Durable one-shot gating belongs to the caller; this never creates,
+/// resumes, or replaces the Herdr-owned thread.
+pub trait SubmitsBoundCodexFirstTurn {
+    fn submit_bound_codex_first_turn(
+        &self,
+        launch: &ComposedLaunch,
+        durable_intent: &PromptDeliveryIntent,
+    ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable>;
 }
 
 struct ProxySession {
@@ -427,6 +456,288 @@ impl BuildsCodexTurn for CodexAdapter {
             "effort": "medium",
             "turnTrigger": "flow-nexus"
         })
+    }
+}
+
+impl CodexAdapter {
+    fn initialize_bound_session(&self) -> Result<ProxySession, CodexAdapterUnavailable> {
+        let mut session = self.open_proxy()?;
+        if let Err(error) = (|| {
+            session.request(
+                1,
+                "initialize",
+                serde_json::json!({
+                    "clientInfo": {
+                        "name": "flow-nexus",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                }),
+                self.timeout,
+            )?;
+            session.notify("initialized", serde_json::Value::Null)
+        })() {
+            session.stop_proxy();
+            return Err(error);
+        }
+        Ok(session)
+    }
+
+    fn require_empty_bound_thread(
+        &self,
+        session: &mut ProxySession,
+        request_id: u64,
+        native_session_id: &str,
+    ) -> Result<(), CodexAdapterUnavailable> {
+        let read = session.request(
+            request_id,
+            "thread/read",
+            serde_json::json!({
+                "threadId": native_session_id,
+                "includeTurns": true
+            }),
+            self.timeout,
+        )?;
+        let thread = read.get("thread").unwrap_or(&read);
+        if thread.get("id").and_then(serde_json::Value::as_str) != Some(native_session_id) {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "thread/read did not return the exact Herdr-bound thread".into(),
+            ));
+        }
+        let turns = thread
+            .get("turns")
+            .or_else(|| thread.pointer("/history/turns"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                CodexAdapterUnavailable::Protocol(
+                    "thread/read did not provide an authenticated turn list".into(),
+                )
+            })?;
+        if !turns.is_empty() {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "Herdr-bound Codex thread already has a turn".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn native_skill_catalog(
+        &self,
+        session: &mut ProxySession,
+        request_id: u64,
+    ) -> Result<Vec<serde_json::Value>, CodexAdapterUnavailable> {
+        let workspace = self.workspace_root.canonicalize().map_err(|error| {
+            CodexAdapterUnavailable::Protocol(format!(
+                "configured Codex workspace is unavailable: {error}"
+            ))
+        })?;
+        if !workspace.is_dir() || workspace != self.workspace_root {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "configured Codex workspace must be an exact canonical directory".into(),
+            ));
+        }
+        let reply = session.request(
+            request_id,
+            "skills/list",
+            serde_json::json!({ "cwds": [workspace] }),
+            self.timeout,
+        )?;
+        let available = reply
+            .get("skills")
+            .or_else(|| reply.pointer("/data/skills"))
+            .or_else(|| reply.pointer("/data/items"))
+            .or_else(|| reply.get("data"))
+            .or_else(|| reply.pointer("/result/skills"))
+            .unwrap_or(&reply)
+            .as_array()
+            .ok_or_else(|| {
+                CodexAdapterUnavailable::Protocol("skills/list did not return an array".into())
+            })?;
+        let mut flattened = Vec::new();
+        for item in available {
+            if let Some(skills) = item.get("skills").and_then(serde_json::Value::as_array) {
+                flattened.extend(skills.iter().cloned());
+            } else if let Some(skill) = item.get("skill") {
+                flattened.push(skill.clone());
+            } else {
+                flattened.push(item.clone());
+            }
+        }
+        Ok(flattened)
+    }
+
+    fn resolve_catalog_skills(
+        requested: &[String],
+        catalog: &[serde_json::Value],
+    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable> {
+        requested
+            .iter()
+            .map(|name| {
+                let matches = catalog
+                    .iter()
+                    .filter(|skill| {
+                        skill.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str())
+                    })
+                    .collect::<Vec<_>>();
+                if matches.len() != 1 {
+                    return Err(CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex catalog did not resolve {name} exactly once"
+                    )));
+                }
+                let path = matches[0]
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(Path::new)
+                    .ok_or_else(|| {
+                        CodexAdapterUnavailable::Protocol(format!(
+                            "native Codex skill {name} has no path"
+                        ))
+                    })?;
+                let metadata = fs::symlink_metadata(path).map_err(|error| {
+                    CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex skill {name} is unreadable: {error}"
+                    ))
+                })?;
+                if !path.is_absolute() || metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex skill {name} is not an absolute regular source"
+                    )));
+                }
+                let canonical = path.canonicalize().map_err(|error| {
+                    CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex skill {name} cannot be canonicalized: {error}"
+                    ))
+                })?;
+                if canonical != path {
+                    return Err(CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex skill {name} path is not canonical"
+                    )));
+                }
+                let source = fs::read(path).map_err(|error| {
+                    CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex skill {name} is unreadable: {error}"
+                    ))
+                })?;
+                Ok(NativeSkillSelection {
+                    skill_name: name.clone(),
+                    native_skill_path: path.to_string_lossy().into_owned(),
+                    native_skill_sha256: format!("{:x}", Sha256::digest(source)),
+                })
+            })
+            .collect()
+    }
+
+    fn bound_turn_params(
+        launch: &ComposedLaunch,
+        intent: &PromptDeliveryIntent,
+    ) -> serde_json::Value {
+        let mut input = intent
+            .native_skill_selection_vector
+            .iter()
+            .map(|skill| {
+                serde_json::json!({
+                    "type": "skill",
+                    "name": skill.skill_name,
+                    "path": skill.native_skill_path
+                })
+            })
+            .collect::<Vec<_>>();
+        input.push(serde_json::json!({
+            "type": "text",
+            "text": launch.first_prompt_payload.first_prompt_text,
+            "text_elements": []
+        }));
+        serde_json::json!({
+            "threadId": intent.native_session_id,
+            "effort": intent.effort,
+            "model": intent.model_name,
+            "input": input,
+            "turnTrigger": "flow-nexus"
+        })
+    }
+}
+
+impl ResolvesBoundCodexSkills for CodexAdapter {
+    fn resolve_bound_codex_skills(
+        &self,
+        launch: &ComposedLaunch,
+        binding: &NativeLaunchBinding,
+    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable> {
+        if launch.launch_profile.harness_kind != HarnessKind::Codex
+            || binding.harness_kind != HarnessKind::Codex
+            || binding.launch_request_id != launch.launch_profile.launch_request_id
+            || self.model != launch.launch_profile.model_name
+        {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "Codex skill resolution profile does not match its native binding".into(),
+            ));
+        }
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            self.require_empty_bound_thread(&mut session, 2, &binding.native_session_id)?;
+            let catalog = self.native_skill_catalog(&mut session, 3)?;
+            Self::resolve_catalog_skills(&launch.launch_profile.skill_name_vector, &catalog)
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+
+impl SubmitsBoundCodexFirstTurn for CodexAdapter {
+    fn submit_bound_codex_first_turn(
+        &self,
+        launch: &ComposedLaunch,
+        intent: &PromptDeliveryIntent,
+    ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable> {
+        if launch.launch_profile.harness_kind != HarnessKind::Codex
+            || intent.harness_kind != HarnessKind::Codex
+            || intent.launch_request_id != launch.launch_profile.launch_request_id
+            || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
+            || intent.model_name != launch.launch_profile.model_name
+            || intent.effort != launch.launch_profile.effort
+            || self.model != intent.model_name
+        {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "Codex first-turn intent does not match the composed launch".into(),
+            ));
+        }
+        let expected_names = intent
+            .native_skill_selection_vector
+            .iter()
+            .map(|skill| skill.skill_name.as_str())
+            .collect::<Vec<_>>();
+        if expected_names
+            != launch
+                .launch_profile
+                .skill_name_vector
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "Codex first-turn skill order differs from the launch profile".into(),
+            ));
+        }
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            self.require_empty_bound_thread(&mut session, 2, &intent.native_session_id)?;
+            let catalog = self.native_skill_catalog(&mut session, 3)?;
+            let selected =
+                Self::resolve_catalog_skills(&launch.launch_profile.skill_name_vector, &catalog)?;
+            if selected != intent.native_skill_selection_vector {
+                return Err(CodexAdapterUnavailable::Protocol(
+                    "native Codex skill selection changed after durable intent".into(),
+                ));
+            }
+            session.request(
+                4,
+                "turn/start",
+                Self::bound_turn_params(launch, intent),
+                self.timeout,
+            )?;
+            Ok(PromptDeliveryResult::Ambiguous(intent.clone()))
+        })();
+        session.stop_proxy();
+        result
     }
 }
 

@@ -20,6 +20,8 @@ pub struct HerdrCli {
     flows_root: PathBuf,
     codex_transcript_root: PathBuf,
     claude_transcript_root: PathBuf,
+    /// Native Claude skill catalogs, highest-precedence first.
+    claude_skill_roots: Vec<PathBuf>,
 }
 
 impl Default for HerdrCli {
@@ -33,12 +35,22 @@ impl Default for HerdrCli {
         let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".claude"));
+        let flows_root = PathBuf::from("/home/li/primary/flows");
+        let workspace_root = flows_root
+            .parent()
+            .expect("default Flow root has a workspace parent")
+            .to_path_buf();
         Self {
             executable: PathBuf::from("herdr"),
             flow_id_executable: PathBuf::from("flow-id"),
-            flows_root: PathBuf::from("/home/li/primary/flows"),
+            flows_root,
             codex_transcript_root: codex_home.join("sessions"),
             claude_transcript_root: claude_home.join("projects"),
+            claude_skill_roots: vec![
+                PathBuf::from("/etc/claude-code/.claude/skills"),
+                claude_home.join("skills"),
+                workspace_root.join(".claude/skills"),
+            ],
         }
     }
 }
@@ -75,6 +87,7 @@ impl HerdrCli {
             flows_root,
             codex_transcript_root: fixture_root.join("codex"),
             claude_transcript_root: fixture_root.join("claude"),
+            claude_skill_roots: vec![fixture_root.join("claude-skills")],
         }
     }
 

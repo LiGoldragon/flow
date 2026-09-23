@@ -8,8 +8,8 @@
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
 use sha2::{Digest, Sha256};
 use signal_flow::{
-    ComposedLaunch, HarnessKind, HerdrPaneBinding, NativeLaunchBinding, NativeTargetReceipt,
-    NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor,
+    ComposedLaunch, HarnessKind, HerdrPaneBinding, NativeLaunchBinding, NativeSkillSelection,
+    NativeTargetReceipt, NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor,
     PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
 };
 use std::{
@@ -52,7 +52,18 @@ pub trait AcceptsLaunchRegistration {
         launch: &ComposedLaunch,
         binding: &NativeLaunchBinding,
         acknowledgement: &RegistrationAcknowledgement,
+        native_skill_selection_vector: Vec<NativeSkillSelection>,
     ) -> Result<PromptDeliveryIntent, String>;
+}
+
+/// Resolves Claude skills with its documented enterprise, personal, then
+/// project catalog precedence before any prompt can be durably authorized.
+pub trait ResolvesClaudeNativeSkills {
+    fn resolve_claude_native_skills(
+        &self,
+        launch: &ComposedLaunch,
+        binding: &NativeLaunchBinding,
+    ) -> Result<Vec<NativeSkillSelection>, String>;
 }
 
 /// Performs one prompt submission attempt per invocation. The caller must
@@ -136,6 +147,44 @@ impl HerdrCli {
         Ok(root)
     }
 
+    fn sha256_file(path: &Path) -> Result<String, String> {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("native skill source metadata failed: {error}"))?;
+        if !path.is_absolute() || metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("native skill source is not an absolute regular file".into());
+        }
+        let source = fs::read(path)
+            .map_err(|error| format!("native skill source is unreadable: {error}"))?;
+        Ok(format!("{:x}", Sha256::digest(source)))
+    }
+
+    fn validate_skill_selections(
+        launch: &ComposedLaunch,
+        selections: &[NativeSkillSelection],
+    ) -> Result<(), String> {
+        if selections
+            .iter()
+            .map(|selection| selection.skill_name.as_str())
+            .ne(launch
+                .launch_profile
+                .skill_name_vector
+                .iter()
+                .map(String::as_str))
+        {
+            return Err("native skill selection order differs from launch profile".into());
+        }
+        for selection in selections {
+            let path = Path::new(&selection.native_skill_path);
+            if Self::sha256_file(path)? != selection.native_skill_sha256 {
+                return Err(format!(
+                    "native skill source changed for {}",
+                    selection.skill_name
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn binding_matches_launch(
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
@@ -157,10 +206,13 @@ impl HerdrCli {
         if intent.launch_request_id != launch.launch_profile.launch_request_id
             || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
             || intent.harness_kind != launch.launch_profile.harness_kind
+            || intent.model_name != launch.launch_profile.model_name
+            || intent.effort != launch.launch_profile.effort
             || !Self::boundary_matches_intent(intent)
         {
             return Err("durable prompt intent does not belong to this composed launch".into());
         }
+        Self::validate_skill_selections(launch, &intent.native_skill_selection_vector)?;
         Ok(())
     }
 
@@ -559,6 +611,52 @@ impl HerdrCli {
 
         None
     }
+
+    fn skill_source(selection: &NativeSkillSelection) -> Result<String, String> {
+        let path = Path::new(&selection.native_skill_path);
+        if Self::sha256_file(path)? != selection.native_skill_sha256 {
+            return Err(format!(
+                "native skill source changed for {}",
+                selection.skill_name
+            ));
+        }
+        fs::read_to_string(path).map_err(|error| {
+            format!(
+                "native skill source is not UTF-8 for {}: {error}",
+                selection.skill_name
+            )
+        })
+    }
+
+    fn claude_skill_expansion(selection: &NativeSkillSelection) -> Result<String, String> {
+        let source = Self::skill_source(selection)?;
+        let body = if let Some(after_open) = source.strip_prefix("---\n") {
+            let closing = after_open.find("\n---\n").ok_or_else(|| {
+                format!(
+                    "native Claude skill {} has unterminated frontmatter",
+                    selection.skill_name
+                )
+            })?;
+            after_open[closing + "\n---\n".len()..].trim_start_matches('\n')
+        } else {
+            source.as_str()
+        };
+        let directory = Path::new(&selection.native_skill_path)
+            .parent()
+            .ok_or_else(|| "native Claude skill has no base directory".to_owned())?;
+        Ok(format!(
+            "Base directory for this skill: {}\n\n{body}",
+            directory.display()
+        ))
+    }
+
+    fn codex_skill_expansion(selection: &NativeSkillSelection) -> Result<String, String> {
+        let source = Self::skill_source(selection)?;
+        Ok(format!(
+            "<skill>\n<name>{}</name>\n<path>{}</path>\n{}\n</skill>",
+            selection.skill_name, selection.native_skill_path, source
+        ))
+    }
 }
 
 impl CreatesHerdrLaunchPane for HerdrCli {
@@ -724,12 +822,73 @@ impl ObservesNativeLaunchBinding for HerdrCli {
     }
 }
 
+impl ResolvesClaudeNativeSkills for HerdrCli {
+    fn resolve_claude_native_skills(
+        &self,
+        launch: &ComposedLaunch,
+        binding: &NativeLaunchBinding,
+    ) -> Result<Vec<NativeSkillSelection>, String> {
+        if launch.launch_profile.harness_kind != HarnessKind::Claude
+            || binding.harness_kind != HarnessKind::Claude
+            || binding.launch_request_id != launch.launch_profile.launch_request_id
+        {
+            return Err("Claude skill resolution does not match its native binding".into());
+        }
+        let mut roots = Vec::new();
+        for configured in &self.claude_skill_roots {
+            if !configured.exists() {
+                continue;
+            }
+            let canonical = configured.canonicalize().map_err(|error| {
+                format!("configured Claude skill catalog is unavailable: {error}")
+            })?;
+            if !canonical.is_dir() {
+                return Err("configured Claude skill catalog is not a directory".into());
+            }
+            roots.push(canonical);
+        }
+        launch
+            .launch_profile
+            .skill_name_vector
+            .iter()
+            .map(|name| {
+                let mut selected = None;
+                for root in &roots {
+                    let candidate = root.join(name).join("SKILL.md");
+                    if !candidate.exists() {
+                        continue;
+                    }
+                    let canonical = candidate.canonicalize().map_err(|error| {
+                        format!("native Claude skill {name} cannot be canonicalized: {error}")
+                    })?;
+                    if !canonical.starts_with(root) {
+                        return Err(format!(
+                            "native Claude skill {name} resolves outside its catalog"
+                        ));
+                    }
+                    selected = Some(canonical);
+                    break;
+                }
+                let path = selected.ok_or_else(|| {
+                    format!("required native Claude skill is unavailable: {name}")
+                })?;
+                Ok(NativeSkillSelection {
+                    skill_name: name.clone(),
+                    native_skill_sha256: Self::sha256_file(&path)?,
+                    native_skill_path: path.to_string_lossy().into_owned(),
+                })
+            })
+            .collect()
+    }
+}
+
 impl AcceptsLaunchRegistration for HerdrCli {
     fn accept_registration(
         &self,
         launch: &ComposedLaunch,
         binding: &NativeLaunchBinding,
         acknowledgement: &RegistrationAcknowledgement,
+        native_skill_selection_vector: Vec<NativeSkillSelection>,
     ) -> Result<PromptDeliveryIntent, String> {
         Self::binding_matches_launch(launch, &binding.herdr_pane_binding)?;
         if binding.harness_kind != launch.launch_profile.harness_kind
@@ -740,6 +899,7 @@ impl AcceptsLaunchRegistration for HerdrCli {
         {
             return Err("registration acknowledgement does not match native binding".into());
         }
+        Self::validate_skill_selections(launch, &native_skill_selection_vector)?;
         let native_transcript_boundary = self.capture_transcript_boundary(binding)?;
         Ok(PromptDeliveryIntent {
             launch_request_id: binding.launch_request_id.clone(),
@@ -748,6 +908,9 @@ impl AcceptsLaunchRegistration for HerdrCli {
             native_session_id: binding.native_session_id.clone(),
             herdr_pane_binding: binding.herdr_pane_binding.clone(),
             harness_kind: binding.harness_kind.clone(),
+            model_name: launch.launch_profile.model_name.clone(),
+            effort: launch.launch_profile.effort.clone(),
+            native_skill_selection_vector,
             native_transcript_boundary,
         })
     }
@@ -760,6 +923,9 @@ impl SubmitsFirstPromptOnce for HerdrCli {
         durable_intent: &PromptDeliveryIntent,
     ) -> Result<PromptDeliveryResult, String> {
         Self::prompt_intent_matches_launch(launch, durable_intent)?;
+        if durable_intent.harness_kind != HarnessKind::Claude {
+            return Err("Codex first turns require the bound native typed-skill controller".into());
+        }
         self.run_json(&[
             "--session".into(),
             durable_intent.herdr_pane_binding.herdr_session_name.clone(),
@@ -785,6 +951,11 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             return Ok(PromptDeliveryResult::Ambiguous(durable_intent.clone()));
         };
         let mut observed_turn = None;
+        let mut native_turn = None;
+        let mut input_verified = false;
+        let mut skill_index = 0_usize;
+        let mut pending_claude_tool = None;
+        let mut claude_tool_succeeded = false;
         let mut reader = BufReader::new(input);
         loop {
             let mut record = Vec::new();
@@ -800,12 +971,243 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             let Ok(row) = serde_json::from_slice::<serde_json::Value>(&record) else {
                 continue;
             };
-            match Self::assistant_receipt(&row, &durable_intent.native_session_id, &expected) {
-                Some(_) if observed_turn.is_some() => {
+            match durable_intent.harness_kind {
+                HarnessKind::Codex => {
+                    if row.get("type").and_then(serde_json::Value::as_str) == Some("turn_context") {
+                        let payload = row.get("payload").unwrap_or(&serde_json::Value::Null);
+                        if payload.get("model").and_then(serde_json::Value::as_str)
+                            != Some(durable_intent.model_name.as_str())
+                            || payload.get("effort").and_then(serde_json::Value::as_str)
+                                != Some(durable_intent.effort.as_str())
+                        {
+                            return Err("native Codex model or effort differs from intent".into());
+                        }
+                        native_turn = payload
+                            .get("turn_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                    }
+                    if row.get("type").and_then(serde_json::Value::as_str) == Some("event_msg")
+                        && row
+                            .pointer("/payload/thread_id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(durable_intent.native_session_id.as_str())
+                        && row
+                            .pointer("/payload/item/type")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("UserMessage")
+                    {
+                        let turn = row
+                            .pointer("/payload/turn_id")
+                            .and_then(serde_json::Value::as_str);
+                        let content = row
+                            .pointer("/payload/item/content")
+                            .and_then(serde_json::Value::as_array)
+                            .ok_or_else(|| {
+                                "native Codex first turn has no input vector".to_owned()
+                            })?;
+                        if turn != native_turn.as_deref()
+                            || content.len()
+                                != durable_intent.native_skill_selection_vector.len() + 1
+                        {
+                            return Err("native Codex first-turn input differs from intent".into());
+                        }
+                        for (got, want) in content
+                            .iter()
+                            .zip(&durable_intent.native_skill_selection_vector)
+                        {
+                            if got.get("type").and_then(serde_json::Value::as_str) != Some("skill")
+                                || got.get("name").and_then(serde_json::Value::as_str)
+                                    != Some(want.skill_name.as_str())
+                                || got.get("path").and_then(serde_json::Value::as_str)
+                                    != Some(want.native_skill_path.as_str())
+                            {
+                                return Err(
+                                    "native Codex typed skill input differs from intent".into()
+                                );
+                            }
+                        }
+                        if content.last().and_then(|value| value.get("type"))
+                            != Some(&serde_json::json!("text"))
+                        {
+                            return Err("native Codex first-turn text is absent".into());
+                        }
+                        input_verified = true;
+                    }
+                    if input_verified
+                        && row.get("type").and_then(serde_json::Value::as_str)
+                            == Some("response_item")
+                        && skill_index < durable_intent.native_skill_selection_vector.len()
+                    {
+                        let expected_expansion = Self::codex_skill_expansion(
+                            &durable_intent.native_skill_selection_vector[skill_index],
+                        )?;
+                        let matched = row
+                            .pointer("/payload/content")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|content| {
+                                content.iter().any(|item| {
+                                    item.get("text").and_then(serde_json::Value::as_str)
+                                        == Some(expected_expansion.as_str())
+                                })
+                            });
+                        if matched {
+                            skill_index += 1;
+                        }
+                    }
+                }
+                HarnessKind::Claude => {
+                    let exact_session = row
+                        .get("sessionId")
+                        .or_else(|| row.get("session_id"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some(durable_intent.native_session_id.as_str());
+                    if exact_session
+                        && row.get("type").and_then(serde_json::Value::as_str) == Some("assistant")
+                    {
+                        if let Some(contents) = row
+                            .pointer("/message/content")
+                            .and_then(serde_json::Value::as_array)
+                        {
+                            for content in contents {
+                                if content.get("type").and_then(serde_json::Value::as_str)
+                                    != Some("tool_use")
+                                    || content.get("name").and_then(serde_json::Value::as_str)
+                                        != Some("Skill")
+                                {
+                                    continue;
+                                }
+                                if pending_claude_tool.is_some()
+                                    || skill_index
+                                        >= durable_intent.native_skill_selection_vector.len()
+                                    || content
+                                        .pointer("/input/skill")
+                                        .and_then(serde_json::Value::as_str)
+                                        != Some(
+                                            durable_intent.native_skill_selection_vector
+                                                [skill_index]
+                                                .skill_name
+                                                .as_str(),
+                                        )
+                                {
+                                    return Err(
+                                        "native Claude Skill invocation order differs from intent"
+                                            .into(),
+                                    );
+                                }
+                                pending_claude_tool = content
+                                    .get("id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned);
+                                if pending_claude_tool.is_none() {
+                                    return Err("native Claude Skill invocation has no id".into());
+                                }
+                                claude_tool_succeeded = false;
+                            }
+                        }
+                    }
+                    if exact_session
+                        && row.get("type").and_then(serde_json::Value::as_str) == Some("user")
+                    {
+                        if let Some(tool_id) = pending_claude_tool.as_deref() {
+                            let matching_result = row
+                                .pointer("/message/content")
+                                .and_then(serde_json::Value::as_array)
+                                .and_then(|contents| {
+                                    contents.iter().find(|content| {
+                                        content.get("type").and_then(serde_json::Value::as_str)
+                                            == Some("tool_result")
+                                            && content
+                                                .get("tool_use_id")
+                                                .and_then(serde_json::Value::as_str)
+                                                == Some(tool_id)
+                                    })
+                                });
+                            if matching_result.is_some() {
+                                let expected_name = &durable_intent.native_skill_selection_vector
+                                    [skill_index]
+                                    .skill_name;
+                                if row.pointer("/toolUseResult/success")
+                                    != Some(&serde_json::Value::Bool(true))
+                                    || row
+                                        .pointer("/toolUseResult/commandName")
+                                        .and_then(serde_json::Value::as_str)
+                                        != Some(expected_name.as_str())
+                                {
+                                    return Err("native Claude Skill tool reported failure".into());
+                                }
+                                claude_tool_succeeded = true;
+                            }
+                        }
+                        if row.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true)
+                            && row
+                                .get("turnCompanion")
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true)
+                        {
+                            let tool_id = pending_claude_tool.as_deref().ok_or_else(|| {
+                                "native Claude skill expansion has no preceding Skill tool"
+                                    .to_owned()
+                            })?;
+                            if !claude_tool_succeeded
+                                || row
+                                    .get("sourceToolUseID")
+                                    .and_then(serde_json::Value::as_str)
+                                    != Some(tool_id)
+                            {
+                                return Err(
+                                    "native Claude skill expansion lacks a successful tool result"
+                                        .into(),
+                                );
+                            }
+                            let expected_expansion = Self::claude_skill_expansion(
+                                &durable_intent.native_skill_selection_vector[skill_index],
+                            )?;
+                            let contents = row
+                                .pointer("/message/content")
+                                .and_then(serde_json::Value::as_array)
+                                .ok_or_else(|| {
+                                    "native Claude skill expansion has no content".to_owned()
+                                })?;
+                            if contents.len() != 1
+                                || contents[0].get("text").and_then(serde_json::Value::as_str)
+                                    != Some(expected_expansion.as_str())
+                            {
+                                return Err(
+                                    "native Claude expanded skill source differs from selection"
+                                        .into(),
+                                );
+                            }
+                            skill_index += 1;
+                            pending_claude_tool = None;
+                            claude_tool_succeeded = false;
+                        }
+                    }
+                }
+            }
+            if let Some(turn) =
+                Self::assistant_receipt(&row, &durable_intent.native_session_id, &expected)
+            {
+                if observed_turn.is_some() {
                     return Err("native transcript contains duplicate target receipts".into());
                 }
-                Some(turn) => observed_turn = Some(turn),
-                None => {}
+                if skill_index != durable_intent.native_skill_selection_vector.len()
+                    || matches!(durable_intent.harness_kind, HarnessKind::Codex)
+                        && (!input_verified || native_turn.as_deref() != Some(turn.as_str()))
+                {
+                    return Err("target receipt preceded native skill confirmation".into());
+                }
+                if matches!(durable_intent.harness_kind, HarnessKind::Claude)
+                    && (row
+                        .pointer("/message/model")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(durable_intent.model_name.as_str())
+                        || row.get("effort").and_then(serde_json::Value::as_str)
+                            != Some(durable_intent.effort.as_str()))
+                {
+                    return Err("native Claude model or effort differs from intent".into());
+                }
+                observed_turn = Some(turn);
             }
         }
         let Some(native_turn_id) = observed_turn else {
@@ -835,6 +1237,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             native_session_id: durable_intent.native_session_id.clone(),
             native_turn_id,
             receipt_sha256,
+            model_name: durable_intent.model_name.clone(),
+            effort: durable_intent.effort.clone(),
+            native_skill_selection_vector: durable_intent.native_skill_selection_vector.clone(),
         }))
     }
 }

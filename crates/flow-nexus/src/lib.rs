@@ -27,7 +27,7 @@ use std::{
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
+    OpensFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
     RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement,
     RecordsRestartedFlow, RegistersFlowIdentity, ReservesLaunchAttempt,
 };
@@ -49,6 +49,61 @@ impl Dispatches for RunningNexus {
         match query {
             Query::Start(request) => {
                 let origin = request.origin_clue.clone();
+                let launch_request_id = request.launch_profile.launch_request_id.clone();
+                let existing = match self.store.launch_attempt(&launch_request_id) {
+                    Ok(existing) => existing,
+                    Err(_) => {
+                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                    }
+                };
+                if let Some(attempt) = existing {
+                    if attempt.launch_profile != request.launch_profile
+                        || attempt.origin_clue != origin
+                    {
+                        return Response::StartRejected(StartRejection::LaunchRequestConflict);
+                    }
+                    if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
+                        return Response::LaunchPending(attempt);
+                    }
+                    let (Some(intent), Some(binding)) = (
+                        attempt.prompt_delivery_intent_option,
+                        attempt.native_launch_binding_option,
+                    ) else {
+                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                    };
+                    let observed = self
+                        .herdr
+                        .observe_native_target_receipt(&intent)
+                        .unwrap_or_else(|_| PromptDeliveryResult::Ambiguous(intent.clone()));
+                    let receipt = match observed {
+                        PromptDeliveryResult::Observed(receipt) => receipt,
+                        PromptDeliveryResult::Ambiguous(updated) => {
+                            if updated != intent
+                                && !self
+                                    .store
+                                    .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
+                                        updated.clone(),
+                                    ))
+                                    .unwrap_or(false)
+                            {
+                                return Response::StartRejected(
+                                    StartRejection::LaunchPersistenceRefused,
+                                );
+                            }
+                            return Response::StartAmbiguous(updated);
+                        }
+                    };
+                    if !self
+                        .store
+                        .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt))
+                        .unwrap_or(false)
+                    {
+                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                    }
+                    return self.store.confirm_started(&binding.flow_id).unwrap_or(
+                        Response::StartRejected(StartRejection::LaunchPersistenceRefused),
+                    );
+                }
                 let launch = match self.composer.compose(&request.launch_profile) {
                     Ok(launch) => launch,
                     Err(_) => return Response::StartRejected(StartRejection::CompositionRefused),
@@ -56,51 +111,7 @@ impl Dispatches for RunningNexus {
                 match self.store.reserve_launch_attempt(&launch, origin.clone()) {
                     Ok(LaunchAttemptReservation::Reserved(_)) => {}
                     Ok(LaunchAttemptReservation::Existing(attempt)) => {
-                        if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
-                            return Response::LaunchPending(attempt);
-                        }
-                        let (Some(intent), Some(binding)) = (
-                            attempt.prompt_delivery_intent_option,
-                            attempt.native_launch_binding_option,
-                        ) else {
-                            return Response::StartRejected(
-                                StartRejection::LaunchPersistenceRefused,
-                            );
-                        };
-                        let observed = self
-                            .herdr
-                            .observe_native_target_receipt(&intent)
-                            .unwrap_or_else(|_| PromptDeliveryResult::Ambiguous(intent.clone()));
-                        let receipt = match observed {
-                            PromptDeliveryResult::Observed(receipt) => receipt,
-                            PromptDeliveryResult::Ambiguous(updated) => {
-                                if updated != intent
-                                    && !self
-                                        .store
-                                        .record_prompt_delivery_result(
-                                            PromptDeliveryResult::Ambiguous(updated.clone()),
-                                        )
-                                        .unwrap_or(false)
-                                {
-                                    return Response::StartRejected(
-                                        StartRejection::LaunchPersistenceRefused,
-                                    );
-                                }
-                                return Response::StartAmbiguous(updated);
-                            }
-                        };
-                        if !self
-                            .store
-                            .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt))
-                            .unwrap_or(false)
-                        {
-                            return Response::StartRejected(
-                                StartRejection::LaunchPersistenceRefused,
-                            );
-                        }
-                        return self.store.confirm_started(&binding.flow_id).unwrap_or(
-                            Response::StartRejected(StartRejection::LaunchPersistenceRefused),
-                        );
+                        return Response::LaunchPending(attempt);
                     }
                     Ok(LaunchAttemptReservation::Conflict) => {
                         return Response::StartRejected(StartRejection::LaunchRequestConflict);
@@ -113,6 +124,9 @@ impl Dispatches for RunningNexus {
                     launch_request_id: launch.launch_profile.launch_request_id.clone(),
                     prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
                     harness_kind: launch.launch_profile.harness_kind.clone(),
+                    model_name: launch.launch_profile.model_name.clone(),
+                    effort: launch.launch_profile.effort.clone(),
+                    skill_name_vector: launch.launch_profile.skill_name_vector.clone(),
                 };
                 if !self
                     .store

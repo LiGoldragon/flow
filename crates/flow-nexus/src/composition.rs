@@ -229,7 +229,7 @@ impl RendersLaunchProfile for LaunchComposer {
             .join(", ");
 
         let mut body = format!(
-            "# Flow launch\n\nLaunch request: {}\nRole: {} {}\nHarness: {}\nModel: {}\nEffort: {}\nPredecessor: {}\nRemembered flows: {}\nHerdr session: {}\nLoadable skills: {}\n\n{}",
+            "# Flow launch\n\nLaunch request: {}\nRole: {} {}\nHarness: {}\nModel: {}\nEffort: {}\nPredecessor: {}\nRemembered flows: {}\nHerdr session: {}\nLoadable skills, in required native-load order: {}\n\nBefore replying, load every named skill through the harness native skill interface in exactly this order. Do not paste skill bodies into the prompt. Emit the requested launch receipt only after every native skill load succeeds.\n\n{}",
             profile.launch_request_id,
             aspect,
             power,

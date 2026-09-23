@@ -497,6 +497,7 @@ impl ReservesLaunchAttempt for FlowStore {
         if let Some(existing) = self.stored_launch_attempt(&launch_request_id)? {
             return Ok(
                 if existing.attempt.prompt_sha256 == prompt_sha256
+                    && existing.attempt.launch_profile == launch.launch_profile
                     && existing.attempt.origin_clue == origin
                 {
                     LaunchAttemptReservation::Existing(existing.attempt)
@@ -507,6 +508,7 @@ impl ReservesLaunchAttempt for FlowStore {
         }
         let attempt = LaunchAttempt {
             launch_request_id,
+            launch_profile: launch.launch_profile.clone(),
             prompt_sha256,
             origin_clue: origin,
             launch_attempt_phase: LaunchAttemptPhase::Reserved,
@@ -533,6 +535,10 @@ impl RecordsNativeLaunchIntent for FlowStore {
         };
         if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::Reserved
             || stored.attempt.prompt_sha256 != intent.prompt_sha256
+            || stored.attempt.launch_profile.harness_kind != intent.harness_kind
+            || stored.attempt.launch_profile.model_name != intent.model_name
+            || stored.attempt.launch_profile.effort != intent.effort
+            || stored.attempt.launch_profile.skill_name_vector != intent.skill_name_vector
             || stored.attempt.native_launch_intent_option.is_some()
         {
             return Ok(false);
@@ -613,6 +619,25 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         let Some(binding) = stored.attempt.native_launch_binding_option.as_ref() else {
             return Ok(false);
         };
+        let Some(native_intent) = stored.attempt.native_launch_intent_option.as_ref() else {
+            return Ok(false);
+        };
+        let valid_skills = intent
+            .native_skill_selection_vector
+            .iter()
+            .map(|selection| selection.skill_name.as_str())
+            .eq(native_intent.skill_name_vector.iter().map(String::as_str))
+            && intent
+                .native_skill_selection_vector
+                .iter()
+                .all(|selection| {
+                    !selection.native_skill_path.is_empty()
+                        && selection.native_skill_sha256.len() == 64
+                        && selection
+                            .native_skill_sha256
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                });
         let valid_boundary = match &intent.native_transcript_boundary {
             signal_flow::NativeTranscriptBoundary::Existing(cursor) => {
                 cursor.native_session_id == intent.native_session_id
@@ -655,6 +680,9 @@ impl RecordsPromptDeliveryIntent for FlowStore {
             || intent.flow_id != acknowledgement.flow_id
             || intent.native_session_id != acknowledgement.native_session_id
             || intent.harness_kind != binding.harness_kind
+            || intent.model_name != native_intent.model_name
+            || intent.effort != native_intent.effort
+            || !valid_skills
             || intent.herdr_pane_binding != acknowledgement.herdr_pane_binding
             || !valid_boundary
             || stored.attempt.prompt_delivery_intent_option.is_some()
@@ -709,6 +737,10 @@ impl RecordsPromptDeliveryResult for FlowStore {
                         && previous.flow_id == updated.flow_id
                         && previous.native_session_id == updated.native_session_id
                         && previous.harness_kind == updated.harness_kind
+                        && previous.model_name == updated.model_name
+                        && previous.effort == updated.effort
+                        && previous.native_skill_selection_vector
+                            == updated.native_skill_selection_vector
                         && previous.herdr_pane_binding == updated.herdr_pane_binding
                         && matches!(
                         (&previous.native_transcript_boundary, &updated.native_transcript_boundary),
@@ -746,7 +778,11 @@ impl RecordsPromptDeliveryResult for FlowStore {
                 if receipt.launch_request_id == intent.launch_request_id
                     && receipt.prompt_sha256 == intent.prompt_sha256
                     && receipt.flow_id == intent.flow_id
-                    && receipt.native_session_id == intent.native_session_id =>
+                    && receipt.native_session_id == intent.native_session_id
+                    && receipt.model_name == intent.model_name
+                    && receipt.effort == intent.effort
+                    && receipt.native_skill_selection_vector
+                        == intent.native_skill_selection_vector =>
             {
                 LaunchAttemptPhase::PromptObserved
             }
@@ -1099,6 +1135,9 @@ mod tests {
             launch_request_id: "request-once".into(),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
             harness_kind: HarnessKind::Codex,
+            model_name: launch.launch_profile.model_name.clone(),
+            effort: launch.launch_profile.effort.clone(),
+            skill_name_vector: launch.launch_profile.skill_name_vector.clone(),
         };
         assert!(
             store
@@ -1117,6 +1156,14 @@ mod tests {
             LaunchAttemptReservation::Existing(attempt)
                 if attempt.launch_attempt_phase == LaunchAttemptPhase::NativeLaunchIntentRecorded
         ));
+        let mut changed_profile = launch.clone();
+        changed_profile.launch_profile.effort = "high".into();
+        assert_eq!(
+            store
+                .reserve_launch_attempt(&changed_profile, origin.clone())
+                .expect("changed profile evaluates before external work"),
+            LaunchAttemptReservation::Conflict
+        );
         let changed = fixture.composed_launch(
             "request-once",
             "2222222222222222222222222222222222222222222222222222222222222222",
@@ -1133,10 +1180,11 @@ mod tests {
     fn prompt_intent_requires_exact_registration_and_authenticated_pre_send_boundary() {
         let fixture = StoreFixture::new();
         let store = fixture.store();
-        let launch = fixture.composed_launch(
+        let mut launch = fixture.composed_launch(
             "request-boundary",
             "3333333333333333333333333333333333333333333333333333333333333333",
         );
+        launch.launch_profile.harness_kind = HarnessKind::Claude;
         store
             .reserve_launch_attempt(&launch, fixture.origin())
             .expect("reservation persists");
@@ -1146,6 +1194,9 @@ mod tests {
                     launch_request_id: "request-boundary".into(),
                     prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
                     harness_kind: HarnessKind::Claude,
+                    model_name: launch.launch_profile.model_name.clone(),
+                    effort: launch.launch_profile.effort.clone(),
+                    skill_name_vector: launch.launch_profile.skill_name_vector.clone(),
                 })
                 .unwrap()
         );
@@ -1174,6 +1225,9 @@ mod tests {
             flow_id: "native-flow".into(),
             native_session_id: "native-session".into(),
             harness_kind: HarnessKind::Claude,
+            model_name: launch.launch_profile.model_name.clone(),
+            effort: launch.launch_profile.effort.clone(),
+            native_skill_selection_vector: Vec::new(),
             herdr_pane_binding: pane,
             native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
                 native_session_id: "different-session".into(),
@@ -1256,6 +1310,10 @@ mod tests {
                         receipt_sha256:
                             "4444444444444444444444444444444444444444444444444444444444444444"
                                 .into(),
+                        model_name: cursor_intent.model_name,
+                        effort: cursor_intent.effort,
+                        native_skill_selection_vector: cursor_intent
+                            .native_skill_selection_vector,
                     }
                 ))
                 .expect("authentic receipt promotes ambiguity")

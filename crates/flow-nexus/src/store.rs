@@ -631,7 +631,7 @@ impl RecordsPromptDeliveryIntent for FlowStore {
                 .native_skill_selection_vector
                 .iter()
                 .all(|selection| {
-                    !selection.native_skill_path.is_empty()
+                    Path::new(&selection.native_skill_path).is_absolute()
                         && selection.native_skill_sha256.len() == 64
                         && selection
                             .native_skill_sha256
@@ -779,6 +779,12 @@ impl RecordsPromptDeliveryResult for FlowStore {
                     && receipt.prompt_sha256 == intent.prompt_sha256
                     && receipt.flow_id == intent.flow_id
                     && receipt.native_session_id == intent.native_session_id
+                    && !receipt.native_turn_id.is_empty()
+                    && receipt.receipt_sha256.len() == 64
+                    && receipt
+                        .receipt_sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                     && receipt.model_name == intent.model_name
                     && receipt.effort == intent.effort
                     && receipt.native_skill_selection_vector
@@ -1319,6 +1325,27 @@ mod tests {
                 .expect("advanced boundary recovers")
                 .prompt_delivery_intent_option,
             Some(cursor_intent.clone())
+        );
+        assert!(
+            !reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Observed(
+                    NativeTargetReceipt {
+                        launch_request_id: cursor_intent.launch_request_id.clone(),
+                        prompt_sha256: cursor_intent.prompt_sha256.clone(),
+                        flow_id: cursor_intent.flow_id.clone(),
+                        native_session_id: cursor_intent.native_session_id.clone(),
+                        native_turn_id: "native-turn".into(),
+                        receipt_sha256:
+                            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                                .into(),
+                        model_name: cursor_intent.model_name.clone(),
+                        effort: cursor_intent.effort.clone(),
+                        native_skill_selection_vector: cursor_intent
+                            .native_skill_selection_vector
+                            .clone(),
+                    }
+                ))
+                .expect("caller-shaped receipt is validated before promotion")
         );
         assert!(
             reopened

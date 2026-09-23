@@ -5,14 +5,18 @@ pub mod composition;
 pub mod herdr;
 pub mod store;
 
-use codex::{CodexAdapter, ConsumesResetCredit, ResumesCodex};
+use codex::{
+    CodexAdapter, ConsumesResetCredit, ResolvesBoundCodexSkills, ResumesCodex,
+    SubmitsBoundCodexFirstTurn,
+};
 use composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer};
 use herdr::launch::{
     AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
-    ObservesNativeTargetReceipt, StartsNativeHerdrHarness, SubmitsFirstPromptOnce,
+    ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
+    SubmitsFirstPromptOnce,
 };
 use signal_flow::{
-    EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection,
+    EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
     LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchIntent, PromptDeliveryResult, Query,
     RegistrationAcknowledgement, Response, RestartRejection, StartRejection,
 };
@@ -201,16 +205,30 @@ impl Dispatches for RunningNexus {
                 {
                     return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
                 }
-                let delivery_intent =
-                    match self
+                let native_skill_selection_vector = match launch.launch_profile.harness_kind {
+                    HarnessKind::Codex => self
+                        .codex
+                        .resolve_bound_codex_skills(&launch, &binding)
+                        .map_err(|_| ()),
+                    HarnessKind::Claude => self
                         .herdr
-                        .accept_registration(&launch, &binding, &acknowledgement)
-                    {
-                        Ok(intent) => intent,
-                        Err(_) => {
-                            return Response::StartRejected(StartRejection::RegistrationRefused);
-                        }
-                    };
+                        .resolve_claude_native_skills(&launch, &binding)
+                        .map_err(|_| ()),
+                };
+                let Ok(native_skill_selection_vector) = native_skill_selection_vector else {
+                    return Response::StartRejected(StartRejection::RegistrationRefused);
+                };
+                let delivery_intent = match self.herdr.accept_registration(
+                    &launch,
+                    &binding,
+                    &acknowledgement,
+                    native_skill_selection_vector,
+                ) {
+                    Ok(intent) => intent,
+                    Err(_) => {
+                        return Response::StartRejected(StartRejection::RegistrationRefused);
+                    }
+                };
                 if !self
                     .store
                     .record_prompt_delivery_intent(delivery_intent.clone())
@@ -218,10 +236,17 @@ impl Dispatches for RunningNexus {
                 {
                     return Response::StartRejected(StartRejection::IntentPersistenceRefused);
                 }
-                let initial = match self
-                    .herdr
-                    .submit_first_prompt_once(&launch, &delivery_intent)
-                {
+                let submission = match launch.launch_profile.harness_kind {
+                    HarnessKind::Codex => self
+                        .codex
+                        .submit_bound_codex_first_turn(&launch, &delivery_intent)
+                        .map_err(|_| ()),
+                    HarnessKind::Claude => self
+                        .herdr
+                        .submit_first_prompt_once(&launch, &delivery_intent)
+                        .map_err(|_| ()),
+                };
+                let initial = match submission {
                     Ok(result) => result,
                     Err(_) => PromptDeliveryResult::Ambiguous(delivery_intent.clone()),
                 };
@@ -385,6 +410,7 @@ impl OpensRunningNexus for RunningNexus {
                 socket,
                 model,
                 timeout,
+                workspace_root: source_root.clone(),
             },
             herdr: herdr::HerdrCli::default(),
             composer: LaunchComposer::at(source_root),
@@ -490,15 +516,27 @@ mod tests {
         codex::CodexAdapter,
         composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
-        store::{FlowStore, OpensFlowStore, ReservesLaunchAttempt},
+        store::{
+            FlowStore, OpensFlowStore, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
+            RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+            RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
+        },
     };
     use sha2::{Digest, Sha256};
     use signal_flow::{
-        EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
-        HerdrRouteSelection, LaunchProfile, LaunchSource, OriginClue, PowerLevel, Query, Response,
-        StartRejection, StartRequest,
+        EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding,
+        HerdrRoute, HerdrRouteSelection, LaunchProfile, LaunchSource, NativeLaunchBinding,
+        NativeLaunchIntent, NativeTranscriptAbsence, NativeTranscriptBoundary, OriginClue,
+        PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
+        Response, StartRejection, StartRequest,
     };
-    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+    use std::{
+        fs,
+        io::Write,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        path::PathBuf,
+        time::Duration,
+    };
 
     struct NexusFixture {
         directory: tempfile::TempDir,
@@ -527,6 +565,7 @@ mod tests {
                     socket: "unused".into(),
                     model: "unused".into(),
                     timeout: Duration::from_secs(1),
+                    workspace_root: directory.path().to_path_buf(),
                 },
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root),
                 composer: LaunchComposer::at(directory.path().to_path_buf()),
@@ -684,6 +723,159 @@ mod tests {
             })),
             Response::StartRejected(StartRejection::LaunchRequestConflict)
         );
+        assert!(!fixture.snapshot_program.exists());
+    }
+
+    #[test]
+    fn delayed_receipt_after_source_deletion_promotes_without_a_second_external_write() {
+        let fixture = NexusFixture::new();
+        let source_path = fixture.directory.path().join("delayed-source.md");
+        fs::write(&source_path, b"delayed exact bytes\n").expect("fixture source");
+        let profile = LaunchProfile {
+            launch_request_id: "delayed-request".into(),
+            launch_source_vector: vec![LaunchSource {
+                source_path: "delayed-source.md".into(),
+                source_sha256: format!("{:x}", Sha256::digest(b"delayed exact bytes\n")),
+            }],
+            skill_name_vector: Vec::new(),
+            flow_aspect: FlowAspect::Field,
+            power_level: PowerLevel::High,
+            harness_kind: HarnessKind::Codex,
+            model_name: "fixture-model".into(),
+            effort: "medium".into(),
+            flow_id_option: None,
+            remembered_flow_vector: Vec::new(),
+            herdr_session_name: "fixture-session".into(),
+            instruction_prompt: "fixture instruction".into(),
+        };
+        let origin = OriginClue {
+            flow_id: "caller".into(),
+            session_id: "caller-session".into(),
+            turn_id: "caller-turn".into(),
+        };
+        let composed = fixture.nexus.composer.compose(&profile).unwrap();
+        fixture
+            .nexus
+            .store
+            .reserve_launch_attempt(&composed, origin.clone())
+            .unwrap();
+        fixture
+            .nexus
+            .store
+            .record_native_launch_intent(NativeLaunchIntent {
+                launch_request_id: profile.launch_request_id.clone(),
+                prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: HarnessKind::Codex,
+                model_name: profile.model_name.clone(),
+                effort: profile.effort.clone(),
+                skill_name_vector: Vec::new(),
+            })
+            .unwrap();
+        let native_session_id = "01a0b22c-e24f-7452-9940-64490878680f";
+        let pane = HerdrPaneBinding {
+            launch_request_id: profile.launch_request_id.clone(),
+            herdr_session_name: profile.herdr_session_name.clone(),
+            herdr_agent_name: "fixture-agent".into(),
+            herdr_workspace_id: "fixture-workspace".into(),
+            herdr_pane_id: "w1:p1".into(),
+            herdr_terminal_id: "fixture-terminal".into(),
+        };
+        let binding = NativeLaunchBinding {
+            launch_request_id: profile.launch_request_id.clone(),
+            flow_id: "908786".into(),
+            native_session_id: native_session_id.into(),
+            harness_kind: HarnessKind::Codex,
+            herdr_pane_binding: pane.clone(),
+        };
+        fixture
+            .nexus
+            .store
+            .record_native_launch_binding(binding.clone())
+            .unwrap();
+        fixture
+            .nexus
+            .store
+            .register_flow(FlowNode {
+                flow_id: binding.flow_id.clone(),
+                session_id: binding.native_session_id.clone(),
+                harness_kind: HarnessKind::Codex,
+                endpoint_selection: EndpointSelection::Unavailable,
+                herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                    herdr_session_name: pane.herdr_session_name.clone(),
+                    herdr_agent_name: pane.herdr_agent_name.clone(),
+                    herdr_pane_id: pane.herdr_pane_id.clone(),
+                    herdr_terminal_id: pane.herdr_terminal_id.clone(),
+                }),
+                origin_clue: origin.clone(),
+                flow_lifecycle: FlowLifecycle::Pending,
+            })
+            .unwrap();
+        let acknowledgement = RegistrationAcknowledgement {
+            launch_request_id: profile.launch_request_id.clone(),
+            flow_id: binding.flow_id.clone(),
+            native_session_id: binding.native_session_id.clone(),
+            herdr_pane_binding: pane.clone(),
+        };
+        fixture
+            .nexus
+            .store
+            .record_registration_acknowledgement(acknowledgement)
+            .unwrap();
+        let transcript_root = fixture.directory.path().join("native-transcripts/codex");
+        fs::create_dir_all(&transcript_root).unwrap();
+        let root_metadata = fs::metadata(&transcript_root).unwrap();
+        let intent = PromptDeliveryIntent {
+            launch_request_id: profile.launch_request_id.clone(),
+            prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+            flow_id: binding.flow_id.clone(),
+            native_session_id: binding.native_session_id.clone(),
+            harness_kind: HarnessKind::Codex,
+            model_name: profile.model_name.clone(),
+            effort: profile.effort.clone(),
+            native_skill_selection_vector: Vec::new(),
+            herdr_pane_binding: pane,
+            native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
+                native_session_id: binding.native_session_id.clone(),
+                harness_kind: HarnessKind::Codex,
+                transcript_root_device: root_metadata.dev().to_string(),
+                transcript_root_inode: root_metadata.ino().to_string(),
+            }),
+        };
+        fixture
+            .nexus
+            .store
+            .record_prompt_delivery_intent(intent.clone())
+            .unwrap();
+        fixture
+            .nexus
+            .store
+            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(intent.clone()))
+            .unwrap();
+        fs::remove_file(source_path).unwrap();
+
+        let marker = format!(
+            "FLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
+            intent.launch_request_id, intent.prompt_sha256
+        );
+        let transcript = transcript_root.join(format!("rollout-{native_session_id}.jsonl"));
+        let mut output = fs::File::create(transcript).unwrap();
+        for row in [
+            serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-delayed"}}),
+            serde_json::json!({"type":"event_msg","payload":{"thread_id":native_session_id,"turn_id":"turn-delayed","item":{"type":"UserMessage","content":[{"type":"text","text":composed.first_prompt_payload.first_prompt_text}]}}}),
+            serde_json::json!({"type":"event_msg","payload":{"thread_id":native_session_id,"turn_id":"turn-delayed","item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}}),
+        ] {
+            writeln!(output, "{row}").unwrap();
+        }
+        output.sync_all().unwrap();
+
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::Start(StartRequest {
+                launch_profile: profile,
+                origin_clue: origin,
+            })),
+            Response::Started(started)
+                if started.flow_id == "908786" && started.session_id == native_session_id
+        ));
         assert!(!fixture.snapshot_program.exists());
     }
 

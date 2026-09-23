@@ -53,8 +53,9 @@ pub trait AcceptsLaunchRegistration {
     ) -> Result<PromptDeliveryIntent, String>;
 }
 
-/// Submits the first prompt once. A successful Herdr write remains ambiguous
-/// until the native transcript independently contains the requested receipt.
+/// Performs one prompt submission attempt per invocation. The caller must
+/// durably gate invocation; a successful Herdr write remains ambiguous until
+/// the native transcript independently contains the requested receipt.
 pub trait SubmitsFirstPromptOnce {
     fn submit_first_prompt_once(
         &self,

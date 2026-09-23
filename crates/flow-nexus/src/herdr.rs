@@ -1,5 +1,7 @@
 //! Herdr roster validation for durable Flow routes.
 
+pub mod launch;
+
 use std::{fs, path::PathBuf, process::Command};
 
 use signal_flow::{
@@ -182,6 +184,7 @@ impl VerifiesFlowClaim for HerdrCli {
 
 struct FlowClaim {
     harness_kind: HarnessKind,
+    identity: String,
     alias: String,
 }
 
@@ -230,6 +233,7 @@ impl DecodesFlowClaim for FlowClaim {
         }
         Some(Self {
             harness_kind,
+            identity,
             alias,
         })
     }

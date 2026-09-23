@@ -39,7 +39,6 @@ pub trait ObservesNativeLaunchBinding {
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
-        claimed_flow_id: &str,
     ) -> Result<NativeLaunchBinding, String>;
 }
 
@@ -54,8 +53,9 @@ pub trait AcceptsLaunchRegistration {
     ) -> Result<PromptDeliveryIntent, String>;
 }
 
-/// Submits the first prompt once. A successful Herdr write remains ambiguous
-/// until the native transcript independently contains the requested receipt.
+/// Performs one prompt submission attempt per invocation. The caller must
+/// durably gate invocation; a successful Herdr write remains ambiguous until
+/// the native transcript independently contains the requested receipt.
 pub trait SubmitsFirstPromptOnce {
     fn submit_first_prompt_once(
         &self,
@@ -70,7 +70,6 @@ pub trait ObservesNativeTargetReceipt {
     fn observe_native_target_receipt(
         &self,
         durable_intent: &PromptDeliveryIntent,
-        transcript: &Path,
     ) -> Result<PromptDeliveryResult, String>;
 }
 
@@ -113,6 +112,23 @@ impl HerdrCli {
             Self::expected_harness(&launch.launch_profile.harness_kind),
             &hash[..24]
         )
+    }
+
+    fn configured_workspace_root(&self) -> Result<&Path, String> {
+        if !self.flows_root.is_absolute()
+            || self.flows_root.file_name().and_then(|name| name.to_str()) != Some("flows")
+        {
+            return Err("configured Flow root must be an absolute directory named flows".into());
+        }
+        let root = self
+            .flows_root
+            .parent()
+            .filter(|root| *root != Path::new("/"))
+            .ok_or_else(|| "configured Flow root has no bounded workspace parent".to_owned())?;
+        if !root.is_dir() {
+            return Err("configured workspace root is not a directory".into());
+        }
+        Ok(root)
     }
 
     fn binding_matches_launch(
@@ -160,6 +176,176 @@ impl HerdrCli {
             return Err("native identity claim does not match flow or harness".into());
         }
         Ok(claim.identity)
+    }
+
+    fn claim_flow_identity(
+        &self,
+        harness: &HarnessKind,
+        native_session_id: &str,
+    ) -> Result<String, String> {
+        let harness_name = Self::expected_harness(harness);
+        let mut command = Command::new(&self.flow_id_executable);
+        command
+            .arg(harness_name)
+            .arg("--flows-root")
+            .arg(&self.flows_root);
+        match harness {
+            HarnessKind::Codex => {
+                command.env("CODEX_SESSION_ID", native_session_id);
+            }
+            HarnessKind::Claude => {
+                command.arg("--parent-session").arg(native_session_id);
+            }
+        }
+        let output = command
+            .output()
+            .map_err(|error| format!("flow-id claim helper could not start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "flow-id claim helper refused the native identity: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let flow_id = String::from_utf8(output.stdout)
+            .map_err(|_| "flow-id claim helper returned non-UTF-8 output".to_owned())?;
+        let flow_id = flow_id.trim_end_matches(['\r', '\n']);
+        if flow_id.is_empty()
+            || flow_id.contains(char::is_whitespace)
+            || !flow_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err("flow-id claim helper returned an invalid alias".into());
+        }
+        Ok(flow_id.into())
+    }
+
+    fn native_harness_for_intent(
+        &self,
+        intent: &PromptDeliveryIntent,
+    ) -> Result<HarnessKind, String> {
+        let pane = &intent.herdr_pane_binding;
+        let response = self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "agent".into(),
+            "get".into(),
+            pane.herdr_agent_name.clone(),
+        ])?;
+        let agent = response
+            .pointer("/result/agent")
+            .ok_or_else(|| "Herdr agent get returned no receipt target".to_owned())?;
+        if agent.get("name").and_then(serde_json::Value::as_str)
+            != Some(pane.herdr_agent_name.as_str())
+            || agent
+                .get("workspace_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(pane.herdr_workspace_id.as_str())
+            || agent.get("pane_id").and_then(serde_json::Value::as_str)
+                != Some(pane.herdr_pane_id.as_str())
+            || agent.get("terminal_id").and_then(serde_json::Value::as_str)
+                != Some(pane.herdr_terminal_id.as_str())
+        {
+            return Err("receipt target no longer matches the registered Herdr pane".into());
+        }
+        let session = agent
+            .get("agent_session")
+            .ok_or_else(|| "receipt target has no official native session".to_owned())?;
+        let harness = match agent.get("agent").and_then(serde_json::Value::as_str) {
+            Some("codex") => HarnessKind::Codex,
+            Some("claude") => HarnessKind::Claude,
+            _ => return Err("receipt target has an unsupported native harness".into()),
+        };
+        let expected_harness = Self::expected_harness(&harness);
+        if session.get("source").and_then(serde_json::Value::as_str)
+            != Some(format!("herdr:{expected_harness}").as_str())
+            || session.get("agent").and_then(serde_json::Value::as_str) != Some(expected_harness)
+            || session.get("kind").and_then(serde_json::Value::as_str) != Some("id")
+            || session.get("value").and_then(serde_json::Value::as_str)
+                != Some(intent.native_session_id.as_str())
+        {
+            return Err("receipt target native identity is no longer exact".into());
+        }
+        Ok(harness)
+    }
+
+    fn collect_native_transcripts(
+        directory: &Path,
+        native_session_id: &str,
+        harness: &HarnessKind,
+        depth: usize,
+        found: &mut Vec<std::path::PathBuf>,
+    ) -> Result<(), String> {
+        if depth > 8 || found.len() > 1 {
+            return Ok(());
+        }
+        let entries = fs::read_dir(directory)
+            .map_err(|error| format!("native transcript directory is unreadable: {error}"))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| format!("native transcript directory entry failed: {error}"))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("native transcript metadata failed: {error}"))?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                Self::collect_native_transcripts(
+                    &path,
+                    native_session_id,
+                    harness,
+                    depth + 1,
+                    found,
+                )?;
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let matches = match harness {
+                HarnessKind::Codex => name.ends_with(".jsonl") && name.contains(native_session_id),
+                HarnessKind::Claude => name == format!("{native_session_id}.jsonl"),
+            };
+            if metadata.is_file() && matches {
+                found.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_native_transcript(
+        &self,
+        intent: &PromptDeliveryIntent,
+    ) -> Result<std::path::PathBuf, String> {
+        let harness = self.native_harness_for_intent(intent)?;
+        let root = match harness {
+            HarnessKind::Codex => &self.codex_transcript_root,
+            HarnessKind::Claude => &self.claude_transcript_root,
+        };
+        let canonical_root = root.canonicalize().map_err(|error| {
+            format!("configured native transcript root is unavailable: {error}")
+        })?;
+        let mut found = Vec::new();
+        Self::collect_native_transcripts(
+            &canonical_root,
+            &intent.native_session_id,
+            &harness,
+            0,
+            &mut found,
+        )?;
+        if found.len() != 1 {
+            return Err("native transcript identity did not resolve to exactly one file".into());
+        }
+        let resolved = found
+            .pop()
+            .expect("one native transcript")
+            .canonicalize()
+            .map_err(|error| format!("native transcript could not be resolved: {error}"))?;
+        if !resolved.starts_with(&canonical_root) {
+            return Err("native transcript resolved outside its configured root".into());
+        }
+        Ok(resolved)
     }
 
     fn assistant_receipt(
@@ -217,7 +403,10 @@ impl CreatesHerdrLaunchPane for HerdrCli {
             "workspace".into(),
             "create".into(),
             "--cwd".into(),
-            "/home/li/primary".into(),
+            self.configured_workspace_root()?
+                .to_str()
+                .ok_or_else(|| "configured workspace root is not UTF-8".to_owned())?
+                .into(),
             "--label".into(),
             agent_name.clone(),
             "--env".into(),
@@ -296,7 +485,6 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
-        claimed_flow_id: &str,
     ) -> Result<NativeLaunchBinding, String> {
         Self::binding_matches_launch(launch, pane)?;
         let expected_harness = Self::expected_harness(&launch.launch_profile.harness_kind);
@@ -352,14 +540,16 @@ impl ObservesNativeLaunchBinding for HerdrCli {
             .map(char::from)
             .collect::<String>()
             .to_ascii_lowercase();
-        if self.claimed_native_identity(claimed_flow_id, &launch.launch_profile.harness_kind)?
+        let flow_id =
+            self.claim_flow_identity(&launch.launch_profile.harness_kind, native_session_id)?;
+        if self.claimed_native_identity(&flow_id, &launch.launch_profile.harness_kind)?
             != normalized_identity
         {
             return Err("flow claim does not contain the observed native identity".into());
         }
         Ok(NativeLaunchBinding {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
-            flow_id: claimed_flow_id.into(),
+            flow_id,
             native_session_id: native_session_id.into(),
             harness_kind: launch.launch_profile.harness_kind.clone(),
             herdr_pane_binding: pane.clone(),
@@ -415,12 +605,12 @@ impl ObservesNativeTargetReceipt for HerdrCli {
     fn observe_native_target_receipt(
         &self,
         durable_intent: &PromptDeliveryIntent,
-        transcript: &Path,
     ) -> Result<PromptDeliveryResult, String> {
         let expected = format!(
             "FLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
             durable_intent.launch_request_id, durable_intent.prompt_sha256
         );
+        let transcript = self.resolve_native_transcript(durable_intent)?;
         let input = fs::File::open(transcript)
             .map_err(|error| format!("native transcript is unreadable: {error}"))?;
         let mut observed_turn = None;
@@ -499,6 +689,7 @@ mod tests {
     fn fixture_herdr(
         harness: &str,
         native_session: &str,
+        claimed_identity: &str,
         agent_name: &str,
     ) -> (tempfile::TempDir, HerdrCli) {
         let root = tempfile::tempdir().expect("fixture root");
@@ -529,6 +720,34 @@ esac
         fs::set_permissions(&executable, permissions).expect("fixture permissions");
         let flows = root.path().join("flows");
         fs::create_dir(&flows).expect("fixture flows root");
+        let transcript_root = root.path().join("native-transcripts");
+        fs::create_dir_all(transcript_root.join("codex")).expect("codex transcript root");
+        fs::create_dir_all(transcript_root.join("claude")).expect("claude transcript root");
+        let flow_id = transcript_root.join("flow-id");
+        let flow_id_calls = root.path().join("flow-id-calls");
+        let uuid_version = if harness == "claude" {
+            "uuid-version=uuid-v4\n"
+        } else {
+            ""
+        };
+        let claim_marker = format!(
+            "version=1\nharness={harness}\nidentity={claimed_identity}\nalias=123456\n{uuid_version}"
+        );
+        let flow_id_script = format!(
+            r##"#!/bin/sh
+printf '%s|%s\n' "$*" "$CODEX_SESSION_ID" >> '{flow_id_calls}'
+printf '%s' '{claim_marker}' > '{flows}/.123456.flow-id'
+printf '%s\n' 123456
+"##,
+            flow_id_calls = flow_id_calls.display(),
+            flows = flows.display(),
+        );
+        fs::write(&flow_id, flow_id_script).expect("flow-id fixture executable");
+        let mut flow_id_permissions = fs::metadata(&flow_id)
+            .expect("flow-id fixture metadata")
+            .permissions();
+        flow_id_permissions.set_mode(0o700);
+        fs::set_permissions(&flow_id, flow_id_permissions).expect("flow-id fixture permissions");
         let adapter = HerdrCli::at(executable, flows);
         (root, adapter)
     }
@@ -538,12 +757,12 @@ esac
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
         let agent_name = HerdrCli::launch_agent_name(&launch);
-        let (root, adapter) = fixture_herdr("claude", native_session, &agent_name);
-        fs::write(
-            root.path().join("flows/.123456.flow-id"),
-            "version=1\nharness=claude\nidentity=1234567812344abc8def123456789abc\nalias=123456\nuuid-version=uuid-v4\n",
-        )
-        .expect("claim marker");
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
             .start_native_harness(&launch, &pane)
@@ -556,9 +775,22 @@ esac
             .expect("agent start call");
         assert!(start_call.contains("--model model-current --effort high"));
         assert!(!start_call.contains("composed body"));
+        let create_call = calls_after_start
+            .lines()
+            .find(|line| line.contains("workspace create"))
+            .expect("workspace create call");
+        assert!(create_call.contains(&format!("--cwd {}", root.path().display())));
+        assert!(!create_call.contains("/home/li/primary"));
         let binding = adapter
-            .observe_native_binding(&launch, &pane, "123456")
+            .observe_native_binding(&launch, &pane)
             .expect("official native binding");
+        assert_eq!(binding.flow_id, "123456");
+        let flow_id_calls =
+            fs::read_to_string(root.path().join("flow-id-calls")).expect("flow-id calls");
+        assert!(flow_id_calls.contains(&format!(
+            "claude --flows-root {} --parent-session {native_session}|",
+            root.path().join("flows").display()
+        )));
         let acknowledgement = RegistrationAcknowledgement {
             launch_request_id: binding.launch_request_id.clone(),
             flow_id: binding.flow_id.clone(),
@@ -589,30 +821,57 @@ esac
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Codex);
         let agent_name = HerdrCli::launch_agent_name(&launch);
-        let (root, adapter) = fixture_herdr("codex", native_session, &agent_name);
-        fs::write(
-            root.path().join("flows/.123456.flow-id"),
-            "version=1\nharness=codex\nidentity=ffffffffffffffffffffffffffffffff\nalias=123456\n",
-        )
-        .expect("claim marker");
+        let (root, adapter) = fixture_herdr(
+            "codex",
+            native_session,
+            "ffffffffffffffffffffffffffffffff",
+            &agent_name,
+        );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         assert!(
             adapter
-                .observe_native_binding(&launch, &pane, "123456")
+                .observe_native_binding(&launch, &pane)
                 .unwrap_err()
                 .contains("observed native identity")
         );
+        let flow_id_calls =
+            fs::read_to_string(root.path().join("flow-id-calls")).expect("flow-id calls");
+        assert!(flow_id_calls.contains(&format!(
+            "codex --flows-root {}|{native_session}",
+            root.path().join("flows").display()
+        )));
 
-        let (_missing_root, missing_adapter) = fixture_herdr("codex", "", &agent_name);
+        let (_missing_root, missing_adapter) =
+            fixture_herdr("codex", "", "ffffffffffffffffffffffffffffffff", &agent_name);
         let missing_pane = missing_adapter
             .create_launch_pane(&launch)
             .expect("created missing-identity pane");
         assert!(
             missing_adapter
-                .observe_native_binding(&launch, &missing_pane, "123456")
+                .observe_native_binding(&launch, &missing_pane)
                 .unwrap_err()
                 .contains("empty native identity")
         );
+    }
+
+    #[test]
+    fn unsupported_workspace_roots_are_rejected_before_herdr_creation() {
+        let launch = launch(HarnessKind::Codex);
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, mut adapter) = fixture_herdr(
+            "codex",
+            "12345678-1234-4abc-8def-123456789abc",
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        adapter.flows_root = root.path().join("not-flows");
+        assert!(
+            adapter
+                .create_launch_pane(&launch)
+                .unwrap_err()
+                .contains("directory named flows")
+        );
+        assert!(!root.path().join("calls").exists());
     }
 
     #[test]
@@ -620,7 +879,12 @@ esac
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Codex);
         let agent_name = HerdrCli::launch_agent_name(&launch);
-        let (root, adapter) = fixture_herdr("codex", native_session, &agent_name);
+        let (root, adapter) = fixture_herdr(
+            "codex",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         let intent = signal_flow::PromptDeliveryIntent {
             launch_request_id: "launch-42".into(),
@@ -631,7 +895,10 @@ esac
             herdr_pane_binding: pane,
         };
         let marker = "FLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let transcript = root.path().join("rollout.jsonl");
+        let transcript = root
+            .path()
+            .join("native-transcripts/codex")
+            .join(format!("rollout-{native_session}.jsonl"));
         let wrong_role = serde_json::json!({"type":"event_msg","payload":{
             "thread_id":native_session,"turn_id":"turn-user",
             "item":{"type":"UserMessage","content":[{"text":marker}]}}});
@@ -641,7 +908,7 @@ esac
         fs::write(&transcript, format!("{}\n{}\n", wrong_role, receipt))
             .expect("native transcript");
         let result = adapter
-            .observe_native_target_receipt(&intent, &transcript)
+            .observe_native_target_receipt(&intent)
             .expect("observed transcript receipt");
         let PromptDeliveryResult::Observed(NativeTargetReceipt {
             native_turn_id,
@@ -660,7 +927,12 @@ esac
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
         let agent_name = HerdrCli::launch_agent_name(&launch);
-        let (root, adapter) = fixture_herdr("claude", native_session, &agent_name);
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         let intent = signal_flow::PromptDeliveryIntent {
             launch_request_id: "launch-42".into(),
@@ -670,21 +942,35 @@ esac
             native_session_id: native_session.into(),
             herdr_pane_binding: pane,
         };
-        let transcript = root.path().join("claude.jsonl");
+        let untrusted_transcript = root.path().join("caller-selected.jsonl");
+        let marker = "FLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let untrusted_row = serde_json::json!({"type":"assistant","sessionId":native_session,
+            "uuid":"untrusted-turn","message":{"content":[{"type":"text","text":marker}]}});
+        fs::write(&untrusted_transcript, format!("{}\n", untrusted_row))
+            .expect("untrusted transcript");
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("exactly one file")
+        );
+        let transcript = root
+            .path()
+            .join("native-transcripts/claude")
+            .join(format!("{native_session}.jsonl"));
         fs::write(&transcript, "{\"type\":\"user\"}\n").expect("empty receipt transcript");
         assert_eq!(
             adapter
-                .observe_native_target_receipt(&intent, &transcript)
+                .observe_native_target_receipt(&intent)
                 .expect("absence is ambiguous"),
             PromptDeliveryResult::Ambiguous(intent.clone())
         );
-        let marker = "FLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let row = serde_json::json!({"type":"assistant","sessionId":native_session,
             "uuid":"turn-claude","message":{"content":[{"type":"text","text":marker}]}});
         fs::write(&transcript, format!("{}\n{}\n", row, row)).expect("duplicate receipts");
         assert!(
             adapter
-                .observe_native_target_receipt(&intent, &transcript)
+                .observe_native_target_receipt(&intent)
                 .unwrap_err()
                 .contains("duplicate")
         );

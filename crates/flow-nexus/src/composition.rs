@@ -357,7 +357,8 @@ mod tests {
             "Predecessor: 1b8ac0\n",
             "Remembered flows: 836818@1\n",
             "Herdr session: messaging-build\n",
-            "Loadable skills: spirit, main-flow\n\n",
+            "Loadable skills, in required native-load order: spirit, main-flow\n\n",
+            "Before replying, load every named skill through the harness native skill interface in exactly this order. Do not paste skill bodies into the prompt. Emit the requested launch receipt only after every native skill load succeeds.\n\n",
             "Carry the bounded task.",
             "\n\n## Source: `first.md`\n\n",
             "first line\n\nfinal line\n",
@@ -367,7 +368,7 @@ mod tests {
         assert_eq!(composed.first_prompt_payload.first_prompt_body, expected);
         assert_eq!(
             composed.first_prompt_payload.prompt_sha256,
-            "0b05f0741623b2544845941417d0c011859132547590385ca02cc694364c1df2"
+            "3d041baecb092c549b4272ab596336ffc968a32d653e86e1d92e35f843ae153c"
         );
         assert!(
             composed
@@ -436,5 +437,14 @@ mod tests {
                 .first_prompt_text
                 .contains("<skill>")
         );
+        assert!(
+            composed
+                .first_prompt_payload
+                .first_prompt_body
+                .contains("Loadable skills, in required native-load order: spirit, main-flow")
+        );
+        assert!(composed.first_prompt_payload.first_prompt_body.contains(
+            "Emit the requested launch receipt only after every native skill load succeeds."
+        ));
     }
 }

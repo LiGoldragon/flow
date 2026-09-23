@@ -62,6 +62,16 @@ impl Dispatches for RunningNexus {
                     {
                         return Response::StartRejected(StartRejection::LaunchRequestConflict);
                     }
+                    if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptObserved {
+                        let Some(binding) = attempt.native_launch_binding_option else {
+                            return Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            );
+                        };
+                        return self.store.confirm_started(&binding.flow_id).unwrap_or(
+                            Response::StartRejected(StartRejection::LaunchPersistenceRefused),
+                        );
+                    }
                     if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
                         return Response::LaunchPending(attempt);
                     }
@@ -478,13 +488,15 @@ mod tests {
     use super::{Dispatches, RunningNexus};
     use crate::{
         codex::CodexAdapter,
-        composition::{LaunchComposer, OpensLaunchComposer},
+        composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
-        store::{FlowStore, OpensFlowStore},
+        store::{FlowStore, OpensFlowStore, ReservesLaunchAttempt},
     };
+    use sha2::{Digest, Sha256};
     use signal_flow::{
-        EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-        OriginClue, Query, Response,
+        EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
+        HerdrRouteSelection, LaunchProfile, LaunchSource, OriginClue, PowerLevel, Query, Response,
+        StartRejection, StartRequest,
     };
     use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
@@ -615,6 +627,64 @@ mod tests {
                 .dispatch(Query::ResolveRecipient("908786".into())),
             Response::RecipientResolved(node)
         );
+    }
+
+    #[test]
+    fn identical_launch_retry_reads_the_journal_before_a_deleted_source() {
+        let fixture = NexusFixture::new();
+        let source_path = fixture.directory.path().join("launch-source.md");
+        fs::write(&source_path, b"exact source bytes\n").expect("fixture source");
+        let profile = LaunchProfile {
+            launch_request_id: "retry-request".into(),
+            launch_source_vector: vec![LaunchSource {
+                source_path: "launch-source.md".into(),
+                source_sha256: format!("{:x}", Sha256::digest(b"exact source bytes\n")),
+            }],
+            skill_name_vector: Vec::new(),
+            flow_aspect: FlowAspect::Field,
+            power_level: PowerLevel::High,
+            harness_kind: HarnessKind::Codex,
+            model_name: "fixture-model".into(),
+            effort: "medium".into(),
+            flow_id_option: None,
+            remembered_flow_vector: Vec::new(),
+            herdr_session_name: "fixture-session".into(),
+            instruction_prompt: "fixture instruction".into(),
+        };
+        let origin = OriginClue {
+            flow_id: "caller".into(),
+            session_id: "caller-session".into(),
+            turn_id: "caller-turn".into(),
+        };
+        let composed = fixture
+            .nexus
+            .composer
+            .compose(&profile)
+            .expect("new request composes once");
+        fixture
+            .nexus
+            .store
+            .reserve_launch_attempt(&composed, origin.clone())
+            .expect("reservation persists");
+        fs::remove_file(source_path).expect("source removed after reservation");
+
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::Start(StartRequest {
+                launch_profile: profile.clone(),
+                origin_clue: origin.clone(),
+            })),
+            Response::LaunchPending(_)
+        ));
+        let mut changed = profile;
+        changed.effort = "high".into();
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Start(StartRequest {
+                launch_profile: changed,
+                origin_clue: origin,
+            })),
+            Response::StartRejected(StartRejection::LaunchRequestConflict)
+        );
+        assert!(!fixture.snapshot_program.exists());
     }
 
     #[test]

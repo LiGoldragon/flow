@@ -984,18 +984,20 @@ impl WritesFlowStore for FlowStore {
         let Some(mut flow) = self.flow(flow_id)? else {
             return Ok(Response::StartRejected(StartRejection::NativeLaunchRefused));
         };
-        if flow.lifecycle != FlowLifecycle::Pending || flow.thread_id.is_none() {
+        if flow.thread_id.is_none() {
             return Ok(Response::StartRejected(StartRejection::NativeLaunchRefused));
         }
-        flow.lifecycle = FlowLifecycle::Active;
-        flow.generation = 1;
         let origin_clue = flow.origin.clone();
         let session_id = flow.thread_id.clone().expect("checked thread identity");
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.flows,
-            RecordKey::new(flow_id),
-            flow,
-        ))?;
+        if flow.lifecycle == FlowLifecycle::Pending {
+            flow.lifecycle = FlowLifecycle::Active;
+            flow.generation = 1;
+            self.engine.mutate_keyed(KeyedMutation::new(
+                self.flows,
+                RecordKey::new(flow_id),
+                flow,
+            ))?;
+        }
         Ok(Response::Started(Started {
             flow_id: flow_id.into(),
             session_id,
@@ -1043,10 +1045,10 @@ mod tests {
     use signal_flow::{
         ComposedLaunch, FirstPromptPayload, FlowAspect, HarnessKind, HerdrPaneBinding,
         LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, NativeLaunchBinding,
-        NativeLaunchIntent, NativeTargetReceipt, NativeTranscriptAbsence, NativeTranscriptBoundary,
-        NativeTranscriptCursor, OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult,
-        Query, RegistrationAcknowledgement, Response, Restarted, StartRequest,
-        TargetReceiptRequest,
+        NativeLaunchIntent, NativeSkillSelection, NativeTargetReceipt, NativeTranscriptAbsence,
+        NativeTranscriptBoundary, NativeTranscriptCursor, OriginClue, PowerLevel,
+        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
+        Restarted, StartRequest, TargetReceiptRequest,
     };
 
     struct StoreFixture {
@@ -1185,6 +1187,7 @@ mod tests {
             "3333333333333333333333333333333333333333333333333333333333333333",
         );
         launch.launch_profile.harness_kind = HarnessKind::Claude;
+        launch.launch_profile.skill_name_vector = vec!["spirit".into(), "main-flow".into()];
         store
             .reserve_launch_attempt(&launch, fixture.origin())
             .expect("reservation persists");
@@ -1227,7 +1230,20 @@ mod tests {
             harness_kind: HarnessKind::Claude,
             model_name: launch.launch_profile.model_name.clone(),
             effort: launch.launch_profile.effort.clone(),
-            native_skill_selection_vector: Vec::new(),
+            native_skill_selection_vector: vec![
+                NativeSkillSelection {
+                    skill_name: "main-flow".into(),
+                    native_skill_path: "/configured/main-flow/SKILL.md".into(),
+                    native_skill_sha256:
+                        "6666666666666666666666666666666666666666666666666666666666666666".into(),
+                },
+                NativeSkillSelection {
+                    skill_name: "spirit".into(),
+                    native_skill_path: "/configured/spirit/SKILL.md".into(),
+                    native_skill_sha256:
+                        "7777777777777777777777777777777777777777777777777777777777777777".into(),
+                },
+            ],
             herdr_pane_binding: pane,
             native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
                 native_session_id: "different-session".into(),
@@ -1239,9 +1255,15 @@ mod tests {
         assert!(
             !store
                 .record_prompt_delivery_intent(intent.clone())
-                .expect("mismatching boundary is refused")
+                .expect("out-of-order native skill selection is refused")
         );
         let mut exact = intent;
+        exact.native_skill_selection_vector.swap(0, 1);
+        assert!(
+            !store
+                .record_prompt_delivery_intent(exact.clone())
+                .expect("mismatching boundary is refused")
+        );
         let NativeTranscriptBoundary::Absent(absence) = &mut exact.native_transcript_boundary
         else {
             panic!("absence fixture")
@@ -1312,8 +1334,7 @@ mod tests {
                                 .into(),
                         model_name: cursor_intent.model_name,
                         effort: cursor_intent.effort,
-                        native_skill_selection_vector: cursor_intent
-                            .native_skill_selection_vector,
+                        native_skill_selection_vector: cursor_intent.native_skill_selection_vector,
                     }
                 ))
                 .expect("authentic receipt promotes ambiguity")

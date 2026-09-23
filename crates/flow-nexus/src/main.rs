@@ -2,7 +2,10 @@ use flow_nexus::{
     OpensRunningNexus, RunningNexus, ServesMeta, ServesOrdinary, store::ConfiguresFlowStore,
 };
 use std::sync::Arc;
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 fn main() {
     std::fs::create_dir_all("/home/li/.local/state/flow")
         .unwrap_or_else(|error| panic!("Flow Nexus state directory: {error}"));

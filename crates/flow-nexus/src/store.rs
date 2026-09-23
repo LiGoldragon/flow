@@ -693,11 +693,53 @@ impl RecordsPromptDeliveryResult for FlowStore {
                 Some(PromptDeliveryResult::Ambiguous(_))
             )
             && matches!(&result, PromptDeliveryResult::Observed(_));
-        if !first_result && !ambiguity_promotion {
+        let boundary_advancement = if stored.attempt.launch_attempt_phase
+            == LaunchAttemptPhase::PromptAmbiguous
+        {
+            match (
+                stored.attempt.prompt_delivery_result_option.as_ref(),
+                &result,
+            ) {
+                (
+                    Some(PromptDeliveryResult::Ambiguous(previous)),
+                    PromptDeliveryResult::Ambiguous(updated),
+                ) => {
+                    previous.launch_request_id == updated.launch_request_id
+                        && previous.prompt_sha256 == updated.prompt_sha256
+                        && previous.flow_id == updated.flow_id
+                        && previous.native_session_id == updated.native_session_id
+                        && previous.harness_kind == updated.harness_kind
+                        && previous.herdr_pane_binding == updated.herdr_pane_binding
+                        && matches!(
+                        (&previous.native_transcript_boundary, &updated.native_transcript_boundary),
+                        (
+                            signal_flow::NativeTranscriptBoundary::Absent(absence),
+                            signal_flow::NativeTranscriptBoundary::Existing(cursor),
+                        ) if absence.native_session_id == cursor.native_session_id
+                            && absence.harness_kind == cursor.harness_kind
+                            && cursor.transcript_byte_offset >= 0
+                            && !cursor.transcript_device.is_empty()
+                            && cursor.transcript_device.bytes().all(|byte| byte.is_ascii_digit())
+                            && !cursor.transcript_inode.is_empty()
+                            && cursor.transcript_inode.bytes().all(|byte| byte.is_ascii_digit())
+                            && cursor.transcript_prefix_sha256.len() == 64
+                            && cursor.transcript_prefix_sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                        )
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if !first_result && !ambiguity_promotion && !boundary_advancement {
             return Ok(false);
         }
         let phase = match &result {
             PromptDeliveryResult::Ambiguous(observed_intent) if observed_intent == intent => {
+                LaunchAttemptPhase::PromptAmbiguous
+            }
+            PromptDeliveryResult::Ambiguous(observed_intent) if boundary_advancement => {
+                stored.attempt.prompt_delivery_intent_option = Some(observed_intent.clone());
                 LaunchAttemptPhase::PromptAmbiguous
             }
             PromptDeliveryResult::Observed(receipt)
@@ -966,8 +1008,9 @@ mod tests {
         ComposedLaunch, FirstPromptPayload, FlowAspect, HarnessKind, HerdrPaneBinding,
         LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, NativeLaunchBinding,
         NativeLaunchIntent, NativeTargetReceipt, NativeTranscriptAbsence, NativeTranscriptBoundary,
-        OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query,
-        RegistrationAcknowledgement, Response, Restarted, StartRequest, TargetReceiptRequest,
+        NativeTranscriptCursor, OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult,
+        Query, RegistrationAcknowledgement, Response, Restarted, StartRequest,
+        TargetReceiptRequest,
     };
 
     struct StoreFixture {
@@ -1175,14 +1218,40 @@ mod tests {
                 .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(exact.clone()))
                 .unwrap()
         );
+        let mut cursor_intent = exact.clone();
+        cursor_intent.native_transcript_boundary =
+            NativeTranscriptBoundary::Existing(NativeTranscriptCursor {
+                native_session_id: "native-session".into(),
+                harness_kind: HarnessKind::Claude,
+                transcript_device: "2049".into(),
+                transcript_inode: "99144".into(),
+                transcript_byte_offset: 127,
+                transcript_prefix_sha256:
+                    "5555555555555555555555555555555555555555555555555555555555555555".into(),
+            });
+        assert!(
+            reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
+                    cursor_intent.clone(),
+                ))
+                .expect("fresh transcript advances the durable boundary")
+        );
+        assert_eq!(
+            reopened
+                .launch_attempt("request-boundary")
+                .unwrap()
+                .expect("advanced boundary recovers")
+                .prompt_delivery_intent_option,
+            Some(cursor_intent.clone())
+        );
         assert!(
             reopened
                 .record_prompt_delivery_result(PromptDeliveryResult::Observed(
                     NativeTargetReceipt {
-                        launch_request_id: exact.launch_request_id,
-                        prompt_sha256: exact.prompt_sha256,
-                        flow_id: exact.flow_id,
-                        native_session_id: exact.native_session_id,
+                        launch_request_id: cursor_intent.launch_request_id,
+                        prompt_sha256: cursor_intent.prompt_sha256,
+                        flow_id: cursor_intent.flow_id,
+                        native_session_id: cursor_intent.native_session_id,
                         native_turn_id: "native-turn".into(),
                         receipt_sha256:
                             "4444444444444444444444444444444444444444444444444444444444444444"
@@ -1382,7 +1451,7 @@ mod tests {
         assert!(matches!(
             node.endpoint_selection,
             signal_flow::EndpointSelection::Available(signal_flow::Available_Data {
-                route_readiness: signal_flow::RouteReadiness::Ready,
+                route_readiness: signal_flow::RouteReadiness::Parked,
                 ..
             })
         ));

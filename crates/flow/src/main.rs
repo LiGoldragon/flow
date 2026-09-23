@@ -134,6 +134,18 @@ mod tests {
                 .parse_command(["ResolveRecipient.fac697".into(), "extra".into()].into_iter())
                 .is_err()
         );
+        assert!(
+            client
+                .parse_command(
+                    ["Start.{ codex-medium { fac697 session-1 turn-2 } }".into()].into_iter()
+                )
+                .is_err()
+        );
+        assert!(
+            client
+                .parse_command(["Start.{".into()].into_iter())
+                .is_err()
+        );
     }
 
     #[test]

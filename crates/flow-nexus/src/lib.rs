@@ -71,8 +71,23 @@ impl Dispatches for RunningNexus {
                             .herdr
                             .observe_native_target_receipt(&intent)
                             .unwrap_or_else(|_| PromptDeliveryResult::Ambiguous(intent.clone()));
-                        let PromptDeliveryResult::Observed(receipt) = observed else {
-                            return Response::StartAmbiguous(intent);
+                        let receipt = match observed {
+                            PromptDeliveryResult::Observed(receipt) => receipt,
+                            PromptDeliveryResult::Ambiguous(updated) => {
+                                if updated != intent
+                                    && !self
+                                        .store
+                                        .record_prompt_delivery_result(
+                                            PromptDeliveryResult::Ambiguous(updated.clone()),
+                                        )
+                                        .unwrap_or(false)
+                                {
+                                    return Response::StartRejected(
+                                        StartRejection::LaunchPersistenceRefused,
+                                    );
+                                }
+                                return Response::StartAmbiguous(updated);
+                            }
                         };
                         if !self
                             .store
@@ -205,7 +220,21 @@ impl Dispatches for RunningNexus {
                         }),
                 };
                 match result {
-                    PromptDeliveryResult::Ambiguous(intent) => Response::StartAmbiguous(intent),
+                    PromptDeliveryResult::Ambiguous(intent) => {
+                        if intent != delivery_intent
+                            && !self
+                                .store
+                                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
+                                    intent.clone(),
+                                ))
+                                .unwrap_or(false)
+                        {
+                            return Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            );
+                        }
+                        Response::StartAmbiguous(intent)
+                    }
                     PromptDeliveryResult::Observed(receipt) => {
                         if !self
                             .store
@@ -435,6 +464,7 @@ mod tests {
     use super::{Dispatches, RunningNexus};
     use crate::{
         codex::CodexAdapter,
+        composition::{LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
         store::{FlowStore, OpensFlowStore},
     };

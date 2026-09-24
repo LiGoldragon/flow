@@ -14,6 +14,8 @@ serde_json.workspace = true
 sha1 = "0.10"
 sha2 = "0.10"
 signal-flow.workspace = true
+meta-signal-lojix.workspace = true
+signal-lojix.workspace = true
 thiserror.workspace = true
 [dev-dependencies]
 tempfile = "3"

@@ -16,9 +16,17 @@ use std::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RecoveryManifest {
     immutable_flake: String,
+    expected_revision: String,
     disposable_flow_id: String,
     expected_title: String,
     expected_herdr_session: String,
+    cluster_name: String,
+    node_name: String,
+    user_name: String,
+    proposal_source: String,
+    nix_store_uri: String,
+    ssh_destination: String,
+    output_selector: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,6 +101,11 @@ impl<L: LaunchesDisposableField, O: ObservesReplacement> DurableRecoveryExecutor
                     lock.write_all(request.requester_flow_id.as_bytes())
                         .map_err(io_error)?;
                     lock.sync_all().map_err(io_error)?;
+                    if receipt.exists() {
+                        let observed = read_receipt(&receipt);
+                        let _ = fs::remove_file(&admission);
+                        return observed;
+                    }
                     let result = self.execute(&request.manifest, &receipt);
                     let _ = fs::remove_file(&admission);
                     return result;
@@ -137,9 +150,21 @@ fn validate_manifest(manifest: &RecoveryManifest) -> Result<(), String> {
     {
         return Err("recovery manifest requires github:<owner>/<repo>/<40 lowercase hex>".into());
     }
+    if revision != manifest.expected_revision {
+        return Err(
+            "recovery manifest immutable revision does not match its expected revision".into(),
+        );
+    }
     if manifest.disposable_flow_id.is_empty()
         || manifest.expected_title.is_empty()
         || manifest.expected_herdr_session.is_empty()
+        || manifest.cluster_name.is_empty()
+        || manifest.node_name.is_empty()
+        || manifest.user_name.is_empty()
+        || manifest.proposal_source.is_empty()
+        || manifest.nix_store_uri.is_empty()
+        || manifest.ssh_destination.is_empty()
+        || manifest.output_selector.is_empty()
     {
         return Err("recovery manifest omits disposable replacement identity".into());
     }
@@ -290,9 +315,17 @@ mod tests {
             manifest: RecoveryManifest {
                 immutable_flake:
                     "github:LiGoldragon/CriomOS/0123456789abcdef0123456789abcdef01234567".into(),
+                expected_revision: "0123456789abcdef0123456789abcdef01234567".into(),
                 disposable_flow_id: "field-luna-disposable".into(),
                 expected_title: "Field Luna disposable".into(),
                 expected_herdr_session: "field-recovery".into(),
+                cluster_name: "field".into(),
+                node_name: "disposable-luna".into(),
+                user_name: "li".into(),
+                proposal_source: "field-recovery-proposal".into(),
+                nix_store_uri: "ssh-ng://li@field".into(),
+                ssh_destination: "li@field".into(),
+                output_selector: "homeConfigurations.li.activationPackage".into(),
             },
         }
     }
@@ -343,6 +376,12 @@ mod tests {
         let mut mutable = request("survivor-a");
         mutable.manifest.immutable_flake = "github:LiGoldragon/CriomOS/main".into();
         assert!(executor.request(&mutable).is_err());
+        let mut mismatched = request("survivor-a");
+        mismatched.manifest.expected_revision = "abcdefabcdefabcdefabcdefabcdefabcdefabcd".into();
+        assert!(executor.request(&mismatched).is_err());
+        let mut missing_selector = request("survivor-a");
+        missing_selector.manifest.output_selector.clear();
+        assert!(executor.request(&missing_selector).is_err());
     }
 
     #[test]

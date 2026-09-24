@@ -16,3 +16,5 @@ serde_json = "1"
 thiserror = "2"
 signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "edfea8712513bd6e7323872c6aacc058bcc51304" }
 meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "71e92386ac0318485ce7eb3bbfab250ad44c68b3" }
+meta-signal-lojix = { git = "https://github.com/LiGoldragon/meta-signal-lojix.git", rev = "45c51112824b487ae3a8e3e5b05cd372b6619481" }
+signal-lojix = { git = "https://github.com/LiGoldragon/signal-lojix.git", rev = "50c4fab3f8a2b16aa1261104395f1dae315035d1" }

@@ -91,6 +91,9 @@ pub trait ObservesNativeTargetReceipt {
 }
 
 impl HerdrCli {
+    const CLAUDE_CHILD_SESSION_ENVIRONMENT: &'static str = "CLAUDE_CODE_CHILD_SESSION";
+    const CLAUDE_SKIP_PERMISSIONS_FLAG: &'static str = "--dangerously-skip-permissions";
+
     fn run_json(&self, arguments: &[String]) -> Result<serde_json::Value, String> {
         let output = Command::new(&self.executable)
             .args(arguments)
@@ -104,6 +107,83 @@ impl HerdrCli {
         }
         serde_json::from_slice(&output.stdout)
             .map_err(|error| format!("Herdr returned unreadable JSON: {error}"))
+    }
+
+    fn run_status(&self, arguments: &[String]) -> Result<(), String> {
+        let output = Command::new(&self.executable)
+            .args(arguments)
+            .output()
+            .map_err(|error| format!("Herdr command could not start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Herdr command refused the launch stage: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+
+    fn claude_environment_preparation(marker_suffix: &str) -> String {
+        format!(
+            "unset {} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+            Self::CLAUDE_CHILD_SESSION_ENVIRONMENT,
+            marker_suffix
+        )
+    }
+
+    fn prepare_claude_pane_environment(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+    ) -> Result<(), String> {
+        let marker_suffix = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "flow-claude-environment-v1\0{}",
+                    launch.launch_profile.launch_request_id
+                )
+                .as_bytes()
+            )
+        );
+        let marker = format!("FLOW_CLAUDE_ENV_READY_{marker_suffix}");
+        self.run_status(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "pane".into(),
+            "run".into(),
+            pane.herdr_pane_id.clone(),
+            Self::claude_environment_preparation(&marker_suffix),
+        ])?;
+        let response = self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "pane".into(),
+            "wait-output".into(),
+            pane.herdr_pane_id.clone(),
+            "--match".into(),
+            marker.clone(),
+            "--source".into(),
+            "visible".into(),
+            "--lines".into(),
+            "50".into(),
+            "--timeout".into(),
+            "5000".into(),
+        ])?;
+        let observed_pane = response
+            .pointer("/result/pane_id")
+            .and_then(serde_json::Value::as_str);
+        let matched_line = response
+            .pointer("/result/matched_line")
+            .and_then(serde_json::Value::as_str);
+        if observed_pane != Some(pane.herdr_pane_id.as_str())
+            || matched_line != Some(marker.as_str())
+        {
+            return Err(
+                "Herdr did not prove the Claude environment was prepared in the launch pane".into(),
+            );
+        }
+        Ok(())
     }
 
     fn expected_harness(harness: &HarnessKind) -> &'static str {
@@ -762,6 +842,9 @@ impl StartsNativeHerdrHarness for HerdrCli {
         pane: &HerdrPaneBinding,
     ) -> Result<(), String> {
         Self::binding_matches_launch(launch, pane)?;
+        if launch.launch_profile.harness_kind == HarnessKind::Claude {
+            self.prepare_claude_pane_environment(launch, pane)?;
+        }
         let harness = Self::expected_harness(&launch.launch_profile.harness_kind);
         let mut arguments = vec![
             "--session".into(),
@@ -800,6 +883,9 @@ impl StartsNativeHerdrHarness for HerdrCli {
         if let Some(endpoint) = codex_endpoint {
             arguments.push("--remote".into());
             arguments.push(format!("unix://{}", endpoint.socket));
+        }
+        if launch.launch_profile.harness_kind == HarnessKind::Claude {
+            arguments.push(Self::CLAUDE_SKIP_PERMISSIONS_FLAG.into());
         }
         arguments.push("--model".into());
         arguments.push(launch.launch_profile.model_name.clone());
@@ -1408,6 +1494,8 @@ mod tests {
 printf '%s\n' "$*" >> '{calls}'
 case "$*" in
   *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
+  *"pane run"*) ;;
+  *"pane wait-output"*) marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$marker" ;;
   *"agent start"*) printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
   *"agent get"*) reported_harness=$(cat '{reported_harness}'); printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$reported_harness" "$reported_harness" ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
@@ -1514,6 +1602,31 @@ printf '%s\n' 123456
         assert!(start.contains("-- --remote unix:///tmp/stable-codex.sock --model model-current"));
         assert!(start.contains("-c model_reasoning_effort=high"));
         assert_eq!(start.matches("--remote").count(), 1);
+        assert!(!calls.contains("pane run"));
+        assert!(!start.contains(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG));
+    }
+
+    #[test]
+    fn claude_environment_preparation_removes_an_inherited_child_session_variable() {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "{}; if [ \"${{{}+present}}\" = present ]; then exit 19; fi",
+                HerdrCli::claude_environment_preparation("test-marker"),
+                HerdrCli::CLAUDE_CHILD_SESSION_ENVIRONMENT
+            ))
+            .env(HerdrCli::CLAUDE_CHILD_SESSION_ENVIRONMENT, "1")
+            .output()
+            .expect("shell environment witness");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("UTF-8 marker"),
+            "FLOW_CLAUDE_ENV_READY_test-marker\n"
+        );
     }
 
     #[test]
@@ -1537,8 +1650,25 @@ printf '%s\n' 123456
             .lines()
             .find(|line| line.contains("agent start"))
             .expect("agent start call");
-        assert!(start_call.contains("--model model-current --effort high"));
+        assert!(
+            start_call
+                .contains("-- --dangerously-skip-permissions --model model-current --effort high")
+        );
         assert!(!start_call.contains("composed body"));
+        let pane_run = calls_after_start
+            .lines()
+            .position(|line| line.contains("pane run"))
+            .expect("Claude environment preparation");
+        let pane_wait = calls_after_start
+            .lines()
+            .position(|line| line.contains("pane wait-output"))
+            .expect("Claude environment preparation receipt");
+        let agent_start = calls_after_start
+            .lines()
+            .position(|line| line.contains("agent start"))
+            .expect("Claude start");
+        assert!(pane_run < pane_wait && pane_wait < agent_start);
+        assert!(calls_after_start.contains("unset CLAUDE_CODE_CHILD_SESSION"));
         let create_call = calls_after_start
             .lines()
             .find(|line| line.contains("workspace create"))

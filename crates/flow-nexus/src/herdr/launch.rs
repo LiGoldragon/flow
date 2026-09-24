@@ -390,10 +390,17 @@ impl HerdrCli {
         pane: &HerdrPaneBinding,
         native_session_id: &str,
         harness: &HarnessKind,
+        model_name: Option<&str>,
     ) -> Result<(PathBuf, Metadata, Vec<PathBuf>), String> {
         self.verify_native_target(pane, native_session_id, harness)?;
         let root = match harness {
-            HarnessKind::Codex => &self.codex_transcript_root,
+            HarnessKind::Codex => {
+                &self
+                    .codex_endpoints
+                    .endpoint_for(model_name.ok_or("Codex transcript selection requires a model")?)
+                    .map_err(|error| error.to_string())?
+                    .transcript_root
+            }
             HarnessKind::Claude => &self.claude_transcript_root,
         };
         let canonical_root = root.canonicalize().map_err(|error| {
@@ -462,11 +469,13 @@ impl HerdrCli {
     fn capture_transcript_boundary(
         &self,
         binding: &NativeLaunchBinding,
+        model_name: &str,
     ) -> Result<NativeTranscriptBoundary, String> {
         let (root, root_metadata, found) = self.transcript_candidates(
             &binding.herdr_pane_binding,
             &binding.native_session_id,
             &binding.harness_kind,
+            Some(model_name),
         )?;
         if found.is_empty() {
             return Ok(NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
@@ -510,11 +519,13 @@ impl HerdrCli {
     fn capture_transcript_start_boundary(
         &self,
         binding: &NativeLaunchBinding,
+        model_name: &str,
     ) -> Result<NativeTranscriptBoundary, String> {
         let (root, _, found) = self.transcript_candidates(
             &binding.herdr_pane_binding,
             &binding.native_session_id,
             &binding.harness_kind,
+            Some(model_name),
         )?;
         let transcript = Self::one_resolved_transcript(&root, found)?;
         let file = File::open(transcript)
@@ -550,6 +561,7 @@ impl HerdrCli {
             &intent.herdr_pane_binding,
             &intent.native_session_id,
             &intent.harness_kind,
+            Some(&intent.model_name),
         )?;
         match &intent.native_transcript_boundary {
             NativeTranscriptBoundary::Absent(absence) => {
@@ -763,10 +775,34 @@ impl StartsNativeHerdrHarness for HerdrCli {
             pane.herdr_pane_id.clone(),
             "--timeout".into(),
             "30000".into(),
-            "--".into(),
-            "--model".into(),
-            launch.launch_profile.model_name.clone(),
         ];
+        let codex_endpoint = if launch.launch_profile.harness_kind == HarnessKind::Codex {
+            let endpoint = self
+                .codex_endpoints
+                .endpoint_for(&launch.launch_profile.model_name)
+                .map_err(|error| error.to_string())?;
+            if !endpoint.client_path.is_absolute() || !Path::new(&endpoint.socket).is_absolute() {
+                return Err("configured Codex client and socket must be absolute".into());
+            }
+            arguments.push("--executable".into());
+            arguments.push(
+                endpoint
+                    .client_path
+                    .to_str()
+                    .ok_or("configured Codex client path must be valid UTF-8")?
+                    .into(),
+            );
+            Some(endpoint)
+        } else {
+            None
+        };
+        arguments.push("--".into());
+        if let Some(endpoint) = codex_endpoint {
+            arguments.push("--remote".into());
+            arguments.push(format!("unix://{}", endpoint.socket));
+        }
+        arguments.push("--model".into());
+        arguments.push(launch.launch_profile.model_name.clone());
         match launch.launch_profile.harness_kind {
             HarnessKind::Claude => {
                 arguments.push("--effort".into());
@@ -939,7 +975,8 @@ impl AcceptsLaunchRegistration for HerdrCli {
             return Err("registration acknowledgement does not match native binding".into());
         }
         Self::validate_skill_selections(launch, &native_skill_selection_vector)?;
-        let native_transcript_boundary = self.capture_transcript_boundary(binding)?;
+        let native_transcript_boundary =
+            self.capture_transcript_boundary(binding, &launch.launch_profile.model_name)?;
         Ok(PromptDeliveryIntent {
             launch_request_id: binding.launch_request_id.clone(),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
@@ -1281,7 +1318,8 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                 // byte zero on reconciliation. Advancing to EOF here would
                 // discard native input and skill evidence emitted before the
                 // assistant receipt.
-                let boundary = self.capture_transcript_start_boundary(&binding)?;
+                let boundary =
+                    self.capture_transcript_start_boundary(&binding, &durable_intent.model_name)?;
                 if !matches!(boundary, NativeTranscriptBoundary::Existing(_)) {
                     return Err("new native transcript disappeared during adoption".into());
                 }
@@ -1451,6 +1489,31 @@ printf '%s\n' 123456
         adapter
             .accept_registration(launch, &binding, &acknowledgement, skills)
             .expect("registered prompt intent")
+    }
+
+    #[test]
+    fn codex_launch_selects_one_exact_executable_and_remote_socket() {
+        let launch = launch(HarnessKind::Codex);
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "codex",
+            "12345678-1234-4abc-8def-123456789abc",
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter
+            .start_native_harness(&launch, &pane)
+            .expect("started exact Codex client");
+        let calls = fs::read_to_string(root.path().join("calls")).expect("launch calls");
+        let start = calls
+            .lines()
+            .find(|line| line.contains("agent start"))
+            .expect("agent start call");
+        assert!(start.contains("--executable /fixture/codex"));
+        assert!(start.contains("-- --remote unix:///tmp/stable-codex.sock --model model-current"));
+        assert!(start.contains("-c model_reasoning_effort=high"));
+        assert_eq!(start.matches("--remote").count(), 1);
     }
 
     #[test]

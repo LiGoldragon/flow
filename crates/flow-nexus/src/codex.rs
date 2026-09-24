@@ -11,6 +11,7 @@ use signal_flow::{
     PromptDeliveryIntent, PromptDeliveryResult,
 };
 use std::{
+    collections::BTreeSet,
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -24,12 +25,56 @@ use thiserror::Error;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
+#[derive(Clone)]
 pub struct CodexAdapter {
+    pub executable: PathBuf,
     pub socket: String,
     pub model: String,
     pub timeout: Duration,
     /// Exact cwd whose native Codex skill catalog is valid for this launch.
     pub workspace_root: PathBuf,
+}
+
+#[derive(Clone)]
+pub struct CodexEndpoint {
+    pub client_path: PathBuf,
+    pub home: PathBuf,
+    pub socket: String,
+    pub transcript_root: PathBuf,
+    pub model_names: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+pub struct CodexEndpoints {
+    pub stable: CodexEndpoint,
+    pub next: CodexEndpoint,
+    pub timeout: Duration,
+    pub workspace_root: PathBuf,
+}
+
+impl CodexEndpoints {
+    pub fn endpoint_for(&self, model: &str) -> Result<&CodexEndpoint, CodexAdapterUnavailable> {
+        let stable = self.stable.model_names.contains(model);
+        let next = self.next.model_names.contains(model);
+        match (stable, next) {
+            (true, false) => Ok(&self.stable),
+            (false, true) => Ok(&self.next),
+            _ => Err(CodexAdapterUnavailable::Protocol(
+                "Codex model does not select exactly one configured endpoint".into(),
+            )),
+        }
+    }
+
+    pub fn adapter_for(&self, model: &str) -> Result<CodexAdapter, CodexAdapterUnavailable> {
+        let endpoint = self.endpoint_for(model)?;
+        Ok(CodexAdapter {
+            executable: endpoint.client_path.clone(),
+            socket: endpoint.socket.clone(),
+            model: model.to_owned(),
+            timeout: self.timeout,
+            workspace_root: self.workspace_root.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -140,7 +185,7 @@ trait BuildsCodexTurn {
 
 impl OpensCodexProxy for CodexAdapter {
     fn open_proxy(&self) -> Result<ProxySession, CodexAdapterUnavailable> {
-        let mut child = Command::new("codex")
+        let mut child = Command::new(&self.executable)
             .args(["app-server", "proxy", "--sock", &self.socket])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -933,12 +978,7 @@ impl ConsumesResetCredit for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        ffi::OsString,
-        fs,
-        os::unix::fs::PermissionsExt,
-        sync::{Mutex, OnceLock},
-    };
+    use std::{fs, os::unix::fs::PermissionsExt};
 
     struct FakeProxy;
 
@@ -962,45 +1002,18 @@ mod tests {
         }
     }
 
-    struct PathScope {
-        previous: Option<OsString>,
-    }
-
     trait InstallsFakeProxy {
-        fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathScope);
+        fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathBuf);
     }
 
     impl InstallsFakeProxy for FakeProxy {
-        fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathScope) {
+        fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathBuf) {
             let directory = tempfile::tempdir().unwrap();
             let executable = directory.path().join("codex");
             fs::write(&executable, self.executable(frames)).unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-            let previous = std::env::var_os("PATH");
-            let mut path = OsString::from(directory.path());
-            if let Some(value) = &previous {
-                path.push(":");
-                path.push(value);
-            }
-            // Tests serialize PATH changes below, and Rust 2024 marks process
-            // environment mutation unsafe because other threads could observe it.
-            unsafe { std::env::set_var("PATH", path) };
-            (directory, PathScope { previous })
+            (directory, executable)
         }
-    }
-
-    impl Drop for PathScope {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(path) => unsafe { std::env::set_var("PATH", path) },
-                None => unsafe { std::env::remove_var("PATH") },
-            }
-        }
-    }
-
-    fn fake_proxy_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn origin() -> OriginClue {
@@ -1013,11 +1026,75 @@ mod tests {
 
     fn adapter() -> CodexAdapter {
         CodexAdapter {
+            executable: PathBuf::from("/fixture/codex-wrapper"),
             socket: "/tmp/fake-codex.sock".into(),
             model: "gpt-5.6".into(),
             timeout: Duration::from_millis(100),
             workspace_root: std::env::current_dir().unwrap(),
         }
+    }
+
+    fn adapter_at(executable: PathBuf) -> CodexAdapter {
+        CodexAdapter {
+            executable,
+            ..adapter()
+        }
+    }
+
+    fn endpoints() -> CodexEndpoints {
+        CodexEndpoints {
+            stable: CodexEndpoint {
+                client_path: PathBuf::from("/profile/bin/codex"),
+                home: PathBuf::from("/home/test/.codex"),
+                socket: "/home/test/.codex/app-server-control/app-server-control.sock".into(),
+                transcript_root: PathBuf::from("/home/test/.codex/sessions"),
+                model_names: BTreeSet::from(["gpt-5.6-terra".into()]),
+            },
+            next: CodexEndpoint {
+                client_path: PathBuf::from("/profile/bin/codex-next"),
+                home: PathBuf::from("/home/test/.codex-next"),
+                socket: "/home/test/.codex-next/app-server-control/app-server-control.sock".into(),
+                transcript_root: PathBuf::from("/home/test/.codex-next/sessions"),
+                model_names: BTreeSet::from([
+                    "gpt-6-astra".into(),
+                    "gpt-6-sol".into(),
+                    "gpt-6-luna".into(),
+                ]),
+            },
+            timeout: Duration::from_secs(10),
+            workspace_root: PathBuf::from("/home/test/primary"),
+        }
+    }
+
+    #[test]
+    fn exact_models_select_one_immutable_codex_endpoint() {
+        let endpoints = endpoints();
+        assert_eq!(
+            endpoints.endpoint_for("gpt-6-sol").unwrap().client_path,
+            PathBuf::from("/profile/bin/codex-next")
+        );
+        assert_eq!(
+            endpoints.endpoint_for("gpt-5.6-terra").unwrap().client_path,
+            PathBuf::from("/profile/bin/codex")
+        );
+        assert!(endpoints.endpoint_for("gpt-6-invented").is_err());
+    }
+
+    #[test]
+    fn overlapping_model_routes_fail_closed() {
+        let mut endpoints = endpoints();
+        endpoints.stable.model_names.insert("gpt-6-sol".into());
+        assert!(endpoints.endpoint_for("gpt-6-sol").is_err());
+    }
+
+    #[test]
+    fn adapter_uses_the_configured_wrapper_without_path_resolution() {
+        let adapter = endpoints().adapter_for("gpt-6-astra").unwrap();
+        assert_eq!(adapter.executable, PathBuf::from("/profile/bin/codex-next"));
+        assert!(matches!(
+            adapter.open_proxy(),
+            Err(CodexAdapterUnavailable::Proxy(_))
+        ));
     }
 
     fn malformed_bound_launch() -> (ComposedLaunch, PromptDeliveryIntent) {
@@ -1102,18 +1179,15 @@ mod tests {
 
     #[test]
     fn fake_proxy_starts_a_thread_after_turn_start_is_accepted() {
-        let _guard = fake_proxy_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
             fake.websocket_frame(r#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#),
             fake.websocket_frame(r#"{"id":3,"result":{}}"#),
         ];
-        let (_directory, _path) = fake.install(&frames);
+        let (_directory, executable) = fake.install(&frames);
         assert_eq!(
-            adapter()
+            adapter_at(executable)
                 .start_codex("flow-test", "start", &origin())
                 .unwrap(),
             "thread-1"
@@ -1122,48 +1196,39 @@ mod tests {
 
     #[test]
     fn fake_proxy_refusal_does_not_report_a_started_thread() {
-        let _guard = fake_proxy_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
             fake.websocket_frame(r#"{"id":2,"error":{"code":-32000,"message":"denied"}}"#),
         ];
-        let (_directory, _path) = fake.install(&frames);
+        let (_directory, executable) = fake.install(&frames);
         assert!(matches!(
-            adapter().start_codex("flow-test", "start", &origin()),
+            adapter_at(executable).start_codex("flow-test", "start", &origin()),
             Err(CodexAdapterUnavailable::Refused { method, .. }) if method == "thread/start"
         ));
     }
 
     #[test]
     fn fake_proxy_timeout_does_not_report_a_started_thread() {
-        let _guard = fake_proxy_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fake = FakeProxy;
         let frames = [fake.websocket_frame(r#"{"id":1,"result":{}}"#)];
-        let (_directory, _path) = fake.install(&frames);
+        let (_directory, executable) = fake.install(&frames);
         assert!(matches!(
-            adapter().start_codex("flow-test", "start", &origin()),
+            adapter_at(executable).start_codex("flow-test", "start", &origin()),
             Err(CodexAdapterUnavailable::TimedOut)
         ));
     }
 
     #[test]
     fn fake_proxy_consumes_a_reset_credit_as_a_typed_outcome() {
-        let _guard = fake_proxy_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
             fake.websocket_frame(r#"{"id":2,"result":{"outcome":"nothingToReset"}}"#),
         ];
-        let (_directory, _path) = fake.install(&frames);
+        let (_directory, executable) = fake.install(&frames);
         assert_eq!(
-            adapter()
+            adapter_at(executable)
                 .consume_reset_credit(&meta_signal_flow::ResetRequest {
                     idempotency_key: "attempt-1".into(),
                     credit_selection: meta_signal_flow::CreditSelection::Next,

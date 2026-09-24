@@ -6,8 +6,7 @@ pub mod herdr;
 pub mod store;
 
 use codex::{
-    CodexAdapter, ConsumesResetCredit, ResolvesBoundCodexSkills, ResumesCodex,
-    SubmitsBoundCodexFirstTurn,
+    CodexEndpoints, ConsumesResetCredit, ResolvesBoundCodexSkills, SubmitsBoundCodexFirstTurn,
 };
 use composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer};
 use herdr::launch::{
@@ -34,7 +33,7 @@ use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
     OpensFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
     RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement,
-    RecordsRestartedFlow, RegistersExistingFlow, RegistersFlowIdentity, ReservesLaunchAttempt,
+    RegistersExistingFlow, RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 
 fn process_identity_matches(identity: &meta_signal_flow::ProcessIdentity) -> bool {
@@ -103,7 +102,7 @@ fn refused_binding(
 
 pub struct RunningNexus {
     pub store: FlowStore,
-    pub codex: CodexAdapter,
+    pub codex_endpoints: CodexEndpoints,
     pub herdr: herdr::HerdrCli,
     pub composer: LaunchComposer,
 }
@@ -186,6 +185,19 @@ impl Dispatches for RunningNexus {
                 let launch = match self.composer.compose(&request.launch_profile) {
                     Ok(launch) => launch,
                     Err(_) => return Response::StartRejected(StartRejection::CompositionRefused),
+                };
+                let codex_adapter = if launch.launch_profile.harness_kind == HarnessKind::Codex {
+                    match self
+                        .codex_endpoints
+                        .adapter_for(&launch.launch_profile.model_name)
+                    {
+                        Ok(adapter) => Some(adapter),
+                        Err(_) => {
+                            return Response::StartRejected(StartRejection::NativeLaunchRefused);
+                        }
+                    }
+                } else {
+                    None
                 };
                 match self.store.reserve_launch_attempt(&launch, origin.clone()) {
                     Ok(LaunchAttemptReservation::Reserved(_)) => {}
@@ -272,8 +284,9 @@ impl Dispatches for RunningNexus {
                 }
                 let native_skill_selection_vector = match launch.launch_profile.harness_kind {
                     HarnessKind::Codex => self
-                        .codex
-                        .resolve_bound_codex_skills(&launch, &binding)
+                        .codex_endpoints
+                        .adapter_for(&launch.launch_profile.model_name)
+                        .and_then(|adapter| adapter.resolve_bound_codex_skills(&launch, &binding))
                         .map_err(|_| ()),
                     HarnessKind::Claude => self
                         .herdr
@@ -302,10 +315,11 @@ impl Dispatches for RunningNexus {
                     return Response::StartRejected(StartRejection::IntentPersistenceRefused);
                 }
                 let submission = match launch.launch_profile.harness_kind {
-                    HarnessKind::Codex => self
-                        .codex
-                        .submit_bound_codex_first_turn(&launch, &delivery_intent)
-                        .map_err(|_| ()),
+                    HarnessKind::Codex => codex_adapter.as_ref().ok_or(()).and_then(|adapter| {
+                        adapter
+                            .submit_bound_codex_first_turn(&launch, &delivery_intent)
+                            .map_err(|_| ())
+                    }),
                     HarnessKind::Claude => self
                         .herdr
                         .submit_first_prompt_once(&launch, &delivery_intent)
@@ -375,21 +389,12 @@ impl Dispatches for RunningNexus {
                 if request.origin_clue.session_id != token.thread_id {
                     return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
                 }
-                let origin = signal_flow::OriginClue {
-                    flow_id: token.authority_flow_id.clone(),
-                    session_id: token.thread_id.clone(),
-                    turn_id: "restart".into(),
-                };
-                if self
-                    .codex
-                    .resume_codex(&token.thread_id, "Resume this Flow.", &origin)
-                    .is_err()
-                {
-                    return Response::RestartRejected(RestartRejection::ResumeRefused);
-                }
-                self.store
-                    .record_restarted(token)
-                    .unwrap_or(Response::RestartRejected(RestartRejection::ResumeRefused))
+                // v2 restart does not carry the original model/endpoint. Moving
+                // a thread between stable and next is never inferred from its
+                // current process or from a caller claim. Refresh uses a fresh
+                // typed Start until the replacement contract is deployed.
+                let _ = token;
+                Response::RestartRejected(RestartRejection::ResumeRefused)
             }
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
@@ -419,8 +424,13 @@ impl Dispatches for RunningNexus {
                 })
             }
             meta_signal_flow::Query::ConsumeReset(request) => self
-                .codex
-                .consume_reset_credit(&request)
+                .codex_endpoints
+                .next
+                .model_names
+                .first()
+                .ok_or(())
+                .and_then(|model| self.codex_endpoints.adapter_for(model).map_err(|_| ()))
+                .and_then(|adapter| adapter.consume_reset_credit(&request).map_err(|_| ()))
                 .map(meta_signal_flow::Response::ResetConsumed)
                 .unwrap_or(meta_signal_flow::Response::ResetRejected(
                     meta_signal_flow::ResetRejection::AdapterUnavailable,
@@ -581,9 +591,7 @@ impl Dispatches for RunningNexus {
 pub trait OpensRunningNexus {
     fn open(
         store: &Path,
-        socket: String,
-        model: String,
-        timeout: std::time::Duration,
+        codex_endpoints: CodexEndpoints,
         source_root: PathBuf,
     ) -> Result<Self, store::StoreError>
     where
@@ -593,20 +601,13 @@ pub trait OpensRunningNexus {
 impl OpensRunningNexus for RunningNexus {
     fn open(
         store: &Path,
-        socket: String,
-        model: String,
-        timeout: std::time::Duration,
+        codex_endpoints: CodexEndpoints,
         source_root: PathBuf,
     ) -> Result<Self, store::StoreError> {
         Ok(Self {
             store: FlowStore::open(store)?,
-            codex: CodexAdapter {
-                socket,
-                model,
-                timeout,
-                workspace_root: source_root.clone(),
-            },
-            herdr: herdr::HerdrCli::default(),
+            codex_endpoints: codex_endpoints.clone(),
+            herdr: herdr::HerdrCli::default().with_codex_endpoints(codex_endpoints),
             composer: LaunchComposer::at(source_root),
         })
     }
@@ -707,7 +708,7 @@ impl Frame {
 mod tests {
     use super::{Dispatches, RunningNexus};
     use crate::{
-        codex::CodexAdapter,
+        codex::{CodexEndpoint, CodexEndpoints},
         composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
         store::{
@@ -725,6 +726,7 @@ mod tests {
         Response, StartRejection, StartRequest,
     };
     use std::{
+        collections::BTreeSet,
         fs,
         io::Write,
         os::unix::fs::{MetadataExt, PermissionsExt},
@@ -800,15 +802,33 @@ mod tests {
             )
             .expect("fixture flow claim");
             let snapshot_program = directory.path().join("herdr-fixture");
+            let codex_endpoints = CodexEndpoints {
+                stable: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex"),
+                    home: directory.path().join("codex-home"),
+                    socket: "unused".into(),
+                    transcript_root: directory.path().join("native-transcripts/codex"),
+                    model_names: BTreeSet::from([
+                        "unused".into(),
+                        "fixture-model".into(),
+                        "gpt-sol".into(),
+                    ]),
+                },
+                next: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex-next"),
+                    home: directory.path().join("codex-next-home"),
+                    socket: "unused-next".into(),
+                    transcript_root: directory.path().join("native-transcripts/codex-next"),
+                    model_names: BTreeSet::from(["gpt-6-sol".into(), "gpt-6-luna".into()]),
+                },
+                timeout: Duration::from_secs(1),
+                workspace_root: directory.path().to_path_buf(),
+            };
             let nexus = RunningNexus {
                 store: FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store"),
-                codex: CodexAdapter {
-                    socket: "unused".into(),
-                    model: "unused".into(),
-                    timeout: Duration::from_secs(1),
-                    workspace_root: directory.path().to_path_buf(),
-                },
-                herdr: HerdrCli::at(snapshot_program.clone(), flows_root),
+                codex_endpoints: codex_endpoints.clone(),
+                herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
+                    .with_codex_endpoints(codex_endpoints),
                 composer: LaunchComposer::at(directory.path().to_path_buf()),
             };
             Self {

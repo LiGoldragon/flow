@@ -2,6 +2,8 @@
 
 pub mod launch;
 
+use crate::codex::{CodexEndpoint, CodexEndpoints};
+use std::collections::BTreeSet;
 use std::{fs, path::PathBuf, process::Command};
 
 use signal_flow::{
@@ -18,7 +20,7 @@ pub struct HerdrCli {
     executable: PathBuf,
     flow_id_executable: PathBuf,
     flows_root: PathBuf,
-    codex_transcript_root: PathBuf,
+    codex_endpoints: CodexEndpoints,
     claude_transcript_root: PathBuf,
     /// Native Claude skill catalogs, highest-precedence first.
     claude_skill_roots: Vec<PathBuf>,
@@ -48,8 +50,35 @@ impl Default for HerdrCli {
         Self {
             executable: PathBuf::from("herdr"),
             flow_id_executable: PathBuf::from("flow-id"),
-            flows_root,
-            codex_transcript_root: codex_home.join("sessions"),
+            flows_root: flows_root.clone(),
+            codex_endpoints: CodexEndpoints {
+                stable: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex"),
+                    home: codex_home.clone(),
+                    socket: home
+                        .join(".codex/app-server-control/app-server-control.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                    transcript_root: codex_home.join("sessions"),
+                    model_names: BTreeSet::from(["gpt-5.6-terra".into()]),
+                },
+                next: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex-next"),
+                    home: home.join(".codex-next"),
+                    socket: home
+                        .join(".codex-next/app-server-control/app-server-control.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                    transcript_root: home.join(".codex-next/sessions"),
+                    model_names: BTreeSet::from([
+                        "gpt-6-astra".into(),
+                        "gpt-6-sol".into(),
+                        "gpt-6-luna".into(),
+                    ]),
+                },
+                timeout: std::time::Duration::from_secs(10),
+                workspace_root: workspace_root.clone(),
+            },
             claude_transcript_root: claude_home.join("projects"),
             claude_skill_roots,
         }
@@ -76,6 +105,11 @@ impl ReadsHerdrRoster for HerdrCli {
 }
 
 impl HerdrCli {
+    pub fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
+        self.codex_endpoints = codex_endpoints;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn at(executable: PathBuf, flows_root: PathBuf) -> Self {
         let fixture_root = flows_root
@@ -85,8 +119,28 @@ impl HerdrCli {
         Self {
             executable,
             flow_id_executable: fixture_root.join("flow-id"),
-            flows_root,
-            codex_transcript_root: fixture_root.join("codex"),
+            flows_root: flows_root.clone(),
+            codex_endpoints: CodexEndpoints {
+                stable: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex"),
+                    home: fixture_root.join("codex-home"),
+                    socket: "/tmp/stable-codex.sock".into(),
+                    transcript_root: fixture_root.join("codex"),
+                    model_names: BTreeSet::from(["model-current".into(), "fixture-model".into()]),
+                },
+                next: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex-next"),
+                    home: fixture_root.join("codex-next-home"),
+                    socket: "/tmp/next-codex.sock".into(),
+                    transcript_root: fixture_root.join("codex-next"),
+                    model_names: BTreeSet::from(["gpt-6-sol".into(), "gpt-6-luna".into()]),
+                },
+                timeout: std::time::Duration::from_millis(100),
+                workspace_root: flows_root
+                    .parent()
+                    .expect("fixture flows root has a parent")
+                    .to_path_buf(),
+            },
             claude_transcript_root: fixture_root.join("claude"),
             claude_skill_roots: vec![fixture_root.join("claude-skills")],
         }

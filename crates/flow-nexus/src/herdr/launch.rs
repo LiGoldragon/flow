@@ -1112,46 +1112,42 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                         == Some(durable_intent.native_session_id.as_str());
                     if exact_session
                         && row.get("type").and_then(serde_json::Value::as_str) == Some("assistant")
-                    {
-                        if let Some(contents) = row
+                        && let Some(contents) = row
                             .pointer("/message/content")
                             .and_then(serde_json::Value::as_array)
-                        {
-                            for content in contents {
-                                if content.get("type").and_then(serde_json::Value::as_str)
-                                    != Some("tool_use")
-                                    || content.get("name").and_then(serde_json::Value::as_str)
-                                        != Some("Skill")
-                                {
-                                    continue;
-                                }
-                                if pending_claude_tool.is_some()
-                                    || skill_index
-                                        >= durable_intent.native_skill_selection_vector.len()
-                                    || content
-                                        .pointer("/input/skill")
-                                        .and_then(serde_json::Value::as_str)
-                                        != Some(
-                                            durable_intent.native_skill_selection_vector
-                                                [skill_index]
-                                                .skill_name
-                                                .as_str(),
-                                        )
-                                {
-                                    return Err(
-                                        "native Claude Skill invocation order differs from intent"
-                                            .into(),
-                                    );
-                                }
-                                pending_claude_tool = content
-                                    .get("id")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_owned);
-                                if pending_claude_tool.is_none() {
-                                    return Err("native Claude Skill invocation has no id".into());
-                                }
-                                claude_tool_succeeded = false;
+                    {
+                        for content in contents {
+                            if content.get("type").and_then(serde_json::Value::as_str)
+                                != Some("tool_use")
+                                || content.get("name").and_then(serde_json::Value::as_str)
+                                    != Some("Skill")
+                            {
+                                continue;
                             }
+                            if pending_claude_tool.is_some()
+                                || skill_index >= durable_intent.native_skill_selection_vector.len()
+                                || content
+                                    .pointer("/input/skill")
+                                    .and_then(serde_json::Value::as_str)
+                                    != Some(
+                                        durable_intent.native_skill_selection_vector[skill_index]
+                                            .skill_name
+                                            .as_str(),
+                                    )
+                            {
+                                return Err(
+                                    "native Claude Skill invocation order differs from intent"
+                                        .into(),
+                                );
+                            }
+                            pending_claude_tool = content
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned);
+                            if pending_claude_tool.is_none() {
+                                return Err("native Claude Skill invocation has no id".into());
+                            }
+                            claude_tool_succeeded = false;
                         }
                     }
                     if exact_session

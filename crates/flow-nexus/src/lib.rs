@@ -79,6 +79,58 @@ pub trait ReconcilesRefreshRetirement {
     ) -> Response;
 }
 
+pub trait AuthenticatesRefreshRetry {
+    fn authenticate_refresh_retry(
+        &self,
+        peer: &UnixStream,
+        request: &signal_flow::RefreshRequest,
+    ) -> Result<signal_flow::CallerProof, signal_flow::RefreshRejection>;
+}
+
+impl AuthenticatesRefreshRetry for RunningNexus {
+    fn authenticate_refresh_retry(
+        &self,
+        peer: &UnixStream,
+        request: &signal_flow::RefreshRequest,
+    ) -> Result<signal_flow::CallerProof, signal_flow::RefreshRejection> {
+        let mut candidates = Vec::new();
+        if let Some(identity) = self
+            .store
+            .process_identity(&request.flow_id)
+            .map_err(|_| signal_flow::RefreshRejection::CallerProofUnavailable)?
+        {
+            candidates.push(identity);
+        }
+        let key = signal_flow::ReplacementIdempotencyKey {
+            flow_id: request.flow_id.clone(),
+            transcript_record_sha256: request
+                .transcript_handover_reference
+                .transcript_record_sha256
+                .clone(),
+        };
+        if let Some(replacement_id) = self
+            .store
+            .refresh_attempt(&key)
+            .map_err(|_| signal_flow::RefreshRejection::CallerProofUnavailable)?
+            .and_then(|attempt| attempt.flow_id_option)
+            && let Some(identity) = self
+                .store
+                .process_identity(&replacement_id)
+                .map_err(|_| signal_flow::RefreshRejection::CallerProofUnavailable)?
+        {
+            candidates.push(identity);
+        }
+        candidates
+            .iter()
+            .find_map(|harness| {
+                LinuxProcessEvidence
+                    .prove_socket_refresh_caller(peer, &request.flow_id, harness)
+                    .ok()
+            })
+            .ok_or(signal_flow::RefreshRejection::CallerProofMismatch)
+    }
+}
+
 impl ReconcilesRefreshRetirement for RunningNexus {
     fn reconcile_refresh_retirement(
         &self,
@@ -580,18 +632,22 @@ impl Dispatches for RunningNexus {
                     }
                     policy
                 };
-                let reservation =
-                    match self
-                        .store
-                        .reserve_refresh_attempt(request.clone(), policy, proof)
-                    {
-                        Ok(response) => response,
-                        Err(_) => {
-                            return Response::RefreshRejected(
-                                signal_flow::RefreshRejection::RefreshPersistenceRefused,
-                            );
-                        }
-                    };
+                let reservation_proof = existing
+                    .as_ref()
+                    .and_then(|attempt| attempt.caller_proof_option.clone())
+                    .unwrap_or(proof);
+                let reservation = match self.store.reserve_refresh_attempt(
+                    request.clone(),
+                    policy,
+                    reservation_proof,
+                ) {
+                    Ok(response) => response,
+                    Err(_) => {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::RefreshPersistenceRefused,
+                        );
+                    }
+                };
                 let Response::RefreshProgress(mut refresh) = reservation else {
                     return reservation;
                 };
@@ -776,20 +832,7 @@ impl ServesOrdinary for RunningNexus {
             let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
             let query = Frame::read_query(&mut peer)?;
             let peer_caller_proof = match &query {
-                Query::Refresh(request) => Some(
-                    self.store
-                        .process_identity(&request.flow_id)
-                        .ok()
-                        .flatten()
-                        .ok_or(signal_flow::RefreshRejection::CallerProofUnavailable)
-                        .and_then(|harness| {
-                            LinuxProcessEvidence.prove_socket_refresh_caller(
-                                &peer,
-                                &request.flow_id,
-                                &harness,
-                            )
-                        }),
-                ),
+                Query::Refresh(request) => Some(self.authenticate_refresh_retry(&peer, request)),
                 _ => None,
             };
             let response = self.dispatch_with_peer(query, peer_caller_proof);

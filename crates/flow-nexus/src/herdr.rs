@@ -120,6 +120,9 @@ impl HerdrCli {
         let agent = snapshot.pointer("/result/snapshot/agents").and_then(serde_json::Value::as_array)
             .and_then(|agents| agents.iter().find(|agent| Self::agent_matches_binding(agent, route, &HarnessKind::Codex)))
             .ok_or("stored Herdr route is absent")?;
+        if agent.get("agent").and_then(serde_json::Value::as_str) != Some("codex") {
+            return Err("native evidence format is not supported for this harness".into());
+        }
         let title = agent.get("terminal_title").and_then(serde_json::Value::as_str).filter(|title| !title.is_empty())
             .ok_or("Herdr title is absent")?;
         let mut candidates = Vec::new();
@@ -152,6 +155,10 @@ impl HerdrCli {
             }
         }
         let prompt = first_prompt.ok_or("native first user prompt absent")?;
+        // Existing bindings have no durable skill-body manifest.  Treat every
+        // skill-bearing prompt as unconfirmable until that producer fact is
+        // added; counting locators would let a fabricated body promote.
+        if skills != 0 { return Err("existing binding has no durable skill body manifest".into()); }
         Ok(RuntimeExistingEvidence { prompt_sha256: format!("{:x}", Sha256::digest(prompt.as_bytes())), native_turn_id: turn.ok_or("native turn absent")?, model_name: model.ok_or("native model absent")?, effort: effort.ok_or("native effort absent")?, skill_count: skills, terminal_title_sha256: format!("{:x}", Sha256::digest(title.as_bytes())) })
     }
 

@@ -1079,7 +1079,12 @@ mod tests {
         fixture.set_agents(vec![serde_json::json!({"agent":"codex", "name":binding.herdr_agent_name, "pane_id":binding.herdr_pane_id, "terminal_id":binding.herdr_terminal_id, "terminal_title":"native title"})]);
         let transcript_root = fixture.directory.path().join("native-transcripts/codex");
         fs::create_dir_all(&transcript_root).unwrap();
-        fs::write(transcript_root.join(format!("{}.jsonl", binding.native_session_id)), format!(
+        let transcript_path = transcript_root.join(format!("{}.jsonl", binding.native_session_id));
+        fs::write(&transcript_path, format!(
+            "{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-sol\",\"effort\":\"medium\",\"turn_id\":\"turn-confirm\"}}}}\n{{\"type\":\"event_msg\",\"payload\":{{\"thread_id\":\"{}\",\"turn_id\":\"turn-confirm\",\"item\":{{\"type\":\"UserMessage\",\"content\":[{{\"type\":\"skill\",\"name\":\"fabricated\",\"path\":\"/tmp/fabricated\"}},{{\"type\":\"text\",\"text\":\"native prompt\"}}]}}}}}}\n", binding.native_session_id)).unwrap();
+        assert!(matches!(fixture.nexus.dispatch_meta(meta_signal_flow::Query::MetaConfirmExisting(confirmation.clone())), meta_signal_flow::Response::ConfirmExistingRejected(_)));
+        assert!(matches!(fixture.nexus.dispatch(Query::ResolveRecipient("mind-confirm".into())), Response::RecipientResolved(ref node) if node.flow_lifecycle == FlowLifecycle::Pending));
+        fs::write(transcript_path, format!(
             "{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-sol\",\"effort\":\"medium\",\"turn_id\":\"turn-confirm\"}}}}\n{{\"type\":\"event_msg\",\"payload\":{{\"thread_id\":\"{}\",\"turn_id\":\"turn-confirm\",\"item\":{{\"type\":\"UserMessage\",\"content\":[{{\"type\":\"text\",\"text\":\"native prompt\"}}]}}}}}}\n", binding.native_session_id)).unwrap();
         assert!(matches!(
             fixture.nexus.dispatch_meta(meta_signal_flow::Query::MetaConfirmExisting(confirmation.clone())),

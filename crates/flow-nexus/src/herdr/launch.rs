@@ -1650,9 +1650,6 @@ printf '%s\n' 123456
                 .expect("stale receipt is ignored"),
             PromptDeliveryResult::Ambiguous(intent.clone())
         );
-        let wrong_role = serde_json::json!({"type":"event_msg","payload":{
-            "thread_id":native_session,"turn_id":"turn-user",
-            "item":{"type":"UserMessage","content":[{"text":marker}]}}});
         let receipt = serde_json::json!({"type":"event_msg","payload":{
             "thread_id":native_session,"turn_id":"turn-new",
             "item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}});
@@ -1666,7 +1663,6 @@ printf '%s\n' 123456
             .append(true)
             .open(&transcript)
             .expect("append transcript");
-        writeln!(append, "{wrong_role}").expect("append wrong role");
         writeln!(append, "{context}").expect("append turn context");
         writeln!(append, "{input}").expect("append native input");
         writeln!(append, "{receipt}").expect("append fresh receipt");

@@ -27,6 +27,17 @@ pub trait ProvesRefreshCaller {
     ) -> Result<CallerProof, RefreshRejection>;
 }
 
+/// Authenticates a refresh caller while the kernel-owned peer pidfd remains
+/// live for the complete ancestry proof.
+pub trait ProvesSocketRefreshCaller {
+    fn prove_socket_refresh_caller(
+        &self,
+        peer: &UnixStream,
+        flow_id: &str,
+        harness: &ProcessIdentity,
+    ) -> Result<CallerProof, RefreshRejection>;
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LinuxProcessEvidence;
 
@@ -157,6 +168,12 @@ impl ProvesRefreshCaller for LinuxProcessEvidence {
         let mut process_id = peer.process_id;
         for depth in 0..=MAXIMUM_PARENT_DEPTH {
             let observed = self.process_identity(process_id)?;
+            if depth == 0 && observed != *peer {
+                // The pidfd-backed socket observation is the requester's
+                // identity. Never continue an ancestry walk from a reused
+                // numeric PID after that pidfd has been released.
+                return Err(RefreshRejection::CallerProofMismatch);
+            }
             if observed == *harness {
                 return Ok(CallerProof {
                     flow_id: flow_id.to_owned(),
@@ -175,6 +192,34 @@ impl ProvesRefreshCaller for LinuxProcessEvidence {
             process_id = parent;
         }
         Err(RefreshRejection::CallerProofMismatch)
+    }
+}
+
+impl ProvesSocketRefreshCaller for LinuxProcessEvidence {
+    fn prove_socket_refresh_caller(
+        &self,
+        peer: &UnixStream,
+        flow_id: &str,
+        harness: &ProcessIdentity,
+    ) -> Result<CallerProof, RefreshRejection> {
+        let credentials = getsockopt(peer, PeerCredentials)
+            .map_err(|_| RefreshRejection::CallerProofUnavailable)?;
+        let pidfd = self.peer_pidfd(peer)?;
+        let process_id = self.pidfd_process_id(&pidfd)?;
+        if process_id != i64::from(credentials.pid()) {
+            return Err(RefreshRejection::CallerProofMismatch);
+        }
+        let peer_identity = self.process_identity(process_id)?;
+        if peer_identity.process_user_id != i64::from(credentials.uid()) {
+            return Err(RefreshRejection::CallerProofMismatch);
+        }
+        let proof = self.prove_refresh_caller(&peer_identity, flow_id, harness)?;
+        if self.pidfd_process_id(&pidfd)? != process_id
+            || self.process_identity(process_id)? != peer_identity
+        {
+            return Err(RefreshRejection::CallerProofUnavailable);
+        }
+        Ok(proof)
     }
 }
 

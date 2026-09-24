@@ -297,6 +297,30 @@ pub trait ReservesRefreshAttempt {
     ) -> Result<Response, StoreError>;
 }
 
+pub trait ReadsRefreshAttempt {
+    fn refresh_attempt(
+        &self,
+        key: &ReplacementIdempotencyKey,
+    ) -> Result<Option<RefreshAttempt>, StoreError>;
+}
+
+pub trait AdvancesRefreshAttempt {
+    fn mark_replacement_launching(
+        &self,
+        key: &ReplacementIdempotencyKey,
+    ) -> Result<RefreshAttempt, StoreError>;
+    fn record_replacement_registered(
+        &self,
+        key: &ReplacementIdempotencyKey,
+        flow_id: &str,
+    ) -> Result<RefreshAttempt, StoreError>;
+    fn record_replacement_ready(
+        &self,
+        key: &ReplacementIdempotencyKey,
+        proof: signal_flow::ReplacementReadyProof,
+    ) -> Result<RefreshAttempt, StoreError>;
+}
+
 trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
@@ -993,6 +1017,104 @@ impl ReservesRefreshAttempt for FlowStore {
             ),
             Err(error) => Err(StoreError::Engine(error)),
         }
+    }
+}
+
+impl ReadsRefreshAttempt for FlowStore {
+    fn refresh_attempt(
+        &self,
+        key: &ReplacementIdempotencyKey,
+    ) -> Result<Option<RefreshAttempt>, StoreError> {
+        Ok(self
+            .stored_refresh_attempt(key)?
+            .map(|stored| stored.attempt))
+    }
+}
+
+impl AdvancesRefreshAttempt for FlowStore {
+    fn mark_replacement_launching(
+        &self,
+        key: &ReplacementIdempotencyKey,
+    ) -> Result<RefreshAttempt, StoreError> {
+        let Some(mut stored) = self.stored_refresh_attempt(key)? else {
+            return Err(StoreError::StateInvariant);
+        };
+        if stored.attempt.refresh_attempt_phase == RefreshAttemptPhase::RouteLocked {
+            stored.attempt.refresh_attempt_phase = RefreshAttemptPhase::ReplacementLaunching;
+            self.engine.mutate_keyed(KeyedMutation::new(
+                self.refresh_attempts,
+                RecordKey::new(Self::refresh_key(key)),
+                stored.clone(),
+            ))?;
+        }
+        Ok(stored.attempt)
+    }
+
+    fn record_replacement_registered(
+        &self,
+        key: &ReplacementIdempotencyKey,
+        flow_id: &str,
+    ) -> Result<RefreshAttempt, StoreError> {
+        let Some(mut stored) = self.stored_refresh_attempt(key)? else {
+            return Err(StoreError::StateInvariant);
+        };
+        if let Some(existing) = &stored.attempt.flow_id_option {
+            if existing != flow_id {
+                return Err(StoreError::StateInvariant);
+            }
+        } else {
+            stored.attempt.flow_id_option = Some(flow_id.to_owned());
+        }
+        if matches!(
+            stored.attempt.refresh_attempt_phase,
+            RefreshAttemptPhase::ReplacementLaunching
+                | RefreshAttemptPhase::Held(signal_flow::RefreshHoldReason::ReplacementNotReady)
+        ) {
+            stored.attempt.refresh_attempt_phase =
+                RefreshAttemptPhase::ReplacementRegisteredUnconfirmed;
+        }
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.refresh_attempts,
+            RecordKey::new(Self::refresh_key(key)),
+            stored.clone(),
+        ))?;
+        Ok(stored.attempt)
+    }
+
+    fn record_replacement_ready(
+        &self,
+        key: &ReplacementIdempotencyKey,
+        proof: signal_flow::ReplacementReadyProof,
+    ) -> Result<RefreshAttempt, StoreError> {
+        let Some(mut stored) = self.stored_refresh_attempt(key)? else {
+            return Err(StoreError::StateInvariant);
+        };
+        if stored.attempt.flow_id_option.as_deref()
+            != Some(proof.native_target_receipt.flow_id.as_str())
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        if let Some(existing) = &stored.attempt.replacement_ready_proof_option {
+            if existing != &proof {
+                return Err(StoreError::StateInvariant);
+            }
+            return Ok(stored.attempt);
+        }
+        if !matches!(
+            stored.attempt.refresh_attempt_phase,
+            RefreshAttemptPhase::ReplacementRegisteredUnconfirmed
+                | RefreshAttemptPhase::ReplacementLaunching
+        ) {
+            return Err(StoreError::StateInvariant);
+        }
+        stored.attempt.replacement_ready_proof_option = Some(proof);
+        stored.attempt.refresh_attempt_phase = RefreshAttemptPhase::ReplacementReady;
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.refresh_attempts,
+            RecordKey::new(Self::refresh_key(key)),
+            stored.clone(),
+        ))?;
+        Ok(stored.attempt)
     }
 }
 

@@ -1,6 +1,7 @@
 //! Herdr roster validation for durable Flow routes.
 
 pub mod launch;
+pub mod refresh;
 
 use std::{fs, path::PathBuf, process::Command};
 

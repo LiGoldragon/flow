@@ -15,11 +15,13 @@ use herdr::launch::{
     ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
     SubmitsFirstPromptOnce,
 };
-use refresh::{LinuxProcessEvidence, ProvesRefreshCaller, ReadsProcessIdentity};
+use herdr::refresh::{ObservesReadyProcessIdentity, ValidatesTranscriptHandover};
+use refresh::{LinuxProcessEvidence, ProvesSocketRefreshCaller};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-    LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchIntent, PromptDeliveryResult, Query,
-    RecipientDisposition, RegistrationAcknowledgement, Response, StartRejection,
+    InteractiveReadiness, LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchIntent,
+    PromptDeliveryResult, Query, RecipientDisposition, RegistrationAcknowledgement,
+    ReplacementReadyProof, Response, StartRejection, StartRequest,
 };
 use std::{
     fs,
@@ -31,10 +33,11 @@ use std::{
     path::{Path, PathBuf},
 };
 use store::{
-    AppliesFlowQuery, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore, OpensFlowStore,
-    ReadsFlowRuntimeEvidence, ReadsLaunchAttempt, RecordsNativeLaunchBinding,
-    RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
-    RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
+    AdvancesRefreshAttempt, AppliesFlowQuery, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
+    OpensFlowStore, ReadsFlowRuntimeEvidence, ReadsLaunchAttempt, ReadsRefreshAttempt,
+    RecordsFlowRuntimeEvidence, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
+    RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement,
+    RegistersFlowIdentity, ReservesLaunchAttempt, ReservesRefreshAttempt,
 };
 
 pub struct RunningNexus {
@@ -42,6 +45,7 @@ pub struct RunningNexus {
     pub codex: CodexAdapter,
     pub herdr: herdr::HerdrCli,
     pub composer: LaunchComposer,
+    pub refresh_policy_option: Option<signal_flow::RefreshPolicy>,
 }
 
 pub trait Dispatches {
@@ -49,9 +53,46 @@ pub trait Dispatches {
     fn dispatch_with_peer(
         &self,
         query: Query,
-        peer_process_identity: Option<signal_flow::ProcessIdentity>,
+        peer_caller_proof: Option<Result<signal_flow::CallerProof, signal_flow::RefreshRejection>>,
     ) -> Response;
     fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response;
+}
+
+pub trait PromotesObservedStart {
+    fn promote_observed_start(
+        &self,
+        binding: &signal_flow::NativeLaunchBinding,
+        receipt: signal_flow::NativeTargetReceipt,
+    ) -> Response;
+}
+
+impl PromotesObservedStart for RunningNexus {
+    fn promote_observed_start(
+        &self,
+        binding: &signal_flow::NativeLaunchBinding,
+        receipt: signal_flow::NativeTargetReceipt,
+    ) -> Response {
+        let process_identity = match self.herdr.observe_ready_process_identity(
+            binding,
+            &receipt,
+            &LinuxProcessEvidence,
+        ) {
+            Ok(identity) => identity,
+            Err(_) => return Response::StartRejected(StartRejection::RegistrationRefused),
+        };
+        if !self
+            .store
+            .record_flow_runtime_evidence(&binding.flow_id, process_identity, receipt)
+            .unwrap_or(false)
+        {
+            return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+        }
+        self.store
+            .confirm_started(&binding.flow_id)
+            .unwrap_or(Response::StartRejected(
+                StartRejection::LaunchPersistenceRefused,
+            ))
+    }
 }
 
 impl Dispatches for RunningNexus {
@@ -62,7 +103,7 @@ impl Dispatches for RunningNexus {
     fn dispatch_with_peer(
         &self,
         query: Query,
-        peer_process_identity: Option<signal_flow::ProcessIdentity>,
+        peer_caller_proof: Option<Result<signal_flow::CallerProof, signal_flow::RefreshRejection>>,
     ) -> Response {
         match query {
             Query::Start(request) => {
@@ -81,14 +122,15 @@ impl Dispatches for RunningNexus {
                         return Response::StartRejected(StartRejection::LaunchRequestConflict);
                     }
                     if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptObserved {
-                        let Some(binding) = attempt.native_launch_binding_option else {
+                        let (Some(binding), Some(PromptDeliveryResult::Observed(receipt))) = (
+                            attempt.native_launch_binding_option,
+                            attempt.prompt_delivery_result_option,
+                        ) else {
                             return Response::StartRejected(
                                 StartRejection::LaunchPersistenceRefused,
                             );
                         };
-                        return self.store.confirm_started(&binding.flow_id).unwrap_or(
-                            Response::StartRejected(StartRejection::LaunchPersistenceRefused),
-                        );
+                        return self.promote_observed_start(&binding, receipt);
                     }
                     if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
                         return Response::LaunchPending(attempt);
@@ -123,14 +165,14 @@ impl Dispatches for RunningNexus {
                     };
                     if !self
                         .store
-                        .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt))
+                        .record_prompt_delivery_result(PromptDeliveryResult::Observed(
+                            receipt.clone(),
+                        ))
                         .unwrap_or(false)
                     {
                         return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
                     }
-                    return self.store.confirm_started(&binding.flow_id).unwrap_or(
-                        Response::StartRejected(StartRejection::LaunchPersistenceRefused),
-                    );
+                    return self.promote_observed_start(&binding, receipt);
                 }
                 let launch = match self.composer.compose(&request.launch_profile) {
                     Ok(launch) => launch,
@@ -301,16 +343,16 @@ impl Dispatches for RunningNexus {
                     PromptDeliveryResult::Observed(receipt) => {
                         if !self
                             .store
-                            .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt))
+                            .record_prompt_delivery_result(PromptDeliveryResult::Observed(
+                                receipt.clone(),
+                            ))
                             .unwrap_or(false)
                         {
                             return Response::StartRejected(
                                 StartRejection::LaunchPersistenceRefused,
                             );
                         }
-                        self.store.confirm_started(&binding.flow_id).unwrap_or(
-                            Response::StartRejected(StartRejection::LaunchPersistenceRefused),
-                        )
+                        self.promote_observed_start(&binding, receipt)
                     }
                 }
             }
@@ -320,27 +362,169 @@ impl Dispatches for RunningNexus {
                         signal_flow::RefreshRejection::ProvenanceMismatch,
                     );
                 }
-                let Some(peer) = peer_process_identity else {
+                let Some(proof) = peer_caller_proof else {
                     return Response::RefreshRejected(
                         signal_flow::RefreshRejection::CallerProofUnavailable,
                     );
                 };
-                let Ok(Some(harness)) = self.store.process_identity(&request.flow_id) else {
-                    return Response::RefreshRejected(
-                        signal_flow::RefreshRejection::CallerProofUnavailable,
-                    );
+                let proof = match proof {
+                    Ok(proof) => proof,
+                    Err(rejection) => return Response::RefreshRejected(rejection),
                 };
-                if LinuxProcessEvidence
-                    .prove_refresh_caller(&peer, &request.flow_id, &harness)
-                    .is_err()
-                {
-                    return Response::RefreshRejected(
-                        signal_flow::RefreshRejection::CallerProofMismatch,
-                    );
+                let key = signal_flow::ReplacementIdempotencyKey {
+                    flow_id: request.flow_id.clone(),
+                    transcript_record_sha256: request
+                        .transcript_handover_reference
+                        .transcript_record_sha256
+                        .clone(),
+                };
+                let existing = match self.store.refresh_attempt(&key) {
+                    Ok(existing) => existing,
+                    Err(_) => {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::RefreshPersistenceRefused,
+                        );
+                    }
+                };
+                let policy = if let Some(existing) = &existing {
+                    existing.refresh_policy.clone()
+                } else {
+                    let Some(policy) = self.refresh_policy_option.clone() else {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::HandoverPolicyUnavailable,
+                        );
+                    };
+                    let Ok(Some(receipt)) = self.store.native_target_receipt(&request.flow_id)
+                    else {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::HandoverBeforeCallerReceipt,
+                        );
+                    };
+                    let Ok(Some(caller_launch)) =
+                        self.store.launch_attempt(&receipt.launch_request_id)
+                    else {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::HandoverBeforeCallerReceipt,
+                        );
+                    };
+                    let Some(binding) = caller_launch.native_launch_binding_option else {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::HandoverBeforeCallerReceipt,
+                        );
+                    };
+                    let now_seconds = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .and_then(|duration| i64::try_from(duration.as_secs()).ok());
+                    let Some(now_seconds) = now_seconds else {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::HandoverPolicyUnavailable,
+                        );
+                    };
+                    if let Err(rejection) = self.herdr.validate_transcript_handover(
+                        &binding,
+                        &receipt,
+                        &request.transcript_handover_reference,
+                        &policy,
+                        now_seconds,
+                    ) {
+                        return Response::RefreshRejected(rejection);
+                    }
+                    let Ok(observed_process) = self.herdr.observe_ready_process_identity(
+                        &binding,
+                        &receipt,
+                        &LinuxProcessEvidence,
+                    ) else {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::CallerProofUnavailable,
+                        );
+                    };
+                    let Ok(Some(stored_process)) = self.store.process_identity(&request.flow_id)
+                    else {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::CallerProofUnavailable,
+                        );
+                    };
+                    if observed_process != stored_process {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::CallerProofMismatch,
+                        );
+                    }
+                    policy
+                };
+                let reservation =
+                    match self
+                        .store
+                        .reserve_refresh_attempt(request.clone(), policy, proof)
+                    {
+                        Ok(response) => response,
+                        Err(_) => {
+                            return Response::RefreshRejected(
+                                signal_flow::RefreshRejection::RefreshPersistenceRefused,
+                            );
+                        }
+                    };
+                let Response::RefreshProgress(mut refresh) = reservation else {
+                    return reservation;
+                };
+                if refresh.replacement_ready_proof_option.is_some() {
+                    return Response::RefreshProgress(refresh);
                 }
-                Response::RefreshRejected(
-                    signal_flow::RefreshRejection::RefreshImplementationUnavailable,
-                )
+                refresh = match self
+                    .store
+                    .mark_replacement_launching(&refresh.replacement_idempotency_key)
+                {
+                    Ok(refresh) => refresh,
+                    Err(_) => {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::RefreshPersistenceRefused,
+                        );
+                    }
+                };
+                let _start_response = self.dispatch(Query::Start(StartRequest {
+                    launch_profile: request.launch_profile.clone(),
+                    origin_clue: request.origin_clue.clone(),
+                }));
+                let Ok(Some(replacement_launch)) = self
+                    .store
+                    .launch_attempt(&request.launch_profile.launch_request_id)
+                else {
+                    return Response::RefreshProgress(refresh);
+                };
+                let Some(replacement_binding) = replacement_launch.native_launch_binding_option
+                else {
+                    return Response::RefreshProgress(refresh);
+                };
+                refresh = match self.store.record_replacement_registered(
+                    &refresh.replacement_idempotency_key,
+                    &replacement_binding.flow_id,
+                ) {
+                    Ok(refresh) => refresh,
+                    Err(_) => {
+                        return Response::RefreshRejected(
+                            signal_flow::RefreshRejection::RefreshPersistenceRefused,
+                        );
+                    }
+                };
+                let (Ok(Some(process_identity)), Ok(Some(native_target_receipt))) = (
+                    self.store.process_identity(&replacement_binding.flow_id),
+                    self.store
+                        .native_target_receipt(&replacement_binding.flow_id),
+                ) else {
+                    return Response::RefreshProgress(refresh);
+                };
+                let ready = ReplacementReadyProof {
+                    herdr_pane_binding: replacement_binding.herdr_pane_binding,
+                    process_identity,
+                    interactive_readiness: InteractiveReadiness::Ready,
+                    native_target_receipt,
+                };
+                self.store
+                    .record_replacement_ready(&refresh.replacement_idempotency_key, ready)
+                    .map(Response::RefreshProgress)
+                    .unwrap_or(Response::RefreshRejected(
+                        signal_flow::RefreshRejection::RefreshPersistenceRefused,
+                    ))
             }
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
@@ -432,6 +616,13 @@ impl OpensRunningNexus for RunningNexus {
             },
             herdr: herdr::HerdrCli::default(),
             composer: LaunchComposer::at(source_root),
+            refresh_policy_option: std::env::var("FLOW_REFRESH_MAXIMUM_HANDOVER_AGE_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok())
+                .filter(|seconds| *seconds > 0)
+                .map(|maximum_handover_age_seconds| signal_flow::RefreshPolicy {
+                    maximum_handover_age_seconds,
+                }),
         })
     }
 }
@@ -448,9 +639,25 @@ impl ServesOrdinary for RunningNexus {
             .map_err(|e| e.to_string())?;
         loop {
             let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
-            let peer_process_identity = LinuxProcessEvidence.peer_process_identity(&peer).ok();
             let query = Frame::read_query(&mut peer)?;
-            let response = self.dispatch_with_peer(query, peer_process_identity);
+            let peer_caller_proof = match &query {
+                Query::Refresh(request) => Some(
+                    self.store
+                        .process_identity(&request.flow_id)
+                        .ok()
+                        .flatten()
+                        .ok_or(signal_flow::RefreshRejection::CallerProofUnavailable)
+                        .and_then(|harness| {
+                            LinuxProcessEvidence.prove_socket_refresh_caller(
+                                &peer,
+                                &request.flow_id,
+                                &harness,
+                            )
+                        }),
+                ),
+                _ => None,
+            };
+            let response = self.dispatch_with_peer(query, peer_caller_proof);
             Frame::write_response(&mut peer, &response)?;
         }
     }
@@ -589,6 +796,9 @@ mod tests {
                 },
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root),
                 composer: LaunchComposer::at(directory.path().to_path_buf()),
+                refresh_policy_option: Some(signal_flow::RefreshPolicy {
+                    maximum_handover_age_seconds: 86_400,
+                }),
             };
             Self {
                 directory,
@@ -884,6 +1094,7 @@ mod tests {
             "workspace_id":"fixture-workspace",
             "pane_id":"w1:p1",
             "terminal_id":"fixture-terminal",
+            "interactive_ready":true,
             "agent_session":{
                 "source":"herdr:codex",
                 "agent":"codex",
@@ -892,7 +1103,7 @@ mod tests {
             }
         }}});
         let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$*\" = \"--session fixture-session agent get fixture-agent\" ] || exit 64\nprintf '%s\\n' '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get fixture-agent\") printf '%s\\n' '{}' ;;\n  \"--session fixture-session pane process-info --pane w1:p1\") printf '{{\"result\":{{\"process_info\":{{\"pane_id\":\"w1:p1\",\"foreground_processes\":[{{\"pid\":%s}}]}}}}}}\\n' \"$PPID\" ;;\n  *) exit 64 ;;\nesac\n",
             herdr_calls.display(),
             agent
         );
@@ -928,7 +1139,7 @@ mod tests {
         ));
         assert_eq!(
             fs::read_to_string(herdr_calls).unwrap(),
-            "--session fixture-session agent get fixture-agent\n"
+            "--session fixture-session agent get fixture-agent\n--session fixture-session agent get fixture-agent\n--session fixture-session pane process-info --pane w1:p1\n"
         );
     }
 

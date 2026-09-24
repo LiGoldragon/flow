@@ -15,4 +15,4 @@ rkyv = { version = "0.8", default-features = false, features = ["std", "bytechec
 serde_json = "1"
 thiserror = "2"
 signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "edfea8712513bd6e7323872c6aacc058bcc51304" }
-meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "71e92386ac0318485ce7eb3bbfab250ad44c68b3" }
+meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "7276903dd930" }

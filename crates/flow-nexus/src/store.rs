@@ -12,7 +12,6 @@ use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey,
     SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
 };
-use sha2::Digest;
 use signal_flow::{
     ComposedLaunch, EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind,
     HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
@@ -97,12 +96,22 @@ struct StoredLaunchAttempt {
     attempt: LaunchAttempt,
 }
 
-/// The privileged confirmation is retained with the Flow row.  The caller
-/// supplies evidence references; this record deliberately retains those
-/// references rather than treating a live process as evidence.
+/// Evidence is minted by the runtime reader, never by the confirmation caller.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct RuntimeExistingEvidence {
+    pub prompt_sha256: String,
+    pub native_turn_id: String,
+    pub model_name: String,
+    pub effort: String,
+    pub skill_count: u64,
+    pub terminal_title_sha256: String,
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct ExistingConfirmation {
     request: meta_signal_flow::MetaConfirmExisting,
+    evidence: RuntimeExistingEvidence,
 }
 
 impl EngineRecord for ExistingConfirmation {
@@ -227,7 +236,13 @@ pub trait ConfirmsExistingFlow {
     fn confirm_existing(
         &self,
         request: meta_signal_flow::MetaConfirmExisting,
+        evidence: RuntimeExistingEvidence,
     ) -> Result<meta_signal_flow::Response, StoreError>;
+}
+
+pub trait ReadsExistingConfirmationBinding {
+    fn existing_confirmation_binding(&self, request: &meta_signal_flow::MetaConfirmExisting)
+    -> Result<Option<HerdrRoute>, StoreError>;
 }
 
 /// Reserves one correlation ID and its exact composed-prompt fingerprint.
@@ -556,6 +571,7 @@ impl ConfirmsExistingFlow for FlowStore {
     fn confirm_existing(
         &self,
         request: meta_signal_flow::MetaConfirmExisting,
+        evidence: RuntimeExistingEvidence,
     ) -> Result<meta_signal_flow::Response, StoreError> {
         use meta_signal_flow::ConfirmExistingRejection as Rejection;
 
@@ -579,69 +595,32 @@ impl ConfirmsExistingFlow for FlowStore {
                 Rejection::StoreRefused,
             ));
         };
-        if route.route.herdr_terminal_id != request.final_title_evidence_reference.herdr_terminal_id
+        if route.route.herdr_terminal_id != request.herdr_terminal_id
         {
             return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
                 Rejection::FinalTitleEvidenceMismatch,
             ));
         }
-        if request
-            .first_start_receipt_reference
-            .launch_request_id
-            .is_empty()
-            || request
-                .first_start_receipt_reference
-                .receipt_sha256
-                .is_empty()
-        {
-            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
-                Rejection::FirstStartReceiptUnavailable,
-            ));
-        }
-        let expected_receipt = format!(
-            "FLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
-            request.first_start_receipt_reference.launch_request_id, request.prompt_sha256
-        );
-        if request.first_start_receipt_reference.receipt_sha256
-            != format!("{:x}", sha2::Sha256::digest(expected_receipt.as_bytes()))
-        {
-            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
-                Rejection::FirstStartReceiptMismatch,
-            ));
-        }
-        if request.model_name.is_empty() {
+        if evidence.model_name.is_empty() {
             return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
                 Rejection::ModelMismatch,
             ));
         }
-        if request.effort.is_empty() {
+        if evidence.effort.is_empty() {
             return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
                 Rejection::EffortMismatch,
             ));
         }
-        if request.prompt_sha256.len() != 64 || request.native_turn_id.is_empty() {
+        if evidence.prompt_sha256.len() != 64 || evidence.native_turn_id.is_empty() {
             return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
-                if request.native_turn_id.is_empty() {
+                if evidence.native_turn_id.is_empty() {
                     Rejection::NativeTurnMismatch
                 } else {
                     Rejection::PromptDigestMismatch
                 },
             ));
         }
-        if request.native_skill_selection_vector.iter().any(|skill| {
-            skill.skill_name.is_empty()
-                || skill.native_skill_path.is_empty()
-                || skill.native_skill_sha256.len() != 64
-        }) {
-            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
-                Rejection::SkillManifestMismatch,
-            ));
-        }
-        if request
-            .final_title_evidence_reference
-            .final_title_evidence_sha256
-            .len()
-            != 64
+        if evidence.terminal_title_sha256.len() != 64
         {
             return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
                 Rejection::FinalTitleEvidenceMismatch,
@@ -670,7 +649,7 @@ impl ConfirmsExistingFlow for FlowStore {
                 .assert(
                     self.confirmations,
                     ExistingConfirmation {
-                        request: request.clone(),
+                    request: request.clone(), evidence,
                     },
                 ),
         )?;
@@ -680,6 +659,16 @@ impl ConfirmsExistingFlow for FlowStore {
                 native_session_id: request.native_session_id,
             },
         ))
+    }
+}
+
+impl ReadsExistingConfirmationBinding for FlowStore {
+    fn existing_confirmation_binding(&self, request: &meta_signal_flow::MetaConfirmExisting) -> Result<Option<HerdrRoute>, StoreError> {
+        let Some(flow) = self.flow(&request.flow_id)? else { return Ok(None) };
+        if flow.lifecycle != FlowLifecycle::Pending || flow.thread_id.as_deref() != Some(request.native_session_id.as_str()) {
+            return Ok(None);
+        }
+        Ok(self.herdr_route(&request.flow_id)?.map(|route| route.route))
     }
 }
 

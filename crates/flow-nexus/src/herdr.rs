@@ -3,6 +3,8 @@
 pub mod launch;
 
 use crate::codex::{CodexEndpoint, CodexEndpoints};
+use crate::store::RuntimeExistingEvidence;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::{fs, path::PathBuf, process::Command};
 
@@ -105,6 +107,59 @@ impl ReadsHerdrRoster for HerdrCli {
 }
 
 impl HerdrCli {
+    /// Reads the native record and the current Herdr title for a stored route.
+    /// The request is only a locator; every returned fact comes from those two
+    /// runtime authorities.
+    pub fn observe_existing_confirmation(
+        &self,
+        request: &meta_signal_flow::MetaConfirmExisting,
+        route: &HerdrRoute,
+    ) -> Result<RuntimeExistingEvidence, String> {
+        if request.herdr_terminal_id != route.herdr_terminal_id { return Err("terminal locator differs from stored route".into()); }
+        let snapshot = self.snapshot(route).ok_or("Herdr snapshot unavailable")?;
+        let agent = snapshot.pointer("/result/snapshot/agents").and_then(serde_json::Value::as_array)
+            .and_then(|agents| agents.iter().find(|agent| Self::agent_matches_binding(agent, route, &HarnessKind::Codex)))
+            .ok_or("stored Herdr route is absent")?;
+        let title = agent.get("terminal_title").and_then(serde_json::Value::as_str).filter(|title| !title.is_empty())
+            .ok_or("Herdr title is absent")?;
+        let mut candidates = Vec::new();
+        for root in [&self.codex_endpoints.stable.transcript_root, &self.codex_endpoints.next.transcript_root, &self.claude_transcript_root] {
+            Self::find_existing_transcripts(root, &request.native_session_id, &mut candidates)?;
+        }
+        if candidates.len() != 1 { return Err("native thread did not resolve to exactly one transcript".into()); }
+        let text = fs::read_to_string(&candidates[0]).map_err(|e| format!("native transcript unreadable: {e}"))?;
+        let mut model = None; let mut effort = None; let mut turn = None; let mut first_prompt = None; let mut skills = 0_u64;
+        for line in text.lines() {
+            let row: serde_json::Value = serde_json::from_str(line).map_err(|_| "noncanonical transcript row")?;
+            if row.get("type").and_then(serde_json::Value::as_str) == Some("turn_context") {
+                let payload = row.get("payload").ok_or("turn context lacks payload")?;
+                model = payload.get("model").and_then(serde_json::Value::as_str).map(str::to_owned);
+                effort = payload.get("effort").and_then(serde_json::Value::as_str).map(str::to_owned);
+                turn = payload.get("turn_id").and_then(serde_json::Value::as_str).map(str::to_owned);
+            }
+            if row.get("type").and_then(serde_json::Value::as_str) == Some("event_msg")
+                && row.pointer("/payload/thread_id").and_then(serde_json::Value::as_str) == Some(request.native_session_id.as_str())
+                && row.pointer("/payload/item/type").and_then(serde_json::Value::as_str) == Some("UserMessage") {
+                if first_prompt.is_some() { return Err("native transcript has more than one first user prompt".into()); }
+                if row.pointer("/payload/turn_id").and_then(serde_json::Value::as_str) != turn.as_deref() { return Err("user prompt turn differs from context".into()); }
+                let content = row.pointer("/payload/item/content").and_then(serde_json::Value::as_array).ok_or("user prompt lacks content")?;
+                let prompt = content.last().and_then(|v| v.get("text")).and_then(serde_json::Value::as_str).ok_or("user prompt lacks text")?;
+                for skill in &content[..content.len().saturating_sub(1)] {
+                    if skill.get("type").and_then(serde_json::Value::as_str) != Some("skill") || skill.get("name").and_then(serde_json::Value::as_str).is_none() || skill.get("path").and_then(serde_json::Value::as_str).is_none() { return Err("unexpanded native skill locator".into()); }
+                    skills += 1;
+                }
+                first_prompt = Some(prompt.to_owned());
+            }
+        }
+        let prompt = first_prompt.ok_or("native first user prompt absent")?;
+        Ok(RuntimeExistingEvidence { prompt_sha256: format!("{:x}", Sha256::digest(prompt.as_bytes())), native_turn_id: turn.ok_or("native turn absent")?, model_name: model.ok_or("native model absent")?, effort: effort.ok_or("native effort absent")?, skill_count: skills, terminal_title_sha256: format!("{:x}", Sha256::digest(title.as_bytes())) })
+    }
+
+    fn find_existing_transcripts(root: &std::path::Path, session: &str, found: &mut Vec<PathBuf>) -> Result<(), String> {
+        let entries = match fs::read_dir(root) { Ok(entries) => entries, Err(_) => return Ok(()) };
+        for entry in entries { let path = entry.map_err(|e| e.to_string())?.path(); let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?; if metadata.file_type().is_symlink() { continue; } if metadata.is_dir() { Self::find_existing_transcripts(&path, session, found)?; } else if metadata.is_file() && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".jsonl") && n.contains(session)) { found.push(path); } }
+        Ok(())
+    }
     pub fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
         self.codex_endpoints = codex_endpoints;
         self

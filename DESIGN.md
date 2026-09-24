@@ -1,10 +1,11 @@
 # Flow Nexus design
 
 The ordinary and meta sockets are separate Signal edges. Text ends at a CLI:
-the client turns a short command into a typed request, sends an rkyv frame,
+the client turns one inline Datom into a typed request, sends an rkyv frame,
 and textualizes the typed reply as Datom. The standalone `signal-flow` repo
-owns `Start`, `Restart`, and `ResolveRecipient`; `meta-signal-flow` owns
-`Configure` and `ConsumeReset`. Each contract versions its own wire.
+owns `Start`, `Restart`, `ResolveRecipient`, `Send`, `Stop`, and `List`;
+`meta-signal-flow` owns `Configure` and `ConsumeReset`. Each contract versions
+its own wire.
 `RunningNexus` dispatches; `FlowStore` owns working state and policy.
 
 ```mermaid
@@ -40,6 +41,13 @@ pending reservation. Both conditions recover from `FLOW_NEXUS_STORE`.
 daemon session ID, harness kind, route readiness, endpoint, origin clue, and
 lifecycle. Message Nexus consumes that typed reply instead of maintaining a
 second identity registry.
+
+`Send` and `Stop` act only on a route that still matches the native Herdr
+snapshot. Send can promote a Pending row only after an idle pane reports a
+post-prompt state transition through Herdr's waiting prompt operation. Stop
+changes the durable lifecycle only after the exact pane closes successfully.
+`List` reads the same store rows and sorts them by Flow ID; it does not infer
+state from the current Herdr roster.
 
 `RegisterFlow` is a meta Signal for importing sessions created before Flow
 Nexus. It preserves the same `FlowNode` shape used by resolution, so imported

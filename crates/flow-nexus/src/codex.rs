@@ -978,7 +978,9 @@ impl ConsumesResetCredit for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{fs, os::unix::fs::PermissionsExt, sync::Mutex};
+
+    static FAKE_PROXY_LOCK: Mutex<()> = Mutex::new(());
 
     struct FakeProxy;
 
@@ -1179,6 +1181,7 @@ mod tests {
 
     #[test]
     fn fake_proxy_starts_a_thread_after_turn_start_is_accepted() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
@@ -1196,6 +1199,7 @@ mod tests {
 
     #[test]
     fn fake_proxy_refusal_does_not_report_a_started_thread() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
@@ -1210,6 +1214,7 @@ mod tests {
 
     #[test]
     fn fake_proxy_timeout_does_not_report_a_started_thread() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let fake = FakeProxy;
         let frames = [fake.websocket_frame(r#"{"id":1,"result":{}}"#)];
         let (_directory, executable) = fake.install(&frames);
@@ -1221,6 +1226,7 @@ mod tests {
 
     #[test]
     fn fake_proxy_consumes_a_reset_credit_as_a_typed_outcome() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),

@@ -15,6 +15,12 @@ pub trait ReadsHerdrRoster {
     fn route_is_available(&self, node: &FlowNode) -> bool;
 }
 
+/// Performs thin ordinary Flow operations against one revalidated Herdr pane.
+pub trait OperatesHerdrPane {
+    fn prompt(&self, node: &FlowNode, text: &str, require_presentation: bool) -> bool;
+    fn close(&self, node: &FlowNode) -> bool;
+}
+
 /// The production Herdr roster reader.
 pub struct HerdrCli {
     executable: PathBuf,
@@ -101,6 +107,72 @@ impl ReadsHerdrRoster for HerdrCli {
         self.snapshot(route).is_some_and(|snapshot| {
             HerdrCli::snapshot_has_route(&snapshot, route, &node.harness_kind)
         })
+    }
+}
+
+impl OperatesHerdrPane for HerdrCli {
+    fn prompt(&self, node: &FlowNode, text: &str, require_presentation: bool) -> bool {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return false;
+        };
+        if !self.identity_is_claimed(node) {
+            return false;
+        }
+        let Some(snapshot) = self.snapshot(route) else {
+            return false;
+        };
+        let route_is_ready = if require_presentation {
+            Self::snapshot_has_idle_route(&snapshot, route, &node.harness_kind)
+        } else {
+            Self::snapshot_has_route(&snapshot, route, &node.harness_kind)
+        };
+        if !route_is_ready {
+            return false;
+        }
+        let mut command = Command::new(&self.executable);
+        command.args([
+            "--session",
+            route.herdr_session_name.as_str(),
+            "agent",
+            "prompt",
+            route.herdr_pane_id.as_str(),
+            text,
+        ]);
+        if require_presentation {
+            command.args([
+                "--wait",
+                "--until",
+                "working",
+                "--until",
+                "idle",
+                "--until",
+                "done",
+                "--until",
+                "blocked",
+                "--timeout",
+                "30000",
+            ]);
+        }
+        command.status().is_ok_and(|status| status.success())
+    }
+
+    fn close(&self, node: &FlowNode) -> bool {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return false;
+        };
+        if !self.route_is_available(node) {
+            return false;
+        }
+        Command::new(&self.executable)
+            .args([
+                "--session",
+                route.herdr_session_name.as_str(),
+                "pane",
+                "close",
+                route.herdr_pane_id.as_str(),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
     }
 }
 
@@ -204,6 +276,29 @@ impl HerdrCli {
                                 .and_then(serde_json::Value::as_str),
                             Some("idle" | "working")
                         )
+                        && agent
+                            .get("interactive_ready")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                })
+            })
+    }
+
+    fn snapshot_has_idle_route(
+        snapshot: &serde_json::Value,
+        route: &HerdrRoute,
+        harness_kind: &HarnessKind,
+    ) -> bool {
+        snapshot
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|agents| {
+                agents.iter().any(|agent| {
+                    HerdrCli::agent_matches_binding(agent, route, harness_kind)
+                        && agent
+                            .get("agent_status")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("idle")
                         && agent
                             .get("interactive_ready")
                             .and_then(serde_json::Value::as_bool)

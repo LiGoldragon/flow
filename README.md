@@ -1,6 +1,6 @@
 # Flow Nexus
 
-Flow Nexus starts, restarts, and resolves flows. `flow-nexus` is the
+Flow Nexus starts, restarts, sends to, stops, lists, and resolves flows. `flow-nexus` is the
 no-argument long-running process, `flow` is its ordinary client, and
 `flow-meta` is its privileged client. The Nexus persists Flow identity and
 policy in one Sema store, and its sockets carry only length-prefixed rkyv
@@ -8,8 +8,8 @@ Signal archives.
 
 The wire contracts are independent repositories:
 
-- `signal-flow` defines `Start`, provenance-authorized `Restart`, and
-  `ResolveRecipient` for Message Nexus routing.
+- `signal-flow` defines `Start`, provenance-authorized `Restart`, `Send`,
+  `Stop`, `List`, and `ResolveRecipient` for Message Nexus routing.
 - `meta-signal-flow` defines `Configure` and reset-credit consumption.
 
 The ordinary client accepts exactly one inline `Query` Datom from the
@@ -18,6 +18,24 @@ The ordinary client accepts exactly one inline `Query` Datom from the
 ```sh
 flow '<one inline Query datom>'
 ```
+
+The basic pane operations use the same typed edge:
+
+```sh
+flow 'Send.{ 00f95a «continue with the implementation» }'
+flow 'Stop.00f95a'
+flow 'List.{}'
+```
+
+`Send` revalidates the stored Flow claim and exact Herdr agent, pane,
+terminal, harness, interactive readiness, and session before prompting that
+pane. An Active row returns `Sent` when Herdr accepts the prompt. A Pending
+row is promoted to Active only when it began idle and `herdr agent prompt
+--wait` witnesses a post-submission agent state transition. A prompt queued to
+an already working pane cannot confirm a Pending row. `Stop` persists the
+Stopped lifecycle only after `herdr pane close` succeeds for the revalidated
+pane. `List` returns all durable rows, sorted by Flow ID, including Pending and
+Stopped rows.
 
 `Start` carries a typed `LaunchProfile` plus an `OriginClue`. The origin is a
 caller claim; its text does not authenticate the caller. A profile names its

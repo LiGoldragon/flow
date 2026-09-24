@@ -9,6 +9,7 @@ use codex::{
     CodexEndpoints, ConsumesResetCredit, ResolvesBoundCodexSkills, SubmitsBoundCodexFirstTurn,
 };
 use composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer};
+use herdr::OperatesHerdrPane;
 use herdr::launch::{
     AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
     ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
@@ -31,9 +32,10 @@ use std::{
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
-    RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement,
-    RegistersExistingFlow, RegistersFlowIdentity, ReservesLaunchAttempt,
+    OpensFlowStore, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle,
+    RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
+    RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersExistingFlow,
+    RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 
 fn process_identity_matches(identity: &meta_signal_flow::ProcessIdentity) -> bool {
@@ -407,6 +409,80 @@ impl Dispatches for RunningNexus {
                     ),
                 }
             }
+            Query::Send(request) => {
+                let node = match self.store.flow_node(&request.flow_id) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => {
+                        return Response::SendRejected(signal_flow::SendRejection::UnknownFlow);
+                    }
+                    Err(_) => {
+                        return Response::SendRejected(
+                            signal_flow::SendRejection::PersistenceRefused,
+                        );
+                    }
+                };
+                if node.flow_lifecycle == FlowLifecycle::Stopped {
+                    return Response::SendRejected(signal_flow::SendRejection::FlowStopped);
+                }
+                let node = self.herdr.refresh_route(node);
+                if !matches!(
+                    node.herdr_route_selection,
+                    HerdrRouteSelection::Available(_)
+                ) {
+                    return Response::SendRejected(signal_flow::SendRejection::RouteUnavailable);
+                }
+                let requires_presentation = node.flow_lifecycle == FlowLifecycle::Pending;
+                if !self
+                    .herdr
+                    .prompt(&node, &request.bare_input, requires_presentation)
+                {
+                    return Response::SendRejected(signal_flow::SendRejection::DeliveryRefused);
+                }
+                if requires_presentation
+                    && !self.store.record_active(&request.flow_id).unwrap_or(false)
+                {
+                    return Response::SendRejected(signal_flow::SendRejection::PersistenceRefused);
+                }
+                Response::Sent(request.flow_id)
+            }
+            Query::Stop(flow_id) => {
+                let node = match self.store.flow_node(&flow_id) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => {
+                        return Response::StopRejected(signal_flow::StopRejection::UnknownFlow);
+                    }
+                    Err(_) => {
+                        return Response::StopRejected(
+                            signal_flow::StopRejection::PersistenceRefused,
+                        );
+                    }
+                };
+                if node.flow_lifecycle == FlowLifecycle::Stopped {
+                    return Response::StopRejected(signal_flow::StopRejection::AlreadyStopped);
+                }
+                let node = self.herdr.refresh_route(node);
+                if !matches!(
+                    node.herdr_route_selection,
+                    HerdrRouteSelection::Available(_)
+                ) {
+                    return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
+                }
+                if !self.herdr.close(&node) {
+                    return Response::StopRejected(signal_flow::StopRejection::CloseRefused);
+                }
+                if !self.store.record_stopped(&flow_id).unwrap_or(false) {
+                    return Response::StopRejected(signal_flow::StopRejection::PersistenceRefused);
+                }
+                Response::Stopped(flow_id)
+            }
+            Query::List(_) => {
+                self.store
+                    .flow_nodes()
+                    .map(Response::Listed)
+                    .unwrap_or(Response::ListRejected(
+                        signal_flow::ListRejection::PersistenceRefused,
+                    ))
+            }
         }
     }
 
@@ -743,6 +819,7 @@ mod tests {
 
     trait ControlsHerdrSnapshot {
         fn set_agents(&self, agents: Vec<serde_json::Value>);
+        fn accept_pane_operations(&self, agents: Vec<serde_json::Value>) -> PathBuf;
     }
 
     fn current_process_identity() -> meta_signal_flow::ProcessIdentity {
@@ -908,6 +985,28 @@ mod tests {
             fs::set_permissions(&self.snapshot_program, permissions)
                 .expect("snapshot fixture executable");
         }
+
+        fn accept_pane_operations(&self, agents: Vec<serde_json::Value>) -> PathBuf {
+            let snapshot = serde_json::json!({
+                "id":"cli:api:snapshot",
+                "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
+                "type":"session_snapshot"}
+            });
+            let log = self.directory.path().join("herdr-operations.log");
+            let body = format!(
+                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\"|\"pane close\") printf '%s\\n' \"$*\" >> '{}' ;;\n  *) exit 64 ;;\nesac\n",
+                snapshot,
+                log.display()
+            );
+            fs::write(&self.snapshot_program, body).expect("Herdr operation fixture");
+            let mut permissions = fs::metadata(&self.snapshot_program)
+                .expect("Herdr operation fixture metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(&self.snapshot_program, permissions)
+                .expect("Herdr operation fixture executable");
+            log
+        }
     }
 
     #[test]
@@ -927,6 +1026,156 @@ mod tests {
                 .dispatch(Query::ResolveRecipient("908786".into())),
             Response::RecipientResolved(node)
         );
+    }
+
+    #[test]
+    fn send_witness_promotes_pending_list_observes_and_stop_persists() {
+        let fixture = NexusFixture::new();
+        let mut agent = fixture.current_agent();
+        agent["agent_status"] = serde_json::Value::String("idle".into());
+        let operation_log = fixture.accept_pane_operations(vec![agent]);
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node.clone())),
+            meta_signal_flow::Response::FlowRegistered(node)
+        );
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "bare prompt".into(),
+                })),
+            Response::Sent("908786".into())
+        );
+        let Response::Listed(active) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].flow_lifecycle, FlowLifecycle::Active);
+
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Stop("908786".into())),
+            Response::Stopped("908786".into())
+        );
+        let Response::Listed(stopped) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return stopped Flow rows")
+        };
+        assert_eq!(stopped[0].flow_lifecycle, FlowLifecycle::Stopped);
+        let operations = fs::read_to_string(operation_log).expect("Herdr operation log");
+        assert!(operations.contains(
+            "agent prompt w1:p3 bare prompt --wait --until working --until idle --until done --until blocked --timeout 30000"
+        ));
+        assert!(operations.contains("pane close w1:p3"));
+    }
+
+    #[test]
+    fn queued_send_cannot_promote_a_pending_working_flow() {
+        let fixture = NexusFixture::new();
+        let operation_log = fixture.accept_pane_operations(vec![fixture.current_agent()]);
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "queued prompt".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::DeliveryRefused)
+        );
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
+        assert!(!operation_log.exists());
+    }
+
+    #[test]
+    fn failed_pending_send_wait_keeps_the_flow_pending() {
+        let fixture = NexusFixture::new();
+        let mut agent = fixture.current_agent();
+        agent["agent_status"] = serde_json::Value::String("idle".into());
+        fixture.set_agents(vec![agent]);
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "unwitnessed prompt".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::DeliveryRefused)
+        );
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
+    }
+
+    #[test]
+    fn stale_pending_send_is_refused_before_prompt_and_keeps_pending() {
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+        let mut stale = fixture.current_agent();
+        stale["terminal_id"] = serde_json::Value::String("term-replaced".into());
+        fixture.set_agents(vec![stale]);
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "stale route prompt".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::RouteUnavailable)
+        );
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
     }
 
     #[test]

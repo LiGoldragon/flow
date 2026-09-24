@@ -3,7 +3,7 @@ members = ["crates/flow-nexus", "crates/flow", "crates/flow-meta"]
 resolver = "3"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -14,5 +14,5 @@ publish = false
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 serde_json = "1"
 thiserror = "2"
-signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "edfea8712513bd6e7323872c6aacc058bcc51304" }
-meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "71e92386ac0318485ce7eb3bbfab250ad44c68b3" }
+signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "569f142031f6c223d841473373782baf220bbd63" }
+meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "23b12fdbf152ac90a57ae299c66e780d37b12c74" }

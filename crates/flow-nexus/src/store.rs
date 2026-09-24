@@ -47,6 +47,7 @@ struct FlowRecord {
 enum FlowLifecycle {
     Pending,
     Active,
+    Stopped,
 }
 
 impl EngineRecord for FlowRecord {
@@ -253,6 +254,18 @@ pub trait ReadsLaunchAttempt {
     fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError>;
 }
 
+/// Reads the durable rows used by the ordinary Send, Stop, and List requests.
+pub trait ReadsFlowRows {
+    fn flow_node(&self, flow_id: &str) -> Result<Option<FlowNode>, StoreError>;
+    fn flow_nodes(&self) -> Result<Vec<FlowNode>, StoreError>;
+}
+
+/// Changes lifecycle only after the corresponding Herdr operation succeeds.
+pub trait RecordsFlowLifecycle {
+    fn record_active(&self, flow_id: &str) -> Result<bool, StoreError>;
+    fn record_stopped(&self, flow_id: &str) -> Result<bool, StoreError>;
+}
+
 trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
@@ -356,6 +369,15 @@ impl AppliesFlowQuery for FlowStore {
             Query::Start(_) => Ok(Response::StartRejected(StartRejection::NativeLaunchRefused)),
             Query::Restart(_) => Ok(Response::RestartRejected(RestartRejection::ResumeRefused)),
             Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
+            Query::Send(_) => Ok(Response::SendRejected(
+                signal_flow::SendRejection::PersistenceRefused,
+            )),
+            Query::Stop(_) => Ok(Response::StopRejected(
+                signal_flow::StopRejection::PersistenceRefused,
+            )),
+            Query::List(_) => Ok(Response::ListRejected(
+                signal_flow::ListRejection::PersistenceRefused,
+            )),
         }
     }
 }
@@ -366,7 +388,11 @@ impl ReservesPendingStart for FlowStore {
             Query::Start(request) => self
                 .reserve_start("legacy-test-start".into(), request.origin_clue)
                 .map(Some),
-            Query::Restart(_) | Query::ResolveRecipient(_) => Ok(None),
+            Query::Restart(_)
+            | Query::ResolveRecipient(_)
+            | Query::Send(_)
+            | Query::Stop(_)
+            | Query::List(_) => Ok(None),
         }
     }
 }
@@ -469,6 +495,7 @@ impl FlowStore {
         let lifecycle = match flow_node.flow_lifecycle {
             SignalFlowLifecycle::Pending => FlowLifecycle::Pending,
             SignalFlowLifecycle::Active => FlowLifecycle::Active,
+            SignalFlowLifecycle::Stopped => FlowLifecycle::Stopped,
         };
         let record = FlowRecord {
             flow_id: flow_node.flow_id.clone(),
@@ -918,31 +945,87 @@ impl ReadsFlowStore for FlowStore {
     }
 
     fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError> {
-        let Some(flow) = self.flow(flow_id)? else {
+        let Some(node) = self.flow_node(flow_id)? else {
             return Ok(Response::RecipientResolutionRejected(
                 RecipientResolutionRejection::UnknownFlow,
             ));
         };
-        let Some(session_id) = flow.thread_id else {
+        if node.session_id.is_empty() {
             return Ok(Response::RecipientResolutionRejected(
                 RecipientResolutionRejection::FlowUnavailable,
             ));
+        }
+        Ok(Response::RecipientResolved(node))
+    }
+}
+
+impl ReadsFlowRows for FlowStore {
+    fn flow_node(&self, flow_id: &str) -> Result<Option<FlowNode>, StoreError> {
+        let Some(flow) = self.flow(flow_id)? else {
+            return Ok(None);
         };
-        Ok(Response::RecipientResolved(FlowNode {
+        Ok(Some(FlowNode {
             flow_id: flow.flow_id,
-            session_id,
-            harness_kind: flow.harness_kind.clone(),
-            endpoint_selection: flow.endpoint_selection.clone(),
+            session_id: flow.thread_id.unwrap_or_default(),
+            harness_kind: flow.harness_kind,
+            endpoint_selection: flow.endpoint_selection,
             herdr_route_selection: self
                 .herdr_route(flow_id)?
                 .map(|record| HerdrRouteSelection::Available(record.route))
                 .unwrap_or(HerdrRouteSelection::Unavailable),
             origin_clue: flow.origin,
             flow_lifecycle: match flow.lifecycle {
-                FlowLifecycle::Active => SignalFlowLifecycle::Active,
                 FlowLifecycle::Pending => SignalFlowLifecycle::Pending,
+                FlowLifecycle::Active => SignalFlowLifecycle::Active,
+                FlowLifecycle::Stopped => SignalFlowLifecycle::Stopped,
             },
         }))
+    }
+
+    fn flow_nodes(&self) -> Result<Vec<FlowNode>, StoreError> {
+        let mut nodes = self
+            .engine
+            .match_records(QueryPlan::all(self.flows))?
+            .records()
+            .iter()
+            .map(|flow| self.flow_node(&flow.flow_id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| left.flow_id.cmp(&right.flow_id));
+        Ok(nodes)
+    }
+}
+
+impl RecordsFlowLifecycle for FlowStore {
+    fn record_active(&self, flow_id: &str) -> Result<bool, StoreError> {
+        let Some(mut flow) = self.flow(flow_id)? else {
+            return Ok(false);
+        };
+        if flow.lifecycle == FlowLifecycle::Stopped {
+            return Ok(false);
+        }
+        flow.lifecycle = FlowLifecycle::Active;
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.flows,
+            RecordKey::new(flow_id),
+            flow,
+        ))?;
+        Ok(true)
+    }
+
+    fn record_stopped(&self, flow_id: &str) -> Result<bool, StoreError> {
+        let Some(mut flow) = self.flow(flow_id)? else {
+            return Ok(false);
+        };
+        flow.lifecycle = FlowLifecycle::Stopped;
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.flows,
+            RecordKey::new(flow_id),
+            flow,
+        ))?;
+        Ok(true)
     }
 }
 

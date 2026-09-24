@@ -194,6 +194,15 @@ pub trait RegistersFlowIdentity {
     fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError>;
 }
 
+/// Imports one already-running native flow without claiming a launch receipt.
+pub trait RegistersExistingFlow {
+    fn register_existing_flow(
+        &self,
+        flow_node: FlowNode,
+        flow_type: String,
+    ) -> Result<FlowRegistration, StoreError>;
+}
+
 /// Reserves one correlation ID and its exact composed-prompt fingerprint.
 pub trait ReservesLaunchAttempt {
     fn reserve_launch_attempt(
@@ -425,8 +434,12 @@ impl ConfiguresFlowStore for FlowStore {
     }
 }
 
-impl RegistersFlowIdentity for FlowStore {
-    fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError> {
+impl FlowStore {
+    fn register_flow_as(
+        &self,
+        flow_node: FlowNode,
+        flow_type: String,
+    ) -> Result<FlowRegistration, StoreError> {
         let HerdrRouteSelection::Available(route) = flow_node.herdr_route_selection.clone() else {
             return Ok(FlowRegistration::ConflictingBinding);
         };
@@ -459,10 +472,7 @@ impl RegistersFlowIdentity for FlowStore {
         };
         let record = FlowRecord {
             flow_id: flow_node.flow_id.clone(),
-            flow_type: match flow_node.harness_kind {
-                HarnessKind::Codex => "codex-registered".into(),
-                HarnessKind::Claude => "claude-registered".into(),
-            },
+            flow_type,
             origin: flow_node.origin_clue.clone(),
             thread_id: Some(flow_node.session_id.clone()),
             harness_kind: flow_node.harness_kind.clone(),
@@ -483,6 +493,29 @@ impl RegistersFlowIdentity for FlowStore {
                 ),
         )?;
         Ok(FlowRegistration::Registered(Box::new(flow_node)))
+    }
+}
+
+impl RegistersFlowIdentity for FlowStore {
+    fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError> {
+        let flow_type = match flow_node.harness_kind {
+            HarnessKind::Codex => "codex-registered".into(),
+            HarnessKind::Claude => "claude-registered".into(),
+        };
+        self.register_flow_as(flow_node, flow_type)
+    }
+}
+
+impl RegistersExistingFlow for FlowStore {
+    fn register_existing_flow(
+        &self,
+        flow_node: FlowNode,
+        flow_type: String,
+    ) -> Result<FlowRegistration, StoreError> {
+        if flow_node.flow_lifecycle != SignalFlowLifecycle::Pending {
+            return Ok(FlowRegistration::ConflictingBinding);
+        }
+        self.register_flow_as(flow_node, flow_type)
     }
 }
 

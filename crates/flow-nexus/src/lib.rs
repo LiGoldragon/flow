@@ -21,10 +21,11 @@ use signal_flow::{
     RegistrationAcknowledgement, Response, RestartRejection, StartRejection,
 };
 use std::{
+    collections::HashSet,
     fs,
     io::{Read, Write},
     os::unix::{
-        fs::PermissionsExt,
+        fs::{FileTypeExt, MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -33,8 +34,72 @@ use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
     OpensFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
     RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement,
-    RecordsRestartedFlow, RegistersFlowIdentity, ReservesLaunchAttempt,
+    RecordsRestartedFlow, RegistersExistingFlow, RegistersFlowIdentity, ReservesLaunchAttempt,
 };
+
+fn process_identity_matches(identity: &meta_signal_flow::ProcessIdentity) -> bool {
+    let Ok(process_id) = u32::try_from(identity.process_id) else {
+        return false;
+    };
+    let process_root = PathBuf::from(format!("/proc/{process_id}"));
+    let Ok(metadata) = fs::metadata(&process_root) else {
+        return false;
+    };
+    if i64::from(metadata.uid()) != identity.process_user_id {
+        return false;
+    }
+    let Ok(stat) = fs::read_to_string(process_root.join("stat")) else {
+        return false;
+    };
+    let Some((_, fields)) = stat.rsplit_once(") ") else {
+        return false;
+    };
+    fields.split_whitespace().nth(19) == Some(identity.process_start_token.as_str())
+}
+
+fn process_cwd_matches(identity: &meta_signal_flow::ProcessIdentity, expected: &str) -> bool {
+    let Ok(process_id) = u32::try_from(identity.process_id) else {
+        return false;
+    };
+    let expected = Path::new(expected);
+    expected.is_absolute()
+        && fs::canonicalize(format!("/proc/{process_id}/cwd")).ok()
+            == fs::canonicalize(expected).ok()
+}
+
+fn container_is_well_formed(container: &meta_signal_flow::FlowContainer) -> bool {
+    !container.herdr_session_name.is_empty()
+        && !container.meta_flow_owner_id.is_empty()
+        && Path::new(&container.herdr_server_socket_path).is_absolute()
+}
+
+fn container_socket_is_live(container: &meta_signal_flow::FlowContainer) -> bool {
+    fs::metadata(&container.herdr_server_socket_path)
+        .map(|metadata| metadata.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+fn binding_is_well_formed(binding: &meta_signal_flow::FlowBinding) -> bool {
+    !binding.flow_id.is_empty()
+        && !binding.model_name.is_empty()
+        && !binding.native_session_id.is_empty()
+        && !binding.herdr_workspace_id.is_empty()
+        && !binding.herdr_pane_id.is_empty()
+        && !binding.herdr_tab_id.is_empty()
+        && !binding.herdr_terminal_id.is_empty()
+        && !binding.herdr_agent_name.is_empty()
+        && Path::new(&binding.working_directory).is_absolute()
+}
+
+fn refused_binding(
+    flow_id: String,
+    reason: meta_signal_flow::FlowBindingRefusalReason,
+) -> meta_signal_flow::FlowBindingResult {
+    meta_signal_flow::FlowBindingResult::Refused(meta_signal_flow::RefusedFlowBinding {
+        flow_id,
+        flow_binding_refusal_reason: reason,
+    })
+}
 
 pub struct RunningNexus {
     pub store: FlowStore,
@@ -360,6 +425,135 @@ impl Dispatches for RunningNexus {
                 .unwrap_or(meta_signal_flow::Response::ResetRejected(
                     meta_signal_flow::ResetRejection::AdapterUnavailable,
                 )),
+            meta_signal_flow::Query::MetaBindExisting(request) => {
+                let container = request.flow_container;
+                if !container_is_well_formed(&container) || !container_socket_is_live(&container) {
+                    return meta_signal_flow::Response::BindExistingRejected(
+                        meta_signal_flow::BindExistingRejection::ContainerUnavailable,
+                    );
+                }
+                if !process_identity_matches(&container.herdr_server_process_identity) {
+                    return meta_signal_flow::Response::BindExistingRejected(
+                        meta_signal_flow::BindExistingRejection::ContainerIdentityMismatch,
+                    );
+                }
+
+                let mut seen_flow_ids = HashSet::new();
+                let mut seen_panes = HashSet::new();
+                let mut results = Vec::with_capacity(request.flow_binding_vector.len());
+                for binding in request.flow_binding_vector {
+                    let flow_id = binding.flow_id.clone();
+                    if !seen_flow_ids.insert(flow_id.clone()) {
+                        results.push(refused_binding(
+                            flow_id,
+                            meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId,
+                        ));
+                        continue;
+                    }
+                    if !binding_is_well_formed(&binding) {
+                        results.push(refused_binding(
+                            flow_id,
+                            meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch,
+                        ));
+                        continue;
+                    }
+                    let pane_identity = (
+                        binding.herdr_workspace_id.clone(),
+                        binding.herdr_pane_id.clone(),
+                        binding.herdr_tab_id.clone(),
+                        binding.herdr_terminal_id.clone(),
+                        binding.herdr_agent_name.clone(),
+                    );
+                    if !seen_panes.insert(pane_identity) {
+                        results.push(refused_binding(
+                            flow_id,
+                            meta_signal_flow::FlowBindingRefusalReason::AmbiguousPane,
+                        ));
+                        continue;
+                    }
+                    if !process_identity_matches(&binding.process_identity) {
+                        results.push(refused_binding(
+                            flow_id,
+                            meta_signal_flow::FlowBindingRefusalReason::DeadProcess,
+                        ));
+                        continue;
+                    }
+                    if !process_cwd_matches(&binding.process_identity, &binding.working_directory) {
+                        results.push(refused_binding(
+                            flow_id,
+                            meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch,
+                        ));
+                        continue;
+                    }
+                    match self.store.apply(Query::ResolveRecipient(flow_id.clone())) {
+                        Ok(Response::RecipientResolutionRejected(
+                            signal_flow::RecipientResolutionRejection::UnknownFlow,
+                        )) => {}
+                        Ok(Response::RecipientResolved(_)) => {
+                            results.push(refused_binding(
+                                flow_id,
+                                meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId,
+                            ));
+                            continue;
+                        }
+                        Ok(_) | Err(_) => {
+                            return meta_signal_flow::Response::BindExistingRejected(
+                                meta_signal_flow::BindExistingRejection::StoreRefused,
+                            );
+                        }
+                    }
+
+                    let node = FlowNode {
+                        flow_id: flow_id.clone(),
+                        session_id: binding.native_session_id,
+                        harness_kind: binding.harness_kind,
+                        endpoint_selection: EndpointSelection::Unavailable,
+                        herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                            herdr_session_name: container.herdr_session_name.clone(),
+                            herdr_agent_name: binding.herdr_agent_name,
+                            herdr_pane_id: binding.herdr_pane_id,
+                            herdr_terminal_id: binding.herdr_terminal_id,
+                        }),
+                        origin_clue: signal_flow::OriginClue {
+                            flow_id: container.meta_flow_owner_id.clone(),
+                            session_id: container.herdr_session_name.clone(),
+                            turn_id: "meta-bind-existing".into(),
+                        },
+                        flow_lifecycle: FlowLifecycle::Pending,
+                    };
+                    let flow_type = format!(
+                        "{:?}:{:?}:{}",
+                        binding.flow_aspect, binding.power_level, binding.model_name
+                    );
+                    match self.store.register_existing_flow(node, flow_type) {
+                        Ok(store::FlowRegistration::Registered(_)) => {
+                            results.push(meta_signal_flow::FlowBindingResult::Bound(
+                                meta_signal_flow::BoundFlowBinding {
+                                    flow_id,
+                                    flow_lifecycle:
+                                        meta_signal_flow::FlowLifecycle::RegisteredUnconfirmed,
+                                },
+                            ))
+                        }
+                        Ok(store::FlowRegistration::ConflictingBinding) => {
+                            results.push(refused_binding(
+                                flow_id,
+                                meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId,
+                            ))
+                        }
+                        Err(_) => {
+                            return meta_signal_flow::Response::BindExistingRejected(
+                                meta_signal_flow::BindExistingRejection::StoreRefused,
+                            );
+                        }
+                    }
+                }
+
+                meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
+                    flow_container: container,
+                    flow_binding_result_vector: results,
+                })
+            }
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
                 if !self.herdr.validate_registration(&flow_node) {
                     return meta_signal_flow::Response::FlowRegistrationRejected(
@@ -534,7 +728,8 @@ mod tests {
         fs,
         io::Write,
         os::unix::fs::{MetadataExt, PermissionsExt},
-        path::PathBuf,
+        os::unix::net::UnixListener,
+        path::{Path, PathBuf},
         time::Duration,
     };
 
@@ -546,6 +741,52 @@ mod tests {
 
     trait ControlsHerdrSnapshot {
         fn set_agents(&self, agents: Vec<serde_json::Value>);
+    }
+
+    fn current_process_identity() -> meta_signal_flow::ProcessIdentity {
+        let process_id = i64::from(std::process::id());
+        let metadata = fs::metadata(format!("/proc/{process_id}")).expect("current process");
+        let stat = fs::read_to_string(format!("/proc/{process_id}/stat")).expect("process stat");
+        let (_, fields) = stat.rsplit_once(") ").expect("process comm boundary");
+        meta_signal_flow::ProcessIdentity {
+            process_id,
+            process_user_id: i64::from(metadata.uid()),
+            process_start_token: fields
+                .split_whitespace()
+                .nth(19)
+                .expect("process start token")
+                .into(),
+        }
+    }
+
+    fn existing_binding(flow_id: &str, pane: &str) -> meta_signal_flow::FlowBinding {
+        meta_signal_flow::FlowBinding {
+            flow_id: flow_id.into(),
+            flow_aspect: FlowAspect::Mind,
+            power_level: PowerLevel::Medium,
+            model_name: "gpt-sol".into(),
+            harness_kind: HarnessKind::Codex,
+            native_session_id: format!("native-{flow_id}"),
+            herdr_workspace_id: "workspace".into(),
+            herdr_pane_id: pane.into(),
+            herdr_tab_id: "tab".into(),
+            herdr_terminal_id: format!("terminal-{pane}"),
+            herdr_agent_name: format!("agent-{pane}"),
+            process_identity: current_process_identity(),
+            working_directory: fs::read_link("/proc/self/cwd")
+                .expect("current cwd")
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
+
+    fn flow_container(socket: &Path) -> meta_signal_flow::FlowContainer {
+        meta_signal_flow::FlowContainer {
+            herdr_session_name: "messaging-build".into(),
+            herdr_server_socket_path: socket.to_string_lossy().into_owned(),
+            herdr_server_process_identity: current_process_identity(),
+            meta_flow_owner_id: "field-owner".into(),
+        }
     }
 
     impl NexusFixture {
@@ -666,6 +907,120 @@ mod tests {
                 .dispatch(Query::ResolveRecipient("908786".into())),
             Response::RecipientResolved(node)
         );
+    }
+
+    #[test]
+    fn meta_bind_existing_imports_only_verified_processes_as_pending() {
+        let fixture = NexusFixture::new();
+        let socket_path = fixture.directory.path().join("herdr.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let container = flow_container(&socket_path);
+        let accepted = existing_binding("mind-live", "pane-1");
+        let ambiguous = existing_binding("field-ambiguous", "pane-1");
+        let mut dead = existing_binding("psyche-dead", "pane-3");
+        dead.process_identity.process_id = i64::MAX;
+        let duplicate = existing_binding("mind-live", "pane-4");
+        let mut wrong_cwd = existing_binding("field-wrong-cwd", "pane-5");
+        wrong_cwd.working_directory = fixture
+            .directory
+            .path()
+            .join("absent")
+            .display()
+            .to_string();
+
+        let response = fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                meta_signal_flow::MetaBindExisting {
+                    flow_container: container.clone(),
+                    flow_binding_vector: vec![accepted, ambiguous, dead, duplicate, wrong_cwd],
+                },
+            ));
+        let meta_signal_flow::Response::BoundExisting(bound) = response else {
+            panic!("valid container must return ordered per-flow results")
+        };
+        assert_eq!(bound.flow_container, container);
+        assert_eq!(bound.flow_binding_result_vector.len(), 5);
+        assert!(matches!(
+            &bound.flow_binding_result_vector[0],
+            meta_signal_flow::FlowBindingResult::Bound(binding)
+                if binding.flow_id == "mind-live"
+                    && binding.flow_lifecycle
+                        == meta_signal_flow::FlowLifecycle::RegisteredUnconfirmed
+        ));
+        assert!(matches!(
+            &bound.flow_binding_result_vector[1],
+            meta_signal_flow::FlowBindingResult::Refused(binding)
+                if binding.flow_binding_refusal_reason
+                    == meta_signal_flow::FlowBindingRefusalReason::AmbiguousPane
+        ));
+        assert!(matches!(
+            &bound.flow_binding_result_vector[2],
+            meta_signal_flow::FlowBindingResult::Refused(binding)
+                if binding.flow_binding_refusal_reason
+                    == meta_signal_flow::FlowBindingRefusalReason::DeadProcess
+        ));
+        assert!(matches!(
+            &bound.flow_binding_result_vector[3],
+            meta_signal_flow::FlowBindingResult::Refused(binding)
+                if binding.flow_binding_refusal_reason
+                    == meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId
+        ));
+        assert!(matches!(
+            &bound.flow_binding_result_vector[4],
+            meta_signal_flow::FlowBindingResult::Refused(binding)
+                if binding.flow_binding_refusal_reason
+                    == meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch
+        ));
+
+        let Response::RecipientResolved(node) = fixture
+            .nexus
+            .dispatch(Query::ResolveRecipient("mind-live".into()))
+        else {
+            panic!("accepted existing flow must resolve")
+        };
+        assert_eq!(node.flow_lifecycle, FlowLifecycle::Pending);
+        assert_eq!(node.endpoint_selection, EndpointSelection::Unavailable);
+        assert_eq!(node.origin_clue.flow_id, "field-owner");
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("field-ambiguous".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::UnknownFlow
+            )
+        ));
+    }
+
+    #[test]
+    fn meta_bind_existing_rejects_unverified_container_without_store_effects() {
+        let fixture = NexusFixture::new();
+        let socket_path = fixture.directory.path().join("herdr.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let mut container = flow_container(&socket_path);
+        container.herdr_server_process_identity.process_start_token = "stale".into();
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                    meta_signal_flow::MetaBindExisting {
+                        flow_container: container,
+                        flow_binding_vector: vec![existing_binding("not-imported", "pane-1")],
+                    }
+                ),),
+            meta_signal_flow::Response::BindExistingRejected(
+                meta_signal_flow::BindExistingRejection::ContainerIdentityMismatch
+            )
+        );
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("not-imported".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::UnknownFlow
+            )
+        ));
     }
 
     #[test]

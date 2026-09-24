@@ -14,10 +14,11 @@ use sema_engine::{
 };
 use signal_flow::{
     ComposedLaunch, EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
-    NativeLaunchBinding, NativeLaunchIntent, OriginClue, PromptDeliveryIntent,
-    PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
-    Response, RestartRejection, Restarted, RouteReadiness, StartRejection, Started,
+    HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase,
+    LaunchAttemptReservation, NativeLaunchBinding, NativeLaunchIntent, OriginClue,
+    PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
+    RegistrationAcknowledgement, Response, RestartRejection, Restarted, RouteReadiness,
+    StartRejection, Started,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -25,6 +26,7 @@ const FLOW_STATE_TABLE_NAME: TableName = TableName::new("flow_nexus_state");
 const FLOW_CONFIGURATION_TABLE_NAME: TableName = TableName::new("flow_nexus_configuration");
 const FLOW_HERDR_ROUTE_TABLE_NAME: TableName = TableName::new("flow_nexus_herdr_routes");
 const FLOW_LAUNCH_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_attempts");
+const FLOW_LAUNCH_PANE_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_panes");
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const DEFAULT_ORDINARY_SOCKET: &str = "/run/user/1001/flow/flow.sock";
@@ -96,6 +98,22 @@ struct StoredLaunchAttempt {
     attempt: LaunchAttempt,
 }
 
+/// The created native pane is distinct from an observed native identity.  It
+/// lets a retry inspect the one pane that was already created without
+/// creating a second external seat.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchPane {
+    pane: HerdrPaneBinding,
+    harness_start_requested: bool,
+    orphaned: bool,
+}
+
+impl EngineRecord for StoredLaunchPane {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.pane.launch_request_id.clone())
+    }
+}
+
 impl EngineRecord for StoredLaunchAttempt {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.attempt.launch_request_id.clone())
@@ -117,6 +135,7 @@ pub struct FlowStore {
     configuration: TableReference<FlowStoreConfiguration>,
     herdr_routes: TableReference<FlowHerdrRouteRecord>,
     launch_attempts: TableReference<StoredLaunchAttempt>,
+    launch_panes: TableReference<StoredLaunchPane>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +237,26 @@ pub trait RecordsNativeLaunchIntent {
     fn record_native_launch_intent(&self, intent: NativeLaunchIntent) -> Result<bool, StoreError>;
 }
 
+/// Records the exact pane created for an intent before the harness is asked
+/// to start.  The record is one-shot and is never replaced by a retry.
+pub trait RecordsCreatedLaunchPane {
+    fn record_created_launch_pane(&self, pane: HerdrPaneBinding) -> Result<bool, StoreError>;
+    fn request_harness_start(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<HerdrPaneBinding>, StoreError>;
+    fn orphan_launch_pane(&self, launch_request_id: &str) -> Result<bool, StoreError>;
+}
+
+/// Reads only a recoverable created pane. An orphan remains durable but is
+/// intentionally not returned as a candidate for another external attempt.
+pub trait ReadsCreatedLaunchPane {
+    fn recoverable_launch_pane(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<HerdrPaneBinding>, StoreError>;
+}
+
 /// Journals the exact native/Herdr tuple observed after the external launch.
 pub trait RecordsNativeLaunchBinding {
     fn record_native_launch_binding(
@@ -275,6 +314,10 @@ trait ReadsFlowStore {
         &self,
         launch_request_id: &str,
     ) -> Result<Option<StoredLaunchAttempt>, StoreError>;
+    fn stored_launch_pane(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<StoredLaunchPane>, StoreError>;
     fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError>;
 }
 
@@ -289,6 +332,7 @@ trait WritesFlowStore {
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError>;
     fn restart(&self, authorization: RestartAuthorization) -> Result<Response, StoreError>;
     fn mutate_launch_attempt(&self, attempt: LaunchAttempt) -> Result<(), StoreError>;
+    fn mutate_launch_pane(&self, pane: StoredLaunchPane) -> Result<(), StoreError>;
 }
 
 impl OpensFlowStore for FlowStore {
@@ -319,6 +363,11 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-attempt"),
             SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
         ))?;
+        let launch_panes = engine.register_table(TableDescriptor::new(
+            FLOW_LAUNCH_PANE_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-pane"),
+            SchemaHash::for_label("flow-nexus-launch-pane-v1"),
+        ))?;
         let store = Self {
             engine,
             flows,
@@ -326,6 +375,7 @@ impl OpensFlowStore for FlowStore {
             configuration,
             herdr_routes,
             launch_attempts,
+            launch_panes,
         };
         if store
             .engine
@@ -607,6 +657,68 @@ impl RecordsNativeLaunchIntent for FlowStore {
         stored.attempt.native_launch_intent_option = Some(intent);
         self.mutate_launch_attempt(stored.attempt)?;
         Ok(true)
+    }
+}
+
+impl RecordsCreatedLaunchPane for FlowStore {
+    fn record_created_launch_pane(&self, pane: HerdrPaneBinding) -> Result<bool, StoreError> {
+        let Some(attempt) = self.stored_launch_attempt(&pane.launch_request_id)? else {
+            return Ok(false);
+        };
+        if attempt.attempt.launch_attempt_phase != LaunchAttemptPhase::NativeLaunchIntentRecorded
+            || self.stored_launch_pane(&pane.launch_request_id)?.is_some()
+        {
+            return Ok(false);
+        }
+        self.engine.assert(Assertion::new(
+            self.launch_panes,
+            StoredLaunchPane {
+                pane,
+                harness_start_requested: false,
+                orphaned: false,
+            },
+        ))?;
+        Ok(true)
+    }
+
+    fn request_harness_start(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<HerdrPaneBinding>, StoreError> {
+        let Some(mut stored) = self.stored_launch_pane(launch_request_id)? else {
+            return Ok(None);
+        };
+        if stored.orphaned || stored.harness_start_requested {
+            return Ok(None);
+        }
+        stored.harness_start_requested = true;
+        let pane = stored.pane.clone();
+        self.mutate_launch_pane(stored)?;
+        Ok(Some(pane))
+    }
+
+    fn orphan_launch_pane(&self, launch_request_id: &str) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_launch_pane(launch_request_id)? else {
+            return Ok(false);
+        };
+        if stored.orphaned {
+            return Ok(true);
+        }
+        stored.orphaned = true;
+        self.mutate_launch_pane(stored)?;
+        Ok(true)
+    }
+}
+
+impl ReadsCreatedLaunchPane for FlowStore {
+    fn recoverable_launch_pane(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<HerdrPaneBinding>, StoreError> {
+        Ok(self
+            .stored_launch_pane(launch_request_id)?
+            .filter(|stored| stored.harness_start_requested && !stored.orphaned)
+            .map(|stored| stored.pane))
     }
 }
 
@@ -944,6 +1056,25 @@ impl ReadsFlowStore for FlowStore {
         }
     }
 
+    fn stored_launch_pane(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<StoredLaunchPane>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.launch_panes,
+                RecordKey::new(launch_request_id),
+            ))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [pane] => Ok(Some(pane.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
     fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError> {
         let Some(node) = self.flow_node(flow_id)? else {
             return Ok(Response::RecipientResolutionRejected(
@@ -1035,6 +1166,15 @@ impl WritesFlowStore for FlowStore {
             self.launch_attempts,
             RecordKey::new(attempt.launch_request_id.clone()),
             StoredLaunchAttempt { attempt },
+        ))?;
+        Ok(())
+    }
+
+    fn mutate_launch_pane(&self, pane: StoredLaunchPane) -> Result<(), StoreError> {
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.launch_panes,
+            RecordKey::new(pane.pane.launch_request_id.clone()),
+            pane,
         ))?;
         Ok(())
     }
@@ -1158,10 +1298,11 @@ impl WritesFlowStore for FlowStore {
 mod tests {
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow,
-        FlowStore, OpensFlowStore, ReadsFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding,
-        RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
-        RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsRestartedFlow,
-        RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
+        FlowStore, OpensFlowStore, ReadsCreatedLaunchPane, ReadsFlowStore, ReadsLaunchAttempt,
+        RecordsCreatedLaunchPane, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
+        RecordsPendingThread, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+        RecordsRegistrationAcknowledgement, RecordsRestartedFlow, RegistersFlowIdentity,
+        ReservesLaunchAttempt, ReservesPendingStart,
     };
     use meta_signal_flow::Configuration;
     use signal_flow::{
@@ -1297,6 +1438,73 @@ mod tests {
                 .reserve_launch_attempt(&changed, origin)
                 .expect("changed duplicate evaluates"),
             LaunchAttemptReservation::Conflict
+        );
+    }
+
+    #[test]
+    fn created_pane_survives_reopen_and_a_second_failed_binding_is_orphaned() {
+        let fixture = StoreFixture::new();
+        let launch = fixture.composed_launch(
+            "created-pane",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let store = fixture.store();
+        store
+            .reserve_launch_attempt(&launch, fixture.origin())
+            .expect("launch reservation");
+        assert!(
+            store
+                .record_native_launch_intent(NativeLaunchIntent {
+                    launch_request_id: "created-pane".into(),
+                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                    harness_kind: HarnessKind::Codex,
+                    model_name: launch.launch_profile.model_name.clone(),
+                    effort: launch.launch_profile.effort.clone(),
+                    skill_name_vector: Vec::new(),
+                })
+                .expect("intent persists")
+        );
+        let pane = fixture.pane("created-pane");
+        assert!(
+            store
+                .record_created_launch_pane(pane.clone())
+                .expect("pane persists")
+        );
+        assert!(
+            !store
+                .record_created_launch_pane(pane.clone())
+                .expect("pane cannot be replaced")
+        );
+        assert_eq!(
+            store
+                .request_harness_start("created-pane")
+                .expect("start reservation"),
+            Some(pane.clone())
+        );
+        assert_eq!(
+            store
+                .request_harness_start("created-pane")
+                .expect("second start reservation"),
+            None
+        );
+        drop(store);
+        let reopened = fixture.store();
+        assert_eq!(
+            reopened
+                .recoverable_launch_pane("created-pane")
+                .expect("recoverable pane"),
+            Some(pane)
+        );
+        assert!(
+            reopened
+                .orphan_launch_pane("created-pane")
+                .expect("orphan persists")
+        );
+        assert_eq!(
+            reopened
+                .recoverable_launch_pane("created-pane")
+                .expect("orphan is not retried"),
+            None
         );
     }
 

@@ -32,10 +32,11 @@ use std::{
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle,
-    RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
-    RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersExistingFlow,
-    RegistersFlowIdentity, ReservesLaunchAttempt,
+    OpensFlowStore, ReadsCreatedLaunchPane, ReadsFlowRows, ReadsLaunchAttempt,
+    RecordsCreatedLaunchPane, RecordsFlowLifecycle, RecordsNativeLaunchBinding,
+    RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+    RecordsRegistrationAcknowledgement, RegistersExistingFlow, RegistersFlowIdentity,
+    ReservesLaunchAttempt,
 };
 
 fn process_identity_matches(identity: &meta_signal_flow::ProcessIdentity) -> bool {
@@ -142,6 +143,50 @@ impl Dispatches for RunningNexus {
                             Response::StartRejected(StartRejection::LaunchPersistenceRefused),
                         );
                     }
+                    if attempt.launch_attempt_phase
+                        == LaunchAttemptPhase::NativeLaunchIntentRecorded
+                    {
+                        let launch = match self.composer.compose(&attempt.launch_profile) {
+                            Ok(launch) => launch,
+                            Err(_) => {
+                                return Response::StartRejected(StartRejection::BindingRefused);
+                            }
+                        };
+                        let pane = match self
+                            .store
+                            .recoverable_launch_pane(&attempt.launch_request_id)
+                        {
+                            Ok(Some(pane)) => pane,
+                            Ok(None) | Err(_) => {
+                                return Response::StartRejected(StartRejection::BindingRefused);
+                            }
+                        };
+                        let binding = match self.herdr.observe_native_binding(&launch, &pane) {
+                            Ok(binding) => binding,
+                            Err(_) => {
+                                let _ = self.store.orphan_launch_pane(&attempt.launch_request_id);
+                                return Response::StartRejected(StartRejection::BindingRefused);
+                            }
+                        };
+                        if !self
+                            .store
+                            .record_native_launch_binding(binding)
+                            .unwrap_or(false)
+                        {
+                            return Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            );
+                        }
+                        return self
+                            .store
+                            .launch_attempt(&attempt.launch_request_id)
+                            .ok()
+                            .flatten()
+                            .map(Response::LaunchPending)
+                            .unwrap_or(Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            ));
+                    }
                     if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
                         return Response::LaunchPending(attempt);
                     }
@@ -233,6 +278,20 @@ impl Dispatches for RunningNexus {
                     Err(_) => {
                         return Response::StartRejected(StartRejection::NativeLaunchRefused);
                     }
+                };
+                if !self
+                    .store
+                    .record_created_launch_pane(pane.clone())
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                let Some(pane) = self
+                    .store
+                    .request_harness_start(&launch.launch_profile.launch_request_id)
+                    .unwrap_or(None)
+                else {
+                    return Response::StartRejected(StartRejection::BindingRefused);
                 };
                 if self.herdr.start_native_harness(&launch, &pane).is_err() {
                     return Response::StartRejected(StartRejection::NativeLaunchRefused);

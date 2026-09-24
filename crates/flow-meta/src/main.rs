@@ -86,7 +86,7 @@ impl ParsesMetaCommand for FlowMetaClient {
                         session_id,
                         turn_id: "unavailable".into(),
                     },
-                    flow_lifecycle: signal_flow::FlowLifecycle::Active,
+                    flow_lifecycle: signal_flow::FlowLifecycle::RegisteredUnconfirmed,
                 }))
             }
             Some("configure") => {

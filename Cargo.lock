@@ -9,6 +9,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "autocfg"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -92,6 +98,12 @@ name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
+name = "cfg_aliases"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "constant_time_eq"
@@ -259,6 +271,7 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "meta-signal-flow",
+ "nix",
  "rkyv",
  "sema-engine",
  "serde_json",
@@ -366,9 +379,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "meta-signal-flow"
-version = "2.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=192e1a8a73072311d146ade790c9511929b9abd3#192e1a8a73072311d146ade790c9511929b9abd3"
+version = "3.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=fcf0a0b24549aee6f505f33e5f86b6ce9a4cff25#fcf0a0b24549aee6f505f33e5f86b6ce9a4cff25"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",
@@ -396,6 +418,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -656,8 +691,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "2.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=edfea8712513bd6e7323872c6aacc058bcc51304#edfea8712513bd6e7323872c6aacc058bcc51304"
+version = "3.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=afcdf076a71263460ef039fac7600ea1310a9707#afcdf076a71263460ef039fac7600ea1310a9707"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",

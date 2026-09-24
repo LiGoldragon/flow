@@ -3,11 +3,11 @@ pub mod claude;
 pub mod codex;
 pub mod composition;
 pub mod herdr;
+pub mod refresh;
 pub mod store;
 
 use codex::{
-    CodexAdapter, ConsumesResetCredit, ResolvesBoundCodexSkills, ResumesCodex,
-    SubmitsBoundCodexFirstTurn,
+    CodexAdapter, ConsumesResetCredit, ResolvesBoundCodexSkills, SubmitsBoundCodexFirstTurn,
 };
 use composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer};
 use herdr::launch::{
@@ -15,10 +15,11 @@ use herdr::launch::{
     ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
     SubmitsFirstPromptOnce,
 };
+use refresh::{LinuxProcessEvidence, ProvesRefreshCaller, ReadsProcessIdentity};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
     LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchIntent, PromptDeliveryResult, Query,
-    RegistrationAcknowledgement, Response, RestartRejection, StartRejection,
+    RecipientDisposition, RegistrationAcknowledgement, Response, StartRejection,
 };
 use std::{
     fs,
@@ -30,10 +31,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use store::{
-    AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
-    RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement,
-    RecordsRestartedFlow, RegistersFlowIdentity, ReservesLaunchAttempt,
+    AppliesFlowQuery, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore, OpensFlowStore,
+    ReadsFlowRuntimeEvidence, ReadsLaunchAttempt, RecordsNativeLaunchBinding,
+    RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+    RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 
 pub struct RunningNexus {
@@ -45,11 +46,24 @@ pub struct RunningNexus {
 
 pub trait Dispatches {
     fn dispatch(&self, query: Query) -> Response;
+    fn dispatch_with_peer(
+        &self,
+        query: Query,
+        peer_process_identity: Option<signal_flow::ProcessIdentity>,
+    ) -> Response;
     fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response;
 }
 
 impl Dispatches for RunningNexus {
     fn dispatch(&self, query: Query) -> Response {
+        self.dispatch_with_peer(query, None)
+    }
+
+    fn dispatch_with_peer(
+        &self,
+        query: Query,
+        peer_process_identity: Option<signal_flow::ProcessIdentity>,
+    ) -> Response {
         match query {
             Query::Start(request) => {
                 let origin = request.origin_clue.clone();
@@ -181,7 +195,7 @@ impl Dispatches for RunningNexus {
                         herdr_terminal_id: binding.herdr_pane_binding.herdr_terminal_id.clone(),
                     }),
                     origin_clue: origin,
-                    flow_lifecycle: FlowLifecycle::Pending,
+                    flow_lifecycle: FlowLifecycle::RegisteredUnconfirmed,
                 };
                 if !self.herdr.validate_registration(&node) {
                     return Response::StartRejected(StartRejection::RegistrationRefused);
@@ -300,37 +314,39 @@ impl Dispatches for RunningNexus {
                     }
                 }
             }
-            Query::Restart(request) => {
-                let authorization = self
-                    .store
-                    .authorize_restart(&request.flow_id, &request.origin_clue.flow_id);
-                let Ok(Some(token)) = authorization else {
-                    return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
-                };
-                if request.origin_clue.session_id != token.thread_id {
-                    return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
+            Query::Refresh(request) => {
+                if request.caller_flow_hint != request.flow_id {
+                    return Response::RefreshRejected(
+                        signal_flow::RefreshRejection::ProvenanceMismatch,
+                    );
                 }
-                let origin = signal_flow::OriginClue {
-                    flow_id: token.authority_flow_id.clone(),
-                    session_id: token.thread_id.clone(),
-                    turn_id: "restart".into(),
+                let Some(peer) = peer_process_identity else {
+                    return Response::RefreshRejected(
+                        signal_flow::RefreshRejection::CallerProofUnavailable,
+                    );
                 };
-                if self
-                    .codex
-                    .resume_codex(&token.thread_id, "Resume this Flow.", &origin)
+                let Ok(Some(harness)) = self.store.process_identity(&request.flow_id) else {
+                    return Response::RefreshRejected(
+                        signal_flow::RefreshRejection::CallerProofUnavailable,
+                    );
+                };
+                if LinuxProcessEvidence
+                    .prove_refresh_caller(&peer, &request.flow_id, &harness)
                     .is_err()
                 {
-                    return Response::RestartRejected(RestartRejection::ResumeRefused);
+                    return Response::RefreshRejected(
+                        signal_flow::RefreshRejection::CallerProofMismatch,
+                    );
                 }
-                self.store
-                    .record_restarted(token)
-                    .unwrap_or(Response::RestartRejected(RestartRejection::ResumeRefused))
+                Response::RefreshRejected(signal_flow::RefreshRejection::HandoverPolicyUnavailable)
             }
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
-                    Ok(Response::RecipientResolved(node)) => Response::RecipientResolved(
+                    Ok(Response::RecipientDispositioned(RecipientDisposition::Deliverable(
+                        node,
+                    ))) => Response::RecipientDispositioned(RecipientDisposition::Deliverable(
                         self.herdr.refresh_route(claude::refresh_readiness(node)),
-                    ),
+                    )),
                     Ok(response) => response,
                     Err(_) => Response::RecipientResolutionRejected(
                         signal_flow::RecipientResolutionRejection::FlowUnavailable,
@@ -430,8 +446,9 @@ impl ServesOrdinary for RunningNexus {
             .map_err(|e| e.to_string())?;
         loop {
             let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
+            let peer_process_identity = LinuxProcessEvidence.peer_process_identity(&peer).ok();
             let query = Frame::read_query(&mut peer)?;
-            let response = self.dispatch(query);
+            let response = self.dispatch_with_peer(query, peer_process_identity);
             Frame::write_response(&mut peer, &response)?;
         }
     }
@@ -524,11 +541,12 @@ mod tests {
     };
     use sha2::{Digest, Sha256};
     use signal_flow::{
-        EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding,
-        HerdrRoute, HerdrRouteSelection, LaunchProfile, LaunchSource, NativeLaunchBinding,
-        NativeLaunchIntent, NativeTranscriptAbsence, NativeTranscriptBoundary, OriginClue,
-        PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
-        Response, StartRejection, StartRequest,
+        DeliveryHoldReason, EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind,
+        HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchProfile, LaunchSource,
+        NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence, NativeTranscriptBoundary,
+        OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query,
+        RecipientDisposition, RecipientHold, RegistrationAcknowledgement, Response, StartRejection,
+        StartRequest,
     };
     use std::{
         fs,
@@ -597,7 +615,7 @@ mod tests {
                     session_id: "01a0b22c-e24f-7452-9940-64490878680f".into(),
                     turn_id: "unavailable".into(),
                 },
-                flow_lifecycle: FlowLifecycle::Active,
+                flow_lifecycle: FlowLifecycle::RegisteredUnconfirmed,
             }
         }
 
@@ -664,7 +682,11 @@ mod tests {
             fixture
                 .nexus
                 .dispatch(Query::ResolveRecipient("908786".into())),
-            Response::RecipientResolved(node)
+            Response::RecipientDispositioned(RecipientDisposition::Held(RecipientHold {
+                flow_id: node.flow_id,
+                flow_lifecycle: FlowLifecycle::RegisteredUnconfirmed,
+                delivery_hold_reason: DeliveryHoldReason::NativeReceiptUnconfirmed,
+            }))
         );
     }
 
@@ -807,7 +829,7 @@ mod tests {
                     herdr_terminal_id: pane.herdr_terminal_id.clone(),
                 }),
                 origin_clue: origin.clone(),
-                flow_lifecycle: FlowLifecycle::Pending,
+                flow_lifecycle: FlowLifecycle::RegisteredUnconfirmed,
             })
             .unwrap();
         let acknowledgement = RegistrationAcknowledgement {
@@ -909,49 +931,6 @@ mod tests {
     }
 
     #[test]
-    fn running_nexus_marks_stale_or_noninteractive_snapshots_unavailable() {
-        let fixture = NexusFixture::new();
-        fixture.set_agents(vec![fixture.current_agent()]);
-        let node = fixture.node();
-        assert!(matches!(
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node.clone())),
-            meta_signal_flow::Response::FlowRegistered(_)
-        ));
-
-        for changed_field in ["terminal", "name", "harness", "interactive"] {
-            let mut agent = fixture.current_agent();
-            match changed_field {
-                "terminal" => agent["terminal_id"] = "term_replaced".into(),
-                "name" => agent["name"] = "another-agent".into(),
-                "harness" => agent["agent"] = "claude".into(),
-                "interactive" => agent["interactive_ready"] = false.into(),
-                _ => unreachable!("closed fixture variants"),
-            }
-            fixture.set_agents(vec![agent]);
-            let Response::RecipientResolved(resolved) = fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("908786".into()))
-            else {
-                panic!("registered recipient resolves")
-            };
-            assert_eq!(
-                resolved.herdr_route_selection,
-                HerdrRouteSelection::Unavailable,
-                "stale {changed_field} must not remain routable"
-            );
-            assert!(matches!(
-                resolved.endpoint_selection,
-                EndpointSelection::Available(signal_flow::Available_Data {
-                    route_readiness: signal_flow::RouteReadiness::Parked,
-                    ..
-                })
-            ));
-        }
-    }
-
-    #[test]
     fn duplicate_registration_is_idempotent_and_conflict_has_no_partial_mutation() {
         let fixture = NexusFixture::new();
         let mut second_agent = fixture.current_agent();
@@ -987,7 +966,11 @@ mod tests {
             fixture
                 .nexus
                 .dispatch(Query::ResolveRecipient("908786".into())),
-            Response::RecipientResolved(node)
+            Response::RecipientDispositioned(RecipientDisposition::Held(RecipientHold {
+                flow_id: node.flow_id,
+                flow_lifecycle: FlowLifecycle::RegisteredUnconfirmed,
+                delivery_hold_reason: DeliveryHoldReason::NativeReceiptUnconfirmed,
+            }))
         );
         assert!(fixture.directory.path().join("flow.sema").exists());
     }

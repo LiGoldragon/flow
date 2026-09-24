@@ -143,7 +143,7 @@ mod tests {
                 session_id: "da1e3f9d-full".into(),
                 turn_id: "unavailable".into(),
             },
-            flow_lifecycle: FlowLifecycle::Active,
+            flow_lifecycle: FlowLifecycle::Ready,
         };
         assert!(matches!(
             refresh_at(&node, &jobs, &daemon.join("roster.json")),

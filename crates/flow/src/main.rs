@@ -153,29 +153,31 @@ mod tests {
         let client = FlowClient {
             socket: "unused".into(),
         };
-        let reply = Response::RecipientResolved(signal_flow::FlowNode {
-            flow_id: "da1e3f".into(),
-            session_id: "da1e3f9d-full".into(),
-            harness_kind: signal_flow::HarnessKind::Claude,
-            endpoint_selection: signal_flow::EndpointSelection::Unavailable,
-            herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
-                signal_flow::HerdrRoute {
-                    herdr_session_name: "messaging-build".into(),
-                    herdr_agent_name: "recipient".into(),
-                    herdr_pane_id: "w1:p2".into(),
-                    herdr_terminal_id: "term-current".into(),
-                },
-            ),
-            origin_clue: signal_flow::OriginClue {
+        let reply = Response::RecipientDispositioned(
+            signal_flow::RecipientDisposition::Deliverable(signal_flow::FlowNode {
                 flow_id: "da1e3f".into(),
                 session_id: "da1e3f9d-full".into(),
-                turn_id: "unavailable".into(),
-            },
-            flow_lifecycle: signal_flow::FlowLifecycle::Active,
-        });
+                harness_kind: signal_flow::HarnessKind::Claude,
+                endpoint_selection: signal_flow::EndpointSelection::Unavailable,
+                herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
+                    signal_flow::HerdrRoute {
+                        herdr_session_name: "messaging-build".into(),
+                        herdr_agent_name: "recipient".into(),
+                        herdr_pane_id: "w1:p2".into(),
+                        herdr_terminal_id: "term-current".into(),
+                    },
+                ),
+                origin_clue: signal_flow::OriginClue {
+                    flow_id: "da1e3f".into(),
+                    session_id: "da1e3f9d-full".into(),
+                    turn_id: "unavailable".into(),
+                },
+                flow_lifecycle: signal_flow::FlowLifecycle::Ready,
+            }),
+        );
         assert_eq!(
             client.textualize_reply(&reply),
-            "RecipientResolved.{ da1e3f da1e3f9d-full Claude Unavailable Available.{ messaging-build recipient w1:p2 term-current } { da1e3f da1e3f9d-full unavailable } Active }"
+            "RecipientDispositioned.Deliverable.{ da1e3f da1e3f9d-full Claude Unavailable Available.{ messaging-build recipient w1:p2 term-current } { da1e3f da1e3f9d-full unavailable } Ready }"
         );
     }
 }

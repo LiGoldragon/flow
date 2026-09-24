@@ -13,11 +13,14 @@ use sema_engine::{
     SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::{
-    ComposedLaunch, EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
-    NativeLaunchBinding, NativeLaunchIntent, OriginClue, PromptDeliveryIntent,
-    PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
-    Response, RestartRejection, Restarted, RouteReadiness, StartRejection, Started,
+    CallerProof, ComposedLaunch, DeliveryHoldReason, EndpointSelection,
+    FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
+    LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchBinding,
+    NativeLaunchIntent, NativeTargetReceipt, OriginClue, ProcessIdentity, PromptDeliveryIntent,
+    PromptDeliveryResult, Query, RecipientDisposition, RecipientHold, RecipientReroute,
+    RecipientResolutionRejection, RefreshAttempt, RefreshAttemptPhase, RefreshPolicy,
+    RefreshRejection, RefreshRequest, RegistrationAcknowledgement, ReplacementIdempotencyKey,
+    Response, RouteReadiness, StartRejection, Started,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -25,6 +28,9 @@ const FLOW_STATE_TABLE_NAME: TableName = TableName::new("flow_nexus_state");
 const FLOW_CONFIGURATION_TABLE_NAME: TableName = TableName::new("flow_nexus_configuration");
 const FLOW_HERDR_ROUTE_TABLE_NAME: TableName = TableName::new("flow_nexus_herdr_routes");
 const FLOW_LAUNCH_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_attempts");
+const FLOW_RUNTIME_TABLE_NAME: TableName = TableName::new("flow_nexus_runtime");
+const FLOW_REFRESH_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_refresh_attempts");
+const FLOW_ROUTE_TRANSFER_TABLE_NAME: TableName = TableName::new("flow_nexus_route_transfers");
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const DEFAULT_ORDINARY_SOCKET: &str = "/run/user/1001/flow/flow.sock";
@@ -95,6 +101,44 @@ struct StoredLaunchAttempt {
     attempt: LaunchAttempt,
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredFlowRuntime {
+    flow_id: String,
+    process_identity_option: Option<ProcessIdentity>,
+    native_target_receipt_option: Option<NativeTargetReceipt>,
+}
+
+impl EngineRecord for StoredFlowRuntime {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredRefreshAttempt {
+    attempt: RefreshAttempt,
+}
+
+impl EngineRecord for StoredRefreshAttempt {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::refresh_key(
+            &self.attempt.replacement_idempotency_key,
+        ))
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredRouteTransfer {
+    predecessor_flow_id: String,
+    replacement_idempotency_key: ReplacementIdempotencyKey,
+}
+
+impl EngineRecord for StoredRouteTransfer {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.predecessor_flow_id.clone())
+    }
+}
+
 impl EngineRecord for StoredLaunchAttempt {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.attempt.launch_request_id.clone())
@@ -116,13 +160,9 @@ pub struct FlowStore {
     configuration: TableReference<FlowStoreConfiguration>,
     herdr_routes: TableReference<FlowHerdrRouteRecord>,
     launch_attempts: TableReference<StoredLaunchAttempt>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RestartAuthorization {
-    pub flow_id: String,
-    pub authority_flow_id: String,
-    pub thread_id: String,
+    flow_runtime: TableReference<StoredFlowRuntime>,
+    refresh_attempts: TableReference<StoredRefreshAttempt>,
+    route_transfers: TableReference<StoredRouteTransfer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,21 +207,6 @@ pub trait RecordsPendingThread {
 /// Marks a known pending launch active only after its first turn was accepted.
 pub trait ConfirmsStartedFlow {
     fn confirm_started(&self, flow_id: &str) -> Result<Response, StoreError>;
-}
-
-/// Reads the persisted daemon thread only after checking restart authority.
-pub trait AuthorizesFlowRestart {
-    fn authorize_restart(
-        &self,
-        flow_id: &str,
-        authority_flow_id: &str,
-    ) -> Result<Option<RestartAuthorization>, StoreError>;
-}
-
-/// Advances the generation after the adapter has accepted the resume turn.
-pub trait RecordsRestartedFlow {
-    fn record_restarted(&self, authorization: RestartAuthorization)
-    -> Result<Response, StoreError>;
 }
 
 /// Configuration is durable policy and shares the Nexus's sole `.sema` store.
@@ -244,6 +269,34 @@ pub trait ReadsLaunchAttempt {
     fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError>;
 }
 
+pub trait RecordsFlowRuntimeEvidence {
+    fn record_flow_runtime_evidence(
+        &self,
+        flow_id: &str,
+        process_identity: ProcessIdentity,
+        native_target_receipt: NativeTargetReceipt,
+    ) -> Result<bool, StoreError>;
+}
+
+pub trait ReadsFlowRuntimeEvidence {
+    fn process_identity(&self, flow_id: &str) -> Result<Option<ProcessIdentity>, StoreError>;
+    fn native_target_receipt(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<NativeTargetReceipt>, StoreError>;
+}
+
+/// Atomically journals an exact refresh request and removes the predecessor
+/// from delivery admission before any replacement-side external write.
+pub trait ReservesRefreshAttempt {
+    fn reserve_refresh_attempt(
+        &self,
+        request: RefreshRequest,
+        policy: RefreshPolicy,
+        caller_proof: CallerProof,
+    ) -> Result<Response, StoreError>;
+}
+
 trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
@@ -253,6 +306,15 @@ trait ReadsFlowStore {
         &self,
         launch_request_id: &str,
     ) -> Result<Option<StoredLaunchAttempt>, StoreError>;
+    fn stored_flow_runtime(&self, flow_id: &str) -> Result<Option<StoredFlowRuntime>, StoreError>;
+    fn stored_refresh_attempt(
+        &self,
+        key: &ReplacementIdempotencyKey,
+    ) -> Result<Option<StoredRefreshAttempt>, StoreError>;
+    fn stored_route_transfer(
+        &self,
+        predecessor_flow_id: &str,
+    ) -> Result<Option<StoredRouteTransfer>, StoreError>;
     fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError>;
 }
 
@@ -265,8 +327,13 @@ trait WritesFlowStore {
     fn record_thread(&self, pending: &PendingLaunch, thread_id: String)
     -> Result<bool, StoreError>;
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError>;
-    fn restart(&self, authorization: RestartAuthorization) -> Result<Response, StoreError>;
     fn mutate_launch_attempt(&self, attempt: LaunchAttempt) -> Result<(), StoreError>;
+}
+
+impl FlowStore {
+    fn refresh_key(key: &ReplacementIdempotencyKey) -> String {
+        format!("{}:{}", key.flow_id, key.transcript_record_sha256)
+    }
 }
 
 impl OpensFlowStore for FlowStore {
@@ -297,6 +364,21 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-attempt"),
             SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
         ))?;
+        let flow_runtime = engine.register_table(TableDescriptor::new(
+            FLOW_RUNTIME_TABLE_NAME,
+            FamilyName::new("flow-nexus-runtime"),
+            SchemaHash::for_label("flow-nexus-runtime-v1"),
+        ))?;
+        let refresh_attempts = engine.register_table(TableDescriptor::new(
+            FLOW_REFRESH_ATTEMPT_TABLE_NAME,
+            FamilyName::new("flow-nexus-refresh-attempt"),
+            SchemaHash::for_label("flow-nexus-refresh-attempt-v1"),
+        ))?;
+        let route_transfers = engine.register_table(TableDescriptor::new(
+            FLOW_ROUTE_TRANSFER_TABLE_NAME,
+            FamilyName::new("flow-nexus-route-transfer"),
+            SchemaHash::for_label("flow-nexus-route-transfer-v1"),
+        ))?;
         let store = Self {
             engine,
             flows,
@@ -304,6 +386,9 @@ impl OpensFlowStore for FlowStore {
             configuration,
             herdr_routes,
             launch_attempts,
+            flow_runtime,
+            refresh_attempts,
+            route_transfers,
         };
         if store
             .engine
@@ -345,7 +430,9 @@ impl AppliesFlowQuery for FlowStore {
     fn apply(&self, query: Query) -> Result<Response, StoreError> {
         match query {
             Query::Start(_) => Ok(Response::StartRejected(StartRejection::NativeLaunchRefused)),
-            Query::Restart(_) => Ok(Response::RestartRejected(RestartRejection::ResumeRefused)),
+            Query::Refresh(_) => Ok(Response::RefreshRejected(
+                RefreshRejection::CallerProofUnavailable,
+            )),
             Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
         }
     }
@@ -357,7 +444,7 @@ impl ReservesPendingStart for FlowStore {
             Query::Start(request) => self
                 .reserve_start("legacy-test-start".into(), request.origin_clue)
                 .map(Some),
-            Query::Restart(_) | Query::ResolveRecipient(_) => Ok(None),
+            Query::Refresh(_) | Query::ResolveRecipient(_) => Ok(None),
         }
     }
 }
@@ -378,38 +465,6 @@ impl ConfirmsStartedFlow for FlowStore {
     }
 }
 
-impl AuthorizesFlowRestart for FlowStore {
-    fn authorize_restart(
-        &self,
-        flow_id: &str,
-        authority_flow_id: &str,
-    ) -> Result<Option<RestartAuthorization>, StoreError> {
-        let Some(flow) = self.flow(flow_id)? else {
-            return Ok(None);
-        };
-        if flow.flow_id != authority_flow_id {
-            return Ok(None);
-        }
-        let Some(thread_id) = flow.thread_id else {
-            return Ok(None);
-        };
-        Ok(Some(RestartAuthorization {
-            flow_id: flow.flow_id,
-            authority_flow_id: authority_flow_id.into(),
-            thread_id,
-        }))
-    }
-}
-
-impl RecordsRestartedFlow for FlowStore {
-    fn record_restarted(
-        &self,
-        authorization: RestartAuthorization,
-    ) -> Result<Response, StoreError> {
-        self.restart(authorization)
-    }
-}
-
 impl ConfiguresFlowStore for FlowStore {
     fn configuration(&self) -> Result<Configuration, StoreError> {
         Ok(self.stored_configuration()?.configuration)
@@ -427,6 +482,9 @@ impl ConfiguresFlowStore for FlowStore {
 
 impl RegistersFlowIdentity for FlowStore {
     fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError> {
+        if flow_node.flow_lifecycle != SignalFlowLifecycle::RegisteredUnconfirmed {
+            return Ok(FlowRegistration::ConflictingBinding);
+        }
         let HerdrRouteSelection::Available(route) = flow_node.herdr_route_selection.clone() else {
             return Ok(FlowRegistration::ConflictingBinding);
         };
@@ -453,10 +511,6 @@ impl RegistersFlowIdentity for FlowStore {
                 }
             }
         }
-        let lifecycle = match flow_node.flow_lifecycle {
-            SignalFlowLifecycle::Pending => FlowLifecycle::Pending,
-            SignalFlowLifecycle::Active => FlowLifecycle::Active,
-        };
         let record = FlowRecord {
             flow_id: flow_node.flow_id.clone(),
             flow_type: match flow_node.harness_kind {
@@ -467,7 +521,7 @@ impl RegistersFlowIdentity for FlowStore {
             thread_id: Some(flow_node.session_id.clone()),
             harness_kind: flow_node.harness_kind.clone(),
             endpoint_selection: flow_node.endpoint_selection.clone(),
-            lifecycle,
+            lifecycle: FlowLifecycle::Pending,
             generation: 1,
         };
         self.engine.commit_atomic(
@@ -811,6 +865,131 @@ impl ReadsLaunchAttempt for FlowStore {
     }
 }
 
+impl RecordsFlowRuntimeEvidence for FlowStore {
+    fn record_flow_runtime_evidence(
+        &self,
+        flow_id: &str,
+        process_identity: ProcessIdentity,
+        native_target_receipt: NativeTargetReceipt,
+    ) -> Result<bool, StoreError> {
+        if native_target_receipt.flow_id != flow_id || self.flow(flow_id)?.is_none() {
+            return Ok(false);
+        }
+        let record = StoredFlowRuntime {
+            flow_id: flow_id.to_owned(),
+            process_identity_option: Some(process_identity),
+            native_target_receipt_option: Some(native_target_receipt),
+        };
+        match self.stored_flow_runtime(flow_id)? {
+            Some(existing) => Ok(existing == record),
+            None => {
+                self.engine
+                    .assert(Assertion::new(self.flow_runtime, record))?;
+                Ok(true)
+            }
+        }
+    }
+}
+
+impl ReadsFlowRuntimeEvidence for FlowStore {
+    fn process_identity(&self, flow_id: &str) -> Result<Option<ProcessIdentity>, StoreError> {
+        Ok(self
+            .stored_flow_runtime(flow_id)?
+            .and_then(|record| record.process_identity_option))
+    }
+
+    fn native_target_receipt(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<NativeTargetReceipt>, StoreError> {
+        Ok(self
+            .stored_flow_runtime(flow_id)?
+            .and_then(|record| record.native_target_receipt_option))
+    }
+}
+
+impl ReservesRefreshAttempt for FlowStore {
+    fn reserve_refresh_attempt(
+        &self,
+        request: RefreshRequest,
+        policy: RefreshPolicy,
+        caller_proof: CallerProof,
+    ) -> Result<Response, StoreError> {
+        if self.flow(&request.flow_id)?.is_none() {
+            return Ok(Response::RefreshRejected(RefreshRejection::UnknownFlow));
+        }
+        let key = ReplacementIdempotencyKey {
+            flow_id: request.flow_id.clone(),
+            transcript_record_sha256: request
+                .transcript_handover_reference
+                .transcript_record_sha256
+                .clone(),
+        };
+        if let Some(transfer) = self.stored_route_transfer(&request.flow_id)? {
+            let Some(existing) =
+                self.stored_refresh_attempt(&transfer.replacement_idempotency_key)?
+            else {
+                return Ok(Response::RefreshRejected(
+                    RefreshRejection::RefreshPersistenceRefused,
+                ));
+            };
+            if transfer.replacement_idempotency_key != key {
+                return Ok(Response::RefreshRejected(
+                    RefreshRejection::RefreshAlreadyInProgress,
+                ));
+            }
+            if existing.attempt.refresh_request != request
+                || existing.attempt.refresh_policy != policy
+                || existing.attempt.caller_proof_option.as_ref() != Some(&caller_proof)
+            {
+                return Ok(Response::RefreshRejected(
+                    RefreshRejection::IdempotencyConflict,
+                ));
+            }
+            return Ok(Response::RefreshProgress(existing.attempt));
+        }
+        if let Some(existing) = self.stored_refresh_attempt(&key)? {
+            if existing.attempt.refresh_request == request
+                && existing.attempt.refresh_policy == policy
+                && existing.attempt.caller_proof_option.as_ref() == Some(&caller_proof)
+            {
+                return Ok(Response::RefreshProgress(existing.attempt));
+            }
+            return Ok(Response::RefreshRejected(
+                RefreshRejection::IdempotencyConflict,
+            ));
+        }
+        let attempt = RefreshAttempt {
+            replacement_idempotency_key: key.clone(),
+            refresh_request: request.clone(),
+            refresh_policy: policy,
+            refresh_attempt_phase: RefreshAttemptPhase::RouteLocked,
+            flow_id_option: None,
+            caller_proof_option: Some(caller_proof),
+            replacement_ready_proof_option: None,
+            cutover_receipt_option: None,
+        };
+        self.engine.commit_atomic(
+            self.engine
+                .begin_atomic_commit()
+                .assert(
+                    self.refresh_attempts,
+                    StoredRefreshAttempt {
+                        attempt: attempt.clone(),
+                    },
+                )
+                .assert(
+                    self.route_transfers,
+                    StoredRouteTransfer {
+                        predecessor_flow_id: request.flow_id,
+                        replacement_idempotency_key: key,
+                    },
+                ),
+        )?;
+        Ok(Response::RefreshProgress(attempt))
+    }
+}
+
 impl ReadsFlowStore for FlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError> {
         let records = self
@@ -884,6 +1063,57 @@ impl ReadsFlowStore for FlowStore {
         }
     }
 
+    fn stored_flow_runtime(&self, flow_id: &str) -> Result<Option<StoredFlowRuntime>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(self.flow_runtime, RecordKey::new(flow_id)))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [record] => Ok(Some(record.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn stored_refresh_attempt(
+        &self,
+        key: &ReplacementIdempotencyKey,
+    ) -> Result<Option<StoredRefreshAttempt>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.refresh_attempts,
+                RecordKey::new(Self::refresh_key(key)),
+            ))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [record] => Ok(Some(record.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn stored_route_transfer(
+        &self,
+        predecessor_flow_id: &str,
+    ) -> Result<Option<StoredRouteTransfer>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.route_transfers,
+                RecordKey::new(predecessor_flow_id),
+            ))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [record] => Ok(Some(record.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
     fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError> {
         let Some(flow) = self.flow(flow_id)? else {
             return Ok(Response::RecipientResolutionRejected(
@@ -895,21 +1125,68 @@ impl ReadsFlowStore for FlowStore {
                 RecipientResolutionRejection::FlowUnavailable,
             ));
         };
-        Ok(Response::RecipientResolved(FlowNode {
-            flow_id: flow.flow_id,
-            session_id,
-            harness_kind: flow.harness_kind.clone(),
-            endpoint_selection: flow.endpoint_selection.clone(),
-            herdr_route_selection: self
-                .herdr_route(flow_id)?
-                .map(|record| HerdrRouteSelection::Available(record.route))
-                .unwrap_or(HerdrRouteSelection::Unavailable),
-            origin_clue: flow.origin,
-            flow_lifecycle: match flow.lifecycle {
-                FlowLifecycle::Active => SignalFlowLifecycle::Active,
-                FlowLifecycle::Pending => SignalFlowLifecycle::Pending,
-            },
-        }))
+        if let Some(transfer) = self.stored_route_transfer(flow_id)? {
+            let Some(refresh) =
+                self.stored_refresh_attempt(&transfer.replacement_idempotency_key)?
+            else {
+                return Ok(Response::RecipientResolutionRejected(
+                    RecipientResolutionRejection::FlowUnavailable,
+                ));
+            };
+            if let Some(replacement_flow_id) = refresh.attempt.flow_id_option {
+                if refresh.attempt.replacement_ready_proof_option.is_some() {
+                    let flow_lifecycle = if matches!(
+                        refresh.attempt.refresh_attempt_phase,
+                        RefreshAttemptPhase::Archived | RefreshAttemptPhase::Complete
+                    ) {
+                        SignalFlowLifecycle::Archived
+                    } else {
+                        SignalFlowLifecycle::Retiring
+                    };
+                    return Ok(Response::RecipientDispositioned(
+                        RecipientDisposition::Reroute(RecipientReroute {
+                            flow_id: flow_id.to_owned(),
+                            replacement_flow_id,
+                            flow_lifecycle,
+                        }),
+                    ));
+                }
+            }
+            return Ok(Response::RecipientDispositioned(
+                RecipientDisposition::Held(RecipientHold {
+                    flow_id: flow_id.to_owned(),
+                    flow_lifecycle: SignalFlowLifecycle::Retiring,
+                    delivery_hold_reason: DeliveryHoldReason::ReplacementNotReady,
+                }),
+            ));
+        }
+        let lifecycle = match flow.lifecycle {
+            FlowLifecycle::Active => SignalFlowLifecycle::Ready,
+            FlowLifecycle::Pending => SignalFlowLifecycle::RegisteredUnconfirmed,
+        };
+        if lifecycle != SignalFlowLifecycle::Ready {
+            return Ok(Response::RecipientDispositioned(
+                RecipientDisposition::Held(RecipientHold {
+                    flow_id: flow_id.to_owned(),
+                    flow_lifecycle: lifecycle,
+                    delivery_hold_reason: DeliveryHoldReason::NativeReceiptUnconfirmed,
+                }),
+            ));
+        }
+        Ok(Response::RecipientDispositioned(
+            RecipientDisposition::Deliverable(FlowNode {
+                flow_id: flow.flow_id,
+                session_id,
+                harness_kind: flow.harness_kind.clone(),
+                endpoint_selection: flow.endpoint_selection.clone(),
+                herdr_route_selection: self
+                    .herdr_route(flow_id)?
+                    .map(|record| HerdrRouteSelection::Available(record.route))
+                    .unwrap_or(HerdrRouteSelection::Unavailable),
+                origin_clue: flow.origin,
+                flow_lifecycle: SignalFlowLifecycle::Ready,
+            }),
+        ))
     }
 }
 
@@ -1010,51 +1287,28 @@ impl WritesFlowStore for FlowStore {
             origin_clue,
         }))
     }
-
-    fn restart(&self, authorization: RestartAuthorization) -> Result<Response, StoreError> {
-        let Some(mut flow) = self.flow(&authorization.flow_id)? else {
-            return Ok(Response::RestartRejected(RestartRejection::UnknownFlow));
-        };
-        if flow.flow_id != authorization.authority_flow_id
-            || flow.thread_id.as_deref() != Some(&authorization.thread_id)
-        {
-            return Ok(Response::RestartRejected(
-                RestartRejection::ProvenanceMismatch,
-            ));
-        }
-        flow.lifecycle = FlowLifecycle::Active;
-        flow.generation += 1;
-        let generation = flow.generation;
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.flows,
-            RecordKey::new(authorization.flow_id.clone()),
-            flow,
-        ))?;
-        Ok(Response::Restarted(Restarted {
-            flow_id: authorization.flow_id,
-            session_id: authorization.thread_id,
-            generation: generation as i64,
-        }))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow,
-        FlowStore, OpensFlowStore, ReadsFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding,
-        RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
-        RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsRestartedFlow,
-        RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
+        AppliesFlowQuery, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore, OpensFlowStore,
+        ReadsFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
+        RecordsPendingThread, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+        RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
+        ReservesPendingStart, ReservesRefreshAttempt,
     };
     use meta_signal_flow::Configuration;
     use signal_flow::{
-        ComposedLaunch, FirstPromptPayload, FlowAspect, HarnessKind, HerdrPaneBinding,
-        LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, NativeLaunchBinding,
-        NativeLaunchIntent, NativeSkillSelection, NativeTargetReceipt, NativeTranscriptAbsence,
-        NativeTranscriptBoundary, NativeTranscriptCursor, OriginClue, PowerLevel,
-        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
-        Restarted, StartRequest, TargetReceiptRequest,
+        CallerProof, CallerRelationship, ComposedLaunch, DeliveryHoldReason, FirstPromptPayload,
+        FlowAspect, FlowLifecycle as SignalFlowLifecycle, HandoverSelection, HarnessKind,
+        HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile,
+        NativeLaunchBinding, NativeLaunchIntent, NativeSkillSelection, NativeTargetReceipt,
+        NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, OriginClue,
+        PowerLevel, ProcessIdentity, PromptDeliveryIntent, PromptDeliveryResult, Query,
+        RecipientDisposition, RecipientHold, RefreshAttemptPhase, RefreshPolicy, RefreshRejection,
+        RefreshRequest, RegistrationAcknowledgement, Response, StartRequest, TargetReceiptRequest,
+        TranscriptHandoverReference, TranscriptRole,
     };
 
     struct StoreFixture {
@@ -1408,28 +1662,6 @@ mod tests {
     }
 
     #[test]
-    fn reopen_recovers_origin_and_matching_authority_restarts() {
-        let fixture = StoreFixture::new();
-        let flow_id = fixture.start(&fixture.store());
-        let reopened = fixture.store();
-        assert_eq!(
-            reopened
-                .record_restarted(
-                    reopened
-                        .authorize_restart(&flow_id, &flow_id)
-                        .expect("authorization reads")
-                        .expect("owner is authorized"),
-                )
-                .expect("restart persists"),
-            Response::Restarted(Restarted {
-                flow_id,
-                session_id: "thread-1".into(),
-                generation: 2,
-            })
-        );
-    }
-
-    #[test]
     fn mismatching_or_unknown_authority_is_rejected() {
         let fixture = StoreFixture::new();
         let store = fixture.store();
@@ -1450,74 +1682,6 @@ mod tests {
             store
                 .authorize_restart("flow-unknown", "flow-unknown")
                 .expect("unknown flow evaluates"),
-            None
-        );
-    }
-
-    #[test]
-    fn pending_thread_recovers_and_restart_activates_it_without_second_launch() {
-        let fixture = StoreFixture::new();
-        let store = fixture.store();
-        let pending = store
-            .reserve_pending_start(Query::Start(StartRequest {
-                launch_profile: fixture.launch_profile("legacy-start-2"),
-                origin_clue: OriginClue {
-                    flow_id: "9fc62b".into(),
-                    session_id: "session-2".into(),
-                    turn_id: "turn-3".into(),
-                },
-            }))
-            .expect("reserve")
-            .expect("accepted flow type");
-        assert!(
-            store
-                .record_pending_thread(&pending, "thread-pending".into())
-                .expect("thread persists")
-        );
-        drop(store);
-        let recovered = fixture.store();
-        let authorization = recovered
-            .authorize_restart(&pending.flow_id, &pending.flow_id)
-            .expect("pending thread reads")
-            .expect("known pending thread is resumable");
-        assert_eq!(authorization.thread_id, "thread-pending");
-        assert_eq!(
-            recovered
-                .authorize_restart(&pending.flow_id, "9fc62b")
-                .expect("parent authority evaluates"),
-            None
-        );
-        assert_eq!(
-            recovered
-                .record_restarted(authorization)
-                .expect("accepted resume activates pending flow"),
-            Response::Restarted(Restarted {
-                flow_id: pending.flow_id,
-                session_id: "thread-pending".into(),
-                generation: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn failed_thread_start_leaves_a_non_resumable_pending_record() {
-        let fixture = StoreFixture::new();
-        let store = fixture.store();
-        let pending = store
-            .reserve_pending_start(Query::Start(StartRequest {
-                launch_profile: fixture.launch_profile("legacy-start-3"),
-                origin_clue: OriginClue {
-                    flow_id: "9fc62b".into(),
-                    session_id: "session-3".into(),
-                    turn_id: "turn-4".into(),
-                },
-            }))
-            .expect("reserve")
-            .expect("accepted flow type");
-        assert_eq!(
-            store
-                .authorize_restart(&pending.flow_id, &pending.flow_id)
-                .expect("authorization evaluates"),
             None
         );
     }
@@ -1545,7 +1709,7 @@ mod tests {
         let fixture = StoreFixture::new();
         let store = fixture.store();
         let flow_id = fixture.start(&store);
-        let Response::RecipientResolved(node) = store
+        let Response::RecipientDispositioned(RecipientDisposition::Deliverable(node)) = store
             .apply(Query::ResolveRecipient(flow_id.clone()))
             .expect("identity resolves")
         else {
@@ -1589,7 +1753,7 @@ mod tests {
                 session_id: "claude-session".into(),
                 turn_id: "unavailable".into(),
             },
-            flow_lifecycle: signal_flow::FlowLifecycle::Active,
+            flow_lifecycle: signal_flow::FlowLifecycle::RegisteredUnconfirmed,
         };
         store
             .register_flow(node.clone())
@@ -1600,7 +1764,13 @@ mod tests {
                 .store()
                 .apply(Query::ResolveRecipient("da1e3f".into()))
                 .unwrap(),
-            Response::RecipientResolved(node)
+            Response::RecipientDispositioned(RecipientDisposition::Held(
+                signal_flow::RecipientHold {
+                    flow_id: node.flow_id,
+                    flow_lifecycle: signal_flow::FlowLifecycle::RegisteredUnconfirmed,
+                    delivery_hold_reason: signal_flow::DeliveryHoldReason::NativeReceiptUnconfirmed,
+                }
+            ))
         );
     }
 
@@ -1626,7 +1796,7 @@ mod tests {
                 session_id: "da1e3f9d-full".into(),
                 turn_id: "unavailable".into(),
             },
-            flow_lifecycle: signal_flow::FlowLifecycle::Active,
+            flow_lifecycle: signal_flow::FlowLifecycle::RegisteredUnconfirmed,
         };
         assert!(matches!(
             store.register_flow(node.clone()).unwrap(),
@@ -1676,7 +1846,7 @@ mod tests {
         drop(store);
         let reopened = fixture.store();
         assert_eq!(reopened.flow("old-v5").unwrap(), Some(old_row));
-        let Response::RecipientResolved(node) = reopened
+        let Response::RecipientDispositioned(RecipientDisposition::Deliverable(node)) = reopened
             .apply(Query::ResolveRecipient("old-v5".into()))
             .unwrap()
         else {
@@ -1685,6 +1855,86 @@ mod tests {
         assert_eq!(
             node.herdr_route_selection,
             signal_flow::HerdrRouteSelection::Unavailable
+        );
+    }
+
+    #[test]
+    fn refresh_admission_is_idempotent_and_holds_predecessor_before_launch() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let flow_id = fixture.start(&store);
+        let process_identity = ProcessIdentity {
+            process_id: 42,
+            process_user_id: 1001,
+            process_start_token: "9001".into(),
+        };
+        let caller_proof = CallerProof {
+            flow_id: flow_id.clone(),
+            process_identity,
+            caller_relationship: CallerRelationship::Harness,
+        };
+        let policy = RefreshPolicy {
+            maximum_handover_age_seconds: 86_400,
+        };
+        let mut profile = fixture.launch_profile("refresh-launch");
+        profile.flow_id_option = Some(flow_id.clone());
+        let request = RefreshRequest {
+            flow_id: flow_id.clone(),
+            caller_flow_hint: flow_id.clone(),
+            transcript_handover_reference: TranscriptHandoverReference {
+                harness_kind: HarnessKind::Codex,
+                native_session_id: "thread-1".into(),
+                native_turn_id: "turn-handoff".into(),
+                transcript_item_id: "item-handoff".into(),
+                transcript_role: TranscriptRole::Assistant,
+                transcript_title: "Handoff — exact fixture".into(),
+                transcript_timestamp_seconds: 1_700_000_000,
+                transcript_record_sha256:
+                    "a1e4e331d40278d0c2c1fdf2cdabd1690682bd13c1fd49dadd40c9df3dc6d6ad".into(),
+                handover_selection: HandoverSelection::WholeMessage,
+            },
+            launch_profile: profile,
+            origin_clue: OriginClue {
+                flow_id: flow_id.clone(),
+                session_id: "thread-1".into(),
+                turn_id: "turn-caller".into(),
+            },
+        };
+
+        let first = store
+            .reserve_refresh_attempt(request.clone(), policy.clone(), caller_proof.clone())
+            .expect("refresh admission persists");
+        let Response::RefreshProgress(attempt) = &first else {
+            panic!("accepted refresh returns its durable attempt")
+        };
+        assert_eq!(
+            attempt.refresh_attempt_phase,
+            RefreshAttemptPhase::RouteLocked
+        );
+        assert_eq!(
+            store
+                .apply(Query::ResolveRecipient(flow_id.clone()))
+                .expect("predecessor disposition reads"),
+            Response::RecipientDispositioned(RecipientDisposition::Held(RecipientHold {
+                flow_id: flow_id.clone(),
+                flow_lifecycle: SignalFlowLifecycle::Retiring,
+                delivery_hold_reason: DeliveryHoldReason::ReplacementNotReady,
+            }))
+        );
+        assert_eq!(
+            store
+                .reserve_refresh_attempt(request.clone(), policy.clone(), caller_proof.clone())
+                .expect("identical retry reads journal"),
+            first
+        );
+
+        let mut conflicting = request;
+        conflicting.launch_profile.effort = "high".into();
+        assert_eq!(
+            store
+                .reserve_refresh_attempt(conflicting, policy, caller_proof)
+                .expect("conflict evaluates"),
+            Response::RefreshRejected(RefreshRejection::IdempotencyConflict)
         );
     }
 }

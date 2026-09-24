@@ -362,7 +362,7 @@ mod tests {
                 session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
                 turn_id: "unavailable".into(),
             },
-            flow_lifecycle: FlowLifecycle::Active,
+            flow_lifecycle: FlowLifecycle::Ready,
         };
         std::fs::write(
             flows.path().join(".1ac573.flow-id"),
@@ -395,7 +395,7 @@ mod tests {
                 session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
                 turn_id: "unavailable".into(),
             },
-            flow_lifecycle: FlowLifecycle::Active,
+            flow_lifecycle: FlowLifecycle::Ready,
         };
         let stale = herdr.refresh_route(node.clone());
         assert_eq!(

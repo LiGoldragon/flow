@@ -4,11 +4,20 @@ pub mod launch;
 
 use crate::codex::{CodexEndpoint, CodexEndpoints};
 use std::collections::BTreeSet;
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::PathBuf,
+    process::Command,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use signal_flow::{
-    EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, RouteReadiness,
+    EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, PresentationReceipt,
+    RouteReadiness, SendOutcome,
 };
+
+static PRESENTATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Reads Herdr's documented session snapshot and validates one complete route.
 pub trait ReadsHerdrRoster {
@@ -17,7 +26,12 @@ pub trait ReadsHerdrRoster {
 
 /// Performs thin ordinary Flow operations against one revalidated Herdr pane.
 pub trait OperatesHerdrPane {
-    fn prompt(&self, node: &FlowNode, text: &str, require_presentation: bool) -> bool;
+    fn prompt(
+        &self,
+        node: &FlowNode,
+        text: &str,
+        require_presentation: bool,
+    ) -> Option<SendOutcome>;
     fn close(&self, node: &FlowNode) -> bool;
 }
 
@@ -111,24 +125,29 @@ impl ReadsHerdrRoster for HerdrCli {
 }
 
 impl OperatesHerdrPane for HerdrCli {
-    fn prompt(&self, node: &FlowNode, text: &str, require_presentation: bool) -> bool {
+    fn prompt(
+        &self,
+        node: &FlowNode,
+        text: &str,
+        require_presentation: bool,
+    ) -> Option<SendOutcome> {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-            return false;
+            return None;
         };
         if !self.identity_is_claimed(node) {
-            return false;
+            return None;
         }
-        let Some(snapshot) = self.snapshot(route) else {
-            return false;
-        };
+        let snapshot = self.snapshot(route)?;
         let route_is_ready = if require_presentation {
             Self::snapshot_has_idle_route(&snapshot, route, &node.harness_kind)
         } else {
             Self::snapshot_has_route(&snapshot, route, &node.harness_kind)
         };
         if !route_is_ready {
-            return false;
+            return None;
         }
+        let marker = require_presentation.then(|| Self::presentation_marker(&node.flow_id));
+        let presented_text = marker.as_ref().map(|marker| format!("{text}\n\n{marker}"));
         let mut command = Command::new(&self.executable);
         command.args([
             "--session",
@@ -136,24 +155,66 @@ impl OperatesHerdrPane for HerdrCli {
             "agent",
             "prompt",
             route.herdr_pane_id.as_str(),
-            text,
+            presented_text.as_deref().unwrap_or(text),
         ]);
-        if require_presentation {
-            command.args([
-                "--wait",
-                "--until",
-                "working",
-                "--until",
-                "idle",
-                "--until",
-                "done",
-                "--until",
-                "blocked",
-                "--timeout",
-                "30000",
-            ]);
+        if !command.status().is_ok_and(|status| status.success()) {
+            return None;
         }
-        command.status().is_ok_and(|status| status.success())
+        let Some(marker) = marker else {
+            return Some(SendOutcome::Accepted(node.flow_id.clone()));
+        };
+        if !Command::new(&self.executable)
+            .args([
+                "--session",
+                route.herdr_session_name.as_str(),
+                "pane",
+                "wait-output",
+                "--match",
+                marker.as_str(),
+                "--source",
+                "recent-unwrapped",
+                "--lines",
+                "200",
+                "--timeout",
+                "5000",
+                route.herdr_pane_id.as_str(),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return None;
+        }
+        let read = Command::new(&self.executable)
+            .args([
+                "--session",
+                route.herdr_session_name.as_str(),
+                "pane",
+                "read",
+                "--source",
+                "recent-unwrapped",
+                "--lines",
+                "200",
+                "--format",
+                "text",
+                route.herdr_pane_id.as_str(),
+            ])
+            .output()
+            .ok()?;
+        if !read.status.success()
+            || !String::from_utf8_lossy(&read.stdout).contains(marker.as_str())
+        {
+            return None;
+        }
+        let presentation_read_unix_milliseconds = Self::unix_milliseconds()?;
+        if !self.route_is_available(node) {
+            return None;
+        }
+        Some(SendOutcome::Presented(PresentationReceipt {
+            flow_id: node.flow_id.clone(),
+            herdr_pane_id: route.herdr_pane_id.clone(),
+            presentation_marker: marker,
+            presentation_read_unix_milliseconds,
+        }))
     }
 
     fn close(&self, node: &FlowNode) -> bool {
@@ -177,6 +238,20 @@ impl OperatesHerdrPane for HerdrCli {
 }
 
 impl HerdrCli {
+    fn unix_milliseconds() -> Option<i64> {
+        let milliseconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_millis();
+        i64::try_from(milliseconds).ok()
+    }
+
+    fn presentation_marker(flow_id: &str) -> String {
+        let sequence = PRESENTATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let milliseconds = Self::unix_milliseconds().unwrap_or_default();
+        format!("FLOW_PRESENTED_{flow_id}_{milliseconds}_{sequence}")
+    }
+
     pub fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
         self.codex_endpoints = codex_endpoints;
         self

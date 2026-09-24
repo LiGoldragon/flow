@@ -432,18 +432,18 @@ impl Dispatches for RunningNexus {
                     return Response::SendRejected(signal_flow::SendRejection::RouteUnavailable);
                 }
                 let requires_presentation = node.flow_lifecycle == FlowLifecycle::Pending;
-                if !self
-                    .herdr
-                    .prompt(&node, &request.bare_input, requires_presentation)
-                {
+                let Some(send_outcome) =
+                    self.herdr
+                        .prompt(&node, &request.bare_input, requires_presentation)
+                else {
                     return Response::SendRejected(signal_flow::SendRejection::DeliveryRefused);
-                }
+                };
                 if requires_presentation
                     && !self.store.record_active(&request.flow_id).unwrap_or(false)
                 {
                     return Response::SendRejected(signal_flow::SendRejection::PersistenceRefused);
                 }
-                Response::Sent(request.flow_id)
+                Response::Sent(send_outcome)
             }
             Query::Stop(flow_id) => {
                 let node = match self.store.flow_node(&flow_id) {
@@ -819,7 +819,11 @@ mod tests {
 
     trait ControlsHerdrSnapshot {
         fn set_agents(&self, agents: Vec<serde_json::Value>);
-        fn accept_pane_operations(&self, agents: Vec<serde_json::Value>) -> PathBuf;
+        fn accept_pane_operations(
+            &self,
+            agents: Vec<serde_json::Value>,
+            rendered_pane: Option<&str>,
+        ) -> PathBuf;
     }
 
     fn current_process_identity() -> meta_signal_flow::ProcessIdentity {
@@ -986,17 +990,33 @@ mod tests {
                 .expect("snapshot fixture executable");
         }
 
-        fn accept_pane_operations(&self, agents: Vec<serde_json::Value>) -> PathBuf {
+        fn accept_pane_operations(
+            &self,
+            agents: Vec<serde_json::Value>,
+            rendered_pane: Option<&str>,
+        ) -> PathBuf {
             let snapshot = serde_json::json!({
                 "id":"cli:api:snapshot",
                 "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
                 "type":"session_snapshot"}
             });
             let log = self.directory.path().join("herdr-operations.log");
+            let pane_output = self.directory.path().join("pane-output.txt");
+            let rendered_pane = rendered_pane.unwrap_or("marker-absent");
             let body = format!(
-                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\"|\"pane close\") printf '%s\\n' \"$*\" >> '{}' ;;\n  *) exit 64 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; if [ '{}' != marker-absent ]; then printf '%s\\n' \"$6\" > '{}'; else printf '%s\\n' 'marker absent' > '{}'; fi ;;\n  \"pane wait-output\") printf '%s\\n' \"$*\" >> '{}'; [ \"${{13}}\" = '{}' ] && grep -F -- \"$6\" '{}' >/dev/null ;;\n  \"pane read\") printf '%s\\n' \"$*\" >> '{}'; [ \"${{11}}\" = '{}' ] && cat '{}' ;;\n  \"pane close\") printf '%s\\n' \"$*\" >> '{}' ;;\n  *) exit 64 ;;\nesac\n",
                 snapshot,
-                log.display()
+                log.display(),
+                rendered_pane,
+                pane_output.display(),
+                pane_output.display(),
+                log.display(),
+                rendered_pane,
+                pane_output.display(),
+                log.display(),
+                rendered_pane,
+                pane_output.display(),
+                log.display(),
             );
             fs::write(&self.snapshot_program, body).expect("Herdr operation fixture");
             let mut permissions = fs::metadata(&self.snapshot_program)
@@ -1033,7 +1053,7 @@ mod tests {
         let fixture = NexusFixture::new();
         let mut agent = fixture.current_agent();
         agent["agent_status"] = serde_json::Value::String("idle".into());
-        let operation_log = fixture.accept_pane_operations(vec![agent]);
+        let operation_log = fixture.accept_pane_operations(vec![agent], Some("w1:p3"));
         let mut node = fixture.node();
         node.flow_lifecycle = FlowLifecycle::Pending;
         assert_eq!(
@@ -1043,15 +1063,27 @@ mod tests {
             meta_signal_flow::Response::FlowRegistered(node)
         );
 
-        assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::Send(signal_flow::SendRequest {
-                    flow_id: "908786".into(),
-                    bare_input: "bare prompt".into(),
-                })),
-            Response::Sent("908786".into())
+        let response = fixture
+            .nexus
+            .dispatch(Query::Send(signal_flow::SendRequest {
+                flow_id: "908786".into(),
+                bare_input: "bare prompt".into(),
+            }));
+        let Response::Sent(signal_flow::SendOutcome::Presented(receipt)) = response else {
+            panic!(
+                "Pending Send must return its pane presentation receipt: {response:?}; operations={:?}; output={:?}",
+                fs::read_to_string(&operation_log),
+                fs::read_to_string(fixture.directory.path().join("pane-output.txt"))
+            )
+        };
+        assert_eq!(receipt.flow_id, "908786");
+        assert_eq!(receipt.herdr_pane_id, "w1:p3");
+        assert!(
+            receipt
+                .presentation_marker
+                .starts_with("FLOW_PRESENTED_908786_")
         );
+        assert!(receipt.presentation_read_unix_milliseconds > 0);
         let Response::Listed(active) = fixture
             .nexus
             .dispatch(Query::List(signal_flow::ListRequest {}))
@@ -1073,16 +1105,21 @@ mod tests {
         };
         assert_eq!(stopped[0].flow_lifecycle, FlowLifecycle::Stopped);
         let operations = fs::read_to_string(operation_log).expect("Herdr operation log");
-        assert!(operations.contains(
-            "agent prompt w1:p3 bare prompt --wait --until working --until idle --until done --until blocked --timeout 30000"
-        ));
+        assert!(operations.contains("agent prompt w1:p3 bare prompt"));
+        assert!(operations.contains(receipt.presentation_marker.as_str()));
+        assert!(operations.contains("pane wait-output --match FLOW_PRESENTED_908786_"));
+        assert!(
+            operations
+                .contains("pane read --source recent-unwrapped --lines 200 --format text w1:p3")
+        );
         assert!(operations.contains("pane close w1:p3"));
     }
 
     #[test]
     fn queued_send_cannot_promote_a_pending_working_flow() {
         let fixture = NexusFixture::new();
-        let operation_log = fixture.accept_pane_operations(vec![fixture.current_agent()]);
+        let operation_log =
+            fixture.accept_pane_operations(vec![fixture.current_agent()], Some("w1:p3"));
         let mut node = fixture.node();
         node.flow_lifecycle = FlowLifecycle::Pending;
         assert!(matches!(
@@ -1142,6 +1179,95 @@ mod tests {
             panic!("list must return durable Flow rows")
         };
         assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
+    }
+
+    #[test]
+    fn marker_absent_from_target_pane_keeps_the_flow_pending() {
+        let fixture = NexusFixture::new();
+        let mut agent = fixture.current_agent();
+        agent["agent_status"] = serde_json::Value::String("idle".into());
+        fixture.accept_pane_operations(vec![agent], None);
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "unrendered prompt".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::DeliveryRefused)
+        );
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
+    }
+
+    #[test]
+    fn marker_rendered_in_a_different_pane_keeps_the_flow_pending() {
+        let fixture = NexusFixture::new();
+        let mut agent = fixture.current_agent();
+        agent["agent_status"] = serde_json::Value::String("idle".into());
+        fixture.accept_pane_operations(vec![agent], Some("w1:p9"));
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "wrong pane prompt".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::DeliveryRefused)
+        );
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
+    }
+
+    #[test]
+    fn active_send_reports_acceptance_without_claiming_presentation_or_read() {
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(vec![fixture.current_agent()], Some("w1:p3"));
+        let node = fixture.node();
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "ordinary active prompt".into(),
+                })),
+            Response::Sent(signal_flow::SendOutcome::Accepted("908786".into()))
+        );
     }
 
     #[test]

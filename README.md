@@ -30,9 +30,13 @@ flow 'List.{}'
 `Send` revalidates the stored Flow claim and exact Herdr agent, pane,
 terminal, harness, interactive readiness, and session before prompting that
 pane. An Active row returns `Sent` when Herdr accepts the prompt. A Pending
-row is promoted to Active only when it began idle and `herdr agent prompt
---wait` witnesses a post-submission agent state transition. A prompt queued to
-an already working pane cannot confirm a Pending row. `Stop` persists the
+row receives a unique harmless marker in its prompt. Flow waits for that marker
+on the exact target pane, reads the pane, requires the marker in the read
+output, and revalidates the pane and terminal before promoting the row. The
+`Presented` receipt carries the Flow ID, pane ID, exact marker, and pane-read
+Unix time. This is presentation evidence; only the target's own later response
+can witness Read. A prompt queued to an already working pane cannot confirm a
+Pending row. `Stop` persists the
 Stopped lifecycle only after `herdr pane close` succeeds for the revalidated
 pane. `List` returns all durable rows, sorted by Flow ID, including Pending and
 Stopped rows.

@@ -43,8 +43,11 @@ lifecycle. Message Nexus consumes that typed reply instead of maintaining a
 second identity registry.
 
 `Send` and `Stop` act only on a route that still matches the native Herdr
-snapshot. Send can promote a Pending row only after an idle pane reports a
-post-prompt state transition through Herdr's waiting prompt operation. Stop
+snapshot. Send can promote a Pending row only after the exact idle target pane
+renders a unique marker, an explicit pane read contains that marker, and a
+post-read route check still matches the bound terminal. The resulting receipt
+records the pane, marker, and read time as Presented grade; it does not claim
+the separate Read grade. Stop
 changes the durable lifecycle only after the exact pane closes successfully.
 `List` reads the same store rows and sorts them by Flow ID; it does not infer
 state from the current Herdr roster.

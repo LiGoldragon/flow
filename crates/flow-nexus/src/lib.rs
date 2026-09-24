@@ -853,6 +853,32 @@ mod tests {
             .unwrap();
         fs::remove_file(source_path).unwrap();
 
+        let herdr_calls = fixture.directory.path().join("delayed-herdr-calls");
+        let agent = serde_json::json!({"result":{"agent":{
+            "name":"fixture-agent",
+            "agent":"codex",
+            "workspace_id":"fixture-workspace",
+            "pane_id":"w1:p1",
+            "terminal_id":"fixture-terminal",
+            "agent_session":{
+                "source":"herdr:codex",
+                "agent":"codex",
+                "kind":"id",
+                "value":native_session_id
+            }
+        }}});
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$*\" = \"--session fixture-session agent get fixture-agent\" ] || exit 64\nprintf '%s\\n' '{}'\n",
+            herdr_calls.display(),
+            agent
+        );
+        fs::write(&fixture.snapshot_program, body).unwrap();
+        let mut permissions = fs::metadata(&fixture.snapshot_program)
+            .unwrap()
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&fixture.snapshot_program, permissions).unwrap();
+
         let marker = format!(
             "FLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
             intent.launch_request_id, intent.prompt_sha256
@@ -876,7 +902,10 @@ mod tests {
             Response::Started(started)
                 if started.flow_id == "908786" && started.session_id == native_session_id
         ));
-        assert!(!fixture.snapshot_program.exists());
+        assert_eq!(
+            fs::read_to_string(herdr_calls).unwrap(),
+            "--session fixture-session agent get fixture-agent\n"
+        );
     }
 
     #[test]

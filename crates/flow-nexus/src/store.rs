@@ -13,7 +13,7 @@ use sema_engine::{
     SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::{
-    CallerProof, ComposedLaunch, DeliveryHoldReason, EndpointSelection,
+    ArchiveReceipt, CallerProof, ComposedLaunch, DeliveryHoldReason, EndpointSelection,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
     LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchBinding,
     NativeLaunchIntent, NativeTargetReceipt, OriginClue, ProcessIdentity, PromptDeliveryIntent,
@@ -31,6 +31,9 @@ const FLOW_LAUNCH_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_lau
 const FLOW_RUNTIME_TABLE_NAME: TableName = TableName::new("flow_nexus_runtime");
 const FLOW_REFRESH_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_refresh_attempts");
 const FLOW_ROUTE_TRANSFER_TABLE_NAME: TableName = TableName::new("flow_nexus_route_transfers");
+const FLOW_REFRESH_TRANSITION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_refresh_transitions");
+const FLOW_ARCHIVE_INDEX_TABLE_NAME: TableName = TableName::new("flow_nexus_archive_index");
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const DEFAULT_ORDINARY_SOCKET: &str = "/run/user/1001/flow/flow.sock";
@@ -133,6 +136,31 @@ struct StoredRouteTransfer {
     replacement_idempotency_key: ReplacementIdempotencyKey,
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredRefreshTransition {
+    transition_id: String,
+}
+
+impl EngineRecord for StoredRefreshTransition {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.transition_id.clone())
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredArchiveIndex {
+    archive_index_id: String,
+    predecessor_flow_id: String,
+    native_session_id: String,
+    archive_receipt: ArchiveReceipt,
+}
+
+impl EngineRecord for StoredArchiveIndex {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.archive_index_id.clone())
+    }
+}
+
 impl EngineRecord for StoredRouteTransfer {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.predecessor_flow_id.clone())
@@ -163,6 +191,8 @@ pub struct FlowStore {
     flow_runtime: TableReference<StoredFlowRuntime>,
     refresh_attempts: TableReference<StoredRefreshAttempt>,
     route_transfers: TableReference<StoredRouteTransfer>,
+    refresh_transitions: TableReference<StoredRefreshTransition>,
+    archive_index: TableReference<StoredArchiveIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -321,6 +351,19 @@ pub trait AdvancesRefreshAttempt {
     ) -> Result<RefreshAttempt, StoreError>;
 }
 
+pub trait ReadsRetirementBinding {
+    fn retirement_binding(&self, flow_id: &str) -> Result<NativeLaunchBinding, StoreError>;
+}
+
+pub trait IndexesTranscriptArchive {
+    fn index_transcript_archive(
+        &self,
+        predecessor_flow_id: &str,
+        native_session_id: &str,
+        receipt: ArchiveReceipt,
+    ) -> Result<ArchiveReceipt, StoreError>;
+}
+
 trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
@@ -403,6 +446,16 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-route-transfer"),
             SchemaHash::for_label("flow-nexus-route-transfer-v1"),
         ))?;
+        let refresh_transitions = engine.register_table(TableDescriptor::new(
+            FLOW_REFRESH_TRANSITION_TABLE_NAME,
+            FamilyName::new("flow-nexus-refresh-transition"),
+            SchemaHash::for_label("flow-nexus-refresh-transition-v1"),
+        ))?;
+        let archive_index = engine.register_table(TableDescriptor::new(
+            FLOW_ARCHIVE_INDEX_TABLE_NAME,
+            FamilyName::new("flow-nexus-archive-index"),
+            SchemaHash::for_label("flow-nexus-archive-index-v1"),
+        ))?;
         let store = Self {
             engine,
             flows,
@@ -413,6 +466,8 @@ impl OpensFlowStore for FlowStore {
             flow_runtime,
             refresh_attempts,
             route_transfers,
+            refresh_transitions,
+            archive_index,
         };
         if store
             .engine
@@ -1115,6 +1170,180 @@ impl AdvancesRefreshAttempt for FlowStore {
             stored.clone(),
         ))?;
         Ok(stored.attempt)
+    }
+}
+
+impl ReadsRetirementBinding for FlowStore {
+    fn retirement_binding(&self, flow_id: &str) -> Result<NativeLaunchBinding, StoreError> {
+        let runtime = self
+            .stored_flow_runtime(flow_id)?
+            .ok_or(StoreError::StateInvariant)?;
+        let receipt = runtime
+            .native_target_receipt_option
+            .ok_or(StoreError::StateInvariant)?;
+        let launch = self
+            .stored_launch_attempt(&receipt.launch_request_id)?
+            .ok_or(StoreError::StateInvariant)?;
+        launch
+            .attempt
+            .native_launch_binding_option
+            .filter(|binding| {
+                binding.flow_id == flow_id && binding.native_session_id == receipt.native_session_id
+            })
+            .ok_or(StoreError::StateInvariant)
+    }
+}
+
+impl IndexesTranscriptArchive for FlowStore {
+    fn index_transcript_archive(
+        &self,
+        predecessor_flow_id: &str,
+        native_session_id: &str,
+        receipt: ArchiveReceipt,
+    ) -> Result<ArchiveReceipt, StoreError> {
+        let record = StoredArchiveIndex {
+            archive_index_id: receipt.archive_index_id.clone(),
+            predecessor_flow_id: predecessor_flow_id.to_owned(),
+            native_session_id: native_session_id.to_owned(),
+            archive_receipt: receipt.clone(),
+        };
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.archive_index,
+                RecordKey::new(receipt.archive_index_id.clone()),
+            ))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => {
+                self.engine
+                    .assert(Assertion::new(self.archive_index, record))?;
+                Ok(receipt)
+            }
+            [existing] if existing == &record => Ok(existing.archive_receipt.clone()),
+            [_] => Err(StoreError::StateInvariant),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+}
+
+impl crate::retirement::PersistsRetirement for FlowStore {
+    fn refresh_attempt(
+        &self,
+        key: &ReplacementIdempotencyKey,
+    ) -> Result<Option<RefreshAttempt>, crate::retirement::RetirementError> {
+        ReadsRefreshAttempt::refresh_attempt(self, key)
+            .map_err(|_| crate::retirement::RetirementError::ObservationRefused)
+    }
+
+    fn predecessor_route(
+        &self,
+        flow_id: &str,
+    ) -> Result<HerdrRoute, crate::retirement::RetirementError> {
+        self.herdr_route(flow_id)
+            .map_err(|_| crate::retirement::RetirementError::ObservationRefused)?
+            .map(|record| record.route)
+            .ok_or(crate::retirement::RetirementError::PersistenceInvariant)
+    }
+
+    fn predecessor_process_identity(
+        &self,
+        flow_id: &str,
+    ) -> Result<ProcessIdentity, crate::retirement::RetirementError> {
+        ReadsFlowRuntimeEvidence::process_identity(self, flow_id)
+            .map_err(|_| crate::retirement::RetirementError::ObservationRefused)?
+            .ok_or(crate::retirement::RetirementError::PersistenceInvariant)
+    }
+
+    fn predecessor_native_session_id(
+        &self,
+        flow_id: &str,
+    ) -> Result<String, crate::retirement::RetirementError> {
+        ReadsFlowRuntimeEvidence::native_target_receipt(self, flow_id)
+            .map_err(|_| crate::retirement::RetirementError::ObservationRefused)?
+            .map(|receipt| receipt.native_session_id)
+            .ok_or(crate::retirement::RetirementError::PersistenceInvariant)
+    }
+
+    fn begin_cutover(
+        &self,
+        expected: &RefreshAttempt,
+    ) -> Result<RefreshAttempt, crate::retirement::RetirementError> {
+        let actual =
+            ReadsRefreshAttempt::refresh_attempt(self, &expected.replacement_idempotency_key)
+                .map_err(|_| crate::retirement::RetirementError::ObservationRefused)?
+                .ok_or(crate::retirement::RetirementError::RefreshAttemptMissing)?;
+        if actual != *expected
+            || actual.refresh_attempt_phase != RefreshAttemptPhase::ReplacementReady
+        {
+            return Err(crate::retirement::RetirementError::PersistenceInvariant);
+        }
+        let mut updated = actual;
+        updated.refresh_attempt_phase = RefreshAttemptPhase::CutoverInProgress;
+        let transition_id = format!(
+            "{}:cutover",
+            Self::refresh_key(&updated.replacement_idempotency_key)
+        );
+        self.engine
+            .commit_atomic(
+                self.engine
+                    .begin_atomic_commit()
+                    .assert(
+                        self.refresh_transitions,
+                        StoredRefreshTransition { transition_id },
+                    )
+                    .mutate(
+                        self.refresh_attempts,
+                        StoredRefreshAttempt {
+                            attempt: updated.clone(),
+                        },
+                    ),
+            )
+            .map_err(|_| crate::retirement::RetirementError::PersistenceInvariant)?;
+        Ok(updated)
+    }
+
+    fn complete_cutover(
+        &self,
+        expected: &RefreshAttempt,
+        receipt: signal_flow::CutoverReceipt,
+    ) -> Result<RefreshAttempt, crate::retirement::RetirementError> {
+        let actual =
+            ReadsRefreshAttempt::refresh_attempt(self, &expected.replacement_idempotency_key)
+                .map_err(|_| crate::retirement::RetirementError::ObservationRefused)?
+                .ok_or(crate::retirement::RetirementError::RefreshAttemptMissing)?;
+        if actual != *expected
+            || actual.refresh_attempt_phase != RefreshAttemptPhase::CutoverInProgress
+            || actual.replacement_ready_proof_option.as_ref()
+                != Some(&receipt.replacement_ready_proof)
+        {
+            return Err(crate::retirement::RetirementError::PersistenceInvariant);
+        }
+        let mut updated = actual;
+        updated.refresh_attempt_phase = RefreshAttemptPhase::Complete;
+        updated.cutover_receipt_option = Some(receipt);
+        let transition_id = format!(
+            "{}:complete",
+            Self::refresh_key(&updated.replacement_idempotency_key)
+        );
+        self.engine
+            .commit_atomic(
+                self.engine
+                    .begin_atomic_commit()
+                    .assert(
+                        self.refresh_transitions,
+                        StoredRefreshTransition { transition_id },
+                    )
+                    .mutate(
+                        self.refresh_attempts,
+                        StoredRefreshAttempt {
+                            attempt: updated.clone(),
+                        },
+                    ),
+            )
+            .map_err(|_| crate::retirement::RetirementError::PersistenceInvariant)?;
+        Ok(updated)
     }
 }
 

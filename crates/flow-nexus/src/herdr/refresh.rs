@@ -10,8 +10,8 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use signal_flow::{
-    HandoverSelection, HarnessKind, NativeLaunchBinding, NativeTargetReceipt, ProcessIdentity,
-    RefreshPolicy, RefreshRejection, TranscriptHandoverReference, TranscriptRole,
+    ArchiveReceipt, HandoverSelection, HarnessKind, NativeLaunchBinding, NativeTargetReceipt,
+    ProcessIdentity, RefreshPolicy, RefreshRejection, TranscriptHandoverReference, TranscriptRole,
 };
 
 use super::HerdrCli;
@@ -38,6 +38,29 @@ pub trait ValidatesTranscriptHandover {
         policy: &RefreshPolicy,
         now_seconds: i64,
     ) -> Result<(), RefreshRejection>;
+}
+
+pub trait ClosesRegisteredNativePane {
+    fn registered_native_process(
+        &self,
+        binding: &NativeLaunchBinding,
+        receipt: &NativeTargetReceipt,
+        process_evidence: &dyn ReadsProcessIdentity,
+    ) -> Result<Option<ProcessIdentity>, String>;
+    fn close_registered_native_pane(
+        &self,
+        binding: &NativeLaunchBinding,
+        receipt: &NativeTargetReceipt,
+        expected: &ProcessIdentity,
+        process_evidence: &dyn ReadsProcessIdentity,
+    ) -> Result<(), String>;
+}
+
+pub trait RetainsNativeTranscript {
+    fn retained_native_transcript(
+        &self,
+        binding: &NativeLaunchBinding,
+    ) -> Result<ArchiveReceipt, String>;
 }
 
 impl HerdrCli {
@@ -111,7 +134,7 @@ impl HerdrCli {
         &self,
         native_session_id: &str,
         harness_kind: &HarnessKind,
-    ) -> Result<File, RefreshRejection> {
+    ) -> Result<(PathBuf, File), RefreshRejection> {
         let configured_root = match harness_kind {
             HarnessKind::Codex => &self.codex_transcript_root,
             HarnessKind::Claude => &self.claude_transcript_root,
@@ -137,7 +160,8 @@ impl HerdrCli {
         if !path.starts_with(&root) {
             return Err(RefreshRejection::HandoverReferenceInvalid);
         }
-        File::open(path).map_err(|_| RefreshRejection::HandoverReferenceInvalid)
+        let file = File::open(&path).map_err(|_| RefreshRejection::HandoverReferenceInvalid)?;
+        Ok((path, file))
     }
 
     fn assistant_text<'a>(
@@ -261,6 +285,44 @@ impl HerdrCli {
         let line = text.split_once('\n').map_or(text, |(line, _)| line);
         line.strip_suffix('\r').unwrap_or(line)
     }
+
+    fn foreground_matches_receipt(
+        process: &serde_json::Value,
+        harness_kind: &HarnessKind,
+        receipt: &NativeTargetReceipt,
+    ) -> bool {
+        let Some(arguments) = process.get("argv").and_then(serde_json::Value::as_array) else {
+            return false;
+        };
+        let arguments = arguments
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>();
+        let Some(arguments) = arguments else {
+            return false;
+        };
+        let expected = Self::expected_refresh_harness(harness_kind);
+        let executable_matches = arguments
+            .first()
+            .and_then(|argument| Path::new(argument).file_name())
+            .and_then(|name| name.to_str())
+            == Some(expected)
+            || matches!(harness_kind, HarnessKind::Codex)
+                && process.get("name").and_then(serde_json::Value::as_str)
+                    == Some(".codex-wrapped");
+        let model_matches = arguments
+            .windows(2)
+            .any(|pair| pair == ["--model", receipt.model_name.as_str()]);
+        let effort_matches = match harness_kind {
+            HarnessKind::Claude => arguments
+                .windows(2)
+                .any(|pair| pair == ["--effort", receipt.effort.as_str()]),
+            HarnessKind::Codex => arguments
+                .iter()
+                .any(|argument| *argument == format!("model_reasoning_effort={}", receipt.effort)),
+        };
+        executable_matches && model_matches && effort_matches
+    }
 }
 
 impl ObservesReadyProcessIdentity for HerdrCli {
@@ -338,6 +400,9 @@ impl ObservesReadyProcessIdentity for HerdrCli {
         let [process] = foreground.as_slice() else {
             return Err("registered pane must have exactly one foreground harness process".into());
         };
+        if !Self::foreground_matches_receipt(process, &binding.harness_kind, receipt) {
+            return Err("foreground process is not the configured native harness".into());
+        }
         let process_id = process
             .get("pid")
             .and_then(serde_json::Value::as_i64)
@@ -375,7 +440,8 @@ impl ValidatesTranscriptHandover for HerdrCli {
         if format!("{:x}", Sha256::digest(expected_receipt.as_bytes())) != receipt.receipt_sha256 {
             return Err(RefreshRejection::HandoverBeforeCallerReceipt);
         }
-        let file = self.refresh_transcript(&binding.native_session_id, &binding.harness_kind)?;
+        let (_, file) =
+            self.refresh_transcript(&binding.native_session_id, &binding.harness_kind)?;
         let before = file
             .metadata()
             .map_err(|_| RefreshRejection::HandoverReferenceInvalid)?;
@@ -471,6 +537,112 @@ impl ValidatesTranscriptHandover for HerdrCli {
             (None, _) | (Some(_), None) => Err(RefreshRejection::HandoverReferenceInvalid),
             _ => Err(RefreshRejection::HandoverBeforeCallerReceipt),
         }
+    }
+}
+
+impl ClosesRegisteredNativePane for HerdrCli {
+    fn registered_native_process(
+        &self,
+        binding: &NativeLaunchBinding,
+        receipt: &NativeTargetReceipt,
+        process_evidence: &dyn ReadsProcessIdentity,
+    ) -> Result<Option<ProcessIdentity>, String> {
+        let list = self.refresh_json(&[
+            "--session".into(),
+            binding.herdr_pane_binding.herdr_session_name.clone(),
+            "agent".into(),
+            "list".into(),
+        ])?;
+        let agents = list
+            .pointer("/result/agents")
+            .or_else(|| list.get("agents"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "Herdr agent list returned no agent vector".to_owned())?;
+        let matching = agents
+            .iter()
+            .filter(|agent| {
+                agent.get("name").and_then(serde_json::Value::as_str)
+                    == Some(binding.herdr_pane_binding.herdr_agent_name.as_str())
+            })
+            .count();
+        match matching {
+            0 => Ok(None),
+            1 => self
+                .observe_ready_process_identity(binding, receipt, process_evidence)
+                .map(Some),
+            _ => Err("Herdr agent list contains duplicate registered names".into()),
+        }
+    }
+
+    fn close_registered_native_pane(
+        &self,
+        binding: &NativeLaunchBinding,
+        receipt: &NativeTargetReceipt,
+        expected: &ProcessIdentity,
+        process_evidence: &dyn ReadsProcessIdentity,
+    ) -> Result<(), String> {
+        let observed = self.observe_ready_process_identity(binding, receipt, process_evidence)?;
+        if &observed != expected {
+            return Err("predecessor process identity changed before close".into());
+        }
+        self.refresh_json(&[
+            "--session".into(),
+            binding.herdr_pane_binding.herdr_session_name.clone(),
+            "pane".into(),
+            "close".into(),
+            binding.herdr_pane_binding.herdr_pane_id.clone(),
+        ])?;
+        Ok(())
+    }
+}
+
+impl RetainsNativeTranscript for HerdrCli {
+    fn retained_native_transcript(
+        &self,
+        binding: &NativeLaunchBinding,
+    ) -> Result<ArchiveReceipt, String> {
+        let (path, mut file) = self
+            .refresh_transcript(&binding.native_session_id, &binding.harness_kind)
+            .map_err(|_| "predecessor transcript did not resolve uniquely".to_owned())?;
+        let before = file
+            .metadata()
+            .map_err(|error| format!("transcript metadata failed: {error}"))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            use std::io::Read;
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| format!("transcript hash read failed: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let after = file
+            .metadata()
+            .map_err(|error| format!("transcript metadata failed: {error}"))?;
+        if before.dev() != after.dev() || before.ino() != after.ino() || before.len() != after.len()
+        {
+            return Err("transcript changed while it was hashed".into());
+        }
+        let archive_sha256 = format!("{:x}", hasher.finalize());
+        let archive_path = path.to_string_lossy().into_owned();
+        let archive_index_id = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "flow-transcript-index-v1\n{}\n{}\n{}\n",
+                    binding.flow_id, archive_path, archive_sha256
+                )
+                .as_bytes()
+            )
+        );
+        Ok(ArchiveReceipt {
+            archive_path,
+            archive_sha256,
+            archive_index_id,
+        })
     }
 }
 
@@ -640,5 +812,28 @@ mod tests {
             ),
             Err(RefreshRejection::HandoverReferenceInvalid)
         );
+    }
+
+    #[test]
+    fn unrelated_foreground_process_cannot_supply_ready_identity() {
+        let fixture = HandoverFixture::canonical(false);
+        let shell = serde_json::json!({
+            "pid":42,
+            "argv":["zsh","--model","gpt-6","-c","model_reasoning_effort=high"]
+        });
+        let codex = serde_json::json!({
+            "pid":43,
+            "argv":["codex","--model","gpt-6","-c","model_reasoning_effort=high"]
+        });
+        assert!(!HerdrCli::foreground_matches_receipt(
+            &shell,
+            &HarnessKind::Codex,
+            &fixture.receipt,
+        ));
+        assert!(HerdrCli::foreground_matches_receipt(
+            &codex,
+            &HarnessKind::Codex,
+            &fixture.receipt,
+        ));
     }
 }

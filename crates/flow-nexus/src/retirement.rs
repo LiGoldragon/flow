@@ -32,11 +32,15 @@ pub trait PersistsRetirement {
 pub trait ObservesRetirement {
     fn registered_process(
         &self,
+        predecessor_flow_id: &str,
         route: &HerdrRoute,
+        native_session_id: &str,
     ) -> Result<Option<ProcessIdentity>, RetirementError>;
     fn close_exact(
         &self,
+        predecessor_flow_id: &str,
         route: &HerdrRoute,
+        native_session_id: &str,
         expected: &ProcessIdentity,
     ) -> Result<(), RetirementError>;
     fn exact_process_is_alive(&self, expected: &ProcessIdentity) -> Result<bool, RetirementError>;
@@ -99,7 +103,9 @@ where
         let route = self.store.predecessor_route(predecessor_id)?;
         let expected_process = self.store.predecessor_process_identity(predecessor_id)?;
         let native_session = self.store.predecessor_native_session_id(predecessor_id)?;
-        let registered = self.runtime.registered_process(&route)?;
+        let registered =
+            self.runtime
+                .registered_process(predecessor_id, &route, &native_session)?;
         let alive = self.runtime.exact_process_is_alive(&expected_process)?;
 
         if matches!(
@@ -113,7 +119,12 @@ where
                 Some(_) if !alive => return Err(RetirementError::IdentityChanged),
                 Some(_) => {
                     let persisted = self.store.begin_cutover(&attempt)?;
-                    self.runtime.close_exact(&route, &expected_process)?;
+                    self.runtime.close_exact(
+                        predecessor_id,
+                        &route,
+                        &native_session,
+                        &expected_process,
+                    )?;
                     return Ok(Response::RefreshProgress(persisted));
                 }
                 None if alive => return Ok(Response::RefreshProgress(attempt)),
@@ -262,11 +273,19 @@ mod tests {
     impl ObservesRetirement for Runtime {
         fn registered_process(
             &self,
+            _: &str,
             _: &HerdrRoute,
+            _: &str,
         ) -> Result<Option<ProcessIdentity>, RetirementError> {
             Ok(self.registered.clone())
         }
-        fn close_exact(&self, _: &HerdrRoute, _: &ProcessIdentity) -> Result<(), RetirementError> {
+        fn close_exact(
+            &self,
+            _: &str,
+            _: &HerdrRoute,
+            _: &str,
+            _: &ProcessIdentity,
+        ) -> Result<(), RetirementError> {
             self.close_count.set(self.close_count.get() + 1);
             Ok(())
         }

@@ -4,6 +4,7 @@ pub mod codex;
 pub mod composition;
 pub mod herdr;
 pub mod refresh;
+pub mod retirement;
 pub mod store;
 
 use codex::{
@@ -15,8 +16,12 @@ use herdr::launch::{
     ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
     SubmitsFirstPromptOnce,
 };
-use herdr::refresh::{ObservesReadyProcessIdentity, ValidatesTranscriptHandover};
-use refresh::{LinuxProcessEvidence, ProvesSocketRefreshCaller};
+use herdr::refresh::{
+    ClosesRegisteredNativePane, ObservesReadyProcessIdentity, RetainsNativeTranscript,
+    ValidatesTranscriptHandover,
+};
+use refresh::{LinuxProcessEvidence, ProvesSocketRefreshCaller, ReadsProcessIdentity};
+use retirement::{ObservesRetirement, PersistedRetirementReconciler, RetirementError};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
     InteractiveReadiness, LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchIntent,
@@ -34,10 +39,11 @@ use std::{
 };
 use store::{
     AdvancesRefreshAttempt, AppliesFlowQuery, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, ReadsFlowRuntimeEvidence, ReadsLaunchAttempt, ReadsRefreshAttempt,
-    RecordsFlowRuntimeEvidence, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
-    RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement,
-    RegistersFlowIdentity, ReservesLaunchAttempt, ReservesRefreshAttempt,
+    IndexesTranscriptArchive, OpensFlowStore, ReadsFlowRuntimeEvidence, ReadsLaunchAttempt,
+    ReadsRefreshAttempt, ReadsRetirementBinding, RecordsFlowRuntimeEvidence,
+    RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
+    RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersFlowIdentity,
+    ReservesLaunchAttempt, ReservesRefreshAttempt,
 };
 
 pub struct RunningNexus {
@@ -66,6 +72,33 @@ pub trait PromotesObservedStart {
     ) -> Response;
 }
 
+pub trait ReconcilesRefreshRetirement {
+    fn reconcile_refresh_retirement(
+        &self,
+        key: &signal_flow::ReplacementIdempotencyKey,
+    ) -> Response;
+}
+
+impl ReconcilesRefreshRetirement for RunningNexus {
+    fn reconcile_refresh_retirement(
+        &self,
+        key: &signal_flow::ReplacementIdempotencyKey,
+    ) -> Response {
+        match PersistedRetirementReconciler::new(&self.store, self).reconcile(key) {
+            Ok(response) => response,
+            Err(RetirementError::ArchiveRefused) => {
+                Response::RefreshRejected(signal_flow::RefreshRejection::ArchiveRefused)
+            }
+            Err(RetirementError::CloseRefused | RetirementError::IdentityChanged) => {
+                Response::RefreshRejected(signal_flow::RefreshRejection::RetirementRefused)
+            }
+            Err(_) => {
+                Response::RefreshRejected(signal_flow::RefreshRejection::RefreshPersistenceRefused)
+            }
+        }
+    }
+}
+
 impl PromotesObservedStart for RunningNexus {
     fn promote_observed_start(
         &self,
@@ -92,6 +125,101 @@ impl PromotesObservedStart for RunningNexus {
             .unwrap_or(Response::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             ))
+    }
+}
+
+impl ObservesRetirement for RunningNexus {
+    fn registered_process(
+        &self,
+        predecessor_flow_id: &str,
+        route: &HerdrRoute,
+        native_session_id: &str,
+    ) -> Result<Option<signal_flow::ProcessIdentity>, RetirementError> {
+        let binding = self
+            .store
+            .retirement_binding(predecessor_flow_id)
+            .map_err(|_| RetirementError::ObservationRefused)?;
+        if binding.native_session_id != native_session_id
+            || binding.herdr_pane_binding.herdr_session_name != route.herdr_session_name
+            || binding.herdr_pane_binding.herdr_agent_name != route.herdr_agent_name
+            || binding.herdr_pane_binding.herdr_pane_id != route.herdr_pane_id
+            || binding.herdr_pane_binding.herdr_terminal_id != route.herdr_terminal_id
+        {
+            return Err(RetirementError::IdentityChanged);
+        }
+        let receipt = self
+            .store
+            .native_target_receipt(predecessor_flow_id)
+            .map_err(|_| RetirementError::ObservationRefused)?
+            .ok_or(RetirementError::PersistenceInvariant)?;
+        self.herdr
+            .registered_native_process(&binding, &receipt, &LinuxProcessEvidence)
+            .map_err(|_| RetirementError::ObservationRefused)
+    }
+
+    fn close_exact(
+        &self,
+        predecessor_flow_id: &str,
+        route: &HerdrRoute,
+        native_session_id: &str,
+        expected: &signal_flow::ProcessIdentity,
+    ) -> Result<(), RetirementError> {
+        let binding = self
+            .store
+            .retirement_binding(predecessor_flow_id)
+            .map_err(|_| RetirementError::ObservationRefused)?;
+        if binding.native_session_id != native_session_id
+            || binding.herdr_pane_binding.herdr_session_name != route.herdr_session_name
+            || binding.herdr_pane_binding.herdr_agent_name != route.herdr_agent_name
+            || binding.herdr_pane_binding.herdr_pane_id != route.herdr_pane_id
+            || binding.herdr_pane_binding.herdr_terminal_id != route.herdr_terminal_id
+        {
+            return Err(RetirementError::IdentityChanged);
+        }
+        let receipt = self
+            .store
+            .native_target_receipt(predecessor_flow_id)
+            .map_err(|_| RetirementError::ObservationRefused)?
+            .ok_or(RetirementError::PersistenceInvariant)?;
+        self.herdr
+            .close_registered_native_pane(&binding, &receipt, expected, &LinuxProcessEvidence)
+            .map_err(|_| RetirementError::CloseRefused)
+    }
+
+    fn exact_process_is_alive(
+        &self,
+        expected: &signal_flow::ProcessIdentity,
+    ) -> Result<bool, RetirementError> {
+        match fs::metadata(format!("/proc/{}", expected.process_id)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(RetirementError::ObservationRefused),
+            Ok(_) => LinuxProcessEvidence
+                .process_identity(expected.process_id)
+                .map(|observed| observed == *expected)
+                .map_err(|_| RetirementError::ObservationRefused),
+        }
+    }
+
+    fn archive_original_transcript(
+        &self,
+        predecessor_flow_id: &str,
+        native_session_id: &str,
+    ) -> Result<Option<signal_flow::ArchiveReceipt>, RetirementError> {
+        let binding = self
+            .store
+            .retirement_binding(predecessor_flow_id)
+            .map_err(|_| RetirementError::ArchiveRefused)?;
+        if binding.native_session_id != native_session_id {
+            return Err(RetirementError::IdentityChanged);
+        }
+        let receipt = self
+            .herdr
+            .retained_native_transcript(&binding)
+            .map_err(|_| RetirementError::ArchiveRefused)?;
+        self.store
+            .index_transcript_archive(predecessor_flow_id, native_session_id, receipt)
+            .map(Some)
+            .map_err(|_| RetirementError::ArchiveRefused)
     }
 }
 
@@ -468,7 +596,7 @@ impl Dispatches for RunningNexus {
                     return reservation;
                 };
                 if refresh.replacement_ready_proof_option.is_some() {
-                    return Response::RefreshProgress(refresh);
+                    return self.reconcile_refresh_retirement(&refresh.replacement_idempotency_key);
                 }
                 refresh = match self
                     .store
@@ -519,12 +647,19 @@ impl Dispatches for RunningNexus {
                     interactive_readiness: InteractiveReadiness::Ready,
                     native_target_receipt,
                 };
-                self.store
+                let response = self
+                    .store
                     .record_replacement_ready(&refresh.replacement_idempotency_key, ready)
                     .map(Response::RefreshProgress)
                     .unwrap_or(Response::RefreshRejected(
                         signal_flow::RefreshRejection::RefreshPersistenceRefused,
-                    ))
+                    ));
+                match response {
+                    Response::RefreshProgress(ready) => {
+                        self.reconcile_refresh_retirement(&ready.replacement_idempotency_key)
+                    }
+                    response => response,
+                }
             }
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
@@ -1103,7 +1238,7 @@ mod tests {
             }
         }}});
         let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get fixture-agent\") printf '%s\\n' '{}' ;;\n  \"--session fixture-session pane process-info --pane w1:p1\") printf '{{\"result\":{{\"process_info\":{{\"pane_id\":\"w1:p1\",\"foreground_processes\":[{{\"pid\":%s}}]}}}}}}\\n' \"$PPID\" ;;\n  *) exit 64 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get fixture-agent\") printf '%s\\n' '{}' ;;\n  \"--session fixture-session pane process-info --pane w1:p1\") printf '{{\"result\":{{\"process_info\":{{\"pane_id\":\"w1:p1\",\"foreground_processes\":[{{\"pid\":%s,\"argv\":[\"codex\",\"--model\",\"fixture-model\",\"-c\",\"model_reasoning_effort=medium\"]}}]}}}}}}\\n' \"$PPID\" ;;\n  *) exit 64 ;;\nesac\n",
             herdr_calls.display(),
             agent
         );

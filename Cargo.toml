@@ -14,5 +14,5 @@ publish = false
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 serde_json = "1"
 thiserror = "2"
-signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "afcdf076a71263460ef039fac7600ea1310a9707" }
-meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "fcf0a0b24549aee6f505f33e5f86b6ce9a4cff25" }
+signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "fa326ac00b47e3e35fb590852c33c672d9e65bb6" }
+meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "1539513d96a0322891ab5ae32ef89ad0f661b766" }

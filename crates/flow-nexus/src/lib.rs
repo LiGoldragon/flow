@@ -338,7 +338,9 @@ impl Dispatches for RunningNexus {
                         signal_flow::RefreshRejection::CallerProofMismatch,
                     );
                 }
-                Response::RefreshRejected(signal_flow::RefreshRejection::HandoverPolicyUnavailable)
+                Response::RefreshRejected(
+                    signal_flow::RefreshRejection::RefreshImplementationUnavailable,
+                )
             }
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {

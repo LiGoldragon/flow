@@ -949,14 +949,9 @@ impl ReservesRefreshAttempt for FlowStore {
             return Ok(Response::RefreshProgress(existing.attempt));
         }
         if let Some(existing) = self.stored_refresh_attempt(&key)? {
-            if existing.attempt.refresh_request == request
-                && existing.attempt.refresh_policy == policy
-                && existing.attempt.caller_proof_option.as_ref() == Some(&caller_proof)
-            {
-                return Ok(Response::RefreshProgress(existing.attempt));
-            }
+            let _ = existing;
             return Ok(Response::RefreshRejected(
-                RefreshRejection::IdempotencyConflict,
+                RefreshRejection::RefreshPersistenceRefused,
             ));
         }
         let attempt = RefreshAttempt {
@@ -969,7 +964,7 @@ impl ReservesRefreshAttempt for FlowStore {
             replacement_ready_proof_option: None,
             cutover_receipt_option: None,
         };
-        self.engine.commit_atomic(
+        let commit = self.engine.commit_atomic(
             self.engine
                 .begin_atomic_commit()
                 .assert(
@@ -981,12 +976,23 @@ impl ReservesRefreshAttempt for FlowStore {
                 .assert(
                     self.route_transfers,
                     StoredRouteTransfer {
-                        predecessor_flow_id: request.flow_id,
+                        predecessor_flow_id: request.flow_id.clone(),
                         replacement_idempotency_key: key,
                     },
                 ),
-        )?;
-        Ok(Response::RefreshProgress(attempt))
+        );
+        match commit {
+            Ok(_) => Ok(Response::RefreshProgress(attempt)),
+            Err(sema_engine::Error::DuplicateAssertKey { .. }) => self.reserve_refresh_attempt(
+                request,
+                attempt.refresh_policy.clone(),
+                attempt
+                    .caller_proof_option
+                    .clone()
+                    .expect("new refresh attempt carries caller proof"),
+            ),
+            Err(error) => Err(StoreError::Engine(error)),
+        }
     }
 }
 
@@ -1310,6 +1316,7 @@ mod tests {
         RefreshRequest, RegistrationAcknowledgement, Response, StartRequest, TargetReceiptRequest,
         TranscriptHandoverReference, TranscriptRole,
     };
+    use std::sync::{Arc, Barrier};
 
     struct StoreFixture {
         directory: tempfile::TempDir,
@@ -1381,7 +1388,7 @@ mod tests {
     #[test]
     fn duplicate_launch_request_returns_the_durable_attempt_and_changed_fingerprint_conflicts() {
         let fixture = StoreFixture::new();
-        let store = fixture.store();
+        let store = Arc::new(fixture.store());
         let launch = fixture.composed_launch(
             "request-once",
             "1111111111111111111111111111111111111111111111111111111111111111",
@@ -1861,7 +1868,7 @@ mod tests {
     #[test]
     fn refresh_admission_is_idempotent_and_holds_predecessor_before_launch() {
         let fixture = StoreFixture::new();
-        let store = fixture.store();
+        let store = Arc::new(fixture.store());
         let flow_id = fixture.start(&store);
         let process_identity = ProcessIdentity {
             process_id: 42,
@@ -1901,9 +1908,24 @@ mod tests {
             },
         };
 
-        let first = store
-            .reserve_refresh_attempt(request.clone(), policy.clone(), caller_proof.clone())
-            .expect("refresh admission persists");
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let request = request.clone();
+            let policy = policy.clone();
+            let caller_proof = caller_proof.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                store
+                    .reserve_refresh_attempt(request, policy, caller_proof)
+                    .expect("concurrent refresh admission resolves")
+            }));
+        }
+        let first = handles.remove(0).join().expect("first admission thread");
+        let concurrent = handles.remove(0).join().expect("second admission thread");
+        assert_eq!(concurrent, first);
         let Response::RefreshProgress(attempt) = &first else {
             panic!("accepted refresh returns its durable attempt")
         };

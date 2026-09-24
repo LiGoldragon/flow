@@ -1,11 +1,16 @@
 //! Authenticated process evidence for ordinary-socket refresh requests.
 
-use std::{fs, os::unix::net::UnixStream};
+use std::{
+    fs,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::unix::net::UnixStream,
+};
 
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use signal_flow::{CallerProof, CallerRelationship, ProcessIdentity, RefreshRejection};
 
 const MAXIMUM_PARENT_DEPTH: usize = 64;
+const SO_PEERPIDFD: nix::libc::c_int = 77;
 
 pub trait ReadsProcessIdentity {
     fn peer_process_identity(&self, peer: &UnixStream)
@@ -26,6 +31,38 @@ pub trait ProvesRefreshCaller {
 pub struct LinuxProcessEvidence;
 
 impl LinuxProcessEvidence {
+    fn peer_pidfd(&self, peer: &UnixStream) -> Result<OwnedFd, RefreshRejection> {
+        let mut pidfd: nix::libc::c_int = -1;
+        let mut length = std::mem::size_of_val(&pidfd) as nix::libc::socklen_t;
+        // A pidfd opened later from SO_PEERCRED's numeric PID would retain a
+        // PID-reuse race. SO_PEERPIDFD returns the connected task itself.
+        let result = unsafe {
+            nix::libc::getsockopt(
+                peer.as_raw_fd(),
+                nix::libc::SOL_SOCKET,
+                SO_PEERPIDFD,
+                std::ptr::addr_of_mut!(pidfd).cast(),
+                std::ptr::addr_of_mut!(length),
+            )
+        };
+        if result != 0 || pidfd < 0 || length as usize != std::mem::size_of_val(&pidfd) {
+            return Err(RefreshRejection::CallerProofUnavailable);
+        }
+        // SAFETY: successful SO_PEERPIDFD initializes a new owned descriptor.
+        Ok(unsafe { OwnedFd::from_raw_fd(pidfd) })
+    }
+
+    fn pidfd_process_id(&self, pidfd: &OwnedFd) -> Result<i64, RefreshRejection> {
+        let fdinfo = fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd()))
+            .map_err(|_| RefreshRejection::CallerProofUnavailable)?;
+        fdinfo
+            .lines()
+            .find_map(|line| line.strip_prefix("Pid:"))
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .filter(|process_id| *process_id > 0)
+            .ok_or(RefreshRejection::CallerProofUnavailable)
+    }
+
     fn status_values(&self, process_id: i64) -> Result<(i64, i64), RefreshRejection> {
         let status = fs::read_to_string(format!("/proc/{process_id}/status"))
             .map_err(|_| RefreshRejection::CallerProofUnavailable)?;
@@ -74,7 +111,15 @@ impl ReadsProcessIdentity for LinuxProcessEvidence {
     ) -> Result<ProcessIdentity, RefreshRejection> {
         let credentials = getsockopt(peer, PeerCredentials)
             .map_err(|_| RefreshRejection::CallerProofUnavailable)?;
+        let pidfd = self.peer_pidfd(peer)?;
+        let pinned_process_id = self.pidfd_process_id(&pidfd)?;
+        if pinned_process_id != i64::from(credentials.pid()) {
+            return Err(RefreshRejection::CallerProofMismatch);
+        }
         let identity = self.process_identity(i64::from(credentials.pid()))?;
+        if self.pidfd_process_id(&pidfd)? != identity.process_id {
+            return Err(RefreshRejection::CallerProofUnavailable);
+        }
         if identity.process_user_id != i64::from(credentials.uid()) {
             return Err(RefreshRejection::CallerProofMismatch);
         }
@@ -165,5 +210,15 @@ mod tests {
             evidence.prove_refresh_caller(&current, "flow-a", &replaced),
             Err(RefreshRejection::CallerProofMismatch)
         );
+    }
+
+    #[test]
+    fn unix_peer_identity_is_bound_through_a_kernel_pidfd() {
+        let evidence = LinuxProcessEvidence;
+        let (peer, _other) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let identity = evidence
+            .peer_process_identity(&peer)
+            .expect("kernel provides peer pidfd");
+        assert_eq!(identity.process_id, i64::from(std::process::id()));
     }
 }

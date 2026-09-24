@@ -12,6 +12,7 @@ use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey,
     SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
 };
+use sha2::Digest;
 use signal_flow::{
     ComposedLaunch, EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind,
     HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
@@ -25,6 +26,7 @@ const FLOW_STATE_TABLE_NAME: TableName = TableName::new("flow_nexus_state");
 const FLOW_CONFIGURATION_TABLE_NAME: TableName = TableName::new("flow_nexus_configuration");
 const FLOW_HERDR_ROUTE_TABLE_NAME: TableName = TableName::new("flow_nexus_herdr_routes");
 const FLOW_LAUNCH_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_attempts");
+const FLOW_CONFIRMATION_TABLE_NAME: TableName = TableName::new("flow_nexus_existing_confirmations");
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const DEFAULT_ORDINARY_SOCKET: &str = "/run/user/1001/flow/flow.sock";
@@ -95,6 +97,20 @@ struct StoredLaunchAttempt {
     attempt: LaunchAttempt,
 }
 
+/// The privileged confirmation is retained with the Flow row.  The caller
+/// supplies evidence references; this record deliberately retains those
+/// references rather than treating a live process as evidence.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct ExistingConfirmation {
+    request: meta_signal_flow::MetaConfirmExisting,
+}
+
+impl EngineRecord for ExistingConfirmation {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.request.flow_id.clone())
+    }
+}
+
 impl EngineRecord for StoredLaunchAttempt {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.attempt.launch_request_id.clone())
@@ -116,6 +132,7 @@ pub struct FlowStore {
     configuration: TableReference<FlowStoreConfiguration>,
     herdr_routes: TableReference<FlowHerdrRouteRecord>,
     launch_attempts: TableReference<StoredLaunchAttempt>,
+    confirmations: TableReference<ExistingConfirmation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +218,16 @@ pub trait RegistersExistingFlow {
         flow_node: FlowNode,
         flow_type: String,
     ) -> Result<FlowRegistration, StoreError>;
+}
+
+/// Validates and atomically promotes one imported binding.  This operation
+/// consumes only retained identity and evidence-reference facts; it performs
+/// no PID or pane-liveness inference.
+pub trait ConfirmsExistingFlow {
+    fn confirm_existing(
+        &self,
+        request: meta_signal_flow::MetaConfirmExisting,
+    ) -> Result<meta_signal_flow::Response, StoreError>;
 }
 
 /// Reserves one correlation ID and its exact composed-prompt fingerprint.
@@ -306,6 +333,11 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-attempt"),
             SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
         ))?;
+        let confirmations = engine.register_table(TableDescriptor::new(
+            FLOW_CONFIRMATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-existing-confirmation"),
+            SchemaHash::for_label("flow-nexus-existing-confirmation-v1"),
+        ))?;
         let store = Self {
             engine,
             flows,
@@ -313,6 +345,7 @@ impl OpensFlowStore for FlowStore {
             configuration,
             herdr_routes,
             launch_attempts,
+            confirmations,
         };
         if store
             .engine
@@ -516,6 +549,137 @@ impl RegistersExistingFlow for FlowStore {
             return Ok(FlowRegistration::ConflictingBinding);
         }
         self.register_flow_as(flow_node, flow_type)
+    }
+}
+
+impl ConfirmsExistingFlow for FlowStore {
+    fn confirm_existing(
+        &self,
+        request: meta_signal_flow::MetaConfirmExisting,
+    ) -> Result<meta_signal_flow::Response, StoreError> {
+        use meta_signal_flow::ConfirmExistingRejection as Rejection;
+
+        let Some(mut flow) = self.flow(&request.flow_id)? else {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::UnknownFlow,
+            ));
+        };
+        if flow.lifecycle != FlowLifecycle::Pending {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::BindingNotRegisteredUnconfirmed,
+            ));
+        }
+        if flow.thread_id.as_deref() != Some(request.native_session_id.as_str()) {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::NativeSessionMismatch,
+            ));
+        }
+        let Some(route) = self.herdr_route(&request.flow_id)? else {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::StoreRefused,
+            ));
+        };
+        if route.route.herdr_terminal_id != request.final_title_evidence_reference.herdr_terminal_id
+        {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::FinalTitleEvidenceMismatch,
+            ));
+        }
+        if request
+            .first_start_receipt_reference
+            .launch_request_id
+            .is_empty()
+            || request
+                .first_start_receipt_reference
+                .receipt_sha256
+                .is_empty()
+        {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::FirstStartReceiptUnavailable,
+            ));
+        }
+        let expected_receipt = format!(
+            "FLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
+            request.first_start_receipt_reference.launch_request_id, request.prompt_sha256
+        );
+        if request.first_start_receipt_reference.receipt_sha256
+            != format!("{:x}", sha2::Sha256::digest(expected_receipt.as_bytes()))
+        {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::FirstStartReceiptMismatch,
+            ));
+        }
+        if request.model_name.is_empty() {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::ModelMismatch,
+            ));
+        }
+        if request.effort.is_empty() {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::EffortMismatch,
+            ));
+        }
+        if request.prompt_sha256.len() != 64 || request.native_turn_id.is_empty() {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                if request.native_turn_id.is_empty() {
+                    Rejection::NativeTurnMismatch
+                } else {
+                    Rejection::PromptDigestMismatch
+                },
+            ));
+        }
+        if request.native_skill_selection_vector.iter().any(|skill| {
+            skill.skill_name.is_empty()
+                || skill.native_skill_path.is_empty()
+                || skill.native_skill_sha256.len() != 64
+        }) {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::SkillManifestMismatch,
+            ));
+        }
+        if request
+            .final_title_evidence_reference
+            .final_title_evidence_sha256
+            .len()
+            != 64
+        {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::FinalTitleEvidenceMismatch,
+            ));
+        }
+        if self
+            .engine
+            .match_records(QueryPlan::key(
+                self.confirmations,
+                RecordKey::new(request.flow_id.clone()),
+            ))?
+            .records()
+            .len()
+            != 0
+        {
+            return Ok(meta_signal_flow::Response::ConfirmExistingRejected(
+                Rejection::StoreRefused,
+            ));
+        }
+        flow.lifecycle = FlowLifecycle::Active;
+        flow.generation += 1;
+        self.engine.commit_atomic(
+            self.engine
+                .begin_atomic_commit()
+                .mutate(self.flows, flow)
+                .assert(
+                    self.confirmations,
+                    ExistingConfirmation {
+                        request: request.clone(),
+                    },
+                ),
+        )?;
+        Ok(meta_signal_flow::Response::ConfirmedExisting(
+            meta_signal_flow::ConfirmedExisting {
+                flow_id: request.flow_id,
+                native_session_id: request.native_session_id,
+            },
+        ))
     }
 }
 

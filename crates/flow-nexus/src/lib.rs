@@ -30,10 +30,11 @@ use std::{
     path::{Path, PathBuf},
 };
 use store::{
-    AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
-    RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement,
-    RegistersExistingFlow, RegistersFlowIdentity, ReservesLaunchAttempt,
+    AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsExistingFlow,
+    ConfirmsStartedFlow, FlowStore, OpensFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding,
+    RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+    RecordsRegistrationAcknowledgement, RegistersExistingFlow, RegistersFlowIdentity,
+    ReservesLaunchAttempt,
 };
 
 fn process_identity_matches(identity: &meta_signal_flow::ProcessIdentity) -> bool {
@@ -564,6 +565,12 @@ impl Dispatches for RunningNexus {
                     flow_binding_result_vector: results,
                 })
             }
+            meta_signal_flow::Query::MetaConfirmExisting(request) => self
+                .store
+                .confirm_existing(request)
+                .unwrap_or(meta_signal_flow::Response::ConfirmExistingRejected(
+                    meta_signal_flow::ConfirmExistingRejection::StoreRefused,
+                )),
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
                 if !self.herdr.validate_registration(&flow_node) {
                     return meta_signal_flow::Response::FlowRegistrationRejected(
@@ -712,8 +719,8 @@ mod tests {
         composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
         store::{
-            FlowStore, OpensFlowStore, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
-            RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+            AppliesFlowQuery, FlowStore, OpensFlowStore, RecordsNativeLaunchBinding,
+            RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
             RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
         },
     };
@@ -1009,6 +1016,109 @@ mod tests {
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
+        ));
+    }
+
+    #[test]
+    fn meta_confirm_existing_promotes_only_the_exact_pending_binding() {
+        let fixture = NexusFixture::new();
+        let socket_path = fixture.directory.path().join("herdr.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let binding = existing_binding("mind-confirm", "pane-confirm");
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                    meta_signal_flow::MetaBindExisting {
+                        flow_container: flow_container(&socket_path),
+                        flow_binding_vector: vec![binding.clone()],
+                    },
+                )),
+            meta_signal_flow::Response::BoundExisting(_)
+        ));
+        let pending = fixture
+            .nexus
+            .dispatch(Query::ResolveRecipient("mind-confirm".into()));
+        assert!(
+            matches!(pending, Response::RecipientResolved(ref node) if node.flow_lifecycle == FlowLifecycle::Pending)
+        );
+
+        let prompt_sha256 = "a".repeat(64);
+        let launch_request_id = "launch-confirm".to_owned();
+        let receipt_sha256 = format!(
+            "{:x}",
+            Sha256::digest(format!(
+                "FLOW_LAUNCH_RECEIPT_V1 launch_request_id={launch_request_id} prompt_body_sha256={prompt_sha256}"
+            ))
+        );
+        let confirmation = meta_signal_flow::MetaConfirmExisting {
+            flow_id: binding.flow_id.clone(),
+            native_session_id: binding.native_session_id.clone(),
+            first_start_receipt_reference: meta_signal_flow::FirstStartReceiptReference {
+                launch_request_id,
+                receipt_sha256,
+            },
+            model_name: binding.model_name.clone(),
+            effort: "medium".into(),
+            prompt_sha256,
+            native_turn_id: "turn-confirm".into(),
+            native_skill_selection_vector: vec![],
+            final_title_evidence_reference: meta_signal_flow::FinalTitleEvidenceReference {
+                herdr_terminal_id: binding.herdr_terminal_id.clone(),
+                final_title_evidence_sha256: "b".repeat(64),
+            },
+        };
+        let mut wrong_terminal = confirmation.clone();
+        wrong_terminal
+            .final_title_evidence_reference
+            .herdr_terminal_id = "other-terminal".into();
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::MetaConfirmExisting(wrong_terminal)),
+            meta_signal_flow::Response::ConfirmExistingRejected(
+                meta_signal_flow::ConfirmExistingRejection::FinalTitleEvidenceMismatch
+            )
+        );
+        let mut wrong_receipt = confirmation.clone();
+        wrong_receipt.first_start_receipt_reference.receipt_sha256 = "c".repeat(64);
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::MetaConfirmExisting(wrong_receipt)),
+            meta_signal_flow::Response::ConfirmExistingRejected(
+                meta_signal_flow::ConfirmExistingRejection::FirstStartReceiptMismatch
+            )
+        );
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::ResolveRecipient("mind-confirm".into())),
+            Response::RecipientResolved(ref node) if node.flow_lifecycle == FlowLifecycle::Pending
+        ));
+        assert!(matches!(
+            fixture.nexus.dispatch_meta(meta_signal_flow::Query::MetaConfirmExisting(confirmation.clone())),
+            meta_signal_flow::Response::ConfirmedExisting(ref confirmed)
+                if confirmed.flow_id == binding.flow_id && confirmed.native_session_id == binding.native_session_id
+        ));
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::ResolveRecipient("mind-confirm".into())),
+            Response::RecipientResolved(ref node) if node.flow_lifecycle == FlowLifecycle::Active
+        ));
+        let mut mismatch = confirmation;
+        mismatch.native_session_id = "wrong-session".into();
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::MetaConfirmExisting(mismatch)),
+            meta_signal_flow::Response::ConfirmExistingRejected(
+                meta_signal_flow::ConfirmExistingRejection::BindingNotRegisteredUnconfirmed
+            )
+        );
+        let store_path = fixture.directory.path().join("flow.sema");
+        drop(fixture.nexus);
+        let reopened = FlowStore::open(&store_path).expect("reopen confirmed store");
+        assert!(matches!(
+            reopened.apply(Query::ResolveRecipient("mind-confirm".into())),
+            Ok(Response::RecipientResolved(ref node)) if node.flow_lifecycle == FlowLifecycle::Active
         ));
     }
 

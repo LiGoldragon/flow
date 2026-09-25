@@ -175,6 +175,16 @@ pub trait SubmitsBoundCodexFirstTurn {
     ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable>;
 }
 
+/// Names the exact Herdr-bound thread through the app-server and reads the
+/// name back from the same thread.
+pub trait NamesBoundCodexThread {
+    fn name_bound_thread(
+        &self,
+        native_session_id: &str,
+        name: &str,
+    ) -> Result<(), CodexAdapterUnavailable>;
+}
+
 struct ProxySession {
     child: Child,
     input: ChildStdin,
@@ -831,6 +841,41 @@ impl SubmitsBoundCodexFirstTurn for CodexAdapter {
     }
 }
 
+impl NamesBoundCodexThread for CodexAdapter {
+    fn name_bound_thread(
+        &self,
+        native_session_id: &str,
+        name: &str,
+    ) -> Result<(), CodexAdapterUnavailable> {
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            session.request(
+                2,
+                "thread/name/set",
+                serde_json::json!({ "threadId": native_session_id, "name": name }),
+                self.timeout,
+            )?;
+            let read = session.request(
+                3,
+                "thread/read",
+                serde_json::json!({ "threadId": native_session_id, "includeTurns": false }),
+                self.timeout,
+            )?;
+            let thread = read.get("thread").unwrap_or(&read);
+            if thread.get("id").and_then(serde_json::Value::as_str) != Some(native_session_id)
+                || thread.get("name").and_then(serde_json::Value::as_str) != Some(name)
+            {
+                return Err(CodexAdapterUnavailable::Protocol(
+                    "Codex thread name readback differs from the set title".into(),
+                ));
+            }
+            Ok(())
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+
 impl StartsCodex for CodexAdapter {
     fn start_codex(
         &self,
@@ -1298,6 +1343,41 @@ mod tests {
                 .unwrap(),
             "thread-1"
         );
+    }
+
+    #[test]
+    fn fake_proxy_names_the_bound_thread_and_reads_the_name_back() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(r#"{"id":2,"result":{}}"#),
+            fake.websocket_frame(
+                r#"{"id":3,"result":{"thread":{"id":"thread-1","name":"FieldV2.{ Astra 123456 }"}}}"#,
+            ),
+        ];
+        let (_directory, executable) = fake.install(&frames);
+        adapter_at(executable)
+            .name_bound_thread("thread-1", "FieldV2.{ Astra 123456 }")
+            .expect("readback equals the set title");
+    }
+
+    #[test]
+    fn fake_proxy_thread_name_readback_mismatch_is_refused() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(r#"{"id":2,"result":{}}"#),
+            fake.websocket_frame(
+                r#"{"id":3,"result":{"thread":{"id":"thread-1","name":"Psyche Opus b87854"}}}"#,
+            ),
+        ];
+        let (_directory, executable) = fake.install(&frames);
+        assert!(matches!(
+            adapter_at(executable).name_bound_thread("thread-1", "FieldV2.{ Astra 123456 }"),
+            Err(CodexAdapterUnavailable::Protocol(detail)) if detail.contains("readback differs")
+        ));
     }
 
     #[test]

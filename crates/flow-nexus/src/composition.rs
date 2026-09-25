@@ -78,6 +78,25 @@ impl LaunchReceipt {
     }
 }
 
+/// How many `/name` commands Claude loads from the head of one prompt.
+///
+/// Claude Code 2.1.280 loads stacked head commands until its stack limit,
+/// then logs "Stacked command limit (5) reached — remaining input passed as
+/// arguments" and passes every later `/name` as argument text, unloaded. A
+/// launch therefore stacks at most this many commands and names any further
+/// skill for the Skill tool. Every stacked command receives the same
+/// argument: the text after the last stacked command.
+pub struct ClaudeCommandStack;
+
+impl ClaudeCommandStack {
+    pub const LIMIT: usize = 5;
+
+    /// The number of commands a launch with `skill_count` skills stacks.
+    pub fn stacked(skill_count: usize) -> usize {
+        skill_count.min(Self::LIMIT)
+    }
+}
+
 /// Names how a launched Flow stays remotely controllable. A Claude launch
 /// passes `--remote-control <name>` with this name; a Codex launch is already
 /// driven through its app-server endpoint. The launch body records the same
@@ -361,12 +380,15 @@ impl RendersLaunchProfile for LaunchComposer {
     fn render_native_head(&self, profile: &LaunchProfile, bundle: Option<&str>) -> String {
         let skills = &profile.skill_name_vector;
         match profile.harness_kind {
-            // Claude reads a command only as the first token of the block, so
-            // the leading skill is the command and the body is its argument.
+            // Claude reads commands only at the head of the block, as
+            // space-separated `/name` tokens, and loads at most a few of
+            // them; the first other token ends the stack and the rest of the
+            // block is the argument every stacked command receives.
             HarnessKind::Claude => skills
-                .first()
+                .iter()
+                .take(ClaudeCommandStack::LIMIT)
                 .map(|skill| format!("/{skill} "))
-                .unwrap_or_default(),
+                .collect(),
             // Codex keeps its stock base instructions. The main Flow alone
             // receives the system-prompt bundle at the top of its first
             // block, then its `$name` skill lines; native Codex descendants
@@ -415,10 +437,12 @@ impl RendersLaunchProfile for LaunchComposer {
             profile.herdr_session_name,
             profile.remote_control_record(),
         ));
-        if profile.harness_kind == HarnessKind::Claude && profile.skill_name_vector.len() > 1 {
+        if profile.harness_kind == HarnessKind::Claude
+            && profile.skill_name_vector.len() > ClaudeCommandStack::LIMIT
+        {
             body.push_str(&format!(
                 "Then load through the Skill tool, in this order: {}\n",
-                profile.skill_name_vector[1..].join(", ")
+                profile.skill_name_vector[ClaudeCommandStack::LIMIT..].join(", ")
             ));
         }
         body.push('\n');
@@ -468,8 +492,8 @@ impl ComposesLaunch for LaunchComposer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposesLaunch, CompositionError, LaunchComposer, NamesRemoteControl, OpensLaunchComposer,
-        ValidatesComposedPrompt,
+        ClaudeCommandStack, ComposesLaunch, CompositionError, LaunchComposer, NamesRemoteControl,
+        OpensLaunchComposer, ValidatesComposedPrompt,
     };
     use signal_flow::{
         FlowAspect, HarnessKind, LaunchProfile, LaunchSource, PowerLevel, RememberedFlow,
@@ -595,17 +619,57 @@ mod tests {
     }
 
     #[test]
-    fn claude_prompt_opens_with_its_leading_skill_command() {
+    fn claude_prompt_stacks_its_skills_as_head_commands() {
         let root = tempfile::tempdir().unwrap();
         let mut profile = root.profile(vec![]);
         profile.harness_kind = HarnessKind::Claude;
         let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
         let body = composed.first_prompt_payload.first_prompt_body.as_str();
-        assert!(body.starts_with("/spirit # Flow launch\n\n"), "{body}");
+        assert!(
+            body.starts_with("/spirit /main-flow # Flow launch\n\n"),
+            "{body}"
+        );
         assert_eq!(body.matches("/spirit").count(), 1);
+        assert_eq!(body.matches("/main-flow").count(), 1);
         assert!(!body.contains("$spirit"));
-        assert!(body.contains("\nThen load through the Skill tool, in this order: main-flow\n"));
+        assert!(!body.contains("Skill tool"));
         assert!(!body.contains("System prompt: read"));
+        assert!(composed.has_canonical_first_prompt());
+    }
+
+    #[test]
+    fn claude_prompt_stacks_at_most_five_commands_and_lists_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = root.profile(vec![]);
+        profile.harness_kind = HarnessKind::Claude;
+        profile.skill_name_vector = [
+            "spirit",
+            "psyche",
+            "main-flow",
+            "behavior",
+            "herdr",
+            "messaging",
+            "datom",
+        ]
+        .map(String::from)
+        .to_vec();
+        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let body = composed.first_prompt_payload.first_prompt_body.as_str();
+        let head = body.split(" # Flow launch").next().unwrap();
+        let commands = head.split(' ').collect::<Vec<_>>();
+        assert!(commands.len() <= ClaudeCommandStack::LIMIT, "{head}");
+        assert_eq!(
+            commands,
+            ["/spirit", "/psyche", "/main-flow", "/behavior", "/herdr"]
+        );
+        assert!(body.starts_with("/spirit /psyche /main-flow /behavior /herdr # Flow launch\n"));
+        // The sixth and seventh skills arrive as text for the Skill tool,
+        // never as a sixth `/name` command.
+        assert!(
+            body.contains("\nThen load through the Skill tool, in this order: messaging, datom\n")
+        );
+        assert!(!body.contains("/messaging"));
+        assert!(!body.contains("/datom"));
         assert!(composed.has_canonical_first_prompt());
     }
 

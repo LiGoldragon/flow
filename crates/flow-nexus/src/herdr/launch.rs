@@ -6,7 +6,11 @@
 //! whose terminal write may already have succeeded.
 
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
-use crate::composition::{LaunchReceipt, NamesRemoteControl, ValidatesComposedPrompt};
+use crate::codex::NamesBoundCodexThread;
+use crate::composition::{
+    ClaudeCommandStack, LaunchReceipt, NamesRemoteControl, ValidatesComposedPrompt,
+};
+use crate::title::NativeTitle;
 use sha2::{Digest, Sha256};
 use signal_flow::{
     ComposedLaunch, HarnessKind, HerdrPaneBinding, NativeLaunchBinding, NativeSkillSelection,
@@ -19,6 +23,7 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 /// Creates topology without launching a harness or sending a prompt.
@@ -43,6 +48,16 @@ pub trait ObservesNativeLaunchBinding {
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
     ) -> Result<NativeLaunchBinding, String>;
+}
+
+/// After the Flow ID is claimed, sets the canonical native title and the
+/// Herdr pane label, and reads both back before any prompt is authorized.
+pub trait TitlesNativeFlow {
+    fn title_native_flow(
+        &self,
+        launch: &ComposedLaunch,
+        binding: &NativeLaunchBinding,
+    ) -> Result<NativeTitle, String>;
 }
 
 /// Converts an exact registration acknowledgement into the value that the
@@ -92,7 +107,24 @@ pub trait ObservesNativeTargetReceipt {
 
 impl HerdrCli {
     const CLAUDE_CHILD_SESSION_ENVIRONMENT: &'static str = "CLAUDE_CODE_CHILD_SESSION";
+    /// Inherited Claude identity that a new Flow must not carry. A shared
+    /// `CLAUDE_JOB_DIR` shares one job state between processes: a new
+    /// session adopts the title another session left there, and its own
+    /// `/rename` is propagated to every process on that job directory.
+    const CLAUDE_INHERITED_ENVIRONMENT: [&'static str; 4] = [
+        Self::CLAUDE_CHILD_SESSION_ENVIRONMENT,
+        "CLAUDE_JOB_DIR",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_SESSION_KIND",
+    ];
     const CLAUDE_SKIP_PERMISSIONS_FLAG: &'static str = "--dangerously-skip-permissions";
+    /// Claude offers "Make auto mode your default permission mode?" when the
+    /// user settings name a non-auto default mode and no other settings
+    /// source names one. Flag settings are such a source: naming the mode the
+    /// launch already runs in suppresses the offer without touching any
+    /// settings file.
+    const CLAUDE_FLAG_SETTINGS: &'static str =
+        r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#;
     const CLAUDE_REMOTE_CONTROL_FLAG: &'static str = "--remote-control";
 
     fn run_json(&self, arguments: &[String]) -> Result<serde_json::Value, String> {
@@ -127,7 +159,7 @@ impl HerdrCli {
     fn claude_environment_preparation(marker_suffix: &str) -> String {
         format!(
             "unset {} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
-            Self::CLAUDE_CHILD_SESSION_ENVIRONMENT,
+            Self::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
             marker_suffix
         )
     }
@@ -381,7 +413,7 @@ impl HerdrCli {
         pane: &HerdrPaneBinding,
         native_session_id: &str,
         harness: &HarnessKind,
-    ) -> Result<(), String> {
+    ) -> Result<serde_json::Value, String> {
         let response = self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -418,7 +450,7 @@ impl HerdrCli {
         {
             return Err("receipt target native identity is no longer exact".into());
         }
-        Ok(())
+        Ok(agent.clone())
     }
 
     fn collect_native_transcripts(
@@ -787,31 +819,182 @@ impl HerdrCli {
             })
     }
 
-    /// Recovers the typed text of a Claude user turn. A block that opened
-    /// with a command is recorded as its command name and argument; the typed
-    /// text is `/name argument`, and the name is returned beside it.
-    fn claude_typed_prompt(text: &str) -> (String, Option<String>) {
-        let parsed = (|| {
-            let rest = text.strip_prefix("<command-message>")?;
-            let (message, rest) = rest.split_once("</command-message>\n<command-name>/")?;
-            let (name, rest) = rest.split_once("</command-name>")?;
-            if message != name {
-                return None;
+    /// Reads one command record of a Claude user turn: the harness records
+    /// each head command it loads as its name and the argument that follows
+    /// the whole command stack.
+    fn claude_command_record(text: &str) -> Option<(String, String)> {
+        let rest = text.strip_prefix("<command-message>")?;
+        let (message, rest) = rest.split_once("</command-message>\n<command-name>/")?;
+        let (name, rest) = rest.split_once("</command-name>")?;
+        if message != name {
+            return None;
+        }
+        let argument = if rest.is_empty() {
+            ""
+        } else {
+            rest.strip_prefix("\n<command-args>")?
+                .strip_suffix("</command-args>")?
+        };
+        Some((name.to_owned(), argument.to_owned()))
+    }
+
+    /// The text that was typed when `names` were stacked at the head of a
+    /// block whose remaining text is `argument`.
+    fn claude_stacked_typed_text(names: &[&str], argument: &str) -> String {
+        let mut typed = names
+            .iter()
+            .map(|name| format!("/{name}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !argument.is_empty() {
+            typed.push(' ');
+            typed.push_str(argument);
+        }
+        typed
+    }
+}
+
+impl HerdrCli {
+    const TITLE_READBACK_ATTEMPTS: usize = 40;
+    #[cfg(not(test))]
+    const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(250);
+    #[cfg(test)]
+    const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(1);
+
+    /// The last title the native Claude transcript records for its session,
+    /// or none while no transcript or no title record exists.
+    fn claude_transcript_title(
+        &self,
+        pane: &HerdrPaneBinding,
+        native_session_id: &str,
+    ) -> Result<Option<String>, String> {
+        let (root, _, found) =
+            self.transcript_candidates(pane, native_session_id, &HarnessKind::Claude, None)?;
+        if found.is_empty() {
+            return Ok(None);
+        }
+        let transcript = fs::read(Self::one_resolved_transcript(&root, found)?)
+            .map_err(|error| format!("native transcript is unreadable: {error}"))?;
+        Ok(transcript
+            .split(|byte| *byte == b'\n')
+            .rev()
+            .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+            .filter(|row| {
+                row.get("type").and_then(serde_json::Value::as_str) == Some("custom-title")
+                    && row.get("sessionId").and_then(serde_json::Value::as_str)
+                        == Some(native_session_id)
+            })
+            .filter_map(|row| {
+                row.get("customTitle")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .next())
+    }
+
+    /// Renames the Claude session with its own `/rename` command and reads
+    /// the title back from the terminal title Claude sets and from the
+    /// session's transcript title record once one exists.
+    fn title_claude_session(
+        &self,
+        binding: &NativeLaunchBinding,
+        title: &NativeTitle,
+    ) -> Result<(), String> {
+        let pane = &binding.herdr_pane_binding;
+        let agent =
+            self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)?;
+        if agent
+            .get("interactive_ready")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return Err("Claude target is not interactively ready for its title".into());
+        }
+        self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "agent".into(),
+            "prompt".into(),
+            pane.herdr_agent_name.clone(),
+            format!("/rename {}", title.as_str()),
+        ])?;
+        for _ in 0..Self::TITLE_READBACK_ATTEMPTS {
+            let agent =
+                self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)?;
+            let terminal = agent
+                .get("terminal_title_stripped")
+                .and_then(serde_json::Value::as_str);
+            let recorded = self.claude_transcript_title(pane, &binding.native_session_id)?;
+            if terminal == Some(title.as_str())
+                && recorded
+                    .as_deref()
+                    .is_none_or(|name| name == title.as_str())
+            {
+                return Ok(());
             }
-            let argument = if rest.is_empty() {
-                ""
-            } else {
-                rest.strip_prefix("\n<command-args>")?
-                    .strip_suffix("</command-args>")?
-            };
-            let typed = if argument.is_empty() {
-                format!("/{name}")
-            } else {
-                format!("/{name} {argument}")
-            };
-            Some((typed, Some(name.to_owned())))
-        })();
-        parsed.unwrap_or_else(|| (text.to_owned(), None))
+            std::thread::sleep(Self::TITLE_READBACK_INTERVAL);
+        }
+        Err("Claude native title readback differs from the set title".into())
+    }
+
+    /// Labels the launch pane with the title and reads the label back.
+    fn label_herdr_pane(&self, pane: &HerdrPaneBinding, title: &NativeTitle) -> Result<(), String> {
+        self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "pane".into(),
+            "rename".into(),
+            pane.herdr_pane_id.clone(),
+            title.as_str().into(),
+        ])?;
+        let response = self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "pane".into(),
+            "get".into(),
+            pane.herdr_pane_id.clone(),
+        ])?;
+        let read = response
+            .pointer("/result/pane")
+            .ok_or_else(|| "Herdr pane get returned no pane".to_owned())?;
+        if read.get("pane_id").and_then(serde_json::Value::as_str)
+            != Some(pane.herdr_pane_id.as_str())
+            || read.get("terminal_id").and_then(serde_json::Value::as_str)
+                != Some(pane.herdr_terminal_id.as_str())
+            || read.get("label").and_then(serde_json::Value::as_str) != Some(title.as_str())
+        {
+            return Err("Herdr pane label readback differs from the title".into());
+        }
+        Ok(())
+    }
+}
+
+impl TitlesNativeFlow for HerdrCli {
+    fn title_native_flow(
+        &self,
+        launch: &ComposedLaunch,
+        binding: &NativeLaunchBinding,
+    ) -> Result<NativeTitle, String> {
+        Self::binding_matches_launch(launch, &binding.herdr_pane_binding)?;
+        if binding.launch_request_id != launch.launch_profile.launch_request_id
+            || binding.harness_kind != launch.launch_profile.harness_kind
+        {
+            return Err("native binding does not belong to this launch".into());
+        }
+        let title = NativeTitle::for_flow(&launch.launch_profile, &binding.flow_id)
+            .map_err(|refusal| refusal.to_string())?;
+        match binding.harness_kind {
+            HarnessKind::Claude => self.title_claude_session(binding, &title)?,
+            HarnessKind::Codex => self
+                .codex_endpoints
+                .adapter_for(&launch.launch_profile.model_name)
+                .and_then(|adapter| {
+                    adapter.name_bound_thread(&binding.native_session_id, title.as_str())
+                })
+                .map_err(|error| error.to_string())?,
+        }
+        self.label_herdr_pane(&binding.herdr_pane_binding, &title)?;
+        Ok(title)
     }
 }
 
@@ -911,6 +1094,8 @@ impl StartsNativeHerdrHarness for HerdrCli {
         }
         if launch.launch_profile.harness_kind == HarnessKind::Claude {
             arguments.push(Self::CLAUDE_SKIP_PERMISSIONS_FLAG.into());
+            arguments.push("--settings".into());
+            arguments.push(Self::CLAUDE_FLAG_SETTINGS.into());
             // Every Claude Flow is remotely controllable; the name never
             // begins with `-`, so the optional value binds to the flag.
             arguments.push(Self::CLAUDE_REMOTE_CONTROL_FLAG.into());
@@ -1148,6 +1333,10 @@ impl ObservesNativeTargetReceipt for HerdrCli {
         let mut pending_claude_tool = None;
         let mut claude_tool_succeeded = false;
         let mut claude_command_expansion_pending = false;
+        let mut claude_commands_loaded = 0_usize;
+        let mut claude_command_argument: Option<String> = None;
+        let claude_stack =
+            ClaudeCommandStack::stacked(durable_intent.native_skill_selection_vector.len());
         let mut reader = BufReader::new(input);
         loop {
             let mut record = Vec::new();
@@ -1278,6 +1467,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                 continue;
                             }
                             if pending_claude_tool.is_some()
+                                || claude_command_expansion_pending
+                                || claude_commands_loaded > 0
+                                    && claude_commands_loaded != claude_stack
                                 || skill_index >= durable_intent.native_skill_selection_vector.len()
                                 || content
                                     .pointer("/input/skill")
@@ -1310,28 +1502,64 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                             .pointer("/message/content")
                             .and_then(serde_json::Value::as_str)
                         {
-                            let (typed, command) = Self::claude_typed_prompt(text);
-                            if input_verified
-                                || !Self::prompt_text_matches_intent(&typed, durable_intent)
-                            {
-                                return Err(
-                                    "native Claude first-turn text differs from intent".into()
-                                );
-                            }
-                            if let Some(command) = command {
-                                if durable_intent
-                                    .native_skill_selection_vector
-                                    .first()
-                                    .map(|selection| selection.skill_name.as_str())
-                                    != Some(command.as_str())
-                                {
-                                    return Err(
-                                        "native Claude leading command differs from intent".into(),
-                                    );
+                            let names = durable_intent
+                                .native_skill_selection_vector
+                                .iter()
+                                .take(claude_stack)
+                                .map(|selection| selection.skill_name.as_str())
+                                .collect::<Vec<_>>();
+                            match Self::claude_command_record(text) {
+                                Some((command, argument)) if claude_commands_loaded == 0 => {
+                                    // The first command record carries the
+                                    // argument after the whole stack; the
+                                    // typed block is every stacked command
+                                    // followed by it.
+                                    let typed = Self::claude_stacked_typed_text(&names, &argument);
+                                    if input_verified
+                                        || names.first() != Some(&command.as_str())
+                                        || !Self::prompt_text_matches_intent(&typed, durable_intent)
+                                        || row
+                                            .get("stackedOriginalInput")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|original| original != typed)
+                                    {
+                                        return Err(
+                                            "native Claude first-turn text differs from intent"
+                                                .into(),
+                                        );
+                                    }
+                                    claude_command_argument = Some(argument);
+                                    claude_commands_loaded = 1;
+                                    claude_command_expansion_pending = true;
+                                    input_verified = true;
                                 }
-                                claude_command_expansion_pending = true;
+                                Some((command, argument)) => {
+                                    if claude_command_expansion_pending
+                                        || claude_commands_loaded >= claude_stack
+                                        || names[claude_commands_loaded] != command
+                                        || claude_command_argument.as_deref()
+                                            != Some(argument.as_str())
+                                    {
+                                        return Err(
+                                            "native Claude stacked command differs from intent"
+                                                .into(),
+                                        );
+                                    }
+                                    claude_commands_loaded += 1;
+                                    claude_command_expansion_pending = true;
+                                }
+                                None => {
+                                    if input_verified
+                                        || !Self::prompt_text_matches_intent(text, durable_intent)
+                                    {
+                                        return Err(
+                                            "native Claude first-turn text differs from intent"
+                                                .into(),
+                                        );
+                                    }
+                                    input_verified = true;
+                                }
                             }
-                            input_verified = true;
                         }
                         if let Some(tool_id) = pending_claude_tool.as_deref() {
                             let matching_result = row
@@ -1370,10 +1598,11 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                 .and_then(serde_json::Value::as_bool)
                                 == Some(true);
                         if companion && claude_command_expansion_pending {
-                            // The harness expands the leading command itself,
-                            // appending the argument after the skill body.
+                            // The harness expands each stacked command
+                            // itself, appending the argument after the body.
                             let expected_expansion = Self::claude_skill_expansion(
-                                &durable_intent.native_skill_selection_vector[0],
+                                &durable_intent.native_skill_selection_vector
+                                    [claude_commands_loaded - 1],
                             )?;
                             let contents = row
                                 .pointer("/message/content")
@@ -1396,7 +1625,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                     "native Claude command expansion differs from selection".into(),
                                 );
                             }
-                            skill_index = 1;
+                            skill_index = claude_commands_loaded;
                             claude_command_expansion_pending = false;
                         } else if companion {
                             let tool_id = pending_claude_tool.as_deref().ok_or_else(|| {
@@ -1448,7 +1677,10 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                 if skill_index != durable_intent.native_skill_selection_vector.len()
                     || matches!(durable_intent.harness_kind, HarnessKind::Codex)
                         && (!input_verified || native_turn.as_deref() != Some(turn.as_str()))
-                    || matches!(durable_intent.harness_kind, HarnessKind::Claude) && !input_verified
+                    || matches!(durable_intent.harness_kind, HarnessKind::Claude)
+                        && (!input_verified
+                            || claude_command_expansion_pending
+                            || claude_commands_loaded > 0 && claude_commands_loaded != claude_stack)
                 {
                     return Err("target receipt preceded native skill confirmation".into());
                 }
@@ -1509,7 +1741,7 @@ mod tests {
     use super::{
         AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
         ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
-        SubmitsFirstPromptOnce,
+        SubmitsFirstPromptOnce, TitlesNativeFlow,
     };
     use crate::composition::{LaunchReceipt, NamesRemoteControl};
     use crate::herdr::HerdrCli;
@@ -1571,13 +1803,24 @@ case "$*" in
   *"pane run"*) ;;
   *"pane wait-output"*) marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$marker" ;;
   *"agent start"*) printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
-  *"agent get"*) reported_harness=$(cat '{reported_harness}'); printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$reported_harness" "$reported_harness" ;;
+  *"agent get"*) reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness" ;;
+  *"agent prompt"*" /rename "*) title=$(printf '%s' "$*" | sed 's/.* \/rename //'); [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}\n' "$title" >> '{claude_transcript}'; printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
+  *"pane rename w7:p1 "*) printf '%s' "$*" | sed 's/.*pane rename w7:p1 //' > '{label_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
+  *"pane get w7:p1"*) label=$(cat '{label_file}' 2>/dev/null); printf '{{"result":{{"pane":{{"pane_id":"w7:p1","terminal_id":"term-native","label":"%s"}}}}}}\n' "$label" ;;
   *) exit 8 ;;
 esac
 "##,
             calls = calls.display(),
             reported_harness = reported_harness.display(),
+            title_file = root.path().join("native-title").display(),
+            title_override = root.path().join("native-title-override").display(),
+            label_file = root.path().join("pane-label").display(),
+            claude_transcript = root
+                .path()
+                .join("native-transcripts/claude")
+                .join(format!("{native_session}.jsonl"))
+                .display(),
         );
         fs::write(&executable, script).expect("fixture executable");
         fs::File::open(&executable)
@@ -1687,17 +1930,22 @@ printf '%s\n' 123456
     }
 
     #[test]
-    fn claude_environment_preparation_removes_an_inherited_child_session_variable() {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "{}; if [ \"${{{}+present}}\" = present ]; then exit 19; fi",
-                HerdrCli::claude_environment_preparation("test-marker"),
-                HerdrCli::CLAUDE_CHILD_SESSION_ENVIRONMENT
-            ))
-            .env(HerdrCli::CLAUDE_CHILD_SESSION_ENVIRONMENT, "1")
-            .output()
-            .expect("shell environment witness");
+    fn claude_environment_preparation_removes_inherited_claude_identity() {
+        let checks = HerdrCli::CLAUDE_INHERITED_ENVIRONMENT
+            .iter()
+            .map(|name| format!("if [ \"${{{name}+present}}\" = present ]; then exit 19; fi"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        assert!(HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.contains(&"CLAUDE_JOB_DIR"));
+        let mut command = std::process::Command::new("sh");
+        command.arg("-c").arg(format!(
+            "{}; {checks}",
+            HerdrCli::claude_environment_preparation("test-marker"),
+        ));
+        for name in HerdrCli::CLAUDE_INHERITED_ENVIRONMENT {
+            command.env(name, "/home/li/.claude/jobs/108ab020");
+        }
+        let output = command.output().expect("shell environment witness");
         assert!(
             output.status.success(),
             "{}",
@@ -1733,8 +1981,11 @@ printf '%s\n' 123456
         let remote_control_name = launch.launch_profile.remote_control_name();
         assert!(remote_control_name.starts_with("flow-"));
         assert!(start_call.ends_with(&format!(
-            "-- --dangerously-skip-permissions --remote-control {remote_control_name} --system-prompt-file /tmp/flow-system-prompt.md --model model-current --effort high"
+            "-- --dangerously-skip-permissions --settings {{\"permissions\":{{\"defaultMode\":\"bypassPermissions\"}}}} --remote-control {remote_control_name} --system-prompt-file /tmp/flow-system-prompt.md --model model-current --effort high"
         )));
+        // The flag settings name the launch's own mode, which suppresses the
+        // auto-mode default offer; no settings file is written.
+        assert_eq!(start_call.matches(" --settings ").count(), 1);
         assert!(!start_call.contains("launch-42"));
         assert!(!start_call.contains("composed body"));
         let pane_run = calls_after_start
@@ -2132,13 +2383,22 @@ printf '%s\n' 123456
     }
 
     #[test]
-    fn claude_one_command_prompt_reaches_its_receipt() {
+    fn claude_stacked_command_prompt_reaches_its_receipt() {
         use sha2::{Digest, Sha256};
         use std::io::Write;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let names = [
+            "spirit",
+            "psyche",
+            "main-flow",
+            "behavior",
+            "herdr",
+            "messaging",
+            "datom",
+        ];
         let mut launch = launch(HarnessKind::Claude);
-        launch.launch_profile.skill_name_vector = vec!["spirit".into(), "main-flow".into()];
-        let body = "/spirit # Flow launch\n\nThen load through the Skill tool, in this order: main-flow\n\ndo the work";
+        launch.launch_profile.skill_name_vector = names.map(String::from).to_vec();
+        let body = "/spirit /psyche /main-flow /behavior /herdr # Flow launch\n\nThen load through the Skill tool, in this order: messaging, datom\n\ndo the work";
         let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
         launch.first_prompt_payload.first_prompt_body = body.into();
         launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
@@ -2153,7 +2413,7 @@ printf '%s\n' 123456
             &agent_name,
         );
         let skills = root.path().join("native-transcripts/claude-skills");
-        for name in ["spirit", "main-flow"] {
+        for name in names {
             fs::create_dir_all(skills.join(name)).expect("skill directory");
             fs::write(
                 skills.join(name).join("SKILL.md"),
@@ -2176,11 +2436,6 @@ printf '%s\n' 123456
             .collect::<Vec<_>>();
         assert_eq!(prompt_bearing.len(), 1, "{calls}");
         assert!(prompt_bearing[0].contains("agent prompt"));
-        assert!(
-            !calls
-                .lines()
-                .any(|line| line.contains("agent start") && line.contains("spirit"))
-        );
 
         let base = |name: &str| {
             format!(
@@ -2188,55 +2443,317 @@ printf '%s\n' 123456
                 skills.join(name).canonicalize().unwrap().display()
             )
         };
-        let argument = body.strip_prefix("/spirit ").unwrap();
-        let typed = format!("{argument}{}", LaunchReceipt::footer());
-        let rows = [
-            serde_json::json!({"type":"user","sessionId":native_session,"message":{"role":"user",
-                "content":format!("<command-message>spirit</command-message>\n<command-name>/spirit</command-name>\n<command-args>{typed}</command-args>")}}),
+        // What Claude Code 2.1.280 records for a stacked head: one command
+        // record per loaded command, each carrying the text after the whole
+        // stack, the first also carrying the original input; each followed
+        // by its expansion.
+        let argument = format!(
+            "{}{}",
+            body.strip_prefix("/spirit /psyche /main-flow /behavior /herdr ")
+                .unwrap(),
+            LaunchReceipt::footer()
+        );
+        let original = format!("{body}{}", LaunchReceipt::footer());
+        let command = |name: &str| {
+            let mut row = serde_json::json!({"type":"user","sessionId":native_session,"message":{"role":"user",
+                "content":format!("<command-message>{name}</command-message>\n<command-name>/{name}</command-name>\n<command-args>{argument}</command-args>")}});
+            if name == "spirit" {
+                row["stackedOriginalInput"] = serde_json::json!(original);
+            }
+            row
+        };
+        let expansion = |name: &str| {
             serde_json::json!({"type":"user","sessionId":native_session,"isMeta":true,"turnCompanion":true,
-                "message":{"role":"user","content":[{"type":"text","text":format!("{}\n\nARGUMENTS: {typed}", base("spirit"))}]}}),
-            serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-skill",
-                "message":{"content":[{"type":"tool_use","id":"tool-1","name":"Skill","input":{"skill":"main-flow"}}]}}),
-            serde_json::json!({"type":"user","sessionId":native_session,
-                "toolUseResult":{"success":true,"commandName":"main-flow"},
-                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1"}]}}),
-            serde_json::json!({"type":"user","sessionId":native_session,"isMeta":true,"turnCompanion":true,
-                "sourceToolUseID":"tool-1",
-                "message":{"role":"user","content":[{"type":"text","text":base("main-flow")}]}}),
-            serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-claude",
-                "effort":"high","message":{"model":"model-current",
-                "content":[{"type":"text","text":LaunchReceipt::MARKER}]}}),
-        ];
+                "message":{"role":"user","content":[{"type":"text","text":format!("{}\n\nARGUMENTS: {argument}", base(name))}]}})
+        };
+        let tool = |name: &str, id: &str| {
+            [
+                serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":format!("turn-{id}"),
+                    "message":{"content":[{"type":"tool_use","id":id,"name":"Skill","input":{"skill":name}}]}}),
+                serde_json::json!({"type":"user","sessionId":native_session,
+                    "toolUseResult":{"success":true,"commandName":name},
+                    "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id}]}}),
+                serde_json::json!({"type":"user","sessionId":native_session,"isMeta":true,"turnCompanion":true,
+                    "sourceToolUseID":id,
+                    "message":{"role":"user","content":[{"type":"text","text":base(name)}]}}),
+            ]
+        };
+        let receipt = serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-claude",
+            "effort":"high","message":{"model":"model-current",
+            "content":[{"type":"text","text":LaunchReceipt::MARKER}]}});
+        let mut rows = Vec::new();
+        for name in &names[..5] {
+            rows.push(command(name));
+            rows.push(expansion(name));
+        }
+        rows.extend(tool("messaging", "tool-6"));
+        rows.extend(tool("datom", "tool-7"));
+        rows.push(receipt.clone());
+        let command_records = rows
+            .iter()
+            .filter(|row| {
+                row.pointer("/message/content")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.starts_with("<command-message>"))
+            })
+            .count();
+        assert!(command_records <= 5);
         let transcript = root
             .path()
             .join("native-transcripts/claude")
             .join(format!("{native_session}.jsonl"));
-        let mut output = fs::File::create(&transcript).expect("transcript");
-        for row in &rows {
-            writeln!(output, "{row}").expect("row");
-        }
-        drop(output);
-        let PromptDeliveryResult::Observed(receipt) = adapter
+        let write = |rows: &[serde_json::Value]| {
+            let mut output = fs::File::create(&transcript).expect("transcript");
+            for row in rows {
+                writeln!(output, "{row}").expect("row");
+            }
+        };
+        write(&rows);
+        let PromptDeliveryResult::Observed(receipt_observed) = adapter
             .observe_native_target_receipt(&intent)
             .expect("observed receipt")
         else {
             panic!("receipt remained ambiguous");
         };
-        assert_eq!(receipt.native_turn_id, "turn-claude");
+        assert_eq!(receipt_observed.native_turn_id, "turn-claude");
 
+        // A wrong leading command.
         let mut wrong = rows.clone();
-        wrong[0] = serde_json::json!({"type":"user","sessionId":native_session,"message":{"role":"user",
-            "content":format!("<command-message>main-flow</command-message>\n<command-name>/main-flow</command-name>\n<command-args>{typed}</command-args>")}});
-        let mut output = fs::File::create(&transcript).expect("transcript");
-        for row in &wrong {
-            writeln!(output, "{row}").expect("row");
-        }
-        drop(output);
+        wrong[0] = command("main-flow");
+        write(&wrong);
         assert!(
             adapter
                 .observe_native_target_receipt(&intent)
                 .unwrap_err()
                 .contains("first-turn text differs")
         );
+
+        // A sixth command record: the stack holds five.
+        let mut sixth = rows[..10].to_vec();
+        sixth.push(command("messaging"));
+        sixth.push(expansion("messaging"));
+        sixth.extend(tool("datom", "tool-7"));
+        sixth.push(receipt.clone());
+        write(&sixth);
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("stacked command differs")
+        );
+
+        // A stacked command out of order.
+        let mut swapped = rows.clone();
+        swapped.swap(2, 4);
+        swapped.swap(3, 5);
+        write(&swapped);
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("stacked command differs")
+        );
+
+        // Only four commands loaded, then the Skill tool.
+        let mut short = rows[..8].to_vec();
+        short.extend(tool("herdr", "tool-5"));
+        short.extend(tool("messaging", "tool-6"));
+        short.extend(tool("datom", "tool-7"));
+        short.push(receipt);
+        write(&short);
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("Skill invocation order differs")
+        );
+    }
+
+    #[test]
+    fn claude_title_is_set_after_the_claim_and_read_back() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let mut launch = launch(HarnessKind::Claude);
+        launch.launch_profile.flow_aspect = FlowAspect::Psyche;
+        launch.launch_profile.model_name = "claude-fable-5-1".into();
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter
+            .start_native_harness(&launch, &pane)
+            .expect("started without prompt");
+        let binding = adapter
+            .observe_native_binding(&launch, &pane)
+            .expect("claimed binding");
+        let title = adapter
+            .title_native_flow(&launch, &binding)
+            .expect("title set and read back");
+        let expected = "PsycheV2.{ Fable 123456 }";
+        assert_eq!(title.as_str(), expected);
+        // Readback: the terminal title Herdr reports, the session's
+        // transcript title record, and the Herdr pane label all equal it.
+        assert_eq!(
+            fs::read_to_string(root.path().join("native-title")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            adapter
+                .claude_transcript_title(&pane, native_session)
+                .unwrap()
+                .as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("pane-label"))
+                .unwrap()
+                .trim_end(),
+            expected
+        );
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        let claim = calls
+            .lines()
+            .position(|line| line.contains("agent get"))
+            .unwrap();
+        let rename = calls
+            .lines()
+            .position(|line| {
+                line.ends_with(&format!("agent prompt {agent_name} /rename {expected}"))
+            })
+            .expect("native rename");
+        let label = calls
+            .lines()
+            .position(|line| line.ends_with(&format!("pane rename w7:p1 {expected}")))
+            .expect("Herdr label");
+        let label_read = calls
+            .lines()
+            .position(|line| line.ends_with("pane get w7:p1"))
+            .expect("Herdr label readback");
+        assert!(claim < rename && rename < label && label < label_read);
+    }
+
+    #[test]
+    fn claude_title_readback_that_differs_refuses_before_the_label() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let mut launch = launch(HarnessKind::Claude);
+        launch.launch_profile.flow_aspect = FlowAspect::Psyche;
+        launch.launch_profile.model_name = "claude-fable-5-1".into();
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        // The pane keeps the title another Flow left behind.
+        fs::write(
+            root.path().join("native-title-override"),
+            "Psyche Opus b87854",
+        )
+        .unwrap();
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter.start_native_harness(&launch, &pane).unwrap();
+        let binding = adapter.observe_native_binding(&launch, &pane).unwrap();
+        assert!(
+            adapter
+                .title_native_flow(&launch, &binding)
+                .unwrap_err()
+                .contains("readback differs")
+        );
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(!calls.contains("pane rename"));
+    }
+
+    #[test]
+    fn unmapped_model_is_refused_before_any_rename() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).unwrap();
+        adapter.start_native_harness(&launch, &pane).unwrap();
+        let binding = adapter.observe_native_binding(&launch, &pane).unwrap();
+        assert!(
+            adapter
+                .title_native_flow(&launch, &binding)
+                .unwrap_err()
+                .contains("unmapped exact native model identifier: model-current")
+        );
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(!calls.contains("/rename"));
+        assert!(!calls.contains("pane rename"));
+    }
+
+    #[test]
+    fn codex_title_is_set_through_the_app_server_and_read_back() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let mut launch = launch(HarnessKind::Codex);
+        launch.launch_profile.model_name = "gpt-6-astra".into();
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, mut adapter) = fixture_herdr(
+            "codex",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let expected = "FieldV2.{ Astra 123456 }";
+        let frame = |json: &str| {
+            let mut bytes = vec![0x81, json.len() as u8];
+            bytes.extend_from_slice(json.as_bytes());
+            bytes
+                .iter()
+                .map(|byte| format!("\\{:03o}", byte))
+                .collect::<String>()
+        };
+        let frames = [
+            frame(r#"{"id":1,"result":{}}"#),
+            frame(r#"{"id":2,"result":{}}"#),
+            frame(&format!(
+                r#"{{"id":3,"result":{{"thread":{{"id":"{native_session}","name":"{expected}"}}}}}}"#
+            )),
+        ]
+        .join("");
+        let proxy = root.path().join("codex-proxy");
+        fs::write(
+            &proxy,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nprintf '%b' '{frames}'\nsleep 2\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&proxy, fs::Permissions::from_mode(0o755)).unwrap();
+        adapter.codex_endpoints.stable.client_path = proxy;
+        adapter
+            .codex_endpoints
+            .stable
+            .model_names
+            .insert("gpt-6-astra".into());
+        adapter
+            .codex_endpoints
+            .next
+            .model_names
+            .remove("gpt-6-astra");
+        let pane = adapter.create_launch_pane(&launch).unwrap();
+        let binding = adapter.observe_native_binding(&launch, &pane).unwrap();
+        let title = adapter
+            .title_native_flow(&launch, &binding)
+            .expect("Codex title set and read back");
+        assert_eq!(title.as_str(), expected);
+        assert_eq!(
+            fs::read_to_string(root.path().join("pane-label"))
+                .unwrap()
+                .trim_end(),
+            expected
+        );
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(!calls.contains("/rename"));
     }
 }

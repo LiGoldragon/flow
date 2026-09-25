@@ -114,12 +114,30 @@ keeps its stock base instructions; the main Flow's system-prompt bundle text
 opens that one text, above the `$name` lines, and native Codex descendants
 never receive it. For
 Claude, it resolves the ordered enterprise, personal, and project catalogs and
-journals the same typed selection; the prompt opens with `/<first skill>`,
-because Claude reads a command only as the first token of a block, and asks
-for the remaining skills through the Skill tool. The observer requires the
-harness's command expansion for the first skill, then native Skill tool calls,
-successful results, and expansion evidence for the rest, before accepting the
-target receipt. Skill bodies are not pasted into the composed first prompt.
+journals the same typed selection; the prompt opens with up to five
+space-separated `/<skill>` commands in the profile's order, because Claude
+reads commands only at the head of a block and loads at most five stacked
+ones, and asks for any further skills through the Skill tool. The observer
+requires one command record and one harness expansion per stacked command,
+each carrying the same argument, then native Skill tool calls, successful
+results, and expansion evidence for the rest, before accepting the target
+receipt. Skill bodies are not pasted into the composed first prompt.
+
+After the Flow ID is claimed and registered, and before any prompt, Start
+sets the canonical native title, `<Aspect>V2.{ <Model> <FlowId> }` (for
+example `PsycheV2.{ Fable 38de5b }`), with the model's display name taken from
+the exact model identifier and an unmapped identifier refused. Claude is
+renamed with its own `/rename` and read back from the terminal title Herdr
+reports and the session's transcript title record; Codex is named with
+`thread/name/set` and read back with `thread/read`. The Herdr pane label is
+set to the same title and read back. A failed readback refuses the Start with
+`BindingRefused`. Before Claude starts, the pane's shell drops inherited
+`CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_JOB_DIR`, `CLAUDE_CODE_SESSION_ID` and
+`CLAUDE_CODE_SESSION_KIND`, so a new Flow shares no job state, and so no title,
+with the process that opened its pane. Claude also starts with
+`--settings '{"permissions":{"defaultMode":"bypassPermissions"}}'`: a
+flag-settings default mode suppresses Claude's "make auto mode your default"
+offer without writing any settings file.
 
 The prompt is lean: no launch request ID, no hash, and no inlined source text.
 Sources are named by absolute path after their bytes are checked against the

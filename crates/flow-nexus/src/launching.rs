@@ -12,7 +12,7 @@ use crate::{
         launch::{
             AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
             ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
-            SubmitsFirstPromptOnce,
+            SubmitsFirstPromptOnce, TitlesNativeFlow,
         },
     },
     store::{
@@ -183,6 +183,11 @@ impl LaunchesFlows for RunningNexus {
             .unwrap_or(false)
         {
             return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+        }
+        // The claimed Flow names its own pane before any prompt: a new pane
+        // never keeps a title another Flow left behind.
+        if self.herdr.title_native_flow(&launch, &binding).is_err() {
+            return Response::StartRejected(StartRejection::BindingRefused);
         }
         let native_skill_selection_vector = match launch.launch_profile.harness_kind {
             HarnessKind::Codex => self

@@ -5,6 +5,7 @@ pub mod composition;
 pub mod herdr;
 pub mod launching;
 pub mod store;
+pub mod title;
 
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchComposer, OpensLaunchComposer};

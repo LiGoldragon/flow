@@ -1239,6 +1239,40 @@ mod tests {
     }
 
     #[test]
+    fn codex_main_flow_first_text_block_opens_with_the_system_prompt_bundle() {
+        use crate::composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer};
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("flow-system-prompt.md");
+        fs::write(&bundle, "# Main-flow mode\n\nYou are a main Flow.\n").unwrap();
+        let (malformed, mut intent) = malformed_bound_launch();
+        let mut profile = malformed.launch_profile;
+        profile.skill_name_vector = vec!["spirit".into()];
+        profile.system_prompt_bundle_file = bundle.to_string_lossy().into_owned();
+        let launch = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        intent.prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
+        intent.native_skill_selection_vector = vec![NativeSkillSelection {
+            skill_name: "spirit".into(),
+            native_skill_path: "/skills/spirit/SKILL.md".into(),
+            native_skill_sha256: "0".repeat(64),
+        }];
+        let params = CodexAdapter::bound_turn_params(&launch, &intent);
+        let first_text = params["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "text")
+            .and_then(|item| item["text"].as_str())
+            .unwrap();
+        assert!(
+            first_text
+                .starts_with("# Main-flow mode\n\nYou are a main Flow.\n\n$main-flow\n$spirit\n\n"),
+            "{first_text}"
+        );
+        assert!(!first_text.contains("System prompt: read"));
+        assert!(!first_text.contains(bundle.to_str().unwrap()));
+    }
+
+    #[test]
     fn malformed_full_prompt_is_rejected_before_codex_proxy_open() {
         let (launch, intent) = malformed_bound_launch();
         assert!(matches!(

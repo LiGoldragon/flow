@@ -81,10 +81,36 @@ impl LaunchReceipt {
 /// Names how a launched Flow stays remotely controllable. A Claude launch
 /// passes `--remote-control <name>` with this name; a Codex launch is already
 /// driven through its app-server endpoint. The launch body records the same
-/// line. The name is the Flow's role, never a request ID or hash.
+/// line.
+///
+/// The name is unique per Flow. The Flow ID is claimed from the native
+/// session only after the harness has started, and the flag must be given at
+/// start, so the name is `flow-` followed by the launch request ID's short
+/// form: the first eight hex digits of its SHA-256. Eight digits keep it
+/// distinct from a six-digit Flow ID, and the request ID itself never enters
+/// the prompt.
 pub trait NamesRemoteControl {
     fn remote_control_name(&self) -> String;
     fn remote_control_record(&self) -> String;
+}
+
+/// The launch request ID's short form, used where a per-Flow name is needed
+/// before the Flow ID is claimed.
+pub trait ShortensLaunchRequest {
+    const SHORT_FORM_LENGTH: usize = 8;
+    fn launch_request_short_form(&self) -> String;
+}
+
+impl ShortensLaunchRequest for LaunchProfile {
+    fn launch_request_short_form(&self) -> String {
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(
+                format!("flow-remote-control-v1\0{}", self.launch_request_id).as_bytes()
+            )
+        );
+        digest[..Self::SHORT_FORM_LENGTH].to_owned()
+    }
 }
 
 trait NamesRole {
@@ -113,9 +139,7 @@ impl NamesRole for LaunchProfile {
 
 impl NamesRemoteControl for LaunchProfile {
     fn remote_control_name(&self) -> String {
-        format!("flow-{}-{}", self.aspect_name(), self.power_name())
-            .to_ascii_lowercase()
-            .replace(' ', "-")
+        format!("flow-{}", self.launch_request_short_form())
     }
 
     fn remote_control_record(&self) -> String {
@@ -136,9 +160,20 @@ trait ReadsLaunchSource {
     fn read(&self, source: &LaunchSource) -> Result<PathBuf, CompositionError>;
 }
 
+/// Reads the system-prompt bundle a Codex main Flow receives at the top of
+/// its first block. Claude receives the same file as `--system-prompt-file`.
+trait ReadsSystemPromptBundle {
+    fn read_bundle(&self, profile: &LaunchProfile) -> Result<String, CompositionError>;
+}
+
 trait RendersLaunchProfile {
-    fn render_native_head(&self, profile: &LaunchProfile) -> String;
-    fn render_body(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String;
+    fn render_native_head(&self, profile: &LaunchProfile, bundle: Option<&str>) -> String;
+    fn render_body(
+        &self,
+        profile: &LaunchProfile,
+        bundle: Option<&str>,
+        sources: &[PathBuf],
+    ) -> String;
 }
 
 trait HashesPromptBody {
@@ -306,8 +341,24 @@ impl ReadsLaunchSource for LaunchComposer {
     }
 }
 
+impl ReadsSystemPromptBundle for LaunchComposer {
+    fn read_bundle(&self, profile: &LaunchProfile) -> Result<String, CompositionError> {
+        let bytes = fs::read(&profile.system_prompt_bundle_file)
+            .map_err(|_| CompositionError::InvalidProfileField("system_prompt_bundle_file"))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| CompositionError::InvalidProfileField("system_prompt_bundle_file"))?;
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(CompositionError::InvalidProfileField(
+                "system_prompt_bundle_file",
+            ));
+        }
+        Ok(text.to_owned())
+    }
+}
+
 impl RendersLaunchProfile for LaunchComposer {
-    fn render_native_head(&self, profile: &LaunchProfile) -> String {
+    fn render_native_head(&self, profile: &LaunchProfile, bundle: Option<&str>) -> String {
         let skills = &profile.skill_name_vector;
         match profile.harness_kind {
             // Claude reads a command only as the first token of the block, so
@@ -316,20 +367,30 @@ impl RendersLaunchProfile for LaunchComposer {
                 .first()
                 .map(|skill| format!("/{skill} "))
                 .unwrap_or_default(),
-            // The main Flow alone loads main-flow at the top of the block;
-            // native Codex descendants keep their stock base instructions.
+            // Codex keeps its stock base instructions. The main Flow alone
+            // receives the system-prompt bundle at the top of its first
+            // block, then its `$name` skill lines; native Codex descendants
+            // never see this block and keep the stock base.
             HarnessKind::Codex => {
+                let mut head = bundle.map(|text| format!("{text}\n\n")).unwrap_or_default();
                 let mut lines = Vec::new();
                 if !skills.iter().any(|skill| skill == "main-flow") {
                     lines.push("$main-flow".to_owned());
                 }
                 lines.extend(skills.iter().map(|skill| format!("${skill}")));
-                format!("{}\n\n", lines.join("\n"))
+                head.push_str(&lines.join("\n"));
+                head.push_str("\n\n");
+                head
             }
         }
     }
 
-    fn render_body(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String {
+    fn render_body(
+        &self,
+        profile: &LaunchProfile,
+        bundle: Option<&str>,
+        sources: &[PathBuf],
+    ) -> String {
         let harness = match profile.harness_kind {
             HarnessKind::Codex => "Codex",
             HarnessKind::Claude => "Claude",
@@ -341,7 +402,7 @@ impl RendersLaunchProfile for LaunchComposer {
             .map(|flow| format!("{}@{}", flow.flow_id, flow.remembering_depth))
             .collect::<Vec<_>>()
             .join(", ");
-        let mut body = self.render_native_head(profile);
+        let mut body = self.render_native_head(profile, bundle);
         body.push_str(&format!(
             "# Flow launch\n\nRole: {} {}\nHarness: {}\nModel: {}\nEffort: {}\nPredecessor: {}\nRemembered flows: {}\nHerdr session: {}\nRemote control: {}\n",
             profile.aspect_name(),
@@ -354,22 +415,13 @@ impl RendersLaunchProfile for LaunchComposer {
             profile.herdr_session_name,
             profile.remote_control_record(),
         ));
-        match profile.harness_kind {
-            HarnessKind::Claude if profile.skill_name_vector.len() > 1 => {
-                body.push_str(&format!(
-                    "Then load through the Skill tool, in this order: {}\n",
-                    profile.skill_name_vector[1..].join(", ")
-                ));
-            }
-            HarnessKind::Codex => {
-                body.push_str(&format!(
-                    "System prompt: read {}\n",
-                    profile.system_prompt_bundle_file
-                ));
-            }
-            HarnessKind::Claude => {}
+        if profile.harness_kind == HarnessKind::Claude && profile.skill_name_vector.len() > 1 {
+            body.push_str(&format!(
+                "Then load through the Skill tool, in this order: {}\n",
+                profile.skill_name_vector[1..].join(", ")
+            ));
         }
-        body.push_str("\n");
+        body.push('\n');
         body.push_str(&profile.instruction_prompt);
         if !sources.is_empty() {
             body.push_str("\n\nSources:");
@@ -390,7 +442,11 @@ impl ComposesLaunch for LaunchComposer {
             .iter()
             .map(|source| self.read(source))
             .collect::<Result<Vec<_>, _>>()?;
-        let body = self.render_body(profile, &sources);
+        let bundle = match profile.harness_kind {
+            HarnessKind::Codex => Some(self.read_bundle(profile)?),
+            HarnessKind::Claude => None,
+        };
+        let body = self.render_body(profile, bundle.as_deref(), &sources);
         let prompt_sha256 = self.sha256(body.as_bytes());
         let target_receipt_request = TargetReceiptRequest {
             launch_request_id: profile.launch_request_id.clone(),
@@ -484,6 +540,7 @@ mod tests {
         let canonical = root.path().canonicalize().unwrap();
         let expected = format!(
             concat!(
+                "fixture bundle\n\n",
                 "$spirit\n",
                 "$main-flow\n\n",
                 "# Flow launch\n\n",
@@ -494,14 +551,12 @@ mod tests {
                 "Predecessor: 1b8ac0\n",
                 "Remembered flows: 836818@1\n",
                 "Herdr session: messaging-build\n",
-                "Remote control: app-server endpoint\n",
-                "System prompt: read {bundle}\n\n",
+                "Remote control: app-server endpoint\n\n",
                 "Carry the bounded task.\n\n",
                 "Sources:\n",
                 "- {root}/first.md\n",
                 "- {root}/second.md"
             ),
-            bundle = profile.system_prompt_bundle_file,
             root = canonical.display(),
         );
         assert_eq!(composed.first_prompt_payload.first_prompt_body, expected);
@@ -560,14 +615,32 @@ mod tests {
         let mut profile = root.profile(vec![]);
         profile.harness_kind = HarnessKind::Claude;
         let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let name = profile.remote_control_name();
+        assert_eq!(name.len(), "flow-".len() + 8);
+        assert!(name.starts_with("flow-"));
+        assert!(
+            name["flow-".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        assert!(!name.contains(&profile.launch_request_id));
         assert!(
             composed
                 .first_prompt_payload
                 .first_prompt_body
-                .contains("\nRemote control: --remote-control flow-field-high\n")
+                .contains(&format!("\nRemote control: --remote-control {name}\n"))
         );
+        assert!(
+            !composed
+                .first_prompt_payload
+                .first_prompt_text
+                .contains("fixture bundle")
+        );
+        let mut sibling = profile.clone();
+        sibling.launch_request_id = "launch-43".into();
+        assert_ne!(sibling.remote_control_name(), name);
         profile.power_level = PowerLevel::UltraLow;
-        assert_eq!(profile.remote_control_name(), "flow-field-ultra-low");
+        assert_eq!(profile.remote_control_name(), name);
         assert!(composed.has_canonical_first_prompt());
     }
 
@@ -638,6 +711,41 @@ mod tests {
     }
 
     #[test]
+    fn codex_first_block_opens_with_the_bundle_text_and_no_read_line() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.profile(vec![]);
+        fs::write(
+            &profile.system_prompt_bundle_file,
+            "\n# Main-flow mode\n\nKeep the stock base.\n\n",
+        )
+        .unwrap();
+        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let text = composed.first_prompt_payload.first_prompt_text.as_str();
+        assert!(
+            text.starts_with("# Main-flow mode\n\nKeep the stock base.\n\n$spirit\n$main-flow\n\n"),
+            "{text}"
+        );
+        assert!(!text.contains("System prompt: read"));
+        assert!(!text.contains(&profile.system_prompt_bundle_file));
+        assert!(composed.has_canonical_first_prompt());
+    }
+
+    #[test]
+    fn codex_launch_refuses_an_empty_or_non_utf8_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.profile(vec![]);
+        for bytes in [&b"  \n"[..], &[0xff, 0xfe][..]] {
+            fs::write(&profile.system_prompt_bundle_file, bytes).unwrap();
+            assert_eq!(
+                LaunchComposer::at(root.path()).compose(&profile),
+                Err(CompositionError::InvalidProfileField(
+                    "system_prompt_bundle_file"
+                ))
+            );
+        }
+    }
+
+    #[test]
     fn codex_head_adds_main_flow_when_the_profile_omits_it() {
         let root = tempfile::tempdir().unwrap();
         let mut profile = root.profile(vec![]);
@@ -647,7 +755,7 @@ mod tests {
             composed
                 .first_prompt_payload
                 .first_prompt_body
-                .starts_with("$main-flow\n$spirit\n\n# Flow launch\n")
+                .starts_with("fixture bundle\n\n$main-flow\n$spirit\n\n# Flow launch\n")
         );
     }
 }

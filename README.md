@@ -109,7 +109,10 @@ positional prompt, and the composed first prompt opens with the native skill
 invocation. For Codex, the Nexus resolves every ordered skill name through the
 bound app-server's `skills/list`, journals the selected absolute path and
 exact source hash, then sends the typed skill inputs and one text, headed by
-`$name` lines, in one `turn/start` on the empty Herdr-bound thread. For
+`$name` lines, in one `turn/start` on the empty Herdr-bound thread. Codex
+keeps its stock base instructions; the main Flow's system-prompt bundle text
+opens that one text, above the `$name` lines, and native Codex descendants
+never receive it. For
 Claude, it resolves the ordered enterprise, personal, and project catalogs and
 journals the same typed selection; the prompt opens with `/<first skill>`,
 because Claude reads a command only as the first token of a block, and asks
@@ -123,8 +126,10 @@ Sources are named by absolute path after their bytes are checked against the
 profile hash. The requested receipt is the fixed line
 `FLOW_LAUNCH_RECEIPT_V2`; the observer binds it to the launch by native
 session, transcript cursor, and the authenticated first turn, whose body
-digest stays in the store. A Claude launch is remotely controllable under the
-role name, for example `--remote-control flow-psyche-high`.
+digest stays in the store. A Claude launch is remotely controllable under a
+name unique to the Flow, `flow-` and the launch request ID's short form (the
+first eight hex digits of its SHA-256). The Flow ID is claimed from the native
+session only after the harness has started, too late for the start flag.
 
 The Codex adapter opens `codex app-server proxy`, then sends `initialize`,
 `thread/start`, and `turn/start`. The returned thread is owned by the running

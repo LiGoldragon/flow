@@ -1,3 +1,16 @@
+# Flow 0.8.1
+
+A Codex main Flow now receives its system-prompt bundle's text at the top of
+its first block, above the `$name` skill lines, in place of the line
+`System prompt: read <bundle>`. Codex keeps its stock base instructions, and
+native Codex descendants never see the block. The bundle must be non-empty
+UTF-8 for a Codex launch.
+
+The Claude remote-control name is now unique per Flow: `flow-` and the first
+eight hex digits of the SHA-256 of the launch request ID, instead of the role.
+No wire or storage change; a 0.8.0 journaled attempt keeps its stored prompt
+digest and is promoted as before.
+
 # Flow 0.8.0
 
 A fresh Flow now receives one prompt. The native harness starts with no

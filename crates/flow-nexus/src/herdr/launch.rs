@@ -1511,7 +1511,7 @@ mod tests {
         ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
         SubmitsFirstPromptOnce,
     };
-    use crate::composition::LaunchReceipt;
+    use crate::composition::{LaunchReceipt, NamesRemoteControl};
     use crate::herdr::HerdrCli;
     use signal_flow::{
         ComposedLaunch, Effort, FirstPromptPayload, FlowAspect, HarnessKind, LaunchProfile,
@@ -1730,10 +1730,11 @@ printf '%s\n' 123456
             .lines()
             .find(|line| line.contains("agent start"))
             .expect("agent start call");
-        assert!(
-            start_call
-                .ends_with("-- --dangerously-skip-permissions --remote-control flow-field-medium --system-prompt-file /tmp/flow-system-prompt.md --model model-current --effort high")
-        );
+        let remote_control_name = launch.launch_profile.remote_control_name();
+        assert!(remote_control_name.starts_with("flow-"));
+        assert!(start_call.ends_with(&format!(
+            "-- --dangerously-skip-permissions --remote-control {remote_control_name} --system-prompt-file /tmp/flow-system-prompt.md --model model-current --effort high"
+        )));
         assert!(!start_call.contains("launch-42"));
         assert!(!start_call.contains("composed body"));
         let pane_run = calls_after_start

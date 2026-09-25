@@ -1292,7 +1292,9 @@ mod tests {
 
     #[test]
     fn codex_main_flow_first_text_block_opens_with_the_system_prompt_bundle() {
-        use crate::composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer};
+        use crate::composition::{
+            ComposesLaunch, LaunchBundles, LaunchComposer, OpensLaunchComposer,
+        };
         let root = tempfile::tempdir().unwrap();
         let bundle = root.path().join("flow-system-prompt.md");
         fs::write(&bundle, "# Main-flow mode\n\nYou are a main Flow.\n").unwrap();
@@ -1300,7 +1302,12 @@ mod tests {
         let mut profile = malformed.launch_profile;
         profile.skill_name_vector = vec!["spirit".into()];
         profile.system_prompt_bundle_file = bundle.to_string_lossy().into_owned();
-        let launch = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let launch = LaunchComposer::at(
+            root.path(),
+            LaunchBundles::at(root.path().join("launch-bundles")),
+        )
+        .compose(&profile)
+        .unwrap();
         intent.prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
         intent.native_skill_selection_vector = vec![NativeSkillSelection {
             skill_name: "spirit".into(),

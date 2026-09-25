@@ -234,7 +234,7 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flow"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "datom-codec 0.31.0",
  "protos 0.31.0",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "flow-meta"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "datom-codec 0.31.0",
  "meta-signal-flow",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "flow-nexus"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "base64",
  "meta-signal-flow",

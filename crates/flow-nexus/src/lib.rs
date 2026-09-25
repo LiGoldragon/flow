@@ -10,7 +10,7 @@ pub mod store;
 pub mod title;
 
 use codex::{CodexEndpoints, ConsumesResetCredit};
-use composition::{LaunchComposer, OpensLaunchComposer};
+use composition::{LaunchBundles, LaunchComposer, OpensLaunchComposer};
 use herdr::OperatesHerdrPane;
 use launching::{LaunchesFlows, ObservesLaunch};
 use signal_flow::{
@@ -464,13 +464,15 @@ impl OpensRunningNexus for RunningNexus {
             );
         }
         let source_root = PathBuf::from(&runtime.source_root);
+        let launch_bundles = LaunchBundles::at(defaults.launch_bundle_directory());
         Ok(Self {
             store,
             codex_endpoints: codex_endpoints.clone(),
             herdr: herdr::HerdrCli::default()
                 .with_source_root(&source_root)
-                .with_codex_endpoints(codex_endpoints),
-            composer: LaunchComposer::at(source_root),
+                .with_codex_endpoints(codex_endpoints)
+                .with_launch_bundles(launch_bundles.clone()),
+            composer: LaunchComposer::at(source_root, launch_bundles),
             dispatch_gate: Mutex::new(()),
         })
     }
@@ -658,7 +660,7 @@ mod tests {
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use crate::{
         codex::{CodexEndpoint, CodexEndpoints},
-        composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer},
+        composition::{ComposesLaunch, LaunchBundles, LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
         store::{
             FlowStore, OpensFlowStore, RecordsFlowLifecycle, RecordsNativeLaunchBinding,
@@ -782,8 +784,14 @@ mod tests {
                 store: FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store"),
                 codex_endpoints: codex_endpoints.clone(),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
-                    .with_codex_endpoints(codex_endpoints),
-                composer: LaunchComposer::at(directory.path().to_path_buf()),
+                    .with_codex_endpoints(codex_endpoints)
+                    .with_launch_bundles(LaunchBundles::at(
+                        directory.path().join("launch-bundles"),
+                    )),
+                composer: LaunchComposer::at(
+                    directory.path().to_path_buf(),
+                    LaunchBundles::at(directory.path().join("launch-bundles")),
+                ),
                 dispatch_gate: std::sync::Mutex::new(()),
             };
             Self {

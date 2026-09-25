@@ -3,6 +3,7 @@
 pub mod launch;
 
 use crate::codex::{CodexEndpoint, CodexEndpoints};
+use crate::composition::LaunchBundles;
 use std::collections::BTreeSet;
 use std::{
     fs,
@@ -84,6 +85,9 @@ pub struct HerdrCli {
     claude_transcript_root: PathBuf,
     /// Native Claude skill catalogs, highest-precedence first.
     claude_skill_roots: Vec<PathBuf>,
+    /// Where each launch's own bundle copy lives, the one a Claude launch
+    /// receives as `--system-prompt-file`.
+    launch_bundles: LaunchBundles,
 }
 
 impl Default for HerdrCli {
@@ -138,6 +142,7 @@ impl Default for HerdrCli {
             },
             claude_transcript_root: claude_home.join("projects"),
             claude_skill_roots,
+            launch_bundles: LaunchBundles::at(defaults.launch_bundle_directory()),
         }
     }
 }
@@ -289,6 +294,16 @@ impl HerdrCli {
         format!("FLOW_PRESENTED_{flow_id}_{milliseconds}_{sequence}")
     }
 
+    pub fn with_launch_bundles(mut self, launch_bundles: LaunchBundles) -> Self {
+        self.launch_bundles = launch_bundles;
+        self
+    }
+
+    /// The per-launch bundle copy the composer wrote for this launch.
+    pub fn launch_bundle_file(&self, profile: &signal_flow::LaunchProfile) -> PathBuf {
+        self.launch_bundles.file_for(profile)
+    }
+
     pub fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
         self.codex_endpoints = codex_endpoints;
         self
@@ -342,6 +357,12 @@ impl HerdrCli {
             },
             claude_transcript_root: fixture_root.join("claude"),
             claude_skill_roots: vec![fixture_root.join("claude-skills")],
+            launch_bundles: LaunchBundles::at(
+                flows_root
+                    .parent()
+                    .expect("fixture flows root has a parent")
+                    .join("launch-bundles"),
+            ),
         }
     }
 

@@ -112,7 +112,9 @@ exact source hash, then sends the typed skill inputs and one text, headed by
 `$name` lines, in one `turn/start` on the empty Herdr-bound thread. Codex
 keeps its stock base instructions; the main Flow's system-prompt bundle text
 opens that one text, above the `$name` lines, and native Codex descendants
-never receive it. For
+never receive it. The bundle text ends with the launch section: a
+`Predecessor: <flow-id>` line when the profile names a predecessor and a
+`Remembered: <ids>` line when it remembers flows, and no line otherwise. For
 Claude, it resolves the ordered enterprise, personal, and project catalogs and
 journals the same typed selection. The Claude prompt is one line of at most
 800 characters with no line break, because Claude Code wraps a longer line, or
@@ -120,10 +122,15 @@ any submission of four or more lines, as pasted content, and a wrapped block
 expands no command. The line opens with up to five space-separated
 `/<skill>` commands in the profile's order, because Claude reads commands only
 at the head of a block and loads at most five stacked ones. One instruction
-sentence follows: read the system-prompt bundle at its path, load any further
-skills through the Skill tool in order, then the goal and any source paths,
-then the receipt request. Role, model, effort and remote control reach Claude
-through its argv and the bundle, not the line. A profile whose line would
+sentence follows: read the launch's system-prompt bundle at its path, load any
+further skills through the Skill tool in order, then the goal and any source
+paths, then the receipt request. At Start the Nexus writes each Claude launch
+its own copy of the caller's bundle, under `~/.local/state/flow/launch-bundles/`,
+named by the launch request's short form: the caller's bytes unchanged, then,
+after a blank line, the same launch section Codex receives. That copy is the
+`--system-prompt-file` and the path the line names; the caller's file is never
+edited. Predecessor and remembered flows reach Claude through that copy;
+role, model, effort and remote control through its argv, not the line. A profile whose line would
 break or pass 800 characters is refused (`CompositionRefused`), never
 truncated. The observer requires one command record and one harness expansion
 per stacked command, each carrying the same argument, then native Skill tool

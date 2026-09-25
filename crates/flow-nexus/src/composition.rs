@@ -38,14 +38,71 @@ pub enum CompositionError {
     /// Claude Code wraps a longer single line as pasted content.
     #[error("Claude first prompt would be {0} characters, past the one-line limit of 800")]
     ClaudeFirstLineTooLong(usize),
+    /// The per-launch copy of the system-prompt bundle could not be written.
+    #[error("per-launch system-prompt bundle cannot be written: {0}")]
+    LaunchBundleUnwritable(String),
 }
 
 pub struct LaunchComposer {
     source_root: PathBuf,
+    launch_bundles: LaunchBundles,
 }
 
 pub trait OpensLaunchComposer {
-    fn at(source_root: impl Into<PathBuf>) -> Self;
+    fn at(source_root: impl Into<PathBuf>, launch_bundles: LaunchBundles) -> Self;
+}
+
+/// Where the Nexus keeps each launch's own copy of the system-prompt bundle.
+///
+/// The caller's bundle is shared across launches and never edited. At Start
+/// the composer copies it here, byte for byte, and appends the launch's
+/// trailing section (its predecessor and remembered flows); a Claude launch
+/// receives the copy as `--system-prompt-file` and is told to read it. The
+/// file is named by the launch request's short form, as the remote-control
+/// name is, so neither the request ID nor a long hex run enters the prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchBundles {
+    directory: PathBuf,
+}
+
+impl LaunchBundles {
+    pub fn at(directory: impl Into<PathBuf>) -> Self {
+        Self {
+            directory: directory.into(),
+        }
+    }
+
+    /// The per-launch copy a profile's launch receives.
+    pub fn file_for(&self, profile: &LaunchProfile) -> PathBuf {
+        self.directory
+            .join(format!("launch-{}.md", profile.launch_request_short_form()))
+    }
+}
+
+/// The trailing section a launch appends to its bundle: `Predecessor:` when
+/// the profile names one, `Remembered:` when it remembers any flows, and
+/// nothing otherwise. Each line ends with a newline.
+pub trait RendersLaunchSection {
+    fn launch_section(&self) -> String;
+}
+
+impl RendersLaunchSection for LaunchProfile {
+    fn launch_section(&self) -> String {
+        let mut section = String::new();
+        if let Some(predecessor) = &self.flow_id_option {
+            section.push_str(&format!("Predecessor: {predecessor}\n"));
+        }
+        if !self.remembered_flow_vector.is_empty() {
+            let remembered = self
+                .remembered_flow_vector
+                .iter()
+                .map(|flow| flow.flow_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            section.push_str(&format!("Remembered: {remembered}\n"));
+        }
+        section
+    }
 }
 
 /// Composes one first prompt from a profile and a configured source root.
@@ -226,20 +283,39 @@ trait ReadsLaunchSource {
 }
 
 /// Reads the system-prompt bundle a Codex main Flow receives at the top of
-/// its first block. Claude receives the same file as `--system-prompt-file`.
+/// its first block, with the launch section at its end. Claude receives the
+/// per-launch copy as `--system-prompt-file`.
 trait ReadsSystemPromptBundle {
     fn read_bundle(&self, profile: &LaunchProfile) -> Result<String, CompositionError>;
 }
 
+/// Writes a launch's own copy of the bundle: the caller's bytes unchanged,
+/// then the launch section after a blank line when it has any line.
+trait WritesLaunchBundle {
+    fn write_launch_bundle(&self, profile: &LaunchProfile) -> Result<PathBuf, CompositionError>;
+}
+
 trait RendersLaunchProfile {
     fn render_native_head(&self, profile: &LaunchProfile, bundle: Option<&str>) -> String;
-    fn render_claude_line(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String;
+    fn render_claude_line(
+        &self,
+        profile: &LaunchProfile,
+        bundle_file: &Path,
+        sources: &[PathBuf],
+    ) -> String;
     fn render_body(
         &self,
         profile: &LaunchProfile,
-        bundle: Option<&str>,
+        bundle: &LaunchBundleText,
         sources: &[PathBuf],
     ) -> String;
+}
+
+/// What a harness receives of the bundle: Codex its text, Claude the path
+/// of its per-launch copy.
+enum LaunchBundleText {
+    Inline(String),
+    File(PathBuf),
 }
 
 trait HashesPromptBody {
@@ -247,9 +323,10 @@ trait HashesPromptBody {
 }
 
 impl OpensLaunchComposer for LaunchComposer {
-    fn at(source_root: impl Into<PathBuf>) -> Self {
+    fn at(source_root: impl Into<PathBuf>, launch_bundles: LaunchBundles) -> Self {
         Self {
             source_root: source_root.into(),
+            launch_bundles,
         }
     }
 }
@@ -422,7 +499,34 @@ impl ReadsSystemPromptBundle for LaunchComposer {
                 "system_prompt_bundle_file",
             ));
         }
-        Ok(text.to_owned())
+        let section = profile.launch_section();
+        if section.is_empty() {
+            return Ok(text.to_owned());
+        }
+        Ok(format!("{text}\n\n{}", section.trim_end()))
+    }
+}
+
+impl WritesLaunchBundle for LaunchComposer {
+    fn write_launch_bundle(&self, profile: &LaunchProfile) -> Result<PathBuf, CompositionError> {
+        let mut bytes = fs::read(&profile.system_prompt_bundle_file)
+            .map_err(|_| CompositionError::InvalidProfileField("system_prompt_bundle_file"))?;
+        let section = profile.launch_section();
+        if !section.is_empty() {
+            if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+                bytes.push(b'\n');
+            }
+            bytes.push(b'\n');
+            bytes.extend_from_slice(section.as_bytes());
+        }
+        let file = self.launch_bundles.file_for(profile);
+        let unwritable =
+            |error: std::io::Error| CompositionError::LaunchBundleUnwritable(error.to_string());
+        fs::create_dir_all(&self.launch_bundles.directory).map_err(unwritable)?;
+        let partial = file.with_extension("md.partial");
+        fs::write(&partial, &bytes).map_err(unwritable)?;
+        fs::rename(&partial, &file).map_err(unwritable)?;
+        Ok(file)
     }
 }
 
@@ -458,14 +562,20 @@ impl RendersLaunchProfile for LaunchComposer {
     }
 
     /// Claude's one line: the stacked commands, then one sentence naming
-    /// the bundle to read, the skills past the stack, the goal, and the
-    /// sources. Role, model, effort and remote control reach Claude through
-    /// its argv and the bundle, and stay in the store.
-    fn render_claude_line(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String {
+    /// the per-launch bundle to read, the skills past the stack, the goal,
+    /// and the sources. Predecessor and remembered flows are in that bundle;
+    /// role, model, effort and remote control reach Claude through its argv
+    /// and stay in the store.
+    fn render_claude_line(
+        &self,
+        profile: &LaunchProfile,
+        bundle_file: &Path,
+        sources: &[PathBuf],
+    ) -> String {
         let mut line = self.render_native_head(profile, None);
         line.push_str(&format!(
             "Read {} for your launch mode",
-            profile.system_prompt_bundle_file
+            bundle_file.display()
         ));
         if profile.skill_name_vector.len() > ClaudeCommandStack::LIMIT {
             line.push_str(&format!(
@@ -492,12 +602,15 @@ impl RendersLaunchProfile for LaunchComposer {
     fn render_body(
         &self,
         profile: &LaunchProfile,
-        bundle: Option<&str>,
+        bundle: &LaunchBundleText,
         sources: &[PathBuf],
     ) -> String {
-        if profile.harness_kind == HarnessKind::Claude {
-            return self.render_claude_line(profile, sources);
-        }
+        let bundle = match bundle {
+            LaunchBundleText::File(file) => {
+                return self.render_claude_line(profile, file, sources);
+            }
+            LaunchBundleText::Inline(text) => Some(text.as_str()),
+        };
         let predecessor = profile.flow_id_option.as_deref().unwrap_or("none");
         let remembered = profile
             .remembered_flow_vector
@@ -539,10 +652,10 @@ impl ComposesLaunch for LaunchComposer {
             .map(|source| self.read(source))
             .collect::<Result<Vec<_>, _>>()?;
         let bundle = match profile.harness_kind {
-            HarnessKind::Codex => Some(self.read_bundle(profile)?),
-            HarnessKind::Claude => None,
+            HarnessKind::Codex => LaunchBundleText::Inline(self.read_bundle(profile)?),
+            HarnessKind::Claude => LaunchBundleText::File(self.write_launch_bundle(profile)?),
         };
-        let body = self.render_body(profile, bundle.as_deref(), &sources);
+        let body = self.render_body(profile, &bundle, &sources);
         let prompt_sha256 = self.sha256(body.as_bytes());
         let target_receipt_request = TargetReceiptRequest {
             launch_request_id: profile.launch_request_id.clone(),
@@ -577,8 +690,8 @@ impl ComposesLaunch for LaunchComposer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeCommandStack, ClaudeFirstLine, ComposesLaunch, CompositionError, LaunchComposer,
-        NamesRemoteControl, OpensLaunchComposer, ValidatesComposedPrompt,
+        ClaudeCommandStack, ClaudeFirstLine, ComposesLaunch, CompositionError, LaunchBundles,
+        LaunchComposer, NamesRemoteControl, OpensLaunchComposer, ValidatesComposedPrompt,
     };
     use signal_flow::{
         FlowAspect, HarnessKind, LaunchProfile, LaunchSource, PowerLevel, RememberedFlow,
@@ -587,9 +700,14 @@ mod tests {
 
     trait BuildsProfile {
         fn profile(&self, sources: Vec<LaunchSource>) -> LaunchProfile;
+        fn bundles(&self) -> LaunchBundles;
     }
 
     impl BuildsProfile for tempfile::TempDir {
+        fn bundles(&self) -> LaunchBundles {
+            LaunchBundles::at(self.path().join("launch-bundles"))
+        }
+
         fn profile(&self, sources: Vec<LaunchSource>) -> LaunchProfile {
             let bundle = self.path().join("flow-system-prompt.md");
             fs::write(&bundle, "fixture bundle").unwrap();
@@ -645,11 +763,15 @@ mod tests {
             },
         ]);
 
-        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let composed = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
         let canonical = root.path().canonicalize().unwrap();
         let expected = format!(
             concat!(
                 "fixture bundle\n\n",
+                "Predecessor: 1b8ac0\n",
+                "Remembered: 836818\n\n",
                 "$spirit\n",
                 "$main-flow\n\n",
                 "# Flow launch\n\n",
@@ -693,7 +815,9 @@ mod tests {
                     .into(),
             }]);
             profile.harness_kind = harness;
-            let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+            let composed = LaunchComposer::at(root.path(), root.bundles())
+                .compose(&profile)
+                .unwrap();
             let text = composed.first_prompt_payload.first_prompt_text.as_str();
             assert!(!text.has_long_hex_run(), "{text}");
             assert!(!text.contains(&profile.launch_request_id), "{text}");
@@ -708,13 +832,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut profile = root.profile(vec![]);
         profile.harness_kind = HarnessKind::Claude;
-        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let composed = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
         let body = composed.first_prompt_payload.first_prompt_body.as_str();
         assert_eq!(
             body,
             format!(
                 "/spirit /main-flow Read {} for your launch mode, then: Carry the bounded task.",
-                profile.system_prompt_bundle_file
+                root.bundles().file_for(&profile).display()
             ),
         );
         assert_eq!(
@@ -747,7 +873,9 @@ mod tests {
         ]
         .map(String::from)
         .to_vec();
-        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let composed = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
         let body = composed.first_prompt_payload.first_prompt_body.as_str();
         let head = body.split(" Read ").next().unwrap();
         let commands = head.split(' ').collect::<Vec<_>>();
@@ -775,7 +903,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut profile = root.profile(vec![]);
         profile.harness_kind = HarnessKind::Claude;
-        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let composed = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
         let name = profile.remote_control_name();
         assert_eq!(name.len(), "flow-".len() + 8);
         assert!(name.starts_with("flow-"));
@@ -823,7 +953,9 @@ mod tests {
                 .into(),
         }]);
         profile.harness_kind = HarnessKind::Claude;
-        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let composed = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
         let text = composed.first_prompt_payload.first_prompt_text.as_str();
         assert!(!text.contains('\n') && !text.contains('\r'), "{text:?}");
         assert!(text.chars().count() <= 800, "{}", text.chars().count());
@@ -840,10 +972,14 @@ mod tests {
         let mut profile = root.profile(vec![]);
         profile.harness_kind = HarnessKind::Claude;
         profile.instruction_prompt = String::new();
-        let empty = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let empty = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
         let room = 800 - empty.first_prompt_payload.first_prompt_text.chars().count();
         profile.instruction_prompt = "x".repeat(room);
-        let exact = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let exact = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
         assert_eq!(
             exact.first_prompt_payload.first_prompt_text.chars().count(),
             800
@@ -851,7 +987,7 @@ mod tests {
         assert!(exact.has_canonical_first_prompt());
         profile.instruction_prompt.push('x');
         assert_eq!(
-            LaunchComposer::at(root.path()).compose(&profile),
+            LaunchComposer::at(root.path(), root.bundles()).compose(&profile),
             Err(CompositionError::ClaudeFirstLineTooLong(801))
         );
     }
@@ -863,17 +999,21 @@ mod tests {
         profile.harness_kind = HarnessKind::Claude;
         profile.instruction_prompt = "Carry the task.\nThen report.".into();
         assert_eq!(
-            LaunchComposer::at(root.path()).compose(&profile),
+            LaunchComposer::at(root.path(), root.bundles()).compose(&profile),
             Err(CompositionError::ClaudeFirstLineBroken)
         );
         profile.instruction_prompt = "Carry the bounded task. ".repeat(40);
         assert!(matches!(
-            LaunchComposer::at(root.path()).compose(&profile),
+            LaunchComposer::at(root.path(), root.bundles()).compose(&profile),
             Err(CompositionError::ClaudeFirstLineTooLong(length)) if length > 800
         ));
         // Codex has no one-line limit: the same instruction composes there.
         profile.harness_kind = HarnessKind::Codex;
-        assert!(LaunchComposer::at(root.path()).compose(&profile).is_ok());
+        assert!(
+            LaunchComposer::at(root.path(), root.bundles())
+                .compose(&profile)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -881,7 +1021,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut profile = root.profile(vec![]);
         profile.harness_kind = HarnessKind::Claude;
-        let mut composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let mut composed = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
         assert!(composed.has_canonical_first_prompt());
         profile.instruction_prompt = "x".repeat(900);
         composed.launch_profile = profile;
@@ -903,7 +1045,7 @@ mod tests {
     #[test]
     fn malformed_full_text_is_not_canonical_when_body_hash_is_unchanged() {
         let root = tempfile::tempdir().unwrap();
-        let mut composed = LaunchComposer::at(root.path())
+        let mut composed = LaunchComposer::at(root.path(), root.bundles())
             .compose(&root.profile(vec![]))
             .unwrap();
         let unchanged_body_hash = composed.first_prompt_payload.prompt_sha256.clone();
@@ -926,7 +1068,7 @@ mod tests {
         }]);
 
         assert_eq!(
-            LaunchComposer::at(root.path()).compose(&profile),
+            LaunchComposer::at(root.path(), root.bundles()).compose(&profile),
             Err(CompositionError::MissingSource("missing.md".into()))
         );
     }
@@ -942,7 +1084,7 @@ mod tests {
         }]);
 
         assert_eq!(
-            LaunchComposer::at(root.path()).compose(&profile),
+            LaunchComposer::at(root.path(), root.bundles()).compose(&profile),
             Err(CompositionError::SourceHashMismatch("changed.md".into()))
         );
     }
@@ -950,7 +1092,7 @@ mod tests {
     #[test]
     fn profile_keeps_skill_names_without_skill_bodies() {
         let root = tempfile::tempdir().unwrap();
-        let composed = LaunchComposer::at(root.path())
+        let composed = LaunchComposer::at(root.path(), root.bundles())
             .compose(&root.profile(vec![]))
             .unwrap();
 
@@ -975,10 +1117,16 @@ mod tests {
             "\n# Main-flow mode\n\nKeep the stock base.\n\n",
         )
         .unwrap();
-        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let composed = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
         let text = composed.first_prompt_payload.first_prompt_text.as_str();
         assert!(
-            text.starts_with("# Main-flow mode\n\nKeep the stock base.\n\n$spirit\n$main-flow\n\n"),
+            text.starts_with(concat!(
+                "# Main-flow mode\n\nKeep the stock base.\n\n",
+                "Predecessor: 1b8ac0\nRemembered: 836818\n\n",
+                "$spirit\n$main-flow\n\n"
+            )),
             "{text}"
         );
         assert!(!text.contains("System prompt: read"));
@@ -993,7 +1141,7 @@ mod tests {
         for bytes in [&b"  \n"[..], &[0xff, 0xfe][..]] {
             fs::write(&profile.system_prompt_bundle_file, bytes).unwrap();
             assert_eq!(
-                LaunchComposer::at(root.path()).compose(&profile),
+                LaunchComposer::at(root.path(), root.bundles()).compose(&profile),
                 Err(CompositionError::InvalidProfileField(
                     "system_prompt_bundle_file"
                 ))
@@ -1006,12 +1154,91 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut profile = root.profile(vec![]);
         profile.skill_name_vector = vec!["spirit".into()];
-        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let composed = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
         assert!(
             composed
                 .first_prompt_payload
                 .first_prompt_body
-                .starts_with("fixture bundle\n\n$main-flow\n$spirit\n\n# Flow launch\n")
+                .starts_with(concat!(
+                    "fixture bundle\n\nPredecessor: 1b8ac0\nRemembered: 836818\n\n",
+                    "$main-flow\n$spirit\n\n# Flow launch\n"
+                ))
+        );
+    }
+
+    #[test]
+    fn claude_launch_copy_carries_predecessor_and_remembered_and_leaves_the_caller_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = root.profile(vec![]);
+        profile.harness_kind = HarnessKind::Claude;
+        profile.remembered_flow_vector.push(RememberedFlow {
+            flow_id: "2c4f10".into(),
+            remembering_depth: 2,
+        });
+        let caller = fs::read(&profile.system_prompt_bundle_file).unwrap();
+        let composed = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
+        let copy = root.bundles().file_for(&profile);
+        assert_ne!(copy.to_string_lossy(), profile.system_prompt_bundle_file);
+        assert_eq!(
+            fs::read_to_string(&copy).unwrap(),
+            "fixture bundle\n\nPredecessor: 1b8ac0\nRemembered: 836818, 2c4f10\n"
+        );
+        assert_eq!(
+            fs::read(&profile.system_prompt_bundle_file).unwrap(),
+            caller
+        );
+        let text = composed.first_prompt_payload.first_prompt_text.as_str();
+        assert!(text.contains(&format!("Read {} for your launch mode", copy.display())));
+        assert!(!text.contains(&profile.system_prompt_bundle_file));
+        assert!(!text.contains("Predecessor") && !text.contains("Remembered"));
+        assert!(ClaudeFirstLine::fits(text), "{text}");
+        assert!(composed.has_canonical_first_prompt());
+    }
+
+    #[test]
+    fn launch_copy_and_codex_bundle_carry_no_section_when_nothing_is_remembered() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = root.profile(vec![]);
+        profile.flow_id_option = None;
+        profile.remembered_flow_vector.clear();
+        fs::write(&profile.system_prompt_bundle_file, "fixture bundle\n").unwrap();
+        profile.harness_kind = HarnessKind::Claude;
+        LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
+        let copy = fs::read_to_string(root.bundles().file_for(&profile)).unwrap();
+        assert_eq!(copy, "fixture bundle\n");
+        assert_eq!(
+            fs::read_to_string(&profile.system_prompt_bundle_file).unwrap(),
+            "fixture bundle\n"
+        );
+
+        profile.harness_kind = HarnessKind::Codex;
+        let composed = LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
+        let text = composed.first_prompt_payload.first_prompt_text.as_str();
+        assert!(text.starts_with("fixture bundle\n\n$spirit\n"), "{text}");
+        assert!(!text.contains("Remembered:"));
+    }
+
+    #[test]
+    fn launch_copy_keeps_a_section_on_its_own_lines_after_a_trailing_newline() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = root.profile(vec![]);
+        profile.harness_kind = HarnessKind::Claude;
+        profile.remembered_flow_vector.clear();
+        fs::write(&profile.system_prompt_bundle_file, "# Mode\n\nBody.\n").unwrap();
+        LaunchComposer::at(root.path(), root.bundles())
+            .compose(&profile)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.bundles().file_for(&profile)).unwrap(),
+            "# Mode\n\nBody.\n\nPredecessor: 1b8ac0\n"
         );
     }
 }

@@ -1106,7 +1106,11 @@ impl StartsNativeHerdrHarness for HerdrCli {
             arguments.push(Self::CLAUDE_REMOTE_CONTROL_FLAG.into());
             arguments.push(launch.launch_profile.remote_control_name());
             arguments.push("--system-prompt-file".into());
-            arguments.push(launch.launch_profile.system_prompt_bundle_file.clone());
+            arguments.push(
+                self.launch_bundle_file(&launch.launch_profile)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
         arguments.push("--model".into());
         arguments.push(launch.launch_profile.model_name.clone());
@@ -1993,8 +1997,14 @@ printf '%s\n' 123456
             .expect("agent start call");
         let remote_control_name = launch.launch_profile.remote_control_name();
         assert!(remote_control_name.starts_with("flow-"));
+        let launch_bundle = adapter.launch_bundle_file(&launch.launch_profile);
+        assert_ne!(
+            launch_bundle.to_string_lossy(),
+            launch.launch_profile.system_prompt_bundle_file
+        );
         assert!(start_call.ends_with(&format!(
-            "-- --dangerously-skip-permissions --settings {{\"permissions\":{{\"defaultMode\":\"bypassPermissions\"}}}} --remote-control {remote_control_name} --system-prompt-file /tmp/flow-system-prompt.md --model model-current --effort high"
+            "-- --dangerously-skip-permissions --settings {{\"permissions\":{{\"defaultMode\":\"bypassPermissions\"}}}} --remote-control {remote_control_name} --system-prompt-file {} --model model-current --effort high",
+            launch_bundle.display()
         )));
         // The flag settings name the launch's own mode, which suppresses the
         // auto-mode default offer; no settings file is written.

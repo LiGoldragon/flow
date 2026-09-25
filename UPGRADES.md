@@ -1,3 +1,16 @@
+# Flow 0.10.4
+
+A patch release with no wire, storage or argv-shape change. A launch's
+predecessor and remembered flows move into the system-prompt bundle, which is
+per launch. At Start the Nexus writes each Claude launch its own copy of the
+caller's bundle under `~/.local/state/flow/launch-bundles/launch-<short>.md`
+(the caller's bytes unchanged, then, when set, a blank line and
+`Predecessor: <flow-id>` and `Remembered: <ids>`), passes that copy as
+`--system-prompt-file`, and names it in the one-line prompt. Codex receives
+the same lines at the end of the bundle text in its first block. The caller's
+bundle is never edited. A copy that cannot be written refuses Start as
+`CompositionRefused`.
+
 # Flow 0.10.3
 
 A patch release with no wire or storage change. `Replace` tells an unreadable

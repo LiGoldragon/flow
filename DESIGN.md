@@ -59,10 +59,14 @@ recorded `Stopped` (so `ResolveRecipient` and `Send` refuse it), then its
 exact pane is closed, and only the `Replaced` outcome releases the successor
 to routing. Until then the successor is held: `ResolveRecipient` answers
 `FlowUnavailable` and `Send` answers `RouteUnavailable`. A predecessor whose
-pane is already absent from Herdr is already reaped: it is recorded `Stopped`,
-nothing is closed, and `Replaced` releases the successor. A close that fails
-on a pane that exists is `ReplaceRejected.ReapRefused`, leaves neither flow
-routable, and a repeated `Replace` of the same request takes the reap up again.
+pane a readable Herdr snapshot shows absent is already reaped: it is recorded
+`Stopped`, nothing is closed, and `Replaced` releases the successor. When Herdr
+cannot be read, or shows the pane under another binding, the pane may still be
+open: that is `ReplaceRejected.ReapRefused.RouteUnavailable`, nothing is
+closed, and the successor stays held. A close that fails on a pane that exists
+is `ReplaceRejected.ReapRefused.CloseRefused`. Either refusal leaves neither
+flow routable, and a repeated `Replace` of the same request takes the reap up
+again.
 
 Every launch request settles into one stored outcome — `Started`, `Replaced`,
 `StartRejected`, or `ReplaceRejected` — once an attempt was reserved for it.

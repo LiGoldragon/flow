@@ -8,7 +8,7 @@ use crate::{
     codex::{ResolvesBoundCodexSkills, SubmitsBoundCodexFirstTurn},
     composition::ComposesLaunch,
     herdr::{
-        LocatesNativeTranscripts, OperatesHerdrPane,
+        LocatesNativeTranscripts, OperatesHerdrPane, PanePresence,
         launch::{
             AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
             ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
@@ -492,15 +492,22 @@ impl LaunchesFlows for RunningNexus {
                 StopRejection::PersistenceRefused,
             ));
         }
-        // A predecessor whose pane is already gone is already reaped: only
-        // a pane that exists is closed, and only its failed close refuses.
-        let node = self.herdr.refresh_route(node);
-        if matches!(
-            node.herdr_route_selection,
-            HerdrRouteSelection::Available(_)
-        ) && !self.herdr.close(&node)
-        {
-            return refuse(ReplaceRejection::ReapRefused(StopRejection::CloseRefused));
+        // A predecessor whose pane Herdr confirms gone is already reaped;
+        // a pane that exists is closed, and its failed close refuses. When
+        // Herdr cannot be read the pane may still be open: the reap is
+        // refused as retryable and the successor stays unroutable.
+        match self.herdr.pane_presence(&node) {
+            PanePresence::Absent => {}
+            PanePresence::Unknown => {
+                return refuse(ReplaceRejection::ReapRefused(
+                    StopRejection::RouteUnavailable,
+                ));
+            }
+            PanePresence::Present => {
+                if !self.herdr.close(&node) {
+                    return refuse(ReplaceRejection::ReapRefused(StopRejection::CloseRefused));
+                }
+            }
         }
         let replaced = Replaced {
             flow_id: replacement.predecessor.clone(),

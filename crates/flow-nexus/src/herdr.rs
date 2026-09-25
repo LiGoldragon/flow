@@ -24,6 +24,20 @@ pub trait ReadsHerdrRoster {
     fn route_is_available(&self, node: &FlowNode) -> bool;
 }
 
+/// What a fresh Herdr snapshot says of a Flow's recorded pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanePresence {
+    /// The snapshot shows the recorded binding: the pane is there to close.
+    Present,
+    /// The Flow has no recorded pane, or a readable snapshot shows neither
+    /// the binding nor its pane: nothing is left to close.
+    Absent,
+    /// Herdr could not be read, its snapshot carries no agent roster, or the
+    /// pane ID is shown under a different binding: the pane's fate is not
+    /// known, so it is neither closed nor counted as reaped.
+    Unknown,
+}
+
 /// Performs thin ordinary Flow operations against one revalidated Herdr pane.
 pub trait OperatesHerdrPane {
     fn prompt(
@@ -339,6 +353,36 @@ impl HerdrCli {
             && self.snapshot(route).is_some_and(|snapshot| {
                 HerdrCli::snapshot_has_binding(&snapshot, route, &node.harness_kind)
             })
+    }
+
+    /// Whether the Flow's recorded pane is still in Herdr. An unreadable
+    /// Herdr is `Unknown`, never `Absent`.
+    pub fn pane_presence(&self, node: &FlowNode) -> PanePresence {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return PanePresence::Absent;
+        };
+        let Some(snapshot) = self.snapshot(route) else {
+            return PanePresence::Unknown;
+        };
+        let Some(agents) = snapshot
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return PanePresence::Unknown;
+        };
+        if agents
+            .iter()
+            .any(|agent| HerdrCli::agent_matches_binding(agent, route, &node.harness_kind))
+        {
+            return PanePresence::Present;
+        }
+        if agents.iter().any(|agent| {
+            agent.get("pane_id").and_then(serde_json::Value::as_str)
+                == Some(route.herdr_pane_id.as_str())
+        }) {
+            return PanePresence::Unknown;
+        }
+        PanePresence::Absent
     }
 
     pub fn refresh_route(&self, mut node: FlowNode) -> FlowNode {

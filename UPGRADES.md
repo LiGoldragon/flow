@@ -1,3 +1,12 @@
+# Flow 0.10.3
+
+A patch release with no wire or storage change. `Replace` tells an unreadable
+Herdr from an absent pane. A failed or roster-less snapshot of the
+predecessor's session, or its pane ID shown under another binding, refuses the
+reap as `ReapRefused.RouteUnavailable` (retryable, nothing closed, successor
+held); only a readable snapshot without the pane counts as reaped. 0.10.1
+counted a failed snapshot as reaped and could leave the old pane open.
+
 # Flow 0.10.2
 
 The Claude first prompt becomes one line; no wire, storage or argv change.

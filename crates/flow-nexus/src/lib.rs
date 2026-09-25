@@ -1739,6 +1739,24 @@ mod tests {
             self.herdr_for_replacement_showing(close_status, Vec::new())
         }
 
+        /// The replacement stand-in with the predecessor's Herdr session
+        /// unreachable: its snapshot fails, while the successor's session
+        /// still answers. Any close is logged.
+        fn herdr_unreachable_for_predecessor(&self) -> PathBuf {
+            let log = self.herdr_for_replacement(0);
+            let body = fs::read_to_string(&self.snapshot_program).expect("Herdr fixture");
+            let body = body.replacen(
+                "case \"$*\" in\n",
+                "case \"$*\" in\n  \"--session messaging-build api snapshot\") echo 'herdr: server unreachable' >&2; exit 1 ;;\n",
+                1,
+            );
+            FixtureExecutable {
+                path: self.snapshot_program.clone(),
+            }
+            .install(&body);
+            log
+        }
+
         fn herdr_for_replacement_showing(
             &self,
             close_status: i32,
@@ -2075,6 +2093,50 @@ mod tests {
             Response::Replaced(replaced) if replaced.flow_id == "fac697"
         ));
         assert!(!fixture.routable("fac697"));
+        assert!(fixture.routable("908786"));
+    }
+
+    #[test]
+    fn an_unreachable_herdr_refuses_the_reap_instead_of_counting_it_done() {
+        let fixture = NexusFixture::new();
+        fixture.herdr_for_replacement(0);
+        fixture.register_predecessor("fac697");
+        let mut launch = fixture.staged_launch("unreachable-request", Some("fac697"));
+        launch.stage_to_ambiguity(&fixture.nexus);
+        launch.write_receipt();
+
+        let calls = fixture.herdr_unreachable_for_predecessor();
+        let refused = Response::ReplaceRejected(signal_flow::ReplaceRejection::ReapRefused(
+            signal_flow::StopRejection::RouteUnavailable,
+        ));
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Replace(launch.request())),
+            refused,
+            "a failed snapshot is not an absent pane"
+        );
+        let logged = fs::read_to_string(&calls).expect("Herdr call log");
+        assert!(logged.contains("api snapshot"), "{logged}");
+        assert!(!logged.contains("pane close"), "{logged}");
+        assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
+        assert!(!fixture.routable("908786"));
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("unreachable-request".into())),
+            refused
+        );
+
+        // Herdr answers again and shows the pane: the retry closes it.
+        let calls = fixture.herdr_for_replacement(0);
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::Replace(launch.request())),
+            Response::Replaced(replaced) if replaced.flow_id == "fac697"
+        ));
+        assert!(
+            fs::read_to_string(calls)
+                .expect("Herdr call log")
+                .contains("pane close")
+        );
         assert!(fixture.routable("908786"));
     }
 

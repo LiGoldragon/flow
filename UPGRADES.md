@@ -1,3 +1,22 @@
+# Flow 0.10.2
+
+The Claude first prompt becomes one line; no wire, storage or argv change.
+
+- A Claude first prompt is one line of at most 800 characters with no line
+  break: up to five stacked `/name` commands in profile order, then one
+  sentence naming the system-prompt bundle to read, any skills past the fifth
+  for the Skill tool, the goal and any source paths, then the receipt request.
+  The multi-line `# Flow launch` block is gone from Claude's prompt; it stays
+  for Codex. Claude Code wraps a longer line, or four or more lines, as pasted
+  content, and a wrapped block expands no command.
+- A profile whose Claude line would break or pass 800 characters is refused
+  at composition (`ClaudeFirstLineBroken`, `ClaudeFirstLineTooLong`), which
+  Start answers as `CompositionRefused`.
+- The observer refuses a Claude first turn that arrived as pasted content or
+  as plain text with no stacked command loaded. A 0.10.1 journaled Claude
+  attempt no longer matches the observer's footer; let it settle before
+  upgrading.
+
 # Flow 0.10.1
 
 A patch release with no wire or storage change. `Replace` now treats a

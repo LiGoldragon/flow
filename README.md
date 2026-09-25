@@ -114,14 +114,23 @@ keeps its stock base instructions; the main Flow's system-prompt bundle text
 opens that one text, above the `$name` lines, and native Codex descendants
 never receive it. For
 Claude, it resolves the ordered enterprise, personal, and project catalogs and
-journals the same typed selection; the prompt opens with up to five
-space-separated `/<skill>` commands in the profile's order, because Claude
-reads commands only at the head of a block and loads at most five stacked
-ones, and asks for any further skills through the Skill tool. The observer
-requires one command record and one harness expansion per stacked command,
-each carrying the same argument, then native Skill tool calls, successful
-results, and expansion evidence for the rest, before accepting the target
-receipt. Skill bodies are not pasted into the composed first prompt.
+journals the same typed selection. The Claude prompt is one line of at most
+800 characters with no line break, because Claude Code wraps a longer line, or
+any submission of four or more lines, as pasted content, and a wrapped block
+expands no command. The line opens with up to five space-separated
+`/<skill>` commands in the profile's order, because Claude reads commands only
+at the head of a block and loads at most five stacked ones. One instruction
+sentence follows: read the system-prompt bundle at its path, load any further
+skills through the Skill tool in order, then the goal and any source paths,
+then the receipt request. Role, model, effort and remote control reach Claude
+through its argv and the bundle, not the line. A profile whose line would
+break or pass 800 characters is refused (`CompositionRefused`), never
+truncated. The observer requires one command record and one harness expansion
+per stacked command, each carrying the same argument, then native Skill tool
+calls, successful results, and expansion evidence for the rest, before
+accepting the target receipt; a first turn wrapped as pasted content, or
+recorded as plain text with no command loaded, is refused. Skill bodies are
+not pasted into the composed first prompt.
 
 After the Flow ID is claimed and registered, and before any prompt, Start
 sets the canonical native title, `<Aspect>V2.{ <Model> <FlowId> }` (for

@@ -8,7 +8,7 @@
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
 use crate::codex::NamesBoundCodexThread;
 use crate::composition::{
-    ClaudeCommandStack, LaunchReceipt, NamesRemoteControl, ValidatesComposedPrompt,
+    ClaudeCommandStack, ClaudeFirstLine, LaunchReceipt, NamesRemoteControl, ValidatesComposedPrompt,
 };
 use crate::title::NativeTitle;
 use sha2::{Digest, Sha256};
@@ -812,11 +812,16 @@ impl HerdrCli {
         ))
     }
 
+    /// Whether `text` is the composed first prompt of the intent: its body
+    /// hash under the harness footer, and for Claude one line within the
+    /// limit, the only shape Claude Code types without a paste wrap.
     fn prompt_text_matches_intent(text: &str, intent: &PromptDeliveryIntent) -> bool {
-        text.strip_suffix(&LaunchReceipt::footer())
-            .is_some_and(|body| {
-                format!("{:x}", Sha256::digest(body.as_bytes())) == intent.prompt_sha256
-            })
+        (intent.harness_kind != HarnessKind::Claude || ClaudeFirstLine::fits(text))
+            && text
+                .strip_suffix(&LaunchReceipt::footer_for(&intent.harness_kind))
+                .is_some_and(|body| {
+                    format!("{:x}", Sha256::digest(body.as_bytes())) == intent.prompt_sha256
+                })
     }
 
     /// Reads one command record of a Claude user turn: the harness records
@@ -1548,6 +1553,20 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                     claude_commands_loaded += 1;
                                     claude_command_expansion_pending = true;
                                 }
+                                None if text.contains("<pasted_content") => {
+                                    // A wrapped block expands no command.
+                                    return Err(
+                                        "native Claude first turn arrived as pasted content".into(),
+                                    );
+                                }
+                                None if claude_stack > 0 && !input_verified => {
+                                    // The one line opens with its stacked
+                                    // commands; a plain record of it means
+                                    // none of them loaded.
+                                    return Err(
+                                        "native Claude first turn loaded no stacked command".into(),
+                                    );
+                                }
                                 None => {
                                     if input_verified
                                         || !Self::prompt_text_matches_intent(text, durable_intent)
@@ -1757,6 +1776,7 @@ mod tests {
     const PROMPT_HASH: &str = "0cb26cfe0a554e4780aa5af20cafbe3ae3259f823438576026a4ffff58371a67";
 
     fn launch(harness_kind: HarnessKind) -> ComposedLaunch {
+        let footer = LaunchReceipt::footer_for(&harness_kind);
         ComposedLaunch {
             launch_profile: LaunchProfile {
                 launch_request_id: "launch-42".into(),
@@ -1776,7 +1796,7 @@ mod tests {
             first_prompt_payload: FirstPromptPayload {
                 first_prompt_body: "composed body".into(),
                 prompt_sha256: PROMPT_HASH.into(),
-                first_prompt_text: format!("composed body{}", LaunchReceipt::footer()),
+                first_prompt_text: format!("composed body{footer}"),
             },
             target_receipt_request: TargetReceiptRequest {
                 launch_request_id: "launch-42".into(),
@@ -2391,12 +2411,21 @@ printf '%s\n' 123456
         ];
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.skill_name_vector = names.map(String::from).to_vec();
-        let body = "/spirit /psyche /main-flow /behavior /herdr # Flow launch\n\nThen load through the Skill tool, in this order: messaging, datom\n\ndo the work";
+        let body = "/spirit /psyche /main-flow /behavior /herdr Read /tmp/flow-system-prompt.md for your launch mode, load messaging, datom through the Skill tool in this order, then: do the work";
         let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
         launch.first_prompt_payload.first_prompt_body = body.into();
         launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
         launch.first_prompt_payload.first_prompt_text =
-            format!("{body}{}", LaunchReceipt::footer());
+            format!("{body}{}", LaunchReceipt::footer_for(&HarnessKind::Claude));
+        assert!(!launch.first_prompt_payload.first_prompt_text.contains('\n'));
+        assert!(
+            launch
+                .first_prompt_payload
+                .first_prompt_text
+                .chars()
+                .count()
+                <= 800
+        );
         launch.target_receipt_request.prompt_sha256 = body_hash;
         let agent_name = HerdrCli::launch_agent_name(&launch);
         let (root, adapter) = fixture_herdr(
@@ -2425,7 +2454,7 @@ printf '%s\n' 123456
         let calls = fs::read_to_string(root.path().join("calls")).expect("launch calls");
         let prompt_bearing = calls
             .lines()
-            .filter(|line| line.contains("agent prompt") || line.contains("# Flow launch"))
+            .filter(|line| line.contains("agent prompt") || line.contains("for your launch mode"))
             .collect::<Vec<_>>();
         assert_eq!(prompt_bearing.len(), 1, "{calls}");
         assert!(prompt_bearing[0].contains("agent prompt"));
@@ -2444,9 +2473,9 @@ printf '%s\n' 123456
             "{}{}",
             body.strip_prefix("/spirit /psyche /main-flow /behavior /herdr ")
                 .unwrap(),
-            LaunchReceipt::footer()
+            LaunchReceipt::footer_for(&HarnessKind::Claude)
         );
-        let original = format!("{body}{}", LaunchReceipt::footer());
+        let original = format!("{body}{}", LaunchReceipt::footer_for(&HarnessKind::Claude));
         let command = |name: &str| {
             let mut row = serde_json::json!({"type":"user","sessionId":native_session,"message":{"role":"user",
                 "content":format!("<command-message>{name}</command-message>\n<command-name>/{name}</command-name>\n<command-args>{argument}</command-args>")}});
@@ -2545,6 +2574,30 @@ printf '%s\n' 123456
                 .observe_native_target_receipt(&intent)
                 .unwrap_err()
                 .contains("stacked command differs")
+        );
+
+        // The line arrived wrapped as pasted content: no command expanded.
+        let mut pasted = vec![serde_json::json!({"type":"user","sessionId":native_session,
+            "message":{"role":"user","content":format!("<pasted_content id=\"ab12\">\n{original}\n</pasted_content>")}})];
+        pasted.extend(rows[10..].iter().cloned());
+        write(&pasted);
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("arrived as pasted content")
+        );
+
+        // The line arrived as plain text: its commands stayed literal.
+        let mut literal = vec![serde_json::json!({"type":"user","sessionId":native_session,
+            "message":{"role":"user","content":original.clone()}})];
+        literal.extend(rows[10..].iter().cloned());
+        write(&literal);
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("loaded no stacked command")
         );
 
         // Only four commands loaded, then the Skill tool.

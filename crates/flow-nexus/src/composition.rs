@@ -29,6 +29,15 @@ pub enum CompositionError {
     InvalidSourceHash(String),
     #[error("launch source hash differs: {0}")]
     SourceHashMismatch(String),
+    /// A Claude first prompt must stay one line: Claude Code wraps a
+    /// submission of four or more lines as pasted content, and a wrapped
+    /// block expands no command.
+    #[error("Claude first prompt would carry a line break")]
+    ClaudeFirstLineBroken,
+    /// A Claude first prompt must stay within [`ClaudeFirstLine::LIMIT`]:
+    /// Claude Code wraps a longer single line as pasted content.
+    #[error("Claude first prompt would be {0} characters, past the one-line limit of 800")]
+    ClaudeFirstLineTooLong(usize),
 }
 
 pub struct LaunchComposer {
@@ -42,9 +51,16 @@ pub trait OpensLaunchComposer {
 /// Composes one first prompt from a profile and a configured source root.
 ///
 /// The prompt is the only prompt a fresh Flow receives, and it opens with the
-/// harness's native skill invocation: Claude reads one `/name` command at the
-/// head of a block, Codex reads `$name` mentions beside its typed skill inputs.
-/// Sources are named by absolute path, never inlined.
+/// harness's native skill invocation: Claude reads stacked `/name` commands at
+/// the head of a block, Codex reads `$name` mentions beside its typed skill
+/// inputs. Sources are named by absolute path, never inlined.
+///
+/// A Claude prompt is one line of at most [`ClaudeFirstLine::LIMIT`]
+/// characters: the stacked commands in profile order, then one instruction
+/// sentence naming the system-prompt bundle to read, any skills past the
+/// stack, the goal and any sources, then the receipt request. Everything else
+/// lives in the bundle and the skills. A profile whose line would break or
+/// run past the limit is refused, never truncated.
 ///
 /// `prompt_sha256` is SHA-256 over the exact UTF-8 bytes in
 /// `first_prompt_body`; it stays in the store and the observer and never
@@ -69,12 +85,42 @@ pub struct LaunchReceipt;
 impl LaunchReceipt {
     pub const MARKER: &'static str = "FLOW_LAUNCH_RECEIPT_V2";
 
-    /// The fixed footer that follows every composed body.
-    pub fn footer() -> String {
-        format!(
-            "\n\nWhen every skill has loaded, reply once with exactly this line and nothing else:\n{}",
-            Self::MARKER
-        )
+    /// The fixed footer that follows every composed body of the harness.
+    /// Claude's footer continues its one line; Codex's is its own paragraph.
+    pub fn footer_for(harness: &HarnessKind) -> String {
+        match harness {
+            HarnessKind::Claude => format!(
+                " When every skill has loaded, reply once with exactly {} and nothing else.",
+                Self::MARKER
+            ),
+            HarnessKind::Codex => format!(
+                "\n\nWhen every skill has loaded, reply once with exactly this line and nothing else:\n{}",
+                Self::MARKER
+            ),
+        }
+    }
+}
+
+/// The one line a Claude first prompt must be.
+///
+/// Claude Code wraps a submission as `<pasted_content>` when it is longer
+/// than 800 characters on one line, or when it has four or more lines, and a
+/// wrapped block expands no command (flows/e51411 pasted-content-threshold:
+/// 800 stayed plain, 801 wrapped). Length is counted in UTF-16 code units,
+/// the terminal input's own string length, which is never less than the
+/// character count.
+pub struct ClaudeFirstLine;
+
+impl ClaudeFirstLine {
+    pub const LIMIT: usize = 800;
+
+    pub fn length(text: &str) -> usize {
+        text.encode_utf16().count()
+    }
+
+    /// Whether `text` can be typed as one Claude submission unwrapped.
+    pub fn fits(text: &str) -> bool {
+        !text.contains(['\r', '\n']) && Self::length(text) <= Self::LIMIT
     }
 }
 
@@ -187,6 +233,7 @@ trait ReadsSystemPromptBundle {
 
 trait RendersLaunchProfile {
     fn render_native_head(&self, profile: &LaunchProfile, bundle: Option<&str>) -> String;
+    fn render_claude_line(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String;
     fn render_body(
         &self,
         profile: &LaunchProfile,
@@ -226,12 +273,15 @@ impl ValidatesComposedPrompt for ComposedLaunch {
         {
             return false;
         }
-        self.first_prompt_payload.first_prompt_text
+        let text = &self.first_prompt_payload.first_prompt_text;
+        let harness = &self.launch_profile.harness_kind;
+        *text
             == format!(
                 "{}{}",
                 self.first_prompt_payload.first_prompt_body,
-                LaunchReceipt::footer()
+                LaunchReceipt::footer_for(harness)
             )
+            && (*harness != HarnessKind::Claude || ClaudeFirstLine::fits(text))
     }
 }
 
@@ -407,16 +457,47 @@ impl RendersLaunchProfile for LaunchComposer {
         }
     }
 
+    /// Claude's one line: the stacked commands, then one sentence naming
+    /// the bundle to read, the skills past the stack, the goal, and the
+    /// sources. Role, model, effort and remote control reach Claude through
+    /// its argv and the bundle, and stay in the store.
+    fn render_claude_line(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String {
+        let mut line = self.render_native_head(profile, None);
+        line.push_str(&format!(
+            "Read {} for your launch mode",
+            profile.system_prompt_bundle_file
+        ));
+        if profile.skill_name_vector.len() > ClaudeCommandStack::LIMIT {
+            line.push_str(&format!(
+                ", load {} through the Skill tool in this order",
+                profile.skill_name_vector[ClaudeCommandStack::LIMIT..].join(", ")
+            ));
+        }
+        line.push_str(", then: ");
+        line.push_str(&profile.instruction_prompt);
+        if !sources.is_empty() {
+            line.push_str(" Sources: ");
+            line.push_str(
+                &sources
+                    .iter()
+                    .map(|source| source.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            line.push('.');
+        }
+        line
+    }
+
     fn render_body(
         &self,
         profile: &LaunchProfile,
         bundle: Option<&str>,
         sources: &[PathBuf],
     ) -> String {
-        let harness = match profile.harness_kind {
-            HarnessKind::Codex => "Codex",
-            HarnessKind::Claude => "Claude",
-        };
+        if profile.harness_kind == HarnessKind::Claude {
+            return self.render_claude_line(profile, sources);
+        }
         let predecessor = profile.flow_id_option.as_deref().unwrap_or("none");
         let remembered = profile
             .remembered_flow_vector
@@ -426,10 +507,9 @@ impl RendersLaunchProfile for LaunchComposer {
             .join(", ");
         let mut body = self.render_native_head(profile, bundle);
         body.push_str(&format!(
-            "# Flow launch\n\nRole: {} {}\nHarness: {}\nModel: {}\nEffort: {}\nPredecessor: {}\nRemembered flows: {}\nHerdr session: {}\nRemote control: {}\n",
+            "# Flow launch\n\nRole: {} {}\nHarness: Codex\nModel: {}\nEffort: {}\nPredecessor: {}\nRemembered flows: {}\nHerdr session: {}\nRemote control: {}\n",
             profile.aspect_name(),
             profile.power_name(),
-            harness,
             profile.model_name,
             profile.effort,
             predecessor,
@@ -437,14 +517,6 @@ impl RendersLaunchProfile for LaunchComposer {
             profile.herdr_session_name,
             profile.remote_control_record(),
         ));
-        if profile.harness_kind == HarnessKind::Claude
-            && profile.skill_name_vector.len() > ClaudeCommandStack::LIMIT
-        {
-            body.push_str(&format!(
-                "Then load through the Skill tool, in this order: {}\n",
-                profile.skill_name_vector[ClaudeCommandStack::LIMIT..].join(", ")
-            ));
-        }
         body.push('\n');
         body.push_str(&profile.instruction_prompt);
         if !sources.is_empty() {
@@ -476,7 +548,20 @@ impl ComposesLaunch for LaunchComposer {
             launch_request_id: profile.launch_request_id.clone(),
             prompt_sha256: prompt_sha256.clone(),
         };
-        let first_prompt_text = format!("{}{}", body, LaunchReceipt::footer());
+        let first_prompt_text = format!(
+            "{}{}",
+            body,
+            LaunchReceipt::footer_for(&profile.harness_kind)
+        );
+        if profile.harness_kind == HarnessKind::Claude {
+            if first_prompt_text.contains(['\r', '\n']) {
+                return Err(CompositionError::ClaudeFirstLineBroken);
+            }
+            let length = ClaudeFirstLine::length(&first_prompt_text);
+            if length > ClaudeFirstLine::LIMIT {
+                return Err(CompositionError::ClaudeFirstLineTooLong(length));
+            }
+        }
         Ok(ComposedLaunch {
             launch_profile: profile.clone(),
             first_prompt_payload: FirstPromptPayload {
@@ -492,8 +577,8 @@ impl ComposesLaunch for LaunchComposer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeCommandStack, ComposesLaunch, CompositionError, LaunchComposer, NamesRemoteControl,
-        OpensLaunchComposer, ValidatesComposedPrompt,
+        ClaudeCommandStack, ClaudeFirstLine, ComposesLaunch, CompositionError, LaunchComposer,
+        NamesRemoteControl, OpensLaunchComposer, ValidatesComposedPrompt,
     };
     use signal_flow::{
         FlowAspect, HarnessKind, LaunchProfile, LaunchSource, PowerLevel, RememberedFlow,
@@ -625,9 +710,18 @@ mod tests {
         profile.harness_kind = HarnessKind::Claude;
         let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
         let body = composed.first_prompt_payload.first_prompt_body.as_str();
-        assert!(
-            body.starts_with("/spirit /main-flow # Flow launch\n\n"),
-            "{body}"
+        assert_eq!(
+            body,
+            format!(
+                "/spirit /main-flow Read {} for your launch mode, then: Carry the bounded task.",
+                profile.system_prompt_bundle_file
+            ),
+        );
+        assert_eq!(
+            composed.first_prompt_payload.first_prompt_text,
+            format!(
+                "{body} When every skill has loaded, reply once with exactly FLOW_LAUNCH_RECEIPT_V2 and nothing else."
+            )
         );
         assert_eq!(body.matches("/spirit").count(), 1);
         assert_eq!(body.matches("/main-flow").count(), 1);
@@ -655,19 +749,22 @@ mod tests {
         .to_vec();
         let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
         let body = composed.first_prompt_payload.first_prompt_body.as_str();
-        let head = body.split(" # Flow launch").next().unwrap();
+        let head = body.split(" Read ").next().unwrap();
         let commands = head.split(' ').collect::<Vec<_>>();
         assert!(commands.len() <= ClaudeCommandStack::LIMIT, "{head}");
         assert_eq!(
             commands,
             ["/spirit", "/psyche", "/main-flow", "/behavior", "/herdr"]
         );
-        assert!(body.starts_with("/spirit /psyche /main-flow /behavior /herdr # Flow launch\n"));
-        // The sixth and seventh skills arrive as text for the Skill tool,
-        // never as a sixth `/name` command.
+        assert!(body.starts_with("/spirit /psyche /main-flow /behavior /herdr Read "));
+        // The sixth and seventh skills arrive as text for the Skill tool in
+        // the same line, never as a sixth `/name` command.
         assert!(
-            body.contains("\nThen load through the Skill tool, in this order: messaging, datom\n")
+            body.contains(" for your launch mode, load messaging, datom through the Skill tool in this order, then: ")
         );
+        assert!(ClaudeFirstLine::fits(
+            &composed.first_prompt_payload.first_prompt_text
+        ));
         assert!(!body.contains("/messaging"));
         assert!(!body.contains("/datom"));
         assert!(composed.has_canonical_first_prompt());
@@ -688,11 +785,19 @@ mod tests {
                 .all(|byte| byte.is_ascii_hexdigit())
         );
         assert!(!name.contains(&profile.launch_request_id));
+        // The flag travels in the argv; the one line carries no launch
+        // record block.
         assert!(
-            composed
+            !composed
                 .first_prompt_payload
                 .first_prompt_body
-                .contains(&format!("\nRemote control: --remote-control {name}\n"))
+                .contains(&name)
+        );
+        assert!(
+            !composed
+                .first_prompt_payload
+                .first_prompt_body
+                .contains("Remote control:")
         );
         assert!(
             !composed
@@ -706,6 +811,93 @@ mod tests {
         profile.power_level = PowerLevel::UltraLow;
         assert_eq!(profile.remote_control_name(), name);
         assert!(composed.has_canonical_first_prompt());
+    }
+
+    #[test]
+    fn claude_prompt_is_one_line_of_at_most_800_characters() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("first.md"), b"first line\n\nfinal line\n").unwrap();
+        let mut profile = root.profile(vec![LaunchSource {
+            source_path: "first.md".into(),
+            source_sha256: "56061831006650848af73c1976eef98f21be2d49f7f611f4dd9eb6d845ba0b1e"
+                .into(),
+        }]);
+        profile.harness_kind = HarnessKind::Claude;
+        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let text = composed.first_prompt_payload.first_prompt_text.as_str();
+        assert!(!text.contains('\n') && !text.contains('\r'), "{text:?}");
+        assert!(text.chars().count() <= 800, "{}", text.chars().count());
+        assert!(text.contains(&format!(
+            " Sources: {}/first.md.",
+            root.path().canonicalize().unwrap().display()
+        )));
+        assert!(composed.has_canonical_first_prompt());
+    }
+
+    #[test]
+    fn claude_line_at_the_limit_is_kept_and_one_past_it_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = root.profile(vec![]);
+        profile.harness_kind = HarnessKind::Claude;
+        profile.instruction_prompt = String::new();
+        let empty = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let room = 800 - empty.first_prompt_payload.first_prompt_text.chars().count();
+        profile.instruction_prompt = "x".repeat(room);
+        let exact = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        assert_eq!(
+            exact.first_prompt_payload.first_prompt_text.chars().count(),
+            800
+        );
+        assert!(exact.has_canonical_first_prompt());
+        profile.instruction_prompt.push('x');
+        assert_eq!(
+            LaunchComposer::at(root.path()).compose(&profile),
+            Err(CompositionError::ClaudeFirstLineTooLong(801))
+        );
+    }
+
+    #[test]
+    fn claude_instruction_that_breaks_or_overruns_the_line_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = root.profile(vec![]);
+        profile.harness_kind = HarnessKind::Claude;
+        profile.instruction_prompt = "Carry the task.\nThen report.".into();
+        assert_eq!(
+            LaunchComposer::at(root.path()).compose(&profile),
+            Err(CompositionError::ClaudeFirstLineBroken)
+        );
+        profile.instruction_prompt = "Carry the bounded task. ".repeat(40);
+        assert!(matches!(
+            LaunchComposer::at(root.path()).compose(&profile),
+            Err(CompositionError::ClaudeFirstLineTooLong(length)) if length > 800
+        ));
+        // Codex has no one-line limit: the same instruction composes there.
+        profile.harness_kind = HarnessKind::Codex;
+        assert!(LaunchComposer::at(root.path()).compose(&profile).is_ok());
+    }
+
+    #[test]
+    fn claude_canonical_check_refuses_a_line_that_is_no_longer_one_line() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = root.profile(vec![]);
+        profile.harness_kind = HarnessKind::Claude;
+        let mut composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        assert!(composed.has_canonical_first_prompt());
+        profile.instruction_prompt = "x".repeat(900);
+        composed.launch_profile = profile;
+        let body = format!("/spirit /main-flow {}", "x".repeat(900));
+        composed.first_prompt_payload.first_prompt_body = body.clone();
+        let hash = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(body.as_bytes())
+        );
+        composed.first_prompt_payload.prompt_sha256 = hash.clone();
+        composed.target_receipt_request.prompt_sha256 = hash;
+        composed.first_prompt_payload.first_prompt_text = format!(
+            "{body}{}",
+            super::LaunchReceipt::footer_for(&HarnessKind::Claude)
+        );
+        assert!(!composed.has_canonical_first_prompt());
     }
 
     #[test]

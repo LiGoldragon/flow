@@ -104,14 +104,27 @@ and personal-skill roots. `CLAUDE_ENTERPRISE_SKILLS_DIR` optionally adds the
 highest-precedence Claude skill catalog. The ordinary client uses
 `FLOW_SOCKET` when set.
 
-For Codex, the Nexus resolves every ordered skill name through the bound
-app-server's `skills/list`, journals the selected absolute path and exact
-source hash, then sends the typed skill inputs and first text in one
-`turn/start` on the empty Herdr-bound thread. For Claude, it resolves the
-ordered enterprise, personal, and project catalogs, journals the same typed
-selection, and requires native Skill tool calls, successful results, and
-native expansion evidence before accepting the target receipt. Skill bodies
-are not pasted into the composed first prompt.
+A fresh Flow receives exactly one prompt. The harness starts with no
+positional prompt, and the composed first prompt opens with the native skill
+invocation. For Codex, the Nexus resolves every ordered skill name through the
+bound app-server's `skills/list`, journals the selected absolute path and
+exact source hash, then sends the typed skill inputs and one text, headed by
+`$name` lines, in one `turn/start` on the empty Herdr-bound thread. For
+Claude, it resolves the ordered enterprise, personal, and project catalogs and
+journals the same typed selection; the prompt opens with `/<first skill>`,
+because Claude reads a command only as the first token of a block, and asks
+for the remaining skills through the Skill tool. The observer requires the
+harness's command expansion for the first skill, then native Skill tool calls,
+successful results, and expansion evidence for the rest, before accepting the
+target receipt. Skill bodies are not pasted into the composed first prompt.
+
+The prompt is lean: no launch request ID, no hash, and no inlined source text.
+Sources are named by absolute path after their bytes are checked against the
+profile hash. The requested receipt is the fixed line
+`FLOW_LAUNCH_RECEIPT_V2`; the observer binds it to the launch by native
+session, transcript cursor, and the authenticated first turn, whose body
+digest stays in the store. A Claude launch is remotely controllable under the
+role name, for example `--remote-control flow-psyche-high`.
 
 The Codex adapter opens `codex app-server proxy`, then sends `initialize`,
 `thread/start`, and `turn/start`. The returned thread is owned by the running

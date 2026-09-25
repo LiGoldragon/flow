@@ -1766,10 +1766,7 @@ mod tests {
         permissions.set_mode(0o700);
         fs::set_permissions(&fixture.snapshot_program, permissions).unwrap();
 
-        let marker = format!(
-            "FLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
-            intent.launch_request_id, intent.prompt_sha256
-        );
+        let marker = crate::composition::LaunchReceipt::MARKER;
         let transcript = transcript_root.join(format!("rollout-{native_session_id}.jsonl"));
         let mut output = fs::File::create(transcript).unwrap();
         for row in [

@@ -1,3 +1,17 @@
+# Flow 0.8.0
+
+A fresh Flow now receives one prompt. The native harness starts with no
+positional startup block; the composed first prompt carries the native skill
+invocation (Claude `/name` at its head, Codex `$name` lines beside the typed
+skill inputs) and then the body.
+
+The composed prompt carries no launch request ID, hash, or inlined source
+text. The receipt line is now `FLOW_LAUNCH_RECEIPT_V2`, with no fields. A
+launch attempt journaled by 0.7.x asked for the old receipt line and cannot be
+promoted by 0.8.0; resolve or discard such attempts before upgrading. The
+Claude remote-control name is now the role, such as `flow-field-high`, instead
+of `flow-<launch request ID>`.
+
 # Flow 0.4.0
 
 Flow 0.4.0 adds the privileged `MetaBindExisting` request from

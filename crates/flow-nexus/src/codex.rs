@@ -1217,6 +1217,28 @@ mod tests {
     }
 
     #[test]
+    fn bound_first_turn_is_one_text_beside_its_typed_skills() {
+        let (mut launch, mut intent) = malformed_bound_launch();
+        launch.first_prompt_payload.first_prompt_text = "$main-flow\n$spirit\n\nbody".into();
+        intent.native_skill_selection_vector = vec![NativeSkillSelection {
+            skill_name: "spirit".into(),
+            native_skill_path: "/skills/spirit/SKILL.md".into(),
+            native_skill_sha256: "0".repeat(64),
+        }];
+        let params = CodexAdapter::bound_turn_params(&launch, &intent);
+        let input = params["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "skill");
+        assert_eq!(input[0]["name"], "spirit");
+        let texts = input
+            .iter()
+            .filter(|item| item["type"] == "text")
+            .collect::<Vec<_>>();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0]["text"], "$main-flow\n$spirit\n\nbody");
+    }
+
+    #[test]
     fn malformed_full_prompt_is_rejected_before_codex_proxy_open() {
         let (launch, intent) = malformed_bound_launch();
         assert!(matches!(

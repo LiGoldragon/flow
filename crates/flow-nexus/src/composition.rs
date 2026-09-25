@@ -39,34 +39,83 @@ pub trait OpensLaunchComposer {
     fn at(source_root: impl Into<PathBuf>) -> Self;
 }
 
-/// Composes one prompt from a profile and a configured source root.
+/// Composes one first prompt from a profile and a configured source root.
+///
+/// The prompt is the only prompt a fresh Flow receives, and it opens with the
+/// harness's native skill invocation: Claude reads one `/name` command at the
+/// head of a block, Codex reads `$name` mentions beside its typed skill inputs.
+/// Sources are named by absolute path, never inlined.
 ///
 /// `prompt_sha256` is SHA-256 over the exact UTF-8 bytes in
-/// `first_prompt_body`. `first_prompt_text` is that body followed by the
-/// deterministic target-receipt footer, whose embedded digest is therefore
-/// outside the digest preimage. The adapter sends `first_prompt_text` exactly.
+/// `first_prompt_body`; it stays in the store and the observer and never
+/// enters the prompt. `first_prompt_text` is that body followed by the fixed
+/// receipt footer, which carries a short marker and no hash or request ID. The
+/// adapter sends `first_prompt_text` exactly.
 pub trait ComposesLaunch {
     fn compose(&self, profile: &LaunchProfile) -> Result<ComposedLaunch, CompositionError>;
 }
 
-/// Verifies the exact body digest and the deterministic receipt footer before
-/// a composed prompt crosses either native harness boundary.
+/// Verifies the exact body digest and the fixed receipt footer before a
+/// composed prompt crosses either native harness boundary.
 pub trait ValidatesComposedPrompt {
     fn has_canonical_first_prompt(&self) -> bool;
+}
+
+/// The receipt a launched Flow is asked for. Its single line is bound to the
+/// Flow by native session, transcript cursor and the authenticated first
+/// turn, so the marker itself carries no identity and no hash.
+pub struct LaunchReceipt;
+
+impl LaunchReceipt {
+    pub const MARKER: &'static str = "FLOW_LAUNCH_RECEIPT_V2";
+
+    /// The fixed footer that follows every composed body.
+    pub fn footer() -> String {
+        format!(
+            "\n\nWhen every skill has loaded, reply once with exactly this line and nothing else:\n{}",
+            Self::MARKER
+        )
+    }
 }
 
 /// Names how a launched Flow stays remotely controllable. A Claude launch
 /// passes `--remote-control <name>` with this name; a Codex launch is already
 /// driven through its app-server endpoint. The launch body records the same
-/// line, so the receipt's prompt digest covers it.
+/// line. The name is the Flow's role, never a request ID or hash.
 pub trait NamesRemoteControl {
     fn remote_control_name(&self) -> String;
     fn remote_control_record(&self) -> String;
 }
 
+trait NamesRole {
+    fn aspect_name(&self) -> &'static str;
+    fn power_name(&self) -> &'static str;
+}
+
+impl NamesRole for LaunchProfile {
+    fn aspect_name(&self) -> &'static str {
+        match self.flow_aspect {
+            FlowAspect::Psyche => "Psyche",
+            FlowAspect::Mind => "Mind",
+            FlowAspect::Field => "Field",
+        }
+    }
+
+    fn power_name(&self) -> &'static str {
+        match self.power_level {
+            PowerLevel::High => "High",
+            PowerLevel::Medium => "Medium",
+            PowerLevel::Low => "Low",
+            PowerLevel::UltraLow => "Ultra Low",
+        }
+    }
+}
+
 impl NamesRemoteControl for LaunchProfile {
     fn remote_control_name(&self) -> String {
-        format!("flow-{}", self.launch_request_id)
+        format!("flow-{}-{}", self.aspect_name(), self.power_name())
+            .to_ascii_lowercase()
+            .replace(' ', "-")
     }
 
     fn remote_control_record(&self) -> String {
@@ -82,16 +131,14 @@ trait ValidatesLaunchProfile {
 }
 
 trait ReadsLaunchSource {
-    fn read(&self, source: &LaunchSource) -> Result<Vec<u8>, CompositionError>;
+    /// Verifies the source bytes against the profile hash and returns the
+    /// canonical absolute path the prompt names.
+    fn read(&self, source: &LaunchSource) -> Result<PathBuf, CompositionError>;
 }
 
 trait RendersLaunchProfile {
-    fn render_body(
-        &self,
-        profile: &LaunchProfile,
-        sources: &[Vec<u8>],
-    ) -> Result<String, CompositionError>;
-    fn render_receipt_footer(&self, request: &TargetReceiptRequest) -> String;
+    fn render_native_head(&self, profile: &LaunchProfile) -> String;
+    fn render_body(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String;
 }
 
 trait HashesPromptBody {
@@ -125,13 +172,12 @@ impl ValidatesComposedPrompt for ComposedLaunch {
         {
             return false;
         }
-        let footer = format!(
-            "\n\n## Target receipt request\n\nReply once with exactly this single line and no trailing newline:\nFLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
-            self.target_receipt_request.launch_request_id,
-            self.target_receipt_request.prompt_sha256
-        );
         self.first_prompt_payload.first_prompt_text
-            == format!("{}{}", self.first_prompt_payload.first_prompt_body, footer)
+            == format!(
+                "{}{}",
+                self.first_prompt_payload.first_prompt_body,
+                LaunchReceipt::footer()
+            )
     }
 }
 
@@ -156,8 +202,15 @@ impl ValidatesLaunchProfile for LaunchComposer {
             return Err(CompositionError::InvalidProfileField("herdr_session_name"));
         }
         let bundle = Path::new(&profile.system_prompt_bundle_file);
-        if !bundle.is_absolute() || !bundle.is_file() || fs::symlink_metadata(bundle).map(|m| m.file_type().is_symlink()).unwrap_or(true) {
-            return Err(CompositionError::InvalidProfileField("system_prompt_bundle_file"));
+        if !bundle.is_absolute()
+            || !bundle.is_file()
+            || fs::symlink_metadata(bundle)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(true)
+        {
+            return Err(CompositionError::InvalidProfileField(
+                "system_prompt_bundle_file",
+            ));
         }
         if profile.skill_name_vector.iter().any(|name| {
             name.is_empty()
@@ -198,7 +251,7 @@ impl ValidatesLaunchProfile for LaunchComposer {
 }
 
 impl ReadsLaunchSource for LaunchComposer {
-    fn read(&self, source: &LaunchSource) -> Result<Vec<u8>, CompositionError> {
+    fn read(&self, source: &LaunchSource) -> Result<PathBuf, CompositionError> {
         let relative = Path::new(&source.source_path);
         if relative.as_os_str().is_empty()
             || relative.is_absolute()
@@ -249,45 +302,50 @@ impl ReadsLaunchSource for LaunchComposer {
                 source.source_path.clone(),
             ));
         }
-        Ok(bytes)
+        Ok(canonical)
     }
 }
 
 impl RendersLaunchProfile for LaunchComposer {
-    fn render_body(
-        &self,
-        profile: &LaunchProfile,
-        sources: &[Vec<u8>],
-    ) -> Result<String, CompositionError> {
-        let aspect = match profile.flow_aspect {
-            FlowAspect::Psyche => "Psyche",
-            FlowAspect::Mind => "Mind",
-            FlowAspect::Field => "Field",
-        };
-        let power = match profile.power_level {
-            PowerLevel::High => "High",
-            PowerLevel::Medium => "Medium",
-            PowerLevel::Low => "Low",
-            PowerLevel::UltraLow => "Ultra Low",
-        };
+    fn render_native_head(&self, profile: &LaunchProfile) -> String {
+        let skills = &profile.skill_name_vector;
+        match profile.harness_kind {
+            // Claude reads a command only as the first token of the block, so
+            // the leading skill is the command and the body is its argument.
+            HarnessKind::Claude => skills
+                .first()
+                .map(|skill| format!("/{skill} "))
+                .unwrap_or_default(),
+            // The main Flow alone loads main-flow at the top of the block;
+            // native Codex descendants keep their stock base instructions.
+            HarnessKind::Codex => {
+                let mut lines = Vec::new();
+                if !skills.iter().any(|skill| skill == "main-flow") {
+                    lines.push("$main-flow".to_owned());
+                }
+                lines.extend(skills.iter().map(|skill| format!("${skill}")));
+                format!("{}\n\n", lines.join("\n"))
+            }
+        }
+    }
+
+    fn render_body(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String {
         let harness = match profile.harness_kind {
             HarnessKind::Codex => "Codex",
             HarnessKind::Claude => "Claude",
         };
         let predecessor = profile.flow_id_option.as_deref().unwrap_or("none");
-        let skills = profile.skill_name_vector.join(", ");
         let remembered = profile
             .remembered_flow_vector
             .iter()
             .map(|flow| format!("{}@{}", flow.flow_id, flow.remembering_depth))
             .collect::<Vec<_>>()
             .join(", ");
-
-        let mut body = format!(
-            "# Flow launch\n\nLaunch request: {}\nRole: {} {}\nHarness: {}\nModel: {}\nEffort: {}\nPredecessor: {}\nRemembered flows: {}\nHerdr session: {}\nRemote control: {}\nLoadable skills, in required native-load order: {}\n\nBefore replying, load every named skill through the harness native skill interface in exactly this order. Do not paste skill bodies into the prompt. Emit the requested launch receipt only after every native skill load succeeds.\n\n{}",
-            profile.launch_request_id,
-            aspect,
-            power,
+        let mut body = self.render_native_head(profile);
+        body.push_str(&format!(
+            "# Flow launch\n\nRole: {} {}\nHarness: {}\nModel: {}\nEffort: {}\nPredecessor: {}\nRemembered flows: {}\nHerdr session: {}\nRemote control: {}\n",
+            profile.aspect_name(),
+            profile.power_name(),
             harness,
             profile.model_name,
             profile.effort,
@@ -295,25 +353,32 @@ impl RendersLaunchProfile for LaunchComposer {
             remembered,
             profile.herdr_session_name,
             profile.remote_control_record(),
-            skills,
-            profile.instruction_prompt,
-        );
-        for (source, bytes) in profile.launch_source_vector.iter().zip(sources) {
-            let text = std::str::from_utf8(bytes)
-                .map_err(|_| CompositionError::NonUtf8Source(source.source_path.clone()))?;
-            body.push_str("\n\n## Source: `");
-            body.push_str(&source.source_path);
-            body.push_str("`\n\n");
-            body.push_str(text);
+        ));
+        match profile.harness_kind {
+            HarnessKind::Claude if profile.skill_name_vector.len() > 1 => {
+                body.push_str(&format!(
+                    "Then load through the Skill tool, in this order: {}\n",
+                    profile.skill_name_vector[1..].join(", ")
+                ));
+            }
+            HarnessKind::Codex => {
+                body.push_str(&format!(
+                    "System prompt: read {}\n",
+                    profile.system_prompt_bundle_file
+                ));
+            }
+            HarnessKind::Claude => {}
         }
-        Ok(body)
-    }
-
-    fn render_receipt_footer(&self, request: &TargetReceiptRequest) -> String {
-        format!(
-            "\n\n## Target receipt request\n\nReply once with exactly this single line and no trailing newline:\nFLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
-            request.launch_request_id, request.prompt_sha256
-        )
+        body.push_str("\n");
+        body.push_str(&profile.instruction_prompt);
+        if !sources.is_empty() {
+            body.push_str("\n\nSources:");
+            for source in sources {
+                body.push_str("\n- ");
+                body.push_str(&source.to_string_lossy());
+            }
+        }
+        body
     }
 }
 
@@ -325,17 +390,13 @@ impl ComposesLaunch for LaunchComposer {
             .iter()
             .map(|source| self.read(source))
             .collect::<Result<Vec<_>, _>>()?;
-        let body = self.render_body(profile, &sources)?;
+        let body = self.render_body(profile, &sources);
         let prompt_sha256 = self.sha256(body.as_bytes());
         let target_receipt_request = TargetReceiptRequest {
             launch_request_id: profile.launch_request_id.clone(),
             prompt_sha256: prompt_sha256.clone(),
         };
-        let first_prompt_text = format!(
-            "{}{}",
-            body,
-            self.render_receipt_footer(&target_receipt_request)
-        );
+        let first_prompt_text = format!("{}{}", body, LaunchReceipt::footer());
         Ok(ComposedLaunch {
             launch_profile: profile.clone(),
             first_prompt_payload: FirstPromptPayload {
@@ -351,7 +412,7 @@ impl ComposesLaunch for LaunchComposer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposesLaunch, CompositionError, LaunchComposer, OpensLaunchComposer,
+        ComposesLaunch, CompositionError, LaunchComposer, NamesRemoteControl, OpensLaunchComposer,
         ValidatesComposedPrompt,
     };
     use signal_flow::{
@@ -388,8 +449,19 @@ mod tests {
         }
     }
 
+    trait FindsLongHexRun {
+        fn has_long_hex_run(&self) -> bool;
+    }
+
+    impl FindsLongHexRun for str {
+        fn has_long_hex_run(&self) -> bool {
+            self.split(|character: char| !character.is_ascii_hexdigit())
+                .any(|run| run.len() >= 16)
+        }
+    }
+
     #[test]
-    fn preserves_exact_source_bytes_and_declared_order() {
+    fn codex_prompt_names_sources_by_path_and_opens_with_native_skills() {
         let root = tempfile::tempdir().unwrap();
         let first = b"first line\n\nfinal line\n";
         let second = b"second source has no trailing newline";
@@ -409,47 +481,76 @@ mod tests {
         ]);
 
         let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
-        let expected = concat!(
-            "# Flow launch\n\n",
-            "Launch request: launch-42\n",
-            "Role: Field High\n",
-            "Harness: Codex\n",
-            "Model: gpt-6-astra\n",
-            "Effort: medium\n",
-            "Predecessor: 1b8ac0\n",
-            "Remembered flows: 836818@1\n",
-            "Herdr session: messaging-build\n",
-            "Remote control: app-server endpoint\n",
-            "Loadable skills, in required native-load order: spirit, main-flow\n\n",
-            "Before replying, load every named skill through the harness native skill interface in exactly this order. Do not paste skill bodies into the prompt. Emit the requested launch receipt only after every native skill load succeeds.\n\n",
-            "Carry the bounded task.",
-            "\n\n## Source: `first.md`\n\n",
-            "first line\n\nfinal line\n",
-            "\n\n## Source: `second.md`\n\n",
-            "second source has no trailing newline"
+        let canonical = root.path().canonicalize().unwrap();
+        let expected = format!(
+            concat!(
+                "$spirit\n",
+                "$main-flow\n\n",
+                "# Flow launch\n\n",
+                "Role: Field High\n",
+                "Harness: Codex\n",
+                "Model: gpt-6-astra\n",
+                "Effort: medium\n",
+                "Predecessor: 1b8ac0\n",
+                "Remembered flows: 836818@1\n",
+                "Herdr session: messaging-build\n",
+                "Remote control: app-server endpoint\n",
+                "System prompt: read {bundle}\n\n",
+                "Carry the bounded task.\n\n",
+                "Sources:\n",
+                "- {root}/first.md\n",
+                "- {root}/second.md"
+            ),
+            bundle = profile.system_prompt_bundle_file,
+            root = canonical.display(),
         );
         assert_eq!(composed.first_prompt_payload.first_prompt_body, expected);
         assert_eq!(
-            composed.first_prompt_payload.prompt_sha256,
-            "b383024f19daee8f9170c1c894ca749ebd566996f207888115fd7b426948e5f9"
+            composed.first_prompt_payload.first_prompt_text,
+            format!(
+                "{expected}\n\nWhen every skill has loaded, reply once with exactly this line and nothing else:\nFLOW_LAUNCH_RECEIPT_V2"
+            )
         );
-        assert!(
-            composed
-                .first_prompt_payload
-                .first_prompt_text
-                .starts_with(expected)
-        );
-        assert!(composed
-            .first_prompt_payload
-            .first_prompt_text
-            .ends_with(&format!(
-                "## Target receipt request\n\nReply once with exactly this single line and no trailing newline:\nFLOW_LAUNCH_RECEIPT_V1 launch_request_id=launch-42 prompt_body_sha256={}",
-                composed.first_prompt_payload.prompt_sha256
-            )));
         assert_eq!(
             composed.target_receipt_request.prompt_sha256,
             composed.first_prompt_payload.prompt_sha256
         );
+        assert!(composed.has_canonical_first_prompt());
+    }
+
+    #[test]
+    fn composed_prompt_carries_no_hash_request_id_or_source_text() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("first.md"), b"first line\n\nfinal line\n").unwrap();
+        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+            let mut profile = root.profile(vec![LaunchSource {
+                source_path: "first.md".into(),
+                source_sha256: "56061831006650848af73c1976eef98f21be2d49f7f611f4dd9eb6d845ba0b1e"
+                    .into(),
+            }]);
+            profile.harness_kind = harness;
+            let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+            let text = composed.first_prompt_payload.first_prompt_text.as_str();
+            assert!(!text.has_long_hex_run(), "{text}");
+            assert!(!text.contains(&profile.launch_request_id), "{text}");
+            assert!(!text.contains(&composed.first_prompt_payload.prompt_sha256));
+            assert!(!text.contains("final line"));
+            assert_eq!(composed.first_prompt_payload.prompt_sha256.len(), 64);
+        }
+    }
+
+    #[test]
+    fn claude_prompt_opens_with_its_leading_skill_command() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = root.profile(vec![]);
+        profile.harness_kind = HarnessKind::Claude;
+        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        let body = composed.first_prompt_payload.first_prompt_body.as_str();
+        assert!(body.starts_with("/spirit # Flow launch\n\n"), "{body}");
+        assert_eq!(body.matches("/spirit").count(), 1);
+        assert!(!body.contains("$spirit"));
+        assert!(body.contains("\nThen load through the Skill tool, in this order: main-flow\n"));
+        assert!(!body.contains("System prompt: read"));
         assert!(composed.has_canonical_first_prompt());
     }
 
@@ -459,10 +560,14 @@ mod tests {
         let mut profile = root.profile(vec![]);
         profile.harness_kind = HarnessKind::Claude;
         let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
-        assert!(composed.first_prompt_payload.first_prompt_body.contains(&format!(
-            "\nRemote control: --remote-control flow-{}\n",
-            profile.launch_request_id
-        )));
+        assert!(
+            composed
+                .first_prompt_payload
+                .first_prompt_body
+                .contains("\nRemote control: --remote-control flow-field-high\n")
+        );
+        profile.power_level = PowerLevel::UltraLow;
+        assert_eq!(profile.remote_control_name(), "flow-field-ultra-low");
         assert!(composed.has_canonical_first_prompt());
     }
 
@@ -530,14 +635,19 @@ mod tests {
                 .first_prompt_text
                 .contains("<skill>")
         );
+    }
+
+    #[test]
+    fn codex_head_adds_main_flow_when_the_profile_omits_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = root.profile(vec![]);
+        profile.skill_name_vector = vec!["spirit".into()];
+        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
         assert!(
             composed
                 .first_prompt_payload
                 .first_prompt_body
-                .contains("Loadable skills, in required native-load order: spirit, main-flow")
+                .starts_with("$main-flow\n$spirit\n\n# Flow launch\n")
         );
-        assert!(composed.first_prompt_payload.first_prompt_body.contains(
-            "Emit the requested launch receipt only after every native skill load succeeds."
-        ));
     }
 }

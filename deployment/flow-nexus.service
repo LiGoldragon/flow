@@ -1,10 +1,17 @@
 [Unit]
 Description=Flow Nexus
+# Codex starts need the app-server control socket, but the Nexus itself
+# starts and serves without it.
+Wants=codex-remote-control.service
 After=codex-remote-control.service
-Requires=codex-remote-control.service
 
 [Service]
 Type=simple
+# No configuration arguments or variables: the executable derives its
+# defaults from HOME and XDG_RUNTIME_DIR, persists them in
+# ~/.local/state/flow/flow.sema, and takes changes over the meta socket.
+# PATH only locates the herdr, codex and Codex flow client executables.
+Environment=PATH=%h/.local/bin:%h/.nix-profile/bin:/etc/profiles/per-user/%u/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/flow-nexus
 Restart=on-failure
 RestartSec=2

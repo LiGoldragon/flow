@@ -48,18 +48,15 @@ pub struct HerdrCli {
 
 impl Default for HerdrCli {
     fn default() -> Self {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| panic!("HOME must name the configured user root"));
+        let defaults = crate::store::DefaultConfiguration::from_environment();
+        let home = defaults.home.clone();
         let codex_home = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
         let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".claude"));
-        let workspace_root = std::env::var_os("FLOW_SOURCE_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| panic!("FLOW_SOURCE_ROOT must name the configured workspace root"));
+        let workspace_root = PathBuf::from(defaults.runtime_configuration().source_root);
         let flows_root = workspace_root.join("flows");
         let mut claude_skill_roots = Vec::new();
         if let Some(enterprise) = std::env::var_os("CLAUDE_ENTERPRISE_SKILLS_DIR") {
@@ -254,6 +251,21 @@ impl HerdrCli {
 
     pub fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
         self.codex_endpoints = codex_endpoints;
+        self
+    }
+
+    /// Re-roots the flows directory and the workspace skill catalog on the
+    /// configured source root.
+    pub fn with_source_root(mut self, source_root: &std::path::Path) -> Self {
+        let previous_skills = self
+            .flows_root
+            .parent()
+            .map(|root| root.join(".claude/skills"));
+        self.claude_skill_roots
+            .retain(|root| Some(root) != previous_skills.as_ref());
+        self.claude_skill_roots
+            .push(source_root.join(".claude/skills"));
+        self.flows_root = source_root.join("flows");
         self
     }
 

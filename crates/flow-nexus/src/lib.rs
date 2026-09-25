@@ -29,6 +29,8 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
+    sync::Mutex,
+    time::Duration,
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
@@ -107,6 +109,8 @@ pub struct RunningNexus {
     pub codex_endpoints: CodexEndpoints,
     pub herdr: herdr::HerdrCli,
     pub composer: LaunchComposer,
+    /// Serializes dispatch; see `dispatch_serially`.
+    pub dispatch_gate: Mutex<()>,
 }
 
 pub trait Dispatches {
@@ -665,10 +669,12 @@ impl Dispatches for RunningNexus {
 }
 
 pub trait OpensRunningNexus {
+    /// Opens the Nexus from its default configuration: the store at the
+    /// default location seeds or resumes configuration, and deployment
+    /// overrides are laid over the stored runtime configuration.
     fn open(
-        store: &Path,
-        codex_endpoints: CodexEndpoints,
-        source_root: PathBuf,
+        defaults: &store::DefaultConfiguration,
+        overrides: &store::DeploymentOverrides,
     ) -> Result<Self, store::StoreError>
     where
         Self: Sized;
@@ -676,16 +682,119 @@ pub trait OpensRunningNexus {
 
 impl OpensRunningNexus for RunningNexus {
     fn open(
-        store: &Path,
-        codex_endpoints: CodexEndpoints,
-        source_root: PathBuf,
+        defaults: &store::DefaultConfiguration,
+        overrides: &store::DeploymentOverrides,
     ) -> Result<Self, store::StoreError> {
+        let store = FlowStore::open_seeded(&defaults.store_path(), defaults)?;
+        let runtime = store.adopt_overrides(overrides)?;
+        let codex_endpoints = CodexEndpoints::from(&runtime);
+        let overlap = codex_endpoints.overlapping_models();
+        if !overlap.is_empty() {
+            eprintln!(
+                "flow-nexus: models selected by both Codex endpoints are unavailable: {overlap:?}"
+            );
+        }
+        let source_root = PathBuf::from(&runtime.source_root);
         Ok(Self {
-            store: FlowStore::open(store)?,
+            store,
             codex_endpoints: codex_endpoints.clone(),
-            herdr: herdr::HerdrCli::default().with_codex_endpoints(codex_endpoints),
+            herdr: herdr::HerdrCli::default()
+                .with_source_root(&source_root)
+                .with_codex_endpoints(codex_endpoints),
             composer: LaunchComposer::at(source_root),
+            dispatch_gate: Mutex::new(()),
         })
+    }
+}
+
+/// One accepted connection: read one frame, answer it, close. A malformed
+/// frame, an idle peer past the read timeout, or a failed write drops only
+/// this connection.
+pub struct Connection {
+    peer: UnixStream,
+}
+
+impl Connection {
+    const READ_TIMEOUT: Duration = Duration::from_secs(5);
+    const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    pub fn accepted(peer: UnixStream) -> Result<Self, String> {
+        peer.set_read_timeout(Some(Self::READ_TIMEOUT))
+            .and_then(|_| peer.set_write_timeout(Some(Self::WRITE_TIMEOUT)))
+            .map_err(|error| error.to_string())?;
+        Ok(Self { peer })
+    }
+
+    fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
+        let query = Frame::read_query(&mut self.peer)?;
+        let response = nexus.dispatch_serially(query);
+        Frame::write_response(&mut self.peer, &response)
+    }
+
+    fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
+        let query = Frame::read_meta_query(&mut self.peer)?;
+        let response = nexus.dispatch_meta_serially(query);
+        Frame::write_meta_response(&mut self.peer, &response)
+    }
+}
+
+/// Binds a socket and serves each connection on its own thread.
+pub trait ListensOnSocket {
+    fn listen(
+        &self,
+        socket: &Path,
+        surface: &str,
+        serve: fn(Connection, &Self) -> Result<(), String>,
+    ) -> Result<(), String>
+    where
+        Self: Sync + Sized,
+    {
+        let _ = fs::remove_file(socket);
+        let listener = UnixListener::bind(socket).map_err(|error| error.to_string())?;
+        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+        std::thread::scope(|scope| {
+            for peer in listener.incoming() {
+                let connection = match peer
+                    .map_err(|error| error.to_string())
+                    .and_then(Connection::accepted)
+                {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        eprintln!("flow-nexus: {surface} accept failed: {error}");
+                        continue;
+                    }
+                };
+                scope.spawn(move || {
+                    if let Err(error) = serve(connection, self) {
+                        eprintln!("flow-nexus: {surface} connection dropped: {error}");
+                    }
+                });
+            }
+        });
+        Err(format!("{surface} listener closed"))
+    }
+}
+
+impl ListensOnSocket for RunningNexus {}
+
+impl RunningNexus {
+    /// Store transitions are read-modify-write; one dispatch runs at a time
+    /// across both sockets while frames are read concurrently.
+    fn dispatch_serially(&self, query: Query) -> Response {
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.dispatch(query)
+    }
+
+    fn dispatch_meta_serially(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.dispatch_meta(query)
     }
 }
 
@@ -695,16 +804,7 @@ pub trait ServesOrdinary {
 
 impl ServesOrdinary for RunningNexus {
     fn serve_ordinary(&self, socket: &Path) -> Result<(), String> {
-        let _ = fs::remove_file(socket);
-        let listener = UnixListener::bind(socket).map_err(|error| error.to_string())?;
-        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-        loop {
-            let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
-            let query = Frame::read_query(&mut peer)?;
-            let response = self.dispatch(query);
-            Frame::write_response(&mut peer, &response)?;
-        }
+        self.listen(socket, "ordinary", Connection::serve_ordinary)
     }
 }
 
@@ -714,15 +814,7 @@ pub trait ServesMeta {
 
 impl ServesMeta for RunningNexus {
     fn serve_meta(&self, socket: &Path) -> Result<(), String> {
-        let _ = fs::remove_file(socket);
-        let listener = UnixListener::bind(socket).map_err(|error| error.to_string())?;
-        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-        loop {
-            let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
-            let reply = self.dispatch_meta(Frame::read_meta_query(&mut peer)?);
-            Frame::write_meta_response(&mut peer, &reply)?;
-        }
+        self.listen(socket, "meta", Connection::serve_meta)
     }
 }
 
@@ -911,6 +1003,7 @@ mod tests {
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
                     .with_codex_endpoints(codex_endpoints),
                 composer: LaunchComposer::at(directory.path().to_path_buf()),
+                dispatch_gate: std::sync::Mutex::new(()),
             };
             Self {
                 directory,
@@ -1027,6 +1120,44 @@ mod tests {
                 .expect("Herdr operation fixture executable");
             log
         }
+    }
+
+    #[test]
+    fn a_malformed_frame_drops_only_its_connection() {
+        use super::{Frame, ServesOrdinary};
+        use std::{io::Write, os::unix::net::UnixStream};
+        let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+        let socket = fixture.directory.path().join("ordinary.sock");
+        let served = socket.clone();
+        std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
+        let connect = || {
+            for _ in 0..200 {
+                if let Ok(peer) = UnixStream::connect(&socket) {
+                    peer.set_read_timeout(Some(Duration::from_secs(2)))
+                        .expect("test peer timeout");
+                    return peer;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("ordinary socket never listened")
+        };
+
+        let mut idle = connect();
+        let mut garbage = connect();
+        garbage
+            .write_all(&16u32.to_be_bytes())
+            .and_then(|_| garbage.write_all(&[0xff; 16]))
+            .expect("garbage frame written");
+        assert!(Frame::read_response(&mut garbage).is_err());
+
+        let mut peer = connect();
+        Frame::write_query(&mut peer, &Query::List(signal_flow::ListRequest {}))
+            .expect("list written");
+        assert!(matches!(
+            Frame::read_response(&mut peer).expect("list answered"),
+            Response::Listed(_)
+        ));
+        idle.write_all(&[0]).expect("idle peer still open");
     }
 
     #[test]

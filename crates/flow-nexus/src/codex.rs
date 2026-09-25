@@ -3,6 +3,7 @@
 //! JSON-RPC conversation; it never falls back to a direct Unix-socket client.
 
 use crate::composition::ValidatesComposedPrompt;
+use crate::store::{CodexEndpointConfiguration, RuntimeConfiguration};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -53,6 +54,17 @@ pub struct CodexEndpoints {
 }
 
 impl CodexEndpoints {
+    const APP_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Models selected by both endpoints select neither.
+    pub fn overlapping_models(&self) -> BTreeSet<String> {
+        self.stable
+            .model_names
+            .intersection(&self.next.model_names)
+            .cloned()
+            .collect()
+    }
+
     pub fn endpoint_for(&self, model: &str) -> Result<&CodexEndpoint, CodexAdapterUnavailable> {
         let stable = self.stable.model_names.contains(model);
         let next = self.next.model_names.contains(model);
@@ -74,6 +86,30 @@ impl CodexEndpoints {
             timeout: self.timeout,
             workspace_root: self.workspace_root.clone(),
         })
+    }
+}
+
+impl From<&CodexEndpointConfiguration> for CodexEndpoint {
+    fn from(configuration: &CodexEndpointConfiguration) -> Self {
+        let home = PathBuf::from(&configuration.home);
+        Self {
+            client_path: PathBuf::from(&configuration.client_path),
+            transcript_root: home.join("sessions"),
+            home,
+            socket: configuration.socket.clone(),
+            model_names: configuration.model_names.iter().cloned().collect(),
+        }
+    }
+}
+
+impl From<&RuntimeConfiguration> for CodexEndpoints {
+    fn from(configuration: &RuntimeConfiguration) -> Self {
+        Self {
+            stable: CodexEndpoint::from(&configuration.stable_codex),
+            next: CodexEndpoint::from(&configuration.next_codex),
+            timeout: Self::APP_SERVER_TIMEOUT,
+            workspace_root: PathBuf::from(&configuration.source_root),
+        }
     }
 }
 
@@ -487,6 +523,13 @@ impl StopsCodexProxy for ProxySession {
     }
 }
 
+impl CodexAdapter {
+    /// The flow's directory under the configured source root.
+    pub fn flow_directory(&self, flow_id: &str) -> PathBuf {
+        self.workspace_root.join("flows").join(flow_id)
+    }
+}
+
 impl BuildsCodexTurn for CodexAdapter {
     fn turn_params(
         &self,
@@ -497,7 +540,7 @@ impl BuildsCodexTurn for CodexAdapter {
     ) -> serde_json::Value {
         serde_json::json!({
             "threadId": thread_id,
-            "input": [{ "type": "text", "text": format!("{goal}\n\nFlow identity:\nFLOW_ID={flow_id}\nFLOW_DIRECTORY=/home/li/primary/flows/{flow_id}\n\nOrigin clue:\nflow: {}\nsession: {}\nturn: {}", origin.flow_id, origin.session_id, origin.turn_id) }],
+            "input": [{ "type": "text", "text": format!("{goal}\n\nFlow identity:\nFLOW_ID={flow_id}\nFLOW_DIRECTORY={}\n\nOrigin clue:\nflow: {}\nsession: {}\nturn: {}", self.flow_directory(flow_id).display(), origin.flow_id, origin.session_id, origin.turn_id) }],
             "model": self.model,
             "effort": "medium",
             "turnTrigger": "flow-nexus"
@@ -802,7 +845,7 @@ impl StartsCodex for CodexAdapter {
             let flow_directory = if cfg!(test) {
                 format!("/tmp/flow-nexus-test-{flow_id}")
             } else {
-                format!("/home/li/primary/flows/{flow_id}")
+                self.flow_directory(flow_id).to_string_lossy().into_owned()
             };
             std::fs::create_dir_all(&flow_directory)
                 .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
@@ -810,7 +853,7 @@ impl StartsCodex for CodexAdapter {
                 2,
                 "thread/start",
                 serde_json::json!({
-                    "cwd": "/home/li/primary",
+                    "cwd": self.workspace_root,
                     "model": self.model,
                     "sandbox": "danger-full-access",
                     "approvalPolicy": "never",
@@ -857,7 +900,7 @@ impl CodexAdapter {
             let flow_directory = if cfg!(test) {
                 format!("/tmp/flow-nexus-test-{flow_id}")
             } else {
-                format!("/home/li/primary/flows/{flow_id}")
+                self.flow_directory(flow_id).to_string_lossy().into_owned()
             };
             std::fs::create_dir_all(&flow_directory)
                 .map_err(|e| CodexAdapterUnavailable::Protocol(e.to_string()))?;
@@ -865,7 +908,7 @@ impl CodexAdapter {
                 2,
                 "thread/start",
                 serde_json::json!({
-                    "cwd":"/home/li/primary",
+                    "cwd":self.workspace_root,
                     "model":self.model,
                     "sandbox":"danger-full-access",
                     "approvalPolicy":"never",
@@ -1166,7 +1209,10 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .unwrap();
         assert!(brief.contains("FLOW_ID=flow-0000000000000001"));
-        assert!(brief.contains("FLOW_DIRECTORY=/home/li/primary/flows/flow-0000000000000001"));
+        let expected = std::env::current_dir()
+            .unwrap()
+            .join("flows/flow-0000000000000001");
+        assert!(brief.contains(&format!("FLOW_DIRECTORY={}", expected.display())));
         assert!(brief.contains("flow: parent-flow\nsession: session-1\nturn: turn-1"));
     }
 

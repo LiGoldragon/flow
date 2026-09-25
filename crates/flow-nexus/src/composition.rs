@@ -55,6 +55,28 @@ pub trait ValidatesComposedPrompt {
     fn has_canonical_first_prompt(&self) -> bool;
 }
 
+/// Names how a launched Flow stays remotely controllable. A Claude launch
+/// passes `--remote-control <name>` with this name; a Codex launch is already
+/// driven through its app-server endpoint. The launch body records the same
+/// line, so the receipt's prompt digest covers it.
+pub trait NamesRemoteControl {
+    fn remote_control_name(&self) -> String;
+    fn remote_control_record(&self) -> String;
+}
+
+impl NamesRemoteControl for LaunchProfile {
+    fn remote_control_name(&self) -> String {
+        format!("flow-{}", self.launch_request_id)
+    }
+
+    fn remote_control_record(&self) -> String {
+        match self.harness_kind {
+            HarnessKind::Claude => format!("--remote-control {}", self.remote_control_name()),
+            HarnessKind::Codex => "app-server endpoint".into(),
+        }
+    }
+}
+
 trait ValidatesLaunchProfile {
     fn validate(&self, profile: &LaunchProfile) -> Result<(), CompositionError>;
 }
@@ -262,7 +284,7 @@ impl RendersLaunchProfile for LaunchComposer {
             .join(", ");
 
         let mut body = format!(
-            "# Flow launch\n\nLaunch request: {}\nRole: {} {}\nHarness: {}\nModel: {}\nEffort: {}\nPredecessor: {}\nRemembered flows: {}\nHerdr session: {}\nLoadable skills, in required native-load order: {}\n\nBefore replying, load every named skill through the harness native skill interface in exactly this order. Do not paste skill bodies into the prompt. Emit the requested launch receipt only after every native skill load succeeds.\n\n{}",
+            "# Flow launch\n\nLaunch request: {}\nRole: {} {}\nHarness: {}\nModel: {}\nEffort: {}\nPredecessor: {}\nRemembered flows: {}\nHerdr session: {}\nRemote control: {}\nLoadable skills, in required native-load order: {}\n\nBefore replying, load every named skill through the harness native skill interface in exactly this order. Do not paste skill bodies into the prompt. Emit the requested launch receipt only after every native skill load succeeds.\n\n{}",
             profile.launch_request_id,
             aspect,
             power,
@@ -272,6 +294,7 @@ impl RendersLaunchProfile for LaunchComposer {
             predecessor,
             remembered,
             profile.herdr_session_name,
+            profile.remote_control_record(),
             skills,
             profile.instruction_prompt,
         );
@@ -396,6 +419,7 @@ mod tests {
             "Predecessor: 1b8ac0\n",
             "Remembered flows: 836818@1\n",
             "Herdr session: messaging-build\n",
+            "Remote control: app-server endpoint\n",
             "Loadable skills, in required native-load order: spirit, main-flow\n\n",
             "Before replying, load every named skill through the harness native skill interface in exactly this order. Do not paste skill bodies into the prompt. Emit the requested launch receipt only after every native skill load succeeds.\n\n",
             "Carry the bounded task.",
@@ -407,7 +431,7 @@ mod tests {
         assert_eq!(composed.first_prompt_payload.first_prompt_body, expected);
         assert_eq!(
             composed.first_prompt_payload.prompt_sha256,
-            "3d041baecb092c549b4272ab596336ffc968a32d653e86e1d92e35f843ae153c"
+            "b383024f19daee8f9170c1c894ca749ebd566996f207888115fd7b426948e5f9"
         );
         assert!(
             composed
@@ -426,6 +450,19 @@ mod tests {
             composed.target_receipt_request.prompt_sha256,
             composed.first_prompt_payload.prompt_sha256
         );
+        assert!(composed.has_canonical_first_prompt());
+    }
+
+    #[test]
+    fn claude_launch_records_its_remote_control_flag() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = root.profile(vec![]);
+        profile.harness_kind = HarnessKind::Claude;
+        let composed = LaunchComposer::at(root.path()).compose(&profile).unwrap();
+        assert!(composed.first_prompt_payload.first_prompt_body.contains(&format!(
+            "\nRemote control: --remote-control flow-{}\n",
+            profile.launch_request_id
+        )));
         assert!(composed.has_canonical_first_prompt());
     }
 

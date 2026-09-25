@@ -6,7 +6,7 @@
 //! whose terminal write may already have succeeded.
 
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
-use crate::composition::ValidatesComposedPrompt;
+use crate::composition::{NamesRemoteControl, ValidatesComposedPrompt};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     ComposedLaunch, HarnessKind, HerdrPaneBinding, NativeLaunchBinding, NativeSkillSelection,
@@ -93,6 +93,7 @@ pub trait ObservesNativeTargetReceipt {
 impl HerdrCli {
     const CLAUDE_CHILD_SESSION_ENVIRONMENT: &'static str = "CLAUDE_CODE_CHILD_SESSION";
     const CLAUDE_SKIP_PERMISSIONS_FLAG: &'static str = "--dangerously-skip-permissions";
+    const CLAUDE_REMOTE_CONTROL_FLAG: &'static str = "--remote-control";
 
     fn run_json(&self, arguments: &[String]) -> Result<serde_json::Value, String> {
         let output = Command::new(&self.executable)
@@ -886,6 +887,10 @@ impl StartsNativeHerdrHarness for HerdrCli {
         }
         if launch.launch_profile.harness_kind == HarnessKind::Claude {
             arguments.push(Self::CLAUDE_SKIP_PERMISSIONS_FLAG.into());
+            // Every Claude Flow is remotely controllable; the name never
+            // begins with `-`, so the optional value binds to the flag.
+            arguments.push(Self::CLAUDE_REMOTE_CONTROL_FLAG.into());
+            arguments.push(launch.launch_profile.remote_control_name());
             arguments.push("--system-prompt-file".into());
             arguments.push(launch.launch_profile.system_prompt_bundle_file.clone());
         }
@@ -1624,6 +1629,7 @@ printf '%s\n' 123456
         assert!(start.contains("--executable /fixture/codex"));
         assert!(start.contains("-- --remote unix:///tmp/stable-codex.sock --model model-current"));
         assert!(start.contains("-c model_reasoning_effort=high"));
+        assert!(!start.contains("--remote-control"));
         assert_eq!(start.matches("--remote").count(), 1);
         assert!(!calls.contains("pane run"));
         assert!(!start.contains(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG));
@@ -1675,7 +1681,7 @@ printf '%s\n' 123456
             .expect("agent start call");
         assert!(
             start_call
-                .contains("-- --dangerously-skip-permissions --system-prompt-file /tmp/flow-system-prompt.md --model model-current --effort high")
+                .contains("-- --dangerously-skip-permissions --remote-control flow-launch-42 --system-prompt-file /tmp/flow-system-prompt.md --model model-current --effort high")
         );
         assert!(!start_call.contains("composed body"));
         let pane_run = calls_after_start

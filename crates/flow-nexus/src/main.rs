@@ -46,7 +46,22 @@ fn endpoint(prefix: &str) -> CodexEndpoint {
     }
 }
 
+/// `--version` alone answers the Cargo package version before any
+/// configuration is read; every other argument vector starts the daemon.
+fn version_answer(arguments: &[String]) -> Option<String> {
+    match arguments {
+        [only] if only == "--version" => {
+            Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
+        }
+        _ => None,
+    }
+}
+
 fn main() {
+    if let Some(version) = version_answer(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        println!("{version}");
+        return;
+    }
     std::fs::create_dir_all("/home/li/.local/state/flow")
         .unwrap_or_else(|error| panic!("Flow Nexus state directory: {error}"));
     std::fs::create_dir_all("/run/user/1001/flow")
@@ -83,4 +98,19 @@ fn main() {
     nexus
         .serve_meta(Path::new(&configuration.meta_socket_path))
         .unwrap_or_else(|error| panic!("Flow Nexus could not serve: {error}"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_answer;
+
+    #[test]
+    fn version_answers_the_cargo_package_version() {
+        assert_eq!(
+            version_answer(&["--version".into()]),
+            Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(version_answer(&[]), None);
+        assert_eq!(version_answer(&["--version".into(), "x".into()]), None);
+    }
 }

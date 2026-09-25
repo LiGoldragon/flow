@@ -904,17 +904,25 @@ impl StartsNativeHerdrHarness for HerdrCli {
                 ));
             }
         }
-        let startup = launch
-            .launch_profile
-            .skill_name_vector
-            .iter()
-            .map(|skill| format!("${skill}"))
-            .chain(std::iter::once(format!(
-                "read {}",
-                launch.launch_profile.system_prompt_bundle_file
-            )))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut startup_lines = Vec::new();
+        if launch.launch_profile.harness_kind == HarnessKind::Codex {
+            // The main Flow alone receives this top-of-block instruction;
+            // native Codex descendants keep their stock base instructions.
+            startup_lines.push("$main-flow".to_owned());
+        }
+        startup_lines.extend(
+            launch
+                .launch_profile
+                .skill_name_vector
+                .iter()
+                .filter(|skill| !(launch.launch_profile.harness_kind == HarnessKind::Codex && skill.as_str() == "main-flow"))
+                .map(|skill| format!("${skill}")),
+        );
+        startup_lines.push(format!(
+            "read {}",
+            launch.launch_profile.system_prompt_bundle_file
+        ));
+        let startup = startup_lines.join("\n");
         arguments.push(startup);
         self.run_json(&arguments).map(|_| ())
     }

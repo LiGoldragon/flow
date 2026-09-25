@@ -17,6 +17,7 @@ use sha1::{Digest, Sha1};
 use signal_flow::OriginClue;
 use std::{
     io::{BufRead, BufReader, Read, Write},
+    path::Path,
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -441,6 +442,31 @@ impl BuildsCodexTurn for CodexAdapter {
 }
 
 impl CodexAdapter {
+    fn thread_start_params(
+        &self,
+        flow_id: &str,
+        flow_directory: &str,
+        system_prompt_file: Option<&Path>,
+    ) -> serde_json::Value {
+        let mut config = serde_json::json!({ "shell_environment_policy": { "inherit": "core", "set": {
+            "FLOW_ID": flow_id,
+            "FLOW_DIRECTORY": flow_directory
+        }}});
+        if let Some(system_prompt_file) = system_prompt_file {
+            config["model_instructions_file"] =
+                serde_json::Value::String(system_prompt_file.display().to_string());
+        }
+        serde_json::json!({
+            "cwd":"/home/li/primary",
+            "model":self.model,
+            "sandbox":"danger-full-access",
+            "approvalPolicy":"never",
+            "ephemeral":false,
+            "threadSource":"flow-nexus",
+            "config": config
+        })
+    }
+
     /// Builds a native turn from modules that an upstream policy has already
     /// accepted. This adapter deliberately does not select Curriculum module
     /// IDs, profiles, or programming variants.
@@ -491,18 +517,7 @@ impl StartsCodex for CodexAdapter {
             let started = session.request(
                 2,
                 "thread/start",
-                serde_json::json!({
-                    "cwd": "/home/li/primary",
-                    "model": self.model,
-                    "sandbox": "danger-full-access",
-                    "approvalPolicy": "never",
-                    "ephemeral": false,
-                    "threadSource": "flow-nexus",
-                    "config": { "shell_environment_policy": { "inherit": "core", "set": {
-                        "FLOW_ID": flow_id,
-                        "FLOW_DIRECTORY": flow_directory
-                    }}}
-                }),
+                self.thread_start_params(flow_id, &flow_directory, None),
                 self.timeout,
             )?;
             let thread_id = started
@@ -532,6 +547,37 @@ impl CodexAdapter {
         origin: &OriginClue,
         observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
     ) -> Result<String, CodexAdapterUnavailable> {
+        self.start_codex_observed_with_optional_system_prompt(flow_id, goal, origin, None, observer)
+    }
+
+    /// Starts an explicitly isolated Flow using Codex's supported
+    /// `model_instructions_file` thread configuration. Ordinary starts keep
+    /// their base instructions because they call `start_codex_observed`.
+    pub fn start_codex_observed_with_system_prompt(
+        &self,
+        flow_id: &str,
+        goal: &str,
+        origin: &OriginClue,
+        system_prompt_file: &Path,
+        observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
+    ) -> Result<String, CodexAdapterUnavailable> {
+        self.start_codex_observed_with_optional_system_prompt(
+            flow_id,
+            goal,
+            origin,
+            Some(system_prompt_file),
+            observer,
+        )
+    }
+
+    fn start_codex_observed_with_optional_system_prompt(
+        &self,
+        flow_id: &str,
+        goal: &str,
+        origin: &OriginClue,
+        system_prompt_file: Option<&Path>,
+        observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
+    ) -> Result<String, CodexAdapterUnavailable> {
         let mut session = self.open_proxy()?;
         let result = (|| {
             session.request(1,"initialize",serde_json::json!({"clientInfo":{"name":"flow-nexus","version":env!("CARGO_PKG_VERSION")}}),self.timeout)?;
@@ -546,18 +592,7 @@ impl CodexAdapter {
             let started = session.request(
                 2,
                 "thread/start",
-                serde_json::json!({
-                    "cwd":"/home/li/primary",
-                    "model":self.model,
-                    "sandbox":"danger-full-access",
-                    "approvalPolicy":"never",
-                    "ephemeral":false,
-                    "threadSource":"flow-nexus",
-                    "config": { "shell_environment_policy": { "inherit": "core", "set": {
-                        "FLOW_ID": flow_id,
-                        "FLOW_DIRECTORY": flow_directory
-                    }}}
-                }),
+                self.thread_start_params(flow_id, &flow_directory, system_prompt_file),
                 self.timeout,
             )?;
             let thread = started
@@ -744,6 +779,29 @@ mod tests {
             model: "gpt-5.6".into(),
             timeout: Duration::from_millis(100),
         }
+    }
+
+    #[test]
+    fn ordinary_codex_start_keeps_the_existing_base_instructions() {
+        let params = adapter().thread_start_params("flow-1", "/tmp/flow-1", None);
+        assert!(params.pointer("/config/model_instructions_file").is_none());
+        assert_eq!(
+            params.pointer("/config/shell_environment_policy/set/FLOW_ID"),
+            Some(&serde_json::json!("flow-1"))
+        );
+    }
+
+    #[test]
+    fn isolated_codex_start_uses_the_supported_instructions_file() {
+        let params = adapter().thread_start_params(
+            "flow-1",
+            "/tmp/flow-1",
+            Some(Path::new("/tmp/system-prompt.md")),
+        );
+        assert_eq!(
+            params.pointer("/config/model_instructions_file"),
+            Some(&serde_json::json!("/tmp/system-prompt.md"))
+        );
     }
 
     #[test]

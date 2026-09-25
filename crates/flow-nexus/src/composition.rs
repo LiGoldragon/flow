@@ -342,6 +342,8 @@ mod tests {
 
     impl BuildsProfile for tempfile::TempDir {
         fn profile(&self, sources: Vec<LaunchSource>) -> LaunchProfile {
+            let bundle = self.path().join("flow-system-prompt.md");
+            fs::write(&bundle, "fixture bundle").unwrap();
             LaunchProfile {
                 launch_request_id: "launch-42".into(),
                 launch_source_vector: sources,
@@ -357,7 +359,7 @@ mod tests {
                     remembering_depth: 1,
                 }],
                 herdr_session_name: "messaging-build".into(),
-                system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
+                system_prompt_bundle_file: bundle.to_string_lossy().into_owned(),
                 instruction_prompt: "Carry the bounded task.".into(),
             }
         }

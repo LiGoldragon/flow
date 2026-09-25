@@ -133,6 +133,10 @@ impl ValidatesLaunchProfile for LaunchComposer {
         {
             return Err(CompositionError::InvalidProfileField("herdr_session_name"));
         }
+        let bundle = Path::new(&profile.system_prompt_bundle_file);
+        if !bundle.is_absolute() || !bundle.is_file() || fs::symlink_metadata(bundle).map(|m| m.file_type().is_symlink()).unwrap_or(true) {
+            return Err(CompositionError::InvalidProfileField("system_prompt_bundle_file"));
+        }
         if profile.skill_name_vector.iter().any(|name| {
             name.is_empty()
                 || !name
@@ -353,6 +357,7 @@ mod tests {
                     remembering_depth: 1,
                 }],
                 herdr_session_name: "messaging-build".into(),
+                system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
                 instruction_prompt: "Carry the bounded task.".into(),
             }
         }

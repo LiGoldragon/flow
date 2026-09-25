@@ -1438,6 +1438,7 @@ mod tests {
             flow_id_option: None,
             remembered_flow_vector: Vec::new(),
             herdr_session_name: "fixture-session".into(),
+            system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
             instruction_prompt: "fixture instruction".into(),
         };
         let origin = OriginClue {
@@ -1496,6 +1497,7 @@ mod tests {
             flow_id_option: None,
             remembered_flow_vector: Vec::new(),
             herdr_session_name: "fixture-session".into(),
+            system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
             instruction_prompt: "fixture instruction".into(),
         };
         let origin = OriginClue {

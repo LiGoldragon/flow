@@ -1122,6 +1122,7 @@ mod tests {
                 flow_id_option: None,
                 remembered_flow_vector: vec![],
                 herdr_session_name: "session".into(),
+                system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
                 instruction_prompt: "body".into(),
             },
             first_prompt_payload: signal_flow::FirstPromptPayload {

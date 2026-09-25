@@ -886,6 +886,8 @@ impl StartsNativeHerdrHarness for HerdrCli {
         }
         if launch.launch_profile.harness_kind == HarnessKind::Claude {
             arguments.push(Self::CLAUDE_SKIP_PERMISSIONS_FLAG.into());
+            arguments.push("--system-prompt-file".into());
+            arguments.push(launch.launch_profile.system_prompt_bundle_file.clone());
         }
         arguments.push("--model".into());
         arguments.push(launch.launch_profile.model_name.clone());
@@ -902,6 +904,18 @@ impl StartsNativeHerdrHarness for HerdrCli {
                 ));
             }
         }
+        let startup = launch
+            .launch_profile
+            .skill_name_vector
+            .iter()
+            .map(|skill| format!("${skill}"))
+            .chain(std::iter::once(format!(
+                "read {}",
+                launch.launch_profile.system_prompt_bundle_file
+            )))
+            .collect::<Vec<_>>()
+            .join("\n");
+        arguments.push(startup);
         self.run_json(&arguments).map(|_| ())
     }
 }
@@ -1462,6 +1476,7 @@ mod tests {
                 flow_id_option: None,
                 remembered_flow_vector: vec![],
                 herdr_session_name: "flowlaunch42".into(),
+                system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
                 instruction_prompt: "do the work".into(),
             },
             first_prompt_payload: FirstPromptPayload {

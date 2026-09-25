@@ -34,7 +34,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.10.4";
+            version = "0.10.5";
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;

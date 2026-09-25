@@ -12,7 +12,7 @@ pub mod title;
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchBundles, LaunchComposer, OpensLaunchComposer};
 use herdr::OperatesHerdrPane;
-use launching::{LaunchesFlows, ObservesLaunch};
+use launching::{LaunchesFlows, ObservesLaunch, PrunesLaunchBundles};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
     Query, Response, RestartRejection,
@@ -236,6 +236,7 @@ impl Dispatches for RunningNexus {
                 if !self.store.record_stopped(&flow_id).unwrap_or(false) {
                     return Response::StopRejected(signal_flow::StopRejection::PersistenceRefused);
                 }
+                self.prune_launch_bundles_of(&flow_id);
                 Response::Stopped(flow_id)
             }
             Query::List(_) => {
@@ -1027,6 +1028,36 @@ mod tests {
                 .contains("pane read --source recent-unwrapped --lines 200 --format text w1:p3")
         );
         assert!(operations.contains("pane close w1:p3"));
+    }
+
+    #[test]
+    fn stop_removes_the_bundle_copy_of_the_launch_that_bound_the_flow() {
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(vec![fixture.current_agent()], Some("w1:p3"));
+        let node = fixture.node();
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node.clone())),
+            meta_signal_flow::Response::FlowRegistered(node)
+        );
+        let launch = fixture.staged_launch("stopped-request", None);
+        launch.reserve(&fixture.nexus);
+        launch.record_native_intent(&fixture.nexus);
+        launch.bind(&fixture.nexus);
+        let bundles = fixture.nexus.composer.launch_bundles().clone();
+        let bound_copy = bundles.file_for_request("stopped-request");
+        let other_copy = bundles.file_for_request("another-request");
+        fs::create_dir_all(bound_copy.parent().unwrap()).unwrap();
+        fs::write(&bound_copy, b"bound copy\n").unwrap();
+        fs::write(&other_copy, b"other copy\n").unwrap();
+
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Stop("908786".into())),
+            Response::Stopped("908786".into())
+        );
+        assert!(!bound_copy.exists(), "the stopped Flow's copy is removed");
+        assert!(other_copy.exists(), "another launch's copy is kept");
     }
 
     #[test]
@@ -2019,10 +2050,20 @@ mod tests {
         ));
 
         launch.write_receipt();
+        // A stand-in for the successor's per-launch copy: a Started Flow
+        // keeps it, since its harness was told to read it.
+        let successor_copy = fixture
+            .nexus
+            .composer
+            .launch_bundles()
+            .file_for_request("replace-request");
+        fs::create_dir_all(successor_copy.parent().unwrap()).unwrap();
+        fs::write(&successor_copy, b"successor copy\n").unwrap();
         let Response::Replaced(replaced) = fixture.nexus.dispatch(Query::Replace(launch.request()))
         else {
             panic!("the observed successor replaces its predecessor")
         };
+        assert!(successor_copy.exists(), "a Started Flow keeps its copy");
         assert_eq!(replaced.flow_id, "fac697");
         assert_eq!(replaced.started.flow_id, "908786");
         assert_eq!(replaced.started.session_id, STAGED_SESSION);
@@ -2266,6 +2307,11 @@ mod tests {
             rejection,
             "a settled rejection is not launched again"
         );
+        // The refused Claude launch wrote its copy at compose time; with the
+        // rejection stored, the copy is gone.
+        let bundles = fixture.nexus.composer.launch_bundles().clone();
+        assert!(fixture.directory.path().join("launch-bundles").is_dir());
+        assert!(!bundles.file_for_request("rejected-request").exists());
 
         // ReplaceRejected: the successor's launch is refused; the
         // predecessor keeps receiving.
@@ -2286,6 +2332,7 @@ mod tests {
             rejection
         );
         assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Active);
+        assert!(!bundles.file_for_request("refused-request").exists());
         // Replaced is answered by the replacement fixture above.
     }
 

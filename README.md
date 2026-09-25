@@ -114,8 +114,10 @@ keeps its stock base instructions; the main Flow's system-prompt bundle text
 opens that one text, above the `$name` lines, and native Codex descendants
 never receive it. The bundle text ends with the launch section: a
 `Predecessor: <flow-id>` line when the profile names a predecessor and a
-`Remembered: <ids>` line when it remembers flows, and no line otherwise. For
-Claude, it resolves the ordered enterprise, personal, and project catalogs and
+`Remembered: <ids>` line when it remembers flows, and no line otherwise.
+That section is the only place the prompt names them; the `# Flow launch`
+record below it carries role, harness, model, effort, Herdr session and
+remote control. For Claude, it resolves the ordered enterprise, personal, and project catalogs and
 journals the same typed selection. The Claude prompt is one line of at most
 800 characters with no line break, because Claude Code wraps a longer line, or
 any submission of four or more lines, as pasted content, and a wrapped block
@@ -130,7 +132,10 @@ named by the launch request's short form: the caller's bytes unchanged, then,
 after a blank line, the same launch section Codex receives. That copy is the
 `--system-prompt-file` and the path the line names; the caller's file is never
 edited. Predecessor and remembered flows reach Claude through that copy;
-role, model, effort and remote control through its argv, not the line. A profile whose line would
+role, model, effort and remote control through its argv, not the line. A copy
+is kept while its launch can need it: it is removed once the launch is refused
+and that outcome is stored, or when the Flow the launch bound is stopped (by
+`Stop` or by a `Replace` reap). A Started Flow keeps its copy. A profile whose line would
 break or pass 800 characters is refused (`CompositionRefused`), never
 truncated. The observer requires one command record and one harness expansion
 per stacked command, each carrying the same argument, then native Skill tool
@@ -162,7 +167,8 @@ profile hash. The requested receipt is the fixed line
 session, transcript cursor, and the authenticated first turn, whose body
 digest stays in the store. A Claude launch is remotely controllable under a
 name unique to the Flow, `flow-` and the launch request ID's short form (the
-first eight hex digits of its SHA-256). The Flow ID is claimed from the native
+first sixteen hex digits of its SHA-256; the bundle copy is named by the same
+short form, so two launch requests never share either). The Flow ID is claimed from the native
 session only after the harness has started, too late for the start flag.
 
 The Codex adapter opens `codex app-server proxy`, then sends `initialize`,

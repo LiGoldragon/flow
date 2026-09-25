@@ -1,3 +1,19 @@
+# Flow 0.10.5
+
+A patch release with no wire, storage or argv-shape change.
+
+- Codex's `# Flow launch` record no longer repeats `Predecessor:` and
+  `Remembered flows:`; the bundle text's trailing section, which opens the
+  same block, is their one home.
+- A per-launch bundle copy is removed when its launch is refused and the
+  outcome is stored, or when the Flow the launch bound is stopped (`Stop`, or
+  the reap of a `Replace`). A Started Flow keeps its copy while it runs.
+- The launch request short form grows from eight to sixteen hex digits of the
+  SHA-256, so the remote-control name is `flow-<16 hex>` and the copy is
+  `launch-<16 hex>.md`. Eight digits already collided (`launch-4646` and
+  `launch-72333`). Copies written by 0.10.4 under eight-digit names are not
+  pruned; remove them by hand from `~/.local/state/flow/launch-bundles/`.
+
 # Flow 0.10.4
 
 A patch release with no wire, storage or argv-shape change. A launch's

@@ -696,6 +696,8 @@ pub trait RecordsReplacement {
 
 pub trait ReadsLaunchAttempt {
     fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError>;
+    /// The launch requests whose native launch bound this Flow ID.
+    fn launch_requests_bound_to(&self, flow_id: &str) -> Result<Vec<String>, StoreError>;
 }
 
 /// Reads the durable rows used by the ordinary Send, Stop, and List requests.
@@ -1483,6 +1485,23 @@ impl ReadsLaunchAttempt for FlowStore {
         Ok(self
             .stored_launch_attempt(launch_request_id)?
             .map(|stored| stored.attempt))
+    }
+
+    fn launch_requests_bound_to(&self, flow_id: &str) -> Result<Vec<String>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.launch_attempts))?
+            .records()
+            .iter()
+            .filter(|stored| {
+                stored
+                    .attempt
+                    .native_launch_binding_option
+                    .as_ref()
+                    .is_some_and(|binding| binding.flow_id == flow_id)
+            })
+            .map(|stored| stored.attempt.launch_request_id.clone())
+            .collect())
     }
 }
 

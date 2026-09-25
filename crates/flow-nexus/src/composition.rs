@@ -59,7 +59,13 @@ pub trait OpensLaunchComposer {
 /// trailing section (its predecessor and remembered flows); a Claude launch
 /// receives the copy as `--system-prompt-file` and is told to read it. The
 /// file is named by the launch request's short form, as the remote-control
-/// name is, so neither the request ID nor a long hex run enters the prompt.
+/// name is, so the request ID itself never enters the prompt.
+///
+/// A copy lives as long as its launch can still need it: it is removed when
+/// the launch is refused and that outcome is stored, or when the Flow the
+/// launch bound is stopped (by Stop, or by the reap of a Replace). A Started
+/// Flow keeps its copy, since its harness was given the path and told to
+/// read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchBundles {
     directory: PathBuf,
@@ -74,8 +80,25 @@ impl LaunchBundles {
 
     /// The per-launch copy a profile's launch receives.
     pub fn file_for(&self, profile: &LaunchProfile) -> PathBuf {
-        self.directory
-            .join(format!("launch-{}.md", profile.launch_request_short_form()))
+        self.file_for_request(&profile.launch_request_id)
+    }
+
+    /// The per-launch copy of the launch request this ID names.
+    pub fn file_for_request(&self, launch_request_id: &str) -> PathBuf {
+        self.directory.join(format!(
+            "launch-{}.md",
+            launch_request_id.launch_request_short_form()
+        ))
+    }
+
+    /// Removes the per-launch copy of a launch request. A copy that was
+    /// never written (a Codex launch, or one refused before composition) is
+    /// already gone; any other failure is reported.
+    pub fn remove_for_request(&self, launch_request_id: &str) -> std::io::Result<()> {
+        match fs::remove_file(self.file_for_request(launch_request_id)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -208,9 +231,11 @@ impl ClaudeCommandStack {
 /// The name is unique per Flow. The Flow ID is claimed from the native
 /// session only after the harness has started, and the flag must be given at
 /// start, so the name is `flow-` followed by the launch request ID's short
-/// form: the first eight hex digits of its SHA-256. Eight digits keep it
-/// distinct from a six-digit Flow ID, and the request ID itself never enters
-/// the prompt.
+/// form: the first sixteen hex digits of its SHA-256. Sixteen digits (64
+/// bits) keep two launch requests from sharing a name, where eight digits
+/// already collide between `launch-4646` and `launch-72333`; they also keep
+/// it distinct from a six-digit Flow ID, and the request ID itself never
+/// enters the prompt.
 pub trait NamesRemoteControl {
     fn remote_control_name(&self) -> String;
     fn remote_control_record(&self) -> String;
@@ -219,19 +244,24 @@ pub trait NamesRemoteControl {
 /// The launch request ID's short form, used where a per-Flow name is needed
 /// before the Flow ID is claimed.
 pub trait ShortensLaunchRequest {
-    const SHORT_FORM_LENGTH: usize = 8;
+    const SHORT_FORM_LENGTH: usize = 16;
     fn launch_request_short_form(&self) -> String;
+}
+
+/// The launch request ID itself.
+impl ShortensLaunchRequest for str {
+    fn launch_request_short_form(&self) -> String {
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(format!("flow-remote-control-v1\0{self}").as_bytes())
+        );
+        digest[..Self::SHORT_FORM_LENGTH].to_owned()
+    }
 }
 
 impl ShortensLaunchRequest for LaunchProfile {
     fn launch_request_short_form(&self) -> String {
-        let digest = format!(
-            "{:x}",
-            Sha256::digest(
-                format!("flow-remote-control-v1\0{}", self.launch_request_id).as_bytes()
-            )
-        );
-        digest[..Self::SHORT_FORM_LENGTH].to_owned()
+        self.launch_request_id.launch_request_short_form()
     }
 }
 
@@ -320,6 +350,13 @@ enum LaunchBundleText {
 
 trait HashesPromptBody {
     fn sha256(&self, bytes: &[u8]) -> String;
+}
+
+impl LaunchComposer {
+    /// Where this composer writes each launch's copy of the bundle.
+    pub fn launch_bundles(&self) -> &LaunchBundles {
+        &self.launch_bundles
+    }
 }
 
 impl OpensLaunchComposer for LaunchComposer {
@@ -611,22 +648,16 @@ impl RendersLaunchProfile for LaunchComposer {
             }
             LaunchBundleText::Inline(text) => Some(text.as_str()),
         };
-        let predecessor = profile.flow_id_option.as_deref().unwrap_or("none");
-        let remembered = profile
-            .remembered_flow_vector
-            .iter()
-            .map(|flow| format!("{}@{}", flow.flow_id, flow.remembering_depth))
-            .collect::<Vec<_>>()
-            .join(", ");
+        // Predecessor and remembered flows are in the bundle text's trailing
+        // section, which opens this block; the launch record does not repeat
+        // them.
         let mut body = self.render_native_head(profile, bundle);
         body.push_str(&format!(
-            "# Flow launch\n\nRole: {} {}\nHarness: Codex\nModel: {}\nEffort: {}\nPredecessor: {}\nRemembered flows: {}\nHerdr session: {}\nRemote control: {}\n",
+            "# Flow launch\n\nRole: {} {}\nHarness: Codex\nModel: {}\nEffort: {}\nHerdr session: {}\nRemote control: {}\n",
             profile.aspect_name(),
             profile.power_name(),
             profile.model_name,
             profile.effort,
-            predecessor,
-            remembered,
             profile.herdr_session_name,
             profile.remote_control_record(),
         ));
@@ -691,7 +722,8 @@ impl ComposesLaunch for LaunchComposer {
 mod tests {
     use super::{
         ClaudeCommandStack, ClaudeFirstLine, ComposesLaunch, CompositionError, LaunchBundles,
-        LaunchComposer, NamesRemoteControl, OpensLaunchComposer, ValidatesComposedPrompt,
+        LaunchComposer, NamesRemoteControl, OpensLaunchComposer, ShortensLaunchRequest,
+        ValidatesComposedPrompt,
     };
     use signal_flow::{
         FlowAspect, HarnessKind, LaunchProfile, LaunchSource, PowerLevel, RememberedFlow,
@@ -779,8 +811,6 @@ mod tests {
                 "Harness: Codex\n",
                 "Model: gpt-6-astra\n",
                 "Effort: medium\n",
-                "Predecessor: 1b8ac0\n",
-                "Remembered flows: 836818@1\n",
                 "Herdr session: messaging-build\n",
                 "Remote control: app-server endpoint\n\n",
                 "Carry the bounded task.\n\n",
@@ -791,6 +821,13 @@ mod tests {
             root = canonical.display(),
         );
         assert_eq!(composed.first_prompt_payload.first_prompt_body, expected);
+        // One home per meaning: the bundle's trailing section names the
+        // predecessor and the remembered flows, and nothing repeats them.
+        let body = composed.first_prompt_payload.first_prompt_body.as_str();
+        assert_eq!(body.matches("Predecessor").count(), 1, "{body}");
+        assert_eq!(body.matches("Remembered").count(), 1, "{body}");
+        assert_eq!(body.matches("1b8ac0").count(), 1, "{body}");
+        assert_eq!(body.matches("836818").count(), 1, "{body}");
         assert_eq!(
             composed.first_prompt_payload.first_prompt_text,
             format!(
@@ -819,7 +856,10 @@ mod tests {
                 .compose(&profile)
                 .unwrap();
             let text = composed.first_prompt_payload.first_prompt_text.as_str();
-            assert!(!text.has_long_hex_run(), "{text}");
+            // The Claude line names its copy by the 16-hex short form; no
+            // other long hex run, hash or request ID enters the prompt.
+            let without_copy_name = text.replace(&profile.launch_request_short_form(), "");
+            assert!(!without_copy_name.has_long_hex_run(), "{text}");
             assert!(!text.contains(&profile.launch_request_id), "{text}");
             assert!(!text.contains(&composed.first_prompt_payload.prompt_sha256));
             assert!(!text.contains("final line"));
@@ -907,7 +947,7 @@ mod tests {
             .compose(&profile)
             .unwrap();
         let name = profile.remote_control_name();
-        assert_eq!(name.len(), "flow-".len() + 8);
+        assert_eq!(name.len(), "flow-".len() + 16);
         assert!(name.starts_with("flow-"));
         assert!(
             name["flow-".len()..]
@@ -941,6 +981,34 @@ mod tests {
         profile.power_level = PowerLevel::UltraLow;
         assert_eq!(profile.remote_control_name(), name);
         assert!(composed.has_canonical_first_prompt());
+    }
+
+    #[test]
+    fn launches_with_distinct_request_ids_never_share_a_name_or_a_copy() {
+        // These two request IDs share the first eight hex digits of their
+        // SHA-256 (0ed0b35c), so an eight-digit short form named both
+        // launches `flow-0ed0b35c` and gave them one copy.
+        let root = tempfile::tempdir().unwrap();
+        let bundles = root.bundles();
+        let mut first = root.profile(vec![]);
+        first.launch_request_id = "launch-4646".into();
+        let mut second = first.clone();
+        second.launch_request_id = "launch-72333".into();
+        assert_eq!(
+            first.launch_request_short_form()[..8],
+            second.launch_request_short_form()[..8]
+        );
+        assert_ne!(first.remote_control_name(), second.remote_control_name());
+        assert_ne!(bundles.file_for(&first), bundles.file_for(&second));
+
+        let mut names = std::collections::BTreeSet::new();
+        let mut files = std::collections::BTreeSet::new();
+        for index in 0..20_000 {
+            let mut profile = first.clone();
+            profile.launch_request_id = format!("launch-{index}");
+            assert!(names.insert(profile.remote_control_name()));
+            assert!(files.insert(bundles.file_for(&profile)));
+        }
     }
 
     #[test]

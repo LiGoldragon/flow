@@ -383,9 +383,13 @@ impl LaunchesFlows for RunningNexus {
                     None => LaunchOutcome::StartRejected(rejection),
                 };
                 if reserved {
-                    let _ = self
+                    if self
                         .store
-                        .record_launch_outcome(launch_request_id, outcome.clone());
+                        .record_launch_outcome(launch_request_id, outcome.clone())
+                        .is_ok()
+                    {
+                        self.prune_launch_bundle(launch_request_id);
+                    }
                 } else {
                     // Nothing was reserved: the request never became a
                     // launch, and it may be sent again.
@@ -509,6 +513,9 @@ impl LaunchesFlows for RunningNexus {
                 }
             }
         }
+        // The predecessor is stopped and its pane is gone: no launch of it
+        // needs its bundle copy any more.
+        self.prune_launch_bundles_of(&replacement.predecessor);
         let replaced = Replaced {
             flow_id: replacement.predecessor.clone(),
             started,
@@ -541,6 +548,39 @@ impl LaunchesFlows for RunningNexus {
             Ok(Some(attempt)) => Response::LaunchPending(attempt),
             Ok(None) => Response::LaunchStatusRejected(LaunchStatusRejection::UnknownLaunchRequest),
             Err(_) => persistence(),
+        }
+    }
+}
+
+/// Removes per-launch bundle copies no launch can still need.
+pub trait PrunesLaunchBundles {
+    /// The launch was refused and its outcome is stored: its copy goes.
+    fn prune_launch_bundle(&self, launch_request_id: &str);
+    /// The Flow is stopped: the copy of every launch that bound it goes.
+    fn prune_launch_bundles_of(&self, flow_id: &str);
+}
+
+impl PrunesLaunchBundles for RunningNexus {
+    fn prune_launch_bundle(&self, launch_request_id: &str) {
+        if let Err(error) = self
+            .composer
+            .launch_bundles()
+            .remove_for_request(launch_request_id)
+        {
+            eprintln!("flow-nexus: launch {launch_request_id} bundle copy not removed: {error}");
+        }
+    }
+
+    fn prune_launch_bundles_of(&self, flow_id: &str) {
+        match self.store.launch_requests_bound_to(flow_id) {
+            Ok(launch_request_ids) => {
+                for launch_request_id in launch_request_ids {
+                    self.prune_launch_bundle(&launch_request_id);
+                }
+            }
+            Err(error) => {
+                eprintln!("flow-nexus: flow {flow_id} bundle copies not found: {error}");
+            }
         }
     }
 }

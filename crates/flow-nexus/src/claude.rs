@@ -197,13 +197,74 @@ fn normalized(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::refresh_at;
+    use super::{
+        finalize_claude_start_after_readiness, refresh_at, ClaudeStartPlan, FinalizesClaudeStart,
+    };
     use signal_flow::{
         Available_Data, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, OriginClue,
         RouteReadiness,
     };
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn claude_start_uses_replacement_prompt_skip_flag_and_one_start_argument() {
+        let plan = ClaudeStartPlan {
+            system_prompt_file: "/tmp/system-prompt.md".into(),
+            startup_skills: vec!["$spirit".into(), "$psyche".into()],
+            startup_bundle_file: "/tmp/start-bundle.md".into(),
+        };
+        let argv = plan.argv().unwrap();
+        assert_eq!(argv[0], "claude");
+        assert!(argv
+            .windows(2)
+            .any(|pair| { pair == ["--system-prompt-file", "/tmp/system-prompt.md"] }));
+        assert!(argv
+            .iter()
+            .any(|argument| argument == "--dangerously-skip-permissions"));
+        assert_eq!(
+            argv.iter()
+                .filter(|argument| argument.as_str() == "--")
+                .count(),
+            1
+        );
+        assert_eq!(argv.len(), 8);
+        assert_eq!(argv[7], "$spirit\n$psyche\nread /tmp/start-bundle.md");
+        assert!(plan
+            .command()
+            .unwrap()
+            .get_envs()
+            .any(|(key, value)| { key == "CLAUDE_CODE_CHILD_SESSION" && value.is_none() }));
+    }
+
+    #[derive(Default)]
+    struct OrderedFinalizer(Vec<&'static str>);
+
+    impl FinalizesClaudeStart for OrderedFinalizer {
+        type Error = ();
+
+        fn startup_is_ready(&mut self) -> Result<(), Self::Error> {
+            self.0.push("ready");
+            Ok(())
+        }
+
+        fn claim_flow_id(&mut self) -> Result<(), Self::Error> {
+            self.0.push("claim");
+            Ok(())
+        }
+
+        fn set_flow_title(&mut self) -> Result<(), Self::Error> {
+            self.0.push("title");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn claude_claim_and_title_follow_startup_readiness() {
+        let mut finalizer = OrderedFinalizer::default();
+        finalize_claude_start_after_readiness(&mut finalizer).unwrap();
+        assert_eq!(finalizer.0, ["ready", "claim", "title"]);
+    }
 
     #[test]
     fn permission_wait_parks_an_otherwise_live_daemon_session() {

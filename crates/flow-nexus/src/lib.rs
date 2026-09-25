@@ -1,30 +1,112 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
 pub mod claude;
 pub mod codex;
+pub mod composition;
 pub mod herdr;
 pub mod store;
 
-use codex::{CodexAdapter, ConsumesResetCredit, ResumesCodex};
-use signal_flow::{Query, Response, RestartRejection, StartRejection};
+use codex::{
+    CodexEndpoints, ConsumesResetCredit, ResolvesBoundCodexSkills, SubmitsBoundCodexFirstTurn,
+};
+use composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer};
+use herdr::OperatesHerdrPane;
+use herdr::launch::{
+    AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
+    ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
+    SubmitsFirstPromptOnce,
+};
+use signal_flow::{
+    EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
+    LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchIntent, PromptDeliveryResult, Query,
+    RegistrationAcknowledgement, Response, RestartRejection, StartRejection,
+};
 use std::{
+    collections::HashSet,
     fs,
     io::{Read, Write},
     os::unix::{
-        fs::PermissionsExt,
+        fs::{FileTypeExt, MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
-    path::Path,
+    path::{Path, PathBuf},
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, RecordsPendingThread, RecordsRestartedFlow, RegistersFlowIdentity,
-    ReservesPendingStart,
+    OpensFlowStore, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle,
+    RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
+    RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersExistingFlow,
+    RegistersFlowIdentity, ReservesLaunchAttempt,
 };
+
+fn process_identity_matches(identity: &meta_signal_flow::ProcessIdentity) -> bool {
+    let Ok(process_id) = u32::try_from(identity.process_id) else {
+        return false;
+    };
+    let process_root = PathBuf::from(format!("/proc/{process_id}"));
+    let Ok(metadata) = fs::metadata(&process_root) else {
+        return false;
+    };
+    if i64::from(metadata.uid()) != identity.process_user_id {
+        return false;
+    }
+    let Ok(stat) = fs::read_to_string(process_root.join("stat")) else {
+        return false;
+    };
+    let Some((_, fields)) = stat.rsplit_once(") ") else {
+        return false;
+    };
+    fields.split_whitespace().nth(19) == Some(identity.process_start_token.as_str())
+}
+
+fn process_cwd_matches(identity: &meta_signal_flow::ProcessIdentity, expected: &str) -> bool {
+    let Ok(process_id) = u32::try_from(identity.process_id) else {
+        return false;
+    };
+    let expected = Path::new(expected);
+    expected.is_absolute()
+        && fs::canonicalize(format!("/proc/{process_id}/cwd")).ok()
+            == fs::canonicalize(expected).ok()
+}
+
+fn container_is_well_formed(container: &meta_signal_flow::FlowContainer) -> bool {
+    !container.herdr_session_name.is_empty()
+        && !container.meta_flow_owner_id.is_empty()
+        && Path::new(&container.herdr_server_socket_path).is_absolute()
+}
+
+fn container_socket_is_live(container: &meta_signal_flow::FlowContainer) -> bool {
+    fs::metadata(&container.herdr_server_socket_path)
+        .map(|metadata| metadata.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+fn binding_is_well_formed(binding: &meta_signal_flow::FlowBinding) -> bool {
+    !binding.flow_id.is_empty()
+        && !binding.model_name.is_empty()
+        && !binding.native_session_id.is_empty()
+        && !binding.herdr_workspace_id.is_empty()
+        && !binding.herdr_pane_id.is_empty()
+        && !binding.herdr_tab_id.is_empty()
+        && !binding.herdr_terminal_id.is_empty()
+        && !binding.herdr_agent_name.is_empty()
+        && Path::new(&binding.working_directory).is_absolute()
+}
+
+fn refused_binding(
+    flow_id: String,
+    reason: meta_signal_flow::FlowBindingRefusalReason,
+) -> meta_signal_flow::FlowBindingResult {
+    meta_signal_flow::FlowBindingResult::Refused(meta_signal_flow::RefusedFlowBinding {
+        flow_id,
+        flow_binding_refusal_reason: reason,
+    })
+}
 
 pub struct RunningNexus {
     pub store: FlowStore,
-    pub codex: CodexAdapter,
+    pub codex_endpoints: CodexEndpoints,
     pub herdr: herdr::HerdrCli,
+    pub composer: LaunchComposer,
 }
 
 pub trait Dispatches {
@@ -37,37 +119,266 @@ impl Dispatches for RunningNexus {
         match query {
             Query::Start(request) => {
                 let origin = request.origin_clue.clone();
-                let goal = match request.flow_type.as_str() {
-                    "codex-medium" => {
-                        "Follow the predefined Codex medium flow procedure. Read the origin clue first, recover the caller's goal from its transcript, then carry the work to completion."
+                let launch_request_id = request.launch_profile.launch_request_id.clone();
+                let existing = match self.store.launch_attempt(&launch_request_id) {
+                    Ok(existing) => existing,
+                    Err(_) => {
+                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
                     }
-                    _ => return Response::StartRejected(StartRejection::UnknownFlowType),
                 };
-                let Ok(Some(pending)) = self.store.reserve_pending_start(Query::Start(request))
-                else {
-                    return Response::StartRejected(StartRejection::LaunchRefused);
-                };
-                let launched =
-                    self.codex
-                        .start_codex_observed(&pending.flow_id, goal, &origin, |thread| {
-                            if self
-                                .store
-                                .record_pending_thread(&pending, thread.into())
-                                .unwrap_or(false)
+                if let Some(attempt) = existing {
+                    if attempt.launch_profile != request.launch_profile
+                        || attempt.origin_clue != origin
+                    {
+                        return Response::StartRejected(StartRejection::LaunchRequestConflict);
+                    }
+                    if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptObserved {
+                        let Some(binding) = attempt.native_launch_binding_option else {
+                            return Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            );
+                        };
+                        return self.store.confirm_started(&binding.flow_id).unwrap_or(
+                            Response::StartRejected(StartRejection::LaunchPersistenceRefused),
+                        );
+                    }
+                    if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
+                        return Response::LaunchPending(attempt);
+                    }
+                    let (Some(intent), Some(binding)) = (
+                        attempt.prompt_delivery_intent_option,
+                        attempt.native_launch_binding_option,
+                    ) else {
+                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                    };
+                    let observed = self
+                        .herdr
+                        .observe_native_target_receipt(&intent)
+                        .unwrap_or_else(|_| PromptDeliveryResult::Ambiguous(intent.clone()));
+                    let receipt = match observed {
+                        PromptDeliveryResult::Observed(receipt) => receipt,
+                        PromptDeliveryResult::Ambiguous(updated) => {
+                            if updated != intent
+                                && !self
+                                    .store
+                                    .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
+                                        updated.clone(),
+                                    ))
+                                    .unwrap_or(false)
                             {
-                                Ok(())
-                            } else {
-                                Err(codex::CodexAdapterUnavailable::Protocol(
-                                    "pending thread persistence failed".into(),
-                                ))
+                                return Response::StartRejected(
+                                    StartRejection::LaunchPersistenceRefused,
+                                );
                             }
-                        });
-                match launched {
-                    Ok(_) => self
+                            return Response::StartAmbiguous(updated);
+                        }
+                    };
+                    if !self
                         .store
-                        .confirm_started(&pending.flow_id)
-                        .unwrap_or(Response::StartRejected(StartRejection::LaunchRefused)),
-                    Err(_) => Response::StartRejected(StartRejection::LaunchRefused),
+                        .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt))
+                        .unwrap_or(false)
+                    {
+                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                    }
+                    return self.store.confirm_started(&binding.flow_id).unwrap_or(
+                        Response::StartRejected(StartRejection::LaunchPersistenceRefused),
+                    );
+                }
+                let launch = match self.composer.compose(&request.launch_profile) {
+                    Ok(launch) => launch,
+                    Err(_) => return Response::StartRejected(StartRejection::CompositionRefused),
+                };
+                let codex_adapter = if launch.launch_profile.harness_kind == HarnessKind::Codex {
+                    match self
+                        .codex_endpoints
+                        .adapter_for(&launch.launch_profile.model_name)
+                    {
+                        Ok(adapter) => Some(adapter),
+                        Err(_) => {
+                            return Response::StartRejected(StartRejection::NativeLaunchRefused);
+                        }
+                    }
+                } else {
+                    None
+                };
+                match self.store.reserve_launch_attempt(&launch, origin.clone()) {
+                    Ok(LaunchAttemptReservation::Reserved(_)) => {}
+                    Ok(LaunchAttemptReservation::Existing(attempt)) => {
+                        return Response::LaunchPending(attempt);
+                    }
+                    Ok(LaunchAttemptReservation::Conflict) => {
+                        return Response::StartRejected(StartRejection::LaunchRequestConflict);
+                    }
+                    Err(_) => {
+                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                    }
+                }
+                let native_intent = NativeLaunchIntent {
+                    launch_request_id: launch.launch_profile.launch_request_id.clone(),
+                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                    harness_kind: launch.launch_profile.harness_kind.clone(),
+                    model_name: launch.launch_profile.model_name.clone(),
+                    effort: launch.launch_profile.effort.clone(),
+                    skill_name_vector: launch.launch_profile.skill_name_vector.clone(),
+                };
+                if !self
+                    .store
+                    .record_native_launch_intent(native_intent)
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                let pane = match self.herdr.create_launch_pane(&launch) {
+                    Ok(pane) => pane,
+                    Err(_) => {
+                        return Response::StartRejected(StartRejection::NativeLaunchRefused);
+                    }
+                };
+                if self.herdr.start_native_harness(&launch, &pane).is_err() {
+                    return Response::StartRejected(StartRejection::NativeLaunchRefused);
+                }
+                let binding = match self.herdr.observe_native_binding(&launch, &pane) {
+                    Ok(binding) => binding,
+                    Err(_) => return Response::StartRejected(StartRejection::BindingRefused),
+                };
+                if !self
+                    .store
+                    .record_native_launch_binding(binding.clone())
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                let node = FlowNode {
+                    flow_id: binding.flow_id.clone(),
+                    session_id: binding.native_session_id.clone(),
+                    harness_kind: binding.harness_kind.clone(),
+                    endpoint_selection: EndpointSelection::Unavailable,
+                    herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                        herdr_session_name: binding.herdr_pane_binding.herdr_session_name.clone(),
+                        herdr_agent_name: binding.herdr_pane_binding.herdr_agent_name.clone(),
+                        herdr_pane_id: binding.herdr_pane_binding.herdr_pane_id.clone(),
+                        herdr_terminal_id: binding.herdr_pane_binding.herdr_terminal_id.clone(),
+                    }),
+                    origin_clue: origin,
+                    flow_lifecycle: FlowLifecycle::Pending,
+                };
+                if !self.herdr.validate_registration(&node) {
+                    return Response::StartRejected(StartRejection::RegistrationRefused);
+                }
+                let registered = match self.store.register_flow(node) {
+                    Ok(store::FlowRegistration::Registered(node)) => node,
+                    Ok(store::FlowRegistration::ConflictingBinding) | Err(_) => {
+                        return Response::StartRejected(StartRejection::RegistrationRefused);
+                    }
+                };
+                let acknowledgement = RegistrationAcknowledgement {
+                    launch_request_id: binding.launch_request_id.clone(),
+                    flow_id: registered.flow_id.clone(),
+                    native_session_id: registered.session_id.clone(),
+                    herdr_pane_binding: binding.herdr_pane_binding.clone(),
+                };
+                if !self
+                    .store
+                    .record_registration_acknowledgement(acknowledgement.clone())
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                let native_skill_selection_vector = match launch.launch_profile.harness_kind {
+                    HarnessKind::Codex => self
+                        .codex_endpoints
+                        .adapter_for(&launch.launch_profile.model_name)
+                        .and_then(|adapter| adapter.resolve_bound_codex_skills(&launch, &binding))
+                        .map_err(|_| ()),
+                    HarnessKind::Claude => self
+                        .herdr
+                        .resolve_claude_native_skills(&launch, &binding)
+                        .map_err(|_| ()),
+                };
+                let Ok(native_skill_selection_vector) = native_skill_selection_vector else {
+                    return Response::StartRejected(StartRejection::RegistrationRefused);
+                };
+                let delivery_intent = match self.herdr.accept_registration(
+                    &launch,
+                    &binding,
+                    &acknowledgement,
+                    native_skill_selection_vector,
+                ) {
+                    Ok(intent) => intent,
+                    Err(_) => {
+                        return Response::StartRejected(StartRejection::RegistrationRefused);
+                    }
+                };
+                if !self
+                    .store
+                    .record_prompt_delivery_intent(delivery_intent.clone())
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::IntentPersistenceRefused);
+                }
+                let submission = match launch.launch_profile.harness_kind {
+                    HarnessKind::Codex => codex_adapter.as_ref().ok_or(()).and_then(|adapter| {
+                        adapter
+                            .submit_bound_codex_first_turn(&launch, &delivery_intent)
+                            .map_err(|_| ())
+                    }),
+                    HarnessKind::Claude => self
+                        .herdr
+                        .submit_first_prompt_once(&launch, &delivery_intent)
+                        .map_err(|_| ()),
+                };
+                let initial = match submission {
+                    Ok(result) => result,
+                    Err(_) => PromptDeliveryResult::Ambiguous(delivery_intent.clone()),
+                };
+                if !self
+                    .store
+                    .record_prompt_delivery_result(initial.clone())
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                let result = match initial {
+                    PromptDeliveryResult::Observed(receipt) => {
+                        PromptDeliveryResult::Observed(receipt)
+                    }
+                    PromptDeliveryResult::Ambiguous(_) => self
+                        .herdr
+                        .observe_native_target_receipt(&delivery_intent)
+                        .unwrap_or_else(|_| {
+                            PromptDeliveryResult::Ambiguous(delivery_intent.clone())
+                        }),
+                };
+                match result {
+                    PromptDeliveryResult::Ambiguous(intent) => {
+                        if intent != delivery_intent
+                            && !self
+                                .store
+                                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
+                                    intent.clone(),
+                                ))
+                                .unwrap_or(false)
+                        {
+                            return Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            );
+                        }
+                        Response::StartAmbiguous(intent)
+                    }
+                    PromptDeliveryResult::Observed(receipt) => {
+                        if !self
+                            .store
+                            .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt))
+                            .unwrap_or(false)
+                        {
+                            return Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            );
+                        }
+                        self.store.confirm_started(&binding.flow_id).unwrap_or(
+                            Response::StartRejected(StartRejection::LaunchPersistenceRefused),
+                        )
+                    }
                 }
             }
             Query::Restart(request) => {
@@ -80,21 +391,12 @@ impl Dispatches for RunningNexus {
                 if request.origin_clue.session_id != token.thread_id {
                     return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
                 }
-                let origin = signal_flow::OriginClue {
-                    flow_id: token.authority_flow_id.clone(),
-                    session_id: token.thread_id.clone(),
-                    turn_id: "restart".into(),
-                };
-                if self
-                    .codex
-                    .resume_codex(&token.thread_id, "Resume this Flow.", &origin)
-                    .is_err()
-                {
-                    return Response::RestartRejected(RestartRejection::ResumeRefused);
-                }
-                self.store
-                    .record_restarted(token)
-                    .unwrap_or(Response::RestartRejected(RestartRejection::ResumeRefused))
+                // v2 restart does not carry the original model/endpoint. Moving
+                // a thread between stable and next is never inferred from its
+                // current process or from a caller claim. Refresh uses a fresh
+                // typed Start until the replacement contract is deployed.
+                let _ = token;
+                Response::RestartRejected(RestartRejection::ResumeRefused)
             }
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
@@ -106,6 +408,80 @@ impl Dispatches for RunningNexus {
                         signal_flow::RecipientResolutionRejection::FlowUnavailable,
                     ),
                 }
+            }
+            Query::Send(request) => {
+                let node = match self.store.flow_node(&request.flow_id) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => {
+                        return Response::SendRejected(signal_flow::SendRejection::UnknownFlow);
+                    }
+                    Err(_) => {
+                        return Response::SendRejected(
+                            signal_flow::SendRejection::PersistenceRefused,
+                        );
+                    }
+                };
+                if node.flow_lifecycle == FlowLifecycle::Stopped {
+                    return Response::SendRejected(signal_flow::SendRejection::FlowStopped);
+                }
+                let node = self.herdr.refresh_route(node);
+                if !matches!(
+                    node.herdr_route_selection,
+                    HerdrRouteSelection::Available(_)
+                ) {
+                    return Response::SendRejected(signal_flow::SendRejection::RouteUnavailable);
+                }
+                let requires_presentation = node.flow_lifecycle == FlowLifecycle::Pending;
+                let Some(send_outcome) =
+                    self.herdr
+                        .prompt(&node, &request.bare_input, requires_presentation)
+                else {
+                    return Response::SendRejected(signal_flow::SendRejection::DeliveryRefused);
+                };
+                if requires_presentation
+                    && !self.store.record_active(&request.flow_id).unwrap_or(false)
+                {
+                    return Response::SendRejected(signal_flow::SendRejection::PersistenceRefused);
+                }
+                Response::Sent(send_outcome)
+            }
+            Query::Stop(flow_id) => {
+                let node = match self.store.flow_node(&flow_id) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => {
+                        return Response::StopRejected(signal_flow::StopRejection::UnknownFlow);
+                    }
+                    Err(_) => {
+                        return Response::StopRejected(
+                            signal_flow::StopRejection::PersistenceRefused,
+                        );
+                    }
+                };
+                if node.flow_lifecycle == FlowLifecycle::Stopped {
+                    return Response::StopRejected(signal_flow::StopRejection::AlreadyStopped);
+                }
+                let node = self.herdr.refresh_route(node);
+                if !matches!(
+                    node.herdr_route_selection,
+                    HerdrRouteSelection::Available(_)
+                ) {
+                    return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
+                }
+                if !self.herdr.close(&node) {
+                    return Response::StopRejected(signal_flow::StopRejection::CloseRefused);
+                }
+                if !self.store.record_stopped(&flow_id).unwrap_or(false) {
+                    return Response::StopRejected(signal_flow::StopRejection::PersistenceRefused);
+                }
+                Response::Stopped(flow_id)
+            }
+            Query::List(_) => {
+                self.store
+                    .flow_nodes()
+                    .map(Response::Listed)
+                    .unwrap_or(Response::ListRejected(
+                        signal_flow::ListRejection::PersistenceRefused,
+                    ))
             }
         }
     }
@@ -124,12 +500,146 @@ impl Dispatches for RunningNexus {
                 })
             }
             meta_signal_flow::Query::ConsumeReset(request) => self
-                .codex
-                .consume_reset_credit(&request)
+                .codex_endpoints
+                .next
+                .model_names
+                .first()
+                .ok_or(())
+                .and_then(|model| self.codex_endpoints.adapter_for(model).map_err(|_| ()))
+                .and_then(|adapter| adapter.consume_reset_credit(&request).map_err(|_| ()))
                 .map(meta_signal_flow::Response::ResetConsumed)
                 .unwrap_or(meta_signal_flow::Response::ResetRejected(
                     meta_signal_flow::ResetRejection::AdapterUnavailable,
                 )),
+            meta_signal_flow::Query::MetaBindExisting(request) => {
+                let container = request.flow_container;
+                if !container_is_well_formed(&container) || !container_socket_is_live(&container) {
+                    return meta_signal_flow::Response::BindExistingRejected(
+                        meta_signal_flow::BindExistingRejection::ContainerUnavailable,
+                    );
+                }
+                if !process_identity_matches(&container.herdr_server_process_identity) {
+                    return meta_signal_flow::Response::BindExistingRejected(
+                        meta_signal_flow::BindExistingRejection::ContainerIdentityMismatch,
+                    );
+                }
+
+                let mut seen_flow_ids = HashSet::new();
+                let mut seen_panes = HashSet::new();
+                let mut results = Vec::with_capacity(request.flow_binding_vector.len());
+                for binding in request.flow_binding_vector {
+                    let flow_id = binding.flow_id.clone();
+                    if !seen_flow_ids.insert(flow_id.clone()) {
+                        results.push(refused_binding(
+                            flow_id,
+                            meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId,
+                        ));
+                        continue;
+                    }
+                    if !binding_is_well_formed(&binding) {
+                        results.push(refused_binding(
+                            flow_id,
+                            meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch,
+                        ));
+                        continue;
+                    }
+                    let pane_identity = (
+                        binding.herdr_workspace_id.clone(),
+                        binding.herdr_pane_id.clone(),
+                        binding.herdr_tab_id.clone(),
+                        binding.herdr_terminal_id.clone(),
+                        binding.herdr_agent_name.clone(),
+                    );
+                    if !seen_panes.insert(pane_identity) {
+                        results.push(refused_binding(
+                            flow_id,
+                            meta_signal_flow::FlowBindingRefusalReason::AmbiguousPane,
+                        ));
+                        continue;
+                    }
+                    if !process_identity_matches(&binding.process_identity) {
+                        results.push(refused_binding(
+                            flow_id,
+                            meta_signal_flow::FlowBindingRefusalReason::DeadProcess,
+                        ));
+                        continue;
+                    }
+                    if !process_cwd_matches(&binding.process_identity, &binding.working_directory) {
+                        results.push(refused_binding(
+                            flow_id,
+                            meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch,
+                        ));
+                        continue;
+                    }
+                    match self.store.apply(Query::ResolveRecipient(flow_id.clone())) {
+                        Ok(Response::RecipientResolutionRejected(
+                            signal_flow::RecipientResolutionRejection::UnknownFlow,
+                        )) => {}
+                        Ok(Response::RecipientResolved(_)) => {
+                            results.push(refused_binding(
+                                flow_id,
+                                meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId,
+                            ));
+                            continue;
+                        }
+                        Ok(_) | Err(_) => {
+                            return meta_signal_flow::Response::BindExistingRejected(
+                                meta_signal_flow::BindExistingRejection::StoreRefused,
+                            );
+                        }
+                    }
+
+                    let node = FlowNode {
+                        flow_id: flow_id.clone(),
+                        session_id: binding.native_session_id,
+                        harness_kind: binding.harness_kind,
+                        endpoint_selection: EndpointSelection::Unavailable,
+                        herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                            herdr_session_name: container.herdr_session_name.clone(),
+                            herdr_agent_name: binding.herdr_agent_name,
+                            herdr_pane_id: binding.herdr_pane_id,
+                            herdr_terminal_id: binding.herdr_terminal_id,
+                        }),
+                        origin_clue: signal_flow::OriginClue {
+                            flow_id: container.meta_flow_owner_id.clone(),
+                            session_id: container.herdr_session_name.clone(),
+                            turn_id: "meta-bind-existing".into(),
+                        },
+                        flow_lifecycle: FlowLifecycle::Pending,
+                    };
+                    let flow_type = format!(
+                        "{:?}:{:?}:{}",
+                        binding.flow_aspect, binding.power_level, binding.model_name
+                    );
+                    match self.store.register_existing_flow(node, flow_type) {
+                        Ok(store::FlowRegistration::Registered(_)) => {
+                            results.push(meta_signal_flow::FlowBindingResult::Bound(
+                                meta_signal_flow::BoundFlowBinding {
+                                    flow_id,
+                                    flow_lifecycle:
+                                        meta_signal_flow::FlowLifecycle::RegisteredUnconfirmed,
+                                },
+                            ))
+                        }
+                        Ok(store::FlowRegistration::ConflictingBinding) => {
+                            results.push(refused_binding(
+                                flow_id,
+                                meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId,
+                            ))
+                        }
+                        Err(_) => {
+                            return meta_signal_flow::Response::BindExistingRejected(
+                                meta_signal_flow::BindExistingRejection::StoreRefused,
+                            );
+                        }
+                    }
+                }
+
+                meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
+                    flow_container: container,
+                    flow_binding_result_vector: results,
+                })
+            }
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
                 if !self.herdr.validate_registration(&flow_node) {
                     return meta_signal_flow::Response::FlowRegistrationRejected(
@@ -157,9 +667,8 @@ impl Dispatches for RunningNexus {
 pub trait OpensRunningNexus {
     fn open(
         store: &Path,
-        socket: String,
-        model: String,
-        timeout: std::time::Duration,
+        codex_endpoints: CodexEndpoints,
+        source_root: PathBuf,
     ) -> Result<Self, store::StoreError>
     where
         Self: Sized;
@@ -168,18 +677,14 @@ pub trait OpensRunningNexus {
 impl OpensRunningNexus for RunningNexus {
     fn open(
         store: &Path,
-        socket: String,
-        model: String,
-        timeout: std::time::Duration,
+        codex_endpoints: CodexEndpoints,
+        source_root: PathBuf,
     ) -> Result<Self, store::StoreError> {
         Ok(Self {
             store: FlowStore::open(store)?,
-            codex: CodexAdapter {
-                socket,
-                model,
-                timeout,
-            },
-            herdr: herdr::HerdrCli::default(),
+            codex_endpoints: codex_endpoints.clone(),
+            herdr: herdr::HerdrCli::default().with_codex_endpoints(codex_endpoints),
+            composer: LaunchComposer::at(source_root),
         })
     }
 }
@@ -279,15 +784,32 @@ impl Frame {
 mod tests {
     use super::{Dispatches, RunningNexus};
     use crate::{
-        codex::CodexAdapter,
+        codex::{CodexEndpoint, CodexEndpoints},
+        composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
-        store::{FlowStore, OpensFlowStore},
+        store::{
+            FlowStore, OpensFlowStore, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
+            RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+            RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
+        },
     };
+    use sha2::{Digest, Sha256};
     use signal_flow::{
-        EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-        OriginClue, Query, Response,
+        EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding,
+        HerdrRoute, HerdrRouteSelection, LaunchProfile, LaunchSource, NativeLaunchBinding,
+        NativeLaunchIntent, NativeTranscriptAbsence, NativeTranscriptBoundary, OriginClue,
+        PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
+        Response, StartRejection, StartRequest,
     };
-    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+    use std::{
+        collections::BTreeSet,
+        fs,
+        io::Write,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        os::unix::net::UnixListener,
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
     struct NexusFixture {
         directory: tempfile::TempDir,
@@ -297,6 +819,57 @@ mod tests {
 
     trait ControlsHerdrSnapshot {
         fn set_agents(&self, agents: Vec<serde_json::Value>);
+        fn accept_pane_operations(
+            &self,
+            agents: Vec<serde_json::Value>,
+            rendered_pane: Option<&str>,
+        ) -> PathBuf;
+    }
+
+    fn current_process_identity() -> meta_signal_flow::ProcessIdentity {
+        let process_id = i64::from(std::process::id());
+        let metadata = fs::metadata(format!("/proc/{process_id}")).expect("current process");
+        let stat = fs::read_to_string(format!("/proc/{process_id}/stat")).expect("process stat");
+        let (_, fields) = stat.rsplit_once(") ").expect("process comm boundary");
+        meta_signal_flow::ProcessIdentity {
+            process_id,
+            process_user_id: i64::from(metadata.uid()),
+            process_start_token: fields
+                .split_whitespace()
+                .nth(19)
+                .expect("process start token")
+                .into(),
+        }
+    }
+
+    fn existing_binding(flow_id: &str, pane: &str) -> meta_signal_flow::FlowBinding {
+        meta_signal_flow::FlowBinding {
+            flow_id: flow_id.into(),
+            flow_aspect: FlowAspect::Mind,
+            power_level: PowerLevel::Medium,
+            model_name: "gpt-sol".into(),
+            harness_kind: HarnessKind::Codex,
+            native_session_id: format!("native-{flow_id}"),
+            herdr_workspace_id: "workspace".into(),
+            herdr_pane_id: pane.into(),
+            herdr_tab_id: "tab".into(),
+            herdr_terminal_id: format!("terminal-{pane}"),
+            herdr_agent_name: format!("agent-{pane}"),
+            process_identity: current_process_identity(),
+            working_directory: fs::read_link("/proc/self/cwd")
+                .expect("current cwd")
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
+
+    fn flow_container(socket: &Path) -> meta_signal_flow::FlowContainer {
+        meta_signal_flow::FlowContainer {
+            herdr_session_name: "messaging-build".into(),
+            herdr_server_socket_path: socket.to_string_lossy().into_owned(),
+            herdr_server_process_identity: current_process_identity(),
+            meta_flow_owner_id: "field-owner".into(),
+        }
     }
 
     impl NexusFixture {
@@ -310,14 +883,34 @@ mod tests {
             )
             .expect("fixture flow claim");
             let snapshot_program = directory.path().join("herdr-fixture");
+            let codex_endpoints = CodexEndpoints {
+                stable: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex"),
+                    home: directory.path().join("codex-home"),
+                    socket: "unused".into(),
+                    transcript_root: directory.path().join("native-transcripts/codex"),
+                    model_names: BTreeSet::from([
+                        "unused".into(),
+                        "fixture-model".into(),
+                        "gpt-sol".into(),
+                    ]),
+                },
+                next: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex-next"),
+                    home: directory.path().join("codex-next-home"),
+                    socket: "unused-next".into(),
+                    transcript_root: directory.path().join("native-transcripts/codex-next"),
+                    model_names: BTreeSet::from(["gpt-6-sol".into(), "gpt-6-luna".into()]),
+                },
+                timeout: Duration::from_secs(1),
+                workspace_root: directory.path().to_path_buf(),
+            };
             let nexus = RunningNexus {
                 store: FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store"),
-                codex: CodexAdapter {
-                    socket: "unused".into(),
-                    model: "unused".into(),
-                    timeout: Duration::from_secs(1),
-                },
-                herdr: HerdrCli::at(snapshot_program.clone(), flows_root),
+                codex_endpoints: codex_endpoints.clone(),
+                herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
+                    .with_codex_endpoints(codex_endpoints),
+                composer: LaunchComposer::at(directory.path().to_path_buf()),
             };
             Self {
                 directory,
@@ -396,6 +989,44 @@ mod tests {
             fs::set_permissions(&self.snapshot_program, permissions)
                 .expect("snapshot fixture executable");
         }
+
+        fn accept_pane_operations(
+            &self,
+            agents: Vec<serde_json::Value>,
+            rendered_pane: Option<&str>,
+        ) -> PathBuf {
+            let snapshot = serde_json::json!({
+                "id":"cli:api:snapshot",
+                "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
+                "type":"session_snapshot"}
+            });
+            let log = self.directory.path().join("herdr-operations.log");
+            let pane_output = self.directory.path().join("pane-output.txt");
+            let rendered_pane = rendered_pane.unwrap_or("marker-absent");
+            let body = format!(
+                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; if [ '{}' != marker-absent ]; then printf '%s\\n' \"$6\" > '{}'; else printf '%s\\n' 'marker absent' > '{}'; fi ;;\n  \"pane wait-output\") printf '%s\\n' \"$*\" >> '{}'; [ \"${{13}}\" = '{}' ] && grep -F -- \"$6\" '{}' >/dev/null ;;\n  \"pane read\") printf '%s\\n' \"$*\" >> '{}'; [ \"${{11}}\" = '{}' ] && cat '{}' ;;\n  \"pane close\") printf '%s\\n' \"$*\" >> '{}' ;;\n  *) exit 64 ;;\nesac\n",
+                snapshot,
+                log.display(),
+                rendered_pane,
+                pane_output.display(),
+                pane_output.display(),
+                log.display(),
+                rendered_pane,
+                pane_output.display(),
+                log.display(),
+                rendered_pane,
+                pane_output.display(),
+                log.display(),
+            );
+            fs::write(&self.snapshot_program, body).expect("Herdr operation fixture");
+            let mut permissions = fs::metadata(&self.snapshot_program)
+                .expect("Herdr operation fixture metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(&self.snapshot_program, permissions)
+                .expect("Herdr operation fixture executable");
+            log
+        }
     }
 
     #[test]
@@ -414,6 +1045,622 @@ mod tests {
                 .nexus
                 .dispatch(Query::ResolveRecipient("908786".into())),
             Response::RecipientResolved(node)
+        );
+    }
+
+    #[test]
+    fn send_witness_promotes_pending_list_observes_and_stop_persists() {
+        let fixture = NexusFixture::new();
+        let mut agent = fixture.current_agent();
+        agent["agent_status"] = serde_json::Value::String("idle".into());
+        let operation_log = fixture.accept_pane_operations(vec![agent], Some("w1:p3"));
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node.clone())),
+            meta_signal_flow::Response::FlowRegistered(node)
+        );
+
+        let response = fixture
+            .nexus
+            .dispatch(Query::Send(signal_flow::SendRequest {
+                flow_id: "908786".into(),
+                bare_input: "bare prompt".into(),
+            }));
+        let Response::Sent(signal_flow::SendOutcome::Presented(receipt)) = response else {
+            panic!(
+                "Pending Send must return its pane presentation receipt: {response:?}; operations={:?}; output={:?}",
+                fs::read_to_string(&operation_log),
+                fs::read_to_string(fixture.directory.path().join("pane-output.txt"))
+            )
+        };
+        assert_eq!(receipt.flow_id, "908786");
+        assert_eq!(receipt.herdr_pane_id, "w1:p3");
+        assert!(
+            receipt
+                .presentation_marker
+                .starts_with("FLOW_PRESENTED_908786_")
+        );
+        assert!(receipt.presentation_read_unix_milliseconds > 0);
+        let Response::Listed(active) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].flow_lifecycle, FlowLifecycle::Active);
+
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Stop("908786".into())),
+            Response::Stopped("908786".into())
+        );
+        let Response::Listed(stopped) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return stopped Flow rows")
+        };
+        assert_eq!(stopped[0].flow_lifecycle, FlowLifecycle::Stopped);
+        let operations = fs::read_to_string(operation_log).expect("Herdr operation log");
+        assert!(operations.contains("agent prompt w1:p3 bare prompt"));
+        assert!(operations.contains(receipt.presentation_marker.as_str()));
+        assert!(operations.contains("pane wait-output --match FLOW_PRESENTED_908786_"));
+        assert!(
+            operations
+                .contains("pane read --source recent-unwrapped --lines 200 --format text w1:p3")
+        );
+        assert!(operations.contains("pane close w1:p3"));
+    }
+
+    #[test]
+    fn queued_send_cannot_promote_a_pending_working_flow() {
+        let fixture = NexusFixture::new();
+        let operation_log =
+            fixture.accept_pane_operations(vec![fixture.current_agent()], Some("w1:p3"));
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "queued prompt".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::DeliveryRefused)
+        );
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
+        assert!(!operation_log.exists());
+    }
+
+    #[test]
+    fn failed_pending_send_wait_keeps_the_flow_pending() {
+        let fixture = NexusFixture::new();
+        let mut agent = fixture.current_agent();
+        agent["agent_status"] = serde_json::Value::String("idle".into());
+        fixture.set_agents(vec![agent]);
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "unwitnessed prompt".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::DeliveryRefused)
+        );
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
+    }
+
+    #[test]
+    fn marker_absent_from_target_pane_keeps_the_flow_pending() {
+        let fixture = NexusFixture::new();
+        let mut agent = fixture.current_agent();
+        agent["agent_status"] = serde_json::Value::String("idle".into());
+        fixture.accept_pane_operations(vec![agent], None);
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "unrendered prompt".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::DeliveryRefused)
+        );
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
+    }
+
+    #[test]
+    fn marker_rendered_in_a_different_pane_keeps_the_flow_pending() {
+        let fixture = NexusFixture::new();
+        let mut agent = fixture.current_agent();
+        agent["agent_status"] = serde_json::Value::String("idle".into());
+        fixture.accept_pane_operations(vec![agent], Some("w1:p9"));
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "wrong pane prompt".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::DeliveryRefused)
+        );
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
+    }
+
+    #[test]
+    fn active_send_reports_acceptance_without_claiming_presentation_or_read() {
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(vec![fixture.current_agent()], Some("w1:p3"));
+        let node = fixture.node();
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "ordinary active prompt".into(),
+                })),
+            Response::Sent(signal_flow::SendOutcome::Accepted("908786".into()))
+        );
+    }
+
+    #[test]
+    fn stale_pending_send_is_refused_before_prompt_and_keeps_pending() {
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        let mut node = fixture.node();
+        node.flow_lifecycle = FlowLifecycle::Pending;
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node)),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+        let mut stale = fixture.current_agent();
+        stale["terminal_id"] = serde_json::Value::String("term-replaced".into());
+        fixture.set_agents(vec![stale]);
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "stale route prompt".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::RouteUnavailable)
+        );
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
+    }
+
+    #[test]
+    fn meta_bind_existing_imports_only_verified_processes_as_pending() {
+        let fixture = NexusFixture::new();
+        let socket_path = fixture.directory.path().join("herdr.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let container = flow_container(&socket_path);
+        let accepted = existing_binding("mind-live", "pane-1");
+        let ambiguous = existing_binding("field-ambiguous", "pane-1");
+        let mut dead = existing_binding("psyche-dead", "pane-3");
+        dead.process_identity.process_id = i64::MAX;
+        let duplicate = existing_binding("mind-live", "pane-4");
+        let mut wrong_cwd = existing_binding("field-wrong-cwd", "pane-5");
+        wrong_cwd.working_directory = fixture
+            .directory
+            .path()
+            .join("absent")
+            .display()
+            .to_string();
+
+        let response = fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                meta_signal_flow::MetaBindExisting {
+                    flow_container: container.clone(),
+                    flow_binding_vector: vec![accepted, ambiguous, dead, duplicate, wrong_cwd],
+                },
+            ));
+        let meta_signal_flow::Response::BoundExisting(bound) = response else {
+            panic!("valid container must return ordered per-flow results")
+        };
+        assert_eq!(bound.flow_container, container);
+        assert_eq!(bound.flow_binding_result_vector.len(), 5);
+        assert!(matches!(
+            &bound.flow_binding_result_vector[0],
+            meta_signal_flow::FlowBindingResult::Bound(binding)
+                if binding.flow_id == "mind-live"
+                    && binding.flow_lifecycle
+                        == meta_signal_flow::FlowLifecycle::RegisteredUnconfirmed
+        ));
+        assert!(matches!(
+            &bound.flow_binding_result_vector[1],
+            meta_signal_flow::FlowBindingResult::Refused(binding)
+                if binding.flow_binding_refusal_reason
+                    == meta_signal_flow::FlowBindingRefusalReason::AmbiguousPane
+        ));
+        assert!(matches!(
+            &bound.flow_binding_result_vector[2],
+            meta_signal_flow::FlowBindingResult::Refused(binding)
+                if binding.flow_binding_refusal_reason
+                    == meta_signal_flow::FlowBindingRefusalReason::DeadProcess
+        ));
+        assert!(matches!(
+            &bound.flow_binding_result_vector[3],
+            meta_signal_flow::FlowBindingResult::Refused(binding)
+                if binding.flow_binding_refusal_reason
+                    == meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId
+        ));
+        assert!(matches!(
+            &bound.flow_binding_result_vector[4],
+            meta_signal_flow::FlowBindingResult::Refused(binding)
+                if binding.flow_binding_refusal_reason
+                    == meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch
+        ));
+
+        let Response::RecipientResolved(node) = fixture
+            .nexus
+            .dispatch(Query::ResolveRecipient("mind-live".into()))
+        else {
+            panic!("accepted existing flow must resolve")
+        };
+        assert_eq!(node.flow_lifecycle, FlowLifecycle::Pending);
+        assert_eq!(node.endpoint_selection, EndpointSelection::Unavailable);
+        assert_eq!(node.origin_clue.flow_id, "field-owner");
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("field-ambiguous".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::UnknownFlow
+            )
+        ));
+    }
+
+    #[test]
+    fn meta_bind_existing_rejects_unverified_container_without_store_effects() {
+        let fixture = NexusFixture::new();
+        let socket_path = fixture.directory.path().join("herdr.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let mut container = flow_container(&socket_path);
+        container.herdr_server_process_identity.process_start_token = "stale".into();
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                    meta_signal_flow::MetaBindExisting {
+                        flow_container: container,
+                        flow_binding_vector: vec![existing_binding("not-imported", "pane-1")],
+                    }
+                ),),
+            meta_signal_flow::Response::BindExistingRejected(
+                meta_signal_flow::BindExistingRejection::ContainerIdentityMismatch
+            )
+        );
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("not-imported".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::UnknownFlow
+            )
+        ));
+    }
+
+    #[test]
+    fn identical_launch_retry_reads_the_journal_before_a_deleted_source() {
+        let fixture = NexusFixture::new();
+        let source_path = fixture.directory.path().join("launch-source.md");
+        let bundle_path = fixture.directory.path().join("flow-system-prompt.md");
+        fs::write(&source_path, b"exact source bytes\n").expect("fixture source");
+        fs::write(&bundle_path, b"fixture bundle\n").expect("fixture bundle");
+        let profile = LaunchProfile {
+            launch_request_id: "retry-request".into(),
+            launch_source_vector: vec![LaunchSource {
+                source_path: "launch-source.md".into(),
+                source_sha256: format!("{:x}", Sha256::digest(b"exact source bytes\n")),
+            }],
+            skill_name_vector: Vec::new(),
+            flow_aspect: FlowAspect::Field,
+            power_level: PowerLevel::High,
+            harness_kind: HarnessKind::Codex,
+            model_name: "fixture-model".into(),
+            effort: "medium".into(),
+            flow_id_option: None,
+            remembered_flow_vector: Vec::new(),
+            herdr_session_name: "fixture-session".into(),
+            system_prompt_bundle_file: bundle_path.to_string_lossy().into_owned(),
+            instruction_prompt: "fixture instruction".into(),
+        };
+        let origin = OriginClue {
+            flow_id: "caller".into(),
+            session_id: "caller-session".into(),
+            turn_id: "caller-turn".into(),
+        };
+        let composed = fixture
+            .nexus
+            .composer
+            .compose(&profile)
+            .expect("new request composes once");
+        fixture
+            .nexus
+            .store
+            .reserve_launch_attempt(&composed, origin.clone())
+            .expect("reservation persists");
+        fs::remove_file(source_path).expect("source removed after reservation");
+
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::Start(StartRequest {
+                launch_profile: profile.clone(),
+                origin_clue: origin.clone(),
+            })),
+            Response::LaunchPending(_)
+        ));
+        let mut changed = profile;
+        changed.effort = "high".into();
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Start(StartRequest {
+                launch_profile: changed,
+                origin_clue: origin,
+            })),
+            Response::StartRejected(StartRejection::LaunchRequestConflict)
+        );
+        assert!(!fixture.snapshot_program.exists());
+    }
+
+    #[test]
+    fn delayed_receipt_after_source_deletion_promotes_without_a_second_external_write() {
+        let fixture = NexusFixture::new();
+        let source_path = fixture.directory.path().join("delayed-source.md");
+        let bundle_path = fixture.directory.path().join("flow-system-prompt.md");
+        fs::write(&source_path, b"delayed exact bytes\n").expect("fixture source");
+        fs::write(&bundle_path, b"fixture bundle\n").expect("fixture bundle");
+        let profile = LaunchProfile {
+            launch_request_id: "delayed-request".into(),
+            launch_source_vector: vec![LaunchSource {
+                source_path: "delayed-source.md".into(),
+                source_sha256: format!("{:x}", Sha256::digest(b"delayed exact bytes\n")),
+            }],
+            skill_name_vector: Vec::new(),
+            flow_aspect: FlowAspect::Field,
+            power_level: PowerLevel::High,
+            harness_kind: HarnessKind::Codex,
+            model_name: "fixture-model".into(),
+            effort: "medium".into(),
+            flow_id_option: None,
+            remembered_flow_vector: Vec::new(),
+            herdr_session_name: "fixture-session".into(),
+            system_prompt_bundle_file: bundle_path.to_string_lossy().into_owned(),
+            instruction_prompt: "fixture instruction".into(),
+        };
+        let origin = OriginClue {
+            flow_id: "caller".into(),
+            session_id: "caller-session".into(),
+            turn_id: "caller-turn".into(),
+        };
+        let composed = fixture.nexus.composer.compose(&profile).unwrap();
+        fixture
+            .nexus
+            .store
+            .reserve_launch_attempt(&composed, origin.clone())
+            .unwrap();
+        fixture
+            .nexus
+            .store
+            .record_native_launch_intent(NativeLaunchIntent {
+                launch_request_id: profile.launch_request_id.clone(),
+                prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: HarnessKind::Codex,
+                model_name: profile.model_name.clone(),
+                effort: profile.effort.clone(),
+                skill_name_vector: Vec::new(),
+            })
+            .unwrap();
+        let native_session_id = "01a0b22c-e24f-7452-9940-64490878680f";
+        let pane = HerdrPaneBinding {
+            launch_request_id: profile.launch_request_id.clone(),
+            herdr_session_name: profile.herdr_session_name.clone(),
+            herdr_agent_name: "fixture-agent".into(),
+            herdr_workspace_id: "fixture-workspace".into(),
+            herdr_pane_id: "w1:p1".into(),
+            herdr_terminal_id: "fixture-terminal".into(),
+        };
+        let binding = NativeLaunchBinding {
+            launch_request_id: profile.launch_request_id.clone(),
+            flow_id: "908786".into(),
+            native_session_id: native_session_id.into(),
+            harness_kind: HarnessKind::Codex,
+            herdr_pane_binding: pane.clone(),
+        };
+        fixture
+            .nexus
+            .store
+            .record_native_launch_binding(binding.clone())
+            .unwrap();
+        fixture
+            .nexus
+            .store
+            .register_flow(FlowNode {
+                flow_id: binding.flow_id.clone(),
+                session_id: binding.native_session_id.clone(),
+                harness_kind: HarnessKind::Codex,
+                endpoint_selection: EndpointSelection::Unavailable,
+                herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                    herdr_session_name: pane.herdr_session_name.clone(),
+                    herdr_agent_name: pane.herdr_agent_name.clone(),
+                    herdr_pane_id: pane.herdr_pane_id.clone(),
+                    herdr_terminal_id: pane.herdr_terminal_id.clone(),
+                }),
+                origin_clue: origin.clone(),
+                flow_lifecycle: FlowLifecycle::Pending,
+            })
+            .unwrap();
+        let acknowledgement = RegistrationAcknowledgement {
+            launch_request_id: profile.launch_request_id.clone(),
+            flow_id: binding.flow_id.clone(),
+            native_session_id: binding.native_session_id.clone(),
+            herdr_pane_binding: pane.clone(),
+        };
+        fixture
+            .nexus
+            .store
+            .record_registration_acknowledgement(acknowledgement)
+            .unwrap();
+        let transcript_root = fixture.directory.path().join("native-transcripts/codex");
+        fs::create_dir_all(&transcript_root).unwrap();
+        let root_metadata = fs::metadata(&transcript_root).unwrap();
+        let intent = PromptDeliveryIntent {
+            launch_request_id: profile.launch_request_id.clone(),
+            prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+            flow_id: binding.flow_id.clone(),
+            native_session_id: binding.native_session_id.clone(),
+            harness_kind: HarnessKind::Codex,
+            model_name: profile.model_name.clone(),
+            effort: profile.effort.clone(),
+            native_skill_selection_vector: Vec::new(),
+            herdr_pane_binding: pane,
+            native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
+                native_session_id: binding.native_session_id.clone(),
+                harness_kind: HarnessKind::Codex,
+                transcript_root_device: root_metadata.dev().to_string(),
+                transcript_root_inode: root_metadata.ino().to_string(),
+            }),
+        };
+        fixture
+            .nexus
+            .store
+            .record_prompt_delivery_intent(intent.clone())
+            .unwrap();
+        fixture
+            .nexus
+            .store
+            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(intent.clone()))
+            .unwrap();
+        fs::remove_file(source_path).unwrap();
+
+        let herdr_calls = fixture.directory.path().join("delayed-herdr-calls");
+        let agent = serde_json::json!({"result":{"agent":{
+            "name":"fixture-agent",
+            "agent":"codex",
+            "workspace_id":"fixture-workspace",
+            "pane_id":"w1:p1",
+            "terminal_id":"fixture-terminal",
+            "agent_session":{
+                "source":"herdr:codex",
+                "agent":"codex",
+                "kind":"id",
+                "value":native_session_id
+            }
+        }}});
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$*\" = \"--session fixture-session agent get fixture-agent\" ] || exit 64\nprintf '%s\\n' '{}'\n",
+            herdr_calls.display(),
+            agent
+        );
+        fs::write(&fixture.snapshot_program, body).unwrap();
+        let mut permissions = fs::metadata(&fixture.snapshot_program)
+            .unwrap()
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&fixture.snapshot_program, permissions).unwrap();
+
+        let marker = format!(
+            "FLOW_LAUNCH_RECEIPT_V1 launch_request_id={} prompt_body_sha256={}",
+            intent.launch_request_id, intent.prompt_sha256
+        );
+        let transcript = transcript_root.join(format!("rollout-{native_session_id}.jsonl"));
+        let mut output = fs::File::create(transcript).unwrap();
+        for row in [
+            serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-delayed"}}),
+            serde_json::json!({"type":"event_msg","payload":{"thread_id":native_session_id,"turn_id":"turn-delayed","item":{"type":"UserMessage","content":[{"type":"text","text":composed.first_prompt_payload.first_prompt_text}]}}}),
+            serde_json::json!({"type":"event_msg","payload":{"thread_id":native_session_id,"turn_id":"turn-delayed","item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}}),
+        ] {
+            writeln!(output, "{row}").unwrap();
+        }
+        output.sync_all().unwrap();
+
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::Start(StartRequest {
+                launch_profile: profile,
+                origin_clue: origin,
+            })),
+            Response::Started(started)
+                if started.flow_id == "908786" && started.session_id == native_session_id
+        ));
+        assert_eq!(
+            fs::read_to_string(herdr_calls).unwrap(),
+            "--session fixture-session agent get fixture-agent\n"
         );
     }
 

@@ -1,6 +1,6 @@
-use datom_codec::Datomizable;
-use protos::{Protosizable, Textualizable};
-use signal_flow::{OriginClue, Query, Response, RestartRequest, StartRequest};
+use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use protos::{Protosizable, ReaderBudget, Textualizable};
+use signal_flow::{Query, Response};
 use std::{
     env,
     io::{Read, Write},
@@ -9,10 +9,6 @@ use std::{
 
 struct FlowClient {
     socket: String,
-}
-
-trait ReadsCallerOrigin {
-    fn caller_origin(&self) -> Result<OriginClue, String>;
 }
 
 trait ParsesFlowCommand {
@@ -27,60 +23,23 @@ trait TextualizesFlowReply {
     fn textualize_reply(&self, reply: &Response) -> String;
 }
 
-impl ReadsCallerOrigin for FlowClient {
-    fn caller_origin(&self) -> Result<OriginClue, String> {
-        let inferred_flow_id = env::var("CODEX_SESSION_ID")
-            .ok()
-            .and_then(|session| codex_flow_id(&session))
-            .or_else(|| {
-                env::var("CLAUDE_SESSION_ID")
-                    .ok()
-                    .and_then(|session| claude_flow_id(&session))
-            });
-        let session_id = env::var("CODEX_THREAD_ID")
-            .or_else(|_| env::var("CODEX_SESSION_ID"))
-            .or_else(|_| env::var("CLAUDE_SESSION_ID"))
-            .map_err(|_| "origin session unavailable".to_string())?;
-        let flow_id = env::var("FLOW_ID")
-            .ok()
-            .or(inferred_flow_id)
-            .ok_or_else(|| "origin flow unavailable".to_string())?;
-        let turn_id = env::var("TURN_ID").unwrap_or_else(|_| "unavailable".into());
-        Ok(OriginClue {
-            flow_id,
-            session_id,
-            turn_id,
-        })
-    }
-}
-
-fn codex_flow_id(session: &str) -> Option<String> {
-    let tail = session.rsplit('-').next()?;
-    tail.get(tail.len().checked_sub(9)?..tail.len().checked_sub(3)?)
-        .map(ToOwned::to_owned)
-}
-
-fn claude_flow_id(session: &str) -> Option<String> {
-    session.split('-').next()?.get(..6).map(ToOwned::to_owned)
-}
-
 impl ParsesFlowCommand for FlowClient {
     fn parse_command(&self, mut arguments: impl Iterator<Item = String>) -> Result<Query, String> {
-        match (arguments.next().as_deref(), arguments.next(), arguments.next()) {
-            (Some("start"), Some(flow_type), None) => Ok(Query::Start(StartRequest {
-                flow_type,
-                origin_clue: self.caller_origin()?,
-            })),
-            (Some("restart"), Some(flow_id), None) => {
-                let origin = self.caller_origin()?;
-                Ok(Query::Restart(RestartRequest {
-                    flow_id,
-                    origin_clue: origin,
-                }))
-            }
-            (Some("resolve"), Some(flow_id), None) => Ok(Query::ResolveRecipient(flow_id)),
-            _ => Err("usage: flow start <predefined-type> | flow restart <flow-id> | flow resolve <flow-id>".into()),
+        let Some(value) = arguments.next() else {
+            return Err("usage: flow '<one inline Query datom>'".into());
+        };
+        if arguments.next().is_some() {
+            return Err("usage: flow '<one inline Query datom>'".into());
         }
+        let mut budget = Budget {
+            remaining: 65_536,
+            reader: ReaderBudget { remaining: 65_536 },
+            depth: 0,
+            maximum_depth: 1_024,
+        };
+        Potential::<Query>::from(value)
+            .actualize(&mut budget)
+            .map_err(|error| format!("invalid Flow query: {error:?}"))
     }
 }
 
@@ -127,9 +86,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FlowClient, ParsesFlowCommand, TextualizesFlowReply, claude_flow_id, codex_flow_id,
-    };
+    use super::{FlowClient, ParsesFlowCommand, TextualizesFlowReply};
     use signal_flow::{Query, Response};
 
     #[test]
@@ -139,21 +96,55 @@ mod tests {
         };
         assert_eq!(
             client
-                .parse_command(["resolve".into(), "fac697".into()].into_iter())
+                .parse_command(["ResolveRecipient.fac697".into()].into_iter())
                 .unwrap(),
             Query::ResolveRecipient("fac697".into())
         );
     }
 
     #[test]
-    fn harness_session_conventions_recover_flow_identity() {
+    fn start_accepts_one_inline_typed_launch_profile() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        let Query::Start(request) = client
+            .parse_command([
+                "Start.{ { request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ spirit main-flow ] Field High Codex gpt-6-astra medium Some.836818 [ { 1b8ac0 1 } ] messaging-build /tmp/flow-system-prompt.md «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into(),
+            ]
+            .into_iter())
+            .expect("typed Start parses")
+        else {
+            panic!("Start fixture must remain a Start query")
+        };
+        assert_eq!(request.launch_profile.launch_request_id, "request-7");
+        assert_eq!(request.launch_profile.launch_source_vector.len(), 1);
         assert_eq!(
-            codex_flow_id("01a0aacb-ac84-71a1-88a0-05ed9961ca9d").as_deref(),
-            Some("d9961c")
+            request.launch_profile.skill_name_vector,
+            ["spirit", "main-flow"]
         );
-        assert_eq!(
-            claude_flow_id("da1e3f9d-857f-49ab-8c6f-3aa0a9db826b").as_deref(),
-            Some("da1e3f")
+    }
+
+    #[test]
+    fn command_refuses_more_than_one_inline_value() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        assert!(
+            client
+                .parse_command(["ResolveRecipient.fac697".into(), "extra".into()].into_iter())
+                .is_err()
+        );
+        assert!(
+            client
+                .parse_command(
+                    ["Start.{ codex-medium { fac697 session-1 turn-2 } }".into()].into_iter()
+                )
+                .is_err()
+        );
+        assert!(
+            client
+                .parse_command(["Start.{".into()].into_iter())
+                .is_err()
         );
     }
 

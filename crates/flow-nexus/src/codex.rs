@@ -2,11 +2,19 @@
 //! The proxy is a byte bridge, so this module owns its bounded WebSocket and
 //! JSON-RPC conversation; it never falls back to a direct Unix-socket client.
 
+use crate::composition::ValidatesComposedPrompt;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
-use signal_flow::OriginClue;
+use sha2::Sha256;
+use signal_flow::{
+    ComposedLaunch, HarnessKind, NativeLaunchBinding, NativeSkillSelection, OriginClue,
+    PromptDeliveryIntent, PromptDeliveryResult,
+};
 use std::{
+    collections::BTreeSet,
+    fs,
     io::{BufRead, BufReader, Read, Write},
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -17,10 +25,56 @@ use thiserror::Error;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
+#[derive(Clone)]
 pub struct CodexAdapter {
+    pub executable: PathBuf,
     pub socket: String,
     pub model: String,
     pub timeout: Duration,
+    /// Exact cwd whose native Codex skill catalog is valid for this launch.
+    pub workspace_root: PathBuf,
+}
+
+#[derive(Clone)]
+pub struct CodexEndpoint {
+    pub client_path: PathBuf,
+    pub home: PathBuf,
+    pub socket: String,
+    pub transcript_root: PathBuf,
+    pub model_names: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+pub struct CodexEndpoints {
+    pub stable: CodexEndpoint,
+    pub next: CodexEndpoint,
+    pub timeout: Duration,
+    pub workspace_root: PathBuf,
+}
+
+impl CodexEndpoints {
+    pub fn endpoint_for(&self, model: &str) -> Result<&CodexEndpoint, CodexAdapterUnavailable> {
+        let stable = self.stable.model_names.contains(model);
+        let next = self.next.model_names.contains(model);
+        match (stable, next) {
+            (true, false) => Ok(&self.stable),
+            (false, true) => Ok(&self.next),
+            _ => Err(CodexAdapterUnavailable::Protocol(
+                "Codex model does not select exactly one configured endpoint".into(),
+            )),
+        }
+    }
+
+    pub fn adapter_for(&self, model: &str) -> Result<CodexAdapter, CodexAdapterUnavailable> {
+        let endpoint = self.endpoint_for(model)?;
+        Ok(CodexAdapter {
+            executable: endpoint.client_path.clone(),
+            socket: endpoint.socket.clone(),
+            model: model.to_owned(),
+            timeout: self.timeout,
+            workspace_root: self.workspace_root.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -62,6 +116,27 @@ pub trait ConsumesResetCredit {
         &self,
         request: &meta_signal_flow::ResetRequest,
     ) -> Result<meta_signal_flow::ResetOutcome, CodexAdapterUnavailable>;
+}
+
+/// Resolves skills through the native app-server catalog only after proving
+/// that the exact Herdr-bound thread exists and still has no turns.
+pub trait ResolvesBoundCodexSkills {
+    fn resolve_bound_codex_skills(
+        &self,
+        launch: &ComposedLaunch,
+        binding: &NativeLaunchBinding,
+    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable>;
+}
+
+/// Submits one typed skill vector and the composed text as one first native
+/// turn. Durable one-shot gating belongs to the caller; this never creates,
+/// resumes, or replaces the Herdr-owned thread.
+pub trait SubmitsBoundCodexFirstTurn {
+    fn submit_bound_codex_first_turn(
+        &self,
+        launch: &ComposedLaunch,
+        durable_intent: &PromptDeliveryIntent,
+    ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable>;
 }
 
 struct ProxySession {
@@ -110,7 +185,7 @@ trait BuildsCodexTurn {
 
 impl OpensCodexProxy for CodexAdapter {
     fn open_proxy(&self) -> Result<ProxySession, CodexAdapterUnavailable> {
-        let mut child = Command::new("codex")
+        let mut child = Command::new(&self.executable)
             .args(["app-server", "proxy", "--sock", &self.socket])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -430,6 +505,289 @@ impl BuildsCodexTurn for CodexAdapter {
     }
 }
 
+impl CodexAdapter {
+    fn initialize_bound_session(&self) -> Result<ProxySession, CodexAdapterUnavailable> {
+        let mut session = self.open_proxy()?;
+        if let Err(error) = (|| {
+            session.request(
+                1,
+                "initialize",
+                serde_json::json!({
+                    "clientInfo": {
+                        "name": "flow-nexus",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                }),
+                self.timeout,
+            )?;
+            session.notify("initialized", serde_json::Value::Null)
+        })() {
+            session.stop_proxy();
+            return Err(error);
+        }
+        Ok(session)
+    }
+
+    fn require_empty_bound_thread(
+        &self,
+        session: &mut ProxySession,
+        request_id: u64,
+        native_session_id: &str,
+    ) -> Result<(), CodexAdapterUnavailable> {
+        let read = session.request(
+            request_id,
+            "thread/read",
+            serde_json::json!({
+                "threadId": native_session_id,
+                "includeTurns": true
+            }),
+            self.timeout,
+        )?;
+        let thread = read.get("thread").unwrap_or(&read);
+        if thread.get("id").and_then(serde_json::Value::as_str) != Some(native_session_id) {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "thread/read did not return the exact Herdr-bound thread".into(),
+            ));
+        }
+        let turns = thread
+            .get("turns")
+            .or_else(|| thread.pointer("/history/turns"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                CodexAdapterUnavailable::Protocol(
+                    "thread/read did not provide an authenticated turn list".into(),
+                )
+            })?;
+        if !turns.is_empty() {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "Herdr-bound Codex thread already has a turn".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn native_skill_catalog(
+        &self,
+        session: &mut ProxySession,
+        request_id: u64,
+    ) -> Result<Vec<serde_json::Value>, CodexAdapterUnavailable> {
+        let workspace = self.workspace_root.canonicalize().map_err(|error| {
+            CodexAdapterUnavailable::Protocol(format!(
+                "configured Codex workspace is unavailable: {error}"
+            ))
+        })?;
+        if !workspace.is_dir() || workspace != self.workspace_root {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "configured Codex workspace must be an exact canonical directory".into(),
+            ));
+        }
+        let reply = session.request(
+            request_id,
+            "skills/list",
+            serde_json::json!({ "cwds": [workspace] }),
+            self.timeout,
+        )?;
+        let available = reply
+            .get("skills")
+            .or_else(|| reply.pointer("/data/skills"))
+            .or_else(|| reply.pointer("/data/items"))
+            .or_else(|| reply.get("data"))
+            .or_else(|| reply.pointer("/result/skills"))
+            .unwrap_or(&reply)
+            .as_array()
+            .ok_or_else(|| {
+                CodexAdapterUnavailable::Protocol("skills/list did not return an array".into())
+            })?;
+        let mut flattened = Vec::new();
+        for item in available {
+            if let Some(skills) = item.get("skills").and_then(serde_json::Value::as_array) {
+                flattened.extend(skills.iter().cloned());
+            } else if let Some(skill) = item.get("skill") {
+                flattened.push(skill.clone());
+            } else {
+                flattened.push(item.clone());
+            }
+        }
+        Ok(flattened)
+    }
+
+    fn resolve_catalog_skills(
+        requested: &[String],
+        catalog: &[serde_json::Value],
+    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable> {
+        requested
+            .iter()
+            .map(|name| {
+                let matches = catalog
+                    .iter()
+                    .filter(|skill| {
+                        skill.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str())
+                    })
+                    .collect::<Vec<_>>();
+                if matches.len() != 1 {
+                    return Err(CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex catalog did not resolve {name} exactly once"
+                    )));
+                }
+                let path = matches[0]
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(Path::new)
+                    .ok_or_else(|| {
+                        CodexAdapterUnavailable::Protocol(format!(
+                            "native Codex skill {name} has no path"
+                        ))
+                    })?;
+                let metadata = fs::symlink_metadata(path).map_err(|error| {
+                    CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex skill {name} is unreadable: {error}"
+                    ))
+                })?;
+                if !path.is_absolute() || metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex skill {name} is not an absolute regular source"
+                    )));
+                }
+                let canonical = path.canonicalize().map_err(|error| {
+                    CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex skill {name} cannot be canonicalized: {error}"
+                    ))
+                })?;
+                if canonical != path {
+                    return Err(CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex skill {name} path is not canonical"
+                    )));
+                }
+                let source = fs::read(path).map_err(|error| {
+                    CodexAdapterUnavailable::Protocol(format!(
+                        "native Codex skill {name} is unreadable: {error}"
+                    ))
+                })?;
+                Ok(NativeSkillSelection {
+                    skill_name: name.clone(),
+                    native_skill_path: path.to_string_lossy().into_owned(),
+                    native_skill_sha256: format!("{:x}", Sha256::digest(source)),
+                })
+            })
+            .collect()
+    }
+
+    fn bound_turn_params(
+        launch: &ComposedLaunch,
+        intent: &PromptDeliveryIntent,
+    ) -> serde_json::Value {
+        let mut input = intent
+            .native_skill_selection_vector
+            .iter()
+            .map(|skill| {
+                serde_json::json!({
+                    "type": "skill",
+                    "name": skill.skill_name,
+                    "path": skill.native_skill_path
+                })
+            })
+            .collect::<Vec<_>>();
+        input.push(serde_json::json!({
+            "type": "text",
+            "text": launch.first_prompt_payload.first_prompt_text,
+            "text_elements": []
+        }));
+        serde_json::json!({
+            "threadId": intent.native_session_id,
+            "effort": intent.effort,
+            "model": intent.model_name,
+            "input": input,
+            "turnTrigger": "flow-nexus"
+        })
+    }
+}
+
+impl ResolvesBoundCodexSkills for CodexAdapter {
+    fn resolve_bound_codex_skills(
+        &self,
+        launch: &ComposedLaunch,
+        binding: &NativeLaunchBinding,
+    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable> {
+        if launch.launch_profile.harness_kind != HarnessKind::Codex
+            || binding.harness_kind != HarnessKind::Codex
+            || binding.launch_request_id != launch.launch_profile.launch_request_id
+            || self.model != launch.launch_profile.model_name
+        {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "Codex skill resolution profile does not match its native binding".into(),
+            ));
+        }
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            self.require_empty_bound_thread(&mut session, 2, &binding.native_session_id)?;
+            let catalog = self.native_skill_catalog(&mut session, 3)?;
+            Self::resolve_catalog_skills(&launch.launch_profile.skill_name_vector, &catalog)
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+
+impl SubmitsBoundCodexFirstTurn for CodexAdapter {
+    fn submit_bound_codex_first_turn(
+        &self,
+        launch: &ComposedLaunch,
+        intent: &PromptDeliveryIntent,
+    ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable> {
+        if !launch.has_canonical_first_prompt()
+            || launch.launch_profile.harness_kind != HarnessKind::Codex
+            || intent.harness_kind != HarnessKind::Codex
+            || intent.launch_request_id != launch.launch_profile.launch_request_id
+            || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
+            || intent.model_name != launch.launch_profile.model_name
+            || intent.effort != launch.launch_profile.effort
+            || self.model != intent.model_name
+        {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "Codex first-turn intent does not match the composed launch".into(),
+            ));
+        }
+        let expected_names = intent
+            .native_skill_selection_vector
+            .iter()
+            .map(|skill| skill.skill_name.as_str())
+            .collect::<Vec<_>>();
+        if expected_names
+            != launch
+                .launch_profile
+                .skill_name_vector
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "Codex first-turn skill order differs from the launch profile".into(),
+            ));
+        }
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            self.require_empty_bound_thread(&mut session, 2, &intent.native_session_id)?;
+            let catalog = self.native_skill_catalog(&mut session, 3)?;
+            let selected =
+                Self::resolve_catalog_skills(&launch.launch_profile.skill_name_vector, &catalog)?;
+            if selected != intent.native_skill_selection_vector {
+                return Err(CodexAdapterUnavailable::Protocol(
+                    "native Codex skill selection changed after durable intent".into(),
+                ));
+            }
+            session.request(
+                4,
+                "turn/start",
+                Self::bound_turn_params(launch, intent),
+                self.timeout,
+            )?;
+            Ok(PromptDeliveryResult::Ambiguous(intent.clone()))
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+
 impl StartsCodex for CodexAdapter {
     fn start_codex(
         &self,
@@ -620,12 +978,9 @@ impl ConsumesResetCredit for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        ffi::OsString,
-        fs,
-        os::unix::fs::PermissionsExt,
-        sync::{Mutex, OnceLock},
-    };
+    use std::{fs, os::unix::fs::PermissionsExt, sync::Mutex};
+
+    static FAKE_PROXY_LOCK: Mutex<()> = Mutex::new(());
 
     struct FakeProxy;
 
@@ -649,45 +1004,18 @@ mod tests {
         }
     }
 
-    struct PathScope {
-        previous: Option<OsString>,
-    }
-
     trait InstallsFakeProxy {
-        fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathScope);
+        fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathBuf);
     }
 
     impl InstallsFakeProxy for FakeProxy {
-        fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathScope) {
+        fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathBuf) {
             let directory = tempfile::tempdir().unwrap();
             let executable = directory.path().join("codex");
             fs::write(&executable, self.executable(frames)).unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-            let previous = std::env::var_os("PATH");
-            let mut path = OsString::from(directory.path());
-            if let Some(value) = &previous {
-                path.push(":");
-                path.push(value);
-            }
-            // Tests serialize PATH changes below, and Rust 2024 marks process
-            // environment mutation unsafe because other threads could observe it.
-            unsafe { std::env::set_var("PATH", path) };
-            (directory, PathScope { previous })
+            (directory, executable)
         }
-    }
-
-    impl Drop for PathScope {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(path) => unsafe { std::env::set_var("PATH", path) },
-                None => unsafe { std::env::remove_var("PATH") },
-            }
-        }
-    }
-
-    fn fake_proxy_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn origin() -> OriginClue {
@@ -700,10 +1028,133 @@ mod tests {
 
     fn adapter() -> CodexAdapter {
         CodexAdapter {
+            executable: PathBuf::from("/fixture/codex-wrapper"),
             socket: "/tmp/fake-codex.sock".into(),
             model: "gpt-5.6".into(),
             timeout: Duration::from_millis(100),
+            workspace_root: std::env::current_dir().unwrap(),
         }
+    }
+
+    fn adapter_at(executable: PathBuf) -> CodexAdapter {
+        CodexAdapter {
+            executable,
+            ..adapter()
+        }
+    }
+
+    fn endpoints() -> CodexEndpoints {
+        CodexEndpoints {
+            stable: CodexEndpoint {
+                client_path: PathBuf::from("/profile/bin/codex"),
+                home: PathBuf::from("/home/test/.codex"),
+                socket: "/home/test/.codex/app-server-control/app-server-control.sock".into(),
+                transcript_root: PathBuf::from("/home/test/.codex/sessions"),
+                model_names: BTreeSet::from(["gpt-5.6-terra".into()]),
+            },
+            next: CodexEndpoint {
+                client_path: PathBuf::from("/profile/bin/codex-next"),
+                home: PathBuf::from("/home/test/.codex-next"),
+                socket: "/home/test/.codex-next/app-server-control/app-server-control.sock".into(),
+                transcript_root: PathBuf::from("/home/test/.codex-next/sessions"),
+                model_names: BTreeSet::from([
+                    "gpt-6-astra".into(),
+                    "gpt-6-sol".into(),
+                    "gpt-6-luna".into(),
+                ]),
+            },
+            timeout: Duration::from_secs(10),
+            workspace_root: PathBuf::from("/home/test/primary"),
+        }
+    }
+
+    #[test]
+    fn exact_models_select_one_immutable_codex_endpoint() {
+        let endpoints = endpoints();
+        assert_eq!(
+            endpoints.endpoint_for("gpt-6-sol").unwrap().client_path,
+            PathBuf::from("/profile/bin/codex-next")
+        );
+        assert_eq!(
+            endpoints.endpoint_for("gpt-5.6-terra").unwrap().client_path,
+            PathBuf::from("/profile/bin/codex")
+        );
+        assert!(endpoints.endpoint_for("gpt-6-invented").is_err());
+    }
+
+    #[test]
+    fn overlapping_model_routes_fail_closed() {
+        let mut endpoints = endpoints();
+        endpoints.stable.model_names.insert("gpt-6-sol".into());
+        assert!(endpoints.endpoint_for("gpt-6-sol").is_err());
+    }
+
+    #[test]
+    fn adapter_uses_the_configured_wrapper_without_path_resolution() {
+        let adapter = endpoints().adapter_for("gpt-6-astra").unwrap();
+        assert_eq!(adapter.executable, PathBuf::from("/profile/bin/codex-next"));
+        assert!(matches!(
+            adapter.open_proxy(),
+            Err(CodexAdapterUnavailable::Proxy(_))
+        ));
+    }
+
+    fn malformed_bound_launch() -> (ComposedLaunch, PromptDeliveryIntent) {
+        let pane = signal_flow::HerdrPaneBinding {
+            launch_request_id: "launch-malformed".into(),
+            herdr_session_name: "session".into(),
+            herdr_agent_name: "codex-agent".into(),
+            herdr_workspace_id: "workspace".into(),
+            herdr_pane_id: "pane".into(),
+            herdr_terminal_id: "terminal".into(),
+        };
+        let prompt_sha256 = "230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5";
+        let launch = ComposedLaunch {
+            launch_profile: signal_flow::LaunchProfile {
+                launch_request_id: "launch-malformed".into(),
+                launch_source_vector: vec![],
+                skill_name_vector: vec![],
+                flow_aspect: signal_flow::FlowAspect::Field,
+                power_level: signal_flow::PowerLevel::Medium,
+                harness_kind: HarnessKind::Codex,
+                model_name: "gpt-5.6".into(),
+                effort: "medium".into(),
+                flow_id_option: None,
+                remembered_flow_vector: vec![],
+                herdr_session_name: "session".into(),
+                system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
+                instruction_prompt: "body".into(),
+            },
+            first_prompt_payload: signal_flow::FirstPromptPayload {
+                first_prompt_body: "body".into(),
+                prompt_sha256: prompt_sha256.into(),
+                first_prompt_text: "body with a malformed footer".into(),
+            },
+            target_receipt_request: signal_flow::TargetReceiptRequest {
+                launch_request_id: "launch-malformed".into(),
+                prompt_sha256: prompt_sha256.into(),
+            },
+        };
+        let intent = PromptDeliveryIntent {
+            launch_request_id: "launch-malformed".into(),
+            prompt_sha256: prompt_sha256.into(),
+            flow_id: "123456".into(),
+            native_session_id: "native-thread".into(),
+            harness_kind: HarnessKind::Codex,
+            model_name: "gpt-5.6".into(),
+            effort: "medium".into(),
+            native_skill_selection_vector: vec![],
+            herdr_pane_binding: pane,
+            native_transcript_boundary: signal_flow::NativeTranscriptBoundary::Absent(
+                signal_flow::NativeTranscriptAbsence {
+                    native_session_id: "native-thread".into(),
+                    harness_kind: HarnessKind::Codex,
+                    transcript_root_device: "1".into(),
+                    transcript_root_inode: "2".into(),
+                },
+            ),
+        };
+        (launch, intent)
     }
 
     #[test]
@@ -720,19 +1171,27 @@ mod tests {
     }
 
     #[test]
+    fn malformed_full_prompt_is_rejected_before_codex_proxy_open() {
+        let (launch, intent) = malformed_bound_launch();
+        assert!(matches!(
+            adapter().submit_bound_codex_first_turn(&launch, &intent),
+            Err(CodexAdapterUnavailable::Protocol(detail))
+                if detail.contains("does not match the composed launch")
+        ));
+    }
+
+    #[test]
     fn fake_proxy_starts_a_thread_after_turn_start_is_accepted() {
-        let _guard = fake_proxy_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
             fake.websocket_frame(r#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#),
             fake.websocket_frame(r#"{"id":3,"result":{}}"#),
         ];
-        let (_directory, _path) = fake.install(&frames);
+        let (_directory, executable) = fake.install(&frames);
         assert_eq!(
-            adapter()
+            adapter_at(executable)
                 .start_codex("flow-test", "start", &origin())
                 .unwrap(),
             "thread-1"
@@ -741,48 +1200,42 @@ mod tests {
 
     #[test]
     fn fake_proxy_refusal_does_not_report_a_started_thread() {
-        let _guard = fake_proxy_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
             fake.websocket_frame(r#"{"id":2,"error":{"code":-32000,"message":"denied"}}"#),
         ];
-        let (_directory, _path) = fake.install(&frames);
+        let (_directory, executable) = fake.install(&frames);
         assert!(matches!(
-            adapter().start_codex("flow-test", "start", &origin()),
+            adapter_at(executable).start_codex("flow-test", "start", &origin()),
             Err(CodexAdapterUnavailable::Refused { method, .. }) if method == "thread/start"
         ));
     }
 
     #[test]
     fn fake_proxy_timeout_does_not_report_a_started_thread() {
-        let _guard = fake_proxy_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let fake = FakeProxy;
         let frames = [fake.websocket_frame(r#"{"id":1,"result":{}}"#)];
-        let (_directory, _path) = fake.install(&frames);
+        let (_directory, executable) = fake.install(&frames);
         assert!(matches!(
-            adapter().start_codex("flow-test", "start", &origin()),
+            adapter_at(executable).start_codex("flow-test", "start", &origin()),
             Err(CodexAdapterUnavailable::TimedOut)
         ));
     }
 
     #[test]
     fn fake_proxy_consumes_a_reset_credit_as_a_typed_outcome() {
-        let _guard = fake_proxy_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let fake = FakeProxy;
         let frames = [
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
             fake.websocket_frame(r#"{"id":2,"result":{"outcome":"nothingToReset"}}"#),
         ];
-        let (_directory, _path) = fake.install(&frames);
+        let (_directory, executable) = fake.install(&frames);
         assert_eq!(
-            adapter()
+            adapter_at(executable)
                 .consume_reset_credit(&meta_signal_flow::ResetRequest {
                     idempotency_key: "attempt-1".into(),
                     credit_selection: meta_signal_flow::CreditSelection::Next,

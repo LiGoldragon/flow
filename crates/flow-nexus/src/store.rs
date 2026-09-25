@@ -13,15 +13,18 @@ use sema_engine::{
     SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::{
-    EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
-    HerdrRouteSelection, OriginClue, Query, RecipientResolutionRejection, Response,
-    RestartRejection, Restarted, RouteReadiness, StartRejection, Started,
+    ComposedLaunch, EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind,
+    HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
+    NativeLaunchBinding, NativeLaunchIntent, OriginClue, PromptDeliveryIntent,
+    PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
+    Response, RestartRejection, Restarted, RouteReadiness, StartRejection, Started,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
 const FLOW_STATE_TABLE_NAME: TableName = TableName::new("flow_nexus_state");
 const FLOW_CONFIGURATION_TABLE_NAME: TableName = TableName::new("flow_nexus_configuration");
 const FLOW_HERDR_ROUTE_TABLE_NAME: TableName = TableName::new("flow_nexus_herdr_routes");
+const FLOW_LAUNCH_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_attempts");
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const DEFAULT_ORDINARY_SOCKET: &str = "/run/user/1001/flow/flow.sock";
@@ -44,6 +47,7 @@ struct FlowRecord {
 enum FlowLifecycle {
     Pending,
     Active,
+    Stopped,
 }
 
 impl EngineRecord for FlowRecord {
@@ -87,6 +91,17 @@ impl EngineRecord for FlowStoreConfiguration {
     }
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchAttempt {
+    attempt: LaunchAttempt,
+}
+
+impl EngineRecord for StoredLaunchAttempt {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.attempt.launch_request_id.clone())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sema-engine operation failed: {0}")]
@@ -101,6 +116,7 @@ pub struct FlowStore {
     state: TableReference<FlowStoreState>,
     configuration: TableReference<FlowStoreConfiguration>,
     herdr_routes: TableReference<FlowHerdrRouteRecord>,
+    launch_attempts: TableReference<StoredLaunchAttempt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,11 +195,86 @@ pub trait RegistersFlowIdentity {
     fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError>;
 }
 
+/// Imports one already-running native flow without claiming a launch receipt.
+pub trait RegistersExistingFlow {
+    fn register_existing_flow(
+        &self,
+        flow_node: FlowNode,
+        flow_type: String,
+    ) -> Result<FlowRegistration, StoreError>;
+}
+
+/// Reserves one correlation ID and its exact composed-prompt fingerprint.
+pub trait ReservesLaunchAttempt {
+    fn reserve_launch_attempt(
+        &self,
+        launch: &ComposedLaunch,
+        origin: OriginClue,
+    ) -> Result<LaunchAttemptReservation, StoreError>;
+}
+
+/// Journals the intent to create an external native seat before any pane write.
+pub trait RecordsNativeLaunchIntent {
+    fn record_native_launch_intent(&self, intent: NativeLaunchIntent) -> Result<bool, StoreError>;
+}
+
+/// Journals the exact native/Herdr tuple observed after the external launch.
+pub trait RecordsNativeLaunchBinding {
+    fn record_native_launch_binding(
+        &self,
+        binding: NativeLaunchBinding,
+    ) -> Result<bool, StoreError>;
+}
+
+/// Journals the registration acknowledgement only when it exactly matches the binding.
+pub trait RecordsRegistrationAcknowledgement {
+    fn record_registration_acknowledgement(
+        &self,
+        acknowledgement: RegistrationAcknowledgement,
+    ) -> Result<bool, StoreError>;
+}
+
+/// Persists the one-shot prompt intent before the adapter may write the prompt.
+pub trait RecordsPromptDeliveryIntent {
+    fn record_prompt_delivery_intent(
+        &self,
+        intent: PromptDeliveryIntent,
+    ) -> Result<bool, StoreError>;
+}
+
+/// Persists either the authentic observed receipt or durable ambiguity.
+pub trait RecordsPromptDeliveryResult {
+    fn record_prompt_delivery_result(
+        &self,
+        result: PromptDeliveryResult,
+    ) -> Result<bool, StoreError>;
+}
+
+pub trait ReadsLaunchAttempt {
+    fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError>;
+}
+
+/// Reads the durable rows used by the ordinary Send, Stop, and List requests.
+pub trait ReadsFlowRows {
+    fn flow_node(&self, flow_id: &str) -> Result<Option<FlowNode>, StoreError>;
+    fn flow_nodes(&self) -> Result<Vec<FlowNode>, StoreError>;
+}
+
+/// Changes lifecycle only after the corresponding Herdr operation succeeds.
+pub trait RecordsFlowLifecycle {
+    fn record_active(&self, flow_id: &str) -> Result<bool, StoreError>;
+    fn record_stopped(&self, flow_id: &str) -> Result<bool, StoreError>;
+}
+
 trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
     fn herdr_route(&self, flow_id: &str) -> Result<Option<FlowHerdrRouteRecord>, StoreError>;
     fn stored_configuration(&self) -> Result<FlowStoreConfiguration, StoreError>;
+    fn stored_launch_attempt(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<StoredLaunchAttempt>, StoreError>;
     fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError>;
 }
 
@@ -197,6 +288,7 @@ trait WritesFlowStore {
     -> Result<bool, StoreError>;
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError>;
     fn restart(&self, authorization: RestartAuthorization) -> Result<Response, StoreError>;
+    fn mutate_launch_attempt(&self, attempt: LaunchAttempt) -> Result<(), StoreError>;
 }
 
 impl OpensFlowStore for FlowStore {
@@ -222,12 +314,18 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-herdr-route"),
             SchemaHash::for_label("flow-nexus-herdr-route-v1"),
         ))?;
+        let launch_attempts = engine.register_table(TableDescriptor::new(
+            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-attempt"),
+            SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
+        ))?;
         let store = Self {
             engine,
             flows,
             state,
             configuration,
             herdr_routes,
+            launch_attempts,
         };
         if store
             .engine
@@ -268,9 +366,18 @@ impl OpensFlowStore for FlowStore {
 impl AppliesFlowQuery for FlowStore {
     fn apply(&self, query: Query) -> Result<Response, StoreError> {
         match query {
-            Query::Start(_) => Ok(Response::StartRejected(StartRejection::LaunchRefused)),
+            Query::Start(_) => Ok(Response::StartRejected(StartRejection::NativeLaunchRefused)),
             Query::Restart(_) => Ok(Response::RestartRejected(RestartRejection::ResumeRefused)),
             Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
+            Query::Send(_) => Ok(Response::SendRejected(
+                signal_flow::SendRejection::PersistenceRefused,
+            )),
+            Query::Stop(_) => Ok(Response::StopRejected(
+                signal_flow::StopRejection::PersistenceRefused,
+            )),
+            Query::List(_) => Ok(Response::ListRejected(
+                signal_flow::ListRejection::PersistenceRefused,
+            )),
         }
     }
 }
@@ -278,10 +385,14 @@ impl AppliesFlowQuery for FlowStore {
 impl ReservesPendingStart for FlowStore {
     fn reserve_pending_start(&self, query: Query) -> Result<Option<PendingLaunch>, StoreError> {
         match query {
-            Query::Start(request) if request.flow_type == "codex-medium" => self
-                .reserve_start(request.flow_type, request.origin_clue)
+            Query::Start(request) => self
+                .reserve_start("legacy-test-start".into(), request.origin_clue)
                 .map(Some),
-            Query::Start(_) | Query::Restart(_) | Query::ResolveRecipient(_) => Ok(None),
+            Query::Restart(_)
+            | Query::ResolveRecipient(_)
+            | Query::Send(_)
+            | Query::Stop(_)
+            | Query::List(_) => Ok(None),
         }
     }
 }
@@ -349,8 +460,12 @@ impl ConfiguresFlowStore for FlowStore {
     }
 }
 
-impl RegistersFlowIdentity for FlowStore {
-    fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError> {
+impl FlowStore {
+    fn register_flow_as(
+        &self,
+        flow_node: FlowNode,
+        flow_type: String,
+    ) -> Result<FlowRegistration, StoreError> {
         let HerdrRouteSelection::Available(route) = flow_node.herdr_route_selection.clone() else {
             return Ok(FlowRegistration::ConflictingBinding);
         };
@@ -380,13 +495,11 @@ impl RegistersFlowIdentity for FlowStore {
         let lifecycle = match flow_node.flow_lifecycle {
             SignalFlowLifecycle::Pending => FlowLifecycle::Pending,
             SignalFlowLifecycle::Active => FlowLifecycle::Active,
+            SignalFlowLifecycle::Stopped => FlowLifecycle::Stopped,
         };
         let record = FlowRecord {
             flow_id: flow_node.flow_id.clone(),
-            flow_type: match flow_node.harness_kind {
-                HarnessKind::Codex => "codex-registered".into(),
-                HarnessKind::Claude => "claude-registered".into(),
-            },
+            flow_type,
             origin: flow_node.origin_clue.clone(),
             thread_id: Some(flow_node.session_id.clone()),
             harness_kind: flow_node.harness_kind.clone(),
@@ -407,6 +520,354 @@ impl RegistersFlowIdentity for FlowStore {
                 ),
         )?;
         Ok(FlowRegistration::Registered(Box::new(flow_node)))
+    }
+}
+
+impl RegistersFlowIdentity for FlowStore {
+    fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError> {
+        let flow_type = match flow_node.harness_kind {
+            HarnessKind::Codex => "codex-registered".into(),
+            HarnessKind::Claude => "claude-registered".into(),
+        };
+        self.register_flow_as(flow_node, flow_type)
+    }
+}
+
+impl RegistersExistingFlow for FlowStore {
+    fn register_existing_flow(
+        &self,
+        flow_node: FlowNode,
+        flow_type: String,
+    ) -> Result<FlowRegistration, StoreError> {
+        if flow_node.flow_lifecycle != SignalFlowLifecycle::Pending {
+            return Ok(FlowRegistration::ConflictingBinding);
+        }
+        self.register_flow_as(flow_node, flow_type)
+    }
+}
+
+impl ReservesLaunchAttempt for FlowStore {
+    fn reserve_launch_attempt(
+        &self,
+        launch: &ComposedLaunch,
+        origin: OriginClue,
+    ) -> Result<LaunchAttemptReservation, StoreError> {
+        let launch_request_id = launch.launch_profile.launch_request_id.clone();
+        let prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
+        if let Some(existing) = self.stored_launch_attempt(&launch_request_id)? {
+            return Ok(
+                if existing.attempt.prompt_sha256 == prompt_sha256
+                    && existing.attempt.launch_profile == launch.launch_profile
+                    && existing.attempt.origin_clue == origin
+                {
+                    LaunchAttemptReservation::Existing(existing.attempt)
+                } else {
+                    LaunchAttemptReservation::Conflict
+                },
+            );
+        }
+        let attempt = LaunchAttempt {
+            launch_request_id,
+            launch_profile: launch.launch_profile.clone(),
+            prompt_sha256,
+            origin_clue: origin,
+            launch_attempt_phase: LaunchAttemptPhase::Reserved,
+            native_launch_intent_option: None,
+            native_launch_binding_option: None,
+            registration_acknowledgement_option: None,
+            prompt_delivery_intent_option: None,
+            prompt_delivery_result_option: None,
+        };
+        self.engine.assert(Assertion::new(
+            self.launch_attempts,
+            StoredLaunchAttempt {
+                attempt: attempt.clone(),
+            },
+        ))?;
+        Ok(LaunchAttemptReservation::Reserved(attempt))
+    }
+}
+
+impl RecordsNativeLaunchIntent for FlowStore {
+    fn record_native_launch_intent(&self, intent: NativeLaunchIntent) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
+            return Ok(false);
+        };
+        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::Reserved
+            || stored.attempt.prompt_sha256 != intent.prompt_sha256
+            || stored.attempt.launch_profile.harness_kind != intent.harness_kind
+            || stored.attempt.launch_profile.model_name != intent.model_name
+            || stored.attempt.launch_profile.effort != intent.effort
+            || stored.attempt.launch_profile.skill_name_vector != intent.skill_name_vector
+            || stored.attempt.native_launch_intent_option.is_some()
+        {
+            return Ok(false);
+        }
+        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::NativeLaunchIntentRecorded;
+        stored.attempt.native_launch_intent_option = Some(intent);
+        self.mutate_launch_attempt(stored.attempt)?;
+        Ok(true)
+    }
+}
+
+impl RecordsNativeLaunchBinding for FlowStore {
+    fn record_native_launch_binding(
+        &self,
+        binding: NativeLaunchBinding,
+    ) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_launch_attempt(&binding.launch_request_id)? else {
+            return Ok(false);
+        };
+        let Some(intent) = stored.attempt.native_launch_intent_option.as_ref() else {
+            return Ok(false);
+        };
+        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::NativeLaunchIntentRecorded
+            || intent.launch_request_id != binding.launch_request_id
+            || intent.harness_kind != binding.harness_kind
+            || binding.herdr_pane_binding.launch_request_id != binding.launch_request_id
+            || stored.attempt.native_launch_binding_option.is_some()
+        {
+            return Ok(false);
+        }
+        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::NativeBound;
+        stored.attempt.native_launch_binding_option = Some(binding);
+        self.mutate_launch_attempt(stored.attempt)?;
+        Ok(true)
+    }
+}
+
+impl RecordsRegistrationAcknowledgement for FlowStore {
+    fn record_registration_acknowledgement(
+        &self,
+        acknowledgement: RegistrationAcknowledgement,
+    ) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_launch_attempt(&acknowledgement.launch_request_id)?
+        else {
+            return Ok(false);
+        };
+        let Some(binding) = stored.attempt.native_launch_binding_option.as_ref() else {
+            return Ok(false);
+        };
+        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::NativeBound
+            || acknowledgement.launch_request_id != binding.launch_request_id
+            || acknowledgement.flow_id != binding.flow_id
+            || acknowledgement.native_session_id != binding.native_session_id
+            || acknowledgement.herdr_pane_binding != binding.herdr_pane_binding
+            || stored.attempt.registration_acknowledgement_option.is_some()
+        {
+            return Ok(false);
+        }
+        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::RegistrationAcknowledged;
+        stored.attempt.registration_acknowledgement_option = Some(acknowledgement);
+        self.mutate_launch_attempt(stored.attempt)?;
+        Ok(true)
+    }
+}
+
+impl RecordsPromptDeliveryIntent for FlowStore {
+    fn record_prompt_delivery_intent(
+        &self,
+        intent: PromptDeliveryIntent,
+    ) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
+            return Ok(false);
+        };
+        let Some(acknowledgement) = stored.attempt.registration_acknowledgement_option.as_ref()
+        else {
+            return Ok(false);
+        };
+        let Some(binding) = stored.attempt.native_launch_binding_option.as_ref() else {
+            return Ok(false);
+        };
+        let Some(native_intent) = stored.attempt.native_launch_intent_option.as_ref() else {
+            return Ok(false);
+        };
+        let valid_skills = intent
+            .native_skill_selection_vector
+            .iter()
+            .map(|selection| selection.skill_name.as_str())
+            .eq(native_intent.skill_name_vector.iter().map(String::as_str))
+            && intent
+                .native_skill_selection_vector
+                .iter()
+                .all(|selection| {
+                    Path::new(&selection.native_skill_path).is_absolute()
+                        && selection.native_skill_sha256.len() == 64
+                        && selection
+                            .native_skill_sha256
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                });
+        let valid_boundary = match &intent.native_transcript_boundary {
+            signal_flow::NativeTranscriptBoundary::Existing(cursor) => {
+                cursor.native_session_id == intent.native_session_id
+                    && cursor.harness_kind == intent.harness_kind
+                    && cursor.transcript_byte_offset >= 0
+                    && !cursor.transcript_device.is_empty()
+                    && cursor
+                        .transcript_device
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit())
+                    && !cursor.transcript_inode.is_empty()
+                    && cursor
+                        .transcript_inode
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit())
+                    && cursor.transcript_prefix_sha256.len() == 64
+                    && cursor
+                        .transcript_prefix_sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }
+            signal_flow::NativeTranscriptBoundary::Absent(absence) => {
+                absence.native_session_id == intent.native_session_id
+                    && absence.harness_kind == intent.harness_kind
+                    && !absence.transcript_root_device.is_empty()
+                    && absence
+                        .transcript_root_device
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit())
+                    && !absence.transcript_root_inode.is_empty()
+                    && absence
+                        .transcript_root_inode
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit())
+            }
+        };
+        if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::RegistrationAcknowledged
+            || intent.prompt_sha256 != stored.attempt.prompt_sha256
+            || intent.launch_request_id != acknowledgement.launch_request_id
+            || intent.flow_id != acknowledgement.flow_id
+            || intent.native_session_id != acknowledgement.native_session_id
+            || intent.harness_kind != binding.harness_kind
+            || intent.model_name != native_intent.model_name
+            || intent.effort != native_intent.effort
+            || !valid_skills
+            || intent.herdr_pane_binding != acknowledgement.herdr_pane_binding
+            || !valid_boundary
+            || stored.attempt.prompt_delivery_intent_option.is_some()
+        {
+            return Ok(false);
+        }
+        stored.attempt.launch_attempt_phase = LaunchAttemptPhase::PromptIntentRecorded;
+        stored.attempt.prompt_delivery_intent_option = Some(intent);
+        self.mutate_launch_attempt(stored.attempt)?;
+        Ok(true)
+    }
+}
+
+impl RecordsPromptDeliveryResult for FlowStore {
+    fn record_prompt_delivery_result(
+        &self,
+        result: PromptDeliveryResult,
+    ) -> Result<bool, StoreError> {
+        let launch_request_id = match &result {
+            PromptDeliveryResult::Observed(receipt) => &receipt.launch_request_id,
+            PromptDeliveryResult::Ambiguous(intent) => &intent.launch_request_id,
+        };
+        let Some(mut stored) = self.stored_launch_attempt(launch_request_id)? else {
+            return Ok(false);
+        };
+        let Some(intent) = stored.attempt.prompt_delivery_intent_option.as_ref() else {
+            return Ok(false);
+        };
+        let first_result = stored.attempt.launch_attempt_phase
+            == LaunchAttemptPhase::PromptIntentRecorded
+            && stored.attempt.prompt_delivery_result_option.is_none();
+        let ambiguity_promotion = stored.attempt.launch_attempt_phase
+            == LaunchAttemptPhase::PromptAmbiguous
+            && matches!(
+                stored.attempt.prompt_delivery_result_option,
+                Some(PromptDeliveryResult::Ambiguous(_))
+            )
+            && matches!(&result, PromptDeliveryResult::Observed(_));
+        let boundary_advancement = if stored.attempt.launch_attempt_phase
+            == LaunchAttemptPhase::PromptAmbiguous
+        {
+            match (
+                stored.attempt.prompt_delivery_result_option.as_ref(),
+                &result,
+            ) {
+                (
+                    Some(PromptDeliveryResult::Ambiguous(previous)),
+                    PromptDeliveryResult::Ambiguous(updated),
+                ) => {
+                    previous.launch_request_id == updated.launch_request_id
+                        && previous.prompt_sha256 == updated.prompt_sha256
+                        && previous.flow_id == updated.flow_id
+                        && previous.native_session_id == updated.native_session_id
+                        && previous.harness_kind == updated.harness_kind
+                        && previous.model_name == updated.model_name
+                        && previous.effort == updated.effort
+                        && previous.native_skill_selection_vector
+                            == updated.native_skill_selection_vector
+                        && previous.herdr_pane_binding == updated.herdr_pane_binding
+                        && matches!(
+                        (&previous.native_transcript_boundary, &updated.native_transcript_boundary),
+                        (
+                            signal_flow::NativeTranscriptBoundary::Absent(absence),
+                            signal_flow::NativeTranscriptBoundary::Existing(cursor),
+                        ) if absence.native_session_id == cursor.native_session_id
+                            && absence.harness_kind == cursor.harness_kind
+                            && cursor.transcript_byte_offset >= 0
+                            && !cursor.transcript_device.is_empty()
+                            && cursor.transcript_device.bytes().all(|byte| byte.is_ascii_digit())
+                            && !cursor.transcript_inode.is_empty()
+                            && cursor.transcript_inode.bytes().all(|byte| byte.is_ascii_digit())
+                            && cursor.transcript_prefix_sha256.len() == 64
+                            && cursor.transcript_prefix_sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                        )
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if !first_result && !ambiguity_promotion && !boundary_advancement {
+            return Ok(false);
+        }
+        let phase = match &result {
+            PromptDeliveryResult::Ambiguous(observed_intent) if observed_intent == intent => {
+                LaunchAttemptPhase::PromptAmbiguous
+            }
+            PromptDeliveryResult::Ambiguous(observed_intent) if boundary_advancement => {
+                stored.attempt.prompt_delivery_intent_option = Some(observed_intent.clone());
+                LaunchAttemptPhase::PromptAmbiguous
+            }
+            PromptDeliveryResult::Observed(receipt)
+                if receipt.launch_request_id == intent.launch_request_id
+                    && receipt.prompt_sha256 == intent.prompt_sha256
+                    && receipt.flow_id == intent.flow_id
+                    && receipt.native_session_id == intent.native_session_id
+                    && !receipt.native_turn_id.is_empty()
+                    && receipt.receipt_sha256.len() == 64
+                    && receipt
+                        .receipt_sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    && receipt.model_name == intent.model_name
+                    && receipt.effort == intent.effort
+                    && receipt.native_skill_selection_vector
+                        == intent.native_skill_selection_vector =>
+            {
+                LaunchAttemptPhase::PromptObserved
+            }
+            PromptDeliveryResult::Observed(_) | PromptDeliveryResult::Ambiguous(_) => {
+                return Ok(false);
+            }
+        };
+        stored.attempt.launch_attempt_phase = phase;
+        stored.attempt.prompt_delivery_result_option = Some(result);
+        self.mutate_launch_attempt(stored.attempt)?;
+        Ok(true)
+    }
+}
+
+impl ReadsLaunchAttempt for FlowStore {
+    fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError> {
+        Ok(self
+            .stored_launch_attempt(launch_request_id)?
+            .map(|stored| stored.attempt))
     }
 }
 
@@ -464,36 +925,120 @@ impl ReadsFlowStore for FlowStore {
         }
     }
 
+    fn stored_launch_attempt(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<StoredLaunchAttempt>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.launch_attempts,
+                RecordKey::new(launch_request_id),
+            ))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [attempt] => Ok(Some(attempt.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
     fn resolve_recipient(&self, flow_id: &str) -> Result<Response, StoreError> {
-        let Some(flow) = self.flow(flow_id)? else {
+        let Some(node) = self.flow_node(flow_id)? else {
             return Ok(Response::RecipientResolutionRejected(
                 RecipientResolutionRejection::UnknownFlow,
             ));
         };
-        let Some(session_id) = flow.thread_id else {
+        if node.session_id.is_empty() {
             return Ok(Response::RecipientResolutionRejected(
                 RecipientResolutionRejection::FlowUnavailable,
             ));
+        }
+        Ok(Response::RecipientResolved(node))
+    }
+}
+
+impl ReadsFlowRows for FlowStore {
+    fn flow_node(&self, flow_id: &str) -> Result<Option<FlowNode>, StoreError> {
+        let Some(flow) = self.flow(flow_id)? else {
+            return Ok(None);
         };
-        Ok(Response::RecipientResolved(FlowNode {
+        Ok(Some(FlowNode {
             flow_id: flow.flow_id,
-            session_id,
-            harness_kind: flow.harness_kind.clone(),
-            endpoint_selection: flow.endpoint_selection.clone(),
+            session_id: flow.thread_id.unwrap_or_default(),
+            harness_kind: flow.harness_kind,
+            endpoint_selection: flow.endpoint_selection,
             herdr_route_selection: self
                 .herdr_route(flow_id)?
                 .map(|record| HerdrRouteSelection::Available(record.route))
                 .unwrap_or(HerdrRouteSelection::Unavailable),
             origin_clue: flow.origin,
             flow_lifecycle: match flow.lifecycle {
-                FlowLifecycle::Active => SignalFlowLifecycle::Active,
                 FlowLifecycle::Pending => SignalFlowLifecycle::Pending,
+                FlowLifecycle::Active => SignalFlowLifecycle::Active,
+                FlowLifecycle::Stopped => SignalFlowLifecycle::Stopped,
             },
         }))
+    }
+
+    fn flow_nodes(&self) -> Result<Vec<FlowNode>, StoreError> {
+        let mut nodes = self
+            .engine
+            .match_records(QueryPlan::all(self.flows))?
+            .records()
+            .iter()
+            .map(|flow| self.flow_node(&flow.flow_id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| left.flow_id.cmp(&right.flow_id));
+        Ok(nodes)
+    }
+}
+
+impl RecordsFlowLifecycle for FlowStore {
+    fn record_active(&self, flow_id: &str) -> Result<bool, StoreError> {
+        let Some(mut flow) = self.flow(flow_id)? else {
+            return Ok(false);
+        };
+        if flow.lifecycle == FlowLifecycle::Stopped {
+            return Ok(false);
+        }
+        flow.lifecycle = FlowLifecycle::Active;
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.flows,
+            RecordKey::new(flow_id),
+            flow,
+        ))?;
+        Ok(true)
+    }
+
+    fn record_stopped(&self, flow_id: &str) -> Result<bool, StoreError> {
+        let Some(mut flow) = self.flow(flow_id)? else {
+            return Ok(false);
+        };
+        flow.lifecycle = FlowLifecycle::Stopped;
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.flows,
+            RecordKey::new(flow_id),
+            flow,
+        ))?;
+        Ok(true)
     }
 }
 
 impl WritesFlowStore for FlowStore {
+    fn mutate_launch_attempt(&self, attempt: LaunchAttempt) -> Result<(), StoreError> {
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.launch_attempts,
+            RecordKey::new(attempt.launch_request_id.clone()),
+            StoredLaunchAttempt { attempt },
+        ))?;
+        Ok(())
+    }
+
     fn reserve_start(
         &self,
         flow_type: String,
@@ -559,24 +1104,22 @@ impl WritesFlowStore for FlowStore {
 
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError> {
         let Some(mut flow) = self.flow(flow_id)? else {
-            return Ok(Response::StartRejected(StartRejection::LaunchRefused));
+            return Ok(Response::StartRejected(StartRejection::NativeLaunchRefused));
         };
-        if flow.lifecycle != FlowLifecycle::Pending || flow.thread_id.is_none() {
-            return Ok(Response::StartRejected(StartRejection::LaunchRefused));
+        if flow.thread_id.is_none() {
+            return Ok(Response::StartRejected(StartRejection::NativeLaunchRefused));
         }
-        flow.lifecycle = FlowLifecycle::Active;
-        flow.generation = 1;
-        flow.endpoint_selection = EndpointSelection::Available(signal_flow::Available_Data {
-            endpoint_path: "/home/li/.codex/app-server-control/app-server-control.sock".into(),
-            route_readiness: RouteReadiness::Ready,
-        });
         let origin_clue = flow.origin.clone();
         let session_id = flow.thread_id.clone().expect("checked thread identity");
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.flows,
-            RecordKey::new(flow_id),
-            flow,
-        ))?;
+        if flow.lifecycle == FlowLifecycle::Pending {
+            flow.lifecycle = FlowLifecycle::Active;
+            flow.generation = 1;
+            self.engine.mutate_keyed(KeyedMutation::new(
+                self.flows,
+                RecordKey::new(flow_id),
+                flow,
+            ))?;
+        }
         Ok(Response::Started(Started {
             flow_id: flow_id.into(),
             session_id,
@@ -615,11 +1158,20 @@ impl WritesFlowStore for FlowStore {
 mod tests {
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow,
-        FlowStore, OpensFlowStore, ReadsFlowStore, RecordsPendingThread, RecordsRestartedFlow,
-        RegistersFlowIdentity, ReservesPendingStart,
+        FlowStore, OpensFlowStore, ReadsFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding,
+        RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
+        RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsRestartedFlow,
+        RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
     };
     use meta_signal_flow::Configuration;
-    use signal_flow::{OriginClue, Query, Response, Restarted, StartRequest};
+    use signal_flow::{
+        ComposedLaunch, FirstPromptPayload, FlowAspect, HarnessKind, HerdrPaneBinding,
+        LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, NativeLaunchBinding,
+        NativeLaunchIntent, NativeSkillSelection, NativeTargetReceipt, NativeTranscriptAbsence,
+        NativeTranscriptBoundary, NativeTranscriptCursor, OriginClue, PowerLevel,
+        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
+        Restarted, StartRequest, TargetReceiptRequest,
+    };
 
     struct StoreFixture {
         directory: tempfile::TempDir,
@@ -635,6 +1187,302 @@ mod tests {
                 directory: tempfile::tempdir().expect("temporary store directory"),
             }
         }
+
+        fn launch_profile(&self, launch_request_id: &str) -> LaunchProfile {
+            LaunchProfile {
+                launch_request_id: launch_request_id.into(),
+                launch_source_vector: Vec::new(),
+                skill_name_vector: Vec::new(),
+                flow_aspect: FlowAspect::Field,
+                power_level: PowerLevel::High,
+                harness_kind: HarnessKind::Codex,
+                model_name: "fixture-model".into(),
+                effort: "medium".into(),
+                flow_id_option: None,
+                remembered_flow_vector: Vec::new(),
+                herdr_session_name: "fixture-session".into(),
+                system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
+                instruction_prompt: "fixture instruction".into(),
+            }
+        }
+
+        fn composed_launch(&self, launch_request_id: &str, prompt_sha256: &str) -> ComposedLaunch {
+            ComposedLaunch {
+                launch_profile: self.launch_profile(launch_request_id),
+                first_prompt_payload: FirstPromptPayload {
+                    first_prompt_body: "fixture prompt".into(),
+                    prompt_sha256: prompt_sha256.into(),
+                    first_prompt_text: "fixture prompt\nreceipt request".into(),
+                },
+                target_receipt_request: TargetReceiptRequest {
+                    launch_request_id: launch_request_id.into(),
+                    prompt_sha256: prompt_sha256.into(),
+                },
+            }
+        }
+
+        fn origin(&self) -> OriginClue {
+            OriginClue {
+                flow_id: "9fc62b".into(),
+                session_id: "caller-session".into(),
+                turn_id: "caller-turn".into(),
+            }
+        }
+
+        fn pane(&self, launch_request_id: &str) -> HerdrPaneBinding {
+            HerdrPaneBinding {
+                launch_request_id: launch_request_id.into(),
+                herdr_session_name: "fixture-session".into(),
+                herdr_agent_name: "fixture-agent".into(),
+                herdr_workspace_id: "fixture-workspace".into(),
+                herdr_pane_id: "w1:p1".into(),
+                herdr_terminal_id: "fixture-terminal".into(),
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_launch_request_returns_the_durable_attempt_and_changed_fingerprint_conflicts() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let launch = fixture.composed_launch(
+            "request-once",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let origin = fixture.origin();
+        assert!(matches!(
+            store
+                .reserve_launch_attempt(&launch, origin.clone())
+                .expect("first reservation persists"),
+            LaunchAttemptReservation::Reserved(_)
+        ));
+        let intent = NativeLaunchIntent {
+            launch_request_id: "request-once".into(),
+            prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+            harness_kind: HarnessKind::Codex,
+            model_name: launch.launch_profile.model_name.clone(),
+            effort: launch.launch_profile.effort.clone(),
+            skill_name_vector: launch.launch_profile.skill_name_vector.clone(),
+        };
+        assert!(
+            store
+                .record_native_launch_intent(intent.clone())
+                .expect("first external intent persists")
+        );
+        assert!(
+            !store
+                .record_native_launch_intent(intent)
+                .expect("a repeated external intent is refused")
+        );
+        assert!(matches!(
+            store
+                .reserve_launch_attempt(&launch, origin.clone())
+                .expect("identical duplicate reads"),
+            LaunchAttemptReservation::Existing(attempt)
+                if attempt.launch_attempt_phase == LaunchAttemptPhase::NativeLaunchIntentRecorded
+        ));
+        let mut changed_profile = launch.clone();
+        changed_profile.launch_profile.effort = "high".into();
+        assert_eq!(
+            store
+                .reserve_launch_attempt(&changed_profile, origin.clone())
+                .expect("changed profile evaluates before external work"),
+            LaunchAttemptReservation::Conflict
+        );
+        let changed = fixture.composed_launch(
+            "request-once",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        );
+        assert_eq!(
+            store
+                .reserve_launch_attempt(&changed, origin)
+                .expect("changed duplicate evaluates"),
+            LaunchAttemptReservation::Conflict
+        );
+    }
+
+    #[test]
+    fn prompt_intent_requires_exact_registration_and_authenticated_pre_send_boundary() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let mut launch = fixture.composed_launch(
+            "request-boundary",
+            "3333333333333333333333333333333333333333333333333333333333333333",
+        );
+        launch.launch_profile.harness_kind = HarnessKind::Claude;
+        launch.launch_profile.skill_name_vector = vec!["spirit".into(), "main-flow".into()];
+        store
+            .reserve_launch_attempt(&launch, fixture.origin())
+            .expect("reservation persists");
+        assert!(
+            store
+                .record_native_launch_intent(NativeLaunchIntent {
+                    launch_request_id: "request-boundary".into(),
+                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                    harness_kind: HarnessKind::Claude,
+                    model_name: launch.launch_profile.model_name.clone(),
+                    effort: launch.launch_profile.effort.clone(),
+                    skill_name_vector: launch.launch_profile.skill_name_vector.clone(),
+                })
+                .unwrap()
+        );
+        let pane = fixture.pane("request-boundary");
+        let binding = NativeLaunchBinding {
+            launch_request_id: "request-boundary".into(),
+            flow_id: "native-flow".into(),
+            native_session_id: "native-session".into(),
+            harness_kind: HarnessKind::Claude,
+            herdr_pane_binding: pane.clone(),
+        };
+        assert!(store.record_native_launch_binding(binding).unwrap());
+        assert!(
+            store
+                .record_registration_acknowledgement(RegistrationAcknowledgement {
+                    launch_request_id: "request-boundary".into(),
+                    flow_id: "native-flow".into(),
+                    native_session_id: "native-session".into(),
+                    herdr_pane_binding: pane.clone(),
+                })
+                .unwrap()
+        );
+        let intent = PromptDeliveryIntent {
+            launch_request_id: "request-boundary".into(),
+            prompt_sha256: launch.first_prompt_payload.prompt_sha256,
+            flow_id: "native-flow".into(),
+            native_session_id: "native-session".into(),
+            harness_kind: HarnessKind::Claude,
+            model_name: launch.launch_profile.model_name.clone(),
+            effort: launch.launch_profile.effort.clone(),
+            native_skill_selection_vector: vec![
+                NativeSkillSelection {
+                    skill_name: "main-flow".into(),
+                    native_skill_path: "/configured/main-flow/SKILL.md".into(),
+                    native_skill_sha256:
+                        "6666666666666666666666666666666666666666666666666666666666666666".into(),
+                },
+                NativeSkillSelection {
+                    skill_name: "spirit".into(),
+                    native_skill_path: "/configured/spirit/SKILL.md".into(),
+                    native_skill_sha256:
+                        "7777777777777777777777777777777777777777777777777777777777777777".into(),
+                },
+            ],
+            herdr_pane_binding: pane,
+            native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
+                native_session_id: "different-session".into(),
+                harness_kind: HarnessKind::Claude,
+                transcript_root_device: "2049".into(),
+                transcript_root_inode: "99143".into(),
+            }),
+        };
+        assert!(
+            !store
+                .record_prompt_delivery_intent(intent.clone())
+                .expect("out-of-order native skill selection is refused")
+        );
+        let mut exact = intent;
+        exact.native_skill_selection_vector.swap(0, 1);
+        assert!(
+            !store
+                .record_prompt_delivery_intent(exact.clone())
+                .expect("mismatching boundary is refused")
+        );
+        let NativeTranscriptBoundary::Absent(absence) = &mut exact.native_transcript_boundary
+        else {
+            panic!("absence fixture")
+        };
+        absence.native_session_id = "native-session".into();
+        assert!(
+            store
+                .record_prompt_delivery_intent(exact.clone())
+                .expect("exact pre-send evidence persists")
+        );
+        assert!(
+            !store
+                .record_prompt_delivery_intent(exact.clone())
+                .expect("one-shot prompt intent cannot be replayed")
+        );
+        drop(store);
+        let reopened = fixture.store();
+        assert_eq!(
+            reopened
+                .launch_attempt("request-boundary")
+                .unwrap()
+                .expect("journal recovers")
+                .prompt_delivery_intent_option,
+            Some(exact.clone())
+        );
+        assert!(
+            reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(exact.clone()))
+                .unwrap()
+        );
+        let mut cursor_intent = exact.clone();
+        cursor_intent.native_transcript_boundary =
+            NativeTranscriptBoundary::Existing(NativeTranscriptCursor {
+                native_session_id: "native-session".into(),
+                harness_kind: HarnessKind::Claude,
+                transcript_device: "2049".into(),
+                transcript_inode: "99144".into(),
+                transcript_byte_offset: 127,
+                transcript_prefix_sha256:
+                    "5555555555555555555555555555555555555555555555555555555555555555".into(),
+            });
+        assert!(
+            reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
+                    cursor_intent.clone(),
+                ))
+                .expect("fresh transcript advances the durable boundary")
+        );
+        assert_eq!(
+            reopened
+                .launch_attempt("request-boundary")
+                .unwrap()
+                .expect("advanced boundary recovers")
+                .prompt_delivery_intent_option,
+            Some(cursor_intent.clone())
+        );
+        assert!(
+            !reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Observed(
+                    NativeTargetReceipt {
+                        launch_request_id: cursor_intent.launch_request_id.clone(),
+                        prompt_sha256: cursor_intent.prompt_sha256.clone(),
+                        flow_id: cursor_intent.flow_id.clone(),
+                        native_session_id: cursor_intent.native_session_id.clone(),
+                        native_turn_id: "native-turn".into(),
+                        receipt_sha256:
+                            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                                .into(),
+                        model_name: cursor_intent.model_name.clone(),
+                        effort: cursor_intent.effort.clone(),
+                        native_skill_selection_vector: cursor_intent
+                            .native_skill_selection_vector
+                            .clone(),
+                    }
+                ))
+                .expect("caller-shaped receipt is validated before promotion")
+        );
+        assert!(
+            reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Observed(
+                    NativeTargetReceipt {
+                        launch_request_id: cursor_intent.launch_request_id,
+                        prompt_sha256: cursor_intent.prompt_sha256,
+                        flow_id: cursor_intent.flow_id,
+                        native_session_id: cursor_intent.native_session_id,
+                        native_turn_id: "native-turn".into(),
+                        receipt_sha256:
+                            "4444444444444444444444444444444444444444444444444444444444444444"
+                                .into(),
+                        model_name: cursor_intent.model_name,
+                        effort: cursor_intent.effort,
+                        native_skill_selection_vector: cursor_intent.native_skill_selection_vector,
+                    }
+                ))
+                .expect("authentic receipt promotes ambiguity")
+        );
     }
 
     impl OpensFixtureStore for StoreFixture {
@@ -652,7 +1500,7 @@ mod tests {
         fn start(&self, store: &FlowStore) -> String {
             let pending = store
                 .reserve_pending_start(Query::Start(StartRequest {
-                    flow_type: "codex-medium".into(),
+                    launch_profile: self.launch_profile("legacy-start-1"),
                     origin_clue: OriginClue {
                         flow_id: "9fc62b".into(),
                         session_id: "session-1".into(),
@@ -729,7 +1577,7 @@ mod tests {
         let store = fixture.store();
         let pending = store
             .reserve_pending_start(Query::Start(StartRequest {
-                flow_type: "codex-medium".into(),
+                launch_profile: fixture.launch_profile("legacy-start-2"),
                 origin_clue: OriginClue {
                     flow_id: "9fc62b".into(),
                     session_id: "session-2".into(),
@@ -774,7 +1622,7 @@ mod tests {
         let store = fixture.store();
         let pending = store
             .reserve_pending_start(Query::Start(StartRequest {
-                flow_type: "codex-medium".into(),
+                launch_profile: fixture.launch_profile("legacy-start-3"),
                 origin_clue: OriginClue {
                     flow_id: "9fc62b".into(),
                     session_id: "session-3".into(),
@@ -826,7 +1674,7 @@ mod tests {
         assert!(matches!(
             node.endpoint_selection,
             signal_flow::EndpointSelection::Available(signal_flow::Available_Data {
-                route_readiness: signal_flow::RouteReadiness::Ready,
+                route_readiness: signal_flow::RouteReadiness::Parked,
                 ..
             })
         ));

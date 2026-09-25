@@ -1,27 +1,106 @@
 //! Herdr roster validation for durable Flow routes.
 
-use std::{fs, path::PathBuf, process::Command};
+pub mod launch;
+
+use crate::codex::{CodexEndpoint, CodexEndpoints};
+use std::collections::BTreeSet;
+use std::{
+    fs,
+    path::PathBuf,
+    process::Command,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use signal_flow::{
-    EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, RouteReadiness,
+    EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, PresentationReceipt,
+    RouteReadiness, SendOutcome,
 };
+
+static PRESENTATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Reads Herdr's documented session snapshot and validates one complete route.
 pub trait ReadsHerdrRoster {
     fn route_is_available(&self, node: &FlowNode) -> bool;
 }
 
+/// Performs thin ordinary Flow operations against one revalidated Herdr pane.
+pub trait OperatesHerdrPane {
+    fn prompt(
+        &self,
+        node: &FlowNode,
+        text: &str,
+        require_presentation: bool,
+    ) -> Option<SendOutcome>;
+    fn close(&self, node: &FlowNode) -> bool;
+}
+
 /// The production Herdr roster reader.
 pub struct HerdrCli {
     executable: PathBuf,
+    flow_id_executable: PathBuf,
     flows_root: PathBuf,
+    codex_endpoints: CodexEndpoints,
+    claude_transcript_root: PathBuf,
+    /// Native Claude skill catalogs, highest-precedence first.
+    claude_skill_roots: Vec<PathBuf>,
 }
 
 impl Default for HerdrCli {
     fn default() -> Self {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| panic!("HOME must name the configured user root"));
+        let codex_home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
+        let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".claude"));
+        let workspace_root = std::env::var_os("FLOW_SOURCE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| panic!("FLOW_SOURCE_ROOT must name the configured workspace root"));
+        let flows_root = workspace_root.join("flows");
+        let mut claude_skill_roots = Vec::new();
+        if let Some(enterprise) = std::env::var_os("CLAUDE_ENTERPRISE_SKILLS_DIR") {
+            claude_skill_roots.push(PathBuf::from(enterprise));
+        }
+        claude_skill_roots.push(claude_home.join("skills"));
+        claude_skill_roots.push(workspace_root.join(".claude/skills"));
         Self {
             executable: PathBuf::from("herdr"),
-            flows_root: PathBuf::from("/home/li/primary/flows"),
+            flow_id_executable: PathBuf::from("flow-id"),
+            flows_root: flows_root.clone(),
+            codex_endpoints: CodexEndpoints {
+                stable: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex"),
+                    home: codex_home.clone(),
+                    socket: home
+                        .join(".codex/app-server-control/app-server-control.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                    transcript_root: codex_home.join("sessions"),
+                    model_names: BTreeSet::from(["gpt-5.6-terra".into()]),
+                },
+                next: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex-next"),
+                    home: home.join(".codex-next"),
+                    socket: home
+                        .join(".codex-next/app-server-control/app-server-control.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                    transcript_root: home.join(".codex-next/sessions"),
+                    model_names: BTreeSet::from([
+                        "gpt-6-astra".into(),
+                        "gpt-6-sol".into(),
+                        "gpt-6-luna".into(),
+                    ]),
+                },
+                timeout: std::time::Duration::from_secs(10),
+                workspace_root: workspace_root.clone(),
+            },
+            claude_transcript_root: claude_home.join("projects"),
+            claude_skill_roots,
         }
     }
 }
@@ -45,12 +124,172 @@ impl ReadsHerdrRoster for HerdrCli {
     }
 }
 
+impl OperatesHerdrPane for HerdrCli {
+    fn prompt(
+        &self,
+        node: &FlowNode,
+        text: &str,
+        require_presentation: bool,
+    ) -> Option<SendOutcome> {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return None;
+        };
+        if !self.identity_is_claimed(node) {
+            return None;
+        }
+        let snapshot = self.snapshot(route)?;
+        let route_is_ready = if require_presentation {
+            Self::snapshot_has_idle_route(&snapshot, route, &node.harness_kind)
+        } else {
+            Self::snapshot_has_route(&snapshot, route, &node.harness_kind)
+        };
+        if !route_is_ready {
+            return None;
+        }
+        let marker = require_presentation.then(|| Self::presentation_marker(&node.flow_id));
+        let presented_text = marker.as_ref().map(|marker| format!("{text}\n\n{marker}"));
+        let mut command = Command::new(&self.executable);
+        command.args([
+            "--session",
+            route.herdr_session_name.as_str(),
+            "agent",
+            "prompt",
+            route.herdr_pane_id.as_str(),
+            presented_text.as_deref().unwrap_or(text),
+        ]);
+        if !command.status().is_ok_and(|status| status.success()) {
+            return None;
+        }
+        let Some(marker) = marker else {
+            return Some(SendOutcome::Accepted(node.flow_id.clone()));
+        };
+        if !Command::new(&self.executable)
+            .args([
+                "--session",
+                route.herdr_session_name.as_str(),
+                "pane",
+                "wait-output",
+                "--match",
+                marker.as_str(),
+                "--source",
+                "recent-unwrapped",
+                "--lines",
+                "200",
+                "--timeout",
+                "5000",
+                route.herdr_pane_id.as_str(),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return None;
+        }
+        let read = Command::new(&self.executable)
+            .args([
+                "--session",
+                route.herdr_session_name.as_str(),
+                "pane",
+                "read",
+                "--source",
+                "recent-unwrapped",
+                "--lines",
+                "200",
+                "--format",
+                "text",
+                route.herdr_pane_id.as_str(),
+            ])
+            .output()
+            .ok()?;
+        if !read.status.success()
+            || !String::from_utf8_lossy(&read.stdout).contains(marker.as_str())
+        {
+            return None;
+        }
+        let presentation_read_unix_milliseconds = Self::unix_milliseconds()?;
+        if !self.route_is_available(node) {
+            return None;
+        }
+        Some(SendOutcome::Presented(PresentationReceipt {
+            flow_id: node.flow_id.clone(),
+            herdr_pane_id: route.herdr_pane_id.clone(),
+            presentation_marker: marker,
+            presentation_read_unix_milliseconds,
+        }))
+    }
+
+    fn close(&self, node: &FlowNode) -> bool {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return false;
+        };
+        if !self.route_is_available(node) {
+            return false;
+        }
+        Command::new(&self.executable)
+            .args([
+                "--session",
+                route.herdr_session_name.as_str(),
+                "pane",
+                "close",
+                route.herdr_pane_id.as_str(),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+}
+
 impl HerdrCli {
+    fn unix_milliseconds() -> Option<i64> {
+        let milliseconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_millis();
+        i64::try_from(milliseconds).ok()
+    }
+
+    fn presentation_marker(flow_id: &str) -> String {
+        let sequence = PRESENTATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let milliseconds = Self::unix_milliseconds().unwrap_or_default();
+        format!("FLOW_PRESENTED_{flow_id}_{milliseconds}_{sequence}")
+    }
+
+    pub fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
+        self.codex_endpoints = codex_endpoints;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn at(executable: PathBuf, flows_root: PathBuf) -> Self {
+        let fixture_root = flows_root
+            .parent()
+            .expect("fixture flows root has a parent")
+            .join("native-transcripts");
         Self {
             executable,
-            flows_root,
+            flow_id_executable: fixture_root.join("flow-id"),
+            flows_root: flows_root.clone(),
+            codex_endpoints: CodexEndpoints {
+                stable: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex"),
+                    home: fixture_root.join("codex-home"),
+                    socket: "/tmp/stable-codex.sock".into(),
+                    transcript_root: fixture_root.join("codex"),
+                    model_names: BTreeSet::from(["model-current".into(), "fixture-model".into()]),
+                },
+                next: CodexEndpoint {
+                    client_path: PathBuf::from("/fixture/codex-next"),
+                    home: fixture_root.join("codex-next-home"),
+                    socket: "/tmp/next-codex.sock".into(),
+                    transcript_root: fixture_root.join("codex-next"),
+                    model_names: BTreeSet::from(["gpt-6-sol".into(), "gpt-6-luna".into()]),
+                },
+                timeout: std::time::Duration::from_millis(100),
+                workspace_root: flows_root
+                    .parent()
+                    .expect("fixture flows root has a parent")
+                    .to_path_buf(),
+            },
+            claude_transcript_root: fixture_root.join("claude"),
+            claude_skill_roots: vec![fixture_root.join("claude-skills")],
         }
     }
 
@@ -112,6 +351,29 @@ impl HerdrCli {
                                 .and_then(serde_json::Value::as_str),
                             Some("idle" | "working")
                         )
+                        && agent
+                            .get("interactive_ready")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                })
+            })
+    }
+
+    fn snapshot_has_idle_route(
+        snapshot: &serde_json::Value,
+        route: &HerdrRoute,
+        harness_kind: &HarnessKind,
+    ) -> bool {
+        snapshot
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|agents| {
+                agents.iter().any(|agent| {
+                    HerdrCli::agent_matches_binding(agent, route, harness_kind)
+                        && agent
+                            .get("agent_status")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("idle")
                         && agent
                             .get("interactive_ready")
                             .and_then(serde_json::Value::as_bool)
@@ -182,6 +444,7 @@ impl VerifiesFlowClaim for HerdrCli {
 
 struct FlowClaim {
     harness_kind: HarnessKind,
+    identity: String,
     alias: String,
 }
 
@@ -230,6 +493,7 @@ impl DecodesFlowClaim for FlowClaim {
         }
         Some(Self {
             harness_kind,
+            identity,
             alias,
         })
     }

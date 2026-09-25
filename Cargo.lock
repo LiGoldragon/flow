@@ -234,7 +234,7 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flow"
-version = "0.3.0"
+version = "0.6.0"
 dependencies = [
  "datom-codec 0.31.0",
  "protos 0.31.0",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "flow-meta"
-version = "0.3.0"
+version = "0.6.0"
 dependencies = [
  "datom-codec 0.31.0",
  "meta-signal-flow",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "flow-nexus"
-version = "0.3.0"
+version = "0.6.0"
 dependencies = [
  "base64",
  "meta-signal-flow",
@@ -263,6 +263,7 @@ dependencies = [
  "sema-engine",
  "serde_json",
  "sha1",
+ "sha2",
  "signal-flow",
  "tempfile",
  "thiserror",
@@ -366,8 +367,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "1.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=aa6104012e1d9c9b9650590e502c51fbea902e81#aa6104012e1d9c9b9650590e502c51fbea902e81"
+version = "4.1.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=a34bc65282d72f8096be850cf14029011ca6816b#a34bc65282d72f8096be850cf14029011ca6816b"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",
@@ -625,6 +626,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -644,8 +656,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "1.1.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=968ae3b00a64ebcb1ef05e21a0a55cee55ad015c#968ae3b00a64ebcb1ef05e21a0a55cee55ad015c"
+version = "2.2.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=ab7033227168be23de6d5c14d0ae73cd23b1d2c3#ab7033227168be23de6d5c14d0ae73cd23b1d2c3"
 dependencies = [
  "datom-codec 0.31.0",
  "ethos-zero 10.0.0",

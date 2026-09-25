@@ -1423,6 +1423,9 @@ mod tests {
         let fixture = NexusFixture::new();
         let source_path = fixture.directory.path().join("launch-source.md");
         fs::write(&source_path, b"exact source bytes\n").expect("fixture source");
+        let system_prompt_bundle = fixture.directory.path().join("flow-system-prompt.md");
+        fs::write(&system_prompt_bundle, b"fixture system prompt\n")
+            .expect("fixture system-prompt bundle");
         let profile = LaunchProfile {
             launch_request_id: "retry-request".into(),
             launch_source_vector: vec![LaunchSource {
@@ -1438,7 +1441,7 @@ mod tests {
             flow_id_option: None,
             remembered_flow_vector: Vec::new(),
             herdr_session_name: "fixture-session".into(),
-            system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
+            system_prompt_bundle_file: system_prompt_bundle.display().to_string(),
             instruction_prompt: "fixture instruction".into(),
         };
         let origin = OriginClue {
@@ -1482,6 +1485,9 @@ mod tests {
         let fixture = NexusFixture::new();
         let source_path = fixture.directory.path().join("delayed-source.md");
         fs::write(&source_path, b"delayed exact bytes\n").expect("fixture source");
+        let system_prompt_bundle = fixture.directory.path().join("flow-system-prompt.md");
+        fs::write(&system_prompt_bundle, b"fixture system prompt\n")
+            .expect("fixture system-prompt bundle");
         let profile = LaunchProfile {
             launch_request_id: "delayed-request".into(),
             launch_source_vector: vec![LaunchSource {
@@ -1497,7 +1503,7 @@ mod tests {
             flow_id_option: None,
             remembered_flow_vector: Vec::new(),
             herdr_session_name: "fixture-session".into(),
-            system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
+            system_prompt_bundle_file: system_prompt_bundle.display().to_string(),
             instruction_prompt: "fixture instruction".into(),
         };
         let origin = OriginClue {

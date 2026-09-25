@@ -208,8 +208,8 @@ dependencies = [
 
 [[package]]
 name = "ethos-zero"
-version = "10.0.0"
-source = "git+https://github.com/LiGoldragon/ethos-zero?rev=4bf73cae8d4f5a2072c76a11cd2f00aa3fe9f8e3#4bf73cae8d4f5a2072c76a11cd2f00aa3fe9f8e3"
+version = "13.0.0"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=407f938d083a89236ef8c2c6e8a90561ec6b637a#407f938d083a89236ef8c2c6e8a90561ec6b637a"
 dependencies = [
  "datom-codec 0.31.0",
  "prettyplease",
@@ -234,7 +234,7 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flow"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "datom-codec 0.31.0",
  "protos 0.31.0",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "flow-meta"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "datom-codec 0.31.0",
  "meta-signal-flow",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "flow-nexus"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "base64",
  "meta-signal-flow",
@@ -423,11 +423,11 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "6.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=4748cfa854131cc4feb592167aa89516840a59e5#4748cfa854131cc4feb592167aa89516840a59e5"
+version = "6.0.2"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=29ec97d854acfc08ff1aba2813cd0957174901b1#29ec97d854acfc08ff1aba2813cd0957174901b1"
 dependencies = [
  "datom-codec 0.31.0",
- "ethos-zero 10.0.0",
+ "ethos-zero 13.0.0",
  "protos 0.31.0",
  "rkyv",
  "signal",
@@ -760,11 +760,11 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "4.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=5ca97cee791df0a63c14ae665e9bd7ad15f1f2b0#5ca97cee791df0a63c14ae665e9bd7ad15f1f2b0"
+version = "4.0.1"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=83171f3f39f53fbcff1a5fdc9bc7c96d6f57ac1f#83171f3f39f53fbcff1a5fdc9bc7c96d6f57ac1f"
 dependencies = [
  "datom-codec 0.31.0",
- "ethos-zero 10.0.0",
+ "ethos-zero 13.0.0",
  "protos 0.31.0",
  "rkyv",
  "signal",

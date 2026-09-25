@@ -492,16 +492,14 @@ impl LaunchesFlows for RunningNexus {
                 StopRejection::PersistenceRefused,
             ));
         }
+        // A predecessor whose pane is already gone is already reaped: only
+        // a pane that exists is closed, and only its failed close refuses.
         let node = self.herdr.refresh_route(node);
-        if !matches!(
+        if matches!(
             node.herdr_route_selection,
             HerdrRouteSelection::Available(_)
-        ) {
-            return refuse(ReplaceRejection::ReapRefused(
-                StopRejection::RouteUnavailable,
-            ));
-        }
-        if !self.herdr.close(&node) {
+        ) && !self.herdr.close(&node)
+        {
             return refuse(ReplaceRejection::ReapRefused(StopRejection::CloseRefused));
         }
         let replaced = Replaced {

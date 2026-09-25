@@ -1,3 +1,14 @@
+# Flow 0.10.1
+
+A patch release with no wire or storage change. `Replace` now treats a
+predecessor whose pane is already gone from Herdr as already reaped: the
+predecessor is recorded `Stopped`, `Replaced` is recorded, and the successor
+routes. `ReapRefused` remains for a close that fails on a pane that exists; a
+request refused as `ReapRefused.RouteUnavailable` earlier settles as
+`Replaced` when it is sent again. `signal-flow` is pinned at 4.0.1 and
+`meta-signal-flow` at 6.0.2, both regenerated on ethos-zero 13.0.0 with the
+wire unchanged.
+
 # Flow 0.10.0
 
 The Claude launch shape changes; no wire or storage change.

@@ -2,6 +2,8 @@
 pub mod claude;
 pub mod codex;
 pub mod composition;
+#[cfg(test)]
+mod fixture_executable;
 pub mod herdr;
 pub mod launching;
 pub mod store;
@@ -653,6 +655,7 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::{Dispatches, RunningNexus};
+    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use crate::{
         codex::{CodexEndpoint, CodexEndpoints},
         composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer},
@@ -675,7 +678,7 @@ mod tests {
         collections::BTreeSet,
         fs,
         io::Write,
-        os::unix::fs::{MetadataExt, PermissionsExt},
+        os::unix::fs::MetadataExt,
         os::unix::net::UnixListener,
         path::{Path, PathBuf},
         time::Duration,
@@ -852,13 +855,10 @@ mod tests {
                 "#!/bin/sh\n[ \"$1\" = \"--session\" ] && [ \"$3\" = \"api\" ] && [ \"$4\" = \"snapshot\" ] || exit 64\nprintf '%s\\n' '{}'\n",
                 snapshot
             );
-            fs::write(&self.snapshot_program, body).expect("snapshot subprocess fixture");
-            let mut permissions = fs::metadata(&self.snapshot_program)
-                .expect("snapshot fixture metadata")
-                .permissions();
-            permissions.set_mode(0o700);
-            fs::set_permissions(&self.snapshot_program, permissions)
-                .expect("snapshot fixture executable");
+            FixtureExecutable {
+                path: self.snapshot_program.clone(),
+            }
+            .install(&body);
         }
 
         fn accept_pane_operations(
@@ -889,13 +889,10 @@ mod tests {
                 pane_output.display(),
                 log.display(),
             );
-            fs::write(&self.snapshot_program, body).expect("Herdr operation fixture");
-            let mut permissions = fs::metadata(&self.snapshot_program)
-                .expect("Herdr operation fixture metadata")
-                .permissions();
-            permissions.set_mode(0o700);
-            fs::set_permissions(&self.snapshot_program, permissions)
-                .expect("Herdr operation fixture executable");
+            FixtureExecutable {
+                path: self.snapshot_program.clone(),
+            }
+            .install(&body);
             log
         }
     }
@@ -1537,12 +1534,10 @@ mod tests {
             herdr_calls.display(),
             agent
         );
-        fs::write(&fixture.snapshot_program, body).unwrap();
-        let mut permissions = fs::metadata(&fixture.snapshot_program)
-            .unwrap()
-            .permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&fixture.snapshot_program, permissions).unwrap();
+        FixtureExecutable {
+            path: fixture.snapshot_program.clone(),
+        }
+        .install(&body);
 
         let marker = crate::composition::LaunchReceipt::MARKER;
         let transcript = transcript_root.join(format!("rollout-{native_session_id}.jsonl"));
@@ -1735,6 +1730,20 @@ mod tests {
         /// A Herdr stand-in that knows the successor's agent, shows the
         /// predecessor's pane in every snapshot, and logs every call.
         fn herdr_for_replacement(&self, close_status: i32) -> PathBuf {
+            self.herdr_for_replacement_showing(close_status, vec![self.current_agent()])
+        }
+
+        /// The same stand-in after the predecessor's pane has exited: no
+        /// snapshot shows it.
+        fn herdr_after_predecessor_exit(&self, close_status: i32) -> PathBuf {
+            self.herdr_for_replacement_showing(close_status, Vec::new())
+        }
+
+        fn herdr_for_replacement_showing(
+            &self,
+            close_status: i32,
+            agents: Vec<serde_json::Value>,
+        ) -> PathBuf {
             let log = self.directory.path().join("herdr-calls.log");
             let agent = serde_json::json!({"result":{"agent":{
                 "name":"fixture-agent",
@@ -1751,7 +1760,7 @@ mod tests {
             }}});
             let snapshot = serde_json::json!({
                 "id":"cli:api:snapshot",
-                "result":{"snapshot":{"agents":[self.current_agent()],"protocol":20,"version":"0.8.2"},
+                "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
                 "type":"session_snapshot"}
             });
             let body = format!(
@@ -1761,13 +1770,10 @@ mod tests {
                 snapshot,
                 close_status
             );
-            fs::write(&self.snapshot_program, body).expect("Herdr fixture");
-            let mut permissions = fs::metadata(&self.snapshot_program)
-                .expect("Herdr fixture metadata")
-                .permissions();
-            permissions.set_mode(0o700);
-            fs::set_permissions(&self.snapshot_program, permissions)
-                .expect("Herdr fixture executable");
+            FixtureExecutable {
+                path: self.snapshot_program.clone(),
+            }
+            .install(&body);
             log
         }
 
@@ -2070,6 +2076,37 @@ mod tests {
         ));
         assert!(!fixture.routable("fac697"));
         assert!(fixture.routable("908786"));
+    }
+
+    #[test]
+    fn a_predecessor_whose_pane_is_gone_is_already_reaped() {
+        let fixture = NexusFixture::new();
+        // Any close would fail: the reap must not need one.
+        let calls = fixture.herdr_after_predecessor_exit(1);
+        fixture.register_predecessor("fac697");
+        let mut launch = fixture.staged_launch("exited-request", Some("fac697"));
+        launch.stage_to_ambiguity(&fixture.nexus);
+        launch.write_receipt();
+
+        let replaced = fixture.nexus.dispatch(Query::Replace(launch.request()));
+        assert!(
+            matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id == "fac697"),
+            "an absent pane is a completed reap, not ReapRefused: {replaced:?}"
+        );
+        assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
+        assert!(!fixture.routable("fac697"));
+        assert!(fixture.routable("908786"));
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("exited-request".into())),
+            replaced
+        );
+        let calls = fs::read_to_string(calls).expect("Herdr call log");
+        assert!(
+            !calls.contains("pane close"),
+            "no close is attempted on an absent pane: {calls}"
+        );
     }
 
     #[test]

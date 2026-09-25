@@ -1066,7 +1066,8 @@ impl ConsumesResetCredit for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt, sync::Mutex};
+    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+    use std::{fs, sync::Mutex};
 
     static FAKE_PROXY_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1100,8 +1101,10 @@ mod tests {
         fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathBuf) {
             let directory = tempfile::tempdir().unwrap();
             let executable = directory.path().join("codex");
-            fs::write(&executable, self.executable(frames)).unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            FixtureExecutable {
+                path: executable.clone(),
+            }
+            .install(&self.executable(frames));
             (directory, executable)
         }
     }
@@ -1124,9 +1127,13 @@ mod tests {
         }
     }
 
+    /// A fake-proxy adapter. Its replies arrive at once, so the wide
+    /// timeout costs nothing and keeps a loaded test machine from turning a
+    /// slow `sh` start into a false `TimedOut`.
     fn adapter_at(executable: PathBuf) -> CodexAdapter {
         CodexAdapter {
             executable,
+            timeout: Duration::from_secs(5),
             ..adapter()
         }
     }
@@ -1401,8 +1408,13 @@ mod tests {
         let fake = FakeProxy;
         let frames = [fake.websocket_frame(r#"{"id":1,"result":{}}"#)];
         let (_directory, executable) = fake.install(&frames);
+        // Shorter than the proxy's two-second silence after its last frame.
+        let adapter = CodexAdapter {
+            timeout: Duration::from_secs(1),
+            ..adapter_at(executable)
+        };
         assert!(matches!(
-            adapter_at(executable).start_codex("flow-test", "start", &origin()),
+            adapter.start_codex("flow-test", "start", &origin()),
             Err(CodexAdapterUnavailable::TimedOut)
         ));
     }

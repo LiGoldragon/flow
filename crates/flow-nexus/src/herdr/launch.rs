@@ -1744,6 +1744,7 @@ mod tests {
         SubmitsFirstPromptOnce, TitlesNativeFlow,
     };
     use crate::composition::{LaunchReceipt, NamesRemoteControl};
+    use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use crate::herdr::HerdrCli;
     use signal_flow::{
         ComposedLaunch, Effort, FirstPromptPayload, FlowAspect, HarnessKind, LaunchProfile,
@@ -1751,7 +1752,7 @@ mod tests {
         PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
         TargetReceiptRequest,
     };
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::fs;
 
     const PROMPT_HASH: &str = "0cb26cfe0a554e4780aa5af20cafbe3ae3259f823438576026a4ffff58371a67";
 
@@ -1822,16 +1823,10 @@ esac
                 .join(format!("{native_session}.jsonl"))
                 .display(),
         );
-        fs::write(&executable, script).expect("fixture executable");
-        fs::File::open(&executable)
-            .expect("open fixture executable")
-            .sync_all()
-            .expect("sync fixture executable");
-        let mut permissions = fs::metadata(&executable)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&executable, permissions).expect("fixture permissions");
+        FixtureExecutable {
+            path: executable.clone(),
+        }
+        .install(&script);
         let flows = root.path().join("flows");
         fs::create_dir(&flows).expect("fixture flows root");
         let transcript_root = root.path().join("native-transcripts");
@@ -1856,12 +1851,10 @@ printf '%s\n' 123456
             flow_id_calls = flow_id_calls.display(),
             flows = flows.display(),
         );
-        fs::write(&flow_id, flow_id_script).expect("flow-id fixture executable");
-        let mut flow_id_permissions = fs::metadata(&flow_id)
-            .expect("flow-id fixture metadata")
-            .permissions();
-        flow_id_permissions.set_mode(0o700);
-        fs::set_permissions(&flow_id, flow_id_permissions).expect("flow-id fixture permissions");
+        FixtureExecutable {
+            path: flow_id.clone(),
+        }
+        .install(&flow_id_script);
         let adapter = HerdrCli::at(executable, flows);
         (root, adapter)
     }
@@ -2722,14 +2715,12 @@ printf '%s\n' 123456
         ]
         .join("");
         let proxy = root.path().join("codex-proxy");
-        fs::write(
-            &proxy,
-            format!(
+        FixtureExecutable {
+            path: proxy.clone(),
+        }
+        .install(&format!(
                 "#!/bin/sh\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nprintf '%b' '{frames}'\nsleep 2\n"
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&proxy, fs::Permissions::from_mode(0o755)).unwrap();
+            ));
         adapter.codex_endpoints.stable.client_path = proxy;
         adapter
             .codex_endpoints

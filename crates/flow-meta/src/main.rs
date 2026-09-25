@@ -1,6 +1,6 @@
-use datom_codec::Datomizable;
-use meta_signal_flow::{Configuration, CreditSelection, Query, ResetRequest, Response};
-use protos::{Protosizable, Textualizable};
+use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use meta_signal_flow::{CreditSelection, Query, ResetRequest, Response};
+use protos::{Protosizable, ReaderBudget, Textualizable};
 use std::{
     env,
     io::{Read, Write},
@@ -89,19 +89,23 @@ impl ParsesMetaCommand for FlowMetaClient {
                     flow_lifecycle: signal_flow::FlowLifecycle::Active,
                 }))
             }
-            Some("configure") => {
-                let Some(ordinary_socket_path) = arguments.next() else {
-                    return Err("usage: flow-meta configure <ordinary-socket> <meta-socket>".into());
-                };
-                let Some(meta_socket_path) = arguments.next() else {
-                    return Err("usage: flow-meta configure <ordinary-socket> <meta-socket>".into());
-                };
+            // A capitalized argument is one inline meta Query datom, the
+            // shape every request takes once the word commands retire.
+            Some(datom) if datom.starts_with(|first: char| first.is_ascii_uppercase()) => {
                 if arguments.next().is_some() {
-                    return Err("usage: flow-meta configure <ordinary-socket> <meta-socket>".into());
+                    return Err("usage: flow-meta '<one inline meta Query datom>'".into());
                 }
-                Ok(Query::Configure(Configuration { ordinary_socket_path, meta_socket_path }))
+                let mut budget = Budget {
+                    remaining: 65_536,
+                    reader: ReaderBudget { remaining: 65_536 },
+                    depth: 0,
+                    maximum_depth: 1_024,
+                };
+                Potential::<Query>::from(datom.to_owned())
+                    .actualize(&mut budget)
+                    .map_err(|error| format!("invalid Flow meta query: {error:?}"))
             }
-            _ => Err("usage: flow-meta reset <idempotency-key> [credit-id] | flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint] | flow-meta configure <ordinary-socket> <meta-socket>".into()),
+            _ => Err("usage: flow-meta reset <idempotency-key> [credit-id] | flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint] | flow-meta '<one inline meta Query datom>'".into()),
         }
     }
 }
@@ -152,6 +156,32 @@ fn main() {
 mod tests {
     use super::{FlowMetaClient, ParsesMetaCommand};
     use meta_signal_flow::{CreditSelection, Query};
+
+    #[test]
+    fn configure_is_one_inline_datom_carrying_the_whole_configuration() {
+        let client = FlowMetaClient {
+            socket: "unused".into(),
+        };
+        let Query::Configure(configuration) = client
+            .parse_command(
+                ["Configure.{ /run/user/1001/flow/flow.sock /run/user/1001/flow/flow-meta.sock /home/li/primary { /etc/profiles/per-user/li/bin/codex-stable-flow-client /home/li/.codex /home/li/.codex/app-server-control/app-server-control.sock [ gpt-5.6-terra gpt-5.6-sol gpt-5.6-luna ] } { /etc/profiles/per-user/li/bin/codex-next-flow-client /home/li/.codex-next /home/li/.codex-next/app-server-control/app-server-control.sock [ gpt-6-sol gpt-6-luna gpt-6-astra ] } }".into()]
+                    .into_iter(),
+            )
+            .expect("configure datom parses")
+        else {
+            panic!("Configure datom must stay a Configure query")
+        };
+        assert_eq!(configuration.source_root, "/home/li/primary");
+        assert_eq!(
+            configuration.next_codex.model_name_vector,
+            ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"]
+        );
+        assert!(
+            client
+                .parse_command(["configure".into(), "/a".into(), "/b".into()].into_iter())
+                .is_err()
+        );
+    }
 
     #[test]
     fn reset_keeps_the_callers_retry_key() {

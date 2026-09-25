@@ -16,7 +16,10 @@ trait ParsesFlowCommand {
 }
 
 trait CallsFlowNexus {
-    fn call(&self, query: &Query) -> Result<Response, String>;
+    /// Sends one query and hands each reply frame on. Every query answers
+    /// with one frame except Observe, whose frames run until the Nexus ends
+    /// the exchange after the outcome.
+    fn call(&self, query: &Query, each: &mut dyn FnMut(Response)) -> Result<(), String>;
 }
 
 trait TextualizesFlowReply {
@@ -44,21 +47,36 @@ impl ParsesFlowCommand for FlowClient {
 }
 
 impl CallsFlowNexus for FlowClient {
-    fn call(&self, query: &Query) -> Result<Response, String> {
+    fn call(&self, query: &Query, each: &mut dyn FnMut(Response)) -> Result<(), String> {
         let mut peer = UnixStream::connect(&self.socket).map_err(|error| error.to_string())?;
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(query).map_err(|e| e.to_string())?;
         peer.write_all(&(bytes.len() as u32).to_be_bytes())
             .map_err(|e| e.to_string())?;
         peer.write_all(&bytes).map_err(|e| e.to_string())?;
-        let mut length = [0; 4];
-        peer.read_exact(&mut length).map_err(|e| e.to_string())?;
-        let length = u32::from_be_bytes(length) as usize;
-        if length > 1024 * 1024 {
-            return Err("Signal frame exceeds 1 MiB".into());
+        let streams = matches!(query, Query::Observe(_));
+        loop {
+            let mut length = [0; 4];
+            match peer.read_exact(&mut length) {
+                Ok(()) => {}
+                Err(error) if streams && error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(());
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+            let length = u32::from_be_bytes(length) as usize;
+            if length > 1024 * 1024 {
+                return Err("Signal frame exceeds 1 MiB".into());
+            }
+            let mut reply = vec![0; length];
+            peer.read_exact(&mut reply).map_err(|e| e.to_string())?;
+            each(
+                rkyv::from_bytes::<Response, rkyv::rancor::Error>(&reply)
+                    .map_err(|e| e.to_string())?,
+            );
+            if !streams {
+                return Ok(());
+            }
         }
-        let mut reply = vec![0; length];
-        peer.read_exact(&mut reply).map_err(|e| e.to_string())?;
-        rkyv::from_bytes::<Response, rkyv::rancor::Error>(&reply).map_err(|e| e.to_string())
     }
 }
 
@@ -89,9 +107,12 @@ fn main() {
     };
     match client
         .parse_command(arguments.into_iter())
-        .and_then(|query| client.call(&query))
-    {
-        Ok(reply) => println!("{}", client.textualize_reply(&reply)),
+        .and_then(|query| {
+            client.call(&query, &mut |reply| {
+                println!("{}", client.textualize_reply(&reply))
+            })
+        }) {
+        Ok(()) => {}
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2)
@@ -148,6 +169,32 @@ mod tests {
             request.launch_profile.skill_name_vector,
             ["spirit", "main-flow"]
         );
+    }
+
+    #[test]
+    fn replace_status_and_observe_are_inline_typed_queries() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        assert_eq!(
+            client
+                .parse_command(["LaunchStatus.request-8".into()].into_iter())
+                .unwrap(),
+            Query::LaunchStatus("request-8".into())
+        );
+        assert_eq!(
+            client
+                .parse_command(["Observe.Launch.request-8".into()].into_iter())
+                .unwrap(),
+            Query::Observe(signal_flow::ObserveSelection::Launch("request-8".into()))
+        );
+        let Query::Replace(request) = client
+            .parse_command(["Replace.{ { request-8 [] [ spirit ] Field High Claude opus-5-5 high Some.fac697 [] messaging-build /workspace/bundles/flow.md «Carry on from fac697.» } { fac697 session-1 turn-2 } }".into()].into_iter())
+            .expect("typed Replace parses")
+        else {
+            panic!("Replace fixture must remain a Replace query")
+        };
+        assert_eq!(request.launch_profile.flow_id_option, Some("fac697".into()));
     }
 
     #[test]

@@ -53,9 +53,23 @@ fn nexus_starts_from_defaults_and_answers_after_meta_configure() {
     };
     let meta_socket = runtime.path().join("flow/flow-meta.sock");
     let ordinary_socket = runtime.path().join("flow/flow.sock");
+    let endpoint = |name: &str| meta_signal_flow::CodexEndpoint {
+        client_path: format!("/opt/{name}-client"),
+        home: home.path().join(name).to_string_lossy().into_owned(),
+        control_socket_path: home
+            .path()
+            .join(name)
+            .join("control.sock")
+            .to_string_lossy()
+            .into_owned(),
+        model_name_vector: vec![format!("{name}-model")],
+    };
     let configuration = meta_signal_flow::Configuration {
         ordinary_socket_path: ordinary_socket.to_string_lossy().into_owned(),
         meta_socket_path: meta_socket.to_string_lossy().into_owned(),
+        source_root: home.path().join("source").to_string_lossy().into_owned(),
+        stable_codex: endpoint("stable"),
+        next_codex: endpoint("next"),
     };
     let mut meta = connect(&meta_socket, &mut nexus);
     let query = meta_signal_flow::Query::Configure(configuration.clone());
@@ -69,7 +83,11 @@ fn nexus_starts_from_defaults_and_answers_after_meta_configure() {
     meta.read_exact(&mut reply).expect("configure reply");
     let reply = rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(&reply)
         .expect("configure reply decodes");
-    assert!(matches!(reply, meta_signal_flow::Response::Configured(_)));
+    assert!(matches!(
+        reply,
+        meta_signal_flow::Response::Configured(configured)
+            if configured.configuration == configuration
+    ));
 
     let mut ordinary = connect(&ordinary_socket, &mut nexus);
     Frame::write_query(

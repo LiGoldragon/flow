@@ -1,3 +1,24 @@
+# Flow 0.9.0
+
+Flow 0.9.0 speaks `signal-flow` 4.0.0 and `meta-signal-flow` 6.0.0. Both wires
+change: upgrade `flow`, `flow-meta`, and `flow-nexus` from one package closure.
+
+- `Replace` launches a successor with its predecessor named. The predecessor
+  is recorded `Stopped` and its pane closed before the successor is routable.
+- `LaunchStatus` answers a launch request's outcome or its pending phase.
+- `Observe.Launch` streams one `LaunchPending` frame per phase change and ends
+  with the outcome. The `flow` CLI prints each frame until the Nexus closes.
+- `ResolveRecipient` now refuses a `Stopped` flow with `FlowUnavailable`.
+- Meta `Configure` carries the source root and both Codex endpoints, and
+  `flow-meta` takes it as one inline datom (`flow-meta 'Configure.{ … }'`);
+  the two-argument `configure` word command is gone. The `FLOW_SOURCE_ROOT`
+  and `FLOW_CODEX_*` deployment overrides still apply at start.
+
+Storage: two new tables (launch outcomes, replacements) are created on open.
+The stored socket record keeps its former archive, so an existing store opens
+unchanged. A launch settled before 0.9.0 has no stored outcome; its
+`LaunchStatus` answers `LaunchPending` with its last phase.
+
 # Flow 0.8.1
 
 A Codex main Flow now receives its system-prompt bundle's text at the top of

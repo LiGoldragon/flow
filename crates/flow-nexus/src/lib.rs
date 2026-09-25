@@ -3,22 +3,16 @@ pub mod claude;
 pub mod codex;
 pub mod composition;
 pub mod herdr;
+pub mod launching;
 pub mod store;
 
-use codex::{
-    CodexEndpoints, ConsumesResetCredit, ResolvesBoundCodexSkills, SubmitsBoundCodexFirstTurn,
-};
-use composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer};
+use codex::{CodexEndpoints, ConsumesResetCredit};
+use composition::{LaunchComposer, OpensLaunchComposer};
 use herdr::OperatesHerdrPane;
-use herdr::launch::{
-    AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
-    ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
-    SubmitsFirstPromptOnce,
-};
+use launching::{LaunchesFlows, ObservesLaunch};
 use signal_flow::{
-    EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-    LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchIntent, PromptDeliveryResult, Query,
-    RegistrationAcknowledgement, Response, RestartRejection, StartRejection,
+    EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
+    Query, Response, RestartRejection,
 };
 use std::{
     collections::HashSet,
@@ -33,11 +27,9 @@ use std::{
     time::Duration,
 };
 use store::{
-    AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow, FlowStore,
-    OpensFlowStore, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle,
-    RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
-    RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersExistingFlow,
-    RegistersFlowIdentity, ReservesLaunchAttempt,
+    AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, FlowStore, OpensFlowStore,
+    ReadsFlowRows, RecordsFlowLifecycle, RecordsReplacement, RegistersExistingFlow,
+    RegistersFlowIdentity,
 };
 
 fn process_identity_matches(identity: &meta_signal_flow::ProcessIdentity) -> bool {
@@ -122,268 +114,19 @@ impl Dispatches for RunningNexus {
     fn dispatch(&self, query: Query) -> Response {
         match query {
             Query::Start(request) => {
-                let origin = request.origin_clue.clone();
                 let launch_request_id = request.launch_profile.launch_request_id.clone();
-                let existing = match self.store.launch_attempt(&launch_request_id) {
-                    Ok(existing) => existing,
-                    Err(_) => {
-                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-                    }
-                };
-                if let Some(attempt) = existing {
-                    if attempt.launch_profile != request.launch_profile
-                        || attempt.origin_clue != origin
-                    {
-                        return Response::StartRejected(StartRejection::LaunchRequestConflict);
-                    }
-                    if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptObserved {
-                        let Some(binding) = attempt.native_launch_binding_option else {
-                            return Response::StartRejected(
-                                StartRejection::LaunchPersistenceRefused,
-                            );
-                        };
-                        return self.store.confirm_started(&binding.flow_id).unwrap_or(
-                            Response::StartRejected(StartRejection::LaunchPersistenceRefused),
-                        );
-                    }
-                    if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
-                        return Response::LaunchPending(attempt);
-                    }
-                    let (Some(intent), Some(binding)) = (
-                        attempt.prompt_delivery_intent_option,
-                        attempt.native_launch_binding_option,
-                    ) else {
-                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-                    };
-                    let observed = self
-                        .herdr
-                        .observe_native_target_receipt(&intent)
-                        .unwrap_or_else(|_| PromptDeliveryResult::Ambiguous(intent.clone()));
-                    let receipt = match observed {
-                        PromptDeliveryResult::Observed(receipt) => receipt,
-                        PromptDeliveryResult::Ambiguous(updated) => {
-                            if updated != intent
-                                && !self
-                                    .store
-                                    .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
-                                        updated.clone(),
-                                    ))
-                                    .unwrap_or(false)
-                            {
-                                return Response::StartRejected(
-                                    StartRejection::LaunchPersistenceRefused,
-                                );
-                            }
-                            return Response::StartAmbiguous(updated);
-                        }
-                    };
-                    if !self
-                        .store
-                        .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt))
-                        .unwrap_or(false)
-                    {
-                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-                    }
-                    return self.store.confirm_started(&binding.flow_id).unwrap_or(
-                        Response::StartRejected(StartRejection::LaunchPersistenceRefused),
-                    );
+                if let Some(settled) = self.settled(&request) {
+                    return settled;
                 }
-                let launch = match self.composer.compose(&request.launch_profile) {
-                    Ok(launch) => launch,
-                    Err(_) => return Response::StartRejected(StartRejection::CompositionRefused),
-                };
-                let codex_adapter = if launch.launch_profile.harness_kind == HarnessKind::Codex {
-                    match self
-                        .codex_endpoints
-                        .adapter_for(&launch.launch_profile.model_name)
-                    {
-                        Ok(adapter) => Some(adapter),
-                        Err(_) => {
-                            return Response::StartRejected(StartRejection::NativeLaunchRefused);
-                        }
-                    }
-                } else {
-                    None
-                };
-                match self.store.reserve_launch_attempt(&launch, origin.clone()) {
-                    Ok(LaunchAttemptReservation::Reserved(_)) => {}
-                    Ok(LaunchAttemptReservation::Existing(attempt)) => {
-                        return Response::LaunchPending(attempt);
-                    }
-                    Ok(LaunchAttemptReservation::Conflict) => {
-                        return Response::StartRejected(StartRejection::LaunchRequestConflict);
-                    }
-                    Err(_) => {
-                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-                    }
-                }
-                let native_intent = NativeLaunchIntent {
-                    launch_request_id: launch.launch_profile.launch_request_id.clone(),
-                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                    harness_kind: launch.launch_profile.harness_kind.clone(),
-                    model_name: launch.launch_profile.model_name.clone(),
-                    effort: launch.launch_profile.effort.clone(),
-                    skill_name_vector: launch.launch_profile.skill_name_vector.clone(),
-                };
-                if !self
-                    .store
-                    .record_native_launch_intent(native_intent)
-                    .unwrap_or(false)
-                {
-                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-                }
-                let pane = match self.herdr.create_launch_pane(&launch) {
-                    Ok(pane) => pane,
-                    Err(_) => {
-                        return Response::StartRejected(StartRejection::NativeLaunchRefused);
-                    }
-                };
-                if self.herdr.start_native_harness(&launch, &pane).is_err() {
-                    return Response::StartRejected(StartRejection::NativeLaunchRefused);
-                }
-                let binding = match self.herdr.observe_native_binding(&launch, &pane) {
-                    Ok(binding) => binding,
-                    Err(_) => return Response::StartRejected(StartRejection::BindingRefused),
-                };
-                if !self
-                    .store
-                    .record_native_launch_binding(binding.clone())
-                    .unwrap_or(false)
-                {
-                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-                }
-                let node = FlowNode {
-                    flow_id: binding.flow_id.clone(),
-                    session_id: binding.native_session_id.clone(),
-                    harness_kind: binding.harness_kind.clone(),
-                    endpoint_selection: EndpointSelection::Unavailable,
-                    herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                        herdr_session_name: binding.herdr_pane_binding.herdr_session_name.clone(),
-                        herdr_agent_name: binding.herdr_pane_binding.herdr_agent_name.clone(),
-                        herdr_pane_id: binding.herdr_pane_binding.herdr_pane_id.clone(),
-                        herdr_terminal_id: binding.herdr_pane_binding.herdr_terminal_id.clone(),
-                    }),
-                    origin_clue: origin,
-                    flow_lifecycle: FlowLifecycle::Pending,
-                };
-                if !self.herdr.validate_registration(&node) {
-                    return Response::StartRejected(StartRejection::RegistrationRefused);
-                }
-                let registered = match self.store.register_flow(node) {
-                    Ok(store::FlowRegistration::Registered(node)) => node,
-                    Ok(store::FlowRegistration::ConflictingBinding) | Err(_) => {
-                        return Response::StartRejected(StartRejection::RegistrationRefused);
-                    }
-                };
-                let acknowledgement = RegistrationAcknowledgement {
-                    launch_request_id: binding.launch_request_id.clone(),
-                    flow_id: registered.flow_id.clone(),
-                    native_session_id: registered.session_id.clone(),
-                    herdr_pane_binding: binding.herdr_pane_binding.clone(),
-                };
-                if !self
-                    .store
-                    .record_registration_acknowledgement(acknowledgement.clone())
-                    .unwrap_or(false)
-                {
-                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-                }
-                let native_skill_selection_vector = match launch.launch_profile.harness_kind {
-                    HarnessKind::Codex => self
-                        .codex_endpoints
-                        .adapter_for(&launch.launch_profile.model_name)
-                        .and_then(|adapter| adapter.resolve_bound_codex_skills(&launch, &binding))
-                        .map_err(|_| ()),
-                    HarnessKind::Claude => self
-                        .herdr
-                        .resolve_claude_native_skills(&launch, &binding)
-                        .map_err(|_| ()),
-                };
-                let Ok(native_skill_selection_vector) = native_skill_selection_vector else {
-                    return Response::StartRejected(StartRejection::RegistrationRefused);
-                };
-                let delivery_intent = match self.herdr.accept_registration(
-                    &launch,
-                    &binding,
-                    &acknowledgement,
-                    native_skill_selection_vector,
-                ) {
-                    Ok(intent) => intent,
-                    Err(_) => {
-                        return Response::StartRejected(StartRejection::RegistrationRefused);
-                    }
-                };
-                if !self
-                    .store
-                    .record_prompt_delivery_intent(delivery_intent.clone())
-                    .unwrap_or(false)
-                {
-                    return Response::StartRejected(StartRejection::IntentPersistenceRefused);
-                }
-                let submission = match launch.launch_profile.harness_kind {
-                    HarnessKind::Codex => codex_adapter.as_ref().ok_or(()).and_then(|adapter| {
-                        adapter
-                            .submit_bound_codex_first_turn(&launch, &delivery_intent)
-                            .map_err(|_| ())
-                    }),
-                    HarnessKind::Claude => self
-                        .herdr
-                        .submit_first_prompt_once(&launch, &delivery_intent)
-                        .map_err(|_| ()),
-                };
-                let initial = match submission {
-                    Ok(result) => result,
-                    Err(_) => PromptDeliveryResult::Ambiguous(delivery_intent.clone()),
-                };
-                if !self
-                    .store
-                    .record_prompt_delivery_result(initial.clone())
-                    .unwrap_or(false)
-                {
-                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-                }
-                let result = match initial {
-                    PromptDeliveryResult::Observed(receipt) => {
-                        PromptDeliveryResult::Observed(receipt)
-                    }
-                    PromptDeliveryResult::Ambiguous(_) => self
-                        .herdr
-                        .observe_native_target_receipt(&delivery_intent)
-                        .unwrap_or_else(|_| {
-                            PromptDeliveryResult::Ambiguous(delivery_intent.clone())
-                        }),
-                };
-                match result {
-                    PromptDeliveryResult::Ambiguous(intent) => {
-                        if intent != delivery_intent
-                            && !self
-                                .store
-                                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
-                                    intent.clone(),
-                                ))
-                                .unwrap_or(false)
-                        {
-                            return Response::StartRejected(
-                                StartRejection::LaunchPersistenceRefused,
-                            );
-                        }
-                        Response::StartAmbiguous(intent)
-                    }
-                    PromptDeliveryResult::Observed(receipt) => {
-                        if !self
-                            .store
-                            .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt))
-                            .unwrap_or(false)
-                        {
-                            return Response::StartRejected(
-                                StartRejection::LaunchPersistenceRefused,
-                            );
-                        }
-                        self.store.confirm_started(&binding.flow_id).unwrap_or(
-                            Response::StartRejected(StartRejection::LaunchPersistenceRefused),
-                        )
-                    }
-                }
+                let response = self.start(request);
+                self.settle(&launch_request_id, response)
+            }
+            Query::Replace(request) => self.replace(request),
+            Query::LaunchStatus(launch_request_id) => self.launch_status(&launch_request_id),
+            // Over a connection Observe streams; a direct dispatch answers the
+            // subscription's opening frame.
+            Query::Observe(ObserveSelection::Launch(launch_request_id)) => {
+                self.launch_status(&launch_request_id)
             }
             Query::Restart(request) => {
                 let authorization = self
@@ -427,6 +170,19 @@ impl Dispatches for RunningNexus {
                 };
                 if node.flow_lifecycle == FlowLifecycle::Stopped {
                     return Response::SendRejected(signal_flow::SendRejection::FlowStopped);
+                }
+                match self.store.held_successor(&request.flow_id) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        return Response::SendRejected(
+                            signal_flow::SendRejection::RouteUnavailable,
+                        );
+                    }
+                    Err(_) => {
+                        return Response::SendRejected(
+                            signal_flow::SendRejection::PersistenceRefused,
+                        );
+                    }
                 }
                 let node = self.herdr.refresh_route(node);
                 if !matches!(
@@ -493,11 +249,18 @@ impl Dispatches for RunningNexus {
     fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
         match query {
             meta_signal_flow::Query::Configure(configuration) => {
-                if self.store.configure(configuration.clone()).is_err() {
+                // The Codex adapters and the composer read the runtime
+                // configuration when the Nexus opens, so every change waits
+                // for the next start.
+                let stored = self
+                    .store
+                    .configure(configuration)
+                    .and_then(|_| self.store.configuration());
+                let Ok(configuration) = stored else {
                     return meta_signal_flow::Response::ConfigureRejected(
                         meta_signal_flow::ConfigureRejection::StoreRefused,
                     );
-                }
+                };
                 meta_signal_flow::Response::Configured(meta_signal_flow::Configured {
                     configuration,
                     activation: meta_signal_flow::Activation::NexusRestartRequired,
@@ -579,7 +342,10 @@ impl Dispatches for RunningNexus {
                         Ok(Response::RecipientResolutionRejected(
                             signal_flow::RecipientResolutionRejection::UnknownFlow,
                         )) => {}
-                        Ok(Response::RecipientResolved(_)) => {
+                        Ok(Response::RecipientResolved(_))
+                        | Ok(Response::RecipientResolutionRejected(
+                            signal_flow::RecipientResolutionRejection::FlowUnavailable,
+                        )) => {
                             results.push(refused_binding(
                                 flow_id,
                                 meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId,
@@ -707,9 +473,10 @@ impl OpensRunningNexus for RunningNexus {
     }
 }
 
-/// One accepted connection: read one frame, answer it, close. A malformed
-/// frame, an idle peer past the read timeout, or a failed write drops only
-/// this connection.
+/// One accepted connection: read one frame, answer it, close — except
+/// Observe, which keeps the connection as its subscription until the
+/// outcome frame. A malformed frame, an idle peer past the read timeout, or
+/// a failed write drops only this connection.
 pub struct Connection {
     peer: UnixStream,
 }
@@ -727,7 +494,17 @@ impl Connection {
 
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
         let query = Frame::read_query(&mut self.peer)?;
-        let response = nexus.dispatch_serially(query);
+        let response = match query {
+            // Reads of launch state never wait behind a running launch.
+            Query::LaunchStatus(launch_request_id) => nexus.launch_status(&launch_request_id),
+            Query::Observe(ObserveSelection::Launch(launch_request_id)) => {
+                let peer = &mut self.peer;
+                return nexus.observe_launch(&launch_request_id, &mut |response| {
+                    Frame::write_response(peer, response)
+                });
+            }
+            query => nexus.dispatch_serially(query),
+        };
         Frame::write_response(&mut self.peer, &response)
     }
 
@@ -880,18 +657,18 @@ mod tests {
         composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
         store::{
-            FlowStore, OpensFlowStore, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
-            RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+            FlowStore, OpensFlowStore, RecordsFlowLifecycle, RecordsNativeLaunchBinding,
+            RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
             RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
         },
     };
     use sha2::{Digest, Sha256};
     use signal_flow::{
         EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding,
-        HerdrRoute, HerdrRouteSelection, LaunchProfile, LaunchSource, NativeLaunchBinding,
-        NativeLaunchIntent, NativeTranscriptAbsence, NativeTranscriptBoundary, OriginClue,
-        PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
-        Response, StartRejection, StartRequest,
+        HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile, LaunchSource,
+        NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence, NativeTranscriptBoundary,
+        OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query,
+        RegistrationAcknowledgement, Response, StartRejection, StartRequest,
     };
     use std::{
         collections::BTreeSet,
@@ -1874,5 +1651,611 @@ mod tests {
             Response::RecipientResolved(node)
         );
         assert!(fixture.directory.path().join("flow.sema").exists());
+    }
+
+    /// A launch driven phase by phase through the store, as the Start path
+    /// drives it, so a fixture can stop at any phase.
+    struct StagedLaunch {
+        profile: LaunchProfile,
+        origin: OriginClue,
+        composed: signal_flow::ComposedLaunch,
+        pane: HerdrPaneBinding,
+        binding: NativeLaunchBinding,
+        intent: Option<PromptDeliveryIntent>,
+        transcript_root: PathBuf,
+    }
+
+    const STAGED_SESSION: &str = "01a0b22c-e24f-7452-9940-64490878680f";
+
+    impl NexusFixture {
+        fn staged_launch(
+            &self,
+            launch_request_id: &str,
+            predecessor: Option<&str>,
+        ) -> StagedLaunch {
+            let source_path = self.directory.path().join("staged-source.md");
+            let bundle_path = self.directory.path().join("flow-system-prompt.md");
+            fs::write(&source_path, b"staged exact bytes\n").expect("fixture source");
+            fs::write(&bundle_path, b"fixture bundle\n").expect("fixture bundle");
+            let profile = LaunchProfile {
+                launch_request_id: launch_request_id.into(),
+                launch_source_vector: vec![LaunchSource {
+                    source_path: "staged-source.md".into(),
+                    source_sha256: format!("{:x}", Sha256::digest(b"staged exact bytes\n")),
+                }],
+                skill_name_vector: Vec::new(),
+                flow_aspect: FlowAspect::Field,
+                power_level: PowerLevel::High,
+                harness_kind: HarnessKind::Codex,
+                model_name: "fixture-model".into(),
+                effort: "medium".into(),
+                flow_id_option: predecessor.map(str::to_owned),
+                remembered_flow_vector: Vec::new(),
+                herdr_session_name: "fixture-session".into(),
+                system_prompt_bundle_file: bundle_path.to_string_lossy().into_owned(),
+                instruction_prompt: "fixture instruction".into(),
+            };
+            let composed = self
+                .nexus
+                .composer
+                .compose(&profile)
+                .expect("launch composes");
+            let pane = HerdrPaneBinding {
+                launch_request_id: launch_request_id.into(),
+                herdr_session_name: "fixture-session".into(),
+                herdr_agent_name: "fixture-agent".into(),
+                herdr_workspace_id: "fixture-workspace".into(),
+                herdr_pane_id: "w1:p1".into(),
+                herdr_terminal_id: "fixture-terminal".into(),
+            };
+            let transcript_root = self.directory.path().join("native-transcripts/codex");
+            fs::create_dir_all(&transcript_root).expect("transcript root");
+            StagedLaunch {
+                binding: NativeLaunchBinding {
+                    launch_request_id: launch_request_id.into(),
+                    flow_id: "908786".into(),
+                    native_session_id: STAGED_SESSION.into(),
+                    harness_kind: HarnessKind::Codex,
+                    herdr_pane_binding: pane.clone(),
+                },
+                profile,
+                origin: OriginClue {
+                    flow_id: "caller".into(),
+                    session_id: "caller-session".into(),
+                    turn_id: "caller-turn".into(),
+                },
+                composed,
+                pane,
+                intent: None,
+                transcript_root,
+            }
+        }
+
+        /// A Herdr stand-in that knows the successor's agent, shows the
+        /// predecessor's pane in every snapshot, and logs every call.
+        fn herdr_for_replacement(&self, close_status: i32) -> PathBuf {
+            let log = self.directory.path().join("herdr-calls.log");
+            let agent = serde_json::json!({"result":{"agent":{
+                "name":"fixture-agent",
+                "agent":"codex",
+                "workspace_id":"fixture-workspace",
+                "pane_id":"w1:p1",
+                "terminal_id":"fixture-terminal",
+                "agent_session":{
+                    "source":"herdr:codex",
+                    "agent":"codex",
+                    "kind":"id",
+                    "value":STAGED_SESSION
+                }
+            }}});
+            let snapshot = serde_json::json!({
+                "id":"cli:api:snapshot",
+                "result":{"snapshot":{"agents":[self.current_agent()],"protocol":20,"version":"0.8.2"},
+                "type":"session_snapshot"}
+            });
+            let body = format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get fixture-agent\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" pane close \"*) exit {} ;;\n  *) exit 64 ;;\nesac\n",
+                log.display(),
+                agent,
+                snapshot,
+                close_status
+            );
+            fs::write(&self.snapshot_program, body).expect("Herdr fixture");
+            let mut permissions = fs::metadata(&self.snapshot_program)
+                .expect("Herdr fixture metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(&self.snapshot_program, permissions)
+                .expect("Herdr fixture executable");
+            log
+        }
+
+        /// The predecessor: the fixture's Herdr pane w1:p3, Active.
+        fn register_predecessor(&self, flow_id: &str) {
+            fs::write(
+                self.directory
+                    .path()
+                    .join(format!("flows/.{flow_id}.flow-id")),
+                format!(
+                    "version=1\nharness=codex\nidentity=02b0c33df35f8563aa5175501989791a\nalias={flow_id}\n"
+                ),
+            )
+            .expect("predecessor flow claim");
+            let mut node = self.node();
+            node.flow_id = flow_id.into();
+            assert!(matches!(
+                self.nexus.store.register_flow(node),
+                Ok(crate::store::FlowRegistration::Registered(_))
+            ));
+            assert!(self.nexus.store.record_active(flow_id).unwrap());
+        }
+
+        fn routable(&self, flow_id: &str) -> bool {
+            matches!(
+                self.nexus.dispatch(Query::ResolveRecipient(flow_id.into())),
+                Response::RecipientResolved(_)
+            )
+        }
+
+        fn lifecycle(&self, flow_id: &str) -> FlowLifecycle {
+            let Response::Listed(rows) = self
+                .nexus
+                .dispatch(Query::List(signal_flow::ListRequest {}))
+            else {
+                panic!("List answers")
+            };
+            rows.into_iter()
+                .find(|row| row.flow_id == flow_id)
+                .expect("listed flow")
+                .flow_lifecycle
+        }
+    }
+
+    impl StagedLaunch {
+        fn request(&self) -> StartRequest {
+            StartRequest {
+                launch_profile: self.profile.clone(),
+                origin_clue: self.origin.clone(),
+            }
+        }
+
+        fn reserve(&self, nexus: &RunningNexus) {
+            nexus
+                .store
+                .reserve_launch_attempt(&self.composed, self.origin.clone())
+                .expect("reservation persists");
+        }
+
+        fn record_native_intent(&self, nexus: &RunningNexus) {
+            assert!(
+                nexus
+                    .store
+                    .record_native_launch_intent(NativeLaunchIntent {
+                        launch_request_id: self.profile.launch_request_id.clone(),
+                        prompt_sha256: self.composed.first_prompt_payload.prompt_sha256.clone(),
+                        harness_kind: HarnessKind::Codex,
+                        model_name: self.profile.model_name.clone(),
+                        effort: self.profile.effort.clone(),
+                        skill_name_vector: Vec::new(),
+                    })
+                    .unwrap()
+            );
+        }
+
+        fn bind(&self, nexus: &RunningNexus) {
+            assert!(
+                nexus
+                    .store
+                    .record_native_launch_binding(self.binding.clone())
+                    .unwrap()
+            );
+        }
+
+        fn register_and_acknowledge(&self, nexus: &RunningNexus) {
+            nexus
+                .store
+                .register_flow(FlowNode {
+                    flow_id: self.binding.flow_id.clone(),
+                    session_id: self.binding.native_session_id.clone(),
+                    harness_kind: HarnessKind::Codex,
+                    endpoint_selection: EndpointSelection::Unavailable,
+                    herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                        herdr_session_name: self.pane.herdr_session_name.clone(),
+                        herdr_agent_name: self.pane.herdr_agent_name.clone(),
+                        herdr_pane_id: self.pane.herdr_pane_id.clone(),
+                        herdr_terminal_id: self.pane.herdr_terminal_id.clone(),
+                    }),
+                    origin_clue: self.origin.clone(),
+                    flow_lifecycle: FlowLifecycle::Pending,
+                })
+                .unwrap();
+            assert!(
+                nexus
+                    .store
+                    .record_registration_acknowledgement(RegistrationAcknowledgement {
+                        launch_request_id: self.profile.launch_request_id.clone(),
+                        flow_id: self.binding.flow_id.clone(),
+                        native_session_id: self.binding.native_session_id.clone(),
+                        herdr_pane_binding: self.pane.clone(),
+                    })
+                    .unwrap()
+            );
+        }
+
+        fn record_prompt_intent(&mut self, nexus: &RunningNexus) {
+            let root_metadata = fs::metadata(&self.transcript_root).unwrap();
+            let intent = PromptDeliveryIntent {
+                launch_request_id: self.profile.launch_request_id.clone(),
+                prompt_sha256: self.composed.first_prompt_payload.prompt_sha256.clone(),
+                flow_id: self.binding.flow_id.clone(),
+                native_session_id: self.binding.native_session_id.clone(),
+                harness_kind: HarnessKind::Codex,
+                model_name: self.profile.model_name.clone(),
+                effort: self.profile.effort.clone(),
+                native_skill_selection_vector: Vec::new(),
+                herdr_pane_binding: self.pane.clone(),
+                native_transcript_boundary: NativeTranscriptBoundary::Absent(
+                    NativeTranscriptAbsence {
+                        native_session_id: self.binding.native_session_id.clone(),
+                        harness_kind: HarnessKind::Codex,
+                        transcript_root_device: root_metadata.dev().to_string(),
+                        transcript_root_inode: root_metadata.ino().to_string(),
+                    },
+                ),
+            };
+            assert!(
+                nexus
+                    .store
+                    .record_prompt_delivery_intent(intent.clone())
+                    .unwrap()
+            );
+            self.intent = Some(intent);
+        }
+
+        fn record_ambiguity(&self, nexus: &RunningNexus) {
+            assert!(
+                nexus
+                    .store
+                    .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
+                        self.intent.clone().expect("prompt intent recorded"),
+                    ))
+                    .unwrap()
+            );
+        }
+
+        fn stage_to_ambiguity(&mut self, nexus: &RunningNexus) {
+            self.reserve(nexus);
+            self.record_native_intent(nexus);
+            self.bind(nexus);
+            self.register_and_acknowledge(nexus);
+            self.record_prompt_intent(nexus);
+            self.record_ambiguity(nexus);
+        }
+
+        /// The harness writes the first turn and the launch receipt.
+        fn write_receipt(&self) {
+            let marker = crate::composition::LaunchReceipt::MARKER;
+            let mut rows = String::new();
+            for row in [
+                serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-staged"}}),
+                serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":self.composed.first_prompt_payload.first_prompt_text}]}}}),
+                serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}}),
+            ] {
+                rows.push_str(&format!("{row}\n"));
+            }
+            fs::write(
+                self.transcript_root
+                    .join(format!("rollout-{STAGED_SESSION}.jsonl")),
+                rows,
+            )
+            .expect("transcript written");
+        }
+    }
+
+    #[test]
+    fn replace_stops_the_predecessor_before_the_successor_is_routable() {
+        let fixture = NexusFixture::new();
+        let calls = fixture.herdr_for_replacement(0);
+        fixture.register_predecessor("fac697");
+        let mut launch = fixture.staged_launch("replace-request", Some("fac697"));
+        launch.stage_to_ambiguity(&fixture.nexus);
+        assert!(fixture.routable("908786"), "a plain pending launch routes");
+
+        // The successor's first turn is not seen yet: the replacement waits,
+        // and the successor is held out of routing while the predecessor
+        // still receives.
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::Replace(launch.request())),
+            Response::StartAmbiguous(_)
+        ));
+        assert!(fixture.routable("fac697"));
+        assert!(!fixture.routable("908786"));
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "908786".into(),
+                    bare_input: "too early".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::RouteUnavailable)
+        );
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::LaunchStatus("replace-request".into())),
+            Response::LaunchPending(attempt)
+                if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous
+        ));
+
+        launch.write_receipt();
+        let Response::Replaced(replaced) = fixture.nexus.dispatch(Query::Replace(launch.request()))
+        else {
+            panic!("the observed successor replaces its predecessor")
+        };
+        assert_eq!(replaced.flow_id, "fac697");
+        assert_eq!(replaced.started.flow_id, "908786");
+        assert_eq!(replaced.started.session_id, STAGED_SESSION);
+
+        assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
+        assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Active);
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("fac697".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::FlowUnavailable
+            )
+        );
+        assert!(fixture.routable("908786"));
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::Send(signal_flow::SendRequest {
+                    flow_id: "fac697".into(),
+                    bare_input: "to the old seat".into(),
+                })),
+            Response::SendRejected(signal_flow::SendRejection::FlowStopped)
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("replace-request".into())),
+            Response::Replaced(replaced.clone())
+        );
+        // A repeated Replace answers the settled outcome and closes nothing.
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Replace(launch.request())),
+            Response::Replaced(replaced)
+        );
+        let calls = fs::read_to_string(calls).expect("Herdr calls");
+        assert_eq!(
+            calls
+                .matches("--session messaging-build pane close w1:p3")
+                .count(),
+            1,
+            "{calls}"
+        );
+        assert!(!calls.contains("agent prompt"), "{calls}");
+    }
+
+    #[test]
+    fn a_refused_reap_leaves_neither_flow_routable_until_it_is_retried() {
+        let fixture = NexusFixture::new();
+        fixture.herdr_for_replacement(1);
+        fixture.register_predecessor("fac697");
+        let mut launch = fixture.staged_launch("reap-request", Some("fac697"));
+        launch.stage_to_ambiguity(&fixture.nexus);
+        launch.write_receipt();
+
+        let refused = Response::ReplaceRejected(signal_flow::ReplaceRejection::ReapRefused(
+            signal_flow::StopRejection::CloseRefused,
+        ));
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Replace(launch.request())),
+            refused
+        );
+        assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
+        assert!(!fixture.routable("fac697"));
+        assert!(!fixture.routable("908786"));
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("reap-request".into())),
+            refused
+        );
+
+        fixture.herdr_for_replacement(0);
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::Replace(launch.request())),
+            Response::Replaced(replaced) if replaced.flow_id == "fac697"
+        ));
+        assert!(!fixture.routable("fac697"));
+        assert!(fixture.routable("908786"));
+    }
+
+    #[test]
+    fn replace_refuses_an_absent_unknown_or_stopped_predecessor() {
+        let fixture = NexusFixture::new();
+        let absent = fixture.staged_launch("absent-request", None);
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Replace(absent.request())),
+            Response::ReplaceRejected(signal_flow::ReplaceRejection::PredecessorAbsent)
+        );
+        let unknown = fixture.staged_launch("unknown-request", Some("nobody"));
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Replace(unknown.request())),
+            Response::ReplaceRejected(signal_flow::ReplaceRejection::UnknownPredecessor)
+        );
+        fixture.register_predecessor("fac697");
+        assert!(fixture.nexus.store.record_stopped("fac697").unwrap());
+        let stopped = fixture.staged_launch("stopped-request", Some("fac697"));
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Replace(stopped.request())),
+            Response::ReplaceRejected(signal_flow::ReplaceRejection::PredecessorStopped)
+        );
+        for request in ["absent-request", "unknown-request", "stopped-request"] {
+            assert_eq!(
+                fixture.nexus.dispatch(Query::LaunchStatus(request.into())),
+                Response::LaunchStatusRejected(
+                    signal_flow::LaunchStatusRejection::UnknownLaunchRequest
+                )
+            );
+        }
+        assert!(
+            !fixture.snapshot_program.exists(),
+            "no launch was attempted"
+        );
+    }
+
+    #[test]
+    fn launch_status_answers_pending_and_every_outcome_once() {
+        let fixture = NexusFixture::new();
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("never-sent".into())),
+            Response::LaunchStatusRejected(
+                signal_flow::LaunchStatusRejection::UnknownLaunchRequest
+            )
+        );
+
+        // Started.
+        fixture.herdr_for_replacement(0);
+        let mut started = fixture.staged_launch("started-request", None);
+        started.stage_to_ambiguity(&fixture.nexus);
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::LaunchStatus("started-request".into())),
+            Response::LaunchPending(attempt)
+                if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous
+        ));
+        started.write_receipt();
+        let Response::Started(outcome) = fixture.nexus.dispatch(Query::Start(started.request()))
+        else {
+            panic!("the observed launch starts")
+        };
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("started-request".into())),
+            Response::Started(outcome)
+        );
+
+        // StartRejected after reservation: Herdr cannot open the pane.
+        fs::remove_file(&fixture.snapshot_program).expect("Herdr withdrawn");
+        let mut rejected = fixture.staged_launch("rejected-request", None);
+        rejected.profile.harness_kind = HarnessKind::Claude;
+        let rejection = fixture.nexus.dispatch(Query::Start(rejected.request()));
+        assert_eq!(
+            rejection,
+            Response::StartRejected(StartRejection::NativeLaunchRefused)
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("rejected-request".into())),
+            rejection
+        );
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Start(rejected.request())),
+            rejection,
+            "a settled rejection is not launched again"
+        );
+
+        // ReplaceRejected: the successor's launch is refused; the
+        // predecessor keeps receiving.
+        fixture.register_predecessor("fac697");
+        let mut refused = fixture.staged_launch("refused-request", Some("fac697"));
+        refused.profile.harness_kind = HarnessKind::Claude;
+        let rejection = fixture.nexus.dispatch(Query::Replace(refused.request()));
+        assert_eq!(
+            rejection,
+            Response::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
+                StartRejection::NativeLaunchRefused
+            ))
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("refused-request".into())),
+            rejection
+        );
+        assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Active);
+        // Replaced is answered by the replacement fixture above.
+    }
+
+    #[test]
+    fn a_launch_observer_receives_each_phase_once_and_the_outcome_last() {
+        use super::{Frame, ServesOrdinary};
+        use std::os::unix::net::UnixStream;
+        let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+        let calls = fixture.herdr_for_replacement(0);
+        let socket = fixture.directory.path().join("observe.sock");
+        let served = socket.clone();
+        std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
+        let subscribe = || {
+            for _ in 0..200 {
+                if let Ok(mut peer) = UnixStream::connect(&socket) {
+                    peer.set_read_timeout(Some(Duration::from_secs(10)))
+                        .expect("observer timeout");
+                    Frame::write_query(
+                        &mut peer,
+                        &Query::Observe(signal_flow::ObserveSelection::Launch(
+                            "observed-request".into(),
+                        )),
+                    )
+                    .expect("Observe written");
+                    return peer;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("ordinary socket never listened")
+        };
+        let phase = |peer: &mut UnixStream| match Frame::read_response(peer) {
+            Ok(Response::LaunchPending(attempt)) => attempt.launch_attempt_phase,
+            other => panic!("expected a LaunchPending frame, got {other:?}"),
+        };
+
+        let mut launch = fixture.staged_launch("observed-request", None);
+        launch.reserve(&fixture.nexus);
+        let mut observer = subscribe();
+        assert_eq!(phase(&mut observer), LaunchAttemptPhase::Reserved);
+        launch.record_native_intent(&fixture.nexus);
+        assert_eq!(
+            phase(&mut observer),
+            LaunchAttemptPhase::NativeLaunchIntentRecorded
+        );
+        launch.bind(&fixture.nexus);
+        assert_eq!(phase(&mut observer), LaunchAttemptPhase::NativeBound);
+        launch.register_and_acknowledge(&fixture.nexus);
+        assert_eq!(
+            phase(&mut observer),
+            LaunchAttemptPhase::RegistrationAcknowledged
+        );
+        launch.record_prompt_intent(&fixture.nexus);
+        assert_eq!(
+            phase(&mut observer),
+            LaunchAttemptPhase::PromptIntentRecorded
+        );
+        launch.record_ambiguity(&fixture.nexus);
+        assert_eq!(phase(&mut observer), LaunchAttemptPhase::PromptAmbiguous);
+
+        // Only the transcript moves; no one sends Start again.
+        launch.write_receipt();
+        let Ok(Response::Started(started)) = Frame::read_response(&mut observer) else {
+            panic!("the observer's last frame is the outcome")
+        };
+        assert_eq!(started.flow_id, "908786");
+        assert!(
+            Frame::read_response(&mut observer).is_err(),
+            "the exchange ends after the outcome"
+        );
+
+        let mut late = subscribe();
+        assert_eq!(
+            Frame::read_response(&mut late).expect("late observer answered"),
+            Response::Started(started)
+        );
+        assert!(Frame::read_response(&mut late).is_err());
+        let calls = fs::read_to_string(calls).unwrap_or_default();
+        assert!(!calls.contains("agent prompt"), "{calls}");
+        assert!(!calls.contains("pane create"), "{calls}");
     }
 }

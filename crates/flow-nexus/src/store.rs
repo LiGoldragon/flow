@@ -7,20 +7,22 @@
 use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex},
 };
 
 use meta_signal_flow::Configuration;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey,
-    SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
+    Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::{
     ComposedLaunch, EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind,
     HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
     NativeLaunchBinding, NativeLaunchIntent, OriginClue, PromptDeliveryIntent,
     PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
-    Response, RestartRejection, Restarted, RouteReadiness, StartRejection, Started,
+    ReplaceRejection, Replaced, Response, RestartRejection, Restarted, RouteReadiness,
+    StartRejection, Started,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -30,6 +32,8 @@ const FLOW_HERDR_ROUTE_TABLE_NAME: TableName = TableName::new("flow_nexus_herdr_
 const FLOW_LAUNCH_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_attempts");
 const FLOW_RUNTIME_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_runtime_configuration");
+const FLOW_LAUNCH_OUTCOME_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_outcomes");
+const FLOW_REPLACEMENT_TABLE_NAME: TableName = TableName::new("flow_nexus_replacements");
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const RUNTIME_CONFIGURATION_KEY: &str = "runtime";
@@ -101,8 +105,13 @@ impl DefaultConfiguration {
     }
 
     pub fn configuration(&self) -> Configuration {
+        self.socket_configuration()
+            .with_runtime(&self.runtime_configuration())
+    }
+
+    fn socket_configuration(&self) -> FlowStoreConfiguration {
         let directory = self.socket_directory();
-        Configuration {
+        FlowStoreConfiguration {
             ordinary_socket_path: directory
                 .join(Self::ORDINARY_SOCKET)
                 .to_string_lossy()
@@ -154,9 +163,9 @@ impl DefaultConfiguration {
 }
 
 /// Launch configuration held in the Nexus's Sema store beside the socket
-/// `Configuration`. The meta `Configure` contract does not yet carry these
-/// fields, so they are seeded from `DefaultConfiguration` and may be
-/// overridden by the deployment through `DeploymentOverrides`.
+/// paths. Together they are the meta `Configuration`: seeded from
+/// `DefaultConfiguration`, replaced by meta `Configure`, and still
+/// overridable by the deployment through `DeploymentOverrides`.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfiguration {
     pub source_root: String,
@@ -170,6 +179,38 @@ pub struct CodexEndpointConfiguration {
     pub home: String,
     pub socket: String,
     pub model_names: Vec<String>,
+}
+
+impl From<&meta_signal_flow::CodexEndpoint> for CodexEndpointConfiguration {
+    fn from(endpoint: &meta_signal_flow::CodexEndpoint) -> Self {
+        Self {
+            client_path: endpoint.client_path.clone(),
+            home: endpoint.home.clone(),
+            socket: endpoint.control_socket_path.clone(),
+            model_names: endpoint.model_name_vector.clone(),
+        }
+    }
+}
+
+impl From<&CodexEndpointConfiguration> for meta_signal_flow::CodexEndpoint {
+    fn from(endpoint: &CodexEndpointConfiguration) -> Self {
+        Self {
+            client_path: endpoint.client_path.clone(),
+            home: endpoint.home.clone(),
+            control_socket_path: endpoint.socket.clone(),
+            model_name_vector: endpoint.model_names.clone(),
+        }
+    }
+}
+
+impl From<&Configuration> for RuntimeConfiguration {
+    fn from(configuration: &Configuration) -> Self {
+        Self {
+            source_root: configuration.source_root.clone(),
+            stable_codex: CodexEndpointConfiguration::from(&configuration.stable_codex),
+            next_codex: CodexEndpointConfiguration::from(&configuration.next_codex),
+        }
+    }
 }
 
 impl EngineRecord for RuntimeConfiguration {
@@ -309,9 +350,34 @@ impl EngineRecord for FlowStoreState {
     }
 }
 
+/// The socket half of the meta `Configuration`. Its archive is the one the
+/// former two-field `Configuration` record had, so a store written before
+/// the contract grew its runtime fields still reads.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct FlowStoreConfiguration {
-    configuration: Configuration,
+    ordinary_socket_path: String,
+    meta_socket_path: String,
+}
+
+impl FlowStoreConfiguration {
+    fn with_runtime(self, runtime: &RuntimeConfiguration) -> Configuration {
+        Configuration {
+            ordinary_socket_path: self.ordinary_socket_path,
+            meta_socket_path: self.meta_socket_path,
+            source_root: runtime.source_root.clone(),
+            stable_codex: meta_signal_flow::CodexEndpoint::from(&runtime.stable_codex),
+            next_codex: meta_signal_flow::CodexEndpoint::from(&runtime.next_codex),
+        }
+    }
+}
+
+impl From<&Configuration> for FlowStoreConfiguration {
+    fn from(configuration: &Configuration) -> Self {
+        Self {
+            ordinary_socket_path: configuration.ordinary_socket_path.clone(),
+            meta_socket_path: configuration.meta_socket_path.clone(),
+        }
+    }
 }
 
 impl EngineRecord for FlowStoreConfiguration {
@@ -331,6 +397,100 @@ impl EngineRecord for StoredLaunchAttempt {
     }
 }
 
+/// How a launch request settled. It is kept beside the attempt so a
+/// LaunchStatus or an Observe.Launch answers it without re-running the launch.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub enum LaunchOutcome {
+    Started(Started),
+    Replaced(Replaced),
+    StartRejected(StartRejection),
+    ReplaceRejected(ReplaceRejection),
+}
+
+impl LaunchOutcome {
+    /// The reply the outcome is on the wire.
+    pub fn response(&self) -> Response {
+        match self {
+            Self::Started(started) => Response::Started(started.clone()),
+            Self::Replaced(replaced) => Response::Replaced(replaced.clone()),
+            Self::StartRejected(rejection) => Response::StartRejected(rejection.clone()),
+            Self::ReplaceRejected(rejection) => Response::ReplaceRejected(rejection.clone()),
+        }
+    }
+
+    /// A refused reap leaves the predecessor Stopped and the successor held;
+    /// it is the one outcome a repeated Replace takes up again.
+    pub fn awaits_reaping(&self) -> bool {
+        matches!(
+            self,
+            Self::ReplaceRejected(ReplaceRejection::ReapRefused(_))
+        )
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcome {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcome,
+}
+
+impl EngineRecord for StoredLaunchOutcome {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+/// A launch request that replaces a predecessor. While it stands without a
+/// Replaced outcome, the flow its launch binds is held out of routing.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Replacement {
+    pub launch_request_id: String,
+    pub predecessor: String,
+}
+
+impl EngineRecord for Replacement {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+/// The store's announcement of launch movement: every change to a launch
+/// attempt or outcome advances the count and wakes whoever waits on it.
+/// Nothing re-reads on a timer; a waiter sleeps until a change is announced.
+#[derive(Clone, Default)]
+pub struct LaunchChanges {
+    count: Arc<(Mutex<u64>, Condvar)>,
+}
+
+impl LaunchChanges {
+    pub fn announce(&self) {
+        let (count, changed) = &*self.count;
+        *count
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+        changed.notify_all();
+    }
+
+    pub fn current(&self) -> u64 {
+        *self
+            .count
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Blocks until the count moves past `seen`, then returns the new count.
+    pub fn after(&self, seen: u64) -> u64 {
+        let (count, changed) = &*self.count;
+        let guard = count
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *changed
+            .wait_while(guard, |current| *current == seen)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sema-engine operation failed: {0}")]
@@ -347,6 +507,9 @@ pub struct FlowStore {
     runtime_configuration: TableReference<RuntimeConfiguration>,
     herdr_routes: TableReference<FlowHerdrRouteRecord>,
     launch_attempts: TableReference<StoredLaunchAttempt>,
+    launch_outcomes: TableReference<StoredLaunchOutcome>,
+    replacements: TableReference<Replacement>,
+    pub launch_changes: LaunchChanges,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,6 +668,25 @@ pub trait RecordsPromptDeliveryResult {
     ) -> Result<bool, StoreError>;
 }
 
+/// Settles a launch request once; reads its settlement back.
+pub trait RecordsLaunchOutcome {
+    fn record_launch_outcome(
+        &self,
+        launch_request_id: &str,
+        outcome: LaunchOutcome,
+    ) -> Result<(), StoreError>;
+    fn launch_outcome(&self, launch_request_id: &str) -> Result<Option<LaunchOutcome>, StoreError>;
+}
+
+/// Marks a launch request as the replacement of a predecessor, and answers
+/// whether a flow is a successor still held out of routing.
+pub trait RecordsReplacement {
+    fn record_replacement(&self, replacement: Replacement) -> Result<(), StoreError>;
+    fn withdraw_replacement(&self, launch_request_id: &str) -> Result<(), StoreError>;
+    fn replacement(&self, launch_request_id: &str) -> Result<Option<Replacement>, StoreError>;
+    fn held_successor(&self, flow_id: &str) -> Result<bool, StoreError>;
+}
+
 pub trait ReadsLaunchAttempt {
     fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError>;
 }
@@ -579,6 +761,16 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-attempt"),
             SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
         ))?;
+        let launch_outcomes = engine.register_table(TableDescriptor::new(
+            FLOW_LAUNCH_OUTCOME_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-outcome"),
+            SchemaHash::for_label("flow-nexus-launch-outcome-v1"),
+        ))?;
+        let replacements = engine.register_table(TableDescriptor::new(
+            FLOW_REPLACEMENT_TABLE_NAME,
+            FamilyName::new("flow-nexus-replacement"),
+            SchemaHash::for_label("flow-nexus-replacement-v1"),
+        ))?;
         let store = Self {
             engine,
             flows,
@@ -587,6 +779,9 @@ impl OpensFlowStore for FlowStore {
             runtime_configuration,
             herdr_routes,
             launch_attempts,
+            launch_outcomes,
+            replacements,
+            launch_changes: LaunchChanges::default(),
         };
         if store
             .engine
@@ -612,9 +807,7 @@ impl OpensFlowStore for FlowStore {
         {
             store.engine.assert(Assertion::new(
                 store.configuration,
-                FlowStoreConfiguration {
-                    configuration: defaults.configuration(),
-                },
+                defaults.socket_configuration(),
             ))?;
         }
         if store
@@ -650,6 +843,12 @@ impl AppliesFlowQuery for FlowStore {
             Query::List(_) => Ok(Response::ListRejected(
                 signal_flow::ListRejection::PersistenceRefused,
             )),
+            Query::Replace(_) => Ok(Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                StartRejection::NativeLaunchRefused,
+            ))),
+            Query::LaunchStatus(_) | Query::Observe(_) => Ok(Response::LaunchStatusRejected(
+                signal_flow::LaunchStatusRejection::PersistenceRefused,
+            )),
         }
     }
 }
@@ -664,7 +863,10 @@ impl ReservesPendingStart for FlowStore {
             | Query::ResolveRecipient(_)
             | Query::Send(_)
             | Query::Stop(_)
-            | Query::List(_) => Ok(None),
+            | Query::List(_)
+            | Query::Replace(_)
+            | Query::LaunchStatus(_)
+            | Query::Observe(_) => Ok(None),
         }
     }
 }
@@ -719,15 +921,24 @@ impl RecordsRestartedFlow for FlowStore {
 
 impl ConfiguresFlowStore for FlowStore {
     fn configuration(&self) -> Result<Configuration, StoreError> {
-        Ok(self.stored_configuration()?.configuration)
+        Ok(self
+            .stored_configuration()?
+            .with_runtime(&self.runtime_configuration()?))
     }
 
     fn configure(&self, configuration: Configuration) -> Result<(), StoreError> {
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.configuration,
-            RecordKey::new(CONFIGURATION_KEY),
-            FlowStoreConfiguration { configuration },
-        ))?;
+        self.engine.commit_atomic(
+            self.engine
+                .begin_atomic_commit()
+                .mutate(
+                    self.configuration,
+                    FlowStoreConfiguration::from(&configuration),
+                )
+                .mutate(
+                    self.runtime_configuration,
+                    RuntimeConfiguration::from(&configuration),
+                ),
+        )?;
         Ok(())
     }
 
@@ -880,6 +1091,7 @@ impl ReservesLaunchAttempt for FlowStore {
                 attempt: attempt.clone(),
             },
         ))?;
+        self.launch_changes.announce();
         Ok(LaunchAttemptReservation::Reserved(attempt))
     }
 }
@@ -1159,6 +1371,106 @@ impl RecordsPromptDeliveryResult for FlowStore {
     }
 }
 
+impl RecordsLaunchOutcome for FlowStore {
+    fn record_launch_outcome(
+        &self,
+        launch_request_id: &str,
+        outcome: LaunchOutcome,
+    ) -> Result<(), StoreError> {
+        let stored = StoredLaunchOutcome {
+            launch_request_id: launch_request_id.into(),
+            launch_outcome: outcome,
+        };
+        if self.launch_outcome(launch_request_id)?.is_some() {
+            self.engine.mutate_keyed(KeyedMutation::new(
+                self.launch_outcomes,
+                RecordKey::new(launch_request_id),
+                stored,
+            ))?;
+        } else {
+            self.engine
+                .assert(Assertion::new(self.launch_outcomes, stored))?;
+        }
+        self.launch_changes.announce();
+        Ok(())
+    }
+
+    fn launch_outcome(&self, launch_request_id: &str) -> Result<Option<LaunchOutcome>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.launch_outcomes,
+                RecordKey::new(launch_request_id),
+            ))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [stored] => Ok(Some(stored.launch_outcome.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+}
+
+impl RecordsReplacement for FlowStore {
+    fn record_replacement(&self, replacement: Replacement) -> Result<(), StoreError> {
+        if self.replacement(&replacement.launch_request_id)?.is_none() {
+            self.engine
+                .assert(Assertion::new(self.replacements, replacement))?;
+        }
+        Ok(())
+    }
+
+    fn withdraw_replacement(&self, launch_request_id: &str) -> Result<(), StoreError> {
+        if self.replacement(launch_request_id)?.is_some() {
+            self.engine.retract(Retraction::new(
+                self.replacements,
+                RecordKey::new(launch_request_id),
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn replacement(&self, launch_request_id: &str) -> Result<Option<Replacement>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.replacements,
+                RecordKey::new(launch_request_id),
+            ))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [replacement] => Ok(Some(replacement.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn held_successor(&self, flow_id: &str) -> Result<bool, StoreError> {
+        for replacement in self
+            .engine
+            .match_records(QueryPlan::all(self.replacements))?
+            .records()
+        {
+            if matches!(
+                self.launch_outcome(&replacement.launch_request_id)?,
+                Some(LaunchOutcome::Replaced(_))
+            ) {
+                continue;
+            }
+            let bound = self
+                .launch_attempt(&replacement.launch_request_id)?
+                .and_then(|attempt| attempt.native_launch_binding_option)
+                .is_some_and(|binding| binding.flow_id == flow_id);
+            if bound {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
 impl ReadsLaunchAttempt for FlowStore {
     fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError> {
         Ok(self
@@ -1246,7 +1558,10 @@ impl ReadsFlowStore for FlowStore {
                 RecipientResolutionRejection::UnknownFlow,
             ));
         };
-        if node.session_id.is_empty() {
+        if node.session_id.is_empty()
+            || node.flow_lifecycle == SignalFlowLifecycle::Stopped
+            || self.held_successor(flow_id)?
+        {
             return Ok(Response::RecipientResolutionRejected(
                 RecipientResolutionRejection::FlowUnavailable,
             ));
@@ -1332,6 +1647,7 @@ impl WritesFlowStore for FlowStore {
             RecordKey::new(attempt.launch_request_id.clone()),
             StoredLaunchAttempt { attempt },
         ))?;
+        self.launch_changes.announce();
         Ok(())
     }
 
@@ -1943,12 +2259,20 @@ mod tests {
         };
         let path = fixture.directory.path().join("seeded.sema");
         let store = FlowStore::open_seeded(&path, &defaults).expect("store opens");
+        let configuration = store.configuration().expect("configuration");
+        assert_eq!(configuration, defaults.configuration());
         assert_eq!(
-            store.configuration().expect("configuration"),
-            Configuration {
-                ordinary_socket_path: "/run/user/4242/flow/flow.sock".into(),
-                meta_socket_path: "/run/user/4242/flow/flow-meta.sock".into(),
-            }
+            configuration.ordinary_socket_path,
+            "/run/user/4242/flow/flow.sock"
+        );
+        assert_eq!(
+            configuration.meta_socket_path,
+            "/run/user/4242/flow/flow-meta.sock"
+        );
+        assert_eq!(configuration.source_root, "/home/someone/primary");
+        assert_eq!(
+            configuration.stable_codex.control_socket_path,
+            "/home/someone/.codex/app-server-control/app-server-control.sock"
         );
         let runtime = store
             .runtime_configuration()
@@ -2012,18 +2336,58 @@ mod tests {
     fn configured_policy_is_recovered_from_the_same_store() {
         let fixture = StoreFixture::new();
         let store = fixture.store();
+        let endpoint = |name: &str| meta_signal_flow::CodexEndpoint {
+            client_path: format!("/opt/{name}-client"),
+            home: format!("/srv/{name}"),
+            control_socket_path: format!("/srv/{name}/control.sock"),
+            model_name_vector: vec![format!("{name}-model")],
+        };
         let configuration = Configuration {
             ordinary_socket_path: "/tmp/ordinary-test.sock".into(),
             meta_socket_path: "/tmp/meta-test.sock".into(),
+            source_root: "/srv/source".into(),
+            stable_codex: endpoint("stable"),
+            next_codex: endpoint("next"),
         };
         store
             .configure(configuration.clone())
             .expect("policy persists");
         drop(store);
+        let store = fixture.store();
         assert_eq!(
-            fixture.store().configuration().expect("policy recovers"),
+            store.configuration().expect("policy recovers"),
             configuration
         );
+        let runtime = store.runtime_configuration().expect("runtime recovers");
+        assert_eq!(runtime.source_root, "/srv/source");
+        assert_eq!(runtime.next_codex.socket, "/srv/next/control.sock");
+        assert_eq!(runtime.stable_codex.model_names, vec!["stable-model"]);
+    }
+
+    #[test]
+    fn socket_record_keeps_the_archive_of_the_former_two_field_configuration() {
+        #[derive(rkyv::Archive, rkyv::Serialize)]
+        struct FormerConfiguration {
+            ordinary_socket_path: String,
+            meta_socket_path: String,
+        }
+        #[derive(rkyv::Archive, rkyv::Serialize)]
+        struct FormerRecord {
+            configuration: FormerConfiguration,
+        }
+        let former = rkyv::to_bytes::<rkyv::rancor::Error>(&FormerRecord {
+            configuration: FormerConfiguration {
+                ordinary_socket_path: "/run/user/1001/flow/flow.sock".into(),
+                meta_socket_path: "/run/user/1001/flow/flow-meta.sock".into(),
+            },
+        })
+        .expect("former archive");
+        let current = rkyv::to_bytes::<rkyv::rancor::Error>(&super::FlowStoreConfiguration {
+            ordinary_socket_path: "/run/user/1001/flow/flow.sock".into(),
+            meta_socket_path: "/run/user/1001/flow/flow-meta.sock".into(),
+        })
+        .expect("current archive");
+        assert_eq!(former.as_slice(), current.as_slice());
     }
 
     #[test]

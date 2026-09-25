@@ -35,6 +35,32 @@ pub trait OperatesHerdrPane {
     fn close(&self, node: &FlowNode) -> bool;
 }
 
+/// Names the directory a harness writes its native transcripts under.
+pub trait LocatesNativeTranscripts {
+    fn native_transcript_root(
+        &self,
+        harness: &HarnessKind,
+        model_name: &str,
+    ) -> Result<PathBuf, String>;
+}
+
+impl LocatesNativeTranscripts for HerdrCli {
+    fn native_transcript_root(
+        &self,
+        harness: &HarnessKind,
+        model_name: &str,
+    ) -> Result<PathBuf, String> {
+        match harness {
+            HarnessKind::Codex => self
+                .codex_endpoints
+                .endpoint_for(model_name)
+                .map(|endpoint| endpoint.transcript_root.clone())
+                .map_err(|error| error.to_string()),
+            HarnessKind::Claude => Ok(self.claude_transcript_root.clone()),
+        }
+    }
+}
+
 /// The production Herdr roster reader.
 pub struct HerdrCli {
     executable: PathBuf,

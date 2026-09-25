@@ -109,7 +109,7 @@ mod tests {
         };
         let Query::Start(request) = client
             .parse_command([
-                "Start.{ { request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ spirit main-flow ] Field High Codex gpt-6-astra medium Some.836818 [ { 1b8ac0 1 } ] messaging-build «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into(),
+                "Start.{ { request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ spirit main-flow ] Field High Codex gpt-6-astra medium Some.836818 [ { 1b8ac0 1 } ] messaging-build /tmp/flow-system-prompt.md «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into(),
             ]
             .into_iter())
             .expect("typed Start parses")

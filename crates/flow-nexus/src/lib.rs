@@ -1422,7 +1422,9 @@ mod tests {
     fn identical_launch_retry_reads_the_journal_before_a_deleted_source() {
         let fixture = NexusFixture::new();
         let source_path = fixture.directory.path().join("launch-source.md");
+        let bundle_path = fixture.directory.path().join("flow-system-prompt.md");
         fs::write(&source_path, b"exact source bytes\n").expect("fixture source");
+        fs::write(&bundle_path, b"fixture bundle\n").expect("fixture bundle");
         let profile = LaunchProfile {
             launch_request_id: "retry-request".into(),
             launch_source_vector: vec![LaunchSource {
@@ -1438,7 +1440,7 @@ mod tests {
             flow_id_option: None,
             remembered_flow_vector: Vec::new(),
             herdr_session_name: "fixture-session".into(),
-            system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
+            system_prompt_bundle_file: bundle_path.to_string_lossy().into_owned(),
             instruction_prompt: "fixture instruction".into(),
         };
         let origin = OriginClue {
@@ -1481,7 +1483,9 @@ mod tests {
     fn delayed_receipt_after_source_deletion_promotes_without_a_second_external_write() {
         let fixture = NexusFixture::new();
         let source_path = fixture.directory.path().join("delayed-source.md");
+        let bundle_path = fixture.directory.path().join("flow-system-prompt.md");
         fs::write(&source_path, b"delayed exact bytes\n").expect("fixture source");
+        fs::write(&bundle_path, b"fixture bundle\n").expect("fixture bundle");
         let profile = LaunchProfile {
             launch_request_id: "delayed-request".into(),
             launch_source_vector: vec![LaunchSource {
@@ -1497,7 +1501,7 @@ mod tests {
             flow_id_option: None,
             remembered_flow_vector: Vec::new(),
             herdr_session_name: "fixture-session".into(),
-            system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
+            system_prompt_bundle_file: bundle_path.to_string_lossy().into_owned(),
             instruction_prompt: "fixture instruction".into(),
         };
         let origin = OriginClue {

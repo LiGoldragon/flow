@@ -1675,7 +1675,7 @@ printf '%s\n' 123456
             .expect("agent start call");
         assert!(
             start_call
-                .contains("-- --dangerously-skip-permissions --model model-current --effort high")
+                .contains("-- --dangerously-skip-permissions --system-prompt-file /tmp/flow-system-prompt.md --model model-current --effort high")
         );
         assert!(!start_call.contains("composed body"));
         let pane_run = calls_after_start

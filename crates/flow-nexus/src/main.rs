@@ -8,9 +8,7 @@ use std::{path::Path, process::ExitCode, sync::Arc};
 /// configuration is read; every other argument vector starts the daemon.
 fn version_answer(arguments: &[String]) -> Option<String> {
     match arguments {
-        [only] if only == "--version" => {
-            Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
-        }
+        [only] if only == "--version" => Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION"))),
         _ => None,
     }
 }

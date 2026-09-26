@@ -44,7 +44,10 @@ lifecycle. Message Nexus consumes that typed reply instead of maintaining a
 second identity registry.
 
 `Send` and `Stop` act only on a route that still matches the native Herdr
-snapshot. Send can promote a Pending row only after the exact idle target pane
+snapshot. A route is keyed on what Herdr binds for the pane's life: session,
+pane id and terminal id, with the harness kind. The agent name is a label a
+running flow may change; it is re-read from the snapshot and reported, never
+matched. Send can promote a Pending row only after the exact idle target pane
 renders a unique marker, an explicit pane read contains that marker, and a
 post-read route check still matches the bound terminal. The resulting receipt
 records the pane, marker, and read time as Presented grade; it does not claim
@@ -76,8 +79,10 @@ connection as the subscription: the current answer on open, one
 `LaunchPending` frame per phase change, the outcome last, then the Nexus
 closes the exchange. Phase changes are announced by the store; a launch
 waiting on its first prompt is moved by a file-change watch on its native
-transcript root, which promotes it under the dispatch gate. Nothing re-reads
-on a timer.
+transcript root, which promotes it under the dispatch gate. The Nexus holds
+that watch itself for every ambiguous launch, from startup on, so a receipt
+that lands after `StartAmbiguous` promotes with no subscriber and no second
+Start. Nothing re-reads on a timer.
 
 `RegisterFlow` is a meta Signal for importing sessions created before Flow
 Nexus. It preserves the same `FlowNode` shape used by resolution, so imported

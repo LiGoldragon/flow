@@ -117,6 +117,13 @@ impl HerdrCli {
         "CLAUDE_CODE_SESSION_ID",
         "CLAUDE_CODE_SESSION_KIND",
     ];
+    /// The permission-skipping flag. The installed `claude` (CriomOS-home's
+    /// claude-code package) already execs `.claude-wrapped
+    /// --dangerously-skip-permissions "$@"`, and 88475f's pane showed it
+    /// twice when Flow passed it as well. Flow therefore never passes it:
+    /// the launch's own permission mode is carried by the flag settings
+    /// below, and the flag, when present, comes once, from the package.
+    #[cfg(test)]
     const CLAUDE_SKIP_PERMISSIONS_FLAG: &'static str = "--dangerously-skip-permissions";
     /// Claude offers "Make auto mode your default permission mode?" when the
     /// user settings name a non-auto default mode and no other settings
@@ -414,22 +421,22 @@ impl HerdrCli {
         native_session_id: &str,
         harness: &HarnessKind,
     ) -> Result<serde_json::Value, String> {
+        // The pane id is the target: the flow may have renamed its agent
+        // since launch, and the name is read, never matched.
         let response = self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
             "agent".into(),
             "get".into(),
-            pane.herdr_agent_name.clone(),
+            pane.herdr_pane_id.clone(),
         ])?;
         let agent = response
             .pointer("/result/agent")
             .ok_or_else(|| "Herdr agent get returned no receipt target".to_owned())?;
-        if agent.get("name").and_then(serde_json::Value::as_str)
-            != Some(pane.herdr_agent_name.as_str())
-            || agent
-                .get("workspace_id")
-                .and_then(serde_json::Value::as_str)
-                != Some(pane.herdr_workspace_id.as_str())
+        if agent
+            .get("workspace_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(pane.herdr_workspace_id.as_str())
             || agent.get("pane_id").and_then(serde_json::Value::as_str)
                 != Some(pane.herdr_pane_id.as_str())
             || agent.get("terminal_id").and_then(serde_json::Value::as_str)
@@ -1098,7 +1105,6 @@ impl StartsNativeHerdrHarness for HerdrCli {
             arguments.push(format!("unix://{}", endpoint.socket));
         }
         if launch.launch_profile.harness_kind == HarnessKind::Claude {
-            arguments.push(Self::CLAUDE_SKIP_PERMISSIONS_FLAG.into());
             arguments.push("--settings".into());
             arguments.push(Self::CLAUDE_FLAG_SETTINGS.into());
             // Every Claude Flow is remotely controllable; the name never
@@ -1361,7 +1367,17 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             let Ok(row) = serde_json::from_slice::<serde_json::Value>(&record) else {
                 continue;
             };
+            // Once the first turn and every selected skill are confirmed,
+            // what the flow does next is its own work: the instruction may
+            // load further skills, and harness notices or later messages may
+            // land before the receipt. Only the receipt is looked for.
+            let claude_first_turn_confirmed = input_verified
+                && !claude_command_expansion_pending
+                && pending_claude_tool.is_none()
+                && skill_index == durable_intent.native_skill_selection_vector.len()
+                && (claude_commands_loaded == 0 || claude_commands_loaded == claude_stack);
             match durable_intent.harness_kind {
+                HarnessKind::Claude if claude_first_turn_confirmed => {}
                 HarnessKind::Codex => {
                     if row.get("type").and_then(serde_json::Value::as_str) == Some("turn_context") {
                         let payload = row
@@ -1504,12 +1520,17 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                             claude_tool_succeeded = false;
                         }
                     }
+                    let harness_notice =
+                        row.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true);
                     if exact_session
                         && row.get("type").and_then(serde_json::Value::as_str) == Some("user")
                     {
+                        // A harness notice (isMeta) with plain text, such as
+                        // the rename reminder, is never typed input.
                         if let Some(text) = row
                             .pointer("/message/content")
                             .and_then(serde_json::Value::as_str)
+                            .filter(|_| !harness_notice)
                         {
                             let names = durable_intent
                                 .native_skill_selection_vector
@@ -2003,12 +2024,37 @@ printf '%s\n' 123456
             launch.launch_profile.system_prompt_bundle_file
         );
         assert!(start_call.ends_with(&format!(
-            "-- --dangerously-skip-permissions --settings {{\"permissions\":{{\"defaultMode\":\"bypassPermissions\"}}}} --remote-control {remote_control_name} --system-prompt-file {} --model model-current --effort high",
+            "-- --settings {{\"permissions\":{{\"defaultMode\":\"bypassPermissions\"}}}} --remote-control {remote_control_name} --system-prompt-file {} --model model-current --effort high",
             launch_bundle.display()
         )));
         // The flag settings name the launch's own mode, which suppresses the
         // auto-mode default offer; no settings file is written.
         assert_eq!(start_call.matches(" --settings ").count(), 1);
+        // Each flag once in the pane's argv: the installed wrapper execs
+        // `.claude-wrapped --dangerously-skip-permissions "$@"`, so Flow's
+        // own arguments never carry that flag.
+        let flow_arguments = start_call
+            .split_once(" -- ")
+            .expect("agent arguments")
+            .1
+            .split(' ')
+            .collect::<Vec<_>>();
+        let pane_argv = std::iter::once(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG)
+            .chain(flow_arguments.iter().copied())
+            .collect::<Vec<_>>();
+        for flag in pane_argv
+            .iter()
+            .filter(|argument| argument.starts_with("--"))
+        {
+            assert_eq!(
+                pane_argv
+                    .iter()
+                    .filter(|argument| *argument == flag)
+                    .count(),
+                1,
+                "{flag} appears more than once in {pane_argv:?}"
+            );
+        }
         assert!(!start_call.contains("launch-42"));
         assert!(!start_call.contains("composed body"));
         let pane_run = calls_after_start
@@ -2623,6 +2669,207 @@ printf '%s\n' 123456
                 .unwrap_err()
                 .contains("Skill invocation order differs")
         );
+    }
+
+    /// The shape of 88475f's transcript (Claude Code 2.1.280, Flow 0.10.5):
+    /// two stacked commands, then an instruction that loads thirteen more
+    /// skills through the Skill tool — two of them in one assistant turn —
+    /// plus Read and Bash work, a harness notice and a plain assistant line,
+    /// all before the receipt. 0.10.5 refused the first extra Skill call as
+    /// out of order and the launch stayed ambiguous.
+    #[test]
+    fn claude_receipt_after_further_skill_loads_and_work_is_observed() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let names = ["main-flow", "refresh"];
+        let mut launch = launch(HarnessKind::Claude);
+        launch.launch_profile.skill_name_vector = names.map(String::from).to_vec();
+        let body = "/main-flow /refresh Read /tmp/flow-system-prompt.md for your launch mode, then: You are Psyche Opus. Load through the Skill tool: spirit, psyche, herdr, file-editing. Read the handover whole.";
+        let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
+        launch.first_prompt_payload.first_prompt_body = body.into();
+        launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
+        launch.first_prompt_payload.first_prompt_text =
+            format!("{body}{}", LaunchReceipt::footer_for(&HarnessKind::Claude));
+        launch.target_receipt_request.prompt_sha256 = body_hash;
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let skills = root.path().join("native-transcripts/claude-skills");
+        for name in names {
+            fs::create_dir_all(skills.join(name)).expect("skill directory");
+            fs::write(
+                skills.join(name).join("SKILL.md"),
+                format!("---\nname: {name}\n---\n\n{name} body\n"),
+            )
+            .expect("skill source");
+        }
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter
+            .start_native_harness(&launch, &pane)
+            .expect("started without prompt");
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        adapter
+            .submit_first_prompt_once(&launch, &intent)
+            .expect("single terminal write");
+
+        let base = |name: &str| {
+            format!(
+                "Base directory for this skill: {}\n\n{name} body\n",
+                skills.join(name).canonicalize().unwrap().display()
+            )
+        };
+        let argument = format!(
+            "{}{}",
+            body.strip_prefix("/main-flow /refresh ").unwrap(),
+            LaunchReceipt::footer_for(&HarnessKind::Claude)
+        );
+        let original = format!("{body}{}", LaunchReceipt::footer_for(&HarnessKind::Claude));
+        let user = |extra: serde_json::Value, content: serde_json::Value| {
+            let mut row = serde_json::json!({"type":"user","sessionId":native_session,
+                "origin":{"kind":"human"},"message":{"role":"user","content":content}});
+            for (key, value) in extra.as_object().unwrap() {
+                row[key] = value.clone();
+            }
+            row
+        };
+        let command = |name: &str, extra: serde_json::Value| {
+            user(
+                extra,
+                serde_json::json!(format!(
+                    "<command-message>{name}</command-message>\n<command-name>/{name}</command-name>\n<command-args>{argument}</command-args>"
+                )),
+            )
+        };
+        let expansion = |name: &str| {
+            user(
+                serde_json::json!({"isMeta":true,"turnCompanion":true}),
+                serde_json::json!([{"type":"text","text":format!("{}\n\nARGUMENTS: {argument}", base(name))}]),
+            )
+        };
+        let attachment = serde_json::json!({"type":"attachment","sessionId":native_session,
+            "attachment":{"type":"skill_listing","content":"- spirit: Every agent task."}});
+        let assistant = |id: &str, content: serde_json::Value| {
+            serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":format!("turn-{id}"),
+                "effort":"high","message":{"model":"model-current","content":content}})
+        };
+        let tool_use = |id: &str, name: &str, input: serde_json::Value| serde_json::json!({"type":"tool_use","id":id,"name":name,"input":input});
+        let result = |id: &str, tool_result: serde_json::Value| {
+            user(
+                serde_json::json!({"toolUseResult":tool_result}),
+                serde_json::json!([{"type":"tool_result","tool_use_id":id,"content":"ok"}]),
+            )
+        };
+        let loaded = |id: &str, name: &str| {
+            [
+                result(id, serde_json::json!({"success":true,"commandName":name})),
+                user(
+                    serde_json::json!({"isMeta":true,"turnCompanion":true,"sourceToolUseID":id}),
+                    serde_json::json!([{"type":"text","text":format!("Base directory for this skill: /elsewhere/{name}\n\n{name} body\n")}]),
+                ),
+            ]
+        };
+        let mut rows = vec![
+            // The rename notice can land after the boundary.
+            user(
+                serde_json::json!({"isMeta":true}),
+                serde_json::json!(
+                    "<system-reminder>\nThe user named this session \"PsycheV2.{ Opus 123456 }\".\n</system-reminder>"
+                ),
+            ),
+            command(
+                "main-flow",
+                serde_json::json!({"stackedOriginalInput":original}),
+            ),
+            expansion("main-flow"),
+            attachment.clone(),
+            command(
+                "refresh",
+                serde_json::json!({"stackedExpansion":true,"turnOrigin":"human"}),
+            ),
+            expansion("refresh"),
+            attachment,
+            assistant(
+                "read",
+                serde_json::json!([tool_use(
+                    "t-read",
+                    "Read",
+                    serde_json::json!({"file_path":"/tmp/flow-system-prompt.md"})
+                )]),
+            ),
+            result("t-read", serde_json::json!({"type":"text"})),
+        ];
+        rows.push(assistant(
+            "s1",
+            serde_json::json!([tool_use(
+                "t-s1",
+                "Skill",
+                serde_json::json!({"skill":"spirit"})
+            )]),
+        ));
+        rows.extend(loaded("t-s1", "spirit"));
+        rows.push(assistant(
+            "s2",
+            serde_json::json!([tool_use(
+                "t-s2",
+                "Skill",
+                serde_json::json!({"skill":"psyche"})
+            )]),
+        ));
+        rows.extend(loaded("t-s2", "psyche"));
+        // Two Skill calls in one assistant turn, answered in order.
+        rows.push(assistant(
+            "s34",
+            serde_json::json!([
+                tool_use("t-s3", "Skill", serde_json::json!({"skill":"herdr"})),
+                tool_use("t-s4", "Skill", serde_json::json!({"skill":"file-editing"})),
+            ]),
+        ));
+        rows.extend(loaded("t-s3", "herdr"));
+        rows.extend(loaded("t-s4", "file-editing"));
+        rows.push(assistant(
+            "bash",
+            serde_json::json!([tool_use(
+                "t-b",
+                "Bash",
+                serde_json::json!({"command":"flow-id claude"})
+            )]),
+        ));
+        rows.push(result("t-b", serde_json::json!({"stdout":"123456"})));
+        rows.push(assistant(
+            "say",
+            serde_json::json!([{"type":"text","text":"Registering this seat."}]),
+        ));
+        let mut receipt = assistant(
+            "claude",
+            serde_json::json!([{"type":"text","text":LaunchReceipt::MARKER}]),
+        );
+        receipt["attributionSkill"] = serde_json::json!("file-editing");
+        rows.push(receipt);
+        let transcript = root
+            .path()
+            .join("native-transcripts/claude")
+            .join(format!("{native_session}.jsonl"));
+        let mut output = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&transcript)
+            .expect("transcript");
+        for row in &rows {
+            writeln!(output, "{row}").expect("row");
+        }
+        drop(output);
+        let PromptDeliveryResult::Observed(observed) = adapter
+            .observe_native_target_receipt(&intent)
+            .expect("observed receipt")
+        else {
+            panic!("receipt remained ambiguous");
+        };
+        assert_eq!(observed.native_turn_id, "turn-claude");
     }
 
     #[test]

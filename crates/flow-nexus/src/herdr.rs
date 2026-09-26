@@ -21,8 +21,19 @@ use signal_flow::{
 static PRESENTATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Reads Herdr's documented session snapshot and validates one complete route.
+///
+/// A route is keyed on what Herdr binds for the pane's life: the session,
+/// the pane id and the terminal id. The agent name is a label the running
+/// harness may change (a flow renames itself after launch); it is re-read
+/// from the snapshot, never matched.
 pub trait ReadsHerdrRoster {
-    fn route_is_available(&self, node: &FlowNode) -> bool;
+    /// The route as Herdr shows it now, carrying the agent's current name,
+    /// or None when the binding is gone or not ready for a prompt.
+    fn current_route(&self, node: &FlowNode) -> Option<HerdrRoute>;
+
+    fn route_is_available(&self, node: &FlowNode) -> bool {
+        self.current_route(node).is_some()
+    }
 }
 
 /// What a fresh Herdr snapshot says of a Flow's recorded pane.
@@ -153,15 +164,21 @@ pub trait VerifiesFlowClaim {
 }
 
 impl ReadsHerdrRoster for HerdrCli {
-    fn route_is_available(&self, node: &FlowNode) -> bool {
+    fn current_route(&self, node: &FlowNode) -> Option<HerdrRoute> {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-            return false;
+            return None;
         };
         if !self.identity_is_claimed(node) {
-            return false;
+            return None;
         }
-        self.snapshot(route).is_some_and(|snapshot| {
-            HerdrCli::snapshot_has_route(&snapshot, route, &node.harness_kind)
+        let snapshot = self.snapshot(route)?;
+        if !HerdrCli::snapshot_has_route(&snapshot, route, &node.harness_kind) {
+            return None;
+        }
+        let herdr_agent_name = HerdrCli::live_agent_name(&snapshot, route, &node.harness_kind)?;
+        Some(HerdrRoute {
+            herdr_agent_name,
+            ..route.clone()
         })
     }
 }
@@ -411,10 +428,17 @@ impl HerdrCli {
             node.herdr_route_selection,
             HerdrRouteSelection::Available(_)
         );
-        if had_persisted_route && !self.route_is_available(&node) {
-            node.herdr_route_selection = HerdrRouteSelection::Unavailable;
-            if let EndpointSelection::Available(endpoint) = &mut node.endpoint_selection {
-                endpoint.route_readiness = RouteReadiness::Parked;
+        if !had_persisted_route {
+            return node;
+        }
+        match self.current_route(&node) {
+            // The agent's current name is reported; the binding is the ids.
+            Some(route) => node.herdr_route_selection = HerdrRouteSelection::Available(route),
+            None => {
+                node.herdr_route_selection = HerdrRouteSelection::Unavailable;
+                if let EndpointSelection::Available(endpoint) = &mut node.endpoint_selection {
+                    endpoint.route_readiness = RouteReadiness::Parked;
+                }
             }
         }
         node
@@ -508,6 +532,26 @@ impl HerdrCli {
         }
     }
 
+    /// The name the bound agent carries now.
+    fn live_agent_name(
+        snapshot: &serde_json::Value,
+        route: &HerdrRoute,
+        harness_kind: &HarnessKind,
+    ) -> Option<String> {
+        snapshot
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .find(|agent| HerdrCli::agent_matches_binding(agent, route, harness_kind))?
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    }
+
+    /// The binding is the pane id and terminal id Herdr assigned (the
+    /// session is the snapshot's own) and the harness kind; the agent name
+    /// is not part of it, since a running flow may rename its agent.
     fn agent_matches_binding(
         agent: &serde_json::Value,
         route: &HerdrRoute,
@@ -517,10 +561,8 @@ impl HerdrCli {
             HarnessKind::Codex => "codex",
             HarnessKind::Claude => "claude",
         };
-        agent.get("name").and_then(serde_json::Value::as_str)
-            == Some(route.herdr_agent_name.as_str())
-            && agent.get("pane_id").and_then(serde_json::Value::as_str)
-                == Some(route.herdr_pane_id.as_str())
+        agent.get("pane_id").and_then(serde_json::Value::as_str)
+            == Some(route.herdr_pane_id.as_str())
             && agent.get("terminal_id").and_then(serde_json::Value::as_str)
                 == Some(route.herdr_terminal_id.as_str())
             && agent.get("agent").and_then(serde_json::Value::as_str) == Some(expected_harness)

@@ -1569,7 +1569,7 @@ mod tests {
             }
         }}});
         let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$*\" = \"--session fixture-session agent get fixture-agent\" ] || exit 64\nprintf '%s\\n' '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$*\" = \"--session fixture-session agent get w1:p1\" ] || exit 64\nprintf '%s\\n' '{}'\n",
             herdr_calls.display(),
             agent
         );
@@ -1600,7 +1600,7 @@ mod tests {
         ));
         assert_eq!(
             fs::read_to_string(herdr_calls).unwrap(),
-            "--session fixture-session agent get fixture-agent\n"
+            "--session fixture-session agent get w1:p1\n"
         );
     }
 
@@ -1616,11 +1616,11 @@ mod tests {
             meta_signal_flow::Response::FlowRegistered(_)
         ));
 
-        for changed_field in ["terminal", "name", "harness", "interactive"] {
+        for changed_field in ["terminal", "pane", "harness", "interactive"] {
             let mut agent = fixture.current_agent();
             match changed_field {
                 "terminal" => agent["terminal_id"] = "term_replaced".into(),
-                "name" => agent["name"] = "another-agent".into(),
+                "pane" => agent["pane_id"] = "w1:p9".into(),
                 "harness" => agent["agent"] = "claude".into(),
                 "interactive" => agent["interactive_ready"] = false.into(),
                 _ => unreachable!("closed fixture variants"),
@@ -1645,6 +1645,50 @@ mod tests {
                 })
             ));
         }
+    }
+
+    /// 88475f renamed its Herdr agent after launch (claude-86b6e54c… to
+    /// psyche-opus-88475f). The route is the session, pane and terminal
+    /// ids; the new name is read back, and the pane is still the one to
+    /// close.
+    #[test]
+    fn a_renamed_agent_keeps_its_route_and_reports_its_current_name() {
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        let node = fixture.node();
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node.clone())),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+        let mut renamed = fixture.current_agent();
+        renamed["name"] = "psyche-opus-88475f".into();
+        fixture.set_agents(vec![renamed]);
+        let Response::RecipientResolved(resolved) = fixture
+            .nexus
+            .dispatch(Query::ResolveRecipient("908786".into()))
+        else {
+            panic!("registered recipient resolves")
+        };
+        let HerdrRouteSelection::Available(route) = &resolved.herdr_route_selection else {
+            panic!("a renamed agent keeps its route: {resolved:?}")
+        };
+        let HerdrRouteSelection::Available(stored) = &node.herdr_route_selection else {
+            panic!("fixture node carries a route")
+        };
+        assert_eq!(route.herdr_agent_name, "psyche-opus-88475f");
+        assert_eq!(route.herdr_session_name, stored.herdr_session_name);
+        assert_eq!(route.herdr_pane_id, stored.herdr_pane_id);
+        assert_eq!(route.herdr_terminal_id, stored.herdr_terminal_id);
+        assert!(crate::herdr::ReadsHerdrRoster::route_is_available(
+            &fixture.nexus.herdr,
+            &node
+        ));
+        assert_eq!(
+            fixture.nexus.herdr.pane_presence(&node),
+            crate::herdr::PanePresence::Present
+        );
     }
 
     #[test]
@@ -1821,7 +1865,7 @@ mod tests {
                 "type":"session_snapshot"}
             });
             let body = format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get fixture-agent\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" pane close \"*) exit {} ;;\n  *) exit 64 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" pane close \"*) exit {} ;;\n  *) exit 64 ;;\nesac\n",
                 log.display(),
                 agent,
                 snapshot,
@@ -2334,6 +2378,63 @@ mod tests {
         assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Active);
         assert!(!bundles.file_for_request("refused-request").exists());
         // Replaced is answered by the replacement fixture above.
+    }
+
+    /// 88475f: Start answered StartAmbiguous, the receipt landed half a
+    /// minute later, and nobody subscribed or sent Start again. The
+    /// Nexus's own watch promotes it.
+    #[test]
+    fn a_receipt_after_ambiguity_promotes_with_no_subscriber_and_no_second_start() {
+        use crate::launching::{LaunchesFlows, PromotesAmbiguousLaunches};
+        let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+        let calls = fixture.herdr_for_replacement(0);
+        let mut launch = fixture.staged_launch("unwatched-request", None);
+        launch.reserve(&fixture.nexus);
+        launch.record_native_intent(&fixture.nexus);
+        launch.bind(&fixture.nexus);
+        launch.register_and_acknowledge(&fixture.nexus);
+        launch.record_prompt_intent(&fixture.nexus);
+        launch.record_ambiguity(&fixture.nexus);
+        std::thread::spawn(move || fixture.nexus.promote_ambiguous_launches());
+        let status = || fixture.nexus.launch_status("unwatched-request");
+        // The promoter has looked once and found no receipt.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .count()
+            == 0
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "promoter never looked"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(
+            status(),
+            Response::LaunchPending(attempt)
+                if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous
+        ));
+
+        // Only the transcript moves.
+        launch.write_receipt();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let started = loop {
+            if let Response::Started(started) = status() {
+                break started;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "receipt never promoted: {:?}",
+                status()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(started.flow_id, "908786");
+        let calls = fs::read_to_string(calls).unwrap_or_default();
+        assert!(!calls.contains("agent prompt"), "{calls}");
+        assert!(!calls.contains("pane create"), "{calls}");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use flow_nexus::{
     OpensRunningNexus, RunningNexus, ServesMeta, ServesOrdinary,
+    launching::PromotesAmbiguousLaunches,
     store::{ConfiguresFlowStore, DefaultConfiguration, DeploymentOverrides},
 };
 use std::{path::Path, process::ExitCode, sync::Arc};
@@ -55,6 +56,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    // A receipt that arrives after StartAmbiguous promotes its launch with
+    // no subscriber and no second Start.
+    let promoting_nexus = Arc::clone(&nexus);
+    std::thread::spawn(move || promoting_nexus.promote_ambiguous_launches());
     let ordinary = configuration.ordinary_socket_path.clone();
     let ordinary_nexus = Arc::clone(&nexus);
     std::thread::spawn(move || {

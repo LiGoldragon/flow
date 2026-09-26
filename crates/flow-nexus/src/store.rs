@@ -698,6 +698,8 @@ pub trait ReadsLaunchAttempt {
     fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError>;
     /// The launch requests whose native launch bound this Flow ID.
     fn launch_requests_bound_to(&self, flow_id: &str) -> Result<Vec<String>, StoreError>;
+    /// Every attempt whose first prompt is ambiguous and that has no outcome.
+    fn ambiguous_launch_attempts(&self) -> Result<Vec<LaunchAttempt>, StoreError>;
 }
 
 /// Reads the durable rows used by the ordinary Send, Stop, and List requests.
@@ -1502,6 +1504,24 @@ impl ReadsLaunchAttempt for FlowStore {
             })
             .map(|stored| stored.attempt.launch_request_id.clone())
             .collect())
+    }
+
+    fn ambiguous_launch_attempts(&self) -> Result<Vec<LaunchAttempt>, StoreError> {
+        let mut ambiguous = Vec::new();
+        for stored in self
+            .engine
+            .match_records(QueryPlan::all(self.launch_attempts))?
+            .records()
+        {
+            if stored.attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous
+                && self
+                    .launch_outcome(&stored.attempt.launch_request_id)?
+                    .is_none()
+            {
+                ambiguous.push(stored.attempt.clone());
+            }
+        }
+        Ok(ambiguous)
     }
 }
 

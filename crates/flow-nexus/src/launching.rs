@@ -731,6 +731,80 @@ impl ObservesLaunch for RunningNexus {
     }
 }
 
+/// The Nexus's own watch over ambiguous launches. A receipt that lands
+/// after Start answered StartAmbiguous promotes the launch whether or not
+/// anyone subscribes or sends Start again: each ambiguous launch's
+/// transcript is watched, and every change of it re-observes the receipt.
+/// It waits on announced changes, never on a timer.
+pub trait PromotesAmbiguousLaunches {
+    /// Runs for the life of the Nexus.
+    fn promote_ambiguous_launches(&self) -> !;
+}
+
+impl PromotesAmbiguousLaunches for RunningNexus {
+    fn promote_ambiguous_launches(&self) -> ! {
+        let changes = self.store.launch_changes.clone();
+        let mut watches = AmbiguousLaunchWatches::default();
+        loop {
+            let seen = changes.current();
+            watches.pass(self);
+            changes.after(seen);
+        }
+    }
+}
+
+/// One transcript watch per ambiguous launch; None when the watch could not
+/// be opened (logged once).
+#[derive(Default)]
+pub struct AmbiguousLaunchWatches {
+    watches: std::collections::BTreeMap<String, Option<TranscriptWatch>>,
+}
+
+impl AmbiguousLaunchWatches {
+    /// Opens a watch for each newly ambiguous launch and looks at it once;
+    /// re-observes each launch whose transcript moved; drops settled ones.
+    pub fn pass(&mut self, nexus: &RunningNexus) {
+        let attempts = match nexus.store.ambiguous_launch_attempts() {
+            Ok(attempts) => attempts,
+            Err(error) => {
+                eprintln!("flow-nexus: ambiguous launches unreadable: {error}");
+                return;
+            }
+        };
+        self.watches.retain(|launch_request_id, _| {
+            attempts
+                .iter()
+                .any(|attempt| &attempt.launch_request_id == launch_request_id)
+        });
+        for attempt in attempts {
+            let launch_request_id = attempt.launch_request_id.clone();
+            let promote = match self.watches.get(&launch_request_id) {
+                None => {
+                    let watch = attempt
+                        .prompt_delivery_intent_option
+                        .as_ref()
+                        .map(|intent| nexus.watch_transcript(intent))
+                        .transpose()
+                        .unwrap_or_else(|error| {
+                            eprintln!(
+                                "flow-nexus: launch {launch_request_id} transcript watch: {error}"
+                            );
+                            None
+                        });
+                    self.watches.insert(launch_request_id.clone(), watch);
+                    // Whatever landed before the watch began is looked at once.
+                    true
+                }
+                Some(Some(watch)) => watch.moved(),
+                Some(None) => false,
+            };
+            if promote {
+                nexus.promote_serially(&launch_request_id);
+            }
+        }
+    }
+}
+
 trait PromotesObservedLaunch {
     fn watch_transcript(&self, intent: &PromptDeliveryIntent) -> Result<TranscriptWatch, String>;
     fn promote_serially(&self, launch_request_id: &str);

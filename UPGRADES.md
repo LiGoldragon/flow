@@ -1,3 +1,31 @@
+# Flow 0.10.7
+
+A patch release with no wire or storage change. Three faults of the first
+real Claude Start (successor 88475f, launched through 0.10.5):
+
+- A receipt that arrives after `StartAmbiguous` now promotes the launch with
+  no subscriber and no second Start. The Nexus runs its own watch over every
+  ambiguous launch (on startup too, so a launch left ambiguous by an older
+  Nexus is picked up): each launch's transcript is watched, and each change
+  re-observes the receipt. It waits on announced changes, never on a timer.
+- The Claude receipt observer stops checking once the first turn and every
+  selected skill are confirmed. An instruction that loads further skills
+  through the Skill tool (88475f loaded thirteen), a harness notice, or plain
+  work before the receipt no longer refuses it as "Skill invocation order
+  differs from intent". An `isMeta` user row with plain text (the rename
+  reminder) is never read as typed input.
+- A Herdr route is keyed on the session, pane id and terminal id. The agent
+  name is re-read from the snapshot (ResolveRecipient, Send and Stop report
+  the current one) and never matched, so a flow that renames its agent
+  (88475f: `claude-86b6e54c…` to `psyche-opus-88475f`) stays routable. The
+  receipt observer's `agent get` targets the pane id for the same reason.
+- Claude's argv no longer carries `--dangerously-skip-permissions` from Flow:
+  the installed `claude` wrapper already execs `.claude-wrapped
+  --dangerously-skip-permissions "$@"`, and the pane showed it twice. The
+  launch's mode is still set by `--settings
+  '{"permissions":{"defaultMode":"bypassPermissions"}}'`. A host whose
+  `claude` does not add the flag runs in that settings mode without it.
+
 # Flow 0.10.6
 
 A patch release with no wire, storage or argv-shape change. The Herdr route

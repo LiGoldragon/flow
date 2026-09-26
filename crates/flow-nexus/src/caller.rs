@@ -11,8 +11,8 @@
 //! snapshot must still show that flow's binding (session, pane, terminal and
 //! harness), so a pane ID Herdr reused for a new terminal names no one.
 //!
-//! Send takes this up next: its connection resolves the caller the same way
-//! and carries the Caller as the sender of the message.
+//! ResolvePeer (meta) answers the same question for a process named by
+//! Message, which reads its own peer from the kernel.
 
 use crate::RunningNexus;
 use crate::herdr::PanePresence;

@@ -34,7 +34,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.14.0";
+            version = "0.15.0";
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -126,6 +126,16 @@
             "tests::a_pending_seat_whose_pane_herdr_shows_live_is_listed_active";
           flow-retire-keeps-history = context.exactTest "flow-nexus"
             "tests::retire_keeps_the_row_and_takes_the_flow_out_of_receiving";
+          flow-deliver-never-interleaves = context.exactTest "flow-nexus"
+            "tests::delivery::two_deliveries_to_one_pane_never_interleave";
+          flow-deliver-refuses-commands-and-keys = context.exactTest "flow-nexus"
+            "tests::delivery::bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed";
+          flow-deliver-crash-settles-uncertain = context.exactTest "flow-nexus"
+            "tests::delivery::a_delivery_a_crash_left_under_its_lease_settles_uncertain_and_is_never_retried";
+          flow-hard-abrupt-interrupts-first = context.exactTest "flow-nexus"
+            "tests::delivery::hard_abrupt_interrupts_a_working_recipient_before_typing";
+          flow-soft-waits-for-rest = context.exactTest "flow-nexus"
+            "tests::delivery::soft_waits_for_a_resting_recipient_and_types_nothing_to_a_working_one";
         }
       );
 

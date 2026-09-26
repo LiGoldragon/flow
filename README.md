@@ -1,6 +1,7 @@
 # Flow Nexus
 
-Flow Nexus starts, restarts, sends to, stops, lists, and resolves flows. `flow-nexus` is the
+Flow Nexus starts, restarts, delivers to, stops, lists, and resolves flows,
+and is the only writer into their panes. `flow-nexus` is the
 no-argument long-running process, `flow` is its ordinary client, and
 `flow-meta` is its privileged client. The Nexus persists Flow identity and
 policy in one Sema store, and its sockets carry only length-prefixed rkyv
@@ -8,11 +9,13 @@ Signal archives.
 
 The wire contracts are independent repositories:
 
-- `signal-flow` defines `Start`, provenance-authorized `Restart`, `Send`,
-  `Stop`, `List`, `ResolveRecipient` for Message Nexus routing, and
-  `ResolveCaller`, which names the flow, aspect, power and model of the
-  process that calls.
-- `meta-signal-flow` defines `Configure` and reset-credit consumption.
+- `signal-flow` defines `Start`, provenance-authorized `Restart`, `Stop`,
+  `List`, `ResolveRecipient` for Message Nexus routing, `ResolveCaller`,
+  which names the flow, aspect, power and model of the process that calls,
+  and `Observe.Agent`, a flow's Herdr agent state on open and on each change.
+  Nothing on the ordinary socket writes into a pane.
+- `meta-signal-flow` defines `Configure`, reset-credit consumption, `Retire`,
+  and the pane writes: `Deliver`, `Vet`, `Command`, plus `ResolvePeer`.
 
 The ordinary client accepts exactly one inline `Query` Datom from the
 `signal-flow` contract:
@@ -21,30 +24,40 @@ The ordinary client accepts exactly one inline `Query` Datom from the
 flow '<one inline Query datom>'
 ```
 
-The basic pane operations use the same typed edge:
+The ordinary pane operations use the same typed edge:
 
 ```sh
-flow 'Send.{ 00f95a «continue with the implementation» }'
 flow 'Stop.00f95a'
 flow 'List.{}'
+flow 'Observe.Agent.00f95a'
 ```
 
-`Send` revalidates the stored Flow claim and exact Herdr agent, pane,
-terminal, harness, interactive readiness, and session before prompting that
-pane. The pane receives the `BareInput` byte for byte and nothing else. Every
-`SendRejected` means nothing was typed; `NotDelivered` is Herdr refusing
-before any input reached the pane. When the target agent is settled (idle or
-done), Flow prompts with Herdr's wait and answers `Sent.Presented` once Herdr
-reports the exact pane reacting and the route still matches; the receipt
-carries the Flow ID, pane ID and observation Unix time. When the agent is
-working, the prompt is queued and the answer is `Sent.Accepted`: no reaction
-to it can be told from the running turn. A prompt that may have been typed
-but whose reaction was not observed answers `Sent.Uncertain`, is never
-retried, and must not be resent blindly. A Pending row becomes Active when the flow
-is witnessed live: on a `Presented` Send, or when `List` finds its bound pane
-present in Herdr. Presented is not Read, which only the target's own later
-response can witness. `Stop` persists the
-Stopped lifecycle only after `herdr pane close` succeeds for the revalidated
+Every write into a pane goes through the privileged socket, and Flow is the
+only writer. `Deliver` carries a typed `Message` whose head is its Priority:
+
+```sh
+flow-meta 'Deliver.{ m-7f3a2c 00f95a Soft.{ Owner Text.«continue with the implementation» } }'
+flow-meta 'Deliver.{ m-81b0e4 00f95a HardAbrupt.{ Flow.e167d8 Text.«stop the build» } }'
+flow-meta 'Command.{ 00f95a Compact }'
+```
+
+Flow renders the Message itself, so the pane text always begins
+`HardAbrupt.`, `MiddleAbrupt.` or `Soft.`. The body may hold no control
+character but LF and TAB (`ControlCharacter` carries the byte offset in the
+pane text), and a first line that is a harness command is refused as
+`HarnessCommand`: use `Command`. Every tier needs the recipient bound, not
+Blocked, and its composer blank; `Soft` also needs it Idle or Done.
+`HardAbrupt` presses the harness profile's interrupt keys when the recipient
+is Working and reports whether it was seen leaving Working. A write holds the
+pane's lease from its first key to its last, so two writes never interleave.
+`Presented` means the recipient was seen reacting on the exact pane,
+`Transported` that Herdr accepted the text, `Uncertain` that it may have been
+typed and was not observed; Uncertain is never retried, and a delivery a
+crash left under its lease settles Uncertain when the Nexus opens. `Deliver`
+is idempotent on its DeliveryId. A Pending row becomes Active when the flow
+is witnessed live: on a `Presented` Deliver, or when `List` finds its bound
+pane present in Herdr. Presented is not Read. `Stop` persists the Stopped
+lifecycle only after `herdr pane close` succeeds for the revalidated
 pane. `List` returns all durable rows, sorted by Flow ID, and reports each one's
 true lifecycle. A row that is still live is reconciled against Herdr before it
 is answered: its bound pane present, the route is refreshed and the flow is
@@ -57,7 +70,7 @@ Flow's own act, `Exited` is the seat's, `Retired` is an owner's, through the
 privileged `Retire`. A pane going away never retires a flow: an exit retains
 the record, and retirement comes from authority, never from an observation.
 None of the three is a deletion — each keeps the row, its origin and its
-history — and `Send`, `ResolveRecipient`, `Stop` and `Replace` treat all three
+history — and `Deliver`, `ResolveRecipient`, `Stop` and `Replace` treat all three
 as gone. `Retire` refuses `AlreadyGone` for a flow that has already ended.
 
 `Start` carries a typed `LaunchProfile` plus an `OriginClue`. The origin is a

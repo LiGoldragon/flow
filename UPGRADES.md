@@ -1,3 +1,27 @@
+# Flow 0.15.0
+
+A breaking release on signal-flow 7.0.0 and meta-signal-flow 9.0.0: Flow is
+the only pane writer (stage S1 of flows/e167d8/reports/message-through-flow-design.md).
+
+- **Ordinary `Send` is removed.** Nothing on the ordinary socket types into a
+  pane. `flow 'Send.…'` no longer parses; use
+  `flow-meta 'Deliver.{ <id> <flow> MiddleAbrupt.{ Owner Text.«…» } }'`.
+  signal-flow 7.0.0 renumbers the variants after the removed ones, so every
+  consumer (today: message) must repin before it talks to Flow 0.15.
+- **`Deliver`, `Vet`, `Command`, `ResolvePeer`** on the meta socket; see the
+  README. The pane lease, the body refusal and the tier preconditions apply
+  to every write, including the brief continuation.
+- **`Observe.Agent`** on the ordinary socket streams a flow's Herdr agent
+  state (Herdr `events.subscribe`), ending on `Gone`.
+- **The meta socket is gated.** A flow outside `MetaAspects` (default
+  `[ Psyche ]`) is answered `MetaRefused.PeerNotAuthorized`; the owner and
+  the configured Message Nexus executable are admitted. Field and Mind seats
+  that call `flow-meta` today will be refused.
+- `Configuration` gains the harness profiles (command sigils, interrupt and
+  submit keys), `MetaAspects` and `MessageNexusPath`. They live in a new
+  store record seeded with defaults, so a 0.14 store opens unchanged. Two
+  more new tables hold settled deliveries and lease rows.
+
 # Flow 0.14.0
 
 A minor release on signal-flow 6.2.0 and meta-signal-flow 8.0.2: the ordinary

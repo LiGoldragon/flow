@@ -164,7 +164,7 @@ mod tests {
         };
         let Query::Configure(configuration) = client
             .parse_command(
-                ["Configure.{ /run/user/1001/flow/flow.sock /run/user/1001/flow/flow-meta.sock /home/li/primary { /etc/profiles/per-user/li/bin/codex-stable-flow-client /home/li/.codex /home/li/.codex/app-server-control/app-server-control.sock [ gpt-5.6-terra gpt-5.6-sol gpt-5.6-luna ] } { /etc/profiles/per-user/li/bin/codex-next-flow-client /home/li/.codex-next /home/li/.codex-next/app-server-control/app-server-control.sock [ gpt-6-sol gpt-6-luna gpt-6-astra ] } }".into()]
+                ["Configure.{ /run/user/1001/flow/flow.sock /run/user/1001/flow/flow-meta.sock /home/li/primary { /etc/profiles/per-user/li/bin/codex-stable-flow-client /home/li/.codex /home/li/.codex/app-server-control/app-server-control.sock [ gpt-5.6-terra gpt-5.6-sol gpt-5.6-luna ] } { /etc/profiles/per-user/li/bin/codex-next-flow-client /home/li/.codex-next /home/li/.codex-next/app-server-control/app-server-control.sock [ gpt-6-sol gpt-6-luna gpt-6-astra ] } [ { Claude [ / «!» # ] [ esc esc ] [ enter ] } { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] /etc/profiles/per-user/li/bin/message-nexus }".into()]
                     .into_iter(),
             )
             .expect("configure datom parses")
@@ -176,11 +176,45 @@ mod tests {
             configuration.next_codex.model_name_vector,
             ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"]
         );
+        assert_eq!(
+            configuration.harness_profile_vector[0].interrupt_keys,
+            ["esc", "esc"]
+        );
+        assert_eq!(
+            configuration.harness_profile_vector[1].command_sigil_vector,
+            ["/", "!"]
+        );
+        assert_eq!(
+            configuration.meta_aspects,
+            [signal_flow::FlowAspect::Psyche]
+        );
         assert!(
             client
                 .parse_command(["configure".into(), "/a".into(), "/b".into()].into_iter())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn deliver_is_one_inline_datom_carrying_a_typed_message() {
+        let client = FlowMetaClient {
+            socket: "unused".into(),
+        };
+        let Query::Deliver(request) = client
+            .parse_command(
+                ["Deliver.{ m-7f3a2c 7d41e0 Soft.{ Flow.e167d8 Text.«Stage 1 is deployed; run the tier tests.» } }".into()]
+                    .into_iter(),
+            )
+            .expect("deliver datom parses")
+        else {
+            panic!("Deliver datom must stay a Deliver query")
+        };
+        assert_eq!(request.delivery_id, "m-7f3a2c");
+        assert_eq!(request.flow_id, "7d41e0");
+        assert!(matches!(
+            request.message,
+            meta_signal_flow::Message::Soft(_)
+        ));
     }
 
     #[test]

@@ -3,9 +3,10 @@
 The ordinary and meta sockets are separate Signal edges. Text ends at a CLI:
 the client turns one inline Datom into a typed request, sends an rkyv frame,
 and textualizes the typed reply as Datom. The standalone `signal-flow` repo
-owns `Start`, `Restart`, `ResolveRecipient`, `Send`, `Stop`, `List`,
+owns `Start`, `Restart`, `ResolveRecipient`, `Stop`, `List`,
 `Replace`, `LaunchStatus`, `Observe`, and `ResolveCaller`;
-`meta-signal-flow` owns `Configure` and `ConsumeReset`. Each contract versions
+`meta-signal-flow` owns `Configure`, `ConsumeReset`, `Retire`, and the pane
+writes `Deliver`, `Vet`, `Command`, with `ResolvePeer`. Each contract versions
 its own wire.
 `RunningNexus` dispatches; `FlowStore` owns working state and policy.
 
@@ -62,30 +63,43 @@ MetaBindExisting of a flow already held records its role only when the stored
 flow is that binding (thread, harness, Herdr session, pane and terminal) and
 has no other role; it writes nothing else, and any other binding is refused as
 `DuplicateFlowId`. The Codex endpoint of an imported flow is a separate fact,
-never a gate: routing and promotion follow the Herdr route. `Send`
-takes this up next: its connection resolves the caller the same way and
-carries the Caller as the message's sender.
+never a gate: routing and promotion follow the Herdr route. `ResolvePeer`
+on the meta socket answers the same question for a process Message names.
 
-`Send` and `Stop` act only on a route that still matches the native Herdr
-snapshot. A route is keyed on what Herdr binds for the pane's life: session,
-pane id and terminal id, with the harness kind. The agent name is a label a
-running flow may change; it is re-read from the snapshot and reported, never
-matched. Send types the bare input and nothing else. Its grades are exact:
-`NotDelivered` (nothing typed), `Accepted` (queued to a working agent),
-`Presented` (a settled agent observed reacting on the exact pane, the route
-still matching afterward) and `Uncertain` (typed, reaction unobserved). A
-Pending row is promoted only by a Presented Send; no probe or marker is ever
-typed to promote it. Presented does not claim the separate Read grade. Stop
-changes the durable lifecycle only after the exact pane closes successfully.
-`List` reads the same store rows and sorts them by Flow ID; it does not infer
-state from the current Herdr roster.
+Flow is the only pane writer. `Deliver`, `Command` and the brief
+continuation act only on a route that still matches the native Herdr
+snapshot, and each holds the pane's lease (`delivery::lease`) from its first
+key to its last. A route is keyed on what Herdr binds for the pane's life:
+session, pane id and terminal id, with the harness kind. The agent name is a
+label a running flow may change; it is re-read from the snapshot and
+reported, never matched. `Deliver` renders the typed Message (its Priority
+head first), refuses a body carrying a control character or a harness command
+(`delivery::body`), refuses a Blocked recipient and an occupied composer, and
+for `Soft` a recipient that is not Idle or Done. `HardAbrupt` presses the
+profile's interrupt keys when the recipient is Working and records whether it
+was seen leaving Working. Grades are exact: `NotDelivered` (nothing typed),
+`Transported` (Herdr took the text for the exact binding), `Presented` (a
+settled agent observed reacting on the exact pane, the route still matching
+afterward) and `Uncertain` (typed, reaction unobserved). Each step is written
+to a `PaneLease` row; a row found when the store opens settles `Uncertain`
+and is never retried, and `Deliver` repeats answer the stored `Delivery`. A
+Pending row is promoted only by a Presented Deliver; no probe or marker is
+ever typed to promote it. Stop changes the durable lifecycle only after the
+exact pane closes successfully, and closes under the lease. `List` reads the
+same store rows and sorts them by Flow ID.
+
+The meta socket answers `MetaRefused` unless its peer (read from the kernel)
+is the configured Message Nexus executable, a process in no flow's pane (the
+owner), or a flow whose aspect is in `MetaAspects` (default `[ Psyche ]`).
+Both sockets are `0600` under one UID, so this stops accidents, not an
+adversary.
 
 `Replace` carries a `StartRequest` whose profile names the predecessor. The
 successor launches through the one Start path; on `Started` the predecessor is
-recorded `Stopped` (so `ResolveRecipient` and `Send` refuse it), then its
+recorded `Stopped` (so `ResolveRecipient` and `Deliver` refuse it), then its
 exact pane is closed, and only the `Replaced` outcome releases the successor
 to routing. Until then the successor is held: `ResolveRecipient` answers
-`FlowUnavailable` and `Send` answers `RouteUnavailable`. A predecessor whose
+`FlowUnavailable` and `Deliver` answers `RouteUnavailable`. A predecessor whose
 pane a readable Herdr snapshot shows absent is already reaped: it is recorded
 `Stopped`, nothing is closed, and `Replaced` releases the successor. When Herdr
 cannot be read, or shows the pane under another binding, the pane may still be
@@ -129,7 +143,7 @@ no route. A Herdr that cannot be read changes nothing.
 Reading that truth and recording it are separate. `List` writes nothing,
 because a query does not change what it is asked about; an ended lifecycle is
 persisted only by a command that witnesses a pane's fate — `Stop` and a
-replacement's reap record `Stopped`, a `Send` whose bound pane is gone records
+replacement's reap record `Stopped`, a `Deliver` whose bound pane is gone records
 `Exited`, and `Retire` on the meta socket records `Retired`.
 
 Each ended state names who ended the flow, and they do not stand in for one

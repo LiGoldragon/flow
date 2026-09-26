@@ -1,6 +1,7 @@
 //! Herdr roster validation for durable Flow routes.
 
 pub mod launch;
+pub mod pane;
 
 use crate::codex::{CodexEndpoint, CodexEndpoints};
 use crate::composition::LaunchBundles;
@@ -9,12 +10,10 @@ use std::{
     fs,
     path::PathBuf,
     process::{Command, Output},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use signal_flow::{
-    EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, PresentationReceipt,
-    RouteReadiness, SendOutcome, SendRejection,
+    EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, RouteReadiness,
 };
 
 /// Reads Herdr's documented session snapshot and validates one complete route.
@@ -47,13 +46,9 @@ pub enum PanePresence {
     Unknown,
 }
 
-/// Performs thin ordinary Flow operations against one revalidated Herdr pane.
+/// Closes one revalidated Herdr pane. Every write into a pane is the pane
+/// writer's (see `pane` and `crate::delivery`).
 pub trait OperatesHerdrPane {
-    /// Types `text`, byte for byte and nothing else, into the bound pane and
-    /// grades what is known of it. `Err(NotDelivered)` only when nothing was
-    /// typed; once input may have reached the pane the answer is a
-    /// `SendOutcome`, `Uncertain` when its reaction was not observed.
-    fn prompt(&self, node: &FlowNode, text: &str) -> Result<SendOutcome, SendRejection>;
     fn close(&self, node: &FlowNode) -> bool;
 }
 
@@ -85,7 +80,7 @@ impl LocatesNativeTranscripts for HerdrCli {
 
 /// The production Herdr roster reader.
 pub struct HerdrCli {
-    executable: PathBuf,
+    pub(crate) executable: PathBuf,
     flow_id_executable: PathBuf,
     flows_root: PathBuf,
     codex_endpoints: CodexEndpoints,
@@ -180,63 +175,6 @@ impl ReadsHerdrRoster for HerdrCli {
 }
 
 impl OperatesHerdrPane for HerdrCli {
-    fn prompt(&self, node: &FlowNode, text: &str) -> Result<SendOutcome, SendRejection> {
-        let not_delivered = Err(SendRejection::NotDelivered);
-        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-            return not_delivered;
-        };
-        if !self.identity_is_claimed(node) {
-            return not_delivered;
-        }
-        let Some(snapshot) = self.snapshot(route) else {
-            return not_delivered;
-        };
-        // A settled (idle or done) agent is observed reacting to the prompt;
-        // a working one takes it into its queue, where no reaction to this
-        // prompt can be told from the turn already running.
-        let observes = Self::snapshot_has_idle_route(&snapshot, route, &node.harness_kind);
-        if !observes && !Self::snapshot_has_route(&snapshot, route, &node.harness_kind) {
-            return not_delivered;
-        }
-        let mut command = Command::new(&self.executable);
-        command.args([
-            "--session",
-            route.herdr_session_name.as_str(),
-            "agent",
-            "prompt",
-            route.herdr_pane_id.as_str(),
-            text,
-        ]);
-        if observes {
-            command.args(PromptReply::OBSERVATION);
-        }
-        let Ok(output) = command.output() else {
-            return not_delivered;
-        };
-        let reply = PromptReply { output };
-        if reply.refused_before_input() {
-            return not_delivered;
-        }
-        let uncertain = Ok(SendOutcome::Uncertain(node.flow_id.clone()));
-        if !reply.prompted_pane(&route.herdr_pane_id) {
-            return uncertain;
-        }
-        if !observes {
-            return Ok(SendOutcome::Accepted(node.flow_id.clone()));
-        }
-        let Some(presentation_observed_unix_milliseconds) = Self::unix_milliseconds() else {
-            return uncertain;
-        };
-        if !self.route_is_available(node) {
-            return uncertain;
-        }
-        Ok(SendOutcome::Presented(PresentationReceipt {
-            flow_id: node.flow_id.clone(),
-            herdr_pane_id: route.herdr_pane_id.clone(),
-            presentation_observed_unix_milliseconds,
-        }))
-    }
-
     fn close(&self, node: &FlowNode) -> bool {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return false;
@@ -324,14 +262,6 @@ impl PromptReply {
 }
 
 impl HerdrCli {
-    fn unix_milliseconds() -> Option<i64> {
-        let milliseconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_millis();
-        i64::try_from(milliseconds).ok()
-    }
-
     pub fn with_launch_bundles(mut self, launch_bundles: LaunchBundles) -> Self {
         self.launch_bundles = launch_bundles;
         self
@@ -504,28 +434,6 @@ impl HerdrCli {
             })
     }
 
-    fn snapshot_has_idle_route(
-        snapshot: &serde_json::Value,
-        route: &HerdrRoute,
-        harness_kind: &HarnessKind,
-    ) -> bool {
-        snapshot
-            .pointer("/result/snapshot/agents")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|agents| {
-                agents.iter().any(|agent| {
-                    HerdrCli::agent_matches_binding(agent, route, harness_kind)
-                        && matches!(
-                            agent
-                                .get("agent_status")
-                                .and_then(serde_json::Value::as_str),
-                            Some("idle" | "done")
-                        )
-                        && HerdrCli::agent_readiness_permits_prompt(agent)
-                })
-            })
-    }
-
     fn snapshot_has_binding(
         snapshot: &serde_json::Value,
         route: &HerdrRoute,
@@ -682,6 +590,18 @@ mod tests {
     };
     use std::path::PathBuf;
 
+    /// Whether the snapshot's one agent is at rest, as the writer reads it.
+    fn idle(snapshot: &serde_json::Value) -> bool {
+        matches!(
+            HerdrCli::agent_state_of(
+                snapshot
+                    .pointer("/result/snapshot/agents/0/agent_status")
+                    .and_then(serde_json::Value::as_str)
+            ),
+            signal_flow::AgentState::Idle | signal_flow::AgentState::Done
+        )
+    }
+
     fn route() -> HerdrRoute {
         HerdrRoute {
             herdr_session_name: "messaging-build".into(),
@@ -778,11 +698,7 @@ mod tests {
             &codex_route(),
             &HarnessKind::Codex
         ));
-        assert!(HerdrCli::snapshot_has_idle_route(
-            &snapshot,
-            &codex_route(),
-            &HarnessKind::Codex
-        ));
+        assert!(idle(&snapshot));
     }
 
     #[test]
@@ -829,11 +745,7 @@ mod tests {
             &codex_route(),
             &HarnessKind::Codex
         ));
-        assert!(!HerdrCli::snapshot_has_idle_route(
-            &snapshot,
-            &codex_route(),
-            &HarnessKind::Codex
-        ));
+        assert!(!idle(&snapshot));
     }
 
     #[test]
@@ -847,11 +759,7 @@ mod tests {
             &route(),
             &HarnessKind::Claude
         ));
-        assert!(HerdrCli::snapshot_has_idle_route(
-            &snapshot,
-            &route(),
-            &HarnessKind::Claude
-        ));
+        assert!(idle(&snapshot));
     }
 
     #[test]

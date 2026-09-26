@@ -4,6 +4,9 @@
 //! owns its single `.sema` store and lowers a closed `signal_flow::Query`
 //! into its typed, durable records.
 
+pub mod delivery;
+
+use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -115,8 +118,10 @@ impl DefaultConfiguration {
     }
 
     pub fn configuration(&self) -> Configuration {
-        self.socket_configuration()
-            .with_runtime(&self.runtime_configuration())
+        self.socket_configuration().with_runtime(
+            &self.runtime_configuration(),
+            &self.delivery_configuration(),
+        )
     }
 
     fn socket_configuration(&self) -> FlowStoreConfiguration {
@@ -410,13 +415,20 @@ struct FlowStoreConfiguration {
 }
 
 impl FlowStoreConfiguration {
-    fn with_runtime(self, runtime: &RuntimeConfiguration) -> Configuration {
+    fn with_runtime(
+        self,
+        runtime: &RuntimeConfiguration,
+        delivery: &DeliveryConfiguration,
+    ) -> Configuration {
         Configuration {
             ordinary_socket_path: self.ordinary_socket_path,
             meta_socket_path: self.meta_socket_path,
             source_root: runtime.source_root.clone(),
             stable_codex: meta_signal_flow::CodexEndpoint::from(&runtime.stable_codex),
             next_codex: meta_signal_flow::CodexEndpoint::from(&runtime.next_codex),
+            harness_profile_vector: delivery.harness_profile_vector.clone(),
+            meta_aspects: delivery.meta_aspects.clone(),
+            message_nexus_path: delivery.message_nexus_path.clone(),
         }
     }
 }
@@ -746,6 +758,7 @@ pub struct FlowStore {
     roles: TableReference<StoredRole>,
     unread_launch_attempts: TableReference<UnreadLaunchAttempt>,
     quarantined_launch_attempts: TableReference<QuarantinedLaunchAttempt>,
+    delivery_tables: DeliveryTables,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows that no longer read in the
     /// current shape; each is also logged.
@@ -954,7 +967,7 @@ pub trait ReadsLaunchAttempt {
     fn ambiguous_launch_attempts(&self) -> Result<Vec<LaunchAttempt>, StoreError>;
 }
 
-/// Reads the durable rows used by the ordinary Send, Stop, and List requests.
+/// Reads the durable rows used by Deliver, Stop, and List.
 pub trait ReadsFlowRows {
     fn flow_node(&self, flow_id: &str) -> Result<Option<FlowNode>, StoreError>;
     fn flow_nodes(&self) -> Result<Vec<FlowNode>, StoreError>;
@@ -1059,6 +1072,7 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-quarantined-launch-attempt"),
             SchemaHash::for_label("flow-nexus-quarantined-launch-attempt-v1"),
         ))?;
+        let delivery_tables = DeliveryTables::register(&mut engine)?;
         let mut store = Self {
             engine,
             flows,
@@ -1072,6 +1086,7 @@ impl OpensFlowStore for FlowStore {
             roles,
             unread_launch_attempts,
             quarantined_launch_attempts,
+            delivery_tables,
             launch_changes: LaunchChanges::default(),
             opening_settlements: Vec::new(),
         };
@@ -1127,6 +1142,15 @@ impl OpensFlowStore for FlowStore {
             eprintln!("flow-nexus: {settlement}");
         }
         store.adopt_legacy_roles()?;
+        store.seed_delivery_configuration(defaults)?;
+        // A delivery a crash left under the lease is settled Uncertain here
+        // and never retried: what reached its pane is not known.
+        for delivery in store.settle_interrupted_deliveries()? {
+            eprintln!(
+                "flow-nexus: delivery {} to {} was interrupted under its lease; settled Uncertain",
+                delivery.delivery_id, delivery.flow_id
+            );
+        }
         Ok(store)
     }
 }
@@ -1137,9 +1161,6 @@ impl AppliesFlowQuery for FlowStore {
             Query::Start(_) => Ok(Response::StartRejected(StartRejection::NativeLaunchRefused)),
             Query::Restart(_) => Ok(Response::RestartRejected(RestartRejection::ResumeRefused)),
             Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
-            Query::Send(_) => Ok(Response::SendRejected(
-                signal_flow::SendRejection::PersistenceRefused,
-            )),
             Query::Stop(_) => Ok(Response::StopRejected(
                 signal_flow::StopRejection::PersistenceRefused,
             )),
@@ -1168,7 +1189,6 @@ impl ReservesPendingStart for FlowStore {
                 .map(Some),
             Query::Restart(_)
             | Query::ResolveRecipient(_)
-            | Query::Send(_)
             | Query::Stop(_)
             | Query::List(_)
             | Query::Replace(_)
@@ -1229,9 +1249,10 @@ impl RecordsRestartedFlow for FlowStore {
 
 impl ConfiguresFlowStore for FlowStore {
     fn configuration(&self) -> Result<Configuration, StoreError> {
-        Ok(self
-            .stored_configuration()?
-            .with_runtime(&self.runtime_configuration()?))
+        Ok(self.stored_configuration()?.with_runtime(
+            &self.runtime_configuration()?,
+            &self.delivery_configuration()?,
+        ))
     }
 
     fn configure(&self, configuration: Configuration) -> Result<(), StoreError> {
@@ -1245,6 +1266,10 @@ impl ConfiguresFlowStore for FlowStore {
                 .mutate(
                     self.runtime_configuration,
                     RuntimeConfiguration::from(&configuration),
+                )
+                .mutate(
+                    self.delivery_tables.configuration,
+                    DeliveryConfiguration::from(&configuration),
                 ),
         )?;
         Ok(())
@@ -3206,6 +3231,17 @@ mod tests {
             source_root: "/srv/source".into(),
             stable_codex: endpoint("stable"),
             next_codex: endpoint("next"),
+            harness_profile_vector: vec![meta_signal_flow::HarnessProfile {
+                harness_kind: signal_flow::HarnessKind::Codex,
+                command_sigil_vector: vec!["/".into()],
+                interrupt_keys: vec!["esc".into()],
+                submit_keys: Vec::new(),
+            }],
+            meta_aspects: vec![
+                signal_flow::FlowAspect::Psyche,
+                signal_flow::FlowAspect::Mind,
+            ],
+            message_nexus_path: "/opt/message-nexus".into(),
         };
         store
             .configure(configuration.clone())

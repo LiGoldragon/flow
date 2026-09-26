@@ -190,8 +190,8 @@ impl OperatesHerdrPane for HerdrCli {
                 "close",
                 route.herdr_pane_id.as_str(),
             ])
-            .status()
-            .is_ok_and(|status| status.success())
+            .output()
+            .is_ok_and(|output| output.status.success())
     }
 }
 

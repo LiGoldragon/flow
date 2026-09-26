@@ -446,3 +446,67 @@ fn the_meta_socket_admits_the_owner_and_refuses_an_unreadable_peer() {
     };
     assert_eq!(fixture.nexus.meta_refusal(Some(own)), None);
 }
+
+#[test]
+fn a_flow_outside_meta_aspects_is_refused_the_meta_socket() {
+    let fixture = NexusFixture::new();
+    super::bind_existing_caller(&fixture, "mind-live", "pane-1");
+    fixture.set_agents(vec![super::codex_agent_in("pane-1", "terminal-pane-1")]);
+    let peer = PanePeer::spawn("pane-1");
+    let refusal = fixture
+        .nexus
+        .meta_refusal(Some(crate::caller::CallerProcess {
+            process_id: peer.0.id(),
+        }));
+    assert_eq!(
+        refusal,
+        Some(meta_signal_flow::MetaRefusal::PeerNotAuthorized(
+            super::mind_live()
+        ))
+    );
+}
+
+#[test]
+fn a_flow_whose_role_flow_does_not_know_is_not_taken_for_the_owner() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.current_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    // Registered through RegisterFlow, which records no role.
+    fixture.register_with(FlowLifecycle::Active);
+    let peer = PanePeer::spawn("w1:p3");
+    assert_eq!(
+        fixture
+            .nexus
+            .meta_refusal(Some(crate::caller::CallerProcess {
+                process_id: peer.0.id(),
+            })),
+        Some(meta_signal_flow::MetaRefusal::PeerUnknown)
+    );
+}
+
+/// A process marked as running in a pane of the fixture session. `sleep` is
+/// spawned directly, not through a shell that execs it, so its environment
+/// is never read in the middle of an exec.
+struct PanePeer(std::process::Child);
+
+impl PanePeer {
+    fn spawn(pane: &str) -> Self {
+        Self(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .env("HERDR_SESSION", "messaging-build")
+                .env("HERDR_PANE_ID", pane)
+                .spawn()
+                .expect("marked peer"),
+        )
+    }
+}
+
+impl Drop for PanePeer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}

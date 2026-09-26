@@ -12,7 +12,8 @@
 //! mistakes, not an adversary (F4).
 
 use crate::RunningNexus;
-use crate::caller::{CallerProcess, LocatesCallerPane, ResolvesCaller};
+use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ResolvesCaller};
+use crate::store::ReadsFlowRoles;
 use crate::store::delivery::RecordsDeliveries;
 use meta_signal_flow::{MetaRefusal, ProcessIdentity, Response};
 use signal_flow::CallerResolutionRejection;
@@ -63,9 +64,15 @@ impl AdmitsMetaPeer for RunningNexus {
         {
             return None;
         }
-        // In no pane, or in a pane that holds no flow: the owner.
-        let caller = match self.resolve_caller(peer.caller_pane(), None) {
+        let pane = peer.caller_pane();
+        let caller = match self.resolve_caller(pane.clone(), None) {
             signal_flow::Response::CallerResolved(caller) => caller,
+            // In a pane that holds a flow whose role Flow does not know: a
+            // flow still, never the owner.
+            _ if pane.as_ref().is_some_and(|pane| self.pane_holds_flow(pane)) => {
+                return Some(MetaRefusal::PeerUnknown);
+            }
+            // In no pane, or in a pane that holds no flow: the owner.
             _ => return None,
         };
         if configuration.meta_aspects.contains(&caller.flow_aspect) {
@@ -73,6 +80,21 @@ impl AdmitsMetaPeer for RunningNexus {
         } else {
             Some(MetaRefusal::PeerNotAuthorized(caller))
         }
+    }
+}
+
+/// Whether a pane holds a live flow, whatever its role.
+trait FindsFlowInPane {
+    fn pane_holds_flow(&self, pane: &CallerPane) -> bool;
+}
+
+impl FindsFlowInPane for RunningNexus {
+    fn pane_holds_flow(&self, pane: &CallerPane) -> bool {
+        self.store
+            .flows_in_pane(&pane.herdr_session_name, &pane.herdr_pane_id)
+            .map(|flows| !flows.is_empty())
+            // A store that cannot say is not taken to mean no flow.
+            .unwrap_or(true)
     }
 }
 

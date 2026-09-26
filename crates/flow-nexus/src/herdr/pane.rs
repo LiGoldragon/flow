@@ -142,7 +142,9 @@ impl WritesPane for HerdrCli {
             route.herdr_pane_id.as_str(),
         ]);
         command.args(keys);
-        command.status().is_ok_and(|status| status.success())
+        // Herdr's reply is read for its status only; it never reaches the
+        // Nexus's own output.
+        command.output().is_ok_and(|output| output.status.success())
     }
 
     fn place(&self, route: &HerdrRoute, text: &str, observe: bool) -> Placement {
@@ -188,8 +190,8 @@ impl WritesPane for HerdrCli {
                 "--timeout",
                 Self::INTERRUPT_WAIT_MILLISECONDS,
             ])
-            .status()
-            .is_ok_and(|status| status.success())
+            .output()
+            .is_ok_and(|output| output.status.success())
     }
 }
 

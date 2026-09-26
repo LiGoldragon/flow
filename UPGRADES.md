@@ -1,3 +1,23 @@
+# Flow 0.17.2
+
+Gate only: no wire, storage or behavior change (meta-signal-flow 11.0.0).
+Deploy beside Message 0.17.0, or do not deploy at all.
+
+- **`tests::a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors`
+  is deterministic.** It spawned its marked sleeper as `sh -c "exec sleep
+  30"`, waited for that shell's Herdr marks, and then read them again after
+  the shell had `exec`ed. `/proc/<pid>/environ` reads back empty for the
+  width of an `execve`, so `caller_pane()` intermittently found no marks and
+  walked to an ancestry that has none in a Nix builder: `None`. The sleeper
+  is now spawned directly, so the process whose marks were settled never
+  execs again. `caller_pane()` itself was not at fault and is unchanged.
+- **The Claude retract path has a fixture test.** `Retraction::Key("ctrl+c")`
+  was covered only by a live witness. Two fixture tests now drive a Claude
+  composer — `❯` and the non-breaking space it renders after the glyph —
+  through `esc esc`: a restored letter is emptied by one `ctrl+c` and the
+  HardAbrupt lands; a person's draft is left alone and the delivery is
+  refused. Both are named Nix checks, as is the deflaked test.
+
 # Flow 0.17.1
 
 A non-breaking fix on the same wire (meta-signal-flow 11.0.0); deploy beside

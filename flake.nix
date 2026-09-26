@@ -34,7 +34,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.17.1";
+            version = "0.17.2";
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -144,6 +144,12 @@
             "tests::delivery::an_interrupt_that_never_shows_is_pressed_a_bounded_number_of_times";
           flow-exited-refusal-names-exited = context.exactTest "flow-nexus"
             "tests::a_flow_whose_pane_left_herdr_is_listed_exited_and_keeps_its_row";
+          flow-claude-retract-is-one-ctrl-c = context.exactTest "flow-nexus"
+            "tests::submission::a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c";
+          flow-claude-draft-is-never-retracted = context.exactTest "flow-nexus"
+            "tests::submission::a_draft_claudes_interrupt_put_back_is_never_taken_out";
+          flow-caller-pane-from-marks-or-ancestry = context.exactTest "flow-nexus"
+            "tests::a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors";
         }
       );
 

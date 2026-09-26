@@ -3127,8 +3127,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         assert_eq!(started.flow_id, "908786");
-        let calls = fs::read_to_string(calls).unwrap_or_default();
-        assert!(!calls.contains("agent prompt"), "{calls}");
+        // Started is recorded before the continuation finishes being typed,
+        // so the log is waited on rather than read once: the promoter settles
+        // the launch and Flow then continues the seat into its brief.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let calls = loop {
+            let calls = fs::read_to_string(&calls).unwrap_or_default();
+            if calls.contains("agent prompt") {
+                break calls;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the brief continuation was never typed: {calls}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        only_the_brief_continuation_was_typed(&calls);
         assert!(!calls.contains("pane create"), "{calls}");
     }
 

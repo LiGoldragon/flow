@@ -3376,9 +3376,17 @@ mod tests {
     struct MarkedProcess(std::process::Child);
 
     impl MarkedProcess {
-        fn spawn(command: &str, pane: &str) -> Self {
-            let child = std::process::Command::new("sh")
-                .args(["-c", command])
+        /// The program is spawned directly, never through a shell that
+        /// `exec`s it: `SettlesItsMarks` settles the marks of one process,
+        /// and a second `execve` in that same process reopens the window it
+        /// waited out — `/proc/<pid>/environ` reads back empty again, which
+        /// a reader cannot tell from a scrubbed environment. A shell is
+        /// spawned only where the shell itself is the marked process and
+        /// stays (its command line ends in another word, so the shell does
+        /// not turn its last command into an `exec` of its own accord).
+        fn spawn(program: &str, arguments: &[&str], pane: &str) -> Self {
+            let child = std::process::Command::new(program)
+                .args(arguments)
                 .env("HERDR_SESSION", "messaging-build")
                 .env("HERDR_PANE_ID", pane)
                 .spawn()
@@ -3418,11 +3426,12 @@ mod tests {
 
     #[test]
     fn a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors() {
-        // `exec` makes the marked shell itself the sleeper; the second shell
+        // The first sleeper carries the marks itself; the second shell
         // stays the parent of a sleeper whose environment drops the marks.
-        let marked = MarkedProcess::spawn("exec sleep 30", "pane-1");
+        let marked = MarkedProcess::spawn("sleep", &["30"], "pane-1");
         let scrubbed = MarkedProcess::spawn(
-            "env -u HERDR_SESSION -u HERDR_PANE_ID sleep 30; true",
+            "sh",
+            &["-c", "env -u HERDR_SESSION -u HERDR_PANE_ID sleep 30; true"],
             "pane-2",
         );
         let marked_process = CallerProcess {

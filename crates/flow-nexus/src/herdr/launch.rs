@@ -831,6 +831,19 @@ impl HerdrCli {
                 })
     }
 
+    /// Whether a Claude assistant row ran at the intended effort. Claude Code
+    /// 2.1.280 records `effort` (and `perTurnEffort`) only for a model that
+    /// takes one; for Claude Haiku 4.5 it records no `effort` and
+    /// `perTurnEffort: null`. A row that names no effort ran at none, which is
+    /// no evidence against the intent; a row that names another one is.
+    fn claude_effort_matches(row: &serde_json::Value, effort: &str) -> bool {
+        ["effort", "perTurnEffort"]
+            .iter()
+            .filter_map(|key| row.get(*key))
+            .filter(|value| !value.is_null())
+            .all(|value| value.as_str() == Some(effort))
+    }
+
     /// Reads one command record of a Claude user turn: the harness records
     /// each head command it loads as its name and the argument that follows
     /// the whole command stack.
@@ -1733,8 +1746,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                         .pointer("/message/model")
                         .and_then(serde_json::Value::as_str)
                         != Some(durable_intent.model_name.as_str())
-                        || row.get("effort").and_then(serde_json::Value::as_str)
-                            != Some(durable_intent.effort.as_str()))
+                        || !Self::claude_effort_matches(&row, durable_intent.effort.as_str()))
                 {
                     return Err("native Claude model or effort differs from intent".into());
                 }
@@ -2380,6 +2392,68 @@ printf '%s\n' 123456
                 .observe_native_target_receipt(&adopted_intent)
                 .unwrap_err()
                 .contains("duplicate")
+        );
+    }
+
+    /// e167d8 sandbox: Claude Haiku 4.5 takes no effort, and Claude Code
+    /// 2.1.280 records its turns with no `effort` and `perTurnEffort: null`.
+    /// The seat answered exactly the marker and Start stayed Ambiguous; a
+    /// recorded effort that differs is still refused.
+    #[test]
+    fn claude_receipt_of_a_model_without_effort_is_observed() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        let transcript = root
+            .path()
+            .join("native-transcripts/claude")
+            .join(format!("{native_session}.jsonl"));
+        let first_input = serde_json::json!({"type":"user","sessionId":native_session,
+            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_text}});
+        let receipt = |effort: serde_json::Value| {
+            let mut row = serde_json::json!({"type":"assistant","sessionId":native_session,
+                "session_id":native_session,"uuid":"turn-claude","perTurnEffort":null,
+                "message":{"model":"model-current",
+                "content":[{"type":"text","text":LaunchReceipt::MARKER}]}});
+            if !effort.is_null() {
+                row["effort"] = effort.clone();
+                row["perTurnEffort"] = effort;
+            }
+            row
+        };
+
+        fs::write(
+            &transcript,
+            format!("{first_input}\n{}\n", receipt(serde_json::Value::Null)),
+        )
+        .expect("receipt without effort");
+        let PromptDeliveryResult::Observed(observed) = adapter
+            .observe_native_target_receipt(&intent)
+            .expect("a turn with no effort recorded is read")
+        else {
+            panic!("a model without effort never reaches Observed");
+        };
+        assert_eq!(observed.native_turn_id, "turn-claude");
+        assert_eq!(observed.effort, Effort::from("high"));
+
+        fs::write(
+            &transcript,
+            format!("{first_input}\n{}\n", receipt(serde_json::json!("low"))),
+        )
+        .expect("receipt with another effort");
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("model or effort differs")
         );
     }
 

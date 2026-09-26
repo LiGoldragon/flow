@@ -14,9 +14,9 @@ pub mod body;
 pub mod lease;
 
 use crate::RunningNexus;
-use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
+use crate::herdr::pane::{Interruption, PaneAgent, Placement, WritesPane};
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
-use crate::store::{NamesLiveFlow, ReadsFlowRows, RecordsFlowLifecycle, RecordsReplacement};
+use crate::store::{ReadsFlowRows, RecordsFlowLifecycle, RecordsReplacement};
 use body::{RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
@@ -31,6 +31,8 @@ use signal_flow::{AgentState, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSel
 pub enum TargetRefusal {
     UnknownFlow,
     FlowStopped,
+    FlowRetired,
+    FlowExited,
     RouteUnavailable,
     PersistenceRefused,
 }
@@ -40,6 +42,8 @@ impl From<TargetRefusal> for DeliveryRejection {
         match refusal {
             TargetRefusal::UnknownFlow => Self::UnknownFlow,
             TargetRefusal::FlowStopped => Self::FlowStopped,
+            TargetRefusal::FlowRetired => Self::FlowRetired,
+            TargetRefusal::FlowExited => Self::FlowExited,
             TargetRefusal::RouteUnavailable => Self::RouteUnavailable,
             TargetRefusal::PersistenceRefused => Self::PersistenceRefused,
         }
@@ -51,6 +55,8 @@ impl From<TargetRefusal> for CommandRejection {
         match refusal {
             TargetRefusal::UnknownFlow => Self::UnknownFlow,
             TargetRefusal::FlowStopped => Self::FlowStopped,
+            TargetRefusal::FlowRetired => Self::FlowRetired,
+            TargetRefusal::FlowExited => Self::FlowExited,
             TargetRefusal::RouteUnavailable => Self::RouteUnavailable,
             // Nothing was typed; Command has no store to refuse.
             TargetRefusal::PersistenceRefused => Self::NotDelivered,
@@ -78,8 +84,13 @@ impl FindsDeliveryTarget for RunningNexus {
             Ok(None) => return Err(TargetRefusal::UnknownFlow),
             Err(_) => return Err(TargetRefusal::PersistenceRefused),
         };
-        if !node.flow_lifecycle.is_live() {
-            return Err(TargetRefusal::FlowStopped);
+        // A gone flow is refused by who ended it: Flow (Stopped), the owner
+        // (Retired), or the seat leaving Herdr (Exited).
+        match node.flow_lifecycle {
+            FlowLifecycle::Pending | FlowLifecycle::Active => {}
+            FlowLifecycle::Stopped => return Err(TargetRefusal::FlowStopped),
+            FlowLifecycle::Retired => return Err(TargetRefusal::FlowRetired),
+            FlowLifecycle::Exited => return Err(TargetRefusal::FlowExited),
         }
         match self.store.held_successor(flow_id) {
             Ok(false) => {}
@@ -228,16 +239,15 @@ impl DeliversMessages for RunningNexus {
                 if agent_state != AgentState::Working {
                     return Response::CommandRejected(CommandRejection::NotDelivered);
                 }
-                if !self
+                match self
                     .herdr
-                    .press(&target.route, &target.profile.interrupt_keys)
+                    .interrupt(&target.route, &target.profile.interrupt_keys)
                 {
-                    return Response::CommandRejected(CommandRejection::NotDelivered);
-                }
-                if self.herdr.left_working(&target.route) {
-                    CommandGrade::Observed
-                } else {
-                    CommandGrade::Transported
+                    Interruption::Refused => {
+                        return Response::CommandRejected(CommandRejection::NotDelivered);
+                    }
+                    Interruption::Observed => CommandGrade::Observed,
+                    Interruption::Unobserved => CommandGrade::Transported,
                 }
             }
             HarnessCommand::Compact => {
@@ -332,17 +342,17 @@ impl<'run> LeasedDelivery<'run> {
         let hard = matches!(self.request.message, Message::HardAbrupt(_));
         let mut interrupt_witness = InterruptWitness::NotRequested;
         if hard && agent_state == AgentState::Working {
-            if !self
+            let interruption = self
                 .nexus
                 .herdr
-                .press(&self.target.route, &self.target.profile.interrupt_keys)
-            {
+                .interrupt(&self.target.route, &self.target.profile.interrupt_keys);
+            if interruption == Interruption::Refused {
                 return self.refuse(DeliveryRejection::NotDelivered);
             }
             if self.step(LeaseStep::Interrupted).is_err() {
                 return self.refuse(DeliveryRejection::PersistenceRefused);
             }
-            interrupt_witness = if self.nexus.herdr.left_working(&self.target.route) {
+            interrupt_witness = if interruption == Interruption::Observed {
                 InterruptWitness::Observed
             } else {
                 InterruptWitness::Unobserved

@@ -34,7 +34,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.16.0";
+            version = "0.17.0";
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -136,6 +136,14 @@
             "tests::delivery::hard_abrupt_interrupts_a_working_recipient_before_typing";
           flow-soft-waits-for-rest = context.exactTest "flow-nexus"
             "tests::delivery::soft_waits_for_a_resting_recipient_and_types_nothing_to_a_working_one";
+          flow-claude-receipt-without-effort = context.exactTest "flow-nexus"
+            "herdr::launch::tests::claude_receipt_of_a_model_without_effort_is_observed";
+          flow-hard-abrupt-presses-again = context.exactTest "flow-nexus"
+            "tests::delivery::hard_abrupt_presses_the_interrupt_again_while_the_recipient_still_works";
+          flow-hard-abrupt-bounded-presses = context.exactTest "flow-nexus"
+            "tests::delivery::an_interrupt_that_never_shows_is_pressed_a_bounded_number_of_times";
+          flow-exited-refusal-names-exited = context.exactTest "flow-nexus"
+            "tests::a_flow_whose_pane_left_herdr_is_listed_exited_and_keeps_its_row";
         }
       );
 

@@ -2179,7 +2179,7 @@ mod tests {
         assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Exited);
         assert_eq!(
             fixture.send("again"),
-            Sent::Refused(meta_signal_flow::DeliveryRejection::FlowStopped)
+            Sent::Refused(meta_signal_flow::DeliveryRejection::FlowExited)
         );
         assert_eq!(
             fixture
@@ -2281,7 +2281,7 @@ mod tests {
         assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Retired);
         assert_eq!(
             fixture.send("to a retired flow"),
-            Sent::Refused(meta_signal_flow::DeliveryRejection::FlowStopped)
+            Sent::Refused(meta_signal_flow::DeliveryRejection::FlowRetired)
         );
         assert_eq!(
             fixture

@@ -1,3 +1,25 @@
+# Flow 0.17.0
+
+A breaking release on meta-signal-flow 11.0.0 (2ac045c) that clears three
+faults the e167d8 sandbox suite found in 0.16.0. Deploy with Message 0.17.0
+(481b579): an older Message cannot decode the new refusals.
+
+- **Start witnesses the receipt of a Claude model that takes no effort.**
+  Claude Code 2.1.280 records no `effort` (and `perTurnEffort: null`) for
+  Claude Haiku 4.5. The receipt check demanded the requested effort on the
+  row, so a seat that answered exactly `FLOW_LAUNCH_RECEIPT_V2` left Start
+  `StartAmbiguous`, the promoter never settled it, and the brief continuation
+  was never typed. A row that names no effort now passes; a row that names a
+  different one is still refused.
+- **HardAbrupt and Command.Interrupt press again while the agent works.**
+  Claude ignores `esc esc` pressed as its turn begins; the letter then queued
+  behind the running command. The interrupt keys are pressed up to three
+  times, each given 3 s to show the agent leaving Working, and only while it
+  is still seen Working.
+- **A gone flow is refused by who ended it.** Deliver and Command to an Exited
+  flow answered `FlowStopped`; they now answer `FlowExited`, and a Retired
+  flow `FlowRetired`. Stopped stays Flow's own act.
+
 # Flow 0.16.0
 
 A breaking release on meta-signal-flow 10.0.0 that clears the three faults

@@ -49,6 +49,34 @@ impl NexusFixture {
         .install(&body);
     }
 
+    /// Makes the fixture's `agent wait` time out `misses` times before the
+    /// agent is seen leaving Working; `None` never shows it leaving.
+    fn leave_working_after(&self, misses: Option<usize>) {
+        let log = self.directory.path().join("herdr-operations.log");
+        let count = self.directory.path().join("agent-waits");
+        let leaves = match misses {
+            Some(misses) => format!("[ \"$n\" -ge {misses} ]"),
+            None => "exit 1".to_owned(),
+        };
+        let body = fs::read_to_string(&self.snapshot_program).expect("Herdr fixture");
+        let body = body
+            .replacen("|\"agent wait\") printf", ") printf", 1)
+            .replacen(
+                "  *) exit 64 ;;",
+                &format!(
+                    "  \"agent wait\") printf '%s\\n' \"$*\" >> '{}'; n=$(cat '{}' 2>/dev/null || echo 0); echo $((n+1)) > '{}'; {leaves} ;;\n  *) exit 64 ;;",
+                    log.display(),
+                    count.display(),
+                    count.display(),
+                ),
+                1,
+            );
+        FixtureExecutable {
+            path: self.snapshot_program.clone(),
+        }
+        .install(&body);
+    }
+
     fn operations(&self) -> String {
         fs::read_to_string(self.directory.path().join("herdr-operations.log")).unwrap_or_default()
     }
@@ -152,10 +180,62 @@ fn hard_abrupt_interrupts_a_working_recipient_before_typing() {
         operations,
         vec![
             "--session messaging-build pane send-keys w1:p3 esc".to_owned(),
-            "--session messaging-build agent wait w1:p3 --until idle --until done --until blocked --timeout 5000".to_owned(),
+            "--session messaging-build agent wait w1:p3 --until idle --until done --until blocked --timeout 3000".to_owned(),
             "--session messaging-build agent prompt w1:p3 HardAbrupt.{ m-7f3a2c Flow.e167d8 Text.«stop the build» }".to_owned(),
         ]
     );
+}
+
+/// e167d8 sandbox: Claude Code ignored `esc esc` pressed as its turn began
+/// (Haiku 4.5, 2.1.280), stayed Working, and the letter queued behind a
+/// 90 s command. Pressed again while it still works, it stops.
+#[test]
+fn hard_abrupt_presses_the_interrupt_again_while_the_recipient_still_works() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.current_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.leave_working_after(Some(1));
+    fixture.register_with(FlowLifecycle::Active);
+    let MetaResponse::Delivered(delivery) =
+        fixture.deliver("hard-again", Message::HardAbrupt(letter("stop now")))
+    else {
+        panic!("the letter is typed after the interrupt")
+    };
+    assert_eq!(delivery.interrupt_witness, InterruptWitness::Observed);
+    let wait = "--session messaging-build agent wait w1:p3 --until idle --until done --until blocked --timeout 3000";
+    let press = "--session messaging-build pane send-keys w1:p3 esc";
+    assert_eq!(
+        fixture.operations().lines().collect::<Vec<_>>(),
+        vec![
+            press,
+            wait,
+            press,
+            wait,
+            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ m-7f3a2c Flow.e167d8 Text.«stop now» }",
+        ]
+    );
+}
+
+#[test]
+fn an_interrupt_that_never_shows_is_pressed_a_bounded_number_of_times() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.current_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.leave_working_after(None);
+    fixture.register_with(FlowLifecycle::Active);
+    let MetaResponse::Delivered(delivery) =
+        fixture.deliver("hard-stuck", Message::HardAbrupt(letter("stop now")))
+    else {
+        panic!("the letter is still typed")
+    };
+    assert_eq!(delivery.interrupt_witness, InterruptWitness::Unobserved);
+    let operations = fixture.operations();
+    assert_eq!(operations.matches("pane send-keys w1:p3 esc").count(), 3);
+    assert_eq!(operations.matches("agent wait").count(), 3);
 }
 
 #[test]

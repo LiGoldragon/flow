@@ -53,12 +53,52 @@ pub trait WritesPane {
     fn place(&self, route: &HerdrRoute, text: &str, observe: bool) -> Placement;
     /// Waits, boundedly, for a working agent to leave Working.
     fn left_working(&self, route: &HerdrRoute) -> bool;
+
+    /// Presses the interrupt keys into a working agent until it is seen
+    /// leaving Working, at most `Interruption::PRESSES` times.
+    ///
+    /// Witnessed of Claude Code 2.1.280 (Haiku 4.5, e167d8 sandbox and a
+    /// disposable pane, 2026-09-26): `esc esc` pressed as a turn begins is
+    /// ignored and the agent keeps working through a 90 s command, while the
+    /// same keys pressed again a moment later stop it. The keys go only into
+    /// an agent still seen Working, never into a resting one.
+    fn interrupt(&self, route: &HerdrRoute, keys: &[String]) -> Interruption {
+        for press in 0..Interruption::PRESSES {
+            if !self.press(route, keys) {
+                return if press == 0 {
+                    Interruption::Refused
+                } else {
+                    Interruption::Unobserved
+                };
+            }
+            if self.left_working(route) {
+                return Interruption::Observed;
+            }
+        }
+        Interruption::Unobserved
+    }
+}
+
+/// What became of an interrupt pressed into a working agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interruption {
+    /// Herdr refused the first keys: nothing reached the pane.
+    Refused,
+    /// The agent was seen leaving Working.
+    Observed,
+    /// Keys reached the pane, and the agent was still Working after them.
+    Unobserved,
+}
+
+impl Interruption {
+    /// Each press is given `HerdrCli::INTERRUPT_WAIT_MILLISECONDS` to show.
+    pub const PRESSES: usize = 3;
 }
 
 impl HerdrCli {
-    /// How long an interrupt is given to show: an interrupted turn stops
-    /// within a second or two.
-    const INTERRUPT_WAIT_MILLISECONDS: &'static str = "5000";
+    /// How long each interrupt press is given to show: an interrupted turn
+    /// stops within a second or two.
+    const INTERRUPT_WAIT_MILLISECONDS: &'static str = "3000";
     /// The composer is at the bottom of the screen.
     const COMPOSER_LINES: &'static str = "12";
 }

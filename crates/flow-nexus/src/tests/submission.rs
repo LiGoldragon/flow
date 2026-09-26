@@ -13,7 +13,7 @@ use meta_signal_flow::{
     Content, Delivery, DeliveryGrade, DeliveryRejection, DeliveryRequest, InterruptWitness, Letter,
     Message, Query as MetaQuery, Response as MetaResponse, Sender,
 };
-use signal_flow::FlowLifecycle;
+use signal_flow::{FlowLifecycle, HarnessKind};
 use std::fs;
 
 /// What the fixture composer does with the keys Flow presses into it.
@@ -25,6 +25,62 @@ enum Composer {
     ClearsOnKill,
     /// Nothing takes the text away.
     Holds,
+}
+
+/// How a harness's own composer shows a letter an interrupt restored, and
+/// which key empties it. Codex 0.153 and Claude Code 2.1.280 as the e167d8
+/// sandbox showed them, 2026-09-26: Claude renders a non-breaking space
+/// after its glyph, and one `ctrl+c` empties it in either vim mode, where
+/// `ctrl+u` after the second `esc` would stop short of the cursor.
+#[derive(Clone, Copy)]
+enum FixtureComposer {
+    Codex,
+    Claude,
+}
+
+impl FixtureComposer {
+    /// The `printf` format the fixture's `agent read` prints the held text
+    /// with: the harness's glyph, its spacing, then the text.
+    fn occupied_line(self) -> &'static str {
+        match self {
+            Self::Codex => "› %s\\n",
+            Self::Claude => "❯\u{a0}%s\\n",
+        }
+    }
+
+    /// The key the fixture composer empties on, and nothing else does.
+    fn empties_on(self) -> &'static str {
+        match self {
+            Self::Codex => "ctrl+u",
+            Self::Claude => "ctrl+c",
+        }
+    }
+
+    fn harness_kind(self) -> HarnessKind {
+        match self {
+            Self::Codex => HarnessKind::Codex,
+            Self::Claude => HarnessKind::Claude,
+        }
+    }
+
+    /// The harness as Herdr's snapshot names it, which the binding must
+    /// agree with before the flow is registered at all.
+    fn herdr_agent(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+
+    /// A session identity of the shape the flow claim admits for this
+    /// harness: Claude's is read as a UUID and must be version 4 with an
+    /// RFC variant nibble, Codex's is its own.
+    fn session_id(self) -> &'static str {
+        match self {
+            Self::Codex => "01a0b22c-e24f-7452-9940-64490878680f",
+            Self::Claude => "01a0b22c-e24f-4452-9940-64490878680f",
+        }
+    }
 }
 
 impl NexusFixture {
@@ -84,8 +140,8 @@ impl NexusFixture {
 
     /// Makes the fixture's interrupt put `restored` back into the composer,
     /// as Claude Code does with the prompt of a turn cancelled before its
-    /// first response, and `ctrl+u` take it out.
-    fn interrupt_restores(&self, restored: &str) {
+    /// first response, and the harness's own retract key take it out.
+    fn interrupt_restores(&self, harness: FixtureComposer, restored: &str) {
         let held = self.directory.path().join("composer.txt");
         let log = self.directory.path().join("herdr-operations.log");
         let body = fs::read_to_string(&self.snapshot_program).expect("Herdr fixture");
@@ -93,17 +149,19 @@ impl NexusFixture {
             .replacen(
                 "\"agent read\") printf '%s\\n' '❯ ' '› ' ;;",
                 &format!(
-                    "\"agent read\") if [ -f '{0}' ]; then printf '› %s\\n' \"$(cat '{0}')\"; else printf '%s\\n' '❯ ' '› '; fi ;;",
-                    held.display()
+                    "\"agent read\") if [ -f '{0}' ]; then printf '{1}' \"$(cat '{0}')\"; else printf '%s\\n' '❯ ' '› '; fi ;;",
+                    held.display(),
+                    harness.occupied_line(),
                 ),
                 1,
             )
             .replacen(
                 "  \"pane close\"|",
                 &format!(
-                    "  \"pane send-keys\") printf '%s\\n' \"$*\" >> '{1}'; case \"$6\" in esc) printf '%s' '{2}' > '{0}' ;; ctrl+u) rm -f '{0}' ;; esac ;;\n  \"pane close\"|",
+                    "  \"pane send-keys\") printf '%s\\n' \"$*\" >> '{1}'; case \"$6\" in esc) printf '%s' '{3}' > '{0}' ;; {2}) rm -f '{0}' ;; esac ;;\n  \"pane close\"|",
                     held.display(),
                     log.display(),
+                    harness.empties_on(),
                     restored,
                 ),
                 1,
@@ -125,6 +183,36 @@ impl NexusFixture {
             .filter_map(|line| line.split_once(" pane send-keys w1:p3 "))
             .map(|(_, keys)| keys.to_owned())
             .collect()
+    }
+
+    /// The Herdr snapshot agent of a working recipient under `harness`.
+    fn working_agent(&self, harness: FixtureComposer) -> serde_json::Value {
+        let mut agent = self.current_agent();
+        agent["agent"] = serde_json::Value::String(harness.herdr_agent().to_owned());
+        agent
+    }
+
+    /// Registers the fixture flow as running under `harness`, so the
+    /// writer reaches for that harness's glyph, interrupt and retract key.
+    fn register_under(&self, harness: FixtureComposer) {
+        fs::write(
+            self.directory.path().join("flows/.908786.flow-id"),
+            format!(
+                "version=1\nharness={}\nidentity={}\nalias=908786\n",
+                harness.herdr_agent(),
+                harness.session_id().replace('-', ""),
+            ),
+        )
+        .expect("fixture flow claim");
+        let mut node = self.node();
+        node.harness_kind = harness.harness_kind();
+        node.session_id = harness.session_id().into();
+        node.origin_clue.session_id = harness.session_id().into();
+        node.flow_lifecycle = FlowLifecycle::Active;
+        assert!(matches!(
+            self.nexus.dispatch_meta(MetaQuery::RegisterFlow(node)),
+            MetaResponse::FlowRegistered(_)
+        ));
     }
 
     fn resting_recipient(&self, composer: Composer) {
@@ -255,8 +343,11 @@ fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
         vec![fixture.current_agent()],
         PromptFixture::Prompted("w1:p3"),
     );
-    fixture.interrupt_restores("Soft.{ m-18d8ebf6d76a13da009 Owner Text.«sleep» }");
-    fixture.register_with(FlowLifecycle::Active);
+    fixture.interrupt_restores(
+        FixtureComposer::Codex,
+        "Soft.{ m-18d8ebf6d76a13da009 Owner Text.«sleep» }",
+    );
+    fixture.register_under(FixtureComposer::Codex);
     assert_eq!(
         fixture
             .nexus
@@ -282,6 +373,82 @@ fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
     );
 }
 
+/// The same path under Claude Code, which is where it was witnessed and
+/// where none of the Codex keys would serve: `esc esc` is the interrupt,
+/// the restored letter comes back behind `❯` and a non-breaking space, and
+/// `Retraction::Key("ctrl+c")` empties the composer with one press —
+/// Claude's vim NORMAL mode, which the second `esc` leaves it in, is what
+/// makes the line-by-line take-back unfit here.
+#[test]
+fn a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.working_agent(FixtureComposer::Claude)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.interrupt_restores(
+        FixtureComposer::Claude,
+        "Soft.{ m-18d8ebf6d76a13da009 Owner Text.«sleep» }",
+    );
+    fixture.register_under(FixtureComposer::Claude);
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                delivery_id: "claude-restored".into(),
+                flow_id: "908786".into(),
+                message: hard_abrupt("stop"),
+            })),
+        MetaResponse::Delivered(Delivery {
+            delivery_id: "claude-restored".into(),
+            flow_id: "908786".into(),
+            interrupt_witness: InterruptWitness::Observed,
+            delivery_grade: DeliveryGrade::Transported,
+        })
+    );
+    assert_eq!(
+        fixture.key_presses(),
+        ["esc esc", "ctrl+c", "enter"],
+        "Claude's interrupt, one retract press and no more, then its submit"
+    );
+    assert_eq!(fixture.composer_holds(), None, "the pane is free again");
+    assert_eq!(
+        fixture.typed().as_deref(),
+        Some("HardAbrupt.{ m-7f3a2c Owner Text.stop }")
+    );
+}
+
+/// A second `ctrl+c` into an empty Claude composer quits Claude, so the key
+/// goes in only while the composer is seen holding a letter of Flow's own.
+/// A text that is not a letter is the person's: the HardAbrupt is refused
+/// and nothing is pressed after the interrupt.
+#[test]
+fn a_draft_claudes_interrupt_put_back_is_never_taken_out() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.working_agent(FixtureComposer::Claude)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.interrupt_restores(FixtureComposer::Claude, "half a thought of my own");
+    fixture.register_under(FixtureComposer::Claude);
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                delivery_id: "claude-draft".into(),
+                flow_id: "908786".into(),
+                message: hard_abrupt("stop"),
+            })),
+        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
+    );
+    assert_eq!(fixture.key_presses(), ["esc esc"]);
+    assert_eq!(
+        fixture.composer_holds().as_deref(),
+        Some("half a thought of my own")
+    );
+    assert_eq!(fixture.typed(), None);
+}
+
 #[test]
 fn a_draft_an_interrupt_put_back_is_never_taken_out() {
     let fixture = NexusFixture::new();
@@ -289,8 +456,8 @@ fn a_draft_an_interrupt_put_back_is_never_taken_out() {
         vec![fixture.current_agent()],
         PromptFixture::Prompted("w1:p3"),
     );
-    fixture.interrupt_restores("half a thought of my own");
-    fixture.register_with(FlowLifecycle::Active);
+    fixture.interrupt_restores(FixtureComposer::Codex, "half a thought of my own");
+    fixture.register_under(FixtureComposer::Codex);
     assert_eq!(
         fixture
             .nexus

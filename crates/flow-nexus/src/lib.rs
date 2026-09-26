@@ -32,9 +32,9 @@ use std::{
     time::Duration,
 };
 use store::{
-    AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, FlowStore, OpensFlowStore,
-    ReadsFlowRows, RecordsFlowLifecycle, RecordsReplacement, RegistersExistingFlow,
-    RegistersFlowIdentity,
+    AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, FlowStore, NamesLiveFlow,
+    OpensFlowStore, ReadsFlowRows, RecordsFlowLifecycle, RecordsLaunchOutcome, RecordsReplacement,
+    RegistersExistingFlow, RegistersFlowIdentity,
 };
 
 fn process_identity_matches(identity: &meta_signal_flow::ProcessIdentity) -> bool {
@@ -173,7 +173,9 @@ impl Dispatches for RunningNexus {
                         );
                     }
                 };
-                if node.flow_lifecycle == FlowLifecycle::Stopped {
+                // Stopped and Retired are both gone: nothing is typed into
+                // the pane of a seat Flow closed or a seat Flow has lost.
+                if !node.flow_lifecycle.is_live() {
                     return Response::SendRejected(signal_flow::SendRejection::FlowStopped);
                 }
                 match self.store.held_successor(&request.flow_id) {
@@ -223,7 +225,9 @@ impl Dispatches for RunningNexus {
                         );
                     }
                 };
-                if node.flow_lifecycle == FlowLifecycle::Stopped {
+                // A Retired seat is gone already, so there is nothing left
+                // for Stop to close: AlreadyStopped is what it answers.
+                if !node.flow_lifecycle.is_live() {
                     return Response::StopRejected(signal_flow::StopRejection::AlreadyStopped);
                 }
                 let node = self.herdr.refresh_route(node);
@@ -244,14 +248,13 @@ impl Dispatches for RunningNexus {
             }
             // A dispatch without a connection has no peer to read.
             Query::ResolveCaller(claim) => self.resolve_caller(None, claim),
-            Query::List(_) => {
-                self.store
-                    .flow_nodes()
-                    .map(Response::Listed)
-                    .unwrap_or(Response::ListRejected(
-                        signal_flow::ListRejection::PersistenceRefused,
-                    ))
-            }
+            Query::List(_) => self
+                .store
+                .flow_nodes()
+                .map(|nodes| Response::Listed(self.reconciled(nodes)))
+                .unwrap_or(Response::ListRejected(
+                    signal_flow::ListRejection::PersistenceRefused,
+                )),
         }
     }
 
@@ -287,6 +290,48 @@ impl Dispatches for RunningNexus {
                 .unwrap_or(meta_signal_flow::Response::ResetRejected(
                     meta_signal_flow::ResetRejection::AdapterUnavailable,
                 )),
+            // A seat Flow lost. Retire keeps the row, its origin and its
+            // history, and takes the flow out of receiving: it is not Stop,
+            // which closes a pane Flow still holds, and it is not a delete.
+            // Privileged, because it changes what Flow holds of a flow
+            // without that flow acting.
+            meta_signal_flow::Query::Retire(flow_id) => {
+                let node = match self.store.flow_node(&flow_id) {
+                    Ok(Some(node)) => node,
+                    Ok(None) => {
+                        return meta_signal_flow::Response::RetireRejected(
+                            meta_signal_flow::RetireRejection::UnknownFlow,
+                        );
+                    }
+                    Err(_) => {
+                        return meta_signal_flow::Response::RetireRejected(
+                            meta_signal_flow::RetireRejection::StoreRefused,
+                        );
+                    }
+                };
+                if !node.flow_lifecycle.is_live() {
+                    return meta_signal_flow::Response::RetireRejected(
+                        meta_signal_flow::RetireRejection::AlreadyGone,
+                    );
+                }
+                match self.store.record_retired(&flow_id) {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => {
+                        return meta_signal_flow::Response::RetireRejected(
+                            meta_signal_flow::RetireRejection::StoreRefused,
+                        );
+                    }
+                }
+                // No launch can still need the bundle copy of a seat that
+                // is gone.
+                self.prune_launch_bundles_of(&flow_id);
+                match self.store.flow_node(&flow_id) {
+                    Ok(Some(retired)) => meta_signal_flow::Response::FlowRetired(retired),
+                    Ok(None) | Err(_) => meta_signal_flow::Response::RetireRejected(
+                        meta_signal_flow::RetireRejection::StoreRefused,
+                    ),
+                }
+            }
             meta_signal_flow::Query::MetaBindExisting(request) => {
                 let container = request.flow_container;
                 if !container_is_well_formed(&container) || !container_socket_is_live(&container) {
@@ -557,15 +602,137 @@ pub trait ListensOnSocket {
 
 impl ListensOnSocket for RunningNexus {}
 
+/// Brings a listed row up to what Herdr shows of it.
+///
+/// A flow's stored row says what Flow last recorded, which is not the same
+/// as what is there now, and List used to report the row alone. Two witnessed
+/// ways it went wrong: a seat whose pane was gone stayed Pending on the route
+/// it was bound to, and a seat that was plainly live stayed Pending because
+/// only a Presented Send ever promoted one — so a flow bound through the
+/// privileged contract, or one started before Flow Nexus, was Pending
+/// forever. A listed flow is therefore reconciled against Herdr before it is
+/// answered:
+///
+/// - its bound pane present: the flow is witnessed live, so its route is
+///   refreshed and it is recorded Active;
+/// - its bound pane gone: the flow is Retired, durably, with no route and no
+///   endpoint. Its row, origin and history stay.
+///
+/// Both are recorded, so the reconciliation settles rather than repeating.
+/// Only a live flow is looked at: one already Stopped or Retired is answered
+/// from its row, and a pane Herdr cannot be read for stays exactly as it is —
+/// an unreadable Herdr neither promotes nor retires anything.
+pub trait ReconcilesListedFlows {
+    fn reconciled(&self, nodes: Vec<FlowNode>) -> Vec<FlowNode>;
+    fn reconciled_node(&self, node: FlowNode) -> FlowNode;
+}
+
+impl ReconcilesListedFlows for RunningNexus {
+    fn reconciled(&self, nodes: Vec<FlowNode>) -> Vec<FlowNode> {
+        nodes
+            .into_iter()
+            .map(|node| self.reconciled_node(node))
+            .collect()
+    }
+
+    fn reconciled_node(&self, node: FlowNode) -> FlowNode {
+        if !node.flow_lifecycle.is_live() {
+            return node;
+        }
+        match self.herdr.pane_presence(&node) {
+            herdr::PanePresence::Present => {
+                let mut node = self.herdr.refresh_route(node);
+                if node.flow_lifecycle == FlowLifecycle::Pending
+                    && self.store.record_active(&node.flow_id).unwrap_or(false)
+                {
+                    node.flow_lifecycle = FlowLifecycle::Active;
+                }
+                node
+            }
+            herdr::PanePresence::Unknown => node,
+            herdr::PanePresence::Absent => {
+                let _ = self.store.record_retired(&node.flow_id);
+                FlowNode {
+                    endpoint_selection: EndpointSelection::Unavailable,
+                    herdr_route_selection: HerdrRouteSelection::Unavailable,
+                    flow_lifecycle: FlowLifecycle::Retired,
+                    ..node
+                }
+            }
+        }
+    }
+}
+
+/// Waits out the transient ambiguity of a launch that is in fact succeeding.
+///
+/// Start submits the first prompt and cannot know in that instant whether
+/// the seat answered: a receipt that has not landed yet is
+/// `PromptDeliveryResult::Ambiguous`, and answering the caller with it makes
+/// every caller of a working launch handle a non-failure. The ambiguity is
+/// not intrinsic — the Nexus's own promoter is already watching the seat's
+/// transcript and settles the launch the moment the receipt lands — so
+/// Start simply waits for that outcome and answers it: Started, Replaced, or
+/// a typed rejection.
+///
+/// The wait ends on the outcome, never on the clock; the deadline only
+/// bounds a launch whose seat never answers at all, and a caller who reaches
+/// it still gets `StartAmbiguous` and can ask again or subscribe with
+/// `Observe.Launch`. The dispatch gate is not held: the promoter needs it.
+pub trait AwaitsLaunchSettlement {
+    /// The settled outcome, or None when nothing settled within the wait.
+    fn settled_launch(&self, launch_request_id: &str) -> Option<Response>;
+}
+
+impl RunningNexus {
+    /// How long Start waits for a seat to answer its receipt. A native
+    /// harness opens, loads its skills and replies well inside this; it is
+    /// the bound on a seat that never will.
+    const LAUNCH_SETTLEMENT_WAIT: Duration = Duration::from_secs(180);
+}
+
+impl AwaitsLaunchSettlement for RunningNexus {
+    fn settled_launch(&self, launch_request_id: &str) -> Option<Response> {
+        let changes = self.store.launch_changes.clone();
+        let deadline = std::time::Instant::now() + Self::LAUNCH_SETTLEMENT_WAIT;
+        loop {
+            let seen = changes.current();
+            match self.store.launch_outcome(launch_request_id) {
+                Ok(Some(outcome)) => return Some(outcome.response()),
+                Ok(None) => {}
+                Err(_) => return None,
+            }
+            if !changes.until(seen, deadline) {
+                return None;
+            }
+        }
+    }
+}
+
 impl RunningNexus {
     /// Store transitions are read-modify-write; one dispatch runs at a time
     /// across both sockets while frames are read concurrently.
     fn dispatch_serially(&self, query: Query) -> Response {
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.dispatch(query)
+        let launch_request_id = match &query {
+            Query::Start(request) | Query::Replace(request) => {
+                Some(request.launch_profile.launch_request_id.clone())
+            }
+            _ => None,
+        };
+        let response = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.dispatch(query)
+        };
+        // The gate is released before the wait: the launch is settled by the
+        // Nexus's own promoter, which needs the gate to do it.
+        match (launch_request_id, &response) {
+            (Some(launch_request_id), Response::StartAmbiguous(_)) => {
+                self.settled_launch(&launch_request_id).unwrap_or(response)
+            }
+            _ => response,
+        }
     }
 
     fn dispatch_meta_serially(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
@@ -1020,6 +1187,19 @@ mod tests {
             }))
         }
 
+        /// The lifecycle as the row holds it, with no reconciliation. This
+        /// is what the Send path did or did not write; List answers the
+        /// reconciled truth instead, which is a separate claim.
+        fn stored_lifecycle(&self) -> FlowLifecycle {
+            use crate::store::ReadsFlowRows as _;
+            self.nexus
+                .store
+                .flow_node("908786")
+                .expect("stored row")
+                .expect("registered flow")
+                .flow_lifecycle
+        }
+
         fn only_lifecycle(&self) -> FlowLifecycle {
             let Response::Listed(rows) = self
                 .nexus
@@ -1120,7 +1300,10 @@ mod tests {
             fixture.send("queued prompt"),
             Response::Sent(signal_flow::SendOutcome::Accepted("908786".into()))
         );
-        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Pending);
+        // The Send did not promote it: only a Presented Send does that.
+        // List separately reports the seat live, because its pane is.
+        assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Pending);
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
         assert_eq!(fixture.typed().as_deref(), Some("queued prompt"));
         assert_eq!(
             prompts(&operation_log),
@@ -1152,7 +1335,7 @@ mod tests {
             );
             assert_eq!(fixture.typed(), None, "{code}");
             assert_eq!(prompts(&operation_log).len(), 1, "{code}");
-            assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Pending, "{code}");
+            assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Pending, "{code}");
         }
     }
 
@@ -1183,7 +1366,7 @@ mod tests {
                 "{failure}: exactly one prompt, no retry"
             );
             assert_eq!(
-                fixture.only_lifecycle(),
+                fixture.stored_lifecycle(),
                 FlowLifecycle::Pending,
                 "{failure}"
             );
@@ -1204,7 +1387,7 @@ mod tests {
             Response::Sent(signal_flow::SendOutcome::Uncertain("908786".into()))
         );
         assert_eq!(prompts(&operation_log).len(), 1);
-        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Pending);
+        assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Pending);
     }
 
     #[test]
@@ -1473,7 +1656,9 @@ mod tests {
         );
         assert_eq!(fixture.typed(), None);
         assert!(prompts(&operation_log).is_empty());
-        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Pending);
+        // The pane is gone and Flow never stopped this flow: List says so
+        // rather than reporting it Pending on a route that is not there.
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Retired);
     }
 
     fn rebind(
@@ -1801,10 +1986,29 @@ mod tests {
                 "value":native_session_id
             }
         }}});
+        // The seat is really there: its pane answers `agent get`, the
+        // session snapshot shows it idle, and it takes a typed prompt. That
+        // is what lets Flow continue the seat into its brief once the
+        // receipt in the transcript is witnessed.
+        let snapshot = serde_json::json!({
+            "id":"cli:api:snapshot",
+            "result":{"snapshot":{"agents":[serde_json::json!({
+                "agent":"codex",
+                "agent_status":"idle",
+                "interactive_ready":true,
+                "name":"fixture-agent",
+                "pane_id":"w1:p1",
+                "revision":1,
+                "terminal_id":"fixture-terminal",
+                "workspace_id":"fixture-workspace"
+            })],"protocol":20,"version":"0.8.2"},
+            "type":"session_snapshot"}
+        });
         let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$*\" = \"--session fixture-session agent get w1:p1\" ] || exit 64\nprintf '%s\\n' '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" agent prompt \"*) exit 0 ;;\n  *) exit 64 ;;\nesac\n",
             herdr_calls.display(),
-            agent
+            agent,
+            snapshot
         );
         FixtureExecutable {
             path: fixture.snapshot_program.clone(),
@@ -1831,10 +2035,161 @@ mod tests {
             Response::Started(started)
                 if started.flow_id == "908786" && started.session_id == native_session_id
         ));
+        let calls = fs::read_to_string(herdr_calls).unwrap();
+        // The receipt was promoted from what was already written: no second
+        // external write, and the first prompt is never re-typed. The one
+        // prompt in the log is the continuation into the brief.
+        only_the_brief_continuation_was_typed(&calls);
+    }
+
+    /// A seat Flow never stopped can still be gone: its pane leaves Herdr
+    /// and nothing can reach it. List used to answer such a flow Pending on
+    /// the route it was bound to, which is what made a retired flow look
+    /// launchable. It is Retired, its route is gone with the pane, its row
+    /// and its history stay, and nothing is sent to it.
+    #[test]
+    fn a_flow_whose_pane_left_herdr_is_listed_retired_and_keeps_its_row() {
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        let node = fixture.node();
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node.clone())),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
+
+        // The pane exits. Nothing else changes.
+        fixture.set_agents(vec![]);
+
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("List answers")
+        };
+        assert_eq!(rows.len(), 1, "the row and its history stay");
+        assert_eq!(rows[0].flow_id, "908786");
+        assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Retired);
         assert_eq!(
-            fs::read_to_string(herdr_calls).unwrap(),
-            "--session fixture-session agent get w1:p1\n"
+            rows[0].herdr_route_selection,
+            HerdrRouteSelection::Unavailable
         );
+        assert_eq!(rows[0].endpoint_selection, EndpointSelection::Unavailable);
+        assert_eq!(
+            rows[0].origin_clue, node.origin_clue,
+            "its provenance is kept"
+        );
+
+        // Retirement is recorded, so it answers the same way again, and the
+        // flow is no longer a recipient or a target of Send.
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Retired);
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("908786".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::FlowUnavailable
+            )
+        );
+        assert_eq!(
+            fixture.send("to a seat that is gone"),
+            Response::SendRejected(signal_flow::SendRejection::FlowStopped)
+        );
+    }
+
+    /// A seat bound through the privileged contract, or started before Flow
+    /// Nexus, has no Presented Send to promote it, and so stayed Pending for
+    /// as long as it lived. Herdr showing its bound pane present is a witness
+    /// that it is live, and List says so.
+    #[test]
+    fn a_pending_seat_whose_pane_herdr_shows_live_is_listed_active() {
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        fixture.register_with(FlowLifecycle::Pending);
+        assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Pending);
+
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
+        // The witness is kept: the row itself now says Active.
+        assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Active);
+    }
+
+    /// Flow had no way to retire a flow at all, so a seat retired elsewhere
+    /// stayed listed as if it were launchable. Retire is privileged, keeps
+    /// the row and its history, and takes the flow out of receiving.
+    #[test]
+    fn retire_keeps_the_row_and_takes_the_flow_out_of_receiving() {
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        let node = fixture.node();
+        fixture.register_with(FlowLifecycle::Active);
+
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::Retire("unknown".into())),
+            meta_signal_flow::Response::RetireRejected(
+                meta_signal_flow::RetireRejection::UnknownFlow
+            )
+        );
+
+        let meta_signal_flow::Response::FlowRetired(retired) = fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::Retire("908786".into()))
+        else {
+            panic!("a live flow is retired")
+        };
+        assert_eq!(retired.flow_lifecycle, FlowLifecycle::Retired);
+        assert_eq!(retired.flow_id, "908786");
+        assert_eq!(retired.session_id, node.session_id, "its history is kept");
+        assert_eq!(retired.origin_clue, node.origin_clue);
+
+        // Retiring it again changes nothing and says so.
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::Retire("908786".into())),
+            meta_signal_flow::Response::RetireRejected(
+                meta_signal_flow::RetireRejection::AlreadyGone
+            )
+        );
+
+        // Its pane is still live in Herdr, and it stays Retired anyway:
+        // retirement is a decision about the flow, not a reading of Herdr.
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Retired);
+        assert_eq!(
+            fixture.send("to a retired flow"),
+            Response::SendRejected(signal_flow::SendRejection::FlowStopped)
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("908786".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::FlowUnavailable
+            )
+        );
+    }
+
+    /// A Herdr that cannot be read never retires a flow: the pane's fate is
+    /// unknown, so the row is answered as it stands.
+    #[test]
+    fn an_unreadable_herdr_leaves_a_listed_flow_as_it_stands() {
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(fixture.node())),
+            meta_signal_flow::Response::FlowRegistered(_)
+        ));
+        FixtureExecutable {
+            path: fixture.snapshot_program.clone(),
+        }
+        .install("#!/bin/sh\necho 'herdr: server unreachable' >&2\nexit 1\n");
+
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
     }
 
     #[test]
@@ -2049,6 +2404,23 @@ mod tests {
             self.herdr_for_replacement_showing(close_status, vec![self.current_agent()])
         }
 
+        /// The successor's own pane as a snapshot shows it: the staged
+        /// launch binds w1:p1 on the fixture terminal. Every replacement
+        /// stand-in shows it, because the successor's seat is really there;
+        /// only the predecessor's presence varies between these tests.
+        fn successor_agent(&self) -> serde_json::Value {
+            serde_json::json!({
+                "agent":"codex",
+                "agent_status":"working",
+                "interactive_ready":true,
+                "name":"fixture-agent",
+                "pane_id":"w1:p1",
+                "revision":1,
+                "terminal_id":"fixture-terminal",
+                "workspace_id":"fixture-workspace"
+            })
+        }
+
         /// The same stand-in after the predecessor's pane has exited: no
         /// snapshot shows it.
         fn herdr_after_predecessor_exit(&self, close_status: i32) -> PathBuf {
@@ -2078,6 +2450,8 @@ mod tests {
             close_status: i32,
             agents: Vec<serde_json::Value>,
         ) -> PathBuf {
+            let mut agents = agents;
+            agents.push(self.successor_agent());
             let log = self.directory.path().join("herdr-calls.log");
             let agent = serde_json::json!({"result":{"agent":{
                 "name":"fixture-agent",
@@ -2384,7 +2758,7 @@ mod tests {
             1,
             "{calls}"
         );
-        assert!(!calls.contains("agent prompt"), "{calls}");
+        only_the_brief_continuation_was_typed(&calls);
     }
 
     #[test]
@@ -2613,6 +2987,60 @@ mod tests {
         // Replaced is answered by the replacement fixture above.
     }
 
+    /// e167d8: a plain Start first answered StartAmbiguous and only the
+    /// watcher promoted it later, so every caller of a launch that was in
+    /// fact succeeding had to handle a non-failure. The ambiguity is not
+    /// intrinsic — the Nexus is already watching the seat's transcript — so
+    /// Start waits for that settlement and answers it. The caller sees
+    /// Started; StartAmbiguous is left for a seat that never answers.
+    #[test]
+    fn a_plain_start_answers_started_rather_than_the_transient_ambiguity() {
+        use crate::launching::PromotesAmbiguousLaunches;
+        let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+        let calls = fixture.herdr_for_replacement(0);
+        let mut launch = fixture.staged_launch("settling-request", None);
+        launch.stage_to_ambiguity(&fixture.nexus);
+        let request = launch.request();
+        let looks = || {
+            fs::read_to_string(&calls)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        let before_start = looks();
+
+        // No promoter runs yet, so Start is the only thing that can look at
+        // the transcript: the log growing is Start having looked and found
+        // no receipt, which is exactly where it used to answer ambiguity.
+        let answering =
+            std::thread::spawn(move || fixture.nexus.dispatch_serially(Query::Start(request)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while looks() == before_start {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Start never looked for the receipt"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Only now does the seat answer its receipt, and only now is there
+        // anything watching for it.
+        launch.write_receipt();
+        std::thread::spawn(move || fixture.nexus.promote_ambiguous_launches());
+
+        let answer = answering.join().expect("Start answered");
+        let Response::Started(started) = answer else {
+            panic!("a launch that succeeded answers Started, not {answer:?}")
+        };
+        assert_eq!(started.flow_id, "908786");
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("settling-request".into())),
+            Response::Started(started)
+        );
+    }
+
     /// 88475f: Start answered StartAmbiguous, the receipt landed half a
     /// minute later, and nobody subscribed or sent Start again. The
     /// Nexus's own watch promotes it.
@@ -2744,8 +3172,23 @@ mod tests {
         );
         assert!(Frame::read_response(&mut late).is_err());
         let calls = fs::read_to_string(calls).unwrap_or_default();
-        assert!(!calls.contains("agent prompt"), "{calls}");
+        only_the_brief_continuation_was_typed(&calls);
         assert!(!calls.contains("pane create"), "{calls}");
+    }
+
+    /// Asserts the Herdr call log shows exactly one typed prompt, the
+    /// continuation Flow sends the moment the launch receipt is witnessed,
+    /// on the successor's own pane. Nothing else is ever typed at a launch:
+    /// the first prompt is never sent twice.
+    fn only_the_brief_continuation_was_typed(calls: &str) {
+        assert_eq!(calls.matches("agent prompt").count(), 1, "{calls}");
+        assert!(
+            calls.contains(&format!(
+                "--session fixture-session agent prompt w1:p1 {}",
+                crate::launching::BriefContinuation::TEXT
+            )),
+            "{calls}"
+        );
     }
 
     fn bind_existing_caller(fixture: &NexusFixture, flow_id: &str, pane: &str) {

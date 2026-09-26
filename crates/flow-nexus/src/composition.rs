@@ -8,7 +8,7 @@ use signal_flow::{
 use std::{
     collections::HashSet,
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -160,6 +160,12 @@ pub trait ValidatesComposedPrompt {
 /// The receipt a launched Flow is asked for. Its single line is bound to the
 /// Flow by native session, transcript cursor and the authenticated first
 /// turn, so the marker itself carries no identity and no hash.
+///
+/// Asking for the marker and nothing else is what makes it verifiable, and
+/// it is also what ends the seat's turn. The brief the same prompt carries
+/// is therefore not begun by this footer; Flow begins it, sending
+/// [`crate::launching::BriefContinuation`] over the seat's bound route the
+/// moment the receipt is witnessed. The footer stays exactly as it is.
 pub struct LaunchReceipt;
 
 impl LaunchReceipt {
@@ -309,6 +315,14 @@ trait ValidatesLaunchProfile {
 trait ReadsLaunchSource {
     /// Verifies the source bytes against the profile hash and returns the
     /// canonical absolute path the prompt names.
+    ///
+    /// A `SourcePath` is written either way and the rule is the same for
+    /// both: absolute is taken as written, relative is taken under
+    /// `FLOW_SOURCE_ROOT`, and the source is accepted exactly when the path
+    /// it resolves to lies inside that root. Anything outside is
+    /// `SourceOutsideRoot`, whichever spelling asked for it. This is the
+    /// same shape `system_prompt_bundle_file` already required, so a caller
+    /// no longer has to spell one profile field two ways.
     fn read(&self, source: &LaunchSource) -> Result<PathBuf, CompositionError>;
 }
 
@@ -470,13 +484,8 @@ impl ValidatesLaunchProfile for LaunchComposer {
 
 impl ReadsLaunchSource for LaunchComposer {
     fn read(&self, source: &LaunchSource) -> Result<PathBuf, CompositionError> {
-        let relative = Path::new(&source.source_path);
-        if relative.as_os_str().is_empty()
-            || relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
-        {
+        let written = Path::new(&source.source_path);
+        if written.as_os_str().is_empty() {
             return Err(CompositionError::SourceOutsideRoot(
                 source.source_path.clone(),
             ));
@@ -501,7 +510,13 @@ impl ReadsLaunchSource for LaunchComposer {
             .source_root
             .canonicalize()
             .map_err(|_| CompositionError::UnreadableSource(source.source_path.clone()))?;
-        let candidate = root.join(relative);
+        // One rule for both spellings: an absolute path is taken as it is
+        // written and a relative one is taken under the root, and either is
+        // accepted exactly when what it resolves to lies inside the root.
+        // `Path::join` yields the absolute path unchanged, so the two
+        // spellings meet here. Escape by `..` or by symlink is caught below,
+        // where the canonical path is required to start with the root.
+        let candidate = root.join(written);
         if !candidate.exists() {
             return Err(CompositionError::MissingSource(source.source_path.clone()));
         }
@@ -725,6 +740,7 @@ mod tests {
         LaunchComposer, NamesRemoteControl, OpensLaunchComposer, ShortensLaunchRequest,
         ValidatesComposedPrompt,
     };
+    use sha2::Digest as _;
     use signal_flow::{
         FlowAspect, HarnessKind, LaunchProfile, LaunchSource, PowerLevel, RememberedFlow,
     };
@@ -1124,6 +1140,91 @@ mod tests {
             unchanged_body_hash
         );
         assert!(!composed.has_canonical_first_prompt());
+    }
+
+    /// One rule for both spellings. `system_prompt_bundle_file` must be
+    /// absolute, so a caller that writes a source path absolutely is
+    /// spelling the same profile the same way; the composer accepts it, and
+    /// the prompt names the same canonical file either way.
+    #[test]
+    fn a_source_inside_the_root_is_read_whether_it_is_written_absolute_or_relative() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"exact source bytes\n";
+        fs::write(root.path().join("inside.md"), bytes).unwrap();
+        let hash = format!("{:x}", super::Sha256::digest(bytes));
+        let composer = LaunchComposer::at(root.path(), root.bundles());
+
+        let relative = composer
+            .compose(&root.profile(vec![LaunchSource {
+                source_path: "inside.md".into(),
+                source_sha256: hash.clone(),
+            }]))
+            .expect("a relative source under the root is read");
+        let absolute_path = root.path().join("inside.md").to_string_lossy().into_owned();
+        let absolute = composer
+            .compose(&root.profile(vec![LaunchSource {
+                source_path: absolute_path.clone(),
+                source_sha256: hash,
+            }]))
+            .expect("an absolute source inside the root is read");
+
+        let named = root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("inside.md")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            relative
+                .first_prompt_payload
+                .first_prompt_body
+                .contains(&named),
+            "{}",
+            relative.first_prompt_payload.first_prompt_body
+        );
+        assert_eq!(
+            relative.first_prompt_payload.first_prompt_body,
+            absolute.first_prompt_payload.first_prompt_body,
+            "both spellings name the same canonical file"
+        );
+    }
+
+    /// Outside is outside, however it is written: the absolute spelling is
+    /// not a way past the root, and neither is `..`.
+    #[test]
+    fn a_source_outside_the_root_is_refused_in_either_spelling() {
+        let outside = tempfile::tempdir().unwrap();
+        let bytes = b"outside bytes\n";
+        fs::write(outside.path().join("outside.md"), bytes).unwrap();
+        let hash = format!("{:x}", super::Sha256::digest(bytes));
+        let root = tempfile::tempdir().unwrap();
+        let composer = LaunchComposer::at(root.path(), root.bundles());
+
+        let absolute_path = outside
+            .path()
+            .join("outside.md")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            composer.compose(&root.profile(vec![LaunchSource {
+                source_path: absolute_path.clone(),
+                source_sha256: hash.clone(),
+            }])),
+            Err(CompositionError::SourceOutsideRoot(absolute_path))
+        );
+
+        let escaping = format!(
+            "../{}/outside.md",
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(matches!(
+            composer.compose(&root.profile(vec![LaunchSource {
+                source_path: escaping,
+                source_sha256: hash,
+            }])),
+            Err(CompositionError::SourceOutsideRoot(_) | CompositionError::MissingSource(_))
+        ));
     }
 
     #[test]

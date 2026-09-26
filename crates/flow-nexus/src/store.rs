@@ -328,6 +328,29 @@ enum FlowLifecycle {
     Pending,
     Active,
     Stopped,
+    Retired,
+}
+
+/// Whether a lifecycle on the wire still names a reachable seat. Stopped
+/// and Retired are both gone: Flow stopped the one and lost the other, and
+/// neither can be sent to, resolved as a recipient, stopped or replaced.
+pub trait NamesLiveFlow {
+    fn is_live(&self) -> bool;
+}
+
+impl NamesLiveFlow for SignalFlowLifecycle {
+    fn is_live(&self) -> bool {
+        matches!(self, Self::Pending | Self::Active)
+    }
+}
+
+impl FlowLifecycle {
+    /// Whether the flow can still be reached: only a live seat can be sent
+    /// to, resolved as a recipient, stopped or replaced. Stopped and Retired
+    /// are both gone; they differ in how they went.
+    fn is_live(&self) -> bool {
+        matches!(self, Self::Pending | Self::Active)
+    }
 }
 
 impl EngineRecord for FlowRecord {
@@ -662,6 +685,30 @@ impl LaunchChanges {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Blocks until the count moves past `seen` or `deadline` passes.
+    /// `true` when a change came, `false` when the deadline did. A caller
+    /// that must eventually answer waits this way; one that runs for the
+    /// life of the Nexus uses [`Self::after`].
+    pub fn until(&self, seen: u64, deadline: std::time::Instant) -> bool {
+        let (count, changed) = &*self.count;
+        let mut guard = count
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *guard == seen {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            let (next, timed_out) = changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard = next;
+            if timed_out.timed_out() && *guard == seen {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Blocks until the count moves past `seen`, then returns the new count.
     pub fn after(&self, seen: u64) -> u64 {
         let (count, changed) = &*self.count;
@@ -913,6 +960,10 @@ pub trait ReadsFlowRows {
 pub trait RecordsFlowLifecycle {
     fn record_active(&self, flow_id: &str) -> Result<bool, StoreError>;
     fn record_stopped(&self, flow_id: &str) -> Result<bool, StoreError>;
+    /// The flow's native seat is gone and Flow never stopped it: its row and
+    /// its history stay, and it is live no longer. A flow already Stopped
+    /// keeps that state — how it went is not rewritten.
+    fn record_retired(&self, flow_id: &str) -> Result<bool, StoreError>;
 }
 
 trait ReadsFlowStore {
@@ -1236,7 +1287,7 @@ impl FlowStore {
                 && stored.route.herdr_pane_id == bound_route.herdr_pane_id
                 && stored.route.herdr_terminal_id == bound_route.herdr_terminal_id
         });
-        if flow.lifecycle == FlowLifecycle::Stopped
+        if !flow.lifecycle.is_live()
             || flow.thread_id.as_deref() != Some(binding.session_id.as_str())
             || flow.harness_kind != binding.harness_kind
             || !same_route
@@ -1313,6 +1364,7 @@ impl FlowStore {
             SignalFlowLifecycle::Pending => FlowLifecycle::Pending,
             SignalFlowLifecycle::Active => FlowLifecycle::Active,
             SignalFlowLifecycle::Stopped => FlowLifecycle::Stopped,
+            SignalFlowLifecycle::Retired => FlowLifecycle::Retired,
         };
         let record = FlowRecord {
             flow_id: flow_node.flow_id.clone(),
@@ -1617,7 +1669,7 @@ impl ReadsFlowRoles for FlowStore {
             };
             if route.herdr_session_name != herdr_session_name
                 || route.herdr_pane_id != herdr_pane_id
-                || node.flow_lifecycle == SignalFlowLifecycle::Stopped
+                || !node.flow_lifecycle.is_live()
                 || self.held_successor(&node.flow_id)?
             {
                 continue;
@@ -2169,7 +2221,7 @@ impl ReadsFlowStore for FlowStore {
             ));
         };
         if node.session_id.is_empty()
-            || node.flow_lifecycle == SignalFlowLifecycle::Stopped
+            || !node.flow_lifecycle.is_live()
             || self.held_successor(flow_id)?
         {
             return Ok(Response::RecipientResolutionRejected(
@@ -2199,6 +2251,7 @@ impl ReadsFlowRows for FlowStore {
                 FlowLifecycle::Pending => SignalFlowLifecycle::Pending,
                 FlowLifecycle::Active => SignalFlowLifecycle::Active,
                 FlowLifecycle::Stopped => SignalFlowLifecycle::Stopped,
+                FlowLifecycle::Retired => SignalFlowLifecycle::Retired,
             },
         }))
     }
@@ -2224,7 +2277,7 @@ impl RecordsFlowLifecycle for FlowStore {
         let Some(mut flow) = self.flow(flow_id)? else {
             return Ok(false);
         };
-        if flow.lifecycle == FlowLifecycle::Stopped {
+        if !flow.lifecycle.is_live() {
             return Ok(false);
         }
         flow.lifecycle = FlowLifecycle::Active;
@@ -2241,6 +2294,22 @@ impl RecordsFlowLifecycle for FlowStore {
             return Ok(false);
         };
         flow.lifecycle = FlowLifecycle::Stopped;
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.flows,
+            RecordKey::new(flow_id),
+            flow,
+        ))?;
+        Ok(true)
+    }
+
+    fn record_retired(&self, flow_id: &str) -> Result<bool, StoreError> {
+        let Some(mut flow) = self.flow(flow_id)? else {
+            return Ok(false);
+        };
+        if !flow.lifecycle.is_live() {
+            return Ok(false);
+        }
+        flow.lifecycle = FlowLifecycle::Retired;
         self.engine.mutate_keyed(KeyedMutation::new(
             self.flows,
             RecordKey::new(flow_id),

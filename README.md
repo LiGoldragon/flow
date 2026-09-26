@@ -40,12 +40,21 @@ carries the Flow ID, pane ID and observation Unix time. When the agent is
 working, the prompt is queued and the answer is `Sent.Accepted`: no reaction
 to it can be told from the running turn. A prompt that may have been typed
 but whose reaction was not observed answers `Sent.Uncertain`, is never
-retried, and must not be resent blindly. Only `Presented` promotes a Pending
-row to Active; Presented is not Read, which only the target's own later
+retried, and must not be resent blindly. A Pending row becomes Active when the flow
+is witnessed live: on a `Presented` Send, or when `List` finds its bound pane
+present in Herdr. Presented is not Read, which only the target's own later
 response can witness. `Stop` persists the
 Stopped lifecycle only after `herdr pane close` succeeds for the revalidated
-pane. `List` returns all durable rows, sorted by Flow ID, including Pending and
-Stopped rows.
+pane. `List` returns all durable rows, sorted by Flow ID, and reports each one's
+true lifecycle. A row that is still live is reconciled against Herdr before it
+is answered: its route is refreshed, and a flow whose pane Herdr no longer
+shows is `Retired`, the lifecycle of a seat Flow did not stop and no longer
+finds. A Retired row keeps its origin and its history and is reported with no
+route and no endpoint; a Herdr that cannot be read retires nothing. `Send`,
+`ResolveRecipient`, `Stop` and `Replace` treat Retired as they treat
+Stopped. The privileged `Retire` records the same state deliberately, for a
+seat Flow lost or one retired elsewhere: it keeps the row and refuses
+`AlreadyGone` for a flow that is already Stopped or Retired.
 
 `Start` carries a typed `LaunchProfile` plus an `OriginClue`. The origin is a
 caller claim; its text does not authenticate the caller. A profile names its
@@ -168,10 +177,15 @@ offer without writing any settings file.
 
 The prompt is lean: no launch request ID, no hash, and no inlined source text.
 Sources are named by absolute path after their bytes are checked against the
-profile hash. The requested receipt is the fixed line
+profile hash. A profile may write a source path absolute or relative: an
+absolute path is taken as written, a relative one under `FLOW_SOURCE_ROOT`,
+and either is read exactly when what it resolves to lies inside that root. The requested receipt is the fixed line
 `FLOW_LAUNCH_RECEIPT_V2`; the observer binds it to the launch by native
 session, transcript cursor, and the authenticated first turn, whose body
-digest stays in the store. A Claude launch is remotely controllable under a
+digest stays in the store. Asking for that line and nothing else ends the
+seat's turn, so Flow begins the brief itself: once the launch is Started it
+types one fixed continuation line into the seat's bound pane, and no caller
+and no human has to follow a launch. A Claude launch is remotely controllable under a
 name unique to the Flow, `flow-` and the launch request ID's short form (the
 first sixteen hex digits of its SHA-256; the bundle copy is named by the same
 short form, so two launch requests never share either). The Flow ID is claimed from the native

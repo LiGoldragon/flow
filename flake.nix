@@ -34,7 +34,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.12.2";
+            version = "0.13.0";
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -110,6 +110,22 @@
             "tests::registration_carries_the_complete_herdr_binding";
           flow-native-resolution-serialization = context.exactTest "flow"
             "tests::native_resolution_serialization_matches_the_signal_contract";
+          flow-source-path-either-spelling = context.exactTest "flow-nexus"
+            "composition::tests::a_source_inside_the_root_is_read_whether_it_is_written_absolute_or_relative";
+          flow-source-outside-root-refused = context.exactTest "flow-nexus"
+            "composition::tests::a_source_outside_the_root_is_refused_in_either_spelling";
+          flow-retired-flow-listing = context.exactTest "flow-nexus"
+            "tests::a_flow_whose_pane_left_herdr_is_listed_retired_and_keeps_its_row";
+          flow-unreadable-herdr-retires-nothing = context.exactTest "flow-nexus"
+            "tests::an_unreadable_herdr_leaves_a_listed_flow_as_it_stands";
+          flow-start-settles-before-answering = context.exactTest "flow-nexus"
+            "tests::a_plain_start_answers_started_rather_than_the_transient_ambiguity";
+          flow-brief-continuation-after-receipt = context.exactTest "flow-nexus"
+            "tests::replace_stops_the_predecessor_before_the_successor_is_routable";
+          flow-live-pane-lists-active = context.exactTest "flow-nexus"
+            "tests::a_pending_seat_whose_pane_herdr_shows_live_is_listed_active";
+          flow-retire-keeps-history = context.exactTest "flow-nexus"
+            "tests::retire_keeps_the_row_and_takes_the_flow_out_of_receiving";
         }
       );
 

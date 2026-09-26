@@ -375,6 +375,7 @@ impl LaunchesFlows for RunningNexus {
                         launch_request_id,
                         LaunchOutcome::Started(started.clone()),
                     );
+                    self.continue_into_brief(&started.flow_id);
                     Response::Started(started)
                 }
             },
@@ -539,6 +540,7 @@ impl LaunchesFlows for RunningNexus {
                 StopRejection::PersistenceRefused,
             ));
         }
+        self.continue_into_brief(&replaced.started.flow_id);
         Response::Replaced(replaced)
     }
 
@@ -844,5 +846,63 @@ impl PromotesObservedLaunch for RunningNexus {
         }
         let response = self.promote_ambiguous(attempt);
         self.settle(launch_request_id, response);
+    }
+}
+
+/// What a seat is told the moment its launch receipt is confirmed.
+///
+/// The first prompt ends by asking for the receipt marker and nothing else,
+/// which is what makes the receipt verifiable: the seat's first turn is
+/// exactly one known line. That same ending ends the turn, so the brief the
+/// first prompt carries would sit there unstarted, waiting for someone to
+/// say go. Nobody says go. Flow does: the receipt is witnessed, the launch
+/// is Started, and Flow sends this one line over the same bound route Send
+/// uses. No caller and no human follows a launch.
+pub struct BriefContinuation;
+
+impl BriefContinuation {
+    pub const TEXT: &'static str =
+        "Launch receipt confirmed. Begin the brief in your first prompt now.";
+}
+
+/// Sends the continuation once a launch has Started.
+pub trait ContinuesIntoBrief {
+    /// Best effort by design: the flow is Started whatever this does. A
+    /// continuation that does not reach the seat is reported to the Nexus
+    /// log, never turned into a launch rejection — the seat exists, is
+    /// registered and is routable, and one more Send can reach it.
+    fn continue_into_brief(&self, flow_id: &str);
+}
+
+impl ContinuesIntoBrief for RunningNexus {
+    fn continue_into_brief(&self, flow_id: &str) {
+        let node = match self.store.flow_node(flow_id) {
+            Ok(Some(node)) => self.herdr.refresh_route(node),
+            Ok(None) => {
+                eprintln!("flow-nexus: flow {flow_id} has no row to continue into its brief");
+                return;
+            }
+            Err(error) => {
+                eprintln!("flow-nexus: flow {flow_id} row unreadable for its brief: {error}");
+                return;
+            }
+        };
+        if !matches!(
+            node.herdr_route_selection,
+            signal_flow::HerdrRouteSelection::Available(_)
+        ) {
+            eprintln!("flow-nexus: flow {flow_id} has no route for its brief");
+            return;
+        }
+        match self.herdr.prompt(&node, BriefContinuation::TEXT) {
+            // The seat was seen reacting to a real Send: it is Active.
+            Ok(signal_flow::SendOutcome::Presented(_)) => {
+                let _ = self.store.record_active(flow_id);
+            }
+            Ok(_) => {}
+            Err(rejection) => {
+                eprintln!("flow-nexus: flow {flow_id} brief continuation refused: {rejection:?}");
+            }
+        }
     }
 }

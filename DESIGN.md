@@ -108,6 +108,27 @@ that watch itself for every ambiguous launch, from startup on, so a receipt
 that lands after `StartAmbiguous` promotes with no subscriber and no second
 Start. Nothing re-reads on a timer.
 
+A plain `Start` does not answer the caller with that ambiguity while the
+launch is in fact settling: having submitted the first prompt it releases the
+dispatch gate and waits for the launch's outcome, which the same watch
+produces, and answers it. `StartAmbiguous` is what a seat that never answers
+at all comes to, once the wait's bound has passed.
+
+When a launch is Started, Flow continues the seat into its brief. The receipt
+footer asks the seat for one marker line and nothing else, which is what binds
+the receipt to the launch and also what ends the seat's turn; the brief the
+same prompt carries is therefore begun by Flow, which types one fixed
+continuation line into the seat's bound pane the moment the receipt is
+witnessed. No caller and no human follows a launch.
+
+`List` answers the reconciled truth, not the stored row alone: a live flow's
+bound pane is looked for in Herdr, and finding it present witnesses the flow
+live (recorded Active, route refreshed) while finding it gone retires the flow
+(recorded `Retired`, no route, row and history kept). A Herdr that cannot be
+read changes nothing. `Retire` on the meta socket is the deliberate form of
+the same state, for a seat Flow lost or that was retired elsewhere; it is not
+`Stop`, which closes a pane Flow still holds, and it is not a delete.
+
 `RegisterFlow` is a meta Signal for importing sessions created before Flow
 Nexus. It preserves the same `FlowNode` shape used by resolution, so imported
 and Nexus-launched identities share one registry and one read contract.

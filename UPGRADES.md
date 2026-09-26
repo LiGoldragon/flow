@@ -1,3 +1,61 @@
+# Flow 0.13.0
+
+A minor release on signal-flow 6.1.0 and meta-signal-flow 8.0.1: the ordinary
+wire gains a `Retired` flow lifecycle, the privileged wire gains `Retire`, and
+the witnessed faults on the Start and List path are fixed (flows/e167d8, with
+evidence from flows/88475f and Field Luna).
+
+- A `LaunchSource.SourcePath` is accepted written absolute or relative. One
+  rule holds for both: an absolute path is taken as written, a relative one
+  under `FLOW_SOURCE_ROOT`, and a source is read exactly when the path it
+  resolves to lies inside that root. Anything outside, by `..` or by symlink
+  or by absolute spelling, is still `SourceOutsideRoot`. Start no longer
+  refuses a profile whose source path is spelled the way
+  `system_prompt_bundle_file` requires.
+- Once a launch receipt is witnessed, Flow itself continues the seat into its
+  brief. The receipt footer asks for the marker and nothing else, which is
+  what makes it verifiable and also what ends the seat's first turn: the brief
+  the same prompt carries used to sit there until a human sent a second
+  prompt. Flow now types one line, "Launch receipt confirmed. Begin the brief
+  in your first prompt now.", into the seat's bound pane as soon as the launch
+  is Started (or Replaced, once the successor is routable). Receipt
+  verification is untouched, and the first prompt is never re-sent. A
+  continuation that cannot be typed is logged; the flow is Started either way.
+- `List` reports each flow's true lifecycle. A listed flow that is still live
+  is reconciled against Herdr: its route is refreshed, and a flow whose pane
+  Herdr no longer shows is `Retired` — a new lifecycle for the seat Flow did
+  not stop and no longer finds. Its row, origin and history stay; its route
+  and endpoint are reported `Unavailable`; retirement is recorded, so it is
+  found once. A Herdr that cannot be read retires nothing. `Send`,
+  `ResolveRecipient`, `Stop` and `Replace` treat `Retired` as they treat
+  `Stopped`: `FlowStopped`, `FlowUnavailable`, `AlreadyStopped` and
+  `PredecessorStopped`.
+- `Retire` is new on the privileged contract: one `FlowId`, answered with
+  `FlowRetired` carrying the whole row, or `RetireRejected` naming
+  `UnknownFlow`, `AlreadyGone` or `StoreRefused`. It is how a seat Flow lost —
+  retired elsewhere, or gone without Flow closing it — leaves Flow's receiving
+  without its row, origin or history being dropped, and without pretending
+  Flow stopped it. Flow had no such verb at all, which is why d8df70 and
+  e51411 stayed listed Pending after messenger-clj had retired them
+  (flows/88475f, Field Luna's audit).
+- A Pending flow becomes Active when it is witnessed live, which is now a
+  Presented Send *or* List finding its bound pane present in Herdr. Only a
+  Presented Send promoted one before, so a seat bound through
+  `MetaBindExisting` or started before Flow Nexus stayed Pending for as long
+  as it lived: of fifteen listed flows only four read Active while every Mind
+  and Field seat was running. The Send path itself is unchanged — it still
+  promotes only on Presented.
+- A plain `Start` answers `Started` for a launch that succeeds. It used to
+  answer `StartAmbiguous` the instant the first prompt was submitted, leaving
+  0.12.2's watcher to promote it later, so every caller of a working launch
+  had to handle a non-failure. The ambiguity is not intrinsic — the Nexus is
+  already watching the seat's transcript — so Start waits for the launch to
+  settle and answers the settled outcome. It waits on the settlement, never on
+  a timer; the dispatch gate is released throughout, so the promoter and every
+  other query run meanwhile. A seat that never answers at all still reaches
+  the bound (three minutes) and is answered `StartAmbiguous`, which the
+  watcher and `Observe.Launch` handle as before.
+
 # Flow 0.12.2
 
 A patch: no wire or contract change. A binding of a flow Flow already holds

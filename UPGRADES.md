@@ -1,3 +1,28 @@
+# Flow 0.12.2
+
+A patch: no wire or contract change. A binding of a flow Flow already holds
+can give that flow its role.
+
+- `MetaBindExisting` of a FlowId already in the store is no longer refused
+  outright. When the stored flow is that binding (not Stopped; the same native
+  thread and harness; a route on the same Herdr session, pane and terminal,
+  whatever the agent is now named), the binding's role is recorded if the flow
+  has none. Nothing else is written: lifecycle, endpoint, route and origin stay
+  as stored, and a repeat changes nothing. The reply is
+  `Bound.{ <flow> RegisteredUnconfirmed }`, the only bound form the meta
+  contract has; for a flow that was already Active it confirms nothing new.
+  This lets a roleless registered flow such as 5f38bc (meta `RegisterFlow`)
+  take a role without disturbing its binding.
+- Any other binding of a held FlowId, or a role different from one already
+  recorded, is still refused as `DuplicateFlowId` and writes nothing.
+- Stated, with fixtures, not changed: an imported Codex flow is routed through
+  its Herdr pane alone. `MetaBindExisting` stores its Codex endpoint as
+  `Unavailable`; nothing on the ResolveRecipient or Send path consults the
+  endpoint or the Codex runtime configuration. ResolveRecipient reports the
+  Herdr route and the endpoint as separate facts, Send types into the pane when
+  the route is Available, and a Presented Send promotes Pending to Active with
+  the endpoint left `Unavailable`.
+
 # Flow 0.12.1
 
 A patch: no wire or contract change. Opening the store no longer depends on

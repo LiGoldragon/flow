@@ -57,7 +57,12 @@ ModelName }`, kept as its own record when MetaBindExisting binds a flow or a
 Start registers one. The optional FlowId in the request is the caller's claim:
 a different one is refused as `CallerMismatch`, which carries the true Caller.
 A store written before roles were kept adopts them when it opens, from the
-binding launch's profile or from the flow type MetaBindExisting wrote. `Send`
+binding launch's profile or from the flow type MetaBindExisting wrote. A
+MetaBindExisting of a flow already held records its role only when the stored
+flow is that binding (thread, harness, Herdr session, pane and terminal) and
+has no other role; it writes nothing else, and any other binding is refused as
+`DuplicateFlowId`. The Codex endpoint of an imported flow is a separate fact,
+never a gate: routing and promotion follow the Herdr route. `Send`
 takes this up next: its connection resolves the caller the same way and
 carries the Caller as the message's sender.
 

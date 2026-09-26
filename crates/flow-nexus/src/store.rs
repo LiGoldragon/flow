@@ -1216,6 +1216,49 @@ impl ConfiguresFlowStore for FlowStore {
 }
 
 impl FlowStore {
+    /// A binding that names a flow already in the store asserts only its
+    /// role, and only when the stored flow is that binding: not Stopped, the
+    /// same native thread and harness, and a route on the same Herdr session,
+    /// pane and terminal (the agent name may have changed since). A role
+    /// already recorded must be the same one. Nothing else is written: the
+    /// flow keeps its lifecycle, endpoint, route and origin.
+    fn assert_role_of_matching_binding(
+        &self,
+        flow: FlowRecord,
+        binding: &FlowNode,
+        role: Caller,
+    ) -> Result<FlowRegistration, StoreError> {
+        let HerdrRouteSelection::Available(bound_route) = &binding.herdr_route_selection else {
+            return Ok(FlowRegistration::ConflictingBinding);
+        };
+        let same_route = self.herdr_route(&flow.flow_id)?.is_some_and(|stored| {
+            stored.route.herdr_session_name == bound_route.herdr_session_name
+                && stored.route.herdr_pane_id == bound_route.herdr_pane_id
+                && stored.route.herdr_terminal_id == bound_route.herdr_terminal_id
+        });
+        if flow.lifecycle == FlowLifecycle::Stopped
+            || flow.thread_id.as_deref() != Some(binding.session_id.as_str())
+            || flow.harness_kind != binding.harness_kind
+            || !same_route
+        {
+            return Ok(FlowRegistration::ConflictingBinding);
+        }
+        match self.role(&flow.flow_id)? {
+            Some(existing) if existing != role => {
+                return Ok(FlowRegistration::ConflictingBinding);
+            }
+            Some(_) => {}
+            None => {
+                self.engine
+                    .assert(Assertion::new(self.roles, StoredRole { caller: role }))?;
+            }
+        }
+        match self.flow_node(&flow.flow_id)? {
+            Some(stored) => Ok(FlowRegistration::Registered(Box::new(stored))),
+            None => Err(StoreError::StateInvariant),
+        }
+    }
+
     fn register_flow_as(
         &self,
         flow_node: FlowNode,
@@ -1531,8 +1574,13 @@ impl RegistersExistingFlow for FlowStore {
         flow_node: FlowNode,
         role: Caller,
     ) -> Result<FlowRegistration, StoreError> {
-        if flow_node.flow_lifecycle != SignalFlowLifecycle::Pending {
+        if flow_node.flow_lifecycle != SignalFlowLifecycle::Pending
+            || role.flow_id != flow_node.flow_id
+        {
             return Ok(FlowRegistration::ConflictingBinding);
+        }
+        if let Some(flow) = self.flow(&flow_node.flow_id)? {
+            return self.assert_role_of_matching_binding(flow, &flow_node, role);
         }
         // The flow type keeps the form it had before roles were a record.
         let flow_type = format!(

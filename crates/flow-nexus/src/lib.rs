@@ -347,27 +347,9 @@ impl Dispatches for RunningNexus {
                         ));
                         continue;
                     }
-                    match self.store.apply(Query::ResolveRecipient(flow_id.clone())) {
-                        Ok(Response::RecipientResolutionRejected(
-                            signal_flow::RecipientResolutionRejection::UnknownFlow,
-                        )) => {}
-                        Ok(Response::RecipientResolved(_))
-                        | Ok(Response::RecipientResolutionRejected(
-                            signal_flow::RecipientResolutionRejection::FlowUnavailable,
-                        )) => {
-                            results.push(refused_binding(
-                                flow_id,
-                                meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId,
-                            ));
-                            continue;
-                        }
-                        Ok(_) | Err(_) => {
-                            return meta_signal_flow::Response::BindExistingRejected(
-                                meta_signal_flow::BindExistingRejection::StoreRefused,
-                            );
-                        }
-                    }
-
+                    // A flow already in the store is not imported again: the
+                    // store asserts the binding's role only when the stored
+                    // flow is this binding, and refuses any other.
                     let node = FlowNode {
                         flow_id: flow_id.clone(),
                         session_id: binding.native_session_id,
@@ -1403,6 +1385,215 @@ mod tests {
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
         ));
+    }
+
+    /// A Codex pane as Herdr 0.8.2 reports a rested imported Codex flow: done,
+    /// with no `interactive_ready` key (the live 26c50c, 2026-09-25).
+    fn rested_imported_codex_agent() -> serde_json::Value {
+        serde_json::json!({
+            "agent":"codex", "agent_status":"done", "name":"agent-w1:p3",
+            "pane_id":"w1:p3", "terminal_id":"terminal-w1:p3"
+        })
+    }
+
+    fn resolved(fixture: &NexusFixture) -> FlowNode {
+        let Response::RecipientResolved(node) = fixture
+            .nexus
+            .dispatch(Query::ResolveRecipient("908786".into()))
+        else {
+            panic!("an imported flow must resolve")
+        };
+        node
+    }
+
+    fn listed(fixture: &NexusFixture) -> FlowNode {
+        let Response::Listed(rows) = fixture
+            .nexus
+            .dispatch(Query::List(signal_flow::ListRequest {}))
+        else {
+            panic!("list must return durable Flow rows")
+        };
+        assert_eq!(rows.len(), 1);
+        rows[0].clone()
+    }
+
+    // The fixture's Codex endpoints name sockets that do not exist: an
+    // imported Codex flow is routed through its Herdr pane alone, and its
+    // endpoint stays a separate fact that neither gates nor changes.
+    #[test]
+    fn an_imported_codex_flow_is_sent_through_its_pane_without_an_endpoint() {
+        let fixture = NexusFixture::new();
+        let operation_log = fixture.accept_pane_operations(
+            vec![rested_imported_codex_agent()],
+            PromptFixture::Prompted("w1:p3"),
+        );
+        bind_existing_caller(&fixture, "908786", "w1:p3");
+
+        let node = resolved(&fixture);
+        assert_eq!(node.endpoint_selection, EndpointSelection::Unavailable);
+        assert_eq!(
+            node.herdr_route_selection,
+            HerdrRouteSelection::Available(HerdrRoute {
+                herdr_session_name: "messaging-build".into(),
+                herdr_agent_name: "agent-w1:p3".into(),
+                herdr_pane_id: "w1:p3".into(),
+                herdr_terminal_id: "terminal-w1:p3".into(),
+            })
+        );
+        assert_eq!(node.flow_lifecycle, FlowLifecycle::Pending);
+
+        let response = fixture.send("bare prompt");
+        assert!(
+            matches!(
+                &response,
+                Response::Sent(signal_flow::SendOutcome::Presented(receipt))
+                    if receipt.flow_id == "908786" && receipt.herdr_pane_id == "w1:p3"
+            ),
+            "{response:?}"
+        );
+        assert_eq!(fixture.typed().as_deref(), Some("bare prompt"));
+        assert_eq!(prompts(&operation_log), vec![OBSERVED_PROMPT.to_owned()]);
+        let after = listed(&fixture);
+        assert_eq!(after.flow_lifecycle, FlowLifecycle::Active);
+        assert_eq!(after.endpoint_selection, EndpointSelection::Unavailable);
+    }
+
+    #[test]
+    fn an_imported_codex_flow_whose_pane_is_gone_is_refused_before_typing() {
+        let fixture = NexusFixture::new();
+        let operation_log =
+            fixture.accept_pane_operations(vec![], PromptFixture::Prompted("w1:p3"));
+        bind_existing_caller(&fixture, "908786", "w1:p3");
+
+        let node = resolved(&fixture);
+        assert_eq!(node.herdr_route_selection, HerdrRouteSelection::Unavailable);
+        assert_eq!(
+            fixture.send("bare prompt"),
+            Response::SendRejected(signal_flow::SendRejection::RouteUnavailable)
+        );
+        assert_eq!(fixture.typed(), None);
+        assert!(prompts(&operation_log).is_empty());
+        assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Pending);
+    }
+
+    fn rebind(
+        fixture: &NexusFixture,
+        binding: meta_signal_flow::FlowBinding,
+    ) -> meta_signal_flow::FlowBindingResult {
+        let socket_path = fixture.directory.path().join("herdr-rebind.sock");
+        let _ = fs::remove_file(&socket_path);
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let meta_signal_flow::Response::BoundExisting(bound) =
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                    meta_signal_flow::MetaBindExisting {
+                        flow_container: flow_container(&socket_path),
+                        flow_binding_vector: vec![binding],
+                    },
+                ))
+        else {
+            panic!("a live container answers per binding")
+        };
+        let [result] = bound.flow_binding_result_vector.as_slice() else {
+            panic!("one binding, one result")
+        };
+        result.clone()
+    }
+
+    /// The binding of the registered 908786 row (a RegisterFlow row, Active
+    /// and roleless, as 5f38bc is live) under a newer agent name.
+    fn binding_of_registered_row(fixture: &NexusFixture) -> meta_signal_flow::FlowBinding {
+        let node = fixture.node();
+        let mut binding = existing_binding("908786", "w1:p3");
+        binding.native_session_id = node.session_id;
+        binding.herdr_terminal_id = "term_65bb7f87270cb3".into();
+        binding.herdr_agent_name = "field-astra-908786".into();
+        binding
+    }
+
+    fn duplicate(flow_binding_result: &meta_signal_flow::FlowBindingResult) -> bool {
+        matches!(
+            flow_binding_result,
+            meta_signal_flow::FlowBindingResult::Refused(refused)
+                if refused.flow_binding_refusal_reason
+                    == meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId
+        )
+    }
+
+    #[test]
+    fn a_matching_binding_of_a_flow_already_held_asserts_only_its_role() {
+        use crate::store::ReadsFlowRoles;
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        fixture.register_with(FlowLifecycle::Active);
+        let before = listed(&fixture);
+        assert_eq!(fixture.nexus.store.role("908786").expect("role read"), None);
+
+        let role = Caller {
+            flow_id: "908786".into(),
+            flow_aspect: FlowAspect::Mind,
+            power_level: PowerLevel::Medium,
+            model_name: "gpt-sol".into(),
+        };
+        for _ in 0..2 {
+            let result = rebind(&fixture, binding_of_registered_row(&fixture));
+            assert!(
+                matches!(
+                    &result,
+                    meta_signal_flow::FlowBindingResult::Bound(bound) if bound.flow_id == "908786"
+                ),
+                "{result:?}"
+            );
+            assert_eq!(
+                fixture.nexus.store.role("908786").expect("role read"),
+                Some(role.clone())
+            );
+            assert_eq!(listed(&fixture), before);
+        }
+    }
+
+    #[test]
+    fn a_differing_binding_of_a_flow_already_held_is_refused_and_writes_nothing() {
+        use crate::store::ReadsFlowRoles;
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        fixture.register_with(FlowLifecycle::Active);
+        let before = listed(&fixture);
+
+        let mut other_terminal = binding_of_registered_row(&fixture);
+        other_terminal.herdr_terminal_id = "term_reused".into();
+        let mut other_pane = binding_of_registered_row(&fixture);
+        other_pane.herdr_pane_id = "w1:p4".into();
+        let mut other_thread = binding_of_registered_row(&fixture);
+        other_thread.native_session_id = "another-thread".into();
+        let mut other_harness = binding_of_registered_row(&fixture);
+        other_harness.harness_kind = HarnessKind::Claude;
+        for binding in [other_terminal, other_pane, other_thread, other_harness] {
+            let result = rebind(&fixture, binding);
+            assert!(duplicate(&result), "{result:?}");
+            assert_eq!(fixture.nexus.store.role("908786").expect("role read"), None);
+            assert_eq!(listed(&fixture), before);
+        }
+
+        // A role once recorded is not replaced by a different one.
+        assert!(!duplicate(&rebind(
+            &fixture,
+            binding_of_registered_row(&fixture)
+        )));
+        let mut other_role = binding_of_registered_row(&fixture);
+        other_role.power_level = PowerLevel::High;
+        assert!(duplicate(&rebind(&fixture, other_role)));
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .role("908786")
+                .expect("role read")
+                .map(|role| role.power_level),
+            Some(PowerLevel::Medium)
+        );
+        assert_eq!(listed(&fixture), before);
     }
 
     #[test]

@@ -9,7 +9,9 @@ Signal archives.
 The wire contracts are independent repositories:
 
 - `signal-flow` defines `Start`, provenance-authorized `Restart`, `Send`,
-  `Stop`, `List`, and `ResolveRecipient` for Message Nexus routing.
+  `Stop`, `List`, `ResolveRecipient` for Message Nexus routing, and
+  `ResolveCaller`, which names the flow, aspect, power and model of the
+  process that calls.
 - `meta-signal-flow` defines `Configure` and reset-credit consumption.
 
 The ordinary client accepts exactly one inline `Query` Datom from the

@@ -1,4 +1,5 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
+pub mod caller;
 pub mod claude;
 pub mod codex;
 pub mod composition;
@@ -9,6 +10,7 @@ pub mod launching;
 pub mod store;
 pub mod title;
 
+use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchBundles, LaunchComposer, OpensLaunchComposer};
 use herdr::OperatesHerdrPane;
@@ -240,6 +242,8 @@ impl Dispatches for RunningNexus {
                 self.prune_launch_bundles_of(&flow_id);
                 Response::Stopped(flow_id)
             }
+            // A dispatch without a connection has no peer to read.
+            Query::ResolveCaller(claim) => self.resolve_caller(None, claim),
             Query::List(_) => {
                 self.store
                     .flow_nodes()
@@ -382,11 +386,13 @@ impl Dispatches for RunningNexus {
                         },
                         flow_lifecycle: FlowLifecycle::Pending,
                     };
-                    let flow_type = format!(
-                        "{:?}:{:?}:{}",
-                        binding.flow_aspect, binding.power_level, binding.model_name
-                    );
-                    match self.store.register_existing_flow(node, flow_type) {
+                    let role = signal_flow::Caller {
+                        flow_id: flow_id.clone(),
+                        flow_aspect: binding.flow_aspect,
+                        power_level: binding.power_level,
+                        model_name: binding.model_name,
+                    };
+                    match self.store.register_existing_flow(node, role) {
                         Ok(store::FlowRegistration::Registered(_)) => {
                             results.push(meta_signal_flow::FlowBindingResult::Bound(
                                 meta_signal_flow::BoundFlowBinding {
@@ -510,6 +516,13 @@ impl Connection {
                     Frame::write_response(peer, response)
                 });
             }
+            // The caller is the peer of this connection, read from the kernel.
+            Query::ResolveCaller(claim) => nexus.resolve_caller(
+                self.peer
+                    .peer_process()
+                    .and_then(|process| process.caller_pane()),
+                claim,
+            ),
             query => nexus.dispatch_serially(query),
         };
         Frame::write_response(&mut self.peer, &response)
@@ -659,6 +672,9 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::{Dispatches, RunningNexus};
+    use crate::caller::{
+        CallerPane, CallerProcess, IdentifiesPeer, LocatesCallerPane, ReadsProcess, ResolvesCaller,
+    };
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use crate::{
         codex::{CodexEndpoint, CodexEndpoints},
@@ -672,11 +688,12 @@ mod tests {
     };
     use sha2::{Digest, Sha256};
     use signal_flow::{
-        EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding,
-        HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile, LaunchSource,
-        NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence, NativeTranscriptBoundary,
-        OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query,
-        RegistrationAcknowledgement, Response, StartRejection, StartRequest,
+        Caller, EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind,
+        HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile,
+        LaunchSource, NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence,
+        NativeTranscriptBoundary, OriginClue, PowerLevel, PromptDeliveryIntent,
+        PromptDeliveryResult, Query, RegistrationAcknowledgement, Response, StartRejection,
+        StartRequest,
     };
     use std::{
         collections::BTreeSet,
@@ -2532,5 +2549,187 @@ mod tests {
         let calls = fs::read_to_string(calls).unwrap_or_default();
         assert!(!calls.contains("agent prompt"), "{calls}");
         assert!(!calls.contains("pane create"), "{calls}");
+    }
+
+    fn bind_existing_caller(fixture: &NexusFixture, flow_id: &str, pane: &str) {
+        let socket_path = fixture
+            .directory
+            .path()
+            .join(format!("herdr-{flow_id}.sock"));
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let response = fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                meta_signal_flow::MetaBindExisting {
+                    flow_container: flow_container(&socket_path),
+                    flow_binding_vector: vec![existing_binding(flow_id, pane)],
+                },
+            ));
+        assert!(matches!(
+            response,
+            meta_signal_flow::Response::BoundExisting(bound)
+                if matches!(
+                    bound.flow_binding_result_vector.as_slice(),
+                    [meta_signal_flow::FlowBindingResult::Bound(_)]
+                )
+        ));
+    }
+
+    fn codex_agent_in(pane: &str, terminal: &str) -> serde_json::Value {
+        serde_json::json!({
+            "agent":"codex", "agent_status":"working", "name":format!("agent-{pane}"),
+            "pane_id":pane, "terminal_id":terminal
+        })
+    }
+
+    fn pane(pane: &str) -> Option<CallerPane> {
+        Some(CallerPane {
+            herdr_session_name: "messaging-build".into(),
+            herdr_pane_id: pane.into(),
+        })
+    }
+
+    fn mind_live() -> Caller {
+        Caller {
+            flow_id: "mind-live".into(),
+            flow_aspect: FlowAspect::Mind,
+            power_level: PowerLevel::Medium,
+            model_name: "gpt-sol".into(),
+        }
+    }
+
+    /// A process that sleeps under the given Herdr marks, killed on drop.
+    struct MarkedProcess(std::process::Child);
+
+    impl MarkedProcess {
+        fn spawn(command: &str, pane: &str) -> Self {
+            Self(
+                std::process::Command::new("sh")
+                    .args(["-c", command])
+                    .env("HERDR_SESSION", "messaging-build")
+                    .env("HERDR_PANE_ID", pane)
+                    .spawn()
+                    .expect("marked fixture process"),
+            )
+        }
+    }
+
+    impl Drop for MarkedProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn a_caller_bound_in_the_registry_resolves_with_its_role() {
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+
+        assert_eq!(
+            fixture.nexus.resolve_caller(pane("pane-1"), None),
+            Response::CallerResolved(mind_live())
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .resolve_caller(pane("pane-1"), Some("mind-live".into())),
+            Response::CallerResolved(mind_live())
+        );
+    }
+
+    #[test]
+    fn a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors() {
+        // `exec` makes the marked shell itself the sleeper; the second shell
+        // stays the parent of a sleeper whose environment drops the marks.
+        let marked = MarkedProcess::spawn("exec sleep 30", "pane-1");
+        let scrubbed = MarkedProcess::spawn(
+            "env -u HERDR_SESSION -u HERDR_PANE_ID sleep 30; true",
+            "pane-2",
+        );
+        let marked_process = CallerProcess {
+            process_id: marked.0.id(),
+        };
+        assert_eq!(marked_process.caller_pane(), pane("pane-1"));
+
+        let shell = scrubbed.0.id();
+        let children = format!("/proc/{shell}/task/{shell}/children");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let sleeper = loop {
+            // The child is `env` until it execs `sleep` without the marks.
+            let listed = fs::read_to_string(&children).unwrap_or_default();
+            if let Some(child) = listed.split_whitespace().next()
+                && fs::read_to_string(format!("/proc/{child}/comm")).unwrap_or_default()
+                    == "sleep\n"
+            {
+                break child.parse::<u32>().expect("child process id");
+            }
+            assert!(std::time::Instant::now() < deadline, "sleeper started");
+            std::thread::yield_now();
+        };
+        let sleeper = CallerProcess {
+            process_id: sleeper,
+        };
+        assert_eq!(sleeper.marked_pane(), None);
+        assert_eq!(sleeper.caller_pane(), pane("pane-2"));
+
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        assert_eq!(
+            fixture
+                .nexus
+                .resolve_caller(marked_process.caller_pane(), None),
+            Response::CallerResolved(mind_live())
+        );
+    }
+
+    #[test]
+    fn an_unbound_peer_is_caller_unknown() {
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        fixture.set_agents(vec![
+            codex_agent_in("pane-1", "terminal-pane-1"),
+            codex_agent_in("pane-9", "terminal-pane-9"),
+        ]);
+        let unknown = Response::CallerResolutionRejected(
+            signal_flow::CallerResolutionRejection::CallerUnknown,
+        );
+
+        // A pane the registry binds no flow to.
+        assert_eq!(fixture.nexus.resolve_caller(pane("pane-9"), None), unknown);
+        // A peer outside any Herdr pane.
+        assert_eq!(fixture.nexus.resolve_caller(None, None), unknown);
+        // A dispatch has no connection, so no peer.
+        assert_eq!(fixture.nexus.dispatch(Query::ResolveCaller(None)), unknown);
+        // Herdr reused the pane ID for a new terminal: the binding is gone.
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-new")]);
+        assert_eq!(fixture.nexus.resolve_caller(pane("pane-1"), None), unknown);
+    }
+
+    #[test]
+    fn a_claimed_flow_id_that_differs_is_caller_mismatch() {
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        assert_eq!(
+            fixture
+                .nexus
+                .resolve_caller(pane("pane-1"), Some("field-other".into())),
+            Response::CallerResolutionRejected(
+                signal_flow::CallerResolutionRejection::CallerMismatch(mind_live())
+            )
+        );
+    }
+
+    #[test]
+    fn the_kernel_names_the_peer_of_a_connection() {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let own = Some(CallerProcess {
+            process_id: std::process::id(),
+        });
+        assert_eq!(ours.peer_process(), own);
+        assert_eq!(theirs.peer_process(), own);
     }
 }

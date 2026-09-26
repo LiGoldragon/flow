@@ -165,7 +165,13 @@ impl LaunchesFlows for RunningNexus {
         if !self.herdr.validate_registration(&node) {
             return Response::StartRejected(StartRejection::RegistrationRefused);
         }
-        let registered = match self.store.register_flow(node) {
+        let role = signal_flow::Caller {
+            flow_id: binding.flow_id.clone(),
+            flow_aspect: launch.launch_profile.flow_aspect.clone(),
+            power_level: launch.launch_profile.power_level.clone(),
+            model_name: launch.launch_profile.model_name.clone(),
+        };
+        let registered = match self.store.register_flow_in_role(node, role) {
             Ok(crate::store::FlowRegistration::Registered(node)) => node,
             Ok(crate::store::FlowRegistration::ConflictingBinding) | Err(_) => {
                 return Response::StartRejected(StartRejection::RegistrationRefused);

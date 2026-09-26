@@ -1,3 +1,32 @@
+# Flow 0.12.0
+
+An additive wire change through signal-flow 5.1.0 (74a47ed) and
+meta-signal-flow 6.0.4 (fbfe897), and a new store table: Flow knows the caller.
+
+- `ResolveCaller.Option<FlowId>` answers `CallerResolved.{ FlowId FlowAspect
+  PowerLevel ModelName }`, or `CallerResolutionRejected` with `CallerUnknown`
+  or `CallerMismatch.Caller`. The caller is the peer process of the ordinary
+  connection (`SO_PEERCRED`), never a field of the request; its Herdr pane is
+  read from `HERDR_SESSION` and `HERDR_PANE_ID` in its `/proc` environment,
+  or its nearest ancestor's. That pane must hold exactly one routable flow
+  whose binding the live snapshot still shows. The optional FlowId is the
+  caller's claim; a different one is `CallerMismatch`, carrying the true
+  Caller.
+- The store keeps each flow's role in a new `flow_nexus_roles` table, written
+  by MetaBindExisting (from the binding's aspect, power and model) and by
+  Start (from the launch profile). A flow registered through the meta
+  `RegisterFlow` has no role and resolves `CallerUnknown`.
+- On open, a store written before roles adopts them: from the launch profile
+  of the launch that bound the flow, else from the `<aspect>:<power>:<model>`
+  flow type MetaBindExisting wrote. The live Pending flows bound by
+  MetaBindExisting therefore resolve without rebinding. The live store's
+  launch attempts do not decode under the current contract (read on a copy,
+  2026-09-25), so adoption reads the flow types alone there; the two flows
+  launched by Start (5f38bc, 88475f) keep no role and resolve
+  `CallerUnknown` until they are bound again.
+- `flow 'ResolveCaller.None'` run inside a bound pane names that pane's flow.
+  Send does not use it yet.
+
 # Flow 0.11.0
 
 A wire change through signal-flow 5.0.0 (cf3648f) and meta-signal-flow 6.0.3

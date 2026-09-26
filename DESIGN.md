@@ -4,7 +4,7 @@ The ordinary and meta sockets are separate Signal edges. Text ends at a CLI:
 the client turns one inline Datom into a typed request, sends an rkyv frame,
 and textualizes the typed reply as Datom. The standalone `signal-flow` repo
 owns `Start`, `Restart`, `ResolveRecipient`, `Send`, `Stop`, `List`,
-`Replace`, `LaunchStatus`, and `Observe`;
+`Replace`, `LaunchStatus`, `Observe`, and `ResolveCaller`;
 `meta-signal-flow` owns `Configure` and `ConsumeReset`. Each contract versions
 its own wire.
 `RunningNexus` dispatches; `FlowStore` owns working state and policy.
@@ -42,6 +42,24 @@ pending reservation. Both conditions recover from `FLOW_NEXUS_STORE`.
 daemon session ID, harness kind, route readiness, endpoint, origin clue, and
 lifecycle. Message Nexus consumes that typed reply instead of maintaining a
 second identity registry.
+
+`ResolveCaller` names the flow that is calling. The Nexus reads the peer
+process of the ordinary connection from the kernel (`SO_PEERCRED`); nothing in
+the request names the caller. Herdr's snapshot carries no process IDs, so the
+pane is read where Herdr marks it: every process Herdr starts in a pane
+inherits `HERDR_SESSION` and `HERDR_PANE_ID`, and the Nexus reads them from
+the peer's `/proc/<pid>/environ`, or from its nearest ancestor's when the
+peer's environment was scrubbed. The registry must hold exactly one routable
+flow on that session and pane, and the live snapshot must still show its
+binding (pane, terminal, harness); otherwise the reply is `CallerUnknown`.
+The answer is the flow's role, `Caller.{ FlowId FlowAspect PowerLevel
+ModelName }`, kept as its own record when MetaBindExisting binds a flow or a
+Start registers one. The optional FlowId in the request is the caller's claim:
+a different one is refused as `CallerMismatch`, which carries the true Caller.
+A store written before roles were kept adopts them when it opens, from the
+binding launch's profile or from the flow type MetaBindExisting wrote. `Send`
+takes this up next: its connection resolves the caller the same way and
+carries the Caller as the message's sender.
 
 `Send` and `Stop` act only on a route that still matches the native Herdr
 snapshot. A route is keyed on what Herdr binds for the pane's life: session,

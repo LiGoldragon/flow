@@ -17,12 +17,12 @@ use sema_engine::{
     Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::{
-    ComposedLaunch, EndpointSelection, FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
-    NativeLaunchBinding, NativeLaunchIntent, OriginClue, PromptDeliveryIntent,
-    PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
-    ReplaceRejection, Replaced, Response, RestartRejection, Restarted, RouteReadiness,
-    StartRejection, Started,
+    Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection, FlowAspect,
+    FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
+    LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, NativeLaunchBinding,
+    NativeLaunchIntent, OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query,
+    RecipientResolutionRejection, RegistrationAcknowledgement, ReplaceRejection, Replaced,
+    Response, RestartRejection, Restarted, RouteReadiness, StartRejection, Started,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -34,6 +34,7 @@ const FLOW_RUNTIME_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_runtime_configuration");
 const FLOW_LAUNCH_OUTCOME_TABLE_NAME: TableName = TableName::new("flow_nexus_launch_outcomes");
 const FLOW_REPLACEMENT_TABLE_NAME: TableName = TableName::new("flow_nexus_replacements");
+const FLOW_ROLE_TABLE_NAME: TableName = TableName::new("flow_nexus_roles");
 const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const RUNTIME_CONFIGURATION_KEY: &str = "runtime";
@@ -333,6 +334,19 @@ impl EngineRecord for FlowRecord {
     }
 }
 
+/// A flow's role: its aspect, power and model, keyed by its FlowId. It is
+/// exactly what ResolveCaller answers, so the Caller is stored as it is.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredRole {
+    caller: Caller,
+}
+
+impl EngineRecord for StoredRole {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.caller.flow_id.clone())
+    }
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct FlowHerdrRouteRecord {
     flow_id: String,
@@ -516,6 +530,7 @@ pub struct FlowStore {
     launch_attempts: TableReference<StoredLaunchAttempt>,
     launch_outcomes: TableReference<StoredLaunchOutcome>,
     replacements: TableReference<Replacement>,
+    roles: TableReference<StoredRole>,
     pub launch_changes: LaunchChanges,
 }
 
@@ -617,7 +632,14 @@ pub trait ConfiguresFlowStore {
 }
 
 pub trait RegistersFlowIdentity {
+    /// Registers a flow whose role is not known (the meta RegisterFlow).
     fn register_flow(&self, flow_node: FlowNode) -> Result<FlowRegistration, StoreError>;
+    /// Registers a launched flow with the role its launch profile named.
+    fn register_flow_in_role(
+        &self,
+        flow_node: FlowNode,
+        role: Caller,
+    ) -> Result<FlowRegistration, StoreError>;
 }
 
 /// Imports one already-running native flow without claiming a launch receipt.
@@ -625,8 +647,20 @@ pub trait RegistersExistingFlow {
     fn register_existing_flow(
         &self,
         flow_node: FlowNode,
-        flow_type: String,
+        role: Caller,
     ) -> Result<FlowRegistration, StoreError>;
+}
+
+/// The role each flow was bound or launched in, and the flows a Herdr pane
+/// holds: what ResolveCaller reads.
+pub trait ReadsFlowRoles {
+    fn role(&self, flow_id: &str) -> Result<Option<Caller>, StoreError>;
+    /// The routable flows whose recorded route names this session and pane.
+    fn flows_in_pane(
+        &self,
+        herdr_session_name: &str,
+        herdr_pane_id: &str,
+    ) -> Result<Vec<FlowNode>, StoreError>;
 }
 
 /// Reserves one correlation ID and its exact composed-prompt fingerprint.
@@ -782,6 +816,11 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-replacement"),
             SchemaHash::for_label("flow-nexus-replacement-v1"),
         ))?;
+        let roles = engine.register_table(TableDescriptor::new(
+            FLOW_ROLE_TABLE_NAME,
+            FamilyName::new("flow-nexus-role"),
+            SchemaHash::for_label("flow-nexus-role-v1"),
+        ))?;
         let store = Self {
             engine,
             flows,
@@ -792,6 +831,7 @@ impl OpensFlowStore for FlowStore {
             launch_attempts,
             launch_outcomes,
             replacements,
+            roles,
             launch_changes: LaunchChanges::default(),
         };
         if store
@@ -835,6 +875,7 @@ impl OpensFlowStore for FlowStore {
                 defaults.runtime_configuration(),
             ))?;
         }
+        store.adopt_legacy_roles()?;
         Ok(store)
     }
 }
@@ -857,6 +898,10 @@ impl AppliesFlowQuery for FlowStore {
             Query::Replace(_) => Ok(Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
                 StartRejection::NativeLaunchRefused,
             ))),
+            // The caller is read from the socket, which the store never sees.
+            Query::ResolveCaller(_) => Ok(Response::CallerResolutionRejected(
+                CallerResolutionRejection::CallerUnknown,
+            )),
             Query::LaunchStatus(_) | Query::Observe(_) => Ok(Response::LaunchStatusRejected(
                 signal_flow::LaunchStatusRejection::PersistenceRefused,
             )),
@@ -877,7 +922,8 @@ impl ReservesPendingStart for FlowStore {
             | Query::List(_)
             | Query::Replace(_)
             | Query::LaunchStatus(_)
-            | Query::Observe(_) => Ok(None),
+            | Query::Observe(_)
+            | Query::ResolveCaller(_) => Ok(None),
         }
     }
 }
@@ -983,7 +1029,14 @@ impl FlowStore {
         &self,
         flow_node: FlowNode,
         flow_type: String,
+        role: Option<Caller>,
     ) -> Result<FlowRegistration, StoreError> {
+        if role
+            .as_ref()
+            .is_some_and(|role| role.flow_id != flow_node.flow_id)
+        {
+            return Ok(FlowRegistration::ConflictingBinding);
+        }
         let HerdrRouteSelection::Available(route) = flow_node.herdr_route_selection.clone() else {
             return Ok(FlowRegistration::ConflictingBinding);
         };
@@ -997,7 +1050,7 @@ impl FlowStore {
                 Some(existing) if existing.route != route => {
                     return Ok(FlowRegistration::ConflictingBinding);
                 }
-                Some(_) => return Ok(FlowRegistration::Registered(Box::new(flow_node))),
+                Some(_) => {}
                 None => {
                     self.engine.assert(Assertion::new(
                         self.herdr_routes,
@@ -1006,9 +1059,21 @@ impl FlowStore {
                             route,
                         },
                     ))?;
-                    return Ok(FlowRegistration::Registered(Box::new(flow_node)));
                 }
             }
+            if let Some(role) = role {
+                match self.role(&flow_node.flow_id)? {
+                    Some(existing) if existing != role => {
+                        return Ok(FlowRegistration::ConflictingBinding);
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.engine
+                            .assert(Assertion::new(self.roles, StoredRole { caller: role }))?;
+                    }
+                }
+            }
+            return Ok(FlowRegistration::Registered(Box::new(flow_node)));
         }
         let lifecycle = match flow_node.flow_lifecycle {
             SignalFlowLifecycle::Pending => FlowLifecycle::Pending,
@@ -1025,19 +1090,97 @@ impl FlowStore {
             lifecycle,
             generation: 1,
         };
-        self.engine.commit_atomic(
-            self.engine
-                .begin_atomic_commit()
-                .assert(self.flows, record)
-                .assert(
-                    self.herdr_routes,
-                    FlowHerdrRouteRecord {
-                        flow_id: flow_node.flow_id.clone(),
-                        route,
-                    },
-                ),
-        )?;
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .assert(self.flows, record)
+            .assert(
+                self.herdr_routes,
+                FlowHerdrRouteRecord {
+                    flow_id: flow_node.flow_id.clone(),
+                    route,
+                },
+            );
+        let commit = match role {
+            Some(role) => commit.assert(self.roles, StoredRole { caller: role }),
+            None => commit,
+        };
+        self.engine.commit_atomic(commit)?;
         Ok(FlowRegistration::Registered(Box::new(flow_node)))
+    }
+
+    /// A store written before roles were kept has flows and no role rows.
+    /// Each such flow's role is taken from what the store already holds: the
+    /// launch profile of the launch that bound it, else the flow type
+    /// MetaBindExisting wrote as `<aspect>:<power>:<model>`. Parsing that
+    /// text is an exception taken only here, to read rows written before the
+    /// typed record existed; nothing new is written in that form for reading.
+    fn adopt_legacy_roles(&self) -> Result<(), StoreError> {
+        let flows = self
+            .engine
+            .match_records(QueryPlan::all(self.flows))?
+            .records()
+            .to_vec();
+        // A launch attempt archived by an earlier contract may not decode
+        // (the live store of 2026-09-25 holds such rows). Adoption then reads
+        // the flow types alone rather than refusing to open the store.
+        let attempts = self
+            .engine
+            .match_records(QueryPlan::all(self.launch_attempts))
+            .map(|matched| matched.records().to_vec())
+            .unwrap_or_default();
+        for flow in flows {
+            if self.role(&flow.flow_id)?.is_some() {
+                continue;
+            }
+            let launched = attempts.iter().find_map(|stored| {
+                let attempt = &stored.attempt;
+                attempt
+                    .native_launch_binding_option
+                    .as_ref()
+                    .filter(|binding| binding.flow_id == flow.flow_id)
+                    .map(|_| Caller {
+                        flow_id: flow.flow_id.clone(),
+                        flow_aspect: attempt.launch_profile.flow_aspect.clone(),
+                        power_level: attempt.launch_profile.power_level.clone(),
+                        model_name: attempt.launch_profile.model_name.clone(),
+                    })
+            });
+            let Some(role) = launched.or_else(|| flow.legacy_role()) else {
+                continue;
+            };
+            self.engine
+                .assert(Assertion::new(self.roles, StoredRole { caller: role }))?;
+        }
+        Ok(())
+    }
+}
+
+impl FlowRecord {
+    /// The role MetaBindExisting wrote into the flow type before roles had
+    /// their own record; see `adopt_legacy_roles`.
+    fn legacy_role(&self) -> Option<Caller> {
+        let mut parts = self.flow_type.splitn(3, ':');
+        let flow_aspect = match parts.next()? {
+            "Psyche" => FlowAspect::Psyche,
+            "Mind" => FlowAspect::Mind,
+            "Field" => FlowAspect::Field,
+            _ => return None,
+        };
+        let power_level = match parts.next()? {
+            "High" => PowerLevel::High,
+            "Medium" => PowerLevel::Medium,
+            "Low" => PowerLevel::Low,
+            "UltraLow" => PowerLevel::UltraLow,
+            _ => return None,
+        };
+        let model_name = parts.next().filter(|model| !model.is_empty())?;
+        Some(Caller {
+            flow_id: self.flow_id.clone(),
+            flow_aspect,
+            power_level,
+            model_name: model_name.into(),
+        })
     }
 }
 
@@ -1047,7 +1190,19 @@ impl RegistersFlowIdentity for FlowStore {
             HarnessKind::Codex => "codex-registered".into(),
             HarnessKind::Claude => "claude-registered".into(),
         };
-        self.register_flow_as(flow_node, flow_type)
+        self.register_flow_as(flow_node, flow_type, None)
+    }
+
+    fn register_flow_in_role(
+        &self,
+        flow_node: FlowNode,
+        role: Caller,
+    ) -> Result<FlowRegistration, StoreError> {
+        let flow_type = match flow_node.harness_kind {
+            HarnessKind::Codex => "codex-registered".into(),
+            HarnessKind::Claude => "claude-registered".into(),
+        };
+        self.register_flow_as(flow_node, flow_type, Some(role))
     }
 }
 
@@ -1055,12 +1210,54 @@ impl RegistersExistingFlow for FlowStore {
     fn register_existing_flow(
         &self,
         flow_node: FlowNode,
-        flow_type: String,
+        role: Caller,
     ) -> Result<FlowRegistration, StoreError> {
         if flow_node.flow_lifecycle != SignalFlowLifecycle::Pending {
             return Ok(FlowRegistration::ConflictingBinding);
         }
-        self.register_flow_as(flow_node, flow_type)
+        // The flow type keeps the form it had before roles were a record.
+        let flow_type = format!(
+            "{:?}:{:?}:{}",
+            role.flow_aspect, role.power_level, role.model_name
+        );
+        self.register_flow_as(flow_node, flow_type, Some(role))
+    }
+}
+
+impl ReadsFlowRoles for FlowStore {
+    fn role(&self, flow_id: &str) -> Result<Option<Caller>, StoreError> {
+        let records = self
+            .engine
+            .match_records(QueryPlan::key(self.roles, RecordKey::new(flow_id)))?
+            .records()
+            .to_vec();
+        match records.as_slice() {
+            [] => Ok(None),
+            [role] => Ok(Some(role.caller.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn flows_in_pane(
+        &self,
+        herdr_session_name: &str,
+        herdr_pane_id: &str,
+    ) -> Result<Vec<FlowNode>, StoreError> {
+        let mut nodes = Vec::new();
+        for node in self.flow_nodes()? {
+            let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+                continue;
+            };
+            if route.herdr_session_name != herdr_session_name
+                || route.herdr_pane_id != herdr_pane_id
+                || node.flow_lifecycle == SignalFlowLifecycle::Stopped
+                || self.held_successor(&node.flow_id)?
+            {
+                continue;
+            }
+            nodes.push(node);
+        }
+        Ok(nodes)
     }
 }
 
@@ -1815,9 +2012,10 @@ impl WritesFlowStore for FlowStore {
 mod tests {
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow,
-        FlowStore, OpensFlowStore, ReadsFlowStore, ReadsLaunchAttempt, RecordsNativeLaunchBinding,
-        RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
-        RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsRestartedFlow,
+        FlowStore, OpensFlowStore, ReadsFlowRoles, ReadsFlowStore, ReadsLaunchAttempt,
+        RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPendingThread,
+        RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+        RecordsRegistrationAcknowledgement, RecordsRestartedFlow, RegistersExistingFlow,
         RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
     };
     use meta_signal_flow::Configuration;
@@ -2497,6 +2695,95 @@ mod tests {
                 .apply(Query::ResolveRecipient("da1e3f".into()))
                 .unwrap(),
             Response::RecipientResolved(node)
+        );
+    }
+
+    fn pane_node(flow_id: &str, pane: &str) -> signal_flow::FlowNode {
+        signal_flow::FlowNode {
+            flow_id: flow_id.into(),
+            session_id: format!("{flow_id}-session"),
+            harness_kind: signal_flow::HarnessKind::Claude,
+            endpoint_selection: signal_flow::EndpointSelection::Unavailable,
+            herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
+                signal_flow::HerdrRoute {
+                    herdr_session_name: "messaging-build".into(),
+                    herdr_agent_name: format!("agent-{pane}"),
+                    herdr_pane_id: pane.into(),
+                    herdr_terminal_id: format!("terminal-{pane}"),
+                },
+            ),
+            origin_clue: signal_flow::OriginClue {
+                flow_id: "field-owner".into(),
+                session_id: "messaging-build".into(),
+                turn_id: "meta-bind-existing".into(),
+            },
+            flow_lifecycle: signal_flow::FlowLifecycle::Pending,
+        }
+    }
+
+    #[test]
+    fn a_store_written_before_roles_adopts_them_when_it_reopens() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        // As MetaBindExisting wrote it before the role had its own record.
+        store
+            .register_flow_as(
+                pane_node("bound-old", "w1:p1"),
+                "Mind:Medium:gpt-sol".into(),
+                None,
+            )
+            .expect("legacy bound flow");
+        store
+            .register_flow(pane_node("registered-old", "w1:p2"))
+            .expect("flow registered without a role");
+        assert_eq!(store.role("bound-old").unwrap(), None);
+        drop(store);
+
+        let store = fixture.store();
+        assert_eq!(
+            store.role("bound-old").unwrap(),
+            Some(signal_flow::Caller {
+                flow_id: "bound-old".into(),
+                flow_aspect: FlowAspect::Mind,
+                power_level: PowerLevel::Medium,
+                model_name: "gpt-sol".into(),
+            })
+        );
+        assert_eq!(store.role("registered-old").unwrap(), None);
+    }
+
+    #[test]
+    fn a_role_is_kept_with_its_binding_and_a_different_one_conflicts() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let role = signal_flow::Caller {
+            flow_id: "psyche-high".into(),
+            flow_aspect: FlowAspect::Psyche,
+            power_level: PowerLevel::High,
+            model_name: "claude-opus-5-5".into(),
+        };
+        let node = pane_node("psyche-high", "w1:p3");
+        assert!(matches!(
+            store
+                .register_existing_flow(node.clone(), role.clone())
+                .unwrap(),
+            super::FlowRegistration::Registered(_)
+        ));
+        assert_eq!(store.role("psyche-high").unwrap(), Some(role.clone()));
+        assert_eq!(
+            store
+                .flows_in_pane("messaging-build", "w1:p3")
+                .unwrap()
+                .into_iter()
+                .map(|node| node.flow_id)
+                .collect::<Vec<_>>(),
+            vec!["psyche-high".to_string()]
+        );
+        let mut other = role;
+        other.model_name = "claude-sonnet".into();
+        assert_eq!(
+            store.register_flow_in_role(node, other).unwrap(),
+            super::FlowRegistration::ConflictingBinding
         );
     }
 

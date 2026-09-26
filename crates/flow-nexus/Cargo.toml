@@ -9,6 +9,7 @@ path = "src/main.rs"
 base64 = "0.22"
 meta-signal-flow.workspace = true
 notify = "8"
+rustix = { version = "1", features = ["net", "time"] }
 rkyv.workspace = true
 sema-engine = { git = "https://github.com/LiGoldragon/sema-engine", rev = "516f01fe0b03157efc6cc3d38b588f0ca123ac94" }
 serde_json.workspace = true

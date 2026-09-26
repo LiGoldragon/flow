@@ -47,11 +47,12 @@ second identity registry.
 snapshot. A route is keyed on what Herdr binds for the pane's life: session,
 pane id and terminal id, with the harness kind. The agent name is a label a
 running flow may change; it is re-read from the snapshot and reported, never
-matched. Send can promote a Pending row only after the exact idle target pane
-renders a unique marker, an explicit pane read contains that marker, and a
-post-read route check still matches the bound terminal. The resulting receipt
-records the pane, marker, and read time as Presented grade; it does not claim
-the separate Read grade. Stop
+matched. Send types the bare input and nothing else. Its grades are exact:
+`NotDelivered` (nothing typed), `Accepted` (queued to a working agent),
+`Presented` (a settled agent observed reacting on the exact pane, the route
+still matching afterward) and `Uncertain` (typed, reaction unobserved). A
+Pending row is promoted only by a Presented Send; no probe or marker is ever
+typed to promote it. Presented does not claim the separate Read grade. Stop
 changes the durable lifecycle only after the exact pane closes successfully.
 `List` reads the same store rows and sorts them by Flow ID; it does not infer
 state from the current Herdr roster.

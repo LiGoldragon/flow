@@ -1,3 +1,28 @@
+# Flow 0.11.0
+
+A wire change through signal-flow 5.0.0 (cf3648f) and meta-signal-flow 6.0.3
+(5926ae7): Send's grades are exact, and no marker is typed.
+
+- `SendRejected` always means nothing was typed. `DeliveryRefused` is
+  replaced by `NotDelivered`: Herdr refused before any input reached the pane
+  (`agent_blocked`, `agent_not_found`, `agent_not_ready`,
+  `agent_target_ambiguous`, `empty_agent_prompt`, `agent_prompt_failed`), or
+  the prompt could not be spawned.
+- `Sent.Uncertain` is new: the input may have been typed but its reaction was
+  not observed (a stalled or timed-out wait, a reply naming another pane, or
+  any unrecognised failure). It is answered once and never retried.
+- `Sent.Presented` now means Herdr's `agent prompt --wait` saw the settled
+  (idle or done) recipient react on the exact pane. The receipt is
+  `{ FlowId HerdrPaneId PresentationObservedUnixMilliseconds }`; the marker
+  and the pane read are gone.
+- `Sent.Accepted` answers a prompt queued to a working agent.
+- No presentation marker is appended to any prompt: the pane text is
+  the `BareInput` byte for byte. A Pending flow becomes Active only on a
+  Presented Send. A Send to a working Pending flow is Accepted and leaves it
+  Pending, where 0.10.x refused it.
+- A Send to a settled Active flow now waits up to five seconds for the
+  reaction and answers Presented instead of Accepted.
+
 # Flow 0.10.7
 
 A patch release with no wire or storage change. Three faults of the first

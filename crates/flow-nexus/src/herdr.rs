@@ -8,17 +8,14 @@ use std::collections::BTreeSet;
 use std::{
     fs,
     path::PathBuf,
-    process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    process::{Command, Output},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use signal_flow::{
     EndpointSelection, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, PresentationReceipt,
-    RouteReadiness, SendOutcome,
+    RouteReadiness, SendOutcome, SendRejection,
 };
-
-static PRESENTATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Reads Herdr's documented session snapshot and validates one complete route.
 ///
@@ -52,12 +49,11 @@ pub enum PanePresence {
 
 /// Performs thin ordinary Flow operations against one revalidated Herdr pane.
 pub trait OperatesHerdrPane {
-    fn prompt(
-        &self,
-        node: &FlowNode,
-        text: &str,
-        require_presentation: bool,
-    ) -> Option<SendOutcome>;
+    /// Types `text`, byte for byte and nothing else, into the bound pane and
+    /// grades what is known of it. `Err(NotDelivered)` only when nothing was
+    /// typed; once input may have reached the pane the answer is a
+    /// `SendOutcome`, `Uncertain` when its reaction was not observed.
+    fn prompt(&self, node: &FlowNode, text: &str) -> Result<SendOutcome, SendRejection>;
     fn close(&self, node: &FlowNode) -> bool;
 }
 
@@ -184,29 +180,24 @@ impl ReadsHerdrRoster for HerdrCli {
 }
 
 impl OperatesHerdrPane for HerdrCli {
-    fn prompt(
-        &self,
-        node: &FlowNode,
-        text: &str,
-        require_presentation: bool,
-    ) -> Option<SendOutcome> {
+    fn prompt(&self, node: &FlowNode, text: &str) -> Result<SendOutcome, SendRejection> {
+        let not_delivered = Err(SendRejection::NotDelivered);
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-            return None;
+            return not_delivered;
         };
         if !self.identity_is_claimed(node) {
-            return None;
+            return not_delivered;
         }
-        let snapshot = self.snapshot(route)?;
-        let route_is_ready = if require_presentation {
-            Self::snapshot_has_idle_route(&snapshot, route, &node.harness_kind)
-        } else {
-            Self::snapshot_has_route(&snapshot, route, &node.harness_kind)
+        let Some(snapshot) = self.snapshot(route) else {
+            return not_delivered;
         };
-        if !route_is_ready {
-            return None;
+        // A settled (idle or done) agent is observed reacting to the prompt;
+        // a working one takes it into its queue, where no reaction to this
+        // prompt can be told from the turn already running.
+        let observes = Self::snapshot_has_idle_route(&snapshot, route, &node.harness_kind);
+        if !observes && !Self::snapshot_has_route(&snapshot, route, &node.harness_kind) {
+            return not_delivered;
         }
-        let marker = require_presentation.then(|| Self::presentation_marker(&node.flow_id));
-        let presented_text = marker.as_ref().map(|marker| format!("{text}\n\n{marker}"));
         let mut command = Command::new(&self.executable);
         command.args([
             "--session",
@@ -214,65 +205,35 @@ impl OperatesHerdrPane for HerdrCli {
             "agent",
             "prompt",
             route.herdr_pane_id.as_str(),
-            presented_text.as_deref().unwrap_or(text),
+            text,
         ]);
-        if !command.status().is_ok_and(|status| status.success()) {
-            return None;
+        if observes {
+            command.args(PromptReply::OBSERVATION);
         }
-        let Some(marker) = marker else {
-            return Some(SendOutcome::Accepted(node.flow_id.clone()));
+        let Ok(output) = command.output() else {
+            return not_delivered;
         };
-        if !Command::new(&self.executable)
-            .args([
-                "--session",
-                route.herdr_session_name.as_str(),
-                "pane",
-                "wait-output",
-                "--match",
-                marker.as_str(),
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                "200",
-                "--timeout",
-                "5000",
-                route.herdr_pane_id.as_str(),
-            ])
-            .status()
-            .is_ok_and(|status| status.success())
-        {
-            return None;
+        let reply = PromptReply { output };
+        if reply.refused_before_input() {
+            return not_delivered;
         }
-        let read = Command::new(&self.executable)
-            .args([
-                "--session",
-                route.herdr_session_name.as_str(),
-                "pane",
-                "read",
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                "200",
-                "--format",
-                "text",
-                route.herdr_pane_id.as_str(),
-            ])
-            .output()
-            .ok()?;
-        if !read.status.success()
-            || !String::from_utf8_lossy(&read.stdout).contains(marker.as_str())
-        {
-            return None;
+        let uncertain = Ok(SendOutcome::Uncertain(node.flow_id.clone()));
+        if !reply.prompted_pane(&route.herdr_pane_id) {
+            return uncertain;
         }
-        let presentation_read_unix_milliseconds = Self::unix_milliseconds()?;
+        if !observes {
+            return Ok(SendOutcome::Accepted(node.flow_id.clone()));
+        }
+        let Some(presentation_observed_unix_milliseconds) = Self::unix_milliseconds() else {
+            return uncertain;
+        };
         if !self.route_is_available(node) {
-            return None;
+            return uncertain;
         }
-        Some(SendOutcome::Presented(PresentationReceipt {
+        Ok(SendOutcome::Presented(PresentationReceipt {
             flow_id: node.flow_id.clone(),
             herdr_pane_id: route.herdr_pane_id.clone(),
-            presentation_marker: marker,
-            presentation_read_unix_milliseconds,
+            presentation_observed_unix_milliseconds,
         }))
     }
 
@@ -296,6 +257,72 @@ impl OperatesHerdrPane for HerdrCli {
     }
 }
 
+/// Herdr's answer to one `agent prompt`, read for what it proves about the
+/// bound pane. Herdr prints a success reply on stdout and an error reply on
+/// stderr, each one JSON object.
+struct PromptReply {
+    output: Output,
+}
+
+impl PromptReply {
+    /// The wait that observes the recipient react: Herdr 0.8.2 requires a
+    /// lifecycle change within five seconds of an accepted prompt to a
+    /// non-working agent, else `agent_prompt_stalled`; any observed state
+    /// then matches.
+    const OBSERVATION: [&'static str; 11] = [
+        "--wait",
+        "--until",
+        "working",
+        "--until",
+        "idle",
+        "--until",
+        "done",
+        "--until",
+        "blocked",
+        "--timeout",
+        "10000",
+    ];
+
+    /// Herdr 0.8.2 error codes answered before any input is sent to the
+    /// pane (`handle_agent_prompt` and the pre-prompt `agent get`). Every
+    /// other failure may follow typed input and is Uncertain.
+    const BEFORE_INPUT: [&'static str; 6] = [
+        "agent_blocked",
+        "agent_not_found",
+        "agent_not_ready",
+        "agent_target_ambiguous",
+        "empty_agent_prompt",
+        "agent_prompt_failed",
+    ];
+
+    fn refused_before_input(&self) -> bool {
+        !self.output.status.success()
+            && serde_json::from_slice::<serde_json::Value>(&self.output.stderr)
+                .ok()
+                .and_then(|reply| {
+                    reply
+                        .pointer("/error/code")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|code| Self::BEFORE_INPUT.contains(&code))
+                })
+                .unwrap_or(false)
+    }
+
+    fn prompted_pane(&self, pane_id: &str) -> bool {
+        self.output.status.success()
+            && serde_json::from_slice::<serde_json::Value>(&self.output.stdout).is_ok_and(|reply| {
+                reply
+                    .pointer("/result/type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("agent_prompted")
+                    && reply
+                        .pointer("/result/agent/pane_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(pane_id)
+            })
+    }
+}
+
 impl HerdrCli {
     fn unix_milliseconds() -> Option<i64> {
         let milliseconds = SystemTime::now()
@@ -303,12 +330,6 @@ impl HerdrCli {
             .ok()?
             .as_millis();
         i64::try_from(milliseconds).ok()
-    }
-
-    fn presentation_marker(flow_id: &str) -> String {
-        let sequence = PRESENTATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let milliseconds = Self::unix_milliseconds().unwrap_or_default();
-        format!("FLOW_PRESENTED_{flow_id}_{milliseconds}_{sequence}")
     }
 
     pub fn with_launch_bundles(mut self, launch_bundles: LaunchBundles) -> Self {

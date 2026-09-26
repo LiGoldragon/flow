@@ -1,3 +1,32 @@
+# Flow 0.12.1
+
+A patch: no wire or contract change. Opening the store no longer depends on
+every launch-attempt row reading in the current shape.
+
+- Each `flow_nexus_launch_attempts` row is read by itself when the store
+  opens. A row that does not read in the current shape is moved aside whole
+  (stored key, original archive bytes, the shape it was found to have) into the
+  new `flow_nexus_quarantined_launch_attempts` table, in one commit with its
+  retraction. Nothing is dropped and opening never fails on such a row.
+- A row archived before signal-flow 3.0.0 added `SystemPromptBundleFile`
+  (Flow 0.6 and earlier) is carried forward into the current shape with an
+  empty `SystemPromptBundleFile` and logged as
+  `LaunchAttemptMigrated.{ <launch-request> BeforeSystemPromptBundle }`. A carry
+  interrupted after the move aside completes at the next open.
+- A row no known shape reads stays only in quarantine and is logged as
+  `LaunchAttemptQuarantined.{ <launch-request> «<decode error>» }`.
+- With every row readable, role adoption reads the launch profiles again: a
+  flow bound by a launch takes its role from that launch's profile. On a copy
+  of the live store (2026-09-25) the one earlier row
+  (`flow06-luna6-20260924-2305`, a Flow 0.6 acceptance launch) is migrated,
+  88475f resolves `CallerResolved.{ 88475f Psyche Medium claude-opus-5-5 }`,
+  and the ambiguous-launch scan reads again. 5f38bc stays without a role: it
+  was registered through the meta `RegisterFlow` and no launch in the store
+  bound it.
+- The rows that failed were never a 0.10 → 0.11 change: signal-flow 4.0.1 and
+  5.x archive `LaunchAttempt` identically, and 0.10.7 logs the same decode
+  failure on the live store.
+
 # Flow 0.12.0
 
 An additive wire change through signal-flow 5.1.0 (74a47ed) and

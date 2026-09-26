@@ -800,7 +800,13 @@ mod tests {
 
     impl NexusFixture {
         fn new() -> Self {
+            Self::with_store(|_| {})
+        }
+
+        /// A fixture whose store at `flow.sema` is first prepared by `seed`.
+        fn with_store(seed: impl FnOnce(&Path)) -> Self {
             let directory = tempfile::tempdir().expect("temporary nexus fixture");
+            seed(&directory.path().join("flow.sema"));
             let flows_root = directory.path().join("flows");
             fs::create_dir(&flows_root).expect("fixture flows root");
             fs::write(
@@ -2731,5 +2737,35 @@ mod tests {
         });
         assert_eq!(ours.peer_process(), own);
         assert_eq!(theirs.peer_process(), own);
+    }
+
+    #[test]
+    fn a_nexus_over_earlier_launch_attempt_rows_opens_and_answers() {
+        let rows = crate::store::EarlierLaunchAttemptRows {
+            bound_flow_id: "launched-earlier".into(),
+        };
+        let fixture = NexusFixture::with_store(|path| rows.seed(path));
+        assert_eq!(fixture.nexus.store.opening_settlements.len(), 2);
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch(Query::List(signal_flow::ListRequest {})),
+            Response::Listed(rows) if rows.len() == 1 && rows[0].flow_id == "launched-earlier"
+        ));
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::LaunchStatus(
+                crate::store::EarlierLaunchAttemptRows::EARLIER_REQUEST.into()
+            )),
+            Response::LaunchPending(attempt)
+                if attempt.launch_profile.flow_aspect == FlowAspect::Psyche
+        ));
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::LaunchStatus(
+                crate::store::EarlierLaunchAttemptRows::UNREADABLE_REQUEST.into()
+            )),
+            Response::LaunchStatusRejected(
+                signal_flow::LaunchStatusRejection::UnknownLaunchRequest
+            )
+        ));
     }
 }

@@ -11,6 +11,7 @@ meta-signal-flow.workspace = true
 notify = "8"
 rustix = { version = "1", features = ["net", "time"] }
 rkyv.workspace = true
+redb = "4"
 sema-engine = { git = "https://github.com/LiGoldragon/sema-engine", rev = "516f01fe0b03157efc6cc3d38b588f0ca123ac94" }
 serde_json.workspace = true
 sha1 = "0.10"

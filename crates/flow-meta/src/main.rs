@@ -202,14 +202,14 @@ mod tests {
         };
         let Query::Deliver(request) = client
             .parse_command(
-                ["Deliver.{ m-7f3a2c 7d41e0 Soft.{ Flow.e167d8 Text.«Stage 1 is deployed; run the tier tests.» } }".into()]
+                ["Deliver.{ m-7f3a2c:7d41e0:0 7d41e0 Soft.{ m-7f3a2c Flow.e167d8 Text.«Stage 1 is deployed; run the tier tests.» } }".into()]
                     .into_iter(),
             )
             .expect("deliver datom parses")
         else {
             panic!("Deliver datom must stay a Deliver query")
         };
-        assert_eq!(request.delivery_id, "m-7f3a2c");
+        assert_eq!(request.delivery_id, "m-7f3a2c:7d41e0:0");
         assert_eq!(request.flow_id, "7d41e0");
         assert!(matches!(
             request.message,

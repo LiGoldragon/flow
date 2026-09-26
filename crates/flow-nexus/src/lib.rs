@@ -854,7 +854,7 @@ mod tests {
     }
 
     impl PromptFixture<'_> {
-        fn shell(&self, typed: &std::path::Path) -> String {
+        fn shell(&self, typed: &std::path::Path, agents: &[serde_json::Value]) -> String {
             let typing = format!("printf '%s' \"$6\" >> '{}'", typed.display());
             let error = |code: &str| {
                 format!(
@@ -862,9 +862,24 @@ mod tests {
                 )
             };
             match self {
-                Self::Prompted(pane) => format!(
-                    "{typing}; printf '%s\\n' '{{\"id\":\"cli:agent:prompt\",\"result\":{{\"type\":\"agent_prompted\",\"agent\":{{\"pane_id\":\"{pane}\"}}}}}}'"
-                ),
+                Self::Prompted(pane) => {
+                    // Herdr answers with the prompted pane's own AgentInfo,
+                    // which the roster already holds; a pane the roster does
+                    // not know is answered with its id alone, as a reply
+                    // naming another pane is.
+                    let agent = agents
+                        .iter()
+                        .find(|agent| {
+                            agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane)
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({ "pane_id": pane }));
+                    let reply = serde_json::json!({
+                        "id":"cli:agent:prompt",
+                        "result":{ "type":"agent_prompted", "agent":agent }
+                    });
+                    format!("{typing}; printf '%s\\n' '{reply}'")
+                }
                 Self::RefusedBeforeInput(code) => error(code),
                 Self::FailedAfterInput(code) => format!("{typing}; {}", error(code)),
             }
@@ -1064,7 +1079,7 @@ mod tests {
         ) -> PathBuf {
             let snapshot = serde_json::json!({
                 "id":"cli:api:snapshot",
-                "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
+                "result":{"snapshot":{"agents":agents.clone(),"protocol":20,"version":"0.8.2"},
                 "type":"session_snapshot"}
             });
             let log = self.directory.path().join("herdr-operations.log");
@@ -1073,7 +1088,7 @@ mod tests {
                 "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; {} ;;\n  \"pane close\"|\"pane send-keys\"|\"agent wait\") printf '%s\\n' \"$*\" >> '{}' ;;\n  \"agent read\") printf '%s\\n' '❯ ' '› ' ;;\n  *) exit 64 ;;\nesac\n",
                 snapshot,
                 log.display(),
-                prompt.shell(&typed),
+                prompt.shell(&typed, &agents),
                 log.display(),
             );
             FixtureExecutable {
@@ -1221,17 +1236,22 @@ mod tests {
         Refused(meta_signal_flow::DeliveryRejection),
     }
 
+    /// The MessageId every fixture letter names: what a recipient reading
+    /// the pane would Acknowledge.
+    const FIXTURE_MESSAGE_ID: &str = "m-7f3a2c";
+
     fn middle_abrupt(text: &str) -> meta_signal_flow::Message {
         meta_signal_flow::Message::MiddleAbrupt(meta_signal_flow::Letter {
+            message_id: FIXTURE_MESSAGE_ID.into(),
             sender: meta_signal_flow::Sender::Owner,
             content: meta_signal_flow::Content::Text(text.into()),
         })
     }
 
     /// The pane text of a MiddleAbrupt from the owner, written out by hand:
-    /// the head comes first and the text sits in guillemets.
+    /// the head comes first, then the id, the sender and the text.
     fn rendered(text: &str) -> String {
-        format!("MiddleAbrupt.{{ Owner Text.«{text}» }}")
+        format!("MiddleAbrupt.{{ {FIXTURE_MESSAGE_ID} Owner Text.«{text}» }}")
     }
 
     fn prompts(operation_log: &std::path::Path) -> Vec<String> {
@@ -1243,7 +1263,7 @@ mod tests {
             .collect()
     }
 
-    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 MiddleAbrupt.{ Owner Text.«bare prompt» } --wait --until working --until idle --until done --until blocked --timeout 10000";
+    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 MiddleAbrupt.{ m-7f3a2c Owner Text.«bare prompt» } --wait --until working --until idle --until done --until blocked --timeout 10000";
 
     #[test]
     fn observed_send_promotes_a_pending_flow_and_types_only_the_bare_input() {
@@ -1605,6 +1625,33 @@ mod tests {
             "agent":"codex", "agent_status":"done", "name":"agent-w1:p3",
             "pane_id":"w1:p3", "terminal_id":"terminal-w1:p3"
         })
+    }
+
+    /// Herdr omits `name` for a pane it was never given one for. The label
+    /// is not part of the binding and is no part of the presentation either:
+    /// a nameless recipient seen reacting is Presented, as any other is.
+    /// Grading through `current_route`, which re-reads the name, settled
+    /// every such delivery Uncertain.
+    fn nameless_rested_codex_agent() -> serde_json::Value {
+        let mut agent = rested_imported_codex_agent();
+        agent.as_object_mut().expect("agent object").remove("name");
+        agent
+    }
+
+    #[test]
+    fn a_nameless_recipient_seen_reacting_is_presented() {
+        let fixture = NexusFixture::new();
+        let operation_log = fixture.accept_pane_operations(
+            vec![nameless_rested_codex_agent()],
+            PromptFixture::Prompted("w1:p3"),
+        );
+        bind_existing_caller(&fixture, "908786", "w1:p3");
+
+        assert_eq!(
+            fixture.send("bare prompt"),
+            Sent::Graded(meta_signal_flow::DeliveryGrade::Presented)
+        );
+        assert_eq!(prompts(&operation_log), vec![OBSERVED_PROMPT.to_owned()]);
     }
 
     fn resolved(fixture: &NexusFixture) -> FlowNode {
@@ -2522,7 +2569,7 @@ mod tests {
             }}});
             let snapshot = serde_json::json!({
                 "id":"cli:api:snapshot",
-                "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
+                "result":{"snapshot":{"agents":agents.clone(),"protocol":20,"version":"0.8.2"},
                 "type":"session_snapshot"}
             });
             let body = format!(
@@ -3292,19 +3339,54 @@ mod tests {
         }
     }
 
+    /// A freshly spawned process is not yet marked. glibc's `posix_spawn`
+    /// wakes the vfork parent from inside the child's `execve`, at
+    /// `mm_release`, which the kernel reaches before it has laid the new
+    /// environment into the new address space: for a few dozen microseconds
+    /// `/proc/<pid>/environ` reads back empty (the `comm` is already the new
+    /// program's). A reader cannot tell that from a scrubbed environment, so
+    /// it would take the peer for the owner. Every fixture peer therefore
+    /// waits for its own marks before it is used as one. The Nexus needs no
+    /// such wait: its peers are processes that have already connected to it.
+    trait SettlesItsMarks {
+        /// A pane's marks appear within microseconds; this is only a bound.
+        const SETTLING_LIMIT: Duration = Duration::from_secs(5);
+
+        fn settled_pane(&self) -> CallerPane;
+    }
+
+    impl SettlesItsMarks for CallerProcess {
+        fn settled_pane(&self) -> CallerPane {
+            let deadline = std::time::Instant::now() + Self::SETTLING_LIMIT;
+            loop {
+                if let Some(pane) = self.marked_pane() {
+                    return pane;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the fixture peer's Herdr marks never became readable"
+                );
+                std::thread::yield_now();
+            }
+        }
+    }
+
     /// A process that sleeps under the given Herdr marks, killed on drop.
     struct MarkedProcess(std::process::Child);
 
     impl MarkedProcess {
         fn spawn(command: &str, pane: &str) -> Self {
-            Self(
-                std::process::Command::new("sh")
-                    .args(["-c", command])
-                    .env("HERDR_SESSION", "messaging-build")
-                    .env("HERDR_PANE_ID", pane)
-                    .spawn()
-                    .expect("marked fixture process"),
-            )
+            let child = std::process::Command::new("sh")
+                .args(["-c", command])
+                .env("HERDR_SESSION", "messaging-build")
+                .env("HERDR_PANE_ID", pane)
+                .spawn()
+                .expect("marked fixture process");
+            CallerProcess {
+                process_id: child.id(),
+            }
+            .settled_pane();
+            Self(child)
         }
     }
 

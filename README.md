@@ -36,27 +36,40 @@ Every write into a pane goes through the privileged socket, and Flow is the
 only writer. `Deliver` carries a typed `Message` whose head is its Priority:
 
 ```sh
-flow-meta 'Deliver.{ m-7f3a2c 00f95a Soft.{ Owner Text.«continue with the implementation» } }'
-flow-meta 'Deliver.{ m-81b0e4 00f95a HardAbrupt.{ Flow.e167d8 Text.«stop the build» } }'
+flow-meta 'Deliver.{ m-7f3a2c:00f95a:0 00f95a Soft.{ m-7f3a2c Owner Text.«continue with the implementation» } }'
+flow-meta 'Deliver.{ m-81b0e4:00f95a:0 00f95a HardAbrupt.{ m-81b0e4 Flow.e167d8 Text.«stop the build» } }'
 flow-meta 'Command.{ 00f95a Compact }'
 ```
 
 Flow renders the Message itself, so the pane text always begins
-`HardAbrupt.`, `MiddleAbrupt.` or `Soft.`. The body may hold no control
-character but LF and TAB (`ControlCharacter` carries the byte offset in the
-pane text), and a first line that is a harness command is refused as
-`HarnessCommand`: use `Command`. Every tier needs the recipient bound, not
-Blocked, and its composer blank; `Soft` also needs it Idle or Done.
-`HardAbrupt` presses the harness profile's interrupt keys when the recipient
-is Working and reports whether it was seen leaving Working. A write holds the
-pane's lease from its first key to its last, so two writes never interleave.
-`Presented` means the recipient was seen reacting on the exact pane,
-`Transported` that Herdr accepted the text, `Uncertain` that it may have been
-typed and was not observed; Uncertain is never retried, and a delivery a
-crash left under its lease settles Uncertain when the Nexus opens. `Deliver`
-is idempotent on its DeliveryId. A Pending row becomes Active when the flow
-is witnessed live: on a `Presented` Deliver, or when `List` finds its bound
-pane present in Herdr. Presented is not Read. `Stop` persists the Stopped
+`HardAbrupt.`, `MiddleAbrupt.` or `Soft.`, then the letter's MessageId:
+
+```
+Soft.{ m-7f3a2c Owner Text.«continue with the implementation» }
+```
+
+That id is the whole of what a recipient needs to answer
+`message 'Acknowledge.m-7f3a2c'`, which is the only source of Read. Flow
+never interprets it; the DeliveryId beside it is Message's own per-attempt
+key.
+
+The body may hold no control character but LF and TAB (`ControlCharacter`
+carries the byte offset in the pane text), and a first line that is a harness
+command is refused as `HarnessCommand`: use `Command`. Every tier needs the
+recipient bound, not Blocked, and its composer blank; `Soft` also needs it Idle
+or Done. `HardAbrupt` presses the harness profile's interrupt keys when the
+recipient is Working and reports whether it was seen leaving Working. A write
+holds the pane's lease from its first key to its last, so two writes never
+interleave. `Presented` means the recipient was seen reacting on the exact pane
+— Herdr's own `agent_prompted` reply after it waited, naming the pane and
+terminal the route names, never the agent's label, which Herdr omits for panes
+it was never given a name for. `Transported` means Herdr accepted the text,
+`Uncertain` that it may have been typed and was not observed; Uncertain is
+never retried, and a delivery a crash left under its lease settles Uncertain
+when the Nexus opens. `Deliver` is idempotent on its DeliveryId. A Pending row
+becomes Active when the flow is witnessed live: on a `Presented` Deliver, or
+when `List` finds its bound pane present in Herdr. Presented is not Read.
+`Stop` persists the Stopped
 lifecycle only after `herdr pane close` succeeds for the revalidated
 pane. `List` returns all durable rows, sorted by Flow ID, and reports each one's
 true lifecycle. A row that is still live is reconciled against Herdr before it

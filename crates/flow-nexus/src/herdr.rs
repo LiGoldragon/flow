@@ -246,7 +246,11 @@ impl PromptReply {
                 .unwrap_or(false)
     }
 
-    fn prompted_pane(&self, pane_id: &str) -> bool {
+    /// Whether Herdr answered `agent_prompted` for the exact binding the
+    /// route names. The reply carries that pane's own AgentInfo, so the pane
+    /// and terminal it names are the observation itself. The agent's `name`
+    /// is a label the harness need not carry at all, and is never read here.
+    fn prompted_binding(&self, route: &HerdrRoute) -> bool {
         self.output.status.success()
             && serde_json::from_slice::<serde_json::Value>(&self.output.stdout).is_ok_and(|reply| {
                 reply
@@ -256,7 +260,11 @@ impl PromptReply {
                     && reply
                         .pointer("/result/agent/pane_id")
                         .and_then(serde_json::Value::as_str)
-                        == Some(pane_id)
+                        == Some(route.herdr_pane_id.as_str())
+                    && reply
+                        .pointer("/result/agent/terminal_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(route.herdr_terminal_id.as_str())
             })
     }
 }

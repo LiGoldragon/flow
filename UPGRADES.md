@@ -1,3 +1,35 @@
+# Flow 0.16.0
+
+A breaking release on meta-signal-flow 10.0.0 that clears the three faults
+found in 0.15.0 before it was deployed.
+
+- **A Letter names its MessageId.** The pane text was
+  `Soft.{ Flow.e167d8 Text.«…» }`, which told the recipient everything except
+  which message it was reading, so it could not `message 'Acknowledge.…'` at
+  all. `Letter` gains `MessageId` as its first position and the pane text is
+  now `Soft.{ m-7f3a2c Flow.e167d8 Text.«…» }` — one bare token wider. Flow
+  never interprets the id; Message mints it and Flow types it. Every consumer
+  must repin: `meta_signal_flow::Letter` gained a field, and signal-message
+  7.0.0 imports `MessageId` from it rather than declaring a second one.
+- **Presented no longer depends on the recipient's agent name.** A delivery
+  seen reacting was re-checked against a fresh Herdr snapshot through
+  `current_route`, which re-reads the agent's `name` — a label Herdr omits for
+  panes that were never named, among them every pane imported with
+  `MetaBindExisting`. Those deliveries settled `Uncertain` however plainly the
+  recipient reacted. The grade now rests on the observation itself: Herdr's
+  own `agent_prompted` reply, after it waited for the reaction, naming the
+  pane and terminal the route names. The name was never the evidence.
+- **The meta-gate tests are correct in a build sandbox.** Two of them spawned a
+  marked process and read its `/proc/<pid>/environ` at once. glibc's
+  `posix_spawn` wakes the vfork parent from inside the child's `execve`, before
+  the kernel has laid the new environment into the new address space, so for a
+  few dozen microseconds the environ reads back *empty* — indistinguishable
+  from a scrubbed one, which makes a flow read as the owner. On a loaded
+  machine the parent was descheduled past that window and the tests passed
+  under plain cargo; in the Nix sandbox they failed every time. Fixture peers
+  now wait for their own marks before they are used as peers. The Nexus needs
+  no such wait: its peers have already connected to it.
+
 # Flow 0.15.0
 
 A breaking release on signal-flow 7.0.0 and meta-signal-flow 9.0.0: Flow is

@@ -17,6 +17,7 @@ use std::fs;
 
 fn letter(text: &str) -> Letter {
     Letter {
+        message_id: super::FIXTURE_MESSAGE_ID.into(),
         sender: Sender::Flow("e167d8".into()),
         content: Content::Text(text.into()),
     }
@@ -85,7 +86,7 @@ fn soft_waits_for_a_resting_recipient_and_types_nothing_to_a_working_one() {
     );
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("Soft.{ Flow.e167d8 Text.«when you rest» }")
+        Some("Soft.{ m-7f3a2c Flow.e167d8 Text.«when you rest» }")
     );
 }
 
@@ -152,7 +153,7 @@ fn hard_abrupt_interrupts_a_working_recipient_before_typing() {
         vec![
             "--session messaging-build pane send-keys w1:p3 esc".to_owned(),
             "--session messaging-build agent wait w1:p3 --until idle --until done --until blocked --timeout 5000".to_owned(),
-            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Flow.e167d8 Text.«stop the build» }".to_owned(),
+            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ m-7f3a2c Flow.e167d8 Text.«stop the build» }".to_owned(),
         ]
     );
 }
@@ -181,11 +182,11 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
         ("!ls -la", BodyRefusal::HarnessCommand("!ls -la".into())),
         (
             "end \u{1b}[201~ of paste",
-            BodyRefusal::ControlCharacter("MiddleAbrupt.{ Owner Text.«end ".len() as i64),
+            BodyRefusal::ControlCharacter("MiddleAbrupt.{ m-7f3a2c Owner Text.«end ".len() as i64),
         ),
         (
             "one\rtwo",
-            BodyRefusal::ControlCharacter("MiddleAbrupt.{ Owner Text.«one".len() as i64),
+            BodyRefusal::ControlCharacter("MiddleAbrupt.{ m-7f3a2c Owner Text.«one".len() as i64),
         ),
         ("   ", BodyRefusal::EmptyBody),
     ] {
@@ -487,20 +488,24 @@ fn a_flow_whose_role_flow_does_not_know_is_not_taken_for_the_owner() {
 }
 
 /// A process marked as running in a pane of the fixture session. `sleep` is
-/// spawned directly, not through a shell that execs it, so its environment
-/// is never read in the middle of an exec.
+/// spawned directly rather than through a shell that execs it, and its marks
+/// are waited for before it is used as a peer.
 struct PanePeer(std::process::Child);
 
 impl PanePeer {
     fn spawn(pane: &str) -> Self {
-        Self(
-            std::process::Command::new("sleep")
-                .arg("30")
-                .env("HERDR_SESSION", "messaging-build")
-                .env("HERDR_PANE_ID", pane)
-                .spawn()
-                .expect("marked peer"),
-        )
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .env("HERDR_SESSION", "messaging-build")
+            .env("HERDR_PANE_ID", pane)
+            .spawn()
+            .expect("marked peer");
+        // A peer is only a peer once its marks are readable: see
+        // SettlesItsMarks, and why exec alone does not settle them.
+        super::SettlesItsMarks::settled_pane(&crate::caller::CallerProcess {
+            process_id: child.id(),
+        });
+        Self(child)
     }
 }
 

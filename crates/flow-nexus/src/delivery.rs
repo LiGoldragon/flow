@@ -14,7 +14,6 @@ pub mod body;
 pub mod lease;
 
 use crate::RunningNexus;
-use crate::herdr::ReadsHerdrRoster;
 use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
 use crate::store::{NamesLiveFlow, ReadsFlowRows, RecordsFlowLifecycle, RecordsReplacement};
@@ -379,10 +378,14 @@ impl<'run> LeasedDelivery<'run> {
         if !observed {
             return self.settle(interrupt_witness, DeliveryGrade::Transported);
         }
-        // Presented only while the exact binding still stands.
-        if !self.nexus.herdr.route_is_available(&self.target.node) {
-            return self.settle(interrupt_witness, DeliveryGrade::Uncertain);
-        }
+        // Presented is the observation itself: Herdr waited for the
+        // recipient's reaction and answered `agent_prompted` for the exact
+        // pane and terminal this route names, so nothing is re-read after.
+        // A second snapshot would only say what the pane looks like later,
+        // and because it re-read the agent's *name* — a label an imported
+        // pane may not carry at all — it turned every nameless recipient's
+        // delivery into Uncertain. The label was never the evidence.
+        //
         // A Pending flow seen reacting to a real Deliver is witnessed live.
         if self.target.node.flow_lifecycle == FlowLifecycle::Pending {
             let _ = self.nexus.store.record_active(&self.target.node.flow_id);

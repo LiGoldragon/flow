@@ -167,7 +167,7 @@ impl WritesPane for HerdrCli {
         if reply.refused_before_input() {
             return Placement::Refused;
         }
-        if !reply.prompted_pane(&route.herdr_pane_id) {
+        if !reply.prompted_binding(route) {
             return Placement::Uncertain;
         }
         Placement::Placed { observed: observe }

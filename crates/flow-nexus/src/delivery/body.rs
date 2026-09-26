@@ -167,6 +167,7 @@ mod tests {
 
     fn soft(text: &str) -> Message {
         Message::Soft(Letter {
+            message_id: "m-7f3a2c".into(),
             sender: Sender::Flow("e167d8".into()),
             content: Content::Text(text.into()),
         })
@@ -182,13 +183,18 @@ mod tests {
             soft("Stage 1 is deployed; run the tier tests.")
                 .pane_text()
                 .as_str(),
-            "Soft.{ Flow.e167d8 Text.«Stage 1 is deployed; run the tier tests.» }"
+            "Soft.{ m-7f3a2c Flow.e167d8 Text.«Stage 1 is deployed; run the tier tests.» }"
         );
         let hard = Message::HardAbrupt(Letter {
+            message_id: "m-81b0e4".into(),
             sender: Sender::Owner,
             content: Content::Text("/compact".into()),
         });
-        assert!(hard.pane_text().as_str().starts_with("HardAbrupt.{ Owner "));
+        assert!(
+            hard.pane_text()
+                .as_str()
+                .starts_with("HardAbrupt.{ m-81b0e4 Owner ")
+        );
     }
 
     #[test]
@@ -228,7 +234,7 @@ mod tests {
 
     #[test]
     fn keys_are_refused_at_their_offset_in_the_pane_text() {
-        let head = "Soft.{ Flow.e167d8 Text.«".len() as i64;
+        let head = "Soft.{ m-7f3a2c Flow.e167d8 Text.«".len() as i64;
         for (text, at) in [
             // Each text holds a space, so it is rendered in guillemets.
             ("a \u{1b}b", 2),
@@ -254,6 +260,7 @@ mod tests {
             Some(BodyRefusal::EmptyBody)
         );
         let relay = Message::MiddleAbrupt(Letter {
+            message_id: "m-90c1aa".into(),
             sender: Sender::Owner,
             content: Content::Psyche(Psyche_Data {
                 psyche_context: "context".into(),

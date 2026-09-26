@@ -58,6 +58,20 @@ impl RendersPaneText for Message {
     }
 }
 
+/// Recognises, in text a composer holds, a letter Flow typed: every PaneText
+/// opens with its Priority head and then its MessageId.
+pub trait RecognizesLetter {
+    fn opens_a_letter(&self) -> bool;
+}
+
+impl RecognizesLetter for str {
+    fn opens_a_letter(&self) -> bool {
+        ["HardAbrupt.{ m-", "MiddleAbrupt.{ m-", "Soft.{ m-"]
+            .iter()
+            .any(|head| self.starts_with(head))
+    }
+}
+
 /// Answers what the writer would refuse of a Message for one harness.
 pub trait VetsBody {
     fn refusal(&self, profile: &HarnessProfile) -> Option<BodyRefusal>;

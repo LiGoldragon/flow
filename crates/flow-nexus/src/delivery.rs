@@ -14,10 +14,10 @@ pub mod body;
 pub mod lease;
 
 use crate::RunningNexus;
-use crate::herdr::pane::{Interruption, PaneAgent, Placement, WritesPane};
+use crate::herdr::pane::{Interruption, PaneAgent, Placement, Submission, WritesPane};
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
 use crate::store::{ReadsFlowRows, RecordsFlowLifecycle, RecordsReplacement};
-use body::{RendersPaneText, VetsBody};
+use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
     CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Delivery, DeliveryGrade,
@@ -270,6 +270,21 @@ impl DeliversMessages for RunningNexus {
     }
 }
 
+/// What became of a placed letter in the composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Submitted {
+    /// It left the composer on Herdr's own submit.
+    Seen,
+    /// It left only after Flow pressed the submit key once more.
+    AfterPress,
+    /// The composer could not be read after placing.
+    Unreadable,
+    /// It would not submit, and was taken back out of the composer.
+    TakenBack,
+    /// It would neither submit nor be taken back.
+    Stuck,
+}
+
 /// One delivery's key sequence, run while its pane lease is held.
 struct LeasedDelivery<'run> {
     nexus: &'run RunningNexus,
@@ -332,6 +347,47 @@ impl<'run> LeasedDelivery<'run> {
         Ok(delivery)
     }
 
+    /// Sees the placed text leave the composer. When it stays, the submit
+    /// key is pressed once; when it stays after that too, the text is taken
+    /// back, so the pane is never left holding a letter.
+    fn submitted(&self, lines: usize) -> Submitted {
+        let herdr = &self.nexus.herdr;
+        let route = &self.target.route;
+        let harness_kind = &self.target.node.harness_kind;
+        match herdr.submission(route, harness_kind) {
+            Submission::Seen => return Submitted::Seen,
+            Submission::Unreadable => return Submitted::Unreadable,
+            Submission::Unseen => {}
+        }
+        if herdr.submit(route, harness_kind) {
+            let _ = self.step(LeaseStep::Submitted);
+            match herdr.submission(route, harness_kind) {
+                Submission::Seen => return Submitted::AfterPress,
+                Submission::Unreadable => return Submitted::Unreadable,
+                Submission::Unseen => {}
+            }
+        }
+        if herdr.take_back(route, harness_kind, lines)
+            && herdr.submission(route, harness_kind) == Submission::Seen
+        {
+            return Submitted::TakenBack;
+        }
+        Submitted::Stuck
+    }
+
+    /// Empties the composer of a letter an interrupt put back into it; a
+    /// text that is not a letter is a person's and is never touched.
+    fn retracted_restored_letter(&self) -> bool {
+        let herdr = &self.nexus.herdr;
+        let route = &self.target.route;
+        let harness_kind = &self.target.node.harness_kind;
+        herdr
+            .composer_text(route, harness_kind)
+            .is_some_and(|text| text.opens_a_letter())
+            && herdr.retract(route, harness_kind)
+            && herdr.submission(route, harness_kind) == Submission::Seen
+    }
+
     fn run(&self) -> Result<Delivery, DeliveryRejection> {
         let mut agent_state = self.nexus.writable_state(self.target)?;
         let soft = matches!(self.request.message, Message::Soft(_));
@@ -358,24 +414,32 @@ impl<'run> LeasedDelivery<'run> {
                 InterruptWitness::Unobserved
             };
             // The interrupt may have raised a dialog or put a queued prompt
-            // back into the composer: the pane is read again.
+            // back into the composer: the pane is read again. A letter it
+            // put back is Flow's own and is taken out; left there, it
+            // refused this letter and every later one to the pane.
             agent_state = match self.nexus.writable_state(self.target) {
                 Ok(agent_state) => agent_state,
+                Err(PaneRefusal::ComposerOccupied) if self.retracted_restored_letter() => {
+                    match self.nexus.writable_state(self.target) {
+                        Ok(agent_state) => agent_state,
+                        Err(refusal) => return self.refuse(refusal.into()),
+                    }
+                }
                 Err(refusal) => return self.refuse(refusal.into()),
             };
         }
         let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
         let text = self.request.message.pane_text();
-        let observed = match self
+        // Whether Herdr saw the recipient react; None when what followed
+        // the text is not known.
+        let reacted = match self
             .nexus
             .herdr
             .place(&self.target.route, text.as_str(), observe)
         {
             Placement::Refused => return self.refuse(DeliveryRejection::NotDelivered),
-            Placement::Uncertain => {
-                return self.settle(interrupt_witness, DeliveryGrade::Uncertain);
-            }
-            Placement::Placed { observed } => observed,
+            Placement::Uncertain => None,
+            Placement::Placed { observed } => Some(observed),
         };
         let _ = self.step(LeaseStep::Placed);
         if hard {
@@ -385,16 +449,32 @@ impl<'run> LeasedDelivery<'run> {
                 .press(&self.target.route, &self.target.profile.submit_keys);
             let _ = self.step(LeaseStep::Submitted);
         }
+        // Whatever Herdr answered, the letter must not be left typed and
+        // unsubmitted: a composer holding it refuses every later letter.
+        let submitted = self.submitted(text.as_str().lines().count());
+        let observed = match (reacted, submitted) {
+            (_, Submitted::TakenBack) => {
+                return self.refuse(DeliveryRejection::ComposerOccupied);
+            }
+            (_, Submitted::Stuck) | (None, Submitted::Seen | Submitted::Unreadable) => {
+                return self.settle(interrupt_witness, DeliveryGrade::Uncertain);
+            }
+            (Some(observed), Submitted::Seen) => observed,
+            // Flow's own press submitted it, or the composer could not be
+            // read: Herdr took the text, and no reaction to it is witnessed.
+            (_, Submitted::AfterPress | Submitted::Unreadable) => false,
+        };
         if !observed {
             return self.settle(interrupt_witness, DeliveryGrade::Transported);
         }
-        // Presented is the observation itself: Herdr waited for the
-        // recipient's reaction and answered `agent_prompted` for the exact
-        // pane and terminal this route names, so nothing is re-read after.
-        // A second snapshot would only say what the pane looks like later,
-        // and because it re-read the agent's *name* — a label an imported
-        // pane may not carry at all — it turned every nameless recipient's
-        // delivery into Uncertain. The label was never the evidence.
+        // Presented is two observations: Herdr waited for the recipient's
+        // reaction and answered `agent_prompted` for the exact pane and
+        // terminal this route names, and the letter was seen to leave the
+        // composer. Herdr's answer alone is not a submission: it matches
+        // any lifecycle change after the text, and in the e167d8 sandbox
+        // (fms-9a3e2b) it answered for a letter Claude Code left typed and
+        // unsubmitted. The agent's *name* is never re-read: it is a label
+        // an imported pane may not carry at all.
         //
         // A Pending flow seen reacting to a real Deliver is witnessed live.
         if self.target.node.flow_lifecycle == FlowLifecycle::Pending {

@@ -45,7 +45,15 @@ pub trait WritesPane {
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent;
     /// Whether the composer holds no text of its own: `None` when the screen
     /// could not be read or shows no composer.
-    fn composer_is_blank(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<bool>;
+    /// The text the composer holds, empty when it holds none of its own:
+    /// `None` when the screen could not be read or shows no composer. Only
+    /// the composer's first line is read.
+    fn composer_text(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String>;
+    /// Whether the composer holds no text of its own.
+    fn composer_is_blank(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<bool> {
+        self.composer_text(route, harness_kind)
+            .map(|text| text.is_empty())
+    }
     /// Presses keys in the pane, in order. False when Herdr refused them.
     fn press(&self, route: &HerdrRoute, keys: &[String]) -> bool;
     /// Types `text` into the pane through `agent prompt`, which submits it.
@@ -53,6 +61,55 @@ pub trait WritesPane {
     fn place(&self, route: &HerdrRoute, text: &str, observe: bool) -> Placement;
     /// Waits, boundedly, for a working agent to leave Working.
     fn left_working(&self, route: &HerdrRoute) -> bool;
+
+    /// Whether the text just placed is seen to leave the composer: the
+    /// submission itself. `agent prompt` sends its submitting CR as a
+    /// separate write 300 ms after the text, and its `agent_prompted`
+    /// answers any lifecycle change, which need not be this text's.
+    ///
+    /// Herdr offers no event for a composer emptying, so the composer is
+    /// read again, a bounded number of times, until it is seen blank: an
+    /// exception to subscribing, taken because there is nothing to
+    /// subscribe to.
+    fn submission(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Submission {
+        let mut submission = Submission::Unreadable;
+        for _ in 0..Submission::READS {
+            // The first read waits too, past Herdr's delayed CR.
+            std::thread::sleep(Submission::SPACING);
+            match self.composer_is_blank(route, harness_kind) {
+                Some(true) => return Submission::Seen,
+                Some(false) => submission = Submission::Unseen,
+                None => {}
+            }
+        }
+        submission
+    }
+
+    /// Presses the composer's submit key once.
+    fn submit(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool {
+        self.press(route, &Composer::of(harness_kind).submit_keys())
+    }
+
+    /// Takes back the letter an interrupt put back into the composer.
+    ///
+    /// Witnessed of Claude Code 2.1.280 (Haiku 4.5, e167d8 sandbox runs
+    /// fms-9a3e2b and fms-d70a61, 2026-09-26): a HardAbrupt's `esc esc`
+    /// pressed before the turn's first response cancels that turn and puts
+    /// its prompt, the letter just Presented, back into the composer; with
+    /// vim editing the second `esc` leaves the composer in NORMAL mode,
+    /// where `ctrl+u` stops short of the cursor's own character. One
+    /// `ctrl+c` empties a composer holding text in either mode; it is
+    /// pressed only while the composer is seen holding a letter, since a
+    /// second one into an empty composer would quit Claude.
+    fn retract(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool {
+        self.press(route, &Composer::of(harness_kind).retract_keys())
+    }
+
+    /// Takes back a text of `lines` lines the composer still holds: a kill
+    /// to the line's start, then a join onto the line above, for each line.
+    fn take_back(&self, route: &HerdrRoute, harness_kind: &HarnessKind, lines: usize) -> bool {
+        self.press(route, &Composer::of(harness_kind).take_back_keys(lines))
+    }
 
     /// Presses the interrupt keys into a working agent until it is seen
     /// leaving Working, at most `Interruption::PRESSES` times.
@@ -88,6 +145,25 @@ pub enum Interruption {
     Observed,
     /// Keys reached the pane, and the agent was still Working after them.
     Unobserved,
+}
+
+/// Whether a placed text was seen to leave the composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Submission {
+    /// The composer was seen blank: the text was submitted.
+    Seen,
+    /// The composer was seen still holding text.
+    Unseen,
+    /// The composer could not be read.
+    Unreadable,
+}
+
+impl Submission {
+    /// The composer is read this many times, each `SPACING` after the
+    /// last: long enough for Herdr's CR, sent 300 ms after the text, and a
+    /// harness's render of a large paste.
+    pub const READS: usize = 12;
+    pub const SPACING: std::time::Duration = std::time::Duration::from_millis(350);
 }
 
 impl Interruption {
@@ -146,7 +222,7 @@ impl WritesPane for HerdrCli {
         }
     }
 
-    fn composer_is_blank(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<bool> {
+    fn composer_text(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String> {
         let output = Command::new(&self.executable)
             .args([
                 "--session",
@@ -166,7 +242,7 @@ impl WritesPane for HerdrCli {
         if !output.status.success() {
             return None;
         }
-        Composer::of(harness_kind).is_blank(&String::from_utf8_lossy(&output.stdout))
+        Composer::of(harness_kind).text(&String::from_utf8_lossy(&output.stdout))
     }
 
     fn press(&self, route: &HerdrRoute, keys: &[String]) -> bool {
@@ -253,25 +329,76 @@ impl HerdrCli {
 /// knowledge of the version witnessed, not a setup value, so it lives here.
 struct Composer {
     glyph: char,
+    /// What empties a composer an interrupt put a letter back into.
+    retraction: Retraction,
+}
+
+/// How a harness's composer is emptied of a letter an interrupt restored.
+enum Retraction {
+    /// One key that empties the composer in any edit mode.
+    Key(&'static str),
+    /// Line by line, as `take_back_keys`.
+    LineByLine,
+}
+
+impl Composer {
+    /// The key that submits the composer, as Herdr's own CR does.
+    fn submit_keys(&self) -> Vec<String> {
+        vec!["enter".to_owned()]
+    }
+
+    /// Witnessed of Claude Code 2.1.280 and Codex 0.153 (e167d8 sandbox,
+    /// 2026-09-26): `ctrl+u` kills from the cursor to the line's start and
+    /// `backspace` at a line's start joins it onto the line above; neither
+    /// interrupts a working turn, as `esc` and `ctrl+c` would. The cursor
+    /// rests at the end of a placed text.
+    /// See `WritesPane::retract`. Codex has no vim mode: its composer is
+    /// taken back line by line, generously, since a restored text's length
+    /// is not known and the keys do nothing to an empty composer.
+    fn retract_keys(&self) -> Vec<String> {
+        match self.retraction {
+            Retraction::Key(key) => vec![key.to_owned()],
+            Retraction::LineByLine => self.take_back_keys(Self::RETRACTED_LINES),
+        }
+    }
+
+    const RETRACTED_LINES: usize = 32;
+
+    fn take_back_keys(&self, lines: usize) -> Vec<String> {
+        (0..lines.max(1))
+            .flat_map(|_| ["ctrl+u".to_owned(), "backspace".to_owned()])
+            .collect()
+    }
 }
 
 impl Composer {
     fn of(harness_kind: &HarnessKind) -> Self {
         match harness_kind {
-            HarnessKind::Claude => Self { glyph: '❯' },
-            HarnessKind::Codex => Self { glyph: '›' },
+            HarnessKind::Claude => Self {
+                glyph: '❯',
+                retraction: Retraction::Key("ctrl+c"),
+            },
+            HarnessKind::Codex => Self {
+                glyph: '›',
+                retraction: Retraction::LineByLine,
+            },
         }
     }
 
-    /// The composer is the last line opening with the glyph. It is blank
-    /// when nothing follows the glyph but a placeholder, which both harnesses
-    /// render dim (SGR 2); text a person typed is not dim.
-    fn is_blank(&self, screen: &str) -> Option<bool> {
+    /// The composer is the last line opening with the glyph. It holds no
+    /// text when nothing follows the glyph but a placeholder, which both
+    /// harnesses render dim (SGR 2); text a person typed is not dim.
+    fn text(&self, screen: &str) -> Option<String> {
         let line = screen
             .lines()
             .map(StyledLine::from)
             .rfind(|line| line.visible().trim_start().starts_with(self.glyph))?;
-        Some(line.blank_after(self.glyph))
+        Some(line.text_after(self.glyph))
+    }
+
+    #[cfg(test)]
+    fn is_blank(&self, screen: &str) -> Option<bool> {
+        self.text(screen).map(|text| text.is_empty())
     }
 }
 
@@ -326,12 +453,17 @@ impl StyledLine {
             .collect()
     }
 
-    fn blank_after(&self, glyph: char) -> bool {
+    /// What follows the glyph, trimmed, with dim placeholder text left out.
+    fn text_after(&self, glyph: char) -> String {
         self.characters
             .iter()
             .skip_while(|(character, _)| *character != glyph)
             .skip(1)
-            .all(|(character, dim)| *dim || character.is_whitespace())
+            .filter(|(_, dim)| !*dim)
+            .map(|(character, _)| *character)
+            .collect::<String>()
+            .trim()
+            .to_owned()
     }
 }
 

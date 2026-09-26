@@ -800,6 +800,7 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     mod delivery;
+    mod submission;
 
     use super::{Dispatches, RunningNexus};
     use crate::caller::{

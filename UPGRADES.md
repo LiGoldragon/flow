@@ -1,3 +1,31 @@
+# Flow 0.17.1
+
+A non-breaking fix on the same wire (meta-signal-flow 11.0.0); deploy beside
+Message 0.17.0.
+
+- **A letter an interrupt puts back is taken out, and the HardAbrupt lands.**
+  In the e167d8 sandbox (fms-9a3e2b, fms-d70a61), a HardAbrupt's `esc esc`
+  was pressed before Claude Code's first response to the Soft letter just
+  Presented. Claude cancelled that turn and put the letter back into the
+  composer. With vim editing, the second `esc` also left the composer in
+  NORMAL mode. The transcript holds the letter as submitted. Flow then
+  refused the HardAbrupt as `ComposerOccupied`. Message parked it, and the
+  restored letter held the pane against every later letter. After an
+  interrupt, a composer holding text that opens with a letter head is now
+  emptied: one `ctrl+c` for Claude (it works in either vim mode and is
+  pressed only onto held text), and line by line for Codex. The HardAbrupt
+  is then typed. A person's draft is never touched.
+- **Presented only when the letter is seen leaving the composer.** Herdr's
+  `agent prompt --wait` answers `agent_prompted` on any lifecycle change, and
+  it sends the submitting CR 300 ms after the text. Every placed letter is
+  now read out of the composer (twelve reads, 350 ms apart). If it stays,
+  the submit key is pressed once, and the letter is graded Transported,
+  since no reaction to it was witnessed. If it still stays, it is taken back
+  with `ctrl+u` and `backspace` per line, which interrupt nothing. The
+  Deliver is then refused `ComposerOccupied`, which Message parks and
+  retries under the same DeliveryId. A letter that can be neither submitted
+  nor taken back settles `Uncertain`. The pane lease is let go on every path.
+
 # Flow 0.17.0
 
 A breaking release on meta-signal-flow 11.0.0 (2ac045c) that clears three

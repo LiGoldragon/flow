@@ -452,12 +452,9 @@ impl HerdrCli {
                             agent
                                 .get("agent_status")
                                 .and_then(serde_json::Value::as_str),
-                            Some("idle" | "working")
+                            Some("idle" | "done" | "working")
                         )
-                        && agent
-                            .get("interactive_ready")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true)
+                        && HerdrCli::agent_readiness_permits_prompt(agent)
                 })
             })
     }
@@ -473,14 +470,13 @@ impl HerdrCli {
             .is_some_and(|agents| {
                 agents.iter().any(|agent| {
                     HerdrCli::agent_matches_binding(agent, route, harness_kind)
-                        && agent
-                            .get("agent_status")
-                            .and_then(serde_json::Value::as_str)
-                            == Some("idle")
-                        && agent
-                            .get("interactive_ready")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true)
+                        && matches!(
+                            agent
+                                .get("agent_status")
+                                .and_then(serde_json::Value::as_str),
+                            Some("idle" | "done")
+                        )
+                        && HerdrCli::agent_readiness_permits_prompt(agent)
                 })
             })
     }
@@ -498,6 +494,18 @@ impl HerdrCli {
                     .iter()
                     .any(|agent| HerdrCli::agent_matches_binding(agent, route, harness_kind))
             })
+    }
+
+    /// Herdr 0.8.2 reports a harness at rest after a turn as `done`, the
+    /// same prompt-accepting state as `idle`, and omits `interactive_ready`
+    /// for many live panes (every rested Codex pane observed, some Claude
+    /// panes). The flag therefore gates a prompt only when Herdr reports it:
+    /// absent permits, `true` permits, anything else refuses.
+    fn agent_readiness_permits_prompt(agent: &serde_json::Value) -> bool {
+        match agent.get("interactive_ready") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(reported) => reported.as_bool() == Some(true),
+        }
     }
 
     fn agent_matches_binding(
@@ -659,7 +667,7 @@ mod tests {
                 "name":"recipient", "pane_id":"w1:p2", "terminal_id":"term-replaced"
             }]}}}),
             serde_json::json!({"result":{"snapshot":{"agents":[{
-                "agent":"claude", "agent_status":"idle",
+                "agent":"claude", "agent_status":"idle", "interactive_ready":false,
                 "name":"recipient", "pane_id":"w1:p2", "terminal_id":"term-current"
             }]}}}),
             serde_json::json!({"result":{"snapshot":{"agents":[{
@@ -673,6 +681,114 @@ mod tests {
                 &HarnessKind::Claude
             ));
         }
+    }
+
+    fn codex_route() -> HerdrRoute {
+        HerdrRoute {
+            herdr_session_name: "messaging-build".into(),
+            herdr_agent_name: "field-sol-b7da5d".into(),
+            herdr_pane_id: "wQ:pT".into(),
+            herdr_terminal_id: "term_65c41aac961f978".into(),
+        }
+    }
+
+    /// The shape Herdr 0.8.2 `api snapshot` reported for a rested Codex
+    /// pane on 2026-09-25: status `done`, no `interactive_ready` key.
+    fn done_codex_snapshot(interactive_ready: Option<bool>) -> serde_json::Value {
+        let mut agent = serde_json::json!({
+            "agent":"codex", "agent_status":"done",
+            "name":"field-sol-b7da5d", "pane_id":"wQ:pT", "workspace_id":"wQ",
+            "tab_id":"wQ:tP", "terminal_id":"term_65c41aac961f978",
+            "cwd":"/home/li/primary", "foreground_cwd":"/home/li/primary"
+        });
+        if let Some(ready) = interactive_ready {
+            agent["interactive_ready"] = ready.into();
+        }
+        serde_json::json!({"result":{"snapshot":{"agents":[agent]}}})
+    }
+
+    #[test]
+    fn done_codex_pane_without_readiness_flag_is_available() {
+        let snapshot = done_codex_snapshot(None);
+        assert!(HerdrCli::snapshot_has_route(
+            &snapshot,
+            &codex_route(),
+            &HarnessKind::Codex
+        ));
+        assert!(HerdrCli::snapshot_has_idle_route(
+            &snapshot,
+            &codex_route(),
+            &HarnessKind::Codex
+        ));
+    }
+
+    #[test]
+    fn done_codex_pane_with_reported_readiness_follows_the_flag() {
+        assert!(HerdrCli::snapshot_has_route(
+            &done_codex_snapshot(Some(true)),
+            &codex_route(),
+            &HarnessKind::Codex
+        ));
+        assert!(!HerdrCli::snapshot_has_route(
+            &done_codex_snapshot(Some(false)),
+            &codex_route(),
+            &HarnessKind::Codex
+        ));
+    }
+
+    #[test]
+    fn missing_codex_agent_is_unavailable() {
+        let snapshot = serde_json::json!({"result":{"snapshot":{"agents":[{
+            "agent":"codex", "agent_status":"done",
+            "name":"field-luna-e71dab", "pane_id":"wQ:pV", "terminal_id":"term_65c41cd7bd31479"
+        }]}}});
+        assert!(!HerdrCli::snapshot_has_route(
+            &snapshot,
+            &codex_route(),
+            &HarnessKind::Codex
+        ));
+        let empty = serde_json::json!({"result":{"snapshot":{"agents":[]}}});
+        assert!(!HerdrCli::snapshot_has_route(
+            &empty,
+            &codex_route(),
+            &HarnessKind::Codex
+        ));
+    }
+
+    #[test]
+    fn working_pane_is_routable_but_not_idle() {
+        let snapshot = serde_json::json!({"result":{"snapshot":{"agents":[{
+            "agent":"codex", "agent_status":"working",
+            "name":"field-sol-b7da5d", "pane_id":"wQ:pT", "terminal_id":"term_65c41aac961f978"
+        }]}}});
+        assert!(HerdrCli::snapshot_has_route(
+            &snapshot,
+            &codex_route(),
+            &HarnessKind::Codex
+        ));
+        assert!(!HerdrCli::snapshot_has_idle_route(
+            &snapshot,
+            &codex_route(),
+            &HarnessKind::Codex
+        ));
+    }
+
+    #[test]
+    fn claude_idle_ready_snapshot_is_unchanged() {
+        let snapshot = serde_json::json!({"result":{"snapshot":{"agents":[{
+            "agent":"claude", "agent_status":"idle", "interactive_ready":true,
+            "name":"recipient", "pane_id":"w1:p2", "terminal_id":"term-current"
+        }]}}});
+        assert!(HerdrCli::snapshot_has_route(
+            &snapshot,
+            &route(),
+            &HarnessKind::Claude
+        ));
+        assert!(HerdrCli::snapshot_has_idle_route(
+            &snapshot,
+            &route(),
+            &HarnessKind::Claude
+        ));
     }
 
     #[test]

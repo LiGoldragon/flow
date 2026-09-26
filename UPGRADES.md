@@ -1,3 +1,21 @@
+# Flow 0.10.6
+
+A patch release with no wire, storage or argv-shape change. The Herdr route
+rule changes:
+
+- A bound agent (name, pane, terminal and harness matching the binding, as
+  before) is routable when its Herdr `agent_status` is `idle`, `done` or
+  `working`, and presentable (a Send that waits for its marker) when it is
+  `idle` or `done`. Herdr 0.8.2 reports a harness at rest after a turn as
+  `done`; Flow now treats it exactly as `idle`.
+- `interactive_ready` gates the route only when Herdr reports it: an absent
+  (or null) flag permits, `true` permits, any other value refuses. Herdr 0.8.2
+  omits the flag for every rested Codex pane observed and for some Claude
+  panes, so 0.10.5 resolved every such Codex binding `Unavailable`.
+- A binding whose agent is missing from the roster, or whose status is
+  anything else (`waiting`, …), stays `Unavailable`. Launch-time readiness
+  checks for new panes are unchanged.
+
 # Flow 0.10.5
 
 A patch release with no wire, storage or argv-shape change.

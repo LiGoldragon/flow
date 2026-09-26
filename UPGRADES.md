@@ -1,9 +1,9 @@
-# Flow 0.13.0
+# Flow 0.14.0
 
-A minor release on signal-flow 6.1.0 and meta-signal-flow 8.0.1: the ordinary
-wire gains a `Retired` flow lifecycle, the privileged wire gains `Retire`, and
-the witnessed faults on the Start and List path are fixed (flows/e167d8, with
-evidence from flows/88475f and Field Luna).
+A minor release on signal-flow 6.2.0 and meta-signal-flow 8.0.2: the ordinary
+wire gains `Exited` and `Retired` flow lifecycles, the privileged wire gains
+`Retire`, and the witnessed faults on the Start and List path are fixed
+(flows/e167d8, with evidence from flows/88475f and Field Luna).
 
 - A `LaunchSource.SourcePath` is accepted written absolute or relative. One
   rule holds for both: an absolute path is taken as written, a relative one
@@ -22,14 +22,24 @@ evidence from flows/88475f and Field Luna).
   verification is untouched, and the first prompt is never re-sent. A
   continuation that cannot be typed is logged; the flow is Started either way.
 - `List` reports each flow's true lifecycle. A listed flow that is still live
-  is reconciled against Herdr: its route is refreshed, and a flow whose pane
-  Herdr no longer shows is `Retired` — a new lifecycle for the seat Flow did
-  not stop and no longer finds. Its row, origin and history stay; its route
-  and endpoint are reported `Unavailable`; retirement is recorded, so it is
-  found once. A Herdr that cannot be read retires nothing. `Send`,
-  `ResolveRecipient`, `Stop` and `Replace` treat `Retired` as they treat
-  `Stopped`: `FlowStopped`, `FlowUnavailable`, `AlreadyStopped` and
-  `PredecessorStopped`.
+  is reconciled against Herdr: its bound pane present, the route is refreshed
+  and the flow is reported `Active`; its bound pane gone, the flow is reported
+  `Exited`, a new lifecycle for the seat whose pane went away without Flow
+  closing it, with no route and no endpoint. Its row, origin and history stay.
+  A Herdr that cannot be read changes nothing either way.
+- **`List` writes nothing.** It is a query, and a query does not change what it
+  is asked about. Reading the truth and recording it are separate: only a
+  command that witnesses a pane's fate persists an ended lifecycle — `Stop` and
+  a replacement's reap record `Stopped`, `Retire` records `Retired`, and a
+  `Send` whose bound pane Herdr says is gone records `Exited` at the point the
+  observation is made.
+- **A pane going away never retires a flow.** An exit retains the flow's record
+  and says only that the seat is no longer there; `Retired` comes from
+  authority — the privileged `Retire` — and no observation ever produces it.
+  The three ended states each name who ended the flow: Flow itself (`Stopped`),
+  the seat (`Exited`), an owner (`Retired`). None is a deletion.
+- `Send`, `ResolveRecipient`, `Stop` and `Replace` treat all three as gone:
+  `FlowStopped`, `FlowUnavailable`, `AlreadyStopped` and `PredecessorStopped`.
 - `Retire` is new on the privileged contract: one `FlowId`, answered with
   `FlowRetired` carrying the whole row, or `RetireRejected` naming
   `UnknownFlow`, `AlreadyGone` or `StoreRefused`. It is how a seat Flow lost —

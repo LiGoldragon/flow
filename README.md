@@ -47,14 +47,18 @@ response can witness. `Stop` persists the
 Stopped lifecycle only after `herdr pane close` succeeds for the revalidated
 pane. `List` returns all durable rows, sorted by Flow ID, and reports each one's
 true lifecycle. A row that is still live is reconciled against Herdr before it
-is answered: its route is refreshed, and a flow whose pane Herdr no longer
-shows is `Retired`, the lifecycle of a seat Flow did not stop and no longer
-finds. A Retired row keeps its origin and its history and is reported with no
-route and no endpoint; a Herdr that cannot be read retires nothing. `Send`,
-`ResolveRecipient`, `Stop` and `Replace` treat Retired as they treat
-Stopped. The privileged `Retire` records the same state deliberately, for a
-seat Flow lost or one retired elsewhere: it keeps the row and refuses
-`AlreadyGone` for a flow that is already Stopped or Retired.
+is answered: its bound pane present, the route is refreshed and the flow is
+reported Active; its bound pane gone, the flow is reported `Exited`, with no
+route and no endpoint. A Herdr that cannot be read changes nothing. `List`
+writes nothing — it is a query, and a query does not change what it is asked
+about; only a command that witnesses a pane's fate persists an ended
+lifecycle. The three ended states each name who ended the flow: `Stopped` is
+Flow's own act, `Exited` is the seat's, `Retired` is an owner's, through the
+privileged `Retire`. A pane going away never retires a flow: an exit retains
+the record, and retirement comes from authority, never from an observation.
+None of the three is a deletion — each keeps the row, its origin and its
+history — and `Send`, `ResolveRecipient`, `Stop` and `Replace` treat all three
+as gone. `Retire` refuses `AlreadyGone` for a flow that has already ended.
 
 `Start` carries a typed `LaunchProfile` plus an `OriginClue`. The origin is a
 caller claim; its text does not authenticate the caller. A profile names its

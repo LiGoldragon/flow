@@ -34,7 +34,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.13.0";
+            version = "0.14.0";
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -114,9 +114,9 @@
             "composition::tests::a_source_inside_the_root_is_read_whether_it_is_written_absolute_or_relative";
           flow-source-outside-root-refused = context.exactTest "flow-nexus"
             "composition::tests::a_source_outside_the_root_is_refused_in_either_spelling";
-          flow-retired-flow-listing = context.exactTest "flow-nexus"
-            "tests::a_flow_whose_pane_left_herdr_is_listed_retired_and_keeps_its_row";
-          flow-unreadable-herdr-retires-nothing = context.exactTest "flow-nexus"
+          flow-gone-pane-lists-exited = context.exactTest "flow-nexus"
+            "tests::a_flow_whose_pane_left_herdr_is_listed_exited_and_keeps_its_row";
+          flow-unreadable-herdr-changes-nothing = context.exactTest "flow-nexus"
             "tests::an_unreadable_herdr_leaves_a_listed_flow_as_it_stands";
           flow-start-settles-before-answering = context.exactTest "flow-nexus"
             "tests::a_plain_start_answers_started_rather_than_the_transient_ambiguity";

@@ -329,11 +329,15 @@ enum FlowLifecycle {
     Active,
     Stopped,
     Retired,
+    Exited,
 }
 
-/// Whether a lifecycle on the wire still names a reachable seat. Stopped
-/// and Retired are both gone: Flow stopped the one and lost the other, and
-/// neither can be sent to, resolved as a recipient, stopped or replaced.
+/// Whether a lifecycle on the wire still names a reachable seat.
+///
+/// Stopped, Exited and Retired are all gone, and each names who ended the
+/// flow: Flow closed a pane it held, the seat's own pane went away, or an
+/// owner retired it. None can be sent to, resolved as a recipient, stopped
+/// or replaced, and none is a deletion.
 pub trait NamesLiveFlow {
     fn is_live(&self) -> bool;
 }
@@ -346,8 +350,8 @@ impl NamesLiveFlow for SignalFlowLifecycle {
 
 impl FlowLifecycle {
     /// Whether the flow can still be reached: only a live seat can be sent
-    /// to, resolved as a recipient, stopped or replaced. Stopped and Retired
-    /// are both gone; they differ in how they went.
+    /// to, resolved as a recipient, stopped or replaced. Stopped, Retired and
+    /// Exited are all gone; they differ in who ended the flow.
     fn is_live(&self) -> bool {
         matches!(self, Self::Pending | Self::Active)
     }
@@ -960,10 +964,15 @@ pub trait ReadsFlowRows {
 pub trait RecordsFlowLifecycle {
     fn record_active(&self, flow_id: &str) -> Result<bool, StoreError>;
     fn record_stopped(&self, flow_id: &str) -> Result<bool, StoreError>;
-    /// The flow's native seat is gone and Flow never stopped it: its row and
-    /// its history stay, and it is live no longer. A flow already Stopped
-    /// keeps that state — how it went is not rewritten.
+    /// An owner retires the flow: it leaves Flow's receiving deliberately,
+    /// whatever its pane is doing. Its row and its history stay. A flow that
+    /// is already ended keeps the state it has — how it went is never
+    /// rewritten, and no observation ever produces this one.
     fn record_retired(&self, flow_id: &str) -> Result<bool, StoreError>;
+    /// The flow's own pane went away and Flow never closed it. Its row and
+    /// its history stay, and it is live no longer. This is what a witnessed
+    /// exit records — never Retired, which only authority writes.
+    fn record_exited(&self, flow_id: &str) -> Result<bool, StoreError>;
 }
 
 trait ReadsFlowStore {
@@ -1365,6 +1374,7 @@ impl FlowStore {
             SignalFlowLifecycle::Active => FlowLifecycle::Active,
             SignalFlowLifecycle::Stopped => FlowLifecycle::Stopped,
             SignalFlowLifecycle::Retired => FlowLifecycle::Retired,
+            SignalFlowLifecycle::Exited => FlowLifecycle::Exited,
         };
         let record = FlowRecord {
             flow_id: flow_node.flow_id.clone(),
@@ -2252,6 +2262,7 @@ impl ReadsFlowRows for FlowStore {
                 FlowLifecycle::Active => SignalFlowLifecycle::Active,
                 FlowLifecycle::Stopped => SignalFlowLifecycle::Stopped,
                 FlowLifecycle::Retired => SignalFlowLifecycle::Retired,
+                FlowLifecycle::Exited => SignalFlowLifecycle::Exited,
             },
         }))
     }
@@ -2310,6 +2321,22 @@ impl RecordsFlowLifecycle for FlowStore {
             return Ok(false);
         }
         flow.lifecycle = FlowLifecycle::Retired;
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.flows,
+            RecordKey::new(flow_id),
+            flow,
+        ))?;
+        Ok(true)
+    }
+
+    fn record_exited(&self, flow_id: &str) -> Result<bool, StoreError> {
+        let Some(mut flow) = self.flow(flow_id)? else {
+            return Ok(false);
+        };
+        if !flow.lifecycle.is_live() {
+            return Ok(false);
+        }
+        flow.lifecycle = FlowLifecycle::Exited;
         self.engine.mutate_keyed(KeyedMutation::new(
             self.flows,
             RecordKey::new(flow_id),

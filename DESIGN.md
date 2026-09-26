@@ -122,12 +122,22 @@ continuation line into the seat's bound pane the moment the receipt is
 witnessed. No caller and no human follows a launch.
 
 `List` answers the reconciled truth, not the stored row alone: a live flow's
-bound pane is looked for in Herdr, and finding it present witnesses the flow
-live (recorded Active, route refreshed) while finding it gone retires the flow
-(recorded `Retired`, no route, row and history kept). A Herdr that cannot be
-read changes nothing. `Retire` on the meta socket is the deliberate form of
-the same state, for a seat Flow lost or that was retired elsewhere; it is not
-`Stop`, which closes a pane Flow still holds, and it is not a delete.
+bound pane is looked for in Herdr, and finding it present reports the flow
+Active with a refreshed route, while finding it gone reports it `Exited`, with
+no route. A Herdr that cannot be read changes nothing.
+
+Reading that truth and recording it are separate. `List` writes nothing,
+because a query does not change what it is asked about; an ended lifecycle is
+persisted only by a command that witnesses a pane's fate — `Stop` and a
+replacement's reap record `Stopped`, a `Send` whose bound pane is gone records
+`Exited`, and `Retire` on the meta socket records `Retired`.
+
+Each ended state names who ended the flow, and they do not stand in for one
+another. `Stopped` is Flow's own act on a pane it held. `Exited` is the seat's
+own going, or its accident. `Retired` is an owner's act, and only authority
+produces it: a pane going away never retires a flow, because an exit retains
+the flow's record and retirement is a decision, not an inference. None of the
+three deletes anything.
 
 `RegisterFlow` is a meta Signal for importing sessions created before Flow
 Nexus. It preserves the same `FlowNode` shape used by resolution, so imported

@@ -834,6 +834,10 @@ impl HerdrCli {
     /// delimiters; the wrapper itself is not part of the persisted digest.
     fn claude_pasted_content(text: &str) -> Option<&str> {
         let rest = text.strip_prefix("<pasted_content")?;
+        let first = rest.chars().next()?;
+        if first != '>' && !first.is_whitespace() {
+            return None;
+        }
         let (attributes, body) = rest.split_once(">\n")?;
         if attributes.contains(['<', '>', '\r', '\n']) {
             return None;
@@ -2851,7 +2855,7 @@ printf '%s\n' 123456
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert_eq!(calls.matches("agent prompt").count(), 1, "{calls}");
 
-        let mut altered = rows;
+        let mut altered = rows.clone();
         altered[0]["message"]["content"] =
             serde_json::json!("<pasted_content id=\"ab12\">\nchanged\n</pasted_content>");
         write(&altered);
@@ -2861,6 +2865,21 @@ printf '%s\n' 123456
                 .unwrap_err()
                 .contains("loaded no stacked command")
         );
+
+        for near_tag in ["<pasted_contention", "<pasted_content-id"] {
+            let mut malformed = rows.clone();
+            malformed[0]["message"]["content"] = serde_json::json!(format!(
+                "{near_tag} id=\"ab12\">\n{original}\n</pasted_content>"
+            ));
+            write(&malformed);
+            assert!(
+                adapter
+                    .observe_native_target_receipt(&intent)
+                    .unwrap_err()
+                    .contains("loaded no stacked command"),
+                "{near_tag} must not normalize as a pasted-content wrapper"
+            );
+        }
     }
 
     /// The shape of 88475f's transcript (Claude Code 2.1.280, Flow 0.10.5):

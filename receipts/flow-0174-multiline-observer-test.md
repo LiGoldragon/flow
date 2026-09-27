@@ -94,3 +94,32 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 164 filtered out
 In the successor workspace, `cargo fmt --check` also exited `0`. Baseline
 changes remain uncommitted and unpushed; this receipt is the durable artifact
 for the command, revision, block-hash, output, and exit evidence.
+
+## Mutation sensitivity rerun, 2026-09-27
+
+Revision: `f0e574263ee66bb91e3cabbe1abaa873635355e8` in a fresh disposable
+workspace. The test source and direct-shape logic were unchanged. The complete
+production mutation was this one hunk in `prompt_text_matches_intent`:
+
+```diff
+-            .is_some_and(|body| {
+-                format!("{:x}", Sha256::digest(body.as_bytes())) == intent.prompt_sha256
+-            })
++            .is_some()
+```
+
+The focused multiline command was the same command recorded above. It exited
+`101` after the accepted case passed and the lone changed-byte first-row case
+reached `Observed`; its `unwrap_err()` panicked on that `Ok` value. The raw
+relevant output was:
+
+```text
+called `Result::unwrap_err()` on an `Ok` value: Observed(NativeTargetReceipt { ... })
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 164 filtered out
+mutant_exit=101
+```
+
+The omitted `NativeTargetReceipt` fields were temporary fixture paths and
+hashes; no result lines were changed. `/usr/bin/time` was unavailable (exit
+`127`), so no duration is claimed. The mutant workspace was not committed or
+pushed.

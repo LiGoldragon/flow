@@ -54,3 +54,43 @@ refused. A following case places the altered body after the authentic input and
 asserts the narrower `first-turn text differs from intent` error. The fixture
 also rejects reversed Skill order and a receipt before the second Skill
 expansion.
+
+## Reproducible rerun, 2026-09-27
+
+Fresh isolated Jujutsu workspaces were created directly at each immutable
+revision. Before invocation, each printed `jj log --no-graph -r @- -T
+'commit_id'` and SHA-256 of the same 205-line test block.
+
+```text
+baseline revision:  0b512ee0b6681b1925fee7b6435aa7c2eac26bfb
+successor revision: 72dd954870816cb0a78465fbcf841ad7ed885c97
+test block SHA-256:  06dc95bafa9d6876d49a6968a6d1d21fee46726c04b42234347611f2cbc3bd22
+```
+
+The block was added unchanged to the disposable baseline test module only.
+The raw focused command in both workspaces was:
+
+```text
+cargo test -p flow-nexus --lib herdr::launch::tests::claude_composed_multiline_direct_skill_prompt_is_observed_byte_for_byte -- --exact
+```
+
+Baseline raw result (exit `101`):
+
+```text
+running 1 test
+test herdr::launch::tests::claude_composed_multiline_direct_skill_prompt_is_observed_byte_for_byte ... FAILED
+called `Result::unwrap()` on an `Err` value: "native Claude first turn loaded no stacked command"
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 164 filtered out
+```
+
+Successor raw result (exit `0`):
+
+```text
+running 1 test
+test herdr::launch::tests::claude_composed_multiline_direct_skill_prompt_is_observed_byte_for_byte ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 164 filtered out
+```
+
+In the successor workspace, `cargo fmt --check` also exited `0`. Baseline
+changes remain uncommitted and unpushed; this receipt is the durable artifact
+for the command, revision, block-hash, output, and exit evidence.

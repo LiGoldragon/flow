@@ -2808,10 +2808,25 @@ printf '%s\n' 123456
 
     #[test]
     fn claude_composed_multiline_direct_skill_prompt_is_observed_byte_for_byte() {
+        use crate::composition::{
+            ComposesLaunch, LaunchBundles, LaunchComposer, OpensLaunchComposer,
+        };
         use std::io::Write;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let names = ["spirit", "main-flow"];
-        let (_composition_root, launch) = composed_multiline_claude_launch();
+        let composition_root = tempfile::tempdir().unwrap();
+        let bundle = composition_root.path().join("flow-system-prompt.md");
+        fs::write(&bundle, "fixture bundle\n").unwrap();
+        let mut profile = launch(HarnessKind::Claude).launch_profile;
+        profile.skill_name_vector = names.map(String::from).to_vec();
+        profile.system_prompt_bundle_file = bundle.to_string_lossy().into_owned();
+        profile.instruction_prompt = "Read the receipt.\nThen report it.".into();
+        let launch = LaunchComposer::at(
+            composition_root.path(),
+            LaunchBundles::at(composition_root.path().join("launch-bundles")),
+        )
+        .compose(&profile)
+        .expect("composer selects Claude's direct form for a two-line instruction");
         let body = &launch.first_prompt_payload.first_prompt_body;
         assert_eq!(
             body.matches('\n').count(),
@@ -2917,9 +2932,24 @@ printf '%s\n' 123456
                 <sha2::Sha256 as sha2::Digest>::digest(changed_body.as_bytes())
             )
         );
+        let mut lone_newline_mutation = rows.clone();
+        lone_newline_mutation[0]["message"]["content"] = serde_json::json!(changed.clone());
+        write(&lone_newline_mutation);
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("loaded no stacked command"),
+            "a lone changed first row must not authenticate as the direct prompt"
+        );
+
         let mut newline_mutated = vec![rows[0].clone()];
-        newline_mutated.push(serde_json::json!({"type":"user","sessionId":native_session,
-            "message":{"role":"user","content":changed}}));
+        let changed_row = serde_json::json!({
+            "type": "user",
+            "sessionId": native_session,
+            "message": {"role": "user", "content": changed},
+        });
+        newline_mutated.push(changed_row);
         newline_mutated.extend_from_slice(&rows[1..]);
         write(&newline_mutated);
         assert!(

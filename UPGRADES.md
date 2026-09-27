@@ -1,3 +1,144 @@
+# Flow 0.17.3
+
+Deploy beside Message 0.17.0, or do not deploy at all.
+
+- **Long Claude Start prompts are durable direct Skill-tool prompts.** A
+  startup text that Claude Code will represent as pasted content no longer
+  fails composition at 800 UTF-16 units. It names every selected skill for
+  the Skill tool, and the observer accepts the native wrapper only after its
+  unwrapped text matches the persisted prompt SHA-256 and every selected
+  skill has been confirmed in order. The native launch intent, transcript
+  boundary, and one-shot prompt-delivery intent remain unchanged.
+- **Pasted-content parsing is exact.** `<pasted_content` must end at `>` or
+  whitespace; near tags such as `<pasted_contention>` and
+  `<pasted_content-id>` cannot be normalized as a Claude wrapper.
+
+# Flow 0.17.2
+
+Gate only: no wire, storage or behavior change (meta-signal-flow 11.0.0).
+Deploy beside Message 0.17.0, or do not deploy at all.
+
+- **`tests::a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors`
+  is deterministic.** It spawned its marked sleeper as `sh -c "exec sleep
+  30"`, waited for that shell's Herdr marks, and then read them again after
+  the shell had `exec`ed. `/proc/<pid>/environ` reads back empty for the
+  width of an `execve`, so `caller_pane()` intermittently found no marks and
+  walked to an ancestry that has none in a Nix builder: `None`. The sleeper
+  is now spawned directly, so the process whose marks were settled never
+  execs again. `caller_pane()` itself was not at fault and is unchanged.
+- **The Claude retract path has a fixture test.** `Retraction::Key("ctrl+c")`
+  was covered only by a live witness. Two fixture tests now drive a Claude
+  composer — `❯` and the non-breaking space it renders after the glyph —
+  through `esc esc`: a restored letter is emptied by one `ctrl+c` and the
+  HardAbrupt lands; a person's draft is left alone and the delivery is
+  refused. Both are named Nix checks, as is the deflaked test.
+
+# Flow 0.17.1
+
+A non-breaking fix on the same wire (meta-signal-flow 11.0.0); deploy beside
+Message 0.17.0.
+
+- **A letter an interrupt puts back is taken out, and the HardAbrupt lands.**
+  In the e167d8 sandbox (fms-9a3e2b, fms-d70a61), a HardAbrupt's `esc esc`
+  was pressed before Claude Code's first response to the Soft letter just
+  Presented. Claude cancelled that turn and put the letter back into the
+  composer. With vim editing, the second `esc` also left the composer in
+  NORMAL mode. The transcript holds the letter as submitted. Flow then
+  refused the HardAbrupt as `ComposerOccupied`. Message parked it, and the
+  restored letter held the pane against every later letter. After an
+  interrupt, a composer holding text that opens with a letter head is now
+  emptied: one `ctrl+c` for Claude (it works in either vim mode and is
+  pressed only onto held text), and line by line for Codex. The HardAbrupt
+  is then typed. A person's draft is never touched.
+- **Presented only when the letter is seen leaving the composer.** Herdr's
+  `agent prompt --wait` answers `agent_prompted` on any lifecycle change, and
+  it sends the submitting CR 300 ms after the text. Every placed letter is
+  now read out of the composer (twelve reads, 350 ms apart). If it stays,
+  the submit key is pressed once, and the letter is graded Transported,
+  since no reaction to it was witnessed. If it still stays, it is taken back
+  with `ctrl+u` and `backspace` per line, which interrupt nothing. The
+  Deliver is then refused `ComposerOccupied`, which Message parks and
+  retries under the same DeliveryId. A letter that can be neither submitted
+  nor taken back settles `Uncertain`. The pane lease is let go on every path.
+
+# Flow 0.17.0
+
+A breaking release on meta-signal-flow 11.0.0 (2ac045c) that clears three
+faults the e167d8 sandbox suite found in 0.16.0. Deploy with Message 0.17.0
+(481b579): an older Message cannot decode the new refusals.
+
+- **Start witnesses the receipt of a Claude model that takes no effort.**
+  Claude Code 2.1.280 records no `effort` (and `perTurnEffort: null`) for
+  Claude Haiku 4.5. The receipt check demanded the requested effort on the
+  row, so a seat that answered exactly `FLOW_LAUNCH_RECEIPT_V2` left Start
+  `StartAmbiguous`, the promoter never settled it, and the brief continuation
+  was never typed. A row that names no effort now passes; a row that names a
+  different one is still refused.
+- **HardAbrupt and Command.Interrupt press again while the agent works.**
+  Claude ignores `esc esc` pressed as its turn begins; the letter then queued
+  behind the running command. The interrupt keys are pressed up to three
+  times, each given 3 s to show the agent leaving Working, and only while it
+  is still seen Working.
+- **A gone flow is refused by who ended it.** Deliver and Command to an Exited
+  flow answered `FlowStopped`; they now answer `FlowExited`, and a Retired
+  flow `FlowRetired`. Stopped stays Flow's own act.
+
+# Flow 0.16.0
+
+A breaking release on meta-signal-flow 10.0.0 that clears the three faults
+found in 0.15.0 before it was deployed.
+
+- **A Letter names its MessageId.** The pane text was
+  `Soft.{ Flow.e167d8 Text.«…» }`, which told the recipient everything except
+  which message it was reading, so it could not `message 'Acknowledge.…'` at
+  all. `Letter` gains `MessageId` as its first position and the pane text is
+  now `Soft.{ m-7f3a2c Flow.e167d8 Text.«…» }` — one bare token wider. Flow
+  never interprets the id; Message mints it and Flow types it. Every consumer
+  must repin: `meta_signal_flow::Letter` gained a field, and signal-message
+  7.0.0 imports `MessageId` from it rather than declaring a second one.
+- **Presented no longer depends on the recipient's agent name.** A delivery
+  seen reacting was re-checked against a fresh Herdr snapshot through
+  `current_route`, which re-reads the agent's `name` — a label Herdr omits for
+  panes that were never named, among them every pane imported with
+  `MetaBindExisting`. Those deliveries settled `Uncertain` however plainly the
+  recipient reacted. The grade now rests on the observation itself: Herdr's
+  own `agent_prompted` reply, after it waited for the reaction, naming the
+  pane and terminal the route names. The name was never the evidence.
+- **The meta-gate tests are correct in a build sandbox.** Two of them spawned a
+  marked process and read its `/proc/<pid>/environ` at once. glibc's
+  `posix_spawn` wakes the vfork parent from inside the child's `execve`, before
+  the kernel has laid the new environment into the new address space, so for a
+  few dozen microseconds the environ reads back *empty* — indistinguishable
+  from a scrubbed one, which makes a flow read as the owner. On a loaded
+  machine the parent was descheduled past that window and the tests passed
+  under plain cargo; in the Nix sandbox they failed every time. Fixture peers
+  now wait for their own marks before they are used as peers. The Nexus needs
+  no such wait: its peers have already connected to it.
+
+# Flow 0.15.0
+
+A breaking release on signal-flow 7.0.0 and meta-signal-flow 9.0.0: Flow is
+the only pane writer (stage S1 of flows/e167d8/reports/message-through-flow-design.md).
+
+- **Ordinary `Send` is removed.** Nothing on the ordinary socket types into a
+  pane. `flow 'Send.…'` no longer parses; use
+  `flow-meta 'Deliver.{ <id> <flow> MiddleAbrupt.{ Owner Text.«…» } }'`.
+  signal-flow 7.0.0 renumbers the variants after the removed ones, so every
+  consumer (today: message) must repin before it talks to Flow 0.15.
+- **`Deliver`, `Vet`, `Command`, `ResolvePeer`** on the meta socket; see the
+  README. The pane lease, the body refusal and the tier preconditions apply
+  to every write, including the brief continuation.
+- **`Observe.Agent`** on the ordinary socket streams a flow's Herdr agent
+  state (Herdr `events.subscribe`), ending on `Gone`.
+- **The meta socket is gated.** A flow outside `MetaAspects` (default
+  `[ Psyche ]`) is answered `MetaRefused.PeerNotAuthorized`; the owner and
+  the configured Message Nexus executable are admitted. Field and Mind seats
+  that call `flow-meta` today will be refused.
+- `Configuration` gains the harness profiles (command sigils, interrupt and
+  submit keys), `MetaAspects` and `MessageNexusPath`. They live in a new
+  store record seeded with defaults, so a 0.14 store opens unchanged. Two
+  more new tables hold settled deliveries and lease rows.
+
 # Flow 0.14.0
 
 A minor release on signal-flow 6.2.0 and meta-signal-flow 8.0.2: the ordinary

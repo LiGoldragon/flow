@@ -8,7 +8,7 @@
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
 use crate::codex::NamesBoundCodexThread;
 use crate::composition::{
-    ClaudeCommandStack, ClaudeFirstLine, LaunchReceipt, NamesRemoteControl, ValidatesComposedPrompt,
+    ClaudeCommandStack, LaunchReceipt, NamesRemoteControl, ValidatesComposedPrompt,
 };
 use crate::title::NativeTitle;
 use sha2::{Digest, Sha256};
@@ -820,15 +820,50 @@ impl HerdrCli {
     }
 
     /// Whether `text` is the composed first prompt of the intent: its body
-    /// hash under the harness footer, and for Claude one line within the
-    /// limit, the only shape Claude Code types without a paste wrap.
+    /// hash under the harness footer. Claude may store the exact text inside
+    /// its native pasted-content wrapper, which is normalized separately.
     fn prompt_text_matches_intent(text: &str, intent: &PromptDeliveryIntent) -> bool {
-        (intent.harness_kind != HarnessKind::Claude || ClaudeFirstLine::fits(text))
-            && text
-                .strip_suffix(&LaunchReceipt::footer_for(&intent.harness_kind))
-                .is_some_and(|body| {
-                    format!("{:x}", Sha256::digest(body.as_bytes())) == intent.prompt_sha256
-                })
+        text.strip_suffix(&LaunchReceipt::footer_for(&intent.harness_kind))
+            .is_some_and(|body| {
+                format!("{:x}", Sha256::digest(body.as_bytes())) == intent.prompt_sha256
+            })
+    }
+
+    /// Returns the exact text inside Claude Code's native paste wrapper.
+    /// Attributes are deliberately opaque but cannot contain tag or line
+    /// delimiters; the wrapper itself is not part of the persisted digest.
+    fn claude_pasted_content(text: &str) -> Option<&str> {
+        let rest = text.strip_prefix("<pasted_content")?;
+        let first = rest.chars().next()?;
+        if first != '>' && !first.is_whitespace() {
+            return None;
+        }
+        let (attributes, body) = rest.split_once(">\n")?;
+        if attributes.contains(['<', '>', '\r', '\n']) {
+            return None;
+        }
+        body.strip_suffix("\n</pasted_content>")
+    }
+
+    /// The direct form is selected by the composer whenever native command
+    /// expansion would be unavailable. Its exact digest still authenticates
+    /// this transcript row before the observer accepts Skill tool calls.
+    fn claude_direct_skill_prompt(text: &str) -> bool {
+        text.starts_with("Read ")
+            && text.contains("then load these skills through the Skill tool in this order:")
+    }
+
+    /// Whether a Claude assistant row ran at the intended effort. Claude Code
+    /// 2.1.280 records `effort` (and `perTurnEffort`) only for a model that
+    /// takes one; for Claude Haiku 4.5 it records no `effort` and
+    /// `perTurnEffort: null`. A row that names no effort ran at none, which is
+    /// no evidence against the intent; a row that names another one is.
+    fn claude_effort_matches(row: &serde_json::Value, effort: &str) -> bool {
+        ["effort", "perTurnEffort"]
+            .iter()
+            .filter_map(|key| row.get(*key))
+            .filter(|value| !value.is_null())
+            .all(|value| value.as_str() == Some(effort))
     }
 
     /// Reads one command record of a Claude user turn: the harness records
@@ -1350,7 +1385,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
         let mut claude_command_expansion_pending = false;
         let mut claude_commands_loaded = 0_usize;
         let mut claude_command_argument: Option<String> = None;
-        let claude_stack =
+        let mut claude_stack =
             ClaudeCommandStack::stacked(durable_intent.native_skill_selection_vector.len());
         let mut reader = BufReader::new(input);
         loop {
@@ -1578,11 +1613,18 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                     claude_commands_loaded += 1;
                                     claude_command_expansion_pending = true;
                                 }
-                                None if text.contains("<pasted_content") => {
-                                    // A wrapped block expands no command.
-                                    return Err(
-                                        "native Claude first turn arrived as pasted content".into(),
-                                    );
+                                None if Self::claude_pasted_content(text).is_some_and(
+                                    |original| {
+                                        Self::prompt_text_matches_intent(original, durable_intent)
+                                            && Self::claude_direct_skill_prompt(original)
+                                    },
+                                ) =>
+                                {
+                                    // The composer selected this form because native commands
+                                    // would remain literal inside the wrapper. All selected
+                                    // skills must now arrive through the Skill tool below.
+                                    claude_stack = 0;
+                                    input_verified = true;
                                 }
                                 None if claude_stack > 0 && !input_verified => {
                                     // The one line opens with its stacked
@@ -1733,8 +1775,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                         .pointer("/message/model")
                         .and_then(serde_json::Value::as_str)
                         != Some(durable_intent.model_name.as_str())
-                        || row.get("effort").and_then(serde_json::Value::as_str)
-                            != Some(durable_intent.effort.as_str()))
+                        || !Self::claude_effort_matches(&row, durable_intent.effort.as_str()))
                 {
                     return Err("native Claude model or effort differs from intent".into());
                 }
@@ -2383,6 +2424,68 @@ printf '%s\n' 123456
         );
     }
 
+    /// e167d8 sandbox: Claude Haiku 4.5 takes no effort, and Claude Code
+    /// 2.1.280 records its turns with no `effort` and `perTurnEffort: null`.
+    /// The seat answered exactly the marker and Start stayed Ambiguous; a
+    /// recorded effort that differs is still refused.
+    #[test]
+    fn claude_receipt_of_a_model_without_effort_is_observed() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        let transcript = root
+            .path()
+            .join("native-transcripts/claude")
+            .join(format!("{native_session}.jsonl"));
+        let first_input = serde_json::json!({"type":"user","sessionId":native_session,
+            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_text}});
+        let receipt = |effort: serde_json::Value| {
+            let mut row = serde_json::json!({"type":"assistant","sessionId":native_session,
+                "session_id":native_session,"uuid":"turn-claude","perTurnEffort":null,
+                "message":{"model":"model-current",
+                "content":[{"type":"text","text":LaunchReceipt::MARKER}]}});
+            if !effort.is_null() {
+                row["effort"] = effort.clone();
+                row["perTurnEffort"] = effort;
+            }
+            row
+        };
+
+        fs::write(
+            &transcript,
+            format!("{first_input}\n{}\n", receipt(serde_json::Value::Null)),
+        )
+        .expect("receipt without effort");
+        let PromptDeliveryResult::Observed(observed) = adapter
+            .observe_native_target_receipt(&intent)
+            .expect("a turn with no effort recorded is read")
+        else {
+            panic!("a model without effort never reaches Observed");
+        };
+        assert_eq!(observed.native_turn_id, "turn-claude");
+        assert_eq!(observed.effort, Effort::from("high"));
+
+        fs::write(
+            &transcript,
+            format!("{first_input}\n{}\n", receipt(serde_json::json!("low"))),
+        )
+        .expect("receipt with another effort");
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("model or effort differs")
+        );
+    }
+
     #[test]
     fn registered_harness_change_with_same_native_id_is_rejected() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
@@ -2632,7 +2735,8 @@ printf '%s\n' 123456
                 .contains("stacked command differs")
         );
 
-        // The line arrived wrapped as pasted content: no command expanded.
+        // A command-form prompt cannot claim a pasted wrapper: its commands
+        // stayed literal rather than loading the selected native skills.
         let mut pasted = vec![serde_json::json!({"type":"user","sessionId":native_session,
             "message":{"role":"user","content":format!("<pasted_content id=\"ab12\">\n{original}\n</pasted_content>")}})];
         pasted.extend(rows[10..].iter().cloned());
@@ -2641,7 +2745,7 @@ printf '%s\n' 123456
             adapter
                 .observe_native_target_receipt(&intent)
                 .unwrap_err()
-                .contains("arrived as pasted content")
+                .contains("loaded no stacked command")
         );
 
         // The line arrived as plain text: its commands stayed literal.
@@ -2669,6 +2773,113 @@ printf '%s\n' 123456
                 .unwrap_err()
                 .contains("Skill invocation order differs")
         );
+    }
+
+    #[test]
+    fn claude_pasted_direct_skill_prompt_normalizes_the_wrapper_and_requires_each_skill() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let names = ["spirit", "main-flow"];
+        let mut launch = launch(HarnessKind::Claude);
+        launch.launch_profile.skill_name_vector = names.map(String::from).to_vec();
+        let body = format!(
+            "Read /tmp/flow-system-prompt.md for your launch mode, then load these skills through the Skill tool in this order: spirit, main-flow. Then: {}",
+            "x".repeat(34_369)
+        );
+        let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
+        launch.first_prompt_payload.first_prompt_body = body.clone();
+        launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
+        launch.first_prompt_payload.first_prompt_text =
+            format!("{body}{}", LaunchReceipt::footer_for(&HarnessKind::Claude));
+        launch.target_receipt_request.prompt_sha256 = body_hash;
+        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let skills = root.path().join("native-transcripts/claude-skills");
+        for name in names {
+            fs::create_dir_all(skills.join(name)).unwrap();
+            fs::write(skills.join(name).join("SKILL.md"), format!("{name} body\n")).unwrap();
+        }
+        let pane = adapter.create_launch_pane(&launch).unwrap();
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        adapter
+            .submit_first_prompt_once(&launch, &intent)
+            .expect("one guarded prompt write");
+        let base = |name: &str| {
+            format!(
+                "Base directory for this skill: {}\n\n{name} body\n",
+                skills.join(name).canonicalize().unwrap().display()
+            )
+        };
+        let tool = |name: &str, id: &str| {
+            [
+                serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":format!("turn-{id}"),"message":{"content":[{"type":"tool_use","id":id,"name":"Skill","input":{"skill":name}}]}}),
+                serde_json::json!({"type":"user","sessionId":native_session,"toolUseResult":{"success":true,"commandName":name},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id}]}}),
+                serde_json::json!({"type":"user","sessionId":native_session,"isMeta":true,"turnCompanion":true,"sourceToolUseID":id,"message":{"role":"user","content":[{"type":"text","text":base(name)}]}}),
+            ]
+        };
+        let original = launch.first_prompt_payload.first_prompt_text.clone();
+        let mut rows = vec![serde_json::json!({"type":"user","sessionId":native_session,
+            "message":{"role":"user","content":format!("<pasted_content id=\"ab12\">\n{original}\n</pasted_content>")}})];
+        rows.extend(tool("spirit", "tool-1"));
+        rows.extend(tool("main-flow", "tool-2"));
+        rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-direct","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":LaunchReceipt::MARKER}]}}));
+        let transcript = root
+            .path()
+            .join("native-transcripts/claude")
+            .join(format!("{native_session}.jsonl"));
+        let write = |rows: &[serde_json::Value]| {
+            let mut output = fs::File::create(&transcript).unwrap();
+            for row in rows {
+                writeln!(output, "{row}").unwrap();
+            }
+        };
+        write(&rows);
+        let PromptDeliveryResult::Observed(observed) =
+            adapter.observe_native_target_receipt(&intent).unwrap()
+        else {
+            panic!("direct prompt stayed ambiguous")
+        };
+        assert_eq!(observed.native_turn_id, "turn-direct");
+        let PromptDeliveryResult::Observed(recovered) =
+            adapter.observe_native_target_receipt(&intent).unwrap()
+        else {
+            panic!("recovery did not retain the observed receipt")
+        };
+        assert_eq!(recovered, observed);
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert_eq!(calls.matches("agent prompt").count(), 1, "{calls}");
+
+        let mut altered = rows.clone();
+        altered[0]["message"]["content"] =
+            serde_json::json!("<pasted_content id=\"ab12\">\nchanged\n</pasted_content>");
+        write(&altered);
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("loaded no stacked command")
+        );
+
+        for near_tag in ["<pasted_contention", "<pasted_content-id"] {
+            let mut malformed = rows.clone();
+            malformed[0]["message"]["content"] = serde_json::json!(format!(
+                "{near_tag} id=\"ab12\">\n{original}\n</pasted_content>"
+            ));
+            write(&malformed);
+            assert!(
+                adapter
+                    .observe_native_target_receipt(&intent)
+                    .unwrap_err()
+                    .contains("loaded no stacked command"),
+                "{near_tag} must not normalize as a pasted-content wrapper"
+            );
+        }
     }
 
     /// The shape of 88475f's transcript (Claude Code 2.1.280, Flow 0.10.5):

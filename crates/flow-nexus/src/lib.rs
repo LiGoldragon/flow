@@ -3,18 +3,24 @@ pub mod caller;
 pub mod claude;
 pub mod codex;
 pub mod composition;
+pub mod delivery;
 #[cfg(test)]
 mod fixture_executable;
 pub mod herdr;
 pub mod launching;
+pub mod observe_agent;
+pub mod peer;
 pub mod store;
 pub mod title;
 
 use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchBundles, LaunchComposer, OpensLaunchComposer};
+use delivery::{DeliversMessages, lease::LeasesPanes};
 use herdr::OperatesHerdrPane;
 use launching::{LaunchesFlows, ObservesLaunch, PrunesLaunchBundles};
+use observe_agent::ObservesAgent;
+use peer::{AdmitsMetaPeer, ResolvesPeer};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
     Query, Response, RestartRejection,
@@ -33,7 +39,7 @@ use std::{
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, FlowStore, NamesLiveFlow,
-    OpensFlowStore, ReadsFlowRows, RecordsFlowLifecycle, RecordsLaunchOutcome, RecordsReplacement,
+    OpensFlowStore, ReadsFlowRows, RecordsFlowLifecycle, RecordsLaunchOutcome,
     RegistersExistingFlow, RegistersFlowIdentity,
 };
 
@@ -108,6 +114,9 @@ pub struct RunningNexus {
     pub composer: LaunchComposer,
     /// Serializes dispatch; see `dispatch_serially`.
     pub dispatch_gate: Mutex<()>,
+    /// The exclusive hold on each pane Flow is writing; see
+    /// `delivery::lease`.
+    pub pane_leases: delivery::lease::PaneLeases,
 }
 
 pub trait Dispatches {
@@ -133,6 +142,7 @@ impl Dispatches for RunningNexus {
             Query::Observe(ObserveSelection::Launch(launch_request_id)) => {
                 self.launch_status(&launch_request_id)
             }
+            Query::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id),
             Query::Restart(request) => {
                 let authorization = self
                     .store
@@ -161,66 +171,6 @@ impl Dispatches for RunningNexus {
                     ),
                 }
             }
-            Query::Send(request) => {
-                let node = match self.store.flow_node(&request.flow_id) {
-                    Ok(Some(node)) => node,
-                    Ok(None) => {
-                        return Response::SendRejected(signal_flow::SendRejection::UnknownFlow);
-                    }
-                    Err(_) => {
-                        return Response::SendRejected(
-                            signal_flow::SendRejection::PersistenceRefused,
-                        );
-                    }
-                };
-                // Stopped and Retired are both gone: nothing is typed into
-                // the pane of a seat Flow closed or a seat Flow has lost.
-                if !node.flow_lifecycle.is_live() {
-                    return Response::SendRejected(signal_flow::SendRejection::FlowStopped);
-                }
-                match self.store.held_successor(&request.flow_id) {
-                    Ok(false) => {}
-                    Ok(true) => {
-                        return Response::SendRejected(
-                            signal_flow::SendRejection::RouteUnavailable,
-                        );
-                    }
-                    Err(_) => {
-                        return Response::SendRejected(
-                            signal_flow::SendRejection::PersistenceRefused,
-                        );
-                    }
-                }
-                // Send is a command, and it witnesses the pane's fate: a
-                // bound pane Herdr says is gone records the flow Exited here,
-                // where the observation is made, rather than from any query.
-                // Herdr merely being unreadable records nothing.
-                if self.herdr.pane_presence(&node) == herdr::PanePresence::Absent {
-                    let _ = self.store.record_exited(&request.flow_id);
-                    return Response::SendRejected(signal_flow::SendRejection::RouteUnavailable);
-                }
-                let node = self.herdr.refresh_route(node);
-                if !matches!(
-                    node.herdr_route_selection,
-                    HerdrRouteSelection::Available(_)
-                ) {
-                    return Response::SendRejected(signal_flow::SendRejection::RouteUnavailable);
-                }
-                let send_outcome = match self.herdr.prompt(&node, &request.bare_input) {
-                    Ok(send_outcome) => send_outcome,
-                    Err(rejection) => return Response::SendRejected(rejection),
-                };
-                // A Pending flow becomes Active only when it was seen reacting
-                // to a real Send. The input is already typed, so a refused
-                // record is not turned into a rejection: the flow stays
-                // Pending until its next Presented Send.
-                if node.flow_lifecycle == FlowLifecycle::Pending
-                    && matches!(send_outcome, signal_flow::SendOutcome::Presented(_))
-                {
-                    let _ = self.store.record_active(&request.flow_id);
-                }
-                Response::Sent(send_outcome)
-            }
             Query::Stop(flow_id) => {
                 let node = match self.store.flow_node(&flow_id) {
                     Ok(Some(node)) => node,
@@ -245,7 +195,15 @@ impl Dispatches for RunningNexus {
                 ) {
                     return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
                 }
-                if !self.herdr.close(&node) {
+                let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+                    return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
+                };
+                // No write is left half-typed into a pane as it closes.
+                let closed = {
+                    let _lease = self.pane_leases.hold(route);
+                    self.herdr.close(&node)
+                };
+                if !closed {
                     return Response::StopRejected(signal_flow::StopRejection::CloseRefused);
                 }
                 if !self.store.record_stopped(&flow_id).unwrap_or(false) {
@@ -456,6 +414,10 @@ impl Dispatches for RunningNexus {
                     flow_binding_result_vector: results,
                 })
             }
+            meta_signal_flow::Query::Deliver(request) => self.deliver(request),
+            meta_signal_flow::Query::Vet(request) => self.vet(&request),
+            meta_signal_flow::Query::Command(request) => self.command(request),
+            meta_signal_flow::Query::ResolvePeer(identity) => self.resolve_peer(&identity),
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
                 if !self.herdr.validate_registration(&flow_node) {
                     return meta_signal_flow::Response::FlowRegistrationRejected(
@@ -517,6 +479,7 @@ impl OpensRunningNexus for RunningNexus {
                 .with_launch_bundles(launch_bundles.clone()),
             composer: LaunchComposer::at(source_root, launch_bundles),
             dispatch_gate: Mutex::new(()),
+            pane_leases: delivery::lease::PaneLeases::default(),
         })
     }
 }
@@ -551,6 +514,12 @@ impl Connection {
                     Frame::write_response(peer, response)
                 });
             }
+            Query::Observe(ObserveSelection::Agent(flow_id)) => {
+                let peer = &mut self.peer;
+                return nexus.observe_agent(&flow_id, &mut |response| {
+                    Frame::write_response(peer, response)
+                });
+            }
             // The caller is the peer of this connection, read from the kernel.
             Query::ResolveCaller(claim) => nexus.resolve_caller(
                 self.peer
@@ -565,7 +534,11 @@ impl Connection {
 
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
         let query = Frame::read_meta_query(&mut self.peer)?;
-        let response = nexus.dispatch_meta_serially(query);
+        // The peer is read from the kernel; nothing in the query names it.
+        let response = match nexus.meta_refusal(self.peer.peer_process()) {
+            Some(refusal) => meta_signal_flow::Response::MetaRefused(refusal),
+            None => nexus.dispatch_meta_serially(query),
+        };
         Frame::write_meta_response(&mut self.peer, &response)
     }
 }
@@ -616,7 +589,7 @@ impl ListensOnSocket for RunningNexus {}
 /// what is there now, and List used to report the row alone. Two witnessed
 /// ways it went wrong: a seat whose pane was gone stayed Pending on the route
 /// it was bound to, and a seat that was plainly live stayed Pending because
-/// only a Presented Send ever promoted one — so a flow bound through the
+/// only a Presented Deliver ever promoted one — so a flow bound through the
 /// privileged contract, or one started before Flow Nexus, was Pending forever.
 /// A listed flow is therefore reconciled against Herdr before it is answered:
 ///
@@ -629,7 +602,7 @@ impl ListensOnSocket for RunningNexus {}
 /// **This writes nothing.** List is a query, and a query does not change what
 /// it is asked about: the row keeps whatever Flow recorded, and only a command
 /// that witnesses a pane's fate — `Stop`, a replacement's reap, `Retire`, or a
-/// `Send` that finds the pane gone — persists an ended lifecycle. Reading the
+/// `Deliver` that finds the pane gone — persists an ended lifecycle. Reading the
 /// truth and recording it are deliberately separate.
 ///
 /// Only a live flow is looked at: one already Stopped, Exited or Retired is
@@ -826,6 +799,9 @@ impl Frame {
 
 #[cfg(test)]
 mod tests {
+    mod delivery;
+    mod submission;
+
     use super::{Dispatches, RunningNexus};
     use crate::caller::{
         CallerPane, CallerProcess, IdentifiesPeer, LocatesCallerPane, ReadsProcess, ResolvesCaller,
@@ -879,7 +855,7 @@ mod tests {
     }
 
     impl PromptFixture<'_> {
-        fn shell(&self, typed: &std::path::Path) -> String {
+        fn shell(&self, typed: &std::path::Path, agents: &[serde_json::Value]) -> String {
             let typing = format!("printf '%s' \"$6\" >> '{}'", typed.display());
             let error = |code: &str| {
                 format!(
@@ -887,9 +863,24 @@ mod tests {
                 )
             };
             match self {
-                Self::Prompted(pane) => format!(
-                    "{typing}; printf '%s\\n' '{{\"id\":\"cli:agent:prompt\",\"result\":{{\"type\":\"agent_prompted\",\"agent\":{{\"pane_id\":\"{pane}\"}}}}}}'"
-                ),
+                Self::Prompted(pane) => {
+                    // Herdr answers with the prompted pane's own AgentInfo,
+                    // which the roster already holds; a pane the roster does
+                    // not know is answered with its id alone, as a reply
+                    // naming another pane is.
+                    let agent = agents
+                        .iter()
+                        .find(|agent| {
+                            agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane)
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({ "pane_id": pane }));
+                    let reply = serde_json::json!({
+                        "id":"cli:agent:prompt",
+                        "result":{ "type":"agent_prompted", "agent":agent }
+                    });
+                    format!("{typing}; printf '%s\\n' '{reply}'")
+                }
                 Self::RefusedBeforeInput(code) => error(code),
                 Self::FailedAfterInput(code) => format!("{typing}; {}", error(code)),
             }
@@ -1005,6 +996,7 @@ mod tests {
                     LaunchBundles::at(directory.path().join("launch-bundles")),
                 ),
                 dispatch_gate: std::sync::Mutex::new(()),
+                pane_leases: crate::delivery::lease::PaneLeases::default(),
             };
             Self {
                 directory,
@@ -1088,16 +1080,16 @@ mod tests {
         ) -> PathBuf {
             let snapshot = serde_json::json!({
                 "id":"cli:api:snapshot",
-                "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
+                "result":{"snapshot":{"agents":agents.clone(),"protocol":20,"version":"0.8.2"},
                 "type":"session_snapshot"}
             });
             let log = self.directory.path().join("herdr-operations.log");
             let typed = self.directory.path().join("pane-typed.txt");
             let body = format!(
-                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; {} ;;\n  \"pane close\") printf '%s\\n' \"$*\" >> '{}' ;;\n  *) exit 64 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; {} ;;\n  \"pane close\"|\"pane send-keys\"|\"agent wait\") printf '%s\\n' \"$*\" >> '{}' ;;\n  \"agent read\") printf '%s\\n' '❯ ' '› ' ;;\n  *) exit 64 ;;\nesac\n",
                 snapshot,
                 log.display(),
-                prompt.shell(&typed),
+                prompt.shell(&typed, &agents),
                 log.display(),
             );
             FixtureExecutable {
@@ -1186,15 +1178,35 @@ mod tests {
             ));
         }
 
-        fn send(&self, bare_input: &str) -> Response {
-            self.nexus.dispatch(Query::Send(signal_flow::SendRequest {
-                flow_id: "908786".into(),
-                bare_input: bare_input.into(),
-            }))
+        /// A MiddleAbrupt Deliver of `text` from the owner: the tier that
+        /// neither interrupts nor waits for the recipient to rest.
+        fn send(&self, text: &str) -> Sent {
+            self.send_to("908786", text)
+        }
+
+        fn send_to(&self, flow_id: &str, text: &str) -> Sent {
+            match self.nexus.dispatch_meta(meta_signal_flow::Query::Deliver(
+                meta_signal_flow::DeliveryRequest {
+                    delivery_id: format!("delivery-{flow_id}-{text}"),
+                    flow_id: flow_id.into(),
+                    message: middle_abrupt(text),
+                },
+            )) {
+                meta_signal_flow::Response::Delivered(delivery) => {
+                    assert_eq!(delivery.flow_id, flow_id);
+                    assert_eq!(
+                        delivery.interrupt_witness,
+                        meta_signal_flow::InterruptWitness::NotRequested
+                    );
+                    Sent::Graded(delivery.delivery_grade)
+                }
+                meta_signal_flow::Response::DeliveryRejected(rejection) => Sent::Refused(rejection),
+                other => panic!("Deliver answers Delivered or DeliveryRejected: {other:?}"),
+            }
         }
 
         /// The lifecycle as the row holds it, with no reconciliation. This
-        /// is what the Send path did or did not write; List answers the
+        /// is what the Deliver path did or did not write; List answers the
         /// reconciled truth instead, which is a separate claim.
         fn stored_lifecycle(&self) -> FlowLifecycle {
             use crate::store::ReadsFlowRows as _;
@@ -1218,6 +1230,31 @@ mod tests {
         }
     }
 
+    /// What a Deliver answered, without its identifiers.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Sent {
+        Graded(meta_signal_flow::DeliveryGrade),
+        Refused(meta_signal_flow::DeliveryRejection),
+    }
+
+    /// The MessageId every fixture letter names: what a recipient reading
+    /// the pane would Acknowledge.
+    const FIXTURE_MESSAGE_ID: &str = "m-7f3a2c";
+
+    fn middle_abrupt(text: &str) -> meta_signal_flow::Message {
+        meta_signal_flow::Message::MiddleAbrupt(meta_signal_flow::Letter {
+            message_id: FIXTURE_MESSAGE_ID.into(),
+            sender: meta_signal_flow::Sender::Owner,
+            content: meta_signal_flow::Content::Text(text.into()),
+        })
+    }
+
+    /// The pane text of a MiddleAbrupt from the owner, written out by hand:
+    /// the head comes first, then the id, the sender and the text.
+    fn rendered(text: &str) -> String {
+        format!("MiddleAbrupt.{{ {FIXTURE_MESSAGE_ID} Owner Text.«{text}» }}")
+    }
+
     fn prompts(operation_log: &std::path::Path) -> Vec<String> {
         fs::read_to_string(operation_log)
             .unwrap_or_default()
@@ -1227,7 +1264,7 @@ mod tests {
             .collect()
     }
 
-    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 bare prompt --wait --until working --until idle --until done --until blocked --timeout 10000";
+    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 MiddleAbrupt.{ m-7f3a2c Owner Text.«bare prompt» } --wait --until working --until idle --until done --until blocked --timeout 10000";
 
     #[test]
     fn observed_send_promotes_a_pending_flow_and_types_only_the_bare_input() {
@@ -1238,15 +1275,16 @@ mod tests {
         );
         fixture.register_with(FlowLifecycle::Pending);
 
-        let response = fixture.send("bare prompt");
-        let Response::Sent(signal_flow::SendOutcome::Presented(receipt)) = response else {
-            panic!("a settled recipient seen reacting is Presented: {response:?}")
-        };
-        assert_eq!(receipt.flow_id, "908786");
-        assert_eq!(receipt.herdr_pane_id, "w1:p3");
-        assert!(receipt.presentation_observed_unix_milliseconds > 0);
+        assert_eq!(
+            fixture.send("bare prompt"),
+            Sent::Graded(meta_signal_flow::DeliveryGrade::Presented),
+            "a settled recipient seen reacting is Presented"
+        );
         assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
-        assert_eq!(fixture.typed().as_deref(), Some("bare prompt"));
+        assert_eq!(
+            fixture.typed().as_deref(),
+            Some(rendered("bare prompt").as_str())
+        );
         assert_eq!(prompts(&operation_log), vec![OBSERVED_PROMPT.to_owned()]);
 
         assert_eq!(
@@ -1304,16 +1342,22 @@ mod tests {
 
         assert_eq!(
             fixture.send("queued prompt"),
-            Response::Sent(signal_flow::SendOutcome::Accepted("908786".into()))
+            Sent::Graded(meta_signal_flow::DeliveryGrade::Transported)
         );
-        // The Send did not promote it: only a Presented Send does that.
+        // The Deliver did not promote it: only a Presented Deliver does that.
         // List separately reports the seat live, because its pane is.
         assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Pending);
         assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
-        assert_eq!(fixture.typed().as_deref(), Some("queued prompt"));
+        assert_eq!(
+            fixture.typed().as_deref(),
+            Some(rendered("queued prompt").as_str())
+        );
         assert_eq!(
             prompts(&operation_log),
-            vec!["--session messaging-build agent prompt w1:p3 queued prompt".to_owned()]
+            vec![format!(
+                "--session messaging-build agent prompt w1:p3 {}",
+                rendered("queued prompt")
+            )]
         );
     }
 
@@ -1336,7 +1380,7 @@ mod tests {
 
             assert_eq!(
                 fixture.send("bare prompt"),
-                Response::SendRejected(signal_flow::SendRejection::NotDelivered),
+                Sent::Refused(meta_signal_flow::DeliveryRejection::NotDelivered),
                 "{code}"
             );
             assert_eq!(fixture.typed(), None, "{code}");
@@ -1362,10 +1406,14 @@ mod tests {
 
             assert_eq!(
                 fixture.send("bare prompt"),
-                Response::Sent(signal_flow::SendOutcome::Uncertain("908786".into())),
+                Sent::Graded(meta_signal_flow::DeliveryGrade::Uncertain),
                 "{failure}"
             );
-            assert_eq!(fixture.typed().as_deref(), Some("bare prompt"), "{failure}");
+            assert_eq!(
+                fixture.typed().as_deref(),
+                Some(rendered("bare prompt").as_str()),
+                "{failure}"
+            );
             assert_eq!(
                 prompts(&operation_log),
                 vec![OBSERVED_PROMPT.to_owned()],
@@ -1390,7 +1438,7 @@ mod tests {
 
         assert_eq!(
             fixture.send("bare prompt"),
-            Response::Sent(signal_flow::SendOutcome::Uncertain("908786".into()))
+            Sent::Graded(meta_signal_flow::DeliveryGrade::Uncertain)
         );
         assert_eq!(prompts(&operation_log).len(), 1);
         assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Pending);
@@ -1407,7 +1455,7 @@ mod tests {
 
         assert_eq!(
             fixture.send("ordinary active prompt"),
-            Response::Sent(signal_flow::SendOutcome::Accepted("908786".into()))
+            Sent::Graded(meta_signal_flow::DeliveryGrade::Transported)
         );
         assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
     }
@@ -1421,10 +1469,10 @@ mod tests {
         );
         fixture.register_with(FlowLifecycle::Active);
 
-        assert!(matches!(
+        assert_eq!(
             fixture.send("bare prompt"),
-            Response::Sent(signal_flow::SendOutcome::Presented(_))
-        ));
+            Sent::Graded(meta_signal_flow::DeliveryGrade::Presented)
+        );
         assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Active);
     }
 
@@ -1445,13 +1493,8 @@ mod tests {
         fixture.set_agents(vec![stale]);
 
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::Send(signal_flow::SendRequest {
-                    flow_id: "908786".into(),
-                    bare_input: "stale route prompt".into(),
-                })),
-            Response::SendRejected(signal_flow::SendRejection::RouteUnavailable)
+            fixture.send_to("908786", "stale route prompt"),
+            Sent::Refused(meta_signal_flow::DeliveryRejection::RouteUnavailable)
         );
         let Response::Listed(rows) = fixture
             .nexus
@@ -1585,6 +1628,33 @@ mod tests {
         })
     }
 
+    /// Herdr omits `name` for a pane it was never given one for. The label
+    /// is not part of the binding and is no part of the presentation either:
+    /// a nameless recipient seen reacting is Presented, as any other is.
+    /// Grading through `current_route`, which re-reads the name, settled
+    /// every such delivery Uncertain.
+    fn nameless_rested_codex_agent() -> serde_json::Value {
+        let mut agent = rested_imported_codex_agent();
+        agent.as_object_mut().expect("agent object").remove("name");
+        agent
+    }
+
+    #[test]
+    fn a_nameless_recipient_seen_reacting_is_presented() {
+        let fixture = NexusFixture::new();
+        let operation_log = fixture.accept_pane_operations(
+            vec![nameless_rested_codex_agent()],
+            PromptFixture::Prompted("w1:p3"),
+        );
+        bind_existing_caller(&fixture, "908786", "w1:p3");
+
+        assert_eq!(
+            fixture.send("bare prompt"),
+            Sent::Graded(meta_signal_flow::DeliveryGrade::Presented)
+        );
+        assert_eq!(prompts(&operation_log), vec![OBSERVED_PROMPT.to_owned()]);
+    }
+
     fn resolved(fixture: &NexusFixture) -> FlowNode {
         let Response::RecipientResolved(node) = fixture
             .nexus
@@ -1631,16 +1701,14 @@ mod tests {
         );
         assert_eq!(node.flow_lifecycle, FlowLifecycle::Pending);
 
-        let response = fixture.send("bare prompt");
-        assert!(
-            matches!(
-                &response,
-                Response::Sent(signal_flow::SendOutcome::Presented(receipt))
-                    if receipt.flow_id == "908786" && receipt.herdr_pane_id == "w1:p3"
-            ),
-            "{response:?}"
+        assert_eq!(
+            fixture.send("bare prompt"),
+            Sent::Graded(meta_signal_flow::DeliveryGrade::Presented)
         );
-        assert_eq!(fixture.typed().as_deref(), Some("bare prompt"));
+        assert_eq!(
+            fixture.typed().as_deref(),
+            Some(rendered("bare prompt").as_str())
+        );
         assert_eq!(prompts(&operation_log), vec![OBSERVED_PROMPT.to_owned()]);
         let after = listed(&fixture);
         assert_eq!(after.flow_lifecycle, FlowLifecycle::Active);
@@ -1658,12 +1726,12 @@ mod tests {
         assert_eq!(node.herdr_route_selection, HerdrRouteSelection::Unavailable);
         assert_eq!(
             fixture.send("bare prompt"),
-            Response::SendRejected(signal_flow::SendRejection::RouteUnavailable)
+            Sent::Refused(meta_signal_flow::DeliveryRejection::RouteUnavailable)
         );
         assert_eq!(fixture.typed(), None);
         assert!(prompts(&operation_log).is_empty());
         // The pane is gone and Flow never closed it, so the flow Exited. The
-        // Send above is the command that witnessed it, so the row itself now
+        // Deliver above is the command that witnessed it, so the row itself now
         // says so; List would report the same either way, and Retired is not
         // what an observation ever produces.
         assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Exited);
@@ -2014,7 +2082,7 @@ mod tests {
             "type":"session_snapshot"}
         });
         let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" agent prompt \"*) exit 0 ;;\n  *) exit 64 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" agent prompt \"*) exit 0 ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
             herdr_calls.display(),
             agent,
             snapshot
@@ -2104,15 +2172,15 @@ mod tests {
             "List must not write"
         );
 
-        // A Send is a command, and it does record the exit it witnesses.
+        // A Deliver is a command, and it does record the exit it witnesses.
         assert_eq!(
             fixture.send("to a seat that is gone"),
-            Response::SendRejected(signal_flow::SendRejection::RouteUnavailable)
+            Sent::Refused(meta_signal_flow::DeliveryRejection::RouteUnavailable)
         );
         assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Exited);
         assert_eq!(
             fixture.send("again"),
-            Response::SendRejected(signal_flow::SendRejection::FlowStopped)
+            Sent::Refused(meta_signal_flow::DeliveryRejection::FlowExited)
         );
         assert_eq!(
             fixture
@@ -2145,7 +2213,7 @@ mod tests {
     }
 
     /// A seat bound through the privileged contract, or started before Flow
-    /// Nexus, has no Presented Send to promote it, and so stayed Pending for
+    /// Nexus, has no Presented Deliver to promote it, and so stayed Pending for
     /// as long as it lived. Herdr showing its bound pane present is a witness
     /// that it is live, and List reports so — without writing: List is a
     /// query, and a query does not change what it is asked about.
@@ -2214,7 +2282,7 @@ mod tests {
         assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Retired);
         assert_eq!(
             fixture.send("to a retired flow"),
-            Response::SendRejected(signal_flow::SendRejection::FlowStopped)
+            Sent::Refused(meta_signal_flow::DeliveryRejection::FlowRetired)
         );
         assert_eq!(
             fixture
@@ -2502,11 +2570,11 @@ mod tests {
             }}});
             let snapshot = serde_json::json!({
                 "id":"cli:api:snapshot",
-                "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
+                "result":{"snapshot":{"agents":agents.clone(),"protocol":20,"version":"0.8.2"},
                 "type":"session_snapshot"}
             });
             let body = format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" pane close \"*) exit {} ;;\n  *) exit 64 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" pane close \"*) exit {} ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
                 log.display(),
                 agent,
                 snapshot,
@@ -2720,13 +2788,8 @@ mod tests {
         assert!(fixture.routable("fac697"));
         assert!(!fixture.routable("908786"));
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::Send(signal_flow::SendRequest {
-                    flow_id: "908786".into(),
-                    bare_input: "too early".into(),
-                })),
-            Response::SendRejected(signal_flow::SendRejection::RouteUnavailable)
+            fixture.send_to("908786", "too early"),
+            Sent::Refused(meta_signal_flow::DeliveryRejection::RouteUnavailable)
         );
         assert!(matches!(
             fixture.nexus.dispatch(Query::LaunchStatus("replace-request".into())),
@@ -2765,13 +2828,8 @@ mod tests {
         );
         assert!(fixture.routable("908786"));
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::Send(signal_flow::SendRequest {
-                    flow_id: "fac697".into(),
-                    bare_input: "to the old seat".into(),
-                })),
-            Response::SendRejected(signal_flow::SendRejection::FlowStopped)
+            fixture.send_to("fac697", "to the old seat"),
+            Sent::Refused(meta_signal_flow::DeliveryRejection::FlowStopped)
         );
         assert_eq!(
             fixture
@@ -3286,19 +3344,62 @@ mod tests {
         }
     }
 
+    /// A freshly spawned process is not yet marked. glibc's `posix_spawn`
+    /// wakes the vfork parent from inside the child's `execve`, at
+    /// `mm_release`, which the kernel reaches before it has laid the new
+    /// environment into the new address space: for a few dozen microseconds
+    /// `/proc/<pid>/environ` reads back empty (the `comm` is already the new
+    /// program's). A reader cannot tell that from a scrubbed environment, so
+    /// it would take the peer for the owner. Every fixture peer therefore
+    /// waits for its own marks before it is used as one. The Nexus needs no
+    /// such wait: its peers are processes that have already connected to it.
+    trait SettlesItsMarks {
+        /// A pane's marks appear within microseconds; this is only a bound.
+        const SETTLING_LIMIT: Duration = Duration::from_secs(5);
+
+        fn settled_pane(&self) -> CallerPane;
+    }
+
+    impl SettlesItsMarks for CallerProcess {
+        fn settled_pane(&self) -> CallerPane {
+            let deadline = std::time::Instant::now() + Self::SETTLING_LIMIT;
+            loop {
+                if let Some(pane) = self.marked_pane() {
+                    return pane;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the fixture peer's Herdr marks never became readable"
+                );
+                std::thread::yield_now();
+            }
+        }
+    }
+
     /// A process that sleeps under the given Herdr marks, killed on drop.
     struct MarkedProcess(std::process::Child);
 
     impl MarkedProcess {
-        fn spawn(command: &str, pane: &str) -> Self {
-            Self(
-                std::process::Command::new("sh")
-                    .args(["-c", command])
-                    .env("HERDR_SESSION", "messaging-build")
-                    .env("HERDR_PANE_ID", pane)
-                    .spawn()
-                    .expect("marked fixture process"),
-            )
+        /// The program is spawned directly, never through a shell that
+        /// `exec`s it: `SettlesItsMarks` settles the marks of one process,
+        /// and a second `execve` in that same process reopens the window it
+        /// waited out — `/proc/<pid>/environ` reads back empty again, which
+        /// a reader cannot tell from a scrubbed environment. A shell is
+        /// spawned only where the shell itself is the marked process and
+        /// stays (its command line ends in another word, so the shell does
+        /// not turn its last command into an `exec` of its own accord).
+        fn spawn(program: &str, arguments: &[&str], pane: &str) -> Self {
+            let child = std::process::Command::new(program)
+                .args(arguments)
+                .env("HERDR_SESSION", "messaging-build")
+                .env("HERDR_PANE_ID", pane)
+                .spawn()
+                .expect("marked fixture process");
+            CallerProcess {
+                process_id: child.id(),
+            }
+            .settled_pane();
+            Self(child)
         }
     }
 
@@ -3329,11 +3430,12 @@ mod tests {
 
     #[test]
     fn a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors() {
-        // `exec` makes the marked shell itself the sleeper; the second shell
+        // The first sleeper carries the marks itself; the second shell
         // stays the parent of a sleeper whose environment drops the marks.
-        let marked = MarkedProcess::spawn("exec sleep 30", "pane-1");
+        let marked = MarkedProcess::spawn("sleep", &["30"], "pane-1");
         let scrubbed = MarkedProcess::spawn(
-            "env -u HERDR_SESSION -u HERDR_PANE_ID sleep 30; true",
+            "sh",
+            &["-c", "env -u HERDR_SESSION -u HERDR_PANE_ID sleep 30; true"],
             "pane-2",
         );
         let marked_process = CallerProcess {

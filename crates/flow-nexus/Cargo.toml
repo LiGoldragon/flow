@@ -7,7 +7,12 @@ name = "flow-nexus"
 path = "src/main.rs"
 [dependencies]
 base64 = "0.22"
-meta-signal-flow.workspace = true
+# The Nexus renders one typed value as text, the Message it types into a
+# pane (F6: Flow textualizes the letter so its Priority head comes first).
+# That one exception is why the Nexus compiles its meta contract with datom.
+meta-signal-flow = { workspace = true, features = ["datom"] }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927" }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "1febca7836bf8d5f5973a302fdd50aa9c84c159b" }
 notify = "8"
 rustix = { version = "1", features = ["net", "time"] }
 rkyv.workspace = true

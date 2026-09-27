@@ -34,7 +34,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.14.0";
+            version = "0.17.3";
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -126,6 +126,30 @@
             "tests::a_pending_seat_whose_pane_herdr_shows_live_is_listed_active";
           flow-retire-keeps-history = context.exactTest "flow-nexus"
             "tests::retire_keeps_the_row_and_takes_the_flow_out_of_receiving";
+          flow-deliver-never-interleaves = context.exactTest "flow-nexus"
+            "tests::delivery::two_deliveries_to_one_pane_never_interleave";
+          flow-deliver-refuses-commands-and-keys = context.exactTest "flow-nexus"
+            "tests::delivery::bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed";
+          flow-deliver-crash-settles-uncertain = context.exactTest "flow-nexus"
+            "tests::delivery::a_delivery_a_crash_left_under_its_lease_settles_uncertain_and_is_never_retried";
+          flow-hard-abrupt-interrupts-first = context.exactTest "flow-nexus"
+            "tests::delivery::hard_abrupt_interrupts_a_working_recipient_before_typing";
+          flow-soft-waits-for-rest = context.exactTest "flow-nexus"
+            "tests::delivery::soft_waits_for_a_resting_recipient_and_types_nothing_to_a_working_one";
+          flow-claude-receipt-without-effort = context.exactTest "flow-nexus"
+            "herdr::launch::tests::claude_receipt_of_a_model_without_effort_is_observed";
+          flow-hard-abrupt-presses-again = context.exactTest "flow-nexus"
+            "tests::delivery::hard_abrupt_presses_the_interrupt_again_while_the_recipient_still_works";
+          flow-hard-abrupt-bounded-presses = context.exactTest "flow-nexus"
+            "tests::delivery::an_interrupt_that_never_shows_is_pressed_a_bounded_number_of_times";
+          flow-exited-refusal-names-exited = context.exactTest "flow-nexus"
+            "tests::a_flow_whose_pane_left_herdr_is_listed_exited_and_keeps_its_row";
+          flow-claude-retract-is-one-ctrl-c = context.exactTest "flow-nexus"
+            "tests::submission::a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c";
+          flow-claude-draft-is-never-retracted = context.exactTest "flow-nexus"
+            "tests::submission::a_draft_claudes_interrupt_put_back_is_never_taken_out";
+          flow-caller-pane-from-marks-or-ancestry = context.exactTest "flow-nexus"
+            "tests::a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors";
         }
       );
 

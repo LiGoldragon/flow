@@ -492,7 +492,7 @@ impl LaunchesFlows for RunningNexus {
             }
         };
         // The predecessor stops receiving first: Stopped is what
-        // ResolveRecipient and Send refuse.
+        // ResolveRecipient and Deliver refuse.
         if node.flow_lifecycle != FlowLifecycle::Stopped
             && !self
                 .store
@@ -856,8 +856,8 @@ impl PromotesObservedLaunch for RunningNexus {
 /// exactly one known line. That same ending ends the turn, so the brief the
 /// first prompt carries would sit there unstarted, waiting for someone to
 /// say go. Nobody says go. Flow does: the receipt is witnessed, the launch
-/// is Started, and Flow sends this one line over the same bound route Send
-/// uses. No caller and no human follows a launch.
+/// is Started, and Flow types this one line into the bound pane through its
+/// own writer. No caller and no human follows a launch.
 pub struct BriefContinuation;
 
 impl BriefContinuation {
@@ -870,38 +870,54 @@ pub trait ContinuesIntoBrief {
     /// Best effort by design: the flow is Started whatever this does. A
     /// continuation that does not reach the seat is reported to the Nexus
     /// log, never turned into a launch rejection — the seat exists, is
-    /// registered and is routable, and one more Send can reach it.
+    /// registered and is routable, and one Deliver can reach it.
     fn continue_into_brief(&self, flow_id: &str);
 }
 
 impl ContinuesIntoBrief for RunningNexus {
+    /// Typed by Flow's own writer, under the pane lease, like any other
+    /// write. Exception, noted here: this one line is Flow's own, not a
+    /// Message, so it carries no Priority head.
     fn continue_into_brief(&self, flow_id: &str) {
-        let node = match self.store.flow_node(flow_id) {
-            Ok(Some(node)) => self.herdr.refresh_route(node),
-            Ok(None) => {
-                eprintln!("flow-nexus: flow {flow_id} has no row to continue into its brief");
-                return;
-            }
-            Err(error) => {
-                eprintln!("flow-nexus: flow {flow_id} row unreadable for its brief: {error}");
+        use crate::delivery::lease::LeasesPanes;
+        use crate::delivery::{FindsDeliveryTarget, ReadsLeasedPane};
+        use crate::herdr::ReadsHerdrRoster;
+        use crate::herdr::pane::{Placement, WritesPane};
+        let target = match self.delivery_target(flow_id) {
+            Ok(target) => target,
+            Err(refusal) => {
+                eprintln!(
+                    "flow-nexus: flow {flow_id} cannot be continued into its brief: {refusal:?}"
+                );
                 return;
             }
         };
-        if !matches!(
-            node.herdr_route_selection,
-            signal_flow::HerdrRouteSelection::Available(_)
-        ) {
-            eprintln!("flow-nexus: flow {flow_id} has no route for its brief");
-            return;
-        }
-        match self.herdr.prompt(&node, BriefContinuation::TEXT) {
-            // The seat was seen reacting to a real Send: it is Active.
-            Ok(signal_flow::SendOutcome::Presented(_)) => {
+        let _lease = self.pane_leases.hold(&target.route);
+        let agent_state = match self.writable_state(&target) {
+            Ok(agent_state) => agent_state,
+            Err(refusal) => {
+                eprintln!("flow-nexus: flow {flow_id} brief continuation refused: {refusal:?}");
+                return;
+            }
+        };
+        let observe = matches!(
+            agent_state,
+            signal_flow::AgentState::Idle | signal_flow::AgentState::Done
+        );
+        match self
+            .herdr
+            .place(&target.route, BriefContinuation::TEXT, observe)
+        {
+            // The seat was seen reacting on its exact pane: it is Active.
+            Placement::Placed { observed: true } if self.herdr.route_is_available(&target.node) => {
                 let _ = self.store.record_active(flow_id);
             }
-            Ok(_) => {}
-            Err(rejection) => {
-                eprintln!("flow-nexus: flow {flow_id} brief continuation refused: {rejection:?}");
+            Placement::Placed { .. } => {}
+            Placement::Uncertain => {
+                eprintln!("flow-nexus: flow {flow_id} brief continuation typed, reaction unknown");
+            }
+            Placement::Refused => {
+                eprintln!("flow-nexus: flow {flow_id} brief continuation refused by Herdr");
             }
         }
     }

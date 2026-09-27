@@ -70,6 +70,17 @@ fn nexus_starts_from_defaults_and_answers_after_meta_configure() {
         source_root: home.path().join("source").to_string_lossy().into_owned(),
         stable_codex: endpoint("stable"),
         next_codex: endpoint("next"),
+        harness_profile_vector: vec![meta_signal_flow::HarnessProfile {
+            harness_kind: signal_flow::HarnessKind::Codex,
+            command_sigil_vector: vec!["/".into()],
+            interrupt_keys: vec!["esc".into()],
+            submit_keys: Vec::new(),
+        }],
+        meta_aspects: vec![
+            signal_flow::FlowAspect::Psyche,
+            signal_flow::FlowAspect::Mind,
+        ],
+        message_nexus_path: "/opt/message-nexus".into(),
     };
     let mut meta = connect(&meta_socket, &mut nexus);
     let query = meta_signal_flow::Query::Configure(configuration.clone());

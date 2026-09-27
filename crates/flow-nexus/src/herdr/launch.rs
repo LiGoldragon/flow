@@ -1626,6 +1626,17 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                     claude_stack = 0;
                                     input_verified = true;
                                 }
+                                None if Self::prompt_text_matches_intent(text, durable_intent)
+                                    && Self::claude_direct_skill_prompt(text) =>
+                                {
+                                    // Claude can also leave the composed
+                                    // direct form as a plain user row. Its
+                                    // server-composed digest authenticates
+                                    // that row; every selected skill still
+                                    // has to arrive through the Skill tool.
+                                    claude_stack = 0;
+                                    input_verified = true;
+                                }
                                 None if claude_stack > 0 && !input_verified => {
                                     // The one line opens with its stacked
                                     // commands; a plain record of it means
@@ -2854,6 +2865,39 @@ printf '%s\n' 123456
         assert_eq!(recovered, observed);
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert_eq!(calls.matches("agent prompt").count(), 1, "{calls}");
+
+        // Claude may preserve the composed direct form as a plain row.
+        let mut plain = rows.clone();
+        plain[0]["message"]["content"] = serde_json::json!(original);
+        write(&plain);
+        let PromptDeliveryResult::Observed(plain_observed) =
+            adapter.observe_native_target_receipt(&intent).unwrap()
+        else {
+            panic!("plain direct prompt stayed ambiguous")
+        };
+        assert_eq!(plain_observed.native_turn_id, "turn-direct");
+
+        let mut plain_altered = plain.clone();
+        plain_altered[0]["message"]["content"] = serde_json::json!(
+            "Read /tmp/flow-system-prompt.md for your launch mode, then load these skills through the Skill tool in this order: spirit."
+        );
+        write(&plain_altered);
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("loaded no stacked command")
+        );
+
+        let mut incomplete = plain[..4].to_vec();
+        incomplete.push(plain.last().unwrap().clone());
+        write(&incomplete);
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("target receipt preceded native skill confirmation")
+        );
 
         let mut altered = rows.clone();
         altered[0]["message"]["content"] =

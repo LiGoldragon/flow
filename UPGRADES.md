@@ -1,3 +1,13 @@
+# Flow 0.17.4
+
+Deploy beside Message 0.17.0, or do not deploy at all.
+
+- **Plain direct Claude Start prompts are attested.** Claude Code may record
+  the composer-selected direct Skill-tool prompt as a plain user row. Flow
+  accepts it only when its exact server-composed text matches the persisted
+  prompt SHA-256, then still requires every selected Skill call, successful
+  result, and source expansion in order before the receipt.
+
 # Flow 0.17.3
 
 Deploy beside Message 0.17.0, or do not deploy at all.

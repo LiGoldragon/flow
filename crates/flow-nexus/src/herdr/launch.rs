@@ -1839,7 +1839,10 @@ mod tests {
         ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
         SubmitsFirstPromptOnce, TitlesNativeFlow,
     };
-    use crate::composition::{LaunchReceipt, NamesRemoteControl};
+    use crate::composition::{
+        ComposesLaunch, LaunchBundles, LaunchComposer, LaunchReceipt, NamesRemoteControl,
+        OpensLaunchComposer,
+    };
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use crate::herdr::HerdrCli;
     use signal_flow::{
@@ -2787,23 +2790,33 @@ printf '%s\n' 123456
     }
 
     #[test]
-    fn claude_pasted_direct_skill_prompt_normalizes_the_wrapper_and_requires_each_skill() {
-        use sha2::{Digest, Sha256};
+    fn claude_composed_multiline_direct_skill_prompt_is_observed_byte_for_byte() {
         use std::io::Write;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let names = ["spirit", "main-flow"];
-        let mut launch = launch(HarnessKind::Claude);
-        launch.launch_profile.skill_name_vector = names.map(String::from).to_vec();
-        let body = format!(
-            "Read /tmp/flow-system-prompt.md for your launch mode, then load these skills through the Skill tool in this order: spirit, main-flow. Then: {}",
-            "x".repeat(34_369)
+        let composition_root = tempfile::tempdir().unwrap();
+        let bundle = composition_root.path().join("flow-system-prompt.md");
+        fs::write(&bundle, "fixture bundle\n").unwrap();
+        let mut profile = launch(HarnessKind::Claude).launch_profile;
+        profile.skill_name_vector = names.map(String::from).to_vec();
+        profile.system_prompt_bundle_file = bundle.to_string_lossy().into_owned();
+        profile.instruction_prompt = "Read the receipt.\nThen report it.".into();
+        let launch = LaunchComposer::at(
+            composition_root.path(),
+            LaunchBundles::at(composition_root.path().join("launch-bundles")),
+        )
+        .compose(&profile)
+        .expect("composer selects Claude's direct form for a two-line instruction");
+        let body = &launch.first_prompt_payload.first_prompt_body;
+        assert_eq!(
+            body.matches('\n').count(),
+            1,
+            "the instruction has one line break"
         );
-        let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
-        launch.first_prompt_payload.first_prompt_body = body.clone();
-        launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
-        launch.first_prompt_payload.first_prompt_text =
-            format!("{body}{}", LaunchReceipt::footer_for(&HarnessKind::Claude));
-        launch.target_receipt_request.prompt_sha256 = body_hash;
+        assert!(body.starts_with("Read "));
+        assert!(body.contains(
+            "then load these skills through the Skill tool in this order: spirit, main-flow."
+        ));
         let agent_name = HerdrCli::launch_agent_name(&launch);
         let (root, adapter) = fixture_herdr(
             "claude",
@@ -2836,7 +2849,7 @@ printf '%s\n' 123456
         };
         let original = launch.first_prompt_payload.first_prompt_text.clone();
         let mut rows = vec![serde_json::json!({"type":"user","sessionId":native_session,
-            "message":{"role":"user","content":format!("<pasted_content id=\"ab12\">\n{original}\n</pasted_content>")}})];
+            "message":{"role":"user","content":original}})];
         rows.extend(tool("spirit", "tool-1"));
         rows.extend(tool("main-flow", "tool-2"));
         rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-direct","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":LaunchReceipt::MARKER}]}}));
@@ -2854,7 +2867,7 @@ printf '%s\n' 123456
         let PromptDeliveryResult::Observed(observed) =
             adapter.observe_native_target_receipt(&intent).unwrap()
         else {
-            panic!("direct prompt stayed ambiguous")
+            panic!("composed direct prompt stayed ambiguous")
         };
         assert_eq!(observed.native_turn_id, "turn-direct");
         let PromptDeliveryResult::Observed(recovered) =
@@ -2866,31 +2879,25 @@ printf '%s\n' 123456
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert_eq!(calls.matches("agent prompt").count(), 1, "{calls}");
 
-        // Claude may preserve the composed direct form as a plain row.
-        let mut plain = rows.clone();
-        plain[0]["message"]["content"] = serde_json::json!(original);
-        write(&plain);
-        let PromptDeliveryResult::Observed(plain_observed) =
-            adapter.observe_native_target_receipt(&intent).unwrap()
-        else {
-            panic!("plain direct prompt stayed ambiguous")
-        };
-        assert_eq!(plain_observed.native_turn_id, "turn-direct");
-
-        let mut plain_altered = plain.clone();
-        plain_altered[0]["message"]["content"] = serde_json::json!(
-            "Read /tmp/flow-system-prompt.md for your launch mode, then load these skills through the Skill tool in this order: spirit."
-        );
-        write(&plain_altered);
+        // A changed newline byte leaves the harness footer intact but changes
+        // the body digest that authenticates the plain direct user row.
+        let footer = LaunchReceipt::footer_for(&HarnessKind::Claude);
+        let changed_body = body.replacen('\n', "\r\n", 1);
+        let changed = format!("{changed_body}{footer}");
+        assert!(changed.ends_with(&footer));
+        let mut newline_mutated = rows.clone();
+        newline_mutated[0]["message"]["content"] = serde_json::json!(changed);
+        write(&newline_mutated);
         assert!(
             adapter
                 .observe_native_target_receipt(&intent)
                 .unwrap_err()
-                .contains("loaded no stacked command")
+                .contains("loaded no stacked command"),
+            "the observer must refuse the body whose newline bytes no longer hash to the intent"
         );
 
-        let mut incomplete = plain[..4].to_vec();
-        incomplete.push(plain.last().unwrap().clone());
+        let mut incomplete = rows[..4].to_vec();
+        incomplete.push(rows.last().unwrap().clone());
         write(&incomplete);
         assert!(
             adapter

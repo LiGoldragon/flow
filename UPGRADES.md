@@ -450,7 +450,7 @@ The Claude launch shape changes; no wire or storage change.
   each with its expansion and the same argument, before the body. A 0.9
   journaled Claude attempt with more than one skill no longer matches the
   observer's reconstruction; let it settle before upgrading.
-- Start sets the canonical native title `<Aspect>V2.{ <Model> <FlowId> }`
+- Start sets the canonical native title `<Aspect>.{ <Model> <FlowId> }`
   and the Herdr pane label after the claim and reads both back before any
   prompt. The model display name comes from a fixed copy of the workspace
   model-display map; an unmapped model refuses the Start (`BindingRefused`).

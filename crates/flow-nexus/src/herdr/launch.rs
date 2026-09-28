@@ -3178,7 +3178,7 @@ printf '%s\n' 123456
             user(
                 serde_json::json!({"isMeta":true}),
                 serde_json::json!(
-                    "<system-reminder>\nThe user named this session \"PsycheV2.{ Opus 123456 }\".\n</system-reminder>"
+                    "<system-reminder>\nThe user named this session \"Psyche.{ Opus 123456 }\".\n</system-reminder>"
                 ),
             ),
             command(
@@ -3295,7 +3295,7 @@ printf '%s\n' 123456
         let title = adapter
             .title_native_flow(&launch, &binding)
             .expect("title set and read back");
-        let expected = "PsycheV2.{ Fable 123456 }";
+        let expected = "Psyche.{ Fable 123456 }";
         assert_eq!(title.as_str(), expected);
         // Readback: the terminal title Herdr reports, the session's
         // transcript title record, and the Herdr pane label all equal it.
@@ -3407,7 +3407,7 @@ printf '%s\n' 123456
             "1234567812344abc8def123456789abc",
             &agent_name,
         );
-        let expected = "FieldV2.{ Astra 123456 }";
+        let expected = "Field.{ Astra 123456 }";
         let frame = |json: &str| {
             let mut bytes = vec![0x81, json.len() as u8];
             bytes.extend_from_slice(json.as_bytes());

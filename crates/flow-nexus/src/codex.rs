@@ -1367,12 +1367,12 @@ mod tests {
             fake.websocket_frame(r#"{"id":1,"result":{}}"#),
             fake.websocket_frame(r#"{"id":2,"result":{}}"#),
             fake.websocket_frame(
-                r#"{"id":3,"result":{"thread":{"id":"thread-1","name":"FieldV2.{ Astra 123456 }"}}}"#,
+                r#"{"id":3,"result":{"thread":{"id":"thread-1","name":"Field.{ Astra 123456 }"}}}"#,
             ),
         ];
         let (_directory, executable) = fake.install(&frames);
         adapter_at(executable)
-            .name_bound_thread("thread-1", "FieldV2.{ Astra 123456 }")
+            .name_bound_thread("thread-1", "Field.{ Astra 123456 }")
             .expect("readback equals the set title");
     }
 
@@ -1389,7 +1389,7 @@ mod tests {
         ];
         let (_directory, executable) = fake.install(&frames);
         assert!(matches!(
-            adapter_at(executable).name_bound_thread("thread-1", "FieldV2.{ Astra 123456 }"),
+            adapter_at(executable).name_bound_thread("thread-1", "Field.{ Astra 123456 }"),
             Err(CodexAdapterUnavailable::Protocol(detail)) if detail.contains("readback differs")
         ));
     }

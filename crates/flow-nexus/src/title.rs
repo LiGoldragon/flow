@@ -1,9 +1,9 @@
 //! The canonical native title of a started Flow.
 //!
-//! A title is a Datom struct, `<Aspect>V2.{ <Model> <FlowId> }`, built from
+//! A title is a Datom struct, `<Aspect>.{ <Model> <FlowId> }`, built from
 //! the launch profile's explicit aspect, the display name of its exact model
 //! identifier, and the Flow ID claimed from the native session:
-//! `PsycheV2.{ Fable 38de5b }`. Power never enters the title. An unmapped
+//! `Psyche.{ Fable 38de5b }`. Power never enters the title. An unmapped
 //! model identifier is refused; no alias and no fallback is accepted.
 
 use signal_flow::{FlowAspect, LaunchProfile};
@@ -70,7 +70,7 @@ impl NativeTitle {
             FlowAspect::Mind => "Mind",
             FlowAspect::Field => "Field",
         };
-        Ok(Self(format!("{aspect}V2.{{ {model} {flow_id} }}")))
+        Ok(Self(format!("{aspect}.{{ {model} {flow_id} }}")))
     }
 
     pub fn as_str(&self) -> &str {
@@ -102,25 +102,25 @@ mod tests {
     }
 
     #[test]
-    fn title_is_the_v2_datom_of_aspect_model_and_flow() {
+    fn title_is_the_datom_of_aspect_model_and_flow() {
         assert_eq!(
             NativeTitle::for_flow(&profile(FlowAspect::Psyche, "claude-fable-5-1"), "38de5b")
                 .unwrap()
                 .as_str(),
-            "PsycheV2.{ Fable 38de5b }"
+            "Psyche.{ Fable 38de5b }"
         );
         assert_eq!(
             NativeTitle::for_flow(&profile(FlowAspect::Mind, "gpt-6-sol"), "00f95a")
                 .unwrap()
                 .as_str(),
-            "MindV2.{ Sol 00f95a }"
+            "Mind.{ Sol 00f95a }"
         );
         // Power never enters the title.
         let mut low = profile(FlowAspect::Field, "gpt-6-luna");
         low.power_level = PowerLevel::UltraLow;
         assert_eq!(
             NativeTitle::for_flow(&low, "e71dab").unwrap().as_str(),
-            "FieldV2.{ Luna e71dab }"
+            "Field.{ Luna e71dab }"
         );
     }
 

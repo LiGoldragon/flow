@@ -190,8 +190,8 @@ recorded as plain text with no command loaded, is refused. Skill bodies are
 not pasted into the composed first prompt.
 
 After the Flow ID is claimed and registered, and before any prompt, Start
-sets the canonical native title, `<Aspect>V2.{ <Model> <FlowId> }` (for
-example `PsycheV2.{ Fable 38de5b }`), with the model's display name taken from
+sets the canonical native title, `<Aspect>.{ <Model> <FlowId> }` (for
+example `Psyche.{ Fable 38de5b }`), with the model's display name taken from
 the exact model identifier and an unmapped identifier refused. Claude is
 renamed with its own `/rename` and read back from the terminal title Herdr
 reports and the session's transcript title record; Codex is named with

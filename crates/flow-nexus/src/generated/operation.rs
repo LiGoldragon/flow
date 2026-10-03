@@ -84,6 +84,7 @@ pub enum Operation {
     Continue(signal_flow::FlowId),
     Close(signal_flow::FlowNode),
     Prune(signal_flow::LaunchRequestId),
+    Release(signal_flow::FlowId),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -123,5 +124,6 @@ pub enum Outcome {
     Continued,
     Closed,
     Pruned,
+    Released,
     Failed(Failed_Data),
 }

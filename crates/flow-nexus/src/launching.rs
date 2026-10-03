@@ -28,10 +28,11 @@ use crate::{
 };
 use notify::Watcher;
 use signal_flow::{
-    EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-    LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchStatusRejection, Launched,
-    NativeLaunchIntent, PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
-    ReplaceRejection, Replaced, Response, StartRejection, StartRequest, StopRejection,
+    ComposedLaunch, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
+    HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
+    LaunchStatusRejection, Launched, NativeLaunchIntent, OriginClue, PromptDeliveryIntent,
+    PromptDeliveryResult, RegistrationAcknowledgement, ReplaceRejection, Replaced, Response,
+    StartRejection, StartRequest, StopRejection,
 };
 use std::sync::{
     Arc,
@@ -58,6 +59,14 @@ pub trait LaunchesFlows {
     fn reap(&self, replacement: Replacement, launched: Launched) -> Response;
     /// Answers once: the outcome, else the pending attempt.
     fn launch_status(&self, launch_request_id: &str) -> Response;
+    /// Everything a new launch does after Reserve, from the native intent
+    /// to the confirmed receipt.
+    fn launch_reserved(
+        &self,
+        launch: ComposedLaunch,
+        origin: OriginClue,
+        reserved: Option<String>,
+    ) -> Response;
 }
 
 impl LaunchesFlows for RunningNexus {
@@ -127,6 +136,22 @@ impl LaunchesFlows for RunningNexus {
             }
             _ => return persistence(),
         };
+        let response = self.launch_reserved(launch, origin, reserved.clone());
+        // A launch refused after Reserve gives back the flow it held and
+        // the FlowId it claimed; the refusal stands whatever Release does.
+        if let (Response::StartRejected(_), Some(flow_id)) = (&response, reserved) {
+            let _ = self.perform(Operation::Release(flow_id));
+        }
+        response
+    }
+
+    fn launch_reserved(
+        &self,
+        launch: ComposedLaunch,
+        origin: OriginClue,
+        reserved: Option<String>,
+    ) -> Response {
+        let persistence = || Response::StartRejected(StartRejection::LaunchPersistenceRefused);
         let native_intent = NativeLaunchIntent {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),

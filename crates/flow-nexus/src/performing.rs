@@ -154,6 +154,7 @@ impl Performs for RunningNexus {
                 }
             }
             Operation::Continue(flow_id) => self.continue_into_brief(&flow_id),
+            Operation::Release(flow_id) => self.release(&flow_id),
             Operation::Close(node) => match self.herdr.close(&node) {
                 true => Outcome::Closed,
                 false => Outcome::Failed(Failed_Data::HerdrRefused),
@@ -183,6 +184,10 @@ trait PerformsInParts {
     /// existed reserves nothing again: it is not spawned again.
     fn reserve(&self, reserve: Reserve_Data) -> Outcome;
     fn record(&self, record: Record_Data) -> Outcome;
+    /// Gives back what Reserve took for a launch that was then refused: the
+    /// flow held in Memory, then the FlowId claim. Both are needed for
+    /// Released; a failure of either is reported to the Nexus log.
+    fn release(&self, flow_id: &str) -> Outcome;
     /// Best effort by design: the flow is Started whatever this does. A
     /// continuation that does not reach the seat is reported to the Nexus
     /// log, never turned into a launch rejection — the seat exists, is
@@ -223,12 +228,30 @@ impl PerformsInParts for RunningNexus {
         if let Some(flow_id) = &flow_id_option
             && self.store.hold_reserved_flow(flow_id).is_err()
         {
+            // The claim was made but the flow is not held: give it back.
+            let _ = self.release(flow_id);
             return Outcome::Failed(Failed_Data::StoreRefused);
         }
         Outcome::Reserved(Reserved_Data {
             launch_attempt_reservation: reservation,
             flow_id_option,
         })
+    }
+
+    fn release(&self, flow_id: &str) -> Outcome {
+        use crate::herdr::reservation::ReleasesFlowIdentity;
+        use crate::store::events::RecordsHarnessEvents;
+        if let Err(error) = self.store.release_reserved_flow(flow_id) {
+            eprintln!("flow-nexus: reserved flow {flow_id} not released: {error:?}");
+            return Outcome::Failed(Failed_Data::StoreRefused);
+        }
+        match self.herdr.release_flow_identity(flow_id) {
+            Ok(()) => Outcome::Released,
+            Err(error) => {
+                eprintln!("flow-nexus: FlowId {flow_id} claim not released: {error}");
+                Outcome::Failed(Failed_Data::ClaimRefused)
+            }
+        }
     }
 
     fn record(&self, record: Record_Data) -> Outcome {

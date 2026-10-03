@@ -1,3 +1,37 @@
+# Flow 0.24.0
+
+No wire change (signal-flow and meta-signal-flow unchanged). The store opens
+as it is: sema-engine moves from 0.16.0 to 0.18.0, whose changes are
+additive for Flow (Flow declared no `with_prior`), and a copy of the
+production store taken 2026-10-03 opened under 0.24.0 with its
+configuration and 26 flow rows read back. Rebuild and restart the Nexus;
+`flow`, `flow-meta` and `flow-hook` come from the same package.
+
+- **Session id per Nexus.** The Claude session id Flow chooses for a
+  launch is now the SHA-256 of the Nexus's own ordinary socket path and the
+  launch request id (`flow-claude-session-v2`), UUIDv5-shaped as before.
+  Two Nexuses sharing one `~/.claude` (a sandbox beside production) serve
+  different sockets, so one request id never names one session twice, and
+  their `flow-id` claims never meet. One Nexus still names one session per
+  request, across restarts, as long as its configured socket is unchanged.
+- **Refused launches give back what Reserve took.** A Claude launch refused
+  after Reserve performs the new Operation `Release.FlowId` (answered
+  `Released`): the flow held in Memory is let go (its events row retracted
+  unless the flow was registered), and the `flow-id` claim is given back
+  under the claim's lock: the empty lane `flows/<FlowId>/` and the marker
+  `.<FlowId>.flow-id` are removed. A lane something wrote into keeps its
+  claim. A hook `Report` for a released FlowId is refused `UnknownFlow`.
+  Reserve also releases its own claim when it cannot hold the flow.
+- **Deploy.** Let in-flight Claude launches settle before the restart: a
+  launch reserved under 0.23.0 that resumes under 0.24.0 expects a session
+  id derived the new way and its Bind is refused. Settled launches and
+  running flows are untouched. Held records and claims left by launches
+  refused under 0.23.0 are not swept; they stay until removed by hand.
+- **Unchanged.** Codex launches still get neither FLOW_ID nor FLOW_SOCKET:
+  Codex names its thread inside its app server at thread/start, and a
+  Herdr-launched Codex runs its tools in that remote app server, not in the
+  pane, so a pane export would not reach them.
+
 # Flow 0.23.0
 
 No wire or storage change. Rebuild and restart the Nexus; `flow`,

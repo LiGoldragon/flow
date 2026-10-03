@@ -1373,7 +1373,7 @@ impl StartsNativeHerdrHarness for HerdrCli {
             // A reserved FlowId was claimed for the session Flow chose; the
             // harness runs as that session.
             if reserved.is_some()
-                && let Some(session) = launch.launch_profile.reserved_native_session_id()
+                && let Some(session) = self.reserved_native_session_id(&launch.launch_profile)
             {
                 arguments.push("--session-id".into());
                 arguments.push(session);
@@ -1461,9 +1461,8 @@ impl ObservesNativeLaunchBinding for HerdrCli {
             .collect::<String>()
             .to_ascii_lowercase();
         if reserved.is_some()
-            && launch
-                .launch_profile
-                .reserved_native_session_id()
+            && self
+                .reserved_native_session_id(&launch.launch_profile)
                 .as_deref()
                 != Some(native_session_id)
         {
@@ -2067,7 +2066,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
         ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
@@ -2097,7 +2096,7 @@ mod tests {
 
     const PROMPT_HASH: &str = "0cb26cfe0a554e4780aa5af20cafbe3ae3259f823438576026a4ffff58371a67";
 
-    fn launch(harness_kind: HarnessKind) -> ComposedLaunch {
+    pub(crate) fn launch(harness_kind: HarnessKind) -> ComposedLaunch {
         let footer = harness_kind.receipt_footer();
         ComposedLaunch {
             launch_profile: LaunchProfile {
@@ -2360,9 +2359,9 @@ printf '%s\n' 123456
     fn a_reserved_claude_launch_starts_as_its_session_with_its_flow_id() {
         use crate::herdr::reservation::{ChoosesNativeSession, ReservesFlowIdentity};
         let launch = launch(HarnessKind::Claude);
-        let session = launch
-            .launch_profile
-            .reserved_native_session_id()
+        let session = HerdrCli::default()
+            .with_ordinary_socket(Path::new("/fixture/run/flow-next/flow/flow.sock"))
+            .reserved_native_session_id(&launch.launch_profile)
             .expect("a Claude launch chooses its session");
         let agent_name = launch.launch_agent_name();
         let (root, adapter) =

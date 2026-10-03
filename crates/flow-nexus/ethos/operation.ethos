@@ -19,7 +19,9 @@
 ; the native harness in it; Bind claims the flow's identity from the
 ; harness's integration report; Title names the claimed flow; Submit types
 ; the first prompt once; Continue types the brief continuation; Close
-; closes a flow's pane; Prune removes a launch's bundle copy.
+; closes a flow's pane; Prune removes a launch's bundle copy. Release
+; gives back what Reserve took for a launch then refused: the held flow
+; and its FlowId claim, answered Released.
 ;
 ; LaunchOutcome and Replacement are the store's own types, imported from
 ; the Nexus crate until the Memory root is compiled.
@@ -51,7 +53,8 @@ Operation
   Submit.{ ComposedLaunch PromptDeliveryIntent }
   Continue.FlowId
   Close.FlowNode
-  Prune.LaunchRequestId ]
+  Prune.LaunchRequestId
+  Release.FlowId ]
 [ Composed.ComposedLaunch
   Reserved.{ LaunchAttemptReservation Option<FlowId> }
   Recorded
@@ -65,6 +68,7 @@ Operation
   Continued
   Closed
   Pruned
+  Released
   Failed.[ CompositionRefused
            StoreRefused
            ConflictingBinding

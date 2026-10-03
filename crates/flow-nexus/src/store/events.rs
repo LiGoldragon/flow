@@ -14,8 +14,8 @@
 use super::{FlowStore, ReadsFlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, SchemaHash,
-    TableDescriptor, TableName, TableReference,
+    Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, Retraction,
+    SchemaHash, TableDescriptor, TableName, TableReference,
 };
 use signal_flow::Event;
 use std::sync::Mutex;
@@ -72,6 +72,10 @@ pub trait RecordsHarnessEvents {
     /// Holds a flow whose FlowId Reserve claimed: its events row, empty,
     /// unless it already has one.
     fn hold_reserved_flow(&self, flow_id: &str) -> Result<(), StoreError>;
+    /// Lets go of a flow Reserve held whose launch was refused: its events
+    /// row is retracted unless the flow was registered. Releasing a flow
+    /// Flow does not hold changes nothing.
+    fn release_reserved_flow(&self, flow_id: &str) -> Result<(), StoreError>;
     /// Appends one event to the flow's events, if Flow holds the flow.
     fn record_event(&self, flow_id: &str, event: Event) -> Result<EventRecording, StoreError>;
     /// The flow's events, oldest first; `None` when Flow does not hold the
@@ -159,6 +163,21 @@ impl RecordsHarnessEvents for FlowStore {
         }
         Ok(())
     }
+
+    fn release_reserved_flow(&self, flow_id: &str) -> Result<(), StoreError> {
+        let _append = self
+            .event_tables
+            .append_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.flow(flow_id)?.is_none() && self.event_row(flow_id)?.is_some() {
+            self.engine.retract(Retraction::new(
+                self.event_tables.events,
+                RecordKey::new(flow_id),
+            ))?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -229,5 +248,35 @@ mod tests {
             ])
         );
         assert_eq!(store.events("0a0a0a").unwrap(), None);
+    }
+
+    /// A held flow whose launch was refused is let go: reports for it are
+    /// refused again, and the release lasts across a reopen. A registered
+    /// flow keeps its events.
+    #[test]
+    fn a_released_reserved_flow_is_no_longer_held() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flow.sema");
+        {
+            let store = FlowStore::open(&path).unwrap();
+            store.hold_reserved_flow("0b0b0b").unwrap();
+            assert_eq!(store.events("0b0b0b").unwrap(), Some(vec![]));
+            store.release_reserved_flow("0b0b0b").unwrap();
+            assert_eq!(store.events("0b0b0b").unwrap(), None);
+            assert_eq!(
+                store.record_event("0b0b0b", Event::Started).unwrap(),
+                EventRecording::UnknownFlow
+            );
+            store.release_reserved_flow("0b0b0b").unwrap();
+            assert!(matches!(
+                store.register_flow(node()).unwrap(),
+                crate::store::FlowRegistration::Registered(_)
+            ));
+            store.record_event("5a4d0b", Event::Started).unwrap();
+            store.release_reserved_flow("5a4d0b").unwrap();
+        }
+        let store = FlowStore::open(&path).unwrap();
+        assert_eq!(store.events("0b0b0b").unwrap(), None);
+        assert_eq!(store.events("5a4d0b").unwrap(), Some(vec![Event::Started]));
     }
 }

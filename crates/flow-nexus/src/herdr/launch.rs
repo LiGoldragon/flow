@@ -205,7 +205,7 @@ impl PreparesClaudePane for HerdrCli {
             "pane".into(),
             "run".into(),
             pane.herdr_pane_id.clone(),
-            marker_suffix.claude_environment_preparation(reserved),
+            marker_suffix.claude_environment_preparation(reserved, &self.ordinary_socket),
         ])?;
         let response = self.run_json(&[
             "--session".into(),
@@ -616,25 +616,41 @@ impl CapturesTranscripts for HerdrCli {
 }
 
 /// The shell line typed into a Claude launch pane before the harness: it
-/// removes the inherited Claude identity and, for a launch Reserve gave a
-/// FlowId, exports that FlowId as FLOW_ID, so the harness Herdr starts at
-/// that prompt (and every hook it runs) carries it. The FlowId is a claim
-/// alias, lowercase hex, so it needs no quoting.
+/// removes the inherited Claude identity, exports `FLOW_SOCKET` as the
+/// ordinary socket of the Nexus launching the flow, and, for a launch
+/// Reserve gave a FlowId, exports that FlowId as FLOW_ID. The harness Herdr
+/// starts at that prompt, and every hook it runs, carries both, so
+/// `flow-hook`'s `flow` reports to this Nexus whatever runtime directory
+/// the pane's shell has. The FlowId is a claim alias, lowercase hex, so it
+/// needs no quoting; the socket path is quoted for the shell.
 pub(crate) trait PreparesClaudeEnvironment {
-    fn claude_environment_preparation(&self, reserved: Option<&str>) -> String;
+    fn claude_environment_preparation(&self, reserved: Option<&str>, socket: &Path) -> String;
 }
 
 impl PreparesClaudeEnvironment for str {
-    fn claude_environment_preparation(&self, reserved: Option<&str>) -> String {
+    fn claude_environment_preparation(&self, reserved: Option<&str>, socket: &Path) -> String {
         let marker_suffix = self;
-        let export = reserved
+        let flow_id = reserved
             .map(|flow_id| format!(" && export FLOW_ID={flow_id}"))
             .unwrap_or_default();
         format!(
-            "unset {}{export} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+            "unset {} && export FLOW_SOCKET={}{flow_id} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
             HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
+            socket.to_string_lossy().shell_quoted(),
             marker_suffix
         )
+    }
+}
+
+/// One shell word holding exactly this text: single-quoted, each single
+/// quote closed, escaped and reopened.
+pub(crate) trait QuotesForShell {
+    fn shell_quoted(&self) -> String;
+}
+
+impl QuotesForShell for str {
+    fn shell_quoted(&self) -> String {
+        format!("'{}'", self.replace('\'', "'\\''"))
     }
 }
 
@@ -2077,6 +2093,7 @@ mod tests {
         TargetReceiptRequest,
     };
     use std::fs;
+    use std::path::Path;
 
     const PROMPT_HASH: &str = "0cb26cfe0a554e4780aa5af20cafbe3ae3259f823438576026a4ffff58371a67";
 
@@ -2275,7 +2292,7 @@ printf '%s\n' 123456
         let mut command = std::process::Command::new("sh");
         command.arg("-c").arg(format!(
             "{}; {checks}",
-            ("test-marker").claude_environment_preparation(None),
+            ("test-marker").claude_environment_preparation(None, Path::new("/run/flow.sock")),
         ));
         for name in HerdrCli::CLAUDE_INHERITED_ENVIRONMENT {
             command.env(name, "/home/li/.claude/jobs/108ab020");
@@ -2302,7 +2319,8 @@ printf '%s\n' 123456
             .arg("-c")
             .arg(format!(
                 "{}; sh -c 'printf %s \"$FLOW_ID\"'",
-                ("test-marker").claude_environment_preparation(Some("5a4d0b")),
+                ("test-marker")
+                    .claude_environment_preparation(Some("5a4d0b"), Path::new("/run/flow.sock")),
             ))
             .env("FLOW_ID", "0a0a0a")
             .output()
@@ -2311,6 +2329,30 @@ printf '%s\n' 123456
         assert_eq!(
             String::from_utf8(output.stdout).expect("UTF-8"),
             "FLOW_CLAUDE_ENV_READY_test-marker\n5a4d0b"
+        );
+    }
+
+    /// The launching Nexus's ordinary socket reaches the harness's
+    /// environment as FLOW_SOCKET, replacing one the pane's shell
+    /// inherited, as one word however the path is spelled.
+    #[test]
+    fn claude_environment_preparation_exports_the_launching_nexus_socket() {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "{}; sh -c 'printf %s \"$FLOW_SOCKET\"'",
+                ("test-marker").claude_environment_preparation(
+                    None,
+                    Path::new("/run/user/1001/flow-next/it's a $HOME/flow.sock")
+                ),
+            ))
+            .env("FLOW_SOCKET", "/run/user/1001/flow/flow.sock")
+            .output()
+            .expect("shell environment witness");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("UTF-8"),
+            "FLOW_CLAUDE_ENV_READY_test-marker\n/run/user/1001/flow-next/it's a $HOME/flow.sock"
         );
     }
 
@@ -2338,7 +2380,9 @@ printf '%s\n' 123456
             .lines()
             .find(|line| line.contains("pane run"))
             .expect("pane prepared");
-        assert!(prepared.contains(" FLOW_ID && export FLOW_ID=123456 && printf "));
+        assert!(prepared.contains(
+            " FLOW_ID && export FLOW_SOCKET='/fixture/run/flow-next/flow/flow.sock' && export FLOW_ID=123456 && printf "
+        ));
         let start = calls
             .lines()
             .find(|line| line.contains("agent start"))
@@ -2379,8 +2423,14 @@ printf '%s\n' 123456
             .start_native_harness(&launch, &pane, None)
             .expect("started");
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
-        // Unreserved: no FlowId exported, no session chosen.
+        // Unreserved: no FlowId exported, no session chosen; the launching
+        // Nexus's socket is exported all the same.
         assert!(!calls.contains("export FLOW_ID"));
+        assert!(
+            calls.contains(
+                " && export FLOW_SOCKET='/fixture/run/flow-next/flow/flow.sock' && printf "
+            )
+        );
         assert!(!calls.contains("--session-id"));
         assert!(
             adapter

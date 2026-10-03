@@ -98,6 +98,12 @@ pub struct HerdrCli {
     /// Stop in every Claude flow Flow launches: the one installed beside
     /// this Nexus's own executable.
     pub(crate) harness_hook: PathBuf,
+    /// This Nexus's own ordinary socket, the one it serves: every Claude
+    /// pane it launches gets it as `FLOW_SOCKET`, so the `flow` CLI that
+    /// `flow-hook` runs reports to the Nexus that launched the flow, not to
+    /// whatever Nexus the default path under the pane's runtime directory
+    /// names.
+    pub(crate) ordinary_socket: PathBuf,
     /// Where each launch's own bundle copy lives, the one a Claude launch
     /// receives as `--system-prompt-file`.
     launch_bundles: LaunchBundles,
@@ -161,6 +167,7 @@ impl Default for HerdrCli {
                 .ok()
                 .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
                 .unwrap_or_else(|| PathBuf::from("flow-hook")),
+            ordinary_socket: defaults.ordinary_socket_path(),
             launch_bundles: LaunchBundles::at(defaults.launch_bundle_directory()),
         }
     }
@@ -294,6 +301,8 @@ pub trait ConfiguresHerdrCli {
     /// The per-launch bundle copy the composer wrote for this launch.
     fn launch_bundle_file(&self, profile: &signal_flow::LaunchProfile) -> PathBuf;
     fn with_codex_endpoints(self, codex_endpoints: CodexEndpoints) -> Self;
+    /// The ordinary socket this Nexus serves, as its store configures it.
+    fn with_ordinary_socket(self, ordinary_socket: &std::path::Path) -> Self;
     /// Re-roots the flows directory and the workspace skill catalog on the
     /// configured source root.
     fn with_source_root(self, source_root: &std::path::Path) -> Self;
@@ -313,6 +322,11 @@ impl ConfiguresHerdrCli for HerdrCli {
 
     fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
         self.codex_endpoints = codex_endpoints;
+        self
+    }
+
+    fn with_ordinary_socket(mut self, ordinary_socket: &std::path::Path) -> Self {
+        self.ordinary_socket = ordinary_socket.to_path_buf();
         self
     }
 
@@ -364,6 +378,7 @@ impl ConfiguresHerdrCli for HerdrCli {
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
             claude_skill_roots: vec![fixture_root.join("claude-skills")],
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
+            ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
             launch_bundles: LaunchBundles::at(
                 flows_root
                     .parent()

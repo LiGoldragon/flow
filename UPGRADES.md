@@ -1,3 +1,29 @@
+# Flow 0.23.0
+
+No wire or storage change. Rebuild and restart the Nexus; `flow`,
+`flow-meta` and `flow-hook` come from the same package.
+
+- **FLOW_SOCKET at launch.** Spawn now types `export FLOW_SOCKET=<path>`
+  into every Claude launch pane, after unsetting the inherited identity and
+  before `FLOW_ID`. The path is the ordinary socket this Nexus serves, read
+  from its store's configuration when the Nexus opens (a meta `Configure`
+  of the sockets takes effect on restart, as before). The harness and every
+  hook it runs inherit it, and `flow-hook`'s `flow` already reads
+  `FLOW_SOCKET` before its default, so a launched flow's `Report`s reach the
+  Nexus that launched it, whatever `XDG_RUNTIME_DIR` the pane's shell has.
+  Until 0.22.0 they went to `$XDG_RUNTIME_DIR/flow/flow.sock` under the
+  pane's runtime directory: on a host whose next-slot Nexus serves
+  `$XDG_RUNTIME_DIR/flow-next/flow/`, that is the stable Nexus, or nothing.
+  The path is exported for an unreserved launch too; it is single-quoted
+  for the shell.
+- **Unchanged.** A harness started by hand, with no FLOW_SOCKET, reaches the
+  default socket under its own runtime directory, as before. Codex panes get
+  no FLOW_SOCKET (Codex runs no `flow-hook`). A seat's own `flow` calls now
+  also reach its launching Nexus.
+- **Deploy.** Install the 0.23.0 package and restart the Nexus. Flows
+  launched before the restart keep the environment they started with: their
+  hooks report as under 0.22.0 until they are relaunched.
+
 # Flow 0.22.0
 
 Rebuild and restart the Nexus, `flow` and `flow-meta` together. The wire is

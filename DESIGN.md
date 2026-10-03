@@ -38,7 +38,11 @@ the pane after unsetting the inherited identity and starts Claude with
 `--session-id` set to that session, so the harness and every hook it runs
 carry the FlowId from `SessionStart` on, and that first `Started` lands
 before Register. Bind verifies the harness came up as that session and the
-claim names that FlowId. A Codex launch reserves nothing: its session is
+claim names that FlowId. Every Claude launch pane also gets `export
+FLOW_SOCKET=<path>`, the ordinary socket this Nexus serves as its store
+configures it, so the hook's `flow` reports to the Nexus that launched the
+flow, not to the default socket under the pane's runtime directory. A Codex
+launch reserves nothing: its session is
 named by its app server, and Bind claims from it as before.
 
 ```mermaid

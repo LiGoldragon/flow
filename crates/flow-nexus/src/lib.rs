@@ -433,12 +433,16 @@ impl OpensRunningNexus for RunningNexus {
         }
         let source_root = PathBuf::from(&runtime.source_root);
         let launch_bundles = LaunchBundles::at(defaults.launch_bundle_directory());
+        // The socket this Nexus serves: a changed one takes effect only on
+        // restart, so the store's value at open is the one being served.
+        let ordinary_socket = PathBuf::from(store.configuration()?.ordinary_socket_path);
         Ok(Self {
             store,
             codex_endpoints: codex_endpoints.clone(),
             herdr: herdr::HerdrCli::default()
                 .with_source_root(&source_root)
                 .with_codex_endpoints(codex_endpoints)
+                .with_ordinary_socket(&ordinary_socket)
                 .with_launch_bundles(launch_bundles.clone()),
             composer: LaunchComposer::at(source_root, launch_bundles),
             dispatch_gate: Mutex::new(()),
@@ -786,6 +790,7 @@ mod tests {
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
     mod delivery;
+    mod launching_nexus;
     mod reservation;
     mod submission;
 

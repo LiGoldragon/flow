@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.21.0";
+            version = "0.22.0";
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -160,6 +160,12 @@
             "store::events::tests::a_flow_keeps_its_reported_events_in_order_across_a_reopen";
           flow-hook-reports-each-event = context.exactTest "flow"
             "tests::each_harness_event_becomes_one_report_of_the_claimed_flow";
+          flow-reserve-holds-the-flow-id = context.exactTest "flow-nexus"
+            "tests::reservation::a_claude_launch_holds_its_flow_id_from_reserve_before_any_harness";
+          flow-reserved-flow-id-reaches-the-harness = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_reserved_claude_launch_starts_as_its_session_with_its_flow_id";
+          flow-reserved-flow-id-in-the-environment = context.exactTest "flow-nexus"
+            "herdr::launch::tests::claude_environment_preparation_exports_the_reserved_flow_id";
           flow-retire-keeps-history = context.exactTest "flow-nexus"
             "tests::retire_keeps_the_row_and_takes_the_flow_out_of_receiving";
           flow-deliver-never-interleaves = context.exactTest "flow-nexus"

@@ -6,7 +6,7 @@
 use crate::codex::SelectsCodexEndpoint;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
-    Register_Data, Reserve_Data, Submit_Data, Title_Data,
+    Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::herdr::ReadsHerdrPanes;
 use crate::performing::Performs;
@@ -100,19 +100,33 @@ impl LaunchesFlows for RunningNexus {
         {
             return Response::StartRejected(StartRejection::NativeLaunchRefused);
         }
-        match self.perform(Operation::Reserve(Reserve_Data {
+        // A Claude launch's FlowId is claimed here, before its harness
+        // exists; the harness is spawned with it.
+        let reserved = match self.perform(Operation::Reserve(Reserve_Data {
             composed_launch: launch.clone(),
             origin_clue: origin.clone(),
         })) {
-            Outcome::Reserved(LaunchAttemptReservation::Reserved(_)) => {}
-            Outcome::Reserved(LaunchAttemptReservation::Existing(attempt)) => {
+            Outcome::Reserved(Reserved_Data {
+                launch_attempt_reservation: LaunchAttemptReservation::Reserved(_),
+                flow_id_option,
+            }) => flow_id_option,
+            Outcome::Reserved(Reserved_Data {
+                launch_attempt_reservation: LaunchAttemptReservation::Existing(attempt),
+                ..
+            }) => {
                 return Response::LaunchPending(attempt);
             }
-            Outcome::Reserved(LaunchAttemptReservation::Conflict) => {
+            Outcome::Reserved(Reserved_Data {
+                launch_attempt_reservation: LaunchAttemptReservation::Conflict,
+                ..
+            }) => {
                 return Response::StartRejected(StartRejection::LaunchRequestConflict);
             }
+            Outcome::Failed(Failed_Data::ClaimRefused) => {
+                return Response::StartRejected(StartRejection::BindingRefused);
+            }
             _ => return persistence(),
-        }
+        };
         let native_intent = NativeLaunchIntent {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
@@ -132,6 +146,7 @@ impl LaunchesFlows for RunningNexus {
         let pane_launch = PaneLaunch {
             composed_launch: launch.clone(),
             herdr_pane_binding: pane,
+            flow_id_option: reserved,
         };
         if self.perform(Operation::Spawn(pane_launch.clone())) != Outcome::Spawned {
             return Response::StartRejected(StartRejection::NativeLaunchRefused);

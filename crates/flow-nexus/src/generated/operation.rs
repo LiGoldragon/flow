@@ -5,6 +5,7 @@
 pub struct PaneLaunch {
     pub composed_launch: signal_flow::ComposedLaunch,
     pub herdr_pane_binding: signal_flow::HerdrPaneBinding,
+    pub flow_id_option: std::option::Option<signal_flow::FlowId>,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -87,6 +88,13 @@ pub enum Operation {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Reserved_Data {
+    pub launch_attempt_reservation: signal_flow::LaunchAttemptReservation,
+    pub flow_id_option: std::option::Option<signal_flow::FlowId>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Failed_Data {
     CompositionRefused,
     StoreRefused,
@@ -96,13 +104,14 @@ pub enum Failed_Data {
     CodexRefused,
     BundleRefused,
     UnknownFlow,
+    ClaimRefused,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Outcome {
     Composed(signal_flow::ComposedLaunch),
-    Reserved(signal_flow::LaunchAttemptReservation),
+    Reserved(Reserved_Data),
     Recorded,
     Registered(signal_flow::FlowNode),
     Started(signal_flow::Launched),

@@ -12,6 +12,7 @@ use crate::composition::{
     AsksForLaunchReceipt, NamesRemoteControl, StacksClaudeCommands, ValidatesComposedPrompt,
 };
 use crate::herdr::ConfiguresHerdrCli;
+use crate::herdr::reservation::ChoosesNativeSession;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use sha2::{Digest, Sha256};
 use signal_flow::{
@@ -34,21 +35,29 @@ pub trait CreatesHerdrLaunchPane {
 }
 
 /// Starts the selected native interactive harness without a positional prompt.
+/// `reserved` is the FlowId Reserve claimed for this launch, if any: the
+/// harness is started with it as FLOW_ID in its environment and with the
+/// native session id it was claimed for. Without one, the harness starts
+/// with no FLOW_ID and chooses its own session.
 pub trait StartsNativeHerdrHarness {
     fn start_native_harness(
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
     ) -> Result<(), String>;
 }
 
 /// Observes an official Herdr integration report and binds it to an exact
 /// native identity claim. Screen detection and caller metadata are rejected.
+/// With a `reserved` FlowId, the observed native session must be the one
+/// Flow chose and the claim must name that FlowId.
 pub trait ObservesNativeLaunchBinding {
     fn observe_native_binding(
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
     ) -> Result<NativeLaunchBinding, String>;
 }
 
@@ -143,6 +152,7 @@ pub(crate) trait PreparesClaudePane {
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
     ) -> Result<(), String>;
 }
 
@@ -176,6 +186,7 @@ impl PreparesClaudePane for HerdrCli {
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
     ) -> Result<(), String> {
         let marker_suffix = format!(
             "{:x}",
@@ -194,7 +205,7 @@ impl PreparesClaudePane for HerdrCli {
             "pane".into(),
             "run".into(),
             pane.herdr_pane_id.clone(),
-            marker_suffix.claude_environment_preparation(),
+            marker_suffix.claude_environment_preparation(reserved),
         ])?;
         let response = self.run_json(&[
             "--session".into(),
@@ -604,15 +615,23 @@ impl CapturesTranscripts for HerdrCli {
     }
 }
 
+/// The shell line typed into a Claude launch pane before the harness: it
+/// removes the inherited Claude identity and, for a launch Reserve gave a
+/// FlowId, exports that FlowId as FLOW_ID, so the harness Herdr starts at
+/// that prompt (and every hook it runs) carries it. The FlowId is a claim
+/// alias, lowercase hex, so it needs no quoting.
 pub(crate) trait PreparesClaudeEnvironment {
-    fn claude_environment_preparation(&self) -> String;
+    fn claude_environment_preparation(&self, reserved: Option<&str>) -> String;
 }
 
 impl PreparesClaudeEnvironment for str {
-    fn claude_environment_preparation(&self) -> String {
+    fn claude_environment_preparation(&self, reserved: Option<&str>) -> String {
         let marker_suffix = self;
+        let export = reserved
+            .map(|flow_id| format!(" && export FLOW_ID={flow_id}"))
+            .unwrap_or_default();
         format!(
-            "unset {} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+            "unset {}{export} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
             HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
             marker_suffix
         )
@@ -1277,10 +1296,11 @@ impl StartsNativeHerdrHarness for HerdrCli {
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
     ) -> Result<(), String> {
         launch.binding_matches_launch(pane)?;
         if launch.launch_profile.harness_kind == HarnessKind::Claude {
-            self.prepare_claude_pane_environment(launch, pane)?;
+            self.prepare_claude_pane_environment(launch, pane, reserved)?;
         }
         let harness = launch.launch_profile.harness_kind.expected_harness();
         let mut arguments = vec![
@@ -1334,6 +1354,14 @@ impl StartsNativeHerdrHarness for HerdrCli {
                     .to_string_lossy()
                     .into_owned(),
             );
+            // A reserved FlowId was claimed for the session Flow chose; the
+            // harness runs as that session.
+            if reserved.is_some()
+                && let Some(session) = launch.launch_profile.reserved_native_session_id()
+            {
+                arguments.push("--session-id".into());
+                arguments.push(session);
+            }
         }
         arguments.push("--model".into());
         arguments.push(launch.launch_profile.model_name.clone());
@@ -1360,6 +1388,7 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
     ) -> Result<NativeLaunchBinding, String> {
         launch.binding_matches_launch(pane)?;
         let expected_harness = launch.launch_profile.harness_kind.expected_harness();
@@ -1415,8 +1444,20 @@ impl ObservesNativeLaunchBinding for HerdrCli {
             .map(char::from)
             .collect::<String>()
             .to_ascii_lowercase();
+        if reserved.is_some()
+            && launch
+                .launch_profile
+                .reserved_native_session_id()
+                .as_deref()
+                != Some(native_session_id)
+        {
+            return Err("native session is not the one Flow reserved for this launch".into());
+        }
         let flow_id =
             self.claim_flow_identity(&launch.launch_profile.harness_kind, native_session_id)?;
+        if reserved.is_some_and(|reserved| reserved != flow_id) {
+            return Err("flow claim does not name the FlowId Flow reserved".into());
+        }
         if self.claimed_native_identity(&flow_id, &launch.launch_profile.harness_kind)?
             != normalized_identity
         {
@@ -2135,10 +2176,10 @@ esac
         fs::create_dir_all(transcript_root.join("claude")).expect("claude transcript root");
         let flow_id = transcript_root.join("flow-id");
         let flow_id_calls = root.path().join("flow-id-calls");
-        let uuid_version = if harness == "claude" {
-            "uuid-version=uuid-v4\n"
-        } else {
-            ""
+        let uuid_version = match (harness, claimed_identity.as_bytes().get(12)) {
+            ("claude", Some(b'5')) => "uuid-version=uuid-v5\n",
+            ("claude", _) => "uuid-version=uuid-v4\n",
+            _ => "",
         };
         let claim_marker = format!(
             "version=1\nharness={harness}\nidentity={claimed_identity}\nalias=123456\n{uuid_version}"
@@ -2202,7 +2243,7 @@ printf '%s\n' 123456
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
-            .start_native_harness(&launch, &pane)
+            .start_native_harness(&launch, &pane, None)
             .expect("started exact Codex client");
         let calls = fs::read_to_string(root.path().join("calls")).expect("launch calls");
         let start = calls
@@ -2234,7 +2275,7 @@ printf '%s\n' 123456
         let mut command = std::process::Command::new("sh");
         command.arg("-c").arg(format!(
             "{}; {checks}",
-            ("test-marker").claude_environment_preparation(),
+            ("test-marker").claude_environment_preparation(None),
         ));
         for name in HerdrCli::CLAUDE_INHERITED_ENVIRONMENT {
             command.env(name, "/home/li/.claude/jobs/108ab020");
@@ -2251,6 +2292,104 @@ printf '%s\n' 123456
         );
     }
 
+    /// The FlowId Reserve claimed reaches the harness's environment: the
+    /// line typed before the harness removes an inherited FLOW_ID and
+    /// exports the reserved one, which a child of that shell (the harness,
+    /// and every hook it runs) inherits.
+    #[test]
+    fn claude_environment_preparation_exports_the_reserved_flow_id() {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "{}; sh -c 'printf %s \"$FLOW_ID\"'",
+                ("test-marker").claude_environment_preparation(Some("5a4d0b")),
+            ))
+            .env("FLOW_ID", "0a0a0a")
+            .output()
+            .expect("shell environment witness");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("UTF-8"),
+            "FLOW_CLAUDE_ENV_READY_test-marker\n5a4d0b"
+        );
+    }
+
+    #[test]
+    fn a_reserved_claude_launch_starts_as_its_session_with_its_flow_id() {
+        use crate::herdr::reservation::{ChoosesNativeSession, ReservesFlowIdentity};
+        let launch = launch(HarnessKind::Claude);
+        let session = launch
+            .launch_profile
+            .reserved_native_session_id()
+            .expect("a Claude launch chooses its session");
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) =
+            fixture_herdr("claude", &session, &session.replace('-', ""), &agent_name);
+        assert_eq!(
+            adapter.reserve_flow_identity(&launch).unwrap().as_deref(),
+            Some("123456")
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter
+            .start_native_harness(&launch, &pane, Some("123456"))
+            .expect("started");
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        let prepared = calls
+            .lines()
+            .find(|line| line.contains("pane run"))
+            .expect("pane prepared");
+        assert!(prepared.contains(" FLOW_ID && export FLOW_ID=123456 && printf "));
+        let start = calls
+            .lines()
+            .find(|line| line.contains("agent start"))
+            .expect("agent start");
+        assert!(start.contains(&format!(" --session-id {session} ")));
+        let flow_id_calls = fs::read_to_string(root.path().join("flow-id-calls")).unwrap();
+        assert!(flow_id_calls.starts_with(&format!(
+            "claude --flows-root {} --parent-session {session}|",
+            root.path().join("flows").display()
+        )));
+        assert_eq!(
+            adapter
+                .observe_native_binding(&launch, &pane, Some("123456"))
+                .expect("bound as reserved")
+                .flow_id,
+            "123456"
+        );
+        assert!(
+            adapter
+                .observe_native_binding(&launch, &pane, Some("abcdef"))
+                .unwrap_err()
+                .contains("does not name the FlowId Flow reserved")
+        );
+    }
+
+    #[test]
+    fn a_reserved_claude_launch_that_came_up_as_another_session_is_not_bound() {
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            "12345678-1234-4abc-8def-123456789abc",
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter
+            .start_native_harness(&launch, &pane, None)
+            .expect("started");
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        // Unreserved: no FlowId exported, no session chosen.
+        assert!(!calls.contains("export FLOW_ID"));
+        assert!(!calls.contains("--session-id"));
+        assert!(
+            adapter
+                .observe_native_binding(&launch, &pane, Some("123456"))
+                .unwrap_err()
+                .contains("not the one Flow reserved")
+        );
+    }
+
     #[test]
     fn stages_pane_native_claim_registration_and_one_ambiguous_prompt_write() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
@@ -2264,7 +2403,7 @@ printf '%s\n' 123456
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
-            .start_native_harness(&launch, &pane)
+            .start_native_harness(&launch, &pane, None)
             .expect("started without prompt");
         let calls_after_start =
             fs::read_to_string(root.path().join("calls")).expect("launch calls");
@@ -2342,7 +2481,7 @@ printf '%s\n' 123456
         assert!(create_call.contains(&format!("--cwd {}", root.path().display())));
         assert!(!create_call.contains("/home/li/primary"));
         let binding = adapter
-            .observe_native_binding(&launch, &pane)
+            .observe_native_binding(&launch, &pane, None)
             .expect("official native binding");
         assert_eq!(binding.flow_id, "123456");
         let flow_id_calls =
@@ -2431,7 +2570,7 @@ printf '%s\n' 123456
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         assert!(
             adapter
-                .observe_native_binding(&launch, &pane)
+                .observe_native_binding(&launch, &pane, None)
                 .unwrap_err()
                 .contains("observed native identity")
         );
@@ -2449,7 +2588,7 @@ printf '%s\n' 123456
             .expect("created missing-identity pane");
         assert!(
             missing_adapter
-                .observe_native_binding(&launch, &missing_pane)
+                .observe_native_binding(&launch, &missing_pane, None)
                 .unwrap_err()
                 .contains("empty native identity")
         );
@@ -2827,7 +2966,7 @@ printf '%s\n' 123456
         }
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
-            .start_native_harness(&launch, &pane)
+            .start_native_harness(&launch, &pane, None)
             .expect("started without prompt");
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         adapter
@@ -3302,7 +3441,7 @@ printf '%s\n' 123456
         }
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
-            .start_native_harness(&launch, &pane)
+            .start_native_harness(&launch, &pane, None)
             .expect("started without prompt");
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         adapter
@@ -3479,10 +3618,10 @@ printf '%s\n' 123456
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
-            .start_native_harness(&launch, &pane)
+            .start_native_harness(&launch, &pane, None)
             .expect("started without prompt");
         let binding = adapter
-            .observe_native_binding(&launch, &pane)
+            .observe_native_binding(&launch, &pane, None)
             .expect("claimed binding");
         let title = adapter
             .title_native_flow(&launch, &binding)
@@ -3550,8 +3689,10 @@ printf '%s\n' 123456
         )
         .unwrap();
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
-        adapter.start_native_harness(&launch, &pane).unwrap();
-        let binding = adapter.observe_native_binding(&launch, &pane).unwrap();
+        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .unwrap();
         assert!(
             adapter
                 .title_native_flow(&launch, &binding)
@@ -3574,8 +3715,10 @@ printf '%s\n' 123456
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).unwrap();
-        adapter.start_native_harness(&launch, &pane).unwrap();
-        let binding = adapter.observe_native_binding(&launch, &pane).unwrap();
+        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .unwrap();
         assert!(
             adapter
                 .title_native_flow(&launch, &binding)
@@ -3635,7 +3778,9 @@ printf '%s\n' 123456
             .model_names
             .remove("gpt-6-astra");
         let pane = adapter.create_launch_pane(&launch).unwrap();
-        let binding = adapter.observe_native_binding(&launch, &pane).unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .unwrap();
         let title = adapter
             .title_native_flow(&launch, &binding)
             .expect("Codex title set and read back");

@@ -5,7 +5,11 @@
 //! before events existed opens unchanged and its flows simply hold none.
 //!
 //! An event is recorded only for a flow Flow holds: a FlowId with no flow
-//! row is refused, never adopted (ruling 12 of flow f1c841).
+//! row is refused, never adopted (ruling 12 of flow f1c841). Flow holds a
+//! flow from the moment Reserve claims its FlowId, before its harness
+//! starts and so before it is registered: Reserve writes the flow's empty
+//! events row, and that row is what lets the harness's first `Started`
+//! land.
 
 use super::{FlowStore, ReadsFlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -65,6 +69,9 @@ pub enum EventRecording {
 }
 
 pub trait RecordsHarnessEvents {
+    /// Holds a flow whose FlowId Reserve claimed: its events row, empty,
+    /// unless it already has one.
+    fn hold_reserved_flow(&self, flow_id: &str) -> Result<(), StoreError>;
     /// Appends one event to the flow's events, if Flow holds the flow.
     fn record_event(&self, flow_id: &str, event: Event) -> Result<EventRecording, StoreError>;
     /// The flow's events, oldest first; `None` when Flow does not hold the
@@ -101,10 +108,11 @@ impl RecordsHarnessEvents for FlowStore {
             .append_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.flow(flow_id)?.is_none() {
+        let row = self.event_row(flow_id)?;
+        if row.is_none() && self.flow(flow_id)?.is_none() {
             return Ok(EventRecording::UnknownFlow);
         }
-        match self.event_row(flow_id)? {
+        match row {
             Some(mut row) => {
                 row.event_vector.push(event);
                 self.engine.mutate_keyed(KeyedMutation::new(
@@ -127,14 +135,29 @@ impl RecordsHarnessEvents for FlowStore {
     }
 
     fn events(&self, flow_id: &str) -> Result<Option<Vec<Event>>, StoreError> {
-        if self.flow(flow_id)?.is_none() {
-            return Ok(None);
+        match self.event_row(flow_id)? {
+            Some(row) => Ok(Some(row.event_vector)),
+            None if self.flow(flow_id)?.is_some() => Ok(Some(Vec::new())),
+            None => Ok(None),
         }
-        Ok(Some(
-            self.event_row(flow_id)?
-                .map(|row| row.event_vector)
-                .unwrap_or_default(),
-        ))
+    }
+
+    fn hold_reserved_flow(&self, flow_id: &str) -> Result<(), StoreError> {
+        let _append = self
+            .event_tables
+            .append_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.event_row(flow_id)?.is_none() {
+            self.engine.assert(Assertion::new(
+                self.event_tables.events,
+                FlowEvents {
+                    flow_id: flow_id.into(),
+                    event_vector: Vec::new(),
+                },
+            ))?;
+        }
+        Ok(())
     }
 }
 

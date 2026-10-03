@@ -30,6 +30,17 @@ appending the event to that flow's events in its Memory, and answers
 `Reported`, or `Refused.UnknownFlow` for a flow it does not hold, which it
 never adopts. The owner reads a flow's events with meta `ReadEvents`.
 
+A Claude flow's FlowId exists before its harness. Reserve chooses the Claude
+session id from the launch request id (UUIDv5-shaped, so one request names
+one session), claims the FlowId for it through `flow-id`, and holds the flow
+in Memory (its empty events row). Spawn types `export FLOW_ID=<FlowId>` into
+the pane after unsetting the inherited identity and starts Claude with
+`--session-id` set to that session, so the harness and every hook it runs
+carry the FlowId from `SessionStart` on, and that first `Started` lands
+before Register. Bind verifies the harness came up as that session and the
+claim names that FlowId. A Codex launch reserves nothing: its session is
+named by its app server, and Bind claims from it as before.
+
 ```mermaid
 sequenceDiagram
   participant C as flow CLI

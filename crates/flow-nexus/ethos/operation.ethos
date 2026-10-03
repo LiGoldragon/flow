@@ -5,7 +5,12 @@
 ; presence, a transcript receipt, a skill catalog) is not an operation.
 ;
 ; Compose writes the per-launch bundle copy and composes the first prompt.
-; Reserve opens the launch attempt in the journal. Record writes one
+; Reserve opens the launch attempt in the journal and, for a Claude launch,
+; claims the flow's FlowId for the native session id Flow chooses for it,
+; and holds that flow in Memory before any harness runs: Reserved carries
+; the FlowId, Spawn starts the harness with it as FLOW_ID and that session
+; id, and Bind verifies the harness came up as the flow reserved. A Codex
+; launch reserves no FlowId; Bind claims it from the session Codex reports. Record writes one
 ; journal or lifecycle entry; Record.Harness appends the harness event a
 ; Report carried to the events Flow's Memory holds for that flow, and a
 ; flow Flow does not hold fails UnknownFlow and is never adopted.
@@ -48,7 +53,7 @@ Operation
   Close.FlowNode
   Prune.LaunchRequestId ]
 [ Composed.ComposedLaunch
-  Reserved.LaunchAttemptReservation
+  Reserved.{ LaunchAttemptReservation Option<FlowId> }
   Recorded
   Registered.FlowNode
   Started.Launched
@@ -67,5 +72,6 @@ Operation
            HerdrRefused
            CodexRefused
            BundleRefused
-           UnknownFlow ] ]
-[ PaneLaunch.{ ComposedLaunch HerdrPaneBinding } ]
+           UnknownFlow
+           ClaimRefused ] ]
+[ PaneLaunch.{ ComposedLaunch HerdrPaneBinding Option<FlowId> } ]

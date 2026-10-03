@@ -786,6 +786,7 @@ mod tests {
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
     mod delivery;
+    mod reservation;
     mod submission;
 
     use super::{Dispatches, RunningNexus};
@@ -3115,7 +3116,9 @@ mod tests {
             Response::Started(outcome)
         );
 
-        // StartRejected after reservation: Herdr cannot open the pane.
+        // StartRejected after reservation: Herdr cannot open the pane. The
+        // Claude launch's FlowId is claimed at Reserve, before the pane.
+        fixture.claims_flow_ids();
         fs::remove_file(&fixture.snapshot_program).expect("Herdr withdrawn");
         let mut rejected = fixture.staged_launch("rejected-request", None);
         rejected.profile.harness_kind = HarnessKind::Claude;

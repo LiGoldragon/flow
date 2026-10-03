@@ -1,3 +1,35 @@
+# Flow 0.22.0
+
+Rebuild and restart the Nexus, `flow` and `flow-meta` together. The wire is
+unchanged from 0.21.0 (the contracts' generated modules are byte-identical),
+and a 0.21.0 store opens unchanged: no table or row format changes.
+
+- **Contracts.** signal-flow 10.0.0 (f95034de) and meta-signal-flow 14.0.0
+  (54eb5618), on signal 8.0.0 (f35460de), where 0.21.0 pinned signal-flow
+  9.0.0 and meta-signal-flow 13.0.0 on signal 7.0.0. The build reads the
+  Operation ethos with ethos-zero 16.0.0 at c2653dd8. The graph holds one
+  datom-codec and one protos, 0.32.2.
+- **FLOW_ID at launch.** A Claude launch's FlowId is claimed at Reserve,
+  before any harness: Flow chooses the Claude session id from the launch
+  request id, runs `flow-id claude --flows-root <root> --parent-session
+  <session>`, and holds the flow in Memory (its empty events row). Spawn
+  exports `FLOW_ID=<FlowId>` in the launch pane and passes `--session-id
+  <session>` to Claude, so `flow-hook`'s `Report`s carry the FlowId from
+  `SessionStart` on and are answered `Reported`. Bind refuses a harness that
+  came up as another session or a claim naming another FlowId
+  (`BindingRefused`). A claim that fails at Reserve refuses the launch with
+  `StartRejected.BindingRefused` before any pane is opened.
+- **Operation root.** `Reserved` carries `{ LaunchAttemptReservation
+  Option<FlowId> }`, `PaneLaunch` carries `Option<FlowId>`, `Failed` gains
+  `ClaimRefused`. These are the Nexus's own types, not on the wire.
+- **Unchanged.** A Codex launch reserves no FlowId and binds as before. A
+  harness started without FLOW_ID reports nothing, as before.
+- **Deploy.** Install the 0.22.0 package (it carries `flow-hook` next to
+  `flow-nexus`) and make sure `flow-id` is on the Nexus's PATH, as Bind
+  already required; restart the Nexus. Launches in flight across the
+  restart: an attempt reserved by 0.21.0 holds no FlowId and is resumed or
+  reported pending as before, never respawned.
+
 # Flow 0.21.0
 
 Wire and storage change. Rebuild and restart the Nexus, `flow` and

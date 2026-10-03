@@ -9,7 +9,7 @@ use crate::codex::{SelectsCodexEndpoint, SubmitsBoundCodexFirstTurn};
 use crate::composition::{ComposesLaunch, KeepsLaunchBundles, OpensLaunchComposer};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Harness_Data,
-    Record_Data_Settled_Data, Register_Data, Reserve_Data, Submit_Data, Title_Data,
+    Record_Data_Settled_Data, Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::herdr::OperatesHerdrPane;
 use crate::herdr::launch::{
@@ -22,7 +22,7 @@ use crate::store::{
     RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsReplacement,
     RegistersFlowIdentity, ReservesLaunchAttempt,
 };
-use signal_flow::{HarnessKind, Response};
+use signal_flow::{HarnessKind, LaunchAttemptReservation, Response};
 
 /// The Nexus acting: one Operation in, one Outcome out.
 pub trait Performs {
@@ -72,16 +72,7 @@ impl Performs for RunningNexus {
                 Ok(launch) => Outcome::Composed(launch),
                 Err(_) => Outcome::Failed(Failed_Data::CompositionRefused),
             },
-            Operation::Reserve(Reserve_Data {
-                composed_launch,
-                origin_clue,
-            }) => match self
-                .store
-                .reserve_launch_attempt(&composed_launch, origin_clue)
-            {
-                Ok(reservation) => Outcome::Reserved(reservation),
-                Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
-            },
+            Operation::Reserve(reserve) => self.reserve(reserve),
             Operation::Record(record) => self.record(record),
             Operation::Register(Register_Data { flow_node, caller }) => {
                 match self.store.register_flow_in_role(flow_node, caller) {
@@ -104,20 +95,24 @@ impl Performs for RunningNexus {
             Operation::Spawn(PaneLaunch {
                 composed_launch,
                 herdr_pane_binding,
-            }) => match self
-                .herdr
-                .start_native_harness(&composed_launch, &herdr_pane_binding)
-            {
+                flow_id_option,
+            }) => match self.herdr.start_native_harness(
+                &composed_launch,
+                &herdr_pane_binding,
+                flow_id_option.as_deref(),
+            ) {
                 Ok(()) => Outcome::Spawned,
                 Err(_) => Outcome::Failed(Failed_Data::HerdrRefused),
             },
             Operation::Bind(PaneLaunch {
                 composed_launch,
                 herdr_pane_binding,
-            }) => match self
-                .herdr
-                .observe_native_binding(&composed_launch, &herdr_pane_binding)
-            {
+                flow_id_option,
+            }) => match self.herdr.observe_native_binding(
+                &composed_launch,
+                &herdr_pane_binding,
+                flow_id_option.as_deref(),
+            ) {
                 Ok(binding) => Outcome::Bound(binding),
                 Err(_) => Outcome::Failed(Failed_Data::HerdrRefused),
             },
@@ -182,6 +177,11 @@ impl Performs for RunningNexus {
 
 /// The arms of `perform` that are longer than one adapter call.
 trait PerformsInParts {
+    /// Opens the launch attempt; a new Claude attempt also claims its
+    /// FlowId for the session Flow chose and holds the flow in Memory, so
+    /// the id exists before any harness runs. An attempt that already
+    /// existed reserves nothing again: it is not spawned again.
+    fn reserve(&self, reserve: Reserve_Data) -> Outcome;
     fn record(&self, record: Record_Data) -> Outcome;
     /// Best effort by design: the flow is Started whatever this does. A
     /// continuation that does not reach the seat is reported to the Nexus
@@ -191,6 +191,46 @@ trait PerformsInParts {
 }
 
 impl PerformsInParts for RunningNexus {
+    fn reserve(&self, reserve: Reserve_Data) -> Outcome {
+        use crate::herdr::reservation::ReservesFlowIdentity;
+        use crate::store::events::RecordsHarnessEvents;
+        let Reserve_Data {
+            composed_launch,
+            origin_clue,
+        } = reserve;
+        let reservation = match self
+            .store
+            .reserve_launch_attempt(&composed_launch, origin_clue)
+        {
+            Ok(reservation) => reservation,
+            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+        };
+        let flow_id_option = match &reservation {
+            LaunchAttemptReservation::Reserved(_) => {
+                match self.herdr.reserve_flow_identity(&composed_launch) {
+                    Ok(flow_id_option) => flow_id_option,
+                    Err(error) => {
+                        eprintln!(
+                            "flow-nexus: launch {} FlowId not claimed: {error}",
+                            composed_launch.launch_profile.launch_request_id
+                        );
+                        return Outcome::Failed(Failed_Data::ClaimRefused);
+                    }
+                }
+            }
+            LaunchAttemptReservation::Existing(_) | LaunchAttemptReservation::Conflict => None,
+        };
+        if let Some(flow_id) = &flow_id_option
+            && self.store.hold_reserved_flow(flow_id).is_err()
+        {
+            return Outcome::Failed(Failed_Data::StoreRefused);
+        }
+        Outcome::Reserved(Reserved_Data {
+            launch_attempt_reservation: reservation,
+            flow_id_option,
+        })
+    }
+
     fn record(&self, record: Record_Data) -> Outcome {
         match record {
             Record_Data::Intent(intent) => {

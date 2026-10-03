@@ -5,6 +5,7 @@ use crate::codex::SelectsCodexEndpoint;
 use crate::composition::KeepsLaunchBundles;
 pub mod launch;
 pub mod pane;
+pub mod reservation;
 
 use crate::codex::{CodexEndpoint, CodexEndpoints};
 use crate::composition::LaunchBundles;

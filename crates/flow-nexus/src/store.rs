@@ -473,7 +473,7 @@ impl From<LaunchAttemptBeforeBundle> for LaunchAttempt {
 
 /// How a launch request settled. It is kept beside the attempt so a
 /// LaunchStatus or an Observe.Launch answers it without re-running the launch.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LaunchOutcome {
     Started(Started),
     Replaced(Replaced),
@@ -521,7 +521,7 @@ impl EngineRecord for StoredLaunchOutcome {
 
 /// A launch request that replaces a predecessor. While it stands without a
 /// Replaced outcome, the flow its launch binds is held out of routing.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Replacement {
     pub launch_request_id: String,
     pub predecessor: String,

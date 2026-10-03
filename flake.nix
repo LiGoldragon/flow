@@ -30,11 +30,19 @@
             "rust-src"
           ];
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
-          src = craneLib.cleanCargoSource ./.;
+          # The Operation root's ethos source is read by flow-nexus's build
+          # script, which holds the committed generated module fresh.
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            name = "source";
+            filter =
+              path: type:
+              (pkgs.lib.hasSuffix ".ethos" path) || (craneLib.filterCargoSources path type);
+          };
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.19.0";
+            version = "0.20.0";
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -144,6 +152,8 @@
             "tests::replace_stops_the_predecessor_before_the_successor_is_routable";
           flow-live-pane-lists-active = context.exactTest "flow-nexus"
             "tests::a_pending_seat_whose_pane_herdr_shows_live_is_listed_active";
+          flow-operation-outcomes = context.exactTest "flow-nexus"
+            "tests::an_operation_is_answered_by_its_own_outcome";
           flow-retire-keeps-history = context.exactTest "flow-nexus"
             "tests::retire_keeps_the_row_and_takes_the_flow_out_of_receiving";
           flow-deliver-never-interleaves = context.exactTest "flow-nexus"

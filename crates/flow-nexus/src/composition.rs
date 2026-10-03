@@ -162,7 +162,7 @@ pub trait ValidatesComposedPrompt {
 /// Asking for the marker and nothing else is what makes it verifiable, and
 /// it is also what ends the seat's turn. The brief the same prompt carries
 /// is therefore not begun by this footer; Flow begins it, sending
-/// [`crate::launching::ContinuesIntoBrief::BRIEF_CONTINUATION`] over the
+/// [`crate::performing::Performs::BRIEF_CONTINUATION`] over the
 /// seat's bound route the moment the receipt is witnessed. The footer stays
 /// exactly as it is.
 pub trait AsksForLaunchReceipt {

@@ -1,0 +1,67 @@
+; Flow Nexus Operation: what the Nexus does. Every effect its launch and
+; record paths perform is one operation, and each is answered by one
+; Outcome. An effect changes something: Herdr's panes, a harness, the
+; launch bundle copies, or the store. A read of the world (a pane's
+; presence, a transcript receipt, a skill catalog) is not an operation.
+;
+; Compose writes the per-launch bundle copy and composes the first prompt.
+; Reserve opens the launch attempt in the journal. Record writes one
+; journal or lifecycle entry. Register binds a flow's row and role.
+; Confirm makes a Pending launch Active and answers Started. Open makes
+; the launch pane; Spawn starts the native harness in it; Bind claims the
+; flow's identity from the harness's integration report; Title names the
+; claimed flow; Submit types the first prompt once; Continue types the
+; brief continuation; Close closes a flow's pane; Prune removes a launch's
+; bundle copy.
+;
+; LaunchOutcome and Replacement are the store's own types, imported from
+; the Nexus crate until the Memory root is compiled.
+
+Operation
+[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch OriginClue LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Started ]
+  flow_nexus:[ LaunchOutcome Replacement ] ]
+[ Compose.LaunchProfile
+  Reserve.{ ComposedLaunch OriginClue }
+  Record.[ Intent.NativeLaunchIntent
+           Binding.NativeLaunchBinding
+           Acknowledgement.RegistrationAcknowledgement
+           Delivery.PromptDeliveryIntent
+           Delivered.PromptDeliveryResult
+           Active.FlowId
+           Stopped.FlowId
+           Retired.FlowId
+           Exited.FlowId
+           Replacing.Replacement
+           Withdrawn.LaunchRequestId
+           Settled.{ LaunchRequestId LaunchOutcome } ]
+  Register.{ FlowNode Caller }
+  Confirm.FlowId
+  Open.ComposedLaunch
+  Spawn.PaneLaunch
+  Bind.PaneLaunch
+  Title.{ ComposedLaunch NativeLaunchBinding }
+  Submit.{ ComposedLaunch PromptDeliveryIntent }
+  Continue.FlowId
+  Close.FlowNode
+  Prune.LaunchRequestId ]
+[ Composed.ComposedLaunch
+  Reserved.LaunchAttemptReservation
+  Recorded
+  Registered.FlowNode
+  Started.Started
+  Opened.HerdrPaneBinding
+  Spawned
+  Bound.NativeLaunchBinding
+  Titled
+  Submitted.PromptDeliveryResult
+  Continued
+  Closed
+  Pruned
+  Failed.[ CompositionRefused
+           StoreRefused
+           ConflictingBinding
+           Unstarted
+           HerdrRefused
+           CodexRefused
+           BundleRefused ] ]
+[ PaneLaunch.{ ComposedLaunch HerdrPaneBinding } ]

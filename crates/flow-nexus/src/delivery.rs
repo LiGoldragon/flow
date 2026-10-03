@@ -15,9 +15,11 @@ pub mod body;
 pub mod lease;
 
 use crate::RunningNexus;
+use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::pane::{Interruption, PaneAgent, Placement, Submission, WritesPane};
+use crate::performing::Performs;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
-use crate::store::{ReadsFlowRows, RecordsFlowLifecycle, RecordsReplacement};
+use crate::store::{ReadsFlowRows, RecordsReplacement};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
@@ -164,7 +166,9 @@ impl ReadsLeasedPane for RunningNexus {
                 return Err(PaneRefusal::RouteUnavailable);
             }
             PaneAgent::Absent => {
-                let _ = self.store.record_exited(&target.node.flow_id);
+                let _ = self.perform(Operation::Record(Record_Data::Exited(
+                    target.node.flow_id.clone(),
+                )));
                 return Err(PaneRefusal::RouteUnavailable);
             }
         };
@@ -497,7 +501,9 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         //
         // A Pending flow seen reacting to a real Deliver is witnessed live.
         if self.target.node.flow_lifecycle == FlowLifecycle::Pending {
-            let _ = self.nexus.store.record_active(&self.target.node.flow_id);
+            let _ = self.nexus.perform(Operation::Record(Record_Data::Active(
+                self.target.node.flow_id.clone(),
+            )));
         }
         self.settle(interrupt_witness, DeliveryGrade::Presented)
     }

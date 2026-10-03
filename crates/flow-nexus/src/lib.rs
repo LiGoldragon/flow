@@ -1,4 +1,8 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
+
+// The generated Operation root names the store's own types by this crate's
+// name, as `flow_nexus::LaunchOutcome`; the Memory root is not compiled yet.
+extern crate self as flow_nexus;
 use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::KeepsLaunchBundles;
@@ -6,6 +10,7 @@ use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::AnswersLaunchOutcome;
+pub use store::{LaunchOutcome, Replacement};
 pub mod binding;
 pub mod caller;
 pub mod claude;
@@ -14,10 +19,15 @@ pub mod composition;
 pub mod delivery;
 #[cfg(test)]
 mod fixture_executable;
+/// Generated from `ethos/operation.ethos`; `build.rs` holds it fresh. Its
+/// datom derives sit behind a `datom` feature this Nexus never enables.
+#[allow(unexpected_cfgs, clippy::large_enum_variant)]
+pub mod generated;
 pub mod herdr;
 pub mod launching;
 pub mod observe_agent;
 pub mod peer;
+pub mod performing;
 pub mod store;
 pub mod title;
 
@@ -26,10 +36,11 @@ use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchBundles, LaunchComposer, OpensLaunchComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
-use herdr::OperatesHerdrPane;
+use generated::operation::{Operation, Outcome, Record_Data};
 use launching::{LaunchesFlows, ObservesLaunch, PrunesLaunchBundles};
 use observe_agent::ObservesAgent;
 use peer::{AdmitsMetaPeer, ResolvesPeer};
+use performing::Performs;
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
     Query, Response, RestartRejection,
@@ -48,8 +59,8 @@ use std::{
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, FlowStore, NamesLiveFlow,
-    OpensFlowStore, ReadsFlowRows, RecordsFlowLifecycle, RecordsLaunchOutcome,
-    RegistersExistingFlow, RegistersFlowIdentity,
+    OpensFlowStore, ReadsFlowRows, RecordsLaunchOutcome, RegistersExistingFlow,
+    RegistersFlowIdentity,
 };
 
 pub struct RunningNexus {
@@ -147,12 +158,14 @@ impl Dispatches for RunningNexus {
                 // No write is left half-typed into a pane as it closes.
                 let closed = {
                     let _lease = self.pane_leases.hold(route);
-                    self.herdr.close(&node)
+                    self.perform(Operation::Close(node.clone()))
                 };
-                if !closed {
+                if closed != Outcome::Closed {
                     return Response::StopRejected(signal_flow::StopRejection::CloseRefused);
                 }
-                if !self.store.record_stopped(&flow_id).unwrap_or(false) {
+                if self.perform(Operation::Record(Record_Data::Stopped(flow_id.clone())))
+                    != Outcome::Recorded
+                {
                     return Response::StopRejected(signal_flow::StopRejection::PersistenceRefused);
                 }
                 self.prune_launch_bundles_of(&flow_id);
@@ -231,13 +244,12 @@ impl Dispatches for RunningNexus {
                         meta_signal_flow::RetireRejection::AlreadyGone,
                     );
                 }
-                match self.store.record_retired(&flow_id) {
-                    Ok(true) => {}
-                    Ok(false) | Err(_) => {
-                        return meta_signal_flow::Response::RetireRejected(
-                            meta_signal_flow::RetireRejection::StoreRefused,
-                        );
-                    }
+                if self.perform(Operation::Record(Record_Data::Retired(flow_id.clone())))
+                    != Outcome::Recorded
+                {
+                    return meta_signal_flow::Response::RetireRejected(
+                        meta_signal_flow::RetireRejection::StoreRefused,
+                    );
                 }
                 // No launch can still need the bundle copy of a seat that
                 // is gone.
@@ -2206,6 +2218,43 @@ mod tests {
     /// row and its history, and takes the flow out of receiving. It is the
     /// only thing that produces Retired: no observation ever does.
     #[test]
+    fn an_operation_is_answered_by_its_own_outcome() {
+        use crate::generated::operation::{Failed_Data, Operation, Outcome, Record_Data};
+        use crate::performing::Performs;
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        fixture.register_with(FlowLifecycle::Active);
+
+        // A record of a flow the store does not hold is refused, not made.
+        assert_eq!(
+            fixture
+                .nexus
+                .perform(Operation::Record(Record_Data::Stopped("unknown".into()))),
+            Outcome::Failed(Failed_Data::StoreRefused)
+        );
+        // Confirming a launch the store never bound does not start it.
+        assert_eq!(
+            fixture.nexus.perform(Operation::Confirm("unknown".into())),
+            Outcome::Failed(Failed_Data::Unstarted)
+        );
+        // A witnessed exit of a live flow is recorded, and the row says so.
+        assert_eq!(
+            fixture
+                .nexus
+                .perform(Operation::Record(Record_Data::Exited("908786".into()))),
+            Outcome::Recorded
+        );
+        assert_eq!(fixture.stored_lifecycle(), FlowLifecycle::Exited);
+        // An exit is recorded once: the flow is no longer live.
+        assert_eq!(
+            fixture
+                .nexus
+                .perform(Operation::Record(Record_Data::Exited("908786".into()))),
+            Outcome::Failed(Failed_Data::StoreRefused)
+        );
+    }
+
+    #[test]
     fn retire_keeps_the_row_and_takes_the_flow_out_of_receiving() {
         let fixture = NexusFixture::new();
         fixture.set_agents(vec![fixture.current_agent()]);
@@ -3255,7 +3304,7 @@ mod tests {
         assert!(
             calls.contains(&format!(
                 "--session fixture-session agent prompt w1:p1 {}",
-                <RunningNexus as crate::launching::ContinuesIntoBrief>::BRIEF_CONTINUATION
+                <RunningNexus as crate::performing::Performs>::BRIEF_CONTINUATION
             )),
             "{calls}"
         );

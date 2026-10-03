@@ -6,19 +6,21 @@
 ;
 ; Compose writes the per-launch bundle copy and composes the first prompt.
 ; Reserve opens the launch attempt in the journal. Record writes one
-; journal or lifecycle entry. Register binds a flow's row and role.
-; Confirm makes a Pending launch Active and answers Started. Open makes
-; the launch pane; Spawn starts the native harness in it; Bind claims the
-; flow's identity from the harness's integration report; Title names the
-; claimed flow; Submit types the first prompt once; Continue types the
-; brief continuation; Close closes a flow's pane; Prune removes a launch's
-; bundle copy.
+; journal or lifecycle entry; Record.Harness appends the harness event a
+; Report carried to the events Flow's Memory holds for that flow, and a
+; flow Flow does not hold fails UnknownFlow and is never adopted.
+; Register binds a flow's row and role. Confirm makes a Pending launch
+; Active and answers Started. Open makes the launch pane; Spawn starts
+; the native harness in it; Bind claims the flow's identity from the
+; harness's integration report; Title names the claimed flow; Submit types
+; the first prompt once; Continue types the brief continuation; Close
+; closes a flow's pane; Prune removes a launch's bundle copy.
 ;
 ; LaunchOutcome and Replacement are the store's own types, imported from
 ; the Nexus crate until the Memory root is compiled.
 
 Operation
-[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch OriginClue LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Started ]
+[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch OriginClue LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event ]
   flow_nexus:[ LaunchOutcome Replacement ] ]
 [ Compose.LaunchProfile
   Reserve.{ ComposedLaunch OriginClue }
@@ -33,7 +35,8 @@ Operation
            Exited.FlowId
            Replacing.Replacement
            Withdrawn.LaunchRequestId
-           Settled.{ LaunchRequestId LaunchOutcome } ]
+           Settled.{ LaunchRequestId LaunchOutcome }
+           Harness.{ FlowId Event } ]
   Register.{ FlowNode Caller }
   Confirm.FlowId
   Open.ComposedLaunch
@@ -48,7 +51,7 @@ Operation
   Reserved.LaunchAttemptReservation
   Recorded
   Registered.FlowNode
-  Started.Started
+  Started.Launched
   Opened.HerdrPaneBinding
   Spawned
   Bound.NativeLaunchBinding
@@ -63,5 +66,6 @@ Operation
            Unstarted
            HerdrRefused
            CodexRefused
-           BundleRefused ] ]
+           BundleRefused
+           UnknownFlow ] ]
 [ PaneLaunch.{ ComposedLaunch HerdrPaneBinding } ]

@@ -113,11 +113,14 @@ pub(crate) trait PreparesClaudePane {
     /// `CLAUDE_JOB_DIR` shares one job state between processes: a new
     /// session adopts the title another session left there, and its own
     /// `/rename` is propagated to every process on that job directory.
-    const CLAUDE_INHERITED_ENVIRONMENT: [&'static str; 4] = [
+    /// `FLOW_ID` is among them: the harness hook reports under the FLOW_ID
+    /// in its environment, and a new flow must never report as another.
+    const CLAUDE_INHERITED_ENVIRONMENT: [&'static str; 5] = [
         Self::CLAUDE_CHILD_SESSION_ENVIRONMENT,
         "CLAUDE_JOB_DIR",
         "CLAUDE_CODE_SESSION_ID",
         "CLAUDE_CODE_SESSION_KIND",
+        "FLOW_ID",
     ];
     /// The permission-skipping flag. The installed `claude` (CriomOS-home's
     /// claude-code package) already execs `.claude-wrapped
@@ -131,9 +134,10 @@ pub(crate) trait PreparesClaudePane {
     /// user settings name a non-auto default mode and no other settings
     /// source names one. Flag settings are such a source: naming the mode the
     /// launch already runs in suppresses the offer without touching any
-    /// settings file.
-    const CLAUDE_FLAG_SETTINGS: &'static str =
-        r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#;
+    /// settings file. They also carry the harness hook: `flow-hook` on
+    /// SessionStart, every PostToolUse and Stop, so each harness event
+    /// reaches Flow as a Report.
+    fn claude_flag_settings(&self) -> String;
     const CLAUDE_REMOTE_CONTROL_FLAG: &'static str = "--remote-control";
     fn prepare_claude_pane_environment(
         &self,
@@ -143,6 +147,31 @@ pub(crate) trait PreparesClaudePane {
 }
 
 impl PreparesClaudePane for HerdrCli {
+    fn claude_flag_settings(&self) -> String {
+        let hook = serde_json::json!([{
+            "hooks": [{
+                "type": "command",
+                "command": self.harness_hook.to_string_lossy(),
+            }]
+        }]);
+        let every_tool = serde_json::json!([{
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": self.harness_hook.to_string_lossy(),
+            }]
+        }]);
+        serde_json::json!({
+            "permissions": { "defaultMode": "bypassPermissions" },
+            "hooks": {
+                "SessionStart": hook,
+                "PostToolUse": every_tool,
+                "Stop": hook,
+            }
+        })
+        .to_string()
+    }
+
     fn prepare_claude_pane_environment(
         &self,
         launch: &ComposedLaunch,
@@ -1294,7 +1323,7 @@ impl StartsNativeHerdrHarness for HerdrCli {
         }
         if launch.launch_profile.harness_kind == HarnessKind::Claude {
             arguments.push("--settings".into());
-            arguments.push(Self::CLAUDE_FLAG_SETTINGS.into());
+            arguments.push(self.claude_flag_settings());
             // Every Claude Flow is remotely controllable; the name never
             // begins with `-`, so the optional value binds to the flag.
             arguments.push(Self::CLAUDE_REMOTE_CONTROL_FLAG.into());
@@ -2251,11 +2280,19 @@ printf '%s\n' 123456
             launch.launch_profile.system_prompt_bundle_file
         );
         assert!(start_call.ends_with(&format!(
-            "-- --settings {{\"permissions\":{{\"defaultMode\":\"bypassPermissions\"}}}} --remote-control {remote_control_name} --system-prompt-file {} --model model-current --effort high",
+            "-- --settings {} --remote-control {remote_control_name} --system-prompt-file {} --model model-current --effort high",
+            concat!(
+                r#"{"hooks":{"#,
+                r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
+                r#""SessionStart":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
+                r#""Stop":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
+                r#""permissions":{"defaultMode":"bypassPermissions"}}"#
+            ),
             launch_bundle.display()
         )));
         // The flag settings name the launch's own mode, which suppresses the
-        // auto-mode default offer; no settings file is written.
+        // auto-mode default offer, and carry the harness hook on SessionStart,
+        // every PostToolUse and Stop; no settings file is written.
         assert_eq!(start_call.matches(" --settings ").count(), 1);
         // Each flag once in the pane's argv: the installed wrapper execs
         // `.claude-wrapped --dangerously-skip-permissions "$@"`, so Flow's

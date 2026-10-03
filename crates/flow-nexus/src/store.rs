@@ -6,6 +6,7 @@
 
 use crate::store::delivery::RegistersDeliveryTables;
 pub mod delivery;
+pub mod events;
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
@@ -22,10 +23,11 @@ use sema_engine::{
 use signal_flow::{
     Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection, FlowAspect,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-    LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchSource, NativeLaunchBinding,
-    NativeLaunchIntent, OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query,
-    RecipientResolutionRejection, RegistrationAcknowledgement, RememberedFlow, ReplaceRejection,
-    Replaced, Response, RestartRejection, Restarted, RouteReadiness, StartRejection, Started,
+    LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchSource, Launched,
+    NativeLaunchBinding, NativeLaunchIntent, OriginClue, PowerLevel, PromptDeliveryIntent,
+    PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
+    RememberedFlow, ReplaceRejection, Replaced, Response, RestartRejection, Restarted,
+    RouteReadiness, StartRejection,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -475,7 +477,7 @@ impl From<LaunchAttemptBeforeBundle> for LaunchAttempt {
 /// LaunchStatus or an Observe.Launch answers it without re-running the launch.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LaunchOutcome {
-    Started(Started),
+    Started(Launched),
     Replaced(Replaced),
     StartRejected(StartRejection),
     ReplaceRejected(ReplaceRejection),
@@ -623,6 +625,7 @@ pub struct FlowStore {
     unread_launch_attempts: TableReference<UnreadLaunchAttempt>,
     quarantined_launch_attempts: TableReference<QuarantinedLaunchAttempt>,
     delivery_tables: DeliveryTables,
+    event_tables: events::EventTables,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows that no longer read in the
     /// current shape; each is also logged.
@@ -923,6 +926,8 @@ impl OpensFlowStore for FlowStore {
             SchemaHash::for_label("flow-nexus-quarantined-launch-attempt-v1"),
         ))?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
+        let event_tables =
+            <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let mut store = Self {
             engine,
             flows,
@@ -937,6 +942,7 @@ impl OpensFlowStore for FlowStore {
             unread_launch_attempts,
             quarantined_launch_attempts,
             delivery_tables,
+            event_tables,
             launch_changes: LaunchChanges::default(),
             opening_settlements: Vec::new(),
         };
@@ -1030,6 +1036,15 @@ impl AppliesFlowQuery for FlowStore {
             Query::QueueTurnEnd(_) => Ok(Response::TurnEndRejected(
                 signal_flow::TurnEndRejection::QueueRefused,
             )),
+            Query::Report(report) => {
+                use events::{EventRecording, RecordsHarnessEvents};
+                match self.record_event(&report.flow_id, report.event)? {
+                    EventRecording::Recorded => Ok(Response::Reported),
+                    EventRecording::UnknownFlow => Ok(Response::Refused(
+                        signal_flow::Refused_Data::UnknownFlow(report.flow_id),
+                    )),
+                }
+            }
         }
     }
 }
@@ -1048,7 +1063,8 @@ impl ReservesPendingStart for FlowStore {
             | Query::LaunchStatus(_)
             | Query::Observe(_)
             | Query::ResolveCaller(_)
-            | Query::QueueTurnEnd(_) => Ok(None),
+            | Query::QueueTurnEnd(_)
+            | Query::Report(_) => Ok(None),
         }
     }
 }
@@ -2352,7 +2368,7 @@ impl WritesFlowStore for FlowStore {
                 flow,
             ))?;
         }
-        Ok(Response::Started(Started {
+        Ok(Response::Started(Launched {
             flow_id: flow_id.into(),
             session_id,
             origin_clue,

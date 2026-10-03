@@ -93,6 +93,10 @@ pub struct HerdrCli {
     pub(crate) claude_daemon: crate::claude::ClaudeDaemon,
     /// Native Claude skill catalogs, highest-precedence first.
     claude_skill_roots: Vec<PathBuf>,
+    /// The `flow-hook` Claude Code runs on SessionStart, PostToolUse and
+    /// Stop in every Claude flow Flow launches: the one installed beside
+    /// this Nexus's own executable.
+    pub(crate) harness_hook: PathBuf,
     /// Where each launch's own bundle copy lives, the one a Claude launch
     /// receives as `--system-prompt-file`.
     launch_bundles: LaunchBundles,
@@ -152,6 +156,10 @@ impl Default for HerdrCli {
             claude_transcript_root: claude_home.join("projects"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&claude_home),
             claude_skill_roots,
+            harness_hook: std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
+                .unwrap_or_else(|| PathBuf::from("flow-hook")),
             launch_bundles: LaunchBundles::at(defaults.launch_bundle_directory()),
         }
     }
@@ -354,6 +362,7 @@ impl ConfiguresHerdrCli for HerdrCli {
             claude_transcript_root: fixture_root.join("claude"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
             claude_skill_roots: vec![fixture_root.join("claude-skills")],
+            harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
             launch_bundles: LaunchBundles::at(
                 flows_root
                     .parent()

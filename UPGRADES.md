@@ -1,3 +1,41 @@
+# Flow 0.21.0
+
+Wire and storage change. Rebuild and restart the Nexus, `flow` and
+`flow-meta` together; an older client and a 0.21.0 Nexus do not read each
+other's frames. A 0.20.0 store opens unchanged: the events live in a new
+table, and every flow it holds starts with none.
+
+- **Contracts.** signal-flow 9.0.0 (2cc48792) and meta-signal-flow 13.0.0
+  (dd7b7df7), still on signal 7.0.0 (66e7b153), where 0.20.0 pinned
+  signal-flow 8.0.0 and meta-signal-flow 12.0.0. signal-flow 9.0.0 renames
+  the Start reply's payload type `Started` to `Launched` (and
+  `Replaced.started` to `launched`); the datom text and archive of each
+  8.0.0 value are unchanged.
+- **Report.** `Report.{ FlowId Event }` (`Event.[ Started ToolUsed.String
+  Stopped ]`) is `Operation::Record(Record.Harness.{ FlowId Event })`, which
+  appends the event to the flow's events in the Nexus's Memory (table
+  `flow_nexus_flow_events`, one `FlowEvents.{ flow_id event_vector }` row per
+  flow, appended under one hold so concurrent tool uses are not lost). A
+  held flow answers `Reported`; a FlowId with no flow row answers
+  `Refused.UnknownFlow.<FlowId>`, and no row is made for it. A store
+  failure is answered the same way and logged: 9.0.0 names no persistence
+  refusal for Report. Report does not wait behind a running launch.
+- **ReadEvents.** meta `ReadEvents.FlowId` answers `EventsRead.{ FlowId
+  [ events, oldest first ] }`, or `ReadEventsRejected.UnknownFlow`.
+- **QueueTurnEnd** stays refused (`TurnEndRejected.QueueRefused`).
+- **The harness hook.** A new executable, `flow-hook`, beside `flow`: it
+  reads a Claude Code hook event on stdin and calls `flow` with
+  `Report.{ «FLOW_ID» Started }` (SessionStart), `Report.{ «FLOW_ID»
+  ToolUsed.«tool» }` (PostToolUse) or `Report.{ «FLOW_ID» Stopped }` (Stop),
+  taking the FlowId from `FLOW_ID` in its environment; with none it sends
+  nothing. It always exits 0. Every Claude flow Flow launches now gets it
+  in its `--settings` flag settings, on those three events, at the
+  `flow-hook` beside the running `flow-nexus`; and the pane preparation now
+  unsets an inherited `FLOW_ID`, so a launched flow never reports as
+  another. A launched flow does not yet have its own `FLOW_ID` in its
+  harness environment (Flow claims the id after the harness starts), so
+  until a launch carries it the hook reports nothing there.
+
 # Flow 0.20.0
 
 No wire, storage or deployment change; the Nexus's library surface changes.

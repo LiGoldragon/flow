@@ -22,6 +22,14 @@ pruning a bundle copy) is one `Operation`, performed through `Performs` on
 catalogs) are not operations, and delivery's own lease and delivery records
 are not yet.
 
+Every harness event reaches Flow through the harness's hooks calling the Flow
+CLI. `flow-hook`, which Flow writes into each Claude flow's launch settings on
+SessionStart, PostToolUse and Stop, sends `Report.{ FlowId Event }` with the
+`FLOW_ID` from its environment; the Nexus performs it as `Record.Harness`,
+appending the event to that flow's events in its Memory, and answers
+`Reported`, or `Refused.UnknownFlow` for a flow it does not hold, which it
+never adopts. The owner reads a flow's events with meta `ReadEvents`.
+
 ```mermaid
 sequenceDiagram
   participant C as flow CLI

@@ -29,9 +29,9 @@ use crate::{
 use notify::Watcher;
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-    LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchStatusRejection,
+    LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchStatusRejection, Launched,
     NativeLaunchIntent, PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
-    ReplaceRejection, Replaced, Response, StartRejection, StartRequest, Started, StopRejection,
+    ReplaceRejection, Replaced, Response, StartRejection, StartRequest, StopRejection,
 };
 use std::sync::{
     Arc,
@@ -55,7 +55,7 @@ pub trait LaunchesFlows {
     fn replace(&self, request: StartRequest) -> Response;
     /// Stops the predecessor, then closes its pane; only then is the
     /// successor routable.
-    fn reap(&self, replacement: Replacement, started: Started) -> Response;
+    fn reap(&self, replacement: Replacement, launched: Launched) -> Response;
     /// Answers once: the outcome, else the pending attempt.
     fn launch_status(&self, launch_request_id: &str) -> Response;
 }
@@ -445,7 +445,7 @@ impl LaunchesFlows for RunningNexus {
         Self::as_replacement(self.settle(&launch_request_id, response))
     }
 
-    fn reap(&self, replacement: Replacement, started: Started) -> Response {
+    fn reap(&self, replacement: Replacement, launched: Launched) -> Response {
         let refuse = |rejection: ReplaceRejection| {
             let _ = self.perform(Self::settled_as(
                 &replacement.launch_request_id,
@@ -495,7 +495,7 @@ impl LaunchesFlows for RunningNexus {
         self.prune_launch_bundles_of(&replacement.predecessor);
         let replaced = Replaced {
             flow_id: replacement.predecessor.clone(),
-            started,
+            launched,
         };
         // The Replaced outcome is what releases the successor to routing.
         if self.perform(Self::settled_as(
@@ -507,7 +507,7 @@ impl LaunchesFlows for RunningNexus {
                 StopRejection::PersistenceRefused,
             ));
         }
-        let _ = self.perform(Operation::Continue(replaced.started.flow_id.clone()));
+        let _ = self.perform(Operation::Continue(replaced.launched.flow_id.clone()));
         Response::Replaced(replaced)
     }
 

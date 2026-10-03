@@ -23,6 +23,13 @@ pub struct Record_Data_Settled_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Record_Data_Harness_Data {
+    pub flow_id: signal_flow::FlowId,
+    pub event: signal_flow::Event,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Record_Data {
     Intent(signal_flow::NativeLaunchIntent),
     Binding(signal_flow::NativeLaunchBinding),
@@ -36,6 +43,7 @@ pub enum Record_Data {
     Replacing(flow_nexus::Replacement),
     Withdrawn(signal_flow::LaunchRequestId),
     Settled(Record_Data_Settled_Data),
+    Harness(Record_Data_Harness_Data),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -87,6 +95,7 @@ pub enum Failed_Data {
     HerdrRefused,
     CodexRefused,
     BundleRefused,
+    UnknownFlow,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -96,7 +105,7 @@ pub enum Outcome {
     Reserved(signal_flow::LaunchAttemptReservation),
     Recorded,
     Registered(signal_flow::FlowNode),
-    Started(signal_flow::Started),
+    Started(signal_flow::Launched),
     Opened(signal_flow::HerdrPaneBinding),
     Spawned,
     Bound(signal_flow::NativeLaunchBinding),

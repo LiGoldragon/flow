@@ -28,6 +28,7 @@ pub mod launching;
 pub mod observe_agent;
 pub mod peer;
 pub mod performing;
+pub mod reporting;
 pub mod store;
 pub mod title;
 
@@ -41,6 +42,7 @@ use launching::{LaunchesFlows, ObservesLaunch, PrunesLaunchBundles};
 use observe_agent::ObservesAgent;
 use peer::{AdmitsMetaPeer, ResolvesPeer};
 use performing::Performs;
+use reporting::RecordsReports;
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
     Query, Response, RestartRejection,
@@ -178,6 +180,7 @@ impl Dispatches for RunningNexus {
             Query::QueueTurnEnd(_) => {
                 Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
             }
+            Query::Report(report) => self.report(report),
             Query::List(_) => self
                 .store
                 .flow_nodes()
@@ -382,6 +385,7 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::Vet(request) => self.vet(&request),
             meta_signal_flow::Query::Command(request) => self.command(request),
             meta_signal_flow::Query::ResolvePeer(identity) => self.resolve_peer(&identity),
+            meta_signal_flow::Query::ReadEvents(flow_id) => self.read_events(flow_id),
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
                 if !self.herdr.validate_registration(&flow_node) {
                     return meta_signal_flow::Response::FlowRegistrationRejected(
@@ -483,6 +487,9 @@ impl ServesConnection for Connection {
                 return nexus
                     .observe_agent(&flow_id, &mut |response| peer.write_response(response));
             }
+            // A hook's Report never waits behind a running launch: the
+            // launch may itself be waiting on the harness whose hook this is.
+            Query::Report(report) => nexus.report(report),
             // The caller is the peer of this connection, read from the kernel.
             Query::ResolveCaller(claim) => nexus.resolve_caller(
                 self.peer
@@ -2254,6 +2261,68 @@ mod tests {
         );
     }
 
+    /// Ruling 12 of flow f1c841: a harness event reaches Flow as
+    /// `Report.{ FlowId Event }`, recorded in the flow's Memory and answered
+    /// Reported; a FlowId Flow does not hold is refused and never adopted.
+    /// The owner reads the events back with ReadEvents.
+    #[test]
+    fn a_report_is_recorded_for_a_held_flow_and_refused_for_an_unknown_one() {
+        use signal_flow::{Event, Refused_Data, Report_Data};
+        let fixture = NexusFixture::new();
+        fixture.set_agents(vec![fixture.current_agent()]);
+        fixture.register_with(FlowLifecycle::Active);
+        let report = |flow_id: &str, event: Event| {
+            fixture.nexus.dispatch(Query::Report(Report_Data {
+                flow_id: flow_id.into(),
+                event,
+            }))
+        };
+
+        assert_eq!(
+            report("0a0a0a", Event::Started),
+            Response::Refused(Refused_Data::UnknownFlow("0a0a0a".into()))
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::ReadEvents("0a0a0a".into())),
+            meta_signal_flow::Response::ReadEventsRejected(
+                meta_signal_flow::ReadEventsRejected_Data::UnknownFlow
+            ),
+            "the refused flow was not adopted"
+        );
+        assert_eq!(report("908786", Event::Started), Response::Reported);
+        assert_eq!(
+            report("908786", Event::ToolUsed("Bash".into())),
+            Response::Reported
+        );
+        assert_eq!(report("908786", Event::Stopped), Response::Reported);
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::ReadEvents("908786".into())),
+            meta_signal_flow::Response::EventsRead(meta_signal_flow::EventsRead_Data {
+                flow_id: "908786".into(),
+                event_vector: vec![
+                    Event::Started,
+                    Event::ToolUsed("Bash".into()),
+                    Event::Stopped
+                ],
+            })
+        );
+        // Stop's turn-end wakeup stays refused: Flow holds no turn-end queue.
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::QueueTurnEnd(signal_flow::TurnEndRequest {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    transcript_path_option: None,
+                })),
+            Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
+        );
+    }
+
     #[test]
     fn retire_keeps_the_row_and_takes_the_flow_out_of_receiving() {
         let fixture = NexusFixture::new();
@@ -2829,8 +2898,8 @@ mod tests {
         };
         assert!(successor_copy.exists(), "a Started Flow keeps its copy");
         assert_eq!(replaced.flow_id, "fac697");
-        assert_eq!(replaced.started.flow_id, "908786");
-        assert_eq!(replaced.started.session_id, STAGED_SESSION);
+        assert_eq!(replaced.launched.flow_id, "908786");
+        assert_eq!(replaced.launched.session_id, STAGED_SESSION);
 
         assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
         assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Active);

@@ -8,8 +8,8 @@ use crate::RunningNexus;
 use crate::codex::{SelectsCodexEndpoint, SubmitsBoundCodexFirstTurn};
 use crate::composition::{ComposesLaunch, KeepsLaunchBundles, OpensLaunchComposer};
 use crate::generated::operation::{
-    Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
-    Register_Data, Reserve_Data, Submit_Data, Title_Data,
+    Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Harness_Data,
+    Record_Data_Settled_Data, Register_Data, Reserve_Data, Submit_Data, Title_Data,
 };
 use crate::herdr::OperatesHerdrPane;
 use crate::herdr::launch::{
@@ -227,6 +227,14 @@ impl PerformsInParts for RunningNexus {
                 .store
                 .record_launch_outcome(&launch_request_id, launch_outcome)
                 .recorded(),
+            Record_Data::Harness(Record_Data_Harness_Data { flow_id, event }) => {
+                use crate::store::events::{EventRecording, RecordsHarnessEvents};
+                match self.store.record_event(&flow_id, event) {
+                    Ok(EventRecording::Recorded) => Outcome::Recorded,
+                    Ok(EventRecording::UnknownFlow) => Outcome::Failed(Failed_Data::UnknownFlow),
+                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
         }
     }
 

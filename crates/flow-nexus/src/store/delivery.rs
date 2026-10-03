@@ -66,8 +66,12 @@ impl EngineRecord for PaneLease {
     }
 }
 
-impl PaneLease {
+trait SettlesInterruptedLease {
     /// What a delivery interrupted at this row settles as.
+    fn uncertain(&self) -> Delivery;
+}
+
+impl SettlesInterruptedLease for PaneLease {
     fn uncertain(&self) -> Delivery {
         Delivery {
             delivery_id: self.delivery_id.clone(),
@@ -160,8 +164,12 @@ pub struct DeliveryTables {
     pub configuration: TableReference<DeliveryConfiguration>,
 }
 
-impl DeliveryTables {
-    pub fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError> {
+pub trait RegistersDeliveryTables: Sized {
+    fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError>;
+}
+
+impl RegistersDeliveryTables for DeliveryTables {
+    fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError> {
         Ok(Self {
             deliveries: engine.register_table(TableDescriptor::new(
                 DELIVERY_TABLE_NAME,

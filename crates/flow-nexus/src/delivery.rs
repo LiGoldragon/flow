@@ -293,7 +293,32 @@ struct LeasedDelivery<'run> {
     target: &'run DeliveryTarget,
 }
 
-impl<'run> LeasedDelivery<'run> {
+trait RunsLeasedDelivery<'run> {
+    fn new(
+        nexus: &'run RunningNexus,
+        request: &'run DeliveryRequest,
+        target: &'run DeliveryTarget,
+    ) -> Self;
+    fn step(&self, lease_step: LeaseStep) -> Result<(), DeliveryRejection>;
+    /// Nothing reached the pane's composer: the lease row goes, and nothing
+    /// is kept, so the same DeliveryId may be delivered again.
+    fn refuse(&self, rejection: DeliveryRejection) -> Result<Delivery, DeliveryRejection>;
+    fn settle(
+        &self,
+        interrupt_witness: InterruptWitness,
+        delivery_grade: DeliveryGrade,
+    ) -> Result<Delivery, DeliveryRejection>;
+    /// Sees the placed text leave the composer. When it stays, the submit
+    /// key is pressed once; when it stays after that too, the text is taken
+    /// back, so the pane is never left holding a letter.
+    fn submitted(&self, lines: usize) -> Submitted;
+    /// Empties the composer of a letter an interrupt put back into it; a
+    /// text that is not a letter is a person's and is never touched.
+    fn retracted_restored_letter(&self) -> bool;
+    fn run(&self) -> Result<Delivery, DeliveryRejection>;
+}
+
+impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
     fn new(
         nexus: &'run RunningNexus,
         request: &'run DeliveryRequest,
@@ -318,8 +343,6 @@ impl<'run> LeasedDelivery<'run> {
             .map_err(|_| DeliveryRejection::PersistenceRefused)
     }
 
-    /// Nothing reached the pane's composer: the lease row goes, and nothing
-    /// is kept, so the same DeliveryId may be delivered again.
     fn refuse(&self, rejection: DeliveryRejection) -> Result<Delivery, DeliveryRejection> {
         let _ = self.nexus.store.release_lease(&self.request.delivery_id);
         Err(rejection)
@@ -348,9 +371,6 @@ impl<'run> LeasedDelivery<'run> {
         Ok(delivery)
     }
 
-    /// Sees the placed text leave the composer. When it stays, the submit
-    /// key is pressed once; when it stays after that too, the text is taken
-    /// back, so the pane is never left holding a letter.
     fn submitted(&self, lines: usize) -> Submitted {
         let herdr = &self.nexus.herdr;
         let route = &self.target.route;
@@ -376,8 +396,6 @@ impl<'run> LeasedDelivery<'run> {
         Submitted::Stuck
     }
 
-    /// Empties the composer of a letter an interrupt put back into it; a
-    /// text that is not a letter is a person's and is never touched.
     fn retracted_restored_letter(&self) -> bool {
         let herdr = &self.nexus.herdr;
         let route = &self.target.route;

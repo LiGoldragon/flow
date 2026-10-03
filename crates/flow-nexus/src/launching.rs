@@ -6,6 +6,8 @@
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::KeepsLaunchBundles;
 use crate::composition::OpensLaunchComposer;
+use crate::store::AnnouncesLaunchChanges;
+use crate::store::AnswersLaunchOutcome;
 use crate::{
     RunningNexus,
     codex::{ResolvesBoundCodexSkills, SubmitsBoundCodexFirstTurn},
@@ -643,8 +645,18 @@ pub struct TranscriptWatch {
     moved: Arc<AtomicBool>,
 }
 
-impl TranscriptWatch {
-    pub fn open(
+pub trait WatchesTranscript: Sized {
+    fn open(
+        root: &std::path::Path,
+        native_session_id: &str,
+        changes: LaunchChanges,
+    ) -> Result<Self, String>;
+    /// Whether the transcript moved since this was last asked.
+    fn moved(&self) -> bool;
+}
+
+impl WatchesTranscript for TranscriptWatch {
+    fn open(
         root: &std::path::Path,
         native_session_id: &str,
         changes: LaunchChanges,
@@ -677,8 +689,7 @@ impl TranscriptWatch {
         })
     }
 
-    /// Whether the transcript moved since this was last asked.
-    pub fn moved(&self) -> bool {
+    fn moved(&self) -> bool {
         self.moved.swap(false, Ordering::SeqCst)
     }
 }
@@ -771,10 +782,14 @@ pub struct AmbiguousLaunchWatches {
     watches: std::collections::BTreeMap<String, Option<TranscriptWatch>>,
 }
 
-impl AmbiguousLaunchWatches {
+pub trait WatchesAmbiguousLaunches {
     /// Opens a watch for each newly ambiguous launch and looks at it once;
     /// re-observes each launch whose transcript moved; drops settled ones.
-    pub fn pass(&mut self, nexus: &RunningNexus) {
+    fn pass(&mut self, nexus: &RunningNexus);
+}
+
+impl WatchesAmbiguousLaunches for AmbiguousLaunchWatches {
+    fn pass(&mut self, nexus: &RunningNexus) {
         let attempts = match nexus.store.ambiguous_launch_attempts() {
             Ok(attempts) => attempts,
             Err(error) => {

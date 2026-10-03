@@ -4,6 +4,7 @@
 //! owns its single `.sema` store and lowers a closed `signal_flow::Query`
 //! into its typed, durable records.
 
+use crate::store::delivery::RegistersDeliveryTables;
 pub mod delivery;
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
@@ -199,10 +200,7 @@ impl NamesLiveFlow for SignalFlowLifecycle {
     }
 }
 
-impl FlowLifecycle {
-    /// Whether the flow can still be reached: only a live seat can be sent
-    /// to, resolved as a recipient, stopped or replaced. Stopped, Retired and
-    /// Exited are all gone; they differ in who ended the flow.
+impl NamesLiveFlow for FlowLifecycle {
     fn is_live(&self) -> bool {
         matches!(self, Self::Pending | Self::Active)
     }
@@ -260,7 +258,15 @@ pub struct FlowStoreConfiguration {
     meta_socket_path: String,
 }
 
-impl FlowStoreConfiguration {
+trait CompletesConfiguration {
+    fn with_runtime(
+        self,
+        runtime: &RuntimeConfiguration,
+        delivery: &DeliveryConfiguration,
+    ) -> Configuration;
+}
+
+impl CompletesConfiguration for FlowStoreConfiguration {
     fn with_runtime(
         self,
         runtime: &RuntimeConfiguration,
@@ -475,9 +481,16 @@ pub enum LaunchOutcome {
     ReplaceRejected(ReplaceRejection),
 }
 
-impl LaunchOutcome {
+pub trait AnswersLaunchOutcome {
     /// The reply the outcome is on the wire.
-    pub fn response(&self) -> Response {
+    fn response(&self) -> Response;
+    /// A refused reap leaves the predecessor Stopped and the successor held;
+    /// it is the one outcome a repeated Replace takes up again.
+    fn awaits_reaping(&self) -> bool;
+}
+
+impl AnswersLaunchOutcome for LaunchOutcome {
+    fn response(&self) -> Response {
         match self {
             Self::Started(started) => Response::Started(started.clone()),
             Self::Replaced(replaced) => Response::Replaced(replaced.clone()),
@@ -486,9 +499,7 @@ impl LaunchOutcome {
         }
     }
 
-    /// A refused reap leaves the predecessor Stopped and the successor held;
-    /// it is the one outcome a repeated Replace takes up again.
-    pub fn awaits_reaping(&self) -> bool {
+    fn awaits_reaping(&self) -> bool {
         matches!(
             self,
             Self::ReplaceRejected(ReplaceRejection::ReapRefused(_))
@@ -530,8 +541,20 @@ pub struct LaunchChanges {
     count: Arc<(Mutex<u64>, Condvar)>,
 }
 
-impl LaunchChanges {
-    pub fn announce(&self) {
+pub trait AnnouncesLaunchChanges {
+    fn announce(&self);
+    fn current(&self) -> u64;
+    /// Blocks until the count moves past `seen` or `deadline` passes.
+    /// `true` when a change came, `false` when the deadline did. A caller
+    /// that must eventually answer waits this way; one that runs for the
+    /// life of the Nexus uses [`Self::after`].
+    fn until(&self, seen: u64, deadline: std::time::Instant) -> bool;
+    /// Blocks until the count moves past `seen`, then returns the new count.
+    fn after(&self, seen: u64) -> u64;
+}
+
+impl AnnouncesLaunchChanges for LaunchChanges {
+    fn announce(&self) {
         let (count, changed) = &*self.count;
         *count
             .lock()
@@ -539,7 +562,7 @@ impl LaunchChanges {
         changed.notify_all();
     }
 
-    pub fn current(&self) -> u64 {
+    fn current(&self) -> u64 {
         *self
             .count
             .0
@@ -547,11 +570,7 @@ impl LaunchChanges {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Blocks until the count moves past `seen` or `deadline` passes.
-    /// `true` when a change came, `false` when the deadline did. A caller
-    /// that must eventually answer waits this way; one that runs for the
-    /// life of the Nexus uses [`Self::after`].
-    pub fn until(&self, seen: u64, deadline: std::time::Instant) -> bool {
+    fn until(&self, seen: u64, deadline: std::time::Instant) -> bool {
         let (count, changed) = &*self.count;
         let mut guard = count
             .lock()
@@ -571,8 +590,7 @@ impl LaunchChanges {
         true
     }
 
-    /// Blocks until the count moves past `seen`, then returns the new count.
-    pub fn after(&self, seen: u64) -> u64 {
+    fn after(&self, seen: u64) -> u64 {
         let (count, changed) = &*self.count;
         let guard = count
             .lock()
@@ -1132,13 +1150,28 @@ impl ConfiguresFlowStore for FlowStore {
     }
 }
 
-impl FlowStore {
+trait RegistersBindings {
     /// A binding that names a flow already in the store asserts only its
     /// role, and only when the stored flow is that binding: not Stopped, the
     /// same native thread and harness, and a route on the same Herdr session,
     /// pane and terminal (the agent name may have changed since). A role
     /// already recorded must be the same one. Nothing else is written: the
     /// flow keeps its lifecycle, endpoint, route and origin.
+    fn assert_role_of_matching_binding(
+        &self,
+        flow: FlowRecord,
+        binding: &FlowNode,
+        role: Caller,
+    ) -> Result<FlowRegistration, StoreError>;
+    fn register_flow_as(
+        &self,
+        flow_node: FlowNode,
+        flow_type: String,
+        role: Option<Caller>,
+    ) -> Result<FlowRegistration, StoreError>;
+}
+
+impl RegistersBindings for FlowStore {
     fn assert_role_of_matching_binding(
         &self,
         flow: FlowRecord,
@@ -1261,13 +1294,28 @@ impl FlowStore {
         self.engine.commit_atomic(commit)?;
         Ok(FlowRegistration::Registered(Box::new(flow_node)))
     }
+}
 
+trait SettlesLaunchAttempts {
     /// Reads every launch-attempt row by itself. A row that reads in the
     /// current shape stays. Any other row is moved aside whole into the
     /// quarantine table, in one commit with its retraction; a row of a known
     /// earlier shape is then carried forward into the current shape. A carry
     /// interrupted before it landed is completed at the next open, since the
     /// quarantined row still names its shape and no attempt holds its key.
+    fn settle_launch_attempts(&self) -> Result<Vec<LaunchAttemptSettlement>, StoreError>;
+    /// Every launch-attempt row as its stored key and archive bytes, read
+    /// through the engine's read-only storage reader. Reading the archive
+    /// undecoded is an exception taken only here: it is how a row that no
+    /// shape reads is found and kept whole.
+    fn launch_attempt_archives(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError>;
+    fn quarantined_launch_attempts_of(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Vec<QuarantinedLaunchAttempt>, StoreError>;
+}
+
+impl SettlesLaunchAttempts for FlowStore {
     fn settle_launch_attempts(&self) -> Result<Vec<LaunchAttemptSettlement>, StoreError> {
         let mut settlements = Vec::new();
         for (launch_request_id, archive) in self.launch_attempt_archives()? {
@@ -1345,10 +1393,6 @@ impl FlowStore {
         Ok(settlements)
     }
 
-    /// Every launch-attempt row as its stored key and archive bytes, read
-    /// through the engine's read-only storage reader. Reading the archive
-    /// undecoded is an exception taken only here: it is how a row that no
-    /// shape reads is found and kept whole.
     fn launch_attempt_archives(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
         let definition =
             redb::TableDefinition::<String, &[u8]>::new(FLOW_LAUNCH_ATTEMPT_TABLE_NAME.as_str());
@@ -1384,13 +1428,19 @@ impl FlowStore {
             .cloned()
             .collect())
     }
+}
 
+trait AdoptsLegacyRoles {
     /// A store written before roles were kept has flows and no role rows.
     /// Each such flow's role is taken from what the store already holds: the
     /// launch profile of the launch that bound it, else the flow type
     /// MetaBindExisting wrote as `<aspect>:<power>:<model>`. Parsing that
     /// text is an exception taken only here, to read rows written before the
     /// typed record existed; nothing new is written in that form for reading.
+    fn adopt_legacy_roles(&self) -> Result<(), StoreError>;
+}
+
+impl AdoptsLegacyRoles for FlowStore {
     fn adopt_legacy_roles(&self) -> Result<(), StoreError> {
         let flows = self
             .engine
@@ -1437,9 +1487,13 @@ impl FlowStore {
     }
 }
 
-impl FlowRecord {
+trait ReadsLegacyRole {
     /// The role MetaBindExisting wrote into the flow type before roles had
     /// their own record; see `adopt_legacy_roles`.
+    fn legacy_role(&self) -> Option<Caller>;
+}
+
+impl ReadsLegacyRole for FlowRecord {
     fn legacy_role(&self) -> Option<Caller> {
         let mut parts = self.flow_type.splitn(3, ':');
         let flow_aspect = match parts.next()? {
@@ -2490,6 +2544,7 @@ mod tests {
         RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
     };
     use super::{LaysOutDefaults, SeedsConfiguration};
+    use crate::store::RegistersBindings;
     use meta_signal_flow::Configuration;
     use signal_flow::{
         ComposedLaunch, FirstPromptPayload, FlowAspect, HarnessKind, HerdrPaneBinding,

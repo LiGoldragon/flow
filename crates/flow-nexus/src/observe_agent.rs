@@ -32,15 +32,26 @@ pub trait ObservesAgent {
     ) -> Result<(), String>;
 }
 
-impl RunningNexus {
-    fn observed(flow_id: &str, agent_state: AgentState) -> Response {
+/// An agent state is observed of one flow.
+trait ReportsAgentState {
+    fn observed_of(self, flow_id: &str) -> Response;
+}
+
+impl ReportsAgentState for AgentState {
+    fn observed_of(self, flow_id: &str) -> Response {
         Response::AgentObserved(AgentObservation {
             flow_id: flow_id.to_owned(),
-            agent_state,
+            agent_state: self,
         })
     }
+}
 
+trait FindsObservableFlow {
     /// The live, routed flow, or None when it has nothing to observe.
+    fn observable(&self, flow_id: &str) -> Option<(FlowNode, HerdrRoute)>;
+}
+
+impl FindsObservableFlow for RunningNexus {
     fn observable(&self, flow_id: &str) -> Option<(FlowNode, HerdrRoute)> {
         let node = self.store.flow_node(flow_id).ok()??;
         if !node.flow_lifecycle.is_live() {
@@ -56,14 +67,14 @@ impl RunningNexus {
 impl ObservesAgent for RunningNexus {
     fn agent_observation(&self, flow_id: &str) -> Response {
         let Some((node, _)) = self.observable(flow_id) else {
-            return Self::observed(flow_id, AgentState::Gone);
+            return AgentState::Gone.observed_of(flow_id);
         };
         let agent_state = match self.herdr.pane_agent(&node) {
             PaneAgent::Present { agent_state, .. } => agent_state,
             PaneAgent::Absent => AgentState::Gone,
             PaneAgent::Unreadable => AgentState::Unknown,
         };
-        Self::observed(flow_id, agent_state)
+        agent_state.observed_of(flow_id)
     }
 
     fn observe_agent(
@@ -84,7 +95,7 @@ impl ObservesAgent for RunningNexus {
             return Ok(());
         }
         let Some((_, route)) = self.observable(flow_id) else {
-            return send(&Self::observed(flow_id, AgentState::Gone));
+            return send(&AgentState::Gone.observed_of(flow_id));
         };
         let socket = self
             .herdr
@@ -94,7 +105,7 @@ impl ObservesAgent for RunningNexus {
         loop {
             let Some(event) = events.next_event()? else {
                 // Herdr closed the subscription: the session is gone.
-                return send(&Self::observed(flow_id, AgentState::Gone));
+                return send(&AgentState::Gone.observed_of(flow_id));
             };
             let agent_state = match event {
                 PaneEvent::Status(status) => HerdrCli::agent_state_of(Some(&status)),
@@ -103,7 +114,7 @@ impl ObservesAgent for RunningNexus {
             if agent_state == last {
                 continue;
             }
-            send(&Self::observed(flow_id, agent_state.clone()))?;
+            send(&agent_state.clone().observed_of(flow_id))?;
             if agent_state == AgentState::Gone {
                 return Ok(());
             }
@@ -150,7 +161,13 @@ struct HerdrEvents {
     reader: BufReader<UnixStream>,
 }
 
-impl HerdrEvents {
+trait SubscribesHerdrEvents: Sized {
+    fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String>;
+    /// The next event about this pane; None when Herdr closes the stream.
+    fn next_event(&mut self) -> Result<Option<PaneEvent>, String>;
+}
+
+impl SubscribesHerdrEvents for HerdrEvents {
     fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String> {
         let mut stream = UnixStream::connect(socket).map_err(|error| error.to_string())?;
         let request = serde_json::json!({
@@ -186,7 +203,6 @@ impl HerdrEvents {
         Ok(events)
     }
 
-    /// The next event about this pane; None when Herdr closes the stream.
     fn next_event(&mut self) -> Result<Option<PaneEvent>, String> {
         loop {
             let mut line = String::new();
@@ -201,44 +217,50 @@ impl HerdrEvents {
             let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
-            if let Some(event) = PaneEvent::read(&event, &self.pane_id) {
+            if let Some(event) = event.pane_event(&self.pane_id) {
                 return Ok(Some(event));
             }
         }
     }
 }
 
-impl PaneEvent {
+/// A Herdr stream event, read as what it says of one pane.
+trait ReadsPaneEvent {
     /// Herdr 0.8.2 names events `pane_closed` on the stream and
     /// `pane.closed` in its schema; both spellings are read.
-    fn read(event: &serde_json::Value, pane_id: &str) -> Option<Self> {
+    fn pane_event(&self, pane_id: &str) -> Option<PaneEvent>;
+}
+
+impl ReadsPaneEvent for serde_json::Value {
+    fn pane_event(&self, pane_id: &str) -> Option<PaneEvent> {
+        let event = self;
         let data = event.get("data")?;
         if data.get("pane_id").and_then(serde_json::Value::as_str) != Some(pane_id) {
             return None;
         }
         let kind = event.get("event").and_then(serde_json::Value::as_str)?;
         if kind.ends_with("closed") || kind.ends_with("exited") {
-            return Some(Self::Gone);
+            return Some(PaneEvent::Gone);
         }
         data.get("agent_status")
             .and_then(serde_json::Value::as_str)
-            .map(|status| Self::Status(status.to_owned()))
+            .map(|status| PaneEvent::Status(status.to_owned()))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::PaneEvent;
+    use super::{PaneEvent, ReadsPaneEvent};
 
     #[test]
     fn herdr_events_read_as_the_observed_panes_state_or_its_going() {
         // As Herdr 0.8.2 sent them on the stream, 2026-09-25.
         let closed = serde_json::json!({"data":{"pane_id":"w1:p3","type":"pane_closed","workspace_id":"w1"},"event":"pane_closed"});
-        assert_eq!(PaneEvent::read(&closed, "w1:p3"), Some(PaneEvent::Gone));
-        assert_eq!(PaneEvent::read(&closed, "w1:p1"), None);
+        assert_eq!(closed.pane_event("w1:p3"), Some(PaneEvent::Gone));
+        assert_eq!(closed.pane_event("w1:p1"), None);
         let working = serde_json::json!({"data":{"pane_id":"w1:p1","agent_status":"working","workspace_id":"w1"},"event":"pane_agent_status_changed"});
         assert_eq!(
-            PaneEvent::read(&working, "w1:p1"),
+            working.pane_event("w1:p1"),
             Some(PaneEvent::Status("working".into()))
         );
     }

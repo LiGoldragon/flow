@@ -616,8 +616,8 @@ impl RendersLaunchProfile for LaunchComposer {
             HarnessKind::Codex => {
                 let mut head = bundle.map(|text| format!("{text}\n\n")).unwrap_or_default();
                 let mut lines = Vec::new();
-                if !skills.iter().any(|skill| skill == "main-flow") {
-                    lines.push("$main-flow".to_owned());
+                if !skills.iter().any(|skill| skill == "operation-main-flow") {
+                    lines.push("$operation-main-flow".to_owned());
                 }
                 lines.extend(skills.iter().map(|skill| format!("${skill}")));
                 head.push_str(&lines.join("\n"));
@@ -804,7 +804,7 @@ mod tests {
             LaunchProfile {
                 launch_request_id: "launch-42".into(),
                 launch_source_vector: sources,
-                skill_name_vector: vec!["spirit".into(), "main-flow".into()],
+                skill_name_vector: vec!["operation-main-flow".into(), "spirit".into()],
                 flow_aspect: FlowAspect::Field,
                 power_level: PowerLevel::High,
                 harness_kind: HarnessKind::Codex,
@@ -862,8 +862,8 @@ mod tests {
                 "fixture bundle\n\n",
                 "Predecessor: 1b8ac0\n",
                 "Remembered: 836818\n\n",
-                "$spirit\n",
-                "$main-flow\n\n",
+                "$operation-main-flow\n",
+                "$spirit\n\n",
                 "# Flow launch\n\n",
                 "Role: Field High\n",
                 "Harness: Codex\n",
@@ -937,7 +937,7 @@ mod tests {
         assert_eq!(
             body,
             format!(
-                "/spirit /main-flow Read {} for your launch mode, then: Carry the bounded task.",
+                "/operation-main-flow /spirit Read {} for your launch mode, then: Carry the bounded task.",
                 root.bundles().file_for(&profile).display()
             ),
         );
@@ -948,7 +948,7 @@ mod tests {
             )
         );
         assert_eq!(body.matches("/spirit").count(), 1);
-        assert_eq!(body.matches("/main-flow").count(), 1);
+        assert_eq!(body.matches("/operation-main-flow").count(), 1);
         assert!(!body.contains("$spirit"));
         assert!(!body.contains("Skill tool"));
         assert!(!body.contains("System prompt: read"));
@@ -961,13 +961,13 @@ mod tests {
         let mut profile = root.profile(vec![]);
         profile.harness_kind = HarnessKind::Claude;
         profile.skill_name_vector = [
-            "spirit",
-            "psyche",
-            "main-flow",
-            "behavior",
-            "herdr",
-            "messaging",
-            "datom",
+            "operation-main-flow",
+            "knowledge-psyche",
+            "compensation-behavior",
+            "knowledge-vocabulary",
+            "compensation-messenger-clj",
+            "knowledge-datom",
+            "operation-file-editing",
         ]
         .map(String::from)
         .to_vec();
@@ -980,13 +980,21 @@ mod tests {
         assert!(commands.len() <= 5, "{head}");
         assert_eq!(
             commands,
-            ["/spirit", "/psyche", "/main-flow", "/behavior", "/herdr"]
+            [
+                "/operation-main-flow",
+                "/knowledge-psyche",
+                "/compensation-behavior",
+                "/knowledge-vocabulary",
+                "/compensation-messenger-clj"
+            ]
         );
-        assert!(body.starts_with("/spirit /psyche /main-flow /behavior /herdr Read "));
+        assert!(body.starts_with(
+            "/operation-main-flow /knowledge-psyche /compensation-behavior /knowledge-vocabulary /compensation-messenger-clj Read "
+        ));
         // The sixth and seventh skills arrive as text for the Skill tool in
         // the same line, never as a sixth `/name` command.
         assert!(
-            body.contains(" for your launch mode, load messaging, datom through the Skill tool in this order, then: ")
+            body.contains(" for your launch mode, load knowledge-datom, operation-file-editing through the Skill tool in this order, then: ")
         );
         assert!(
             composed
@@ -994,8 +1002,8 @@ mod tests {
                 .first_prompt_text
                 .fits_claude_paste()
         );
-        assert!(!body.contains("/messaging"));
-        assert!(!body.contains("/datom"));
+        assert!(!body.contains("/knowledge-datom"));
+        assert!(!body.contains("/operation-file-editing"));
         assert!(composed.has_canonical_first_prompt());
     }
 
@@ -1109,7 +1117,7 @@ mod tests {
         assert!(!text.fits_claude_paste());
         assert!(text.starts_with("Read "));
         assert!(text.contains(
-            "then load these skills through the Skill tool in this order: spirit, main-flow."
+            "then load these skills through the Skill tool in this order: operation-main-flow, spirit."
         ));
         assert!(!text.starts_with("/spirit"));
         assert!(composed.has_canonical_first_prompt());
@@ -1150,7 +1158,7 @@ mod tests {
         assert!(composed.has_canonical_first_prompt());
         profile.instruction_prompt = "x".repeat(900);
         composed.launch_profile = profile;
-        let body = format!("/spirit /main-flow {}", "x".repeat(900));
+        let body = format!("/operation-main-flow /spirit {}", "x".repeat(900));
         composed.first_prompt_payload.first_prompt_body = body.clone();
         let hash = format!(
             "{:x}",
@@ -1304,7 +1312,7 @@ mod tests {
 
         assert_eq!(
             composed.launch_profile.skill_name_vector,
-            vec!["spirit", "main-flow"]
+            vec!["operation-main-flow", "spirit"]
         );
         assert!(
             !composed
@@ -1331,7 +1339,7 @@ mod tests {
             text.starts_with(concat!(
                 "# Main-flow mode\n\nKeep the stock base.\n\n",
                 "Predecessor: 1b8ac0\nRemembered: 836818\n\n",
-                "$spirit\n$main-flow\n\n"
+                "$operation-main-flow\n$spirit\n\n"
             )),
             "{text}"
         );
@@ -1369,7 +1377,7 @@ mod tests {
                 .first_prompt_body
                 .starts_with(concat!(
                     "fixture bundle\n\nPredecessor: 1b8ac0\nRemembered: 836818\n\n",
-                    "$main-flow\n$spirit\n\n# Flow launch\n"
+                    "$operation-main-flow\n$spirit\n\n# Flow launch\n"
                 ))
         );
     }
@@ -1428,7 +1436,10 @@ mod tests {
             .compose(&profile)
             .unwrap();
         let text = composed.first_prompt_payload.first_prompt_text.as_str();
-        assert!(text.starts_with("fixture bundle\n\n$spirit\n"), "{text}");
+        assert!(
+            text.starts_with("fixture bundle\n\n$operation-main-flow\n$spirit\n"),
+            "{text}"
+        );
         assert!(!text.contains("Remembered:"));
     }
 

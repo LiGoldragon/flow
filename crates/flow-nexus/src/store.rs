@@ -2450,10 +2450,10 @@ impl EarlierLaunchAttemptRows {
             launch_profile: LaunchProfileBeforeBundle {
                 launch_request_id: Self::EARLIER_REQUEST.into(),
                 launch_source_vector: vec![LaunchSource {
-                    source_path: "skills/main-flow.md".into(),
+                    source_path: "skills/operation-main-flow.md".into(),
                     source_sha256: "ab".repeat(32),
                 }],
-                skill_name_vector: vec!["main-flow".into()],
+                skill_name_vector: vec!["operation-main-flow".into()],
                 flow_aspect: FlowAspect::Psyche,
                 power_level: PowerLevel::Medium,
                 harness_kind: HarnessKind::Claude,
@@ -2480,7 +2480,7 @@ impl EarlierLaunchAttemptRows {
                 harness_kind: HarnessKind::Claude,
                 model_name: "claude-opus-5-5".into(),
                 effort: "medium".into(),
-                skill_name_vector: vec!["main-flow".into()],
+                skill_name_vector: vec!["operation-main-flow".into()],
             }),
             native_launch_binding_option: Some(NativeLaunchBinding {
                 launch_request_id: Self::EARLIER_REQUEST.into(),
@@ -2712,7 +2712,8 @@ mod tests {
             "3333333333333333333333333333333333333333333333333333333333333333",
         );
         launch.launch_profile.harness_kind = HarnessKind::Claude;
-        launch.launch_profile.skill_name_vector = vec!["spirit".into(), "main-flow".into()];
+        launch.launch_profile.skill_name_vector =
+            vec!["operation-main-flow".into(), "spirit".into()];
         store
             .reserve_launch_attempt(&launch, fixture.origin())
             .expect("reservation persists");
@@ -2757,16 +2758,16 @@ mod tests {
             effort: launch.launch_profile.effort.clone(),
             native_skill_selection_vector: vec![
                 NativeSkillSelection {
-                    skill_name: "main-flow".into(),
-                    native_skill_path: "/configured/main-flow/SKILL.md".into(),
-                    native_skill_sha256:
-                        "6666666666666666666666666666666666666666666666666666666666666666".into(),
-                },
-                NativeSkillSelection {
                     skill_name: "spirit".into(),
                     native_skill_path: "/configured/spirit/SKILL.md".into(),
                     native_skill_sha256:
                         "7777777777777777777777777777777777777777777777777777777777777777".into(),
+                },
+                NativeSkillSelection {
+                    skill_name: "operation-main-flow".into(),
+                    native_skill_path: "/configured/operation-main-flow/SKILL.md".into(),
+                    native_skill_sha256:
+                        "6666666666666666666666666666666666666666666666666666666666666666".into(),
                 },
             ],
             herdr_pane_binding: pane,

@@ -1314,7 +1314,8 @@ mod tests {
     #[test]
     fn bound_first_turn_is_one_text_beside_its_typed_skills() {
         let (mut launch, mut intent) = malformed_bound_launch();
-        launch.first_prompt_payload.first_prompt_text = "$main-flow\n$spirit\n\nbody".into();
+        launch.first_prompt_payload.first_prompt_text =
+            "$operation-main-flow\n$spirit\n\nbody".into();
         intent.native_skill_selection_vector = vec![NativeSkillSelection {
             skill_name: "spirit".into(),
             native_skill_path: "/skills/spirit/SKILL.md".into(),
@@ -1330,7 +1331,7 @@ mod tests {
             .filter(|item| item["type"] == "text")
             .collect::<Vec<_>>();
         assert_eq!(texts.len(), 1);
-        assert_eq!(texts[0]["text"], "$main-flow\n$spirit\n\nbody");
+        assert_eq!(texts[0]["text"], "$operation-main-flow\n$spirit\n\nbody");
     }
 
     #[test]
@@ -1366,8 +1367,9 @@ mod tests {
             .and_then(|item| item["text"].as_str())
             .unwrap();
         assert!(
-            first_text
-                .starts_with("# Main-flow mode\n\nYou are a main Flow.\n\n$main-flow\n$spirit\n\n"),
+            first_text.starts_with(
+                "# Main-flow mode\n\nYou are a main Flow.\n\n$operation-main-flow\n$spirit\n\n"
+            ),
             "{first_text}"
         );
         assert!(!first_text.contains("System prompt: read"));

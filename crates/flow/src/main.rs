@@ -1,4 +1,7 @@
-use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use datom_codec::{
+    Actualizing, Budget, Composing, Datom, Datomizable, Error, ErrorKind, ErrorRaising, Potential,
+    Variantizing,
+};
 use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use signal_flow::{Query, Response};
@@ -121,6 +124,7 @@ fn main() {
     };
     match client
         .parse_command(arguments.into_iter())
+        .and_then(|query| resolve_launch_skills(query, curriculum_resolve_skills))
         .and_then(|query| {
             client.call(&query, &mut |reply| {
                 println!("{}", client.textualize_reply(&reply))
@@ -134,9 +138,94 @@ fn main() {
     }
 }
 
+struct ResolvedSkills(Vec<String>);
+
+impl Composing for ResolvedSkills {
+    fn compose(datom: &Datom, budget: &mut Budget) -> Result<Self, Error> {
+        let (name, body) = datom.variant(budget, "ResolvedSkills")?;
+        if name != "ResolvedSkills" {
+            return Err(Error::composition(
+                datom.path.clone(),
+                ErrorKind::Variant {
+                    expected: "ResolvedSkills".into(),
+                    found: name.into(),
+                },
+            ));
+        }
+        Vec::<String>::compose(body, budget).map(Self)
+    }
+}
+
+fn curriculum_resolve_skills_argument(names: &[String]) -> String {
+    names
+        .to_vec()
+        .datomize(vec![])
+        .named_variant(vec![], "ResolveSkills")
+        .protosize()
+        .compact()
+}
+
+fn parse_curriculum_skills_reply(reply: &str) -> Result<Vec<String>, String> {
+    let mut budget = Budget {
+        remaining: 65_536,
+        reader: ReaderBudget { remaining: 65_536 },
+        depth: 0,
+        maximum_depth: 1_024,
+    };
+    Potential::<ResolvedSkills>::from(reply.trim().to_owned())
+        .actualize(&mut budget)
+        .map(|resolved| resolved.0)
+        .map_err(|error| format!("invalid Curriculum skill resolution reply: {error:?}"))
+}
+
+fn curriculum_resolve_skills(names: &[String]) -> Result<Vec<String>, String> {
+    let argument = curriculum_resolve_skills_argument(names);
+    let output = std::process::Command::new("curriculum")
+        .arg(&argument)
+        .output()
+        .map_err(|error| format!("could not run Curriculum skill resolution: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = detail.trim();
+        return Err(if detail.is_empty() {
+            format!("Curriculum skill resolution failed with {}", output.status)
+        } else {
+            format!("Curriculum skill resolution failed: {detail}")
+        });
+    }
+    let reply = String::from_utf8(output.stdout)
+        .map_err(|error| format!("Curriculum returned non-UTF-8 skill resolution: {error}"))?;
+    parse_curriculum_skills_reply(&reply)
+}
+
+fn resolve_launch_skills(
+    mut query: Query,
+    resolve: impl FnOnce(&[String]) -> Result<Vec<String>, String>,
+) -> Result<Query, String> {
+    let profile = match &mut query {
+        Query::Start(request) | Query::Replace(request) => &mut request.launch_profile,
+        _ => return Ok(query),
+    };
+    let mut names = resolve(&profile.skill_name_vector)?;
+    if names.iter().collect::<std::collections::HashSet<_>>().len() != names.len() {
+        return Err("Curriculum returned duplicate resolved skills".into());
+    }
+    if let Some(index) = names.iter().position(|name| name == "operation-main-flow") {
+        if index > 0 {
+            let main_flow = names.remove(index);
+            names.insert(0, main_flow);
+        }
+    }
+    profile.skill_name_vector = names;
+    Ok(query)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AnswersVersion, FlowClient, ParsesFlowCommand, TextualizesFlowReply};
+    use super::{
+        AnswersVersion, FlowClient, ParsesFlowCommand, TextualizesFlowReply,
+        curriculum_resolve_skills_argument, parse_curriculum_skills_reply, resolve_launch_skills,
+    };
     use signal_flow::{Query, Response};
 
     #[test]
@@ -176,7 +265,7 @@ mod tests {
         };
         let Query::Start(request) = client
             .parse_command([
-                "Start.{ { request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ spirit main-flow ] Field High Codex gpt-6-astra medium Some.836818 [ { 1b8ac0 1 } ] messaging-build /tmp/flow-system-prompt.md «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into(),
+                "Start.{ { request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ spirit operation-main-flow ] Field High Codex gpt-6-astra medium Some.836818 [ { 1b8ac0 1 } ] messaging-build /tmp/flow-system-prompt.md «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into(),
             ]
             .into_iter())
             .expect("typed Start parses")
@@ -187,7 +276,130 @@ mod tests {
         assert_eq!(request.launch_profile.launch_source_vector.len(), 1);
         assert_eq!(
             request.launch_profile.skill_name_vector,
-            ["spirit", "main-flow"]
+            ["spirit", "operation-main-flow"]
+        );
+    }
+
+    #[test]
+    fn start_and_replace_expand_skills_before_submission() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        let start = client
+            .parse_command(["Start.{ { request-7 [] [ spirit operation-main-flow ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into()].into_iter())
+            .unwrap();
+        let start = resolve_launch_skills(start, |roots| {
+            assert_eq!(roots, ["spirit", "operation-main-flow"]);
+            Ok(vec![
+                "compensation-behavior".into(),
+                "spirit".into(),
+                "operation-main-flow".into(),
+            ])
+        })
+        .unwrap();
+        let Query::Start(start) = start else {
+            panic!("Start fixture must remain a Start query")
+        };
+        assert_eq!(
+            start.launch_profile.skill_name_vector,
+            ["operation-main-flow", "compensation-behavior", "spirit"]
+        );
+
+        let replace = client
+            .parse_command(["Replace.{ { request-8 [] [ spirit ] Field High Claude opus-5-5 high Some.fac697 [] messaging-build /workspace/bundles/flow.md «Carry on from fac697.» } { fac697 session-1 turn-2 } }".into()].into_iter())
+            .unwrap();
+        let replace = resolve_launch_skills(replace, |roots| {
+            assert_eq!(roots, ["spirit"]);
+            Ok(vec!["compensation-behavior".into(), "spirit".into()])
+        })
+        .unwrap();
+        let Query::Replace(replace) = replace else {
+            panic!("Replace fixture must remain a Replace query")
+        };
+        assert_eq!(
+            replace.launch_profile.skill_name_vector,
+            ["compensation-behavior", "spirit"]
+        );
+    }
+
+    #[test]
+    fn skill_resolution_is_typed_and_non_launch_queries_pass_through() {
+        assert_eq!(
+            curriculum_resolve_skills_argument(&["spirit".into(), "compensation-behavior".into()]),
+            "ResolveSkills.[ spirit compensation-behavior ]"
+        );
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        let query = client
+            .parse_command(["ResolveRecipient.fac697".into()].into_iter())
+            .unwrap();
+        let unchanged = resolve_launch_skills(query.clone(), |_| {
+            panic!("non-launch queries must not resolve skills")
+        })
+        .unwrap();
+        assert_eq!(unchanged, query);
+    }
+
+    #[test]
+    fn curriculum_skill_resolution_reply_is_typed_and_ordered() {
+        assert_eq!(
+            parse_curriculum_skills_reply(
+                "ResolvedSkills.[ compensation-behavior spirit operation-main-flow ]\n"
+            )
+            .unwrap(),
+            ["compensation-behavior", "spirit", "operation-main-flow"]
+        );
+        assert!(parse_curriculum_skills_reply("Other.[ spirit ]").is_err());
+    }
+
+    #[test]
+    fn resolver_failure_prevents_flow_submission() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        let query = client
+            .parse_command(["Start.{ { request-7 [] [ spirit ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }".into()].into_iter())
+            .unwrap();
+        let mut submitted = false;
+        let result = resolve_launch_skills(query, |_| Err("missing dependency".into())).and_then(
+            |resolved| {
+                submitted = true;
+                Ok(resolved)
+            },
+        );
+        assert_eq!(result.unwrap_err(), "missing dependency");
+        assert!(!submitted);
+    }
+
+    #[test]
+    fn main_flow_is_promoted_without_reordering_the_rest_of_the_closure() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        let query = client
+            .parse_command(["Start.{ { request-7 [] [ spirit operation-main-flow ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }".into()].into_iter())
+            .unwrap();
+        let result = resolve_launch_skills(query, |_| {
+            Ok(vec![
+                "compensation-behavior".into(),
+                "spirit".into(),
+                "operation-main-flow".into(),
+                "compensation-correction".into(),
+            ])
+        })
+        .unwrap();
+        let Query::Start(request) = result else {
+            panic!("Start fixture must remain a Start query")
+        };
+        assert_eq!(
+            request.launch_profile.skill_name_vector,
+            [
+                "operation-main-flow",
+                "compensation-behavior",
+                "spirit",
+                "compensation-correction"
+            ]
         );
     }
 

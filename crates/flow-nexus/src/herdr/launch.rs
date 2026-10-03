@@ -2164,7 +2164,7 @@ pub(crate) mod tests {
         let bundle = composition_root.path().join("flow-system-prompt.md");
         fs::write(&bundle, "fixture bundle\n").unwrap();
         let mut profile = launch(HarnessKind::Claude).launch_profile;
-        profile.skill_name_vector = ["spirit", "main-flow"].map(String::from).to_vec();
+        profile.skill_name_vector = ["operation-main-flow", "spirit"].map(String::from).to_vec();
         profile.system_prompt_bundle_file = bundle.to_string_lossy().into_owned();
         profile.instruction_prompt = "Read the receipt.\nThen report it.".into();
         let launch = LaunchComposer::at(
@@ -3114,17 +3114,17 @@ printf '%s\n' 123456
         use std::io::Write;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let names = [
-            "spirit",
-            "psyche",
-            "main-flow",
-            "behavior",
-            "herdr",
-            "messaging",
-            "datom",
+            "operation-main-flow",
+            "knowledge-psyche",
+            "compensation-behavior",
+            "knowledge-vocabulary",
+            "compensation-messenger-clj",
+            "knowledge-datom",
+            "operation-file-editing",
         ];
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.skill_name_vector = names.map(String::from).to_vec();
-        let body = "/spirit /psyche /main-flow /behavior /herdr Read /tmp/flow-system-prompt.md for your launch mode, load messaging, datom through the Skill tool in this order, then: do the work";
+        let body = "/operation-main-flow /knowledge-psyche /compensation-behavior /knowledge-vocabulary /compensation-messenger-clj Read /tmp/flow-system-prompt.md for your launch mode, load knowledge-datom, operation-file-editing through the Skill tool in this order, then: do the work";
         let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
         launch.first_prompt_payload.first_prompt_body = body.into();
         launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
@@ -3184,7 +3184,7 @@ printf '%s\n' 123456
         // by its expansion.
         let argument = format!(
             "{}{}",
-            body.strip_prefix("/spirit /psyche /main-flow /behavior /herdr ")
+            body.strip_prefix("/operation-main-flow /knowledge-psyche /compensation-behavior /knowledge-vocabulary /compensation-messenger-clj ")
                 .unwrap(),
             HarnessKind::Claude.receipt_footer()
         );
@@ -3192,7 +3192,7 @@ printf '%s\n' 123456
         let command = |name: &str| {
             let mut row = serde_json::json!({"type":"user","sessionId":native_session,"message":{"role":"user",
                 "content":format!("<command-message>{name}</command-message>\n<command-name>/{name}</command-name>\n<command-args>{argument}</command-args>")}});
-            if name == "spirit" {
+            if name == "operation-main-flow" {
                 row["stackedOriginalInput"] = serde_json::json!(original);
             }
             row
@@ -3221,8 +3221,8 @@ printf '%s\n' 123456
             rows.push(command(name));
             rows.push(expansion(name));
         }
-        rows.extend(tool("messaging", "tool-6"));
-        rows.extend(tool("datom", "tool-7"));
+        rows.extend(tool("knowledge-datom", "tool-6"));
+        rows.extend(tool("operation-file-editing", "tool-7"));
         rows.push(receipt.clone());
         let command_records = rows
             .iter()
@@ -3254,7 +3254,7 @@ printf '%s\n' 123456
 
         // A wrong leading command.
         let mut wrong = rows.clone();
-        wrong[0] = command("main-flow");
+        wrong[0] = command("knowledge-psyche");
         write(&wrong);
         assert!(
             adapter
@@ -3265,9 +3265,9 @@ printf '%s\n' 123456
 
         // A sixth command record: the stack holds five.
         let mut sixth = rows[..10].to_vec();
-        sixth.push(command("messaging"));
-        sixth.push(expansion("messaging"));
-        sixth.extend(tool("datom", "tool-7"));
+        sixth.push(command("knowledge-datom"));
+        sixth.push(expansion("knowledge-datom"));
+        sixth.extend(tool("operation-file-editing", "tool-7"));
         sixth.push(receipt.clone());
         write(&sixth);
         assert!(
@@ -3316,9 +3316,9 @@ printf '%s\n' 123456
 
         // Only four commands loaded, then the Skill tool.
         let mut short = rows[..8].to_vec();
-        short.extend(tool("herdr", "tool-5"));
-        short.extend(tool("messaging", "tool-6"));
-        short.extend(tool("datom", "tool-7"));
+        short.extend(tool("compensation-messenger-clj", "tool-5"));
+        short.extend(tool("knowledge-datom", "tool-6"));
+        short.extend(tool("operation-file-editing", "tool-7"));
         short.push(receipt);
         write(&short);
         assert!(
@@ -3336,7 +3336,7 @@ printf '%s\n' 123456
         };
         use std::io::Write;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
-        let names = ["spirit", "main-flow"];
+        let names = ["operation-main-flow", "spirit"];
         let composition_root = tempfile::tempdir().unwrap();
         let bundle = composition_root.path().join("flow-system-prompt.md");
         fs::write(&bundle, "fixture bundle\n").unwrap();
@@ -3358,7 +3358,7 @@ printf '%s\n' 123456
         );
         assert!(body.starts_with("Read "));
         assert!(body.contains(
-            "then load these skills through the Skill tool in this order: spirit, main-flow."
+            "then load these skills through the Skill tool in this order: operation-main-flow, spirit."
         ));
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
@@ -3393,8 +3393,8 @@ printf '%s\n' 123456
         let original = launch.first_prompt_payload.first_prompt_text.clone();
         let mut rows = vec![serde_json::json!({"type":"user","sessionId":native_session,
             "message":{"role":"user","content":original}})];
+        rows.extend(tool("operation-main-flow", "tool-2"));
         rows.extend(tool("spirit", "tool-1"));
-        rows.extend(tool("main-flow", "tool-2"));
         rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-direct","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}}));
         let skill_invocations = rows
             .iter()
@@ -3547,7 +3547,7 @@ printf '%s\n' 123456
             &agent_name,
         );
         let skills = root.path().join("native-transcripts/claude-skills");
-        for name in ["spirit", "main-flow"] {
+        for name in ["operation-main-flow", "spirit"] {
             fs::create_dir_all(skills.join(name)).unwrap();
             fs::write(skills.join(name).join("SKILL.md"), format!("{name} body\n")).unwrap();
         }
@@ -3572,8 +3572,8 @@ printf '%s\n' 123456
         let original = &launch.first_prompt_payload.first_prompt_text;
         let mut rows = vec![serde_json::json!({"type":"user","sessionId":native_session,
             "message":{"role":"user","content":format!("<pasted_content id=\"ab12\">\n{original}\n</pasted_content>")}})];
+        rows.extend(tool("operation-main-flow", "tool-2"));
         rows.extend(tool("spirit", "tool-1"));
-        rows.extend(tool("main-flow", "tool-2"));
         rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-wrapped","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}}));
         let transcript = root
             .path()
@@ -3605,10 +3605,10 @@ printf '%s\n' 123456
         use sha2::{Digest, Sha256};
         use std::io::Write;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
-        let names = ["main-flow", "refresh"];
+        let names = ["operation-main-flow", "operation-file-editing"];
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.skill_name_vector = names.map(String::from).to_vec();
-        let body = "/main-flow /refresh Read /tmp/flow-system-prompt.md for your launch mode, then: You are Psyche Opus. Load through the Skill tool: spirit, psyche, herdr, file-editing. Read the handover whole.";
+        let body = "/operation-main-flow /operation-file-editing Read /tmp/flow-system-prompt.md for your launch mode, then: You are Psyche Opus. Load through the Skill tool: spirit, knowledge-psyche, knowledge-flow, compensation-prose. Read the handover whole.";
         let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
         launch.first_prompt_payload.first_prompt_body = body.into();
         launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
@@ -3648,7 +3648,8 @@ printf '%s\n' 123456
         };
         let argument = format!(
             "{}{}",
-            body.strip_prefix("/main-flow /refresh ").unwrap(),
+            body.strip_prefix("/operation-main-flow /operation-file-editing ")
+                .unwrap(),
             HarnessKind::Claude.receipt_footer()
         );
         let original = format!("{body}{}", HarnessKind::Claude.receipt_footer());
@@ -3705,16 +3706,16 @@ printf '%s\n' 123456
                 ),
             ),
             command(
-                "main-flow",
+                "operation-main-flow",
                 serde_json::json!({"stackedOriginalInput":original}),
             ),
-            expansion("main-flow"),
+            expansion("operation-main-flow"),
             attachment.clone(),
             command(
-                "refresh",
+                "operation-file-editing",
                 serde_json::json!({"stackedExpansion":true,"turnOrigin":"human"}),
             ),
-            expansion("refresh"),
+            expansion("operation-file-editing"),
             attachment,
             assistant(
                 "read",
@@ -3740,20 +3741,28 @@ printf '%s\n' 123456
             serde_json::json!([tool_use(
                 "t-s2",
                 "Skill",
-                serde_json::json!({"skill":"psyche"})
+                serde_json::json!({"skill":"knowledge-psyche"})
             )]),
         ));
-        rows.extend(loaded("t-s2", "psyche"));
+        rows.extend(loaded("t-s2", "knowledge-psyche"));
         // Two Skill calls in one assistant turn, answered in order.
         rows.push(assistant(
             "s34",
             serde_json::json!([
-                tool_use("t-s3", "Skill", serde_json::json!({"skill":"herdr"})),
-                tool_use("t-s4", "Skill", serde_json::json!({"skill":"file-editing"})),
+                tool_use(
+                    "t-s3",
+                    "Skill",
+                    serde_json::json!({"skill":"knowledge-flow"})
+                ),
+                tool_use(
+                    "t-s4",
+                    "Skill",
+                    serde_json::json!({"skill":"compensation-prose"})
+                ),
             ]),
         ));
-        rows.extend(loaded("t-s3", "herdr"));
-        rows.extend(loaded("t-s4", "file-editing"));
+        rows.extend(loaded("t-s3", "knowledge-flow"));
+        rows.extend(loaded("t-s4", "compensation-prose"));
         rows.push(assistant(
             "bash",
             serde_json::json!([tool_use(
@@ -3771,7 +3780,7 @@ printf '%s\n' 123456
             "claude",
             serde_json::json!([{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]),
         );
-        receipt["attributionSkill"] = serde_json::json!("file-editing");
+        receipt["attributionSkill"] = serde_json::json!("compensation-prose");
         rows.push(receipt);
         let transcript = root
             .path()

@@ -2159,8 +2159,8 @@ pub(crate) mod tests {
 printf '%s\n' "$*" >> '{calls}'
 case "$*" in
   *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
-  *"pane run"*) ;;
-  *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$marker" ;;
+  *"pane run"*) sh -c "$6" > '{marker_output}'; width=$(cat '{pane_width}' 2>/dev/null || printf 120); fold -w "$width" '{marker_output}' > '{visible_output}' ;;
+  *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
   *"agent start"*) printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
   *"agent get"*) reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness" ;;
   *"agent prompt"*" /rename "*) title=$(printf '%s' "$*" | sed 's/.* \/rename //'); [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}\n' "$title" >> '{claude_transcript}'; printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
@@ -2172,6 +2172,9 @@ esac
 "##,
             calls = calls.display(),
             reported_harness = reported_harness.display(),
+            marker_output = root.path().join("marker-unwrapped").display(),
+            visible_output = root.path().join("marker-visible").display(),
+            pane_width = root.path().join("pane-width").display(),
             title_file = root.path().join("native-title").display(),
             title_override = root.path().join("native-title-override").display(),
             label_file = root.path().join("pane-label").display(),
@@ -2522,7 +2525,10 @@ printf '%s\n' 123456
             .position(|line| line.contains("agent start"))
             .expect("Claude start");
         assert!(pane_run < pane_wait && pane_wait < agent_start);
-        let wait_call = calls_after_start.lines().find(|line| line.contains("pane wait-output")).unwrap();
+        let wait_call = calls_after_start
+            .lines()
+            .find(|line| line.contains("pane wait-output"))
+            .unwrap();
         assert!(wait_call.contains("--source recent-unwrapped"));
         assert!(calls_after_start.contains("unset CLAUDE_CODE_CHILD_SESSION"));
         let create_call = calls_after_start
@@ -2605,6 +2611,58 @@ printf '%s\n' 123456
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn narrow_and_normal_claude_panes_require_unwrapped_marker_and_native_identity() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        for width in [54, 160] {
+            let launch = launch(HarnessKind::Claude);
+            let agent_name = launch.launch_agent_name();
+            let (root, adapter) = fixture_herdr(
+                "claude",
+                native_session,
+                "1234567812344abc8def123456789abc",
+                &agent_name,
+            );
+            fs::write(root.path().join("pane-width"), width.to_string()).unwrap();
+            let pane = adapter.create_launch_pane(&launch).unwrap();
+            adapter
+                .prepare_claude_pane_environment(&launch, &pane)
+                .unwrap();
+            let unwrapped = fs::read_to_string(root.path().join("marker-unwrapped")).unwrap();
+            let visible = fs::read_to_string(root.path().join("marker-visible")).unwrap();
+            assert!(unwrapped.trim().len() > 54);
+            assert_eq!(
+                visible.lines().any(|line| line == unwrapped.trim()),
+                width == 160
+            );
+            let binding = adapter.observe_native_binding(&launch, &pane).unwrap();
+            assert_eq!(binding.native_session_id, native_session);
+        }
+        for (native, claim, reason) in [
+            (
+                "",
+                "1234567812344abc8def123456789abc",
+                "empty native identity",
+            ),
+            (
+                native_session,
+                "8765432112344abc8def123456789abc",
+                "observed native identity",
+            ),
+        ] {
+            let launch = launch(HarnessKind::Claude);
+            let (root, adapter) =
+                fixture_herdr("claude", native, claim, &launch.launch_agent_name());
+            fs::write(root.path().join("pane-width"), "54").unwrap();
+            let pane = adapter.create_launch_pane(&launch).unwrap();
+            adapter
+                .prepare_claude_pane_environment(&launch, &pane)
+                .unwrap();
+            let refusal = adapter.observe_native_binding(&launch, &pane).unwrap_err();
+            assert!(refusal.contains(reason), "expected {reason}: {refusal}");
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@
 
 use crate::RunningNexus;
 use crate::herdr::PanePresence;
+use crate::herdr::ReadsHerdrPanes;
 use crate::store::{ReadsFlowRoles, StoreError};
 use signal_flow::{Caller, CallerResolutionRejection, FlowId, FlowNode, Response};
 use std::{fs, os::unix::net::UnixStream};

@@ -11,6 +11,7 @@ use crate::codex::SelectsCodexEndpoint;
 use crate::composition::{
     AsksForLaunchReceipt, NamesRemoteControl, StacksClaudeCommands, ValidatesComposedPrompt,
 };
+use crate::herdr::ConfiguresHerdrCli;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use sha2::{Digest, Sha256};
 use signal_flow::{
@@ -106,7 +107,7 @@ pub trait ObservesNativeTargetReceipt {
     ) -> Result<PromptDeliveryResult, String>;
 }
 
-impl HerdrCli {
+pub(crate) trait PreparesClaudePane {
     const CLAUDE_CHILD_SESSION_ENVIRONMENT: &'static str = "CLAUDE_CODE_CHILD_SESSION";
     /// Inherited Claude identity that a new Flow must not carry. A shared
     /// `CLAUDE_JOB_DIR` shares one job state between processes: a new
@@ -134,44 +135,14 @@ impl HerdrCli {
     const CLAUDE_FLAG_SETTINGS: &'static str =
         r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#;
     const CLAUDE_REMOTE_CONTROL_FLAG: &'static str = "--remote-control";
+    fn prepare_claude_pane_environment(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+    ) -> Result<(), String>;
+}
 
-    fn run_json(&self, arguments: &[String]) -> Result<serde_json::Value, String> {
-        let output = Command::new(&self.executable)
-            .args(arguments)
-            .output()
-            .map_err(|error| format!("Herdr command could not start: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Herdr command refused the launch stage: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|error| format!("Herdr returned unreadable JSON: {error}"))
-    }
-
-    fn run_status(&self, arguments: &[String]) -> Result<(), String> {
-        let output = Command::new(&self.executable)
-            .args(arguments)
-            .output()
-            .map_err(|error| format!("Herdr command could not start: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Herdr command refused the launch stage: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        Ok(())
-    }
-
-    fn claude_environment_preparation(marker_suffix: &str) -> String {
-        format!(
-            "unset {} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
-            Self::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
-            marker_suffix
-        )
-    }
-
+impl PreparesClaudePane for HerdrCli {
     fn prepare_claude_pane_environment(
         &self,
         launch: &ComposedLaunch,
@@ -194,7 +165,7 @@ impl HerdrCli {
             "pane".into(),
             "run".into(),
             pane.herdr_pane_id.clone(),
-            Self::claude_environment_preparation(&marker_suffix),
+            marker_suffix.claude_environment_preparation(),
         ])?;
         let response = self.run_json(&[
             "--session".into(),
@@ -226,32 +197,65 @@ impl HerdrCli {
         }
         Ok(())
     }
+}
 
-    fn expected_harness(harness: &HarnessKind) -> &'static str {
-        match harness {
-            HarnessKind::Claude => "claude",
-            HarnessKind::Codex => "codex",
+pub(crate) trait RunsHerdr {
+    fn run_json(&self, arguments: &[String]) -> Result<serde_json::Value, String>;
+    fn run_status(&self, arguments: &[String]) -> Result<(), String>;
+}
+
+impl RunsHerdr for HerdrCli {
+    fn run_json(&self, arguments: &[String]) -> Result<serde_json::Value, String> {
+        let output = Command::new(&self.executable)
+            .args(arguments)
+            .output()
+            .map_err(|error| format!("Herdr command could not start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Herdr command refused the launch stage: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("Herdr returned unreadable JSON: {error}"))
     }
 
-    fn launch_agent_name(launch: &ComposedLaunch) -> String {
-        let hash = format!(
-            "{:x}",
-            Sha256::digest(
-                format!(
-                    "flow-herdr-agent-v1\0{}",
-                    launch.launch_profile.launch_request_id
-                )
-                .as_bytes()
-            )
-        );
-        format!(
-            "{}-{}",
-            Self::expected_harness(&launch.launch_profile.harness_kind),
-            &hash[..24]
-        )
+    fn run_status(&self, arguments: &[String]) -> Result<(), String> {
+        let output = Command::new(&self.executable)
+            .args(arguments)
+            .output()
+            .map_err(|error| format!("Herdr command could not start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Herdr command refused the launch stage: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
     }
+}
 
+pub(crate) trait ClaimsNativeIdentity {
+    fn configured_workspace_root(&self) -> Result<&Path, String>;
+    fn claimed_native_identity(
+        &self,
+        flow_id: &str,
+        harness: &HarnessKind,
+    ) -> Result<String, String>;
+    fn claim_flow_identity(
+        &self,
+        harness: &HarnessKind,
+        native_session_id: &str,
+    ) -> Result<String, String>;
+    fn verify_native_target(
+        &self,
+        pane: &HerdrPaneBinding,
+        native_session_id: &str,
+        harness: &HarnessKind,
+    ) -> Result<serde_json::Value, String>;
+}
+
+impl ClaimsNativeIdentity for HerdrCli {
     fn configured_workspace_root(&self) -> Result<&Path, String> {
         if !self.flows_root.is_absolute()
             || self.flows_root.file_name().and_then(|name| name.to_str()) != Some("flows")
@@ -267,90 +271,6 @@ impl HerdrCli {
             return Err("configured workspace root is not a directory".into());
         }
         Ok(root)
-    }
-
-    fn sha256_file(path: &Path) -> Result<String, String> {
-        let metadata = fs::symlink_metadata(path)
-            .map_err(|error| format!("native skill source metadata failed: {error}"))?;
-        if !path.is_absolute() || metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err("native skill source is not an absolute regular file".into());
-        }
-        let source = fs::read(path)
-            .map_err(|error| format!("native skill source is unreadable: {error}"))?;
-        Ok(format!("{:x}", Sha256::digest(source)))
-    }
-
-    fn validate_skill_selections(
-        launch: &ComposedLaunch,
-        selections: &[NativeSkillSelection],
-    ) -> Result<(), String> {
-        if selections
-            .iter()
-            .map(|selection| selection.skill_name.as_str())
-            .ne(launch
-                .launch_profile
-                .skill_name_vector
-                .iter()
-                .map(String::as_str))
-        {
-            return Err("native skill selection order differs from launch profile".into());
-        }
-        for selection in selections {
-            let path = Path::new(&selection.native_skill_path);
-            if Self::sha256_file(path)? != selection.native_skill_sha256 {
-                return Err(format!(
-                    "native skill source changed for {}",
-                    selection.skill_name
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn binding_matches_launch(
-        launch: &ComposedLaunch,
-        pane: &HerdrPaneBinding,
-    ) -> Result<(), String> {
-        if pane.launch_request_id != launch.launch_profile.launch_request_id
-            || pane.herdr_session_name != launch.launch_profile.herdr_session_name
-            || pane.herdr_agent_name != Self::launch_agent_name(launch)
-        {
-            return Err("Herdr pane binding does not belong to this launch request".into());
-        }
-        Ok(())
-    }
-
-    fn prompt_intent_matches_launch(
-        launch: &ComposedLaunch,
-        intent: &PromptDeliveryIntent,
-    ) -> Result<(), String> {
-        if !launch.has_canonical_first_prompt() {
-            return Err("composed first prompt is not canonical".into());
-        }
-        Self::binding_matches_launch(launch, &intent.herdr_pane_binding)?;
-        if intent.launch_request_id != launch.launch_profile.launch_request_id
-            || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
-            || intent.harness_kind != launch.launch_profile.harness_kind
-            || intent.model_name != launch.launch_profile.model_name
-            || intent.effort != launch.launch_profile.effort
-            || !Self::boundary_matches_intent(intent)
-        {
-            return Err("durable prompt intent does not belong to this composed launch".into());
-        }
-        Self::validate_skill_selections(launch, &intent.native_skill_selection_vector)?;
-        Ok(())
-    }
-
-    fn boundary_matches_intent(intent: &PromptDeliveryIntent) -> bool {
-        let (native_session_id, harness_kind) = match &intent.native_transcript_boundary {
-            NativeTranscriptBoundary::Existing(cursor) => {
-                (&cursor.native_session_id, &cursor.harness_kind)
-            }
-            NativeTranscriptBoundary::Absent(absence) => {
-                (&absence.native_session_id, &absence.harness_kind)
-            }
-        };
-        native_session_id == &intent.native_session_id && harness_kind == &intent.harness_kind
     }
 
     fn claimed_native_identity(
@@ -379,7 +299,7 @@ impl HerdrCli {
         harness: &HarnessKind,
         native_session_id: &str,
     ) -> Result<String, String> {
-        let harness_name = Self::expected_harness(harness);
+        let harness_name = harness.expected_harness();
         let mut command = Command::new(&self.flow_id_executable);
         command
             .arg(harness_name)
@@ -448,7 +368,7 @@ impl HerdrCli {
         let session = agent
             .get("agent_session")
             .ok_or_else(|| "receipt target has no official native session".to_owned())?;
-        let expected_harness = Self::expected_harness(harness);
+        let expected_harness = harness.expected_harness();
         if agent.get("agent").and_then(serde_json::Value::as_str) != Some(expected_harness)
             || session.get("source").and_then(serde_json::Value::as_str)
                 != Some(format!("herdr:{expected_harness}").as_str())
@@ -460,52 +380,30 @@ impl HerdrCli {
         }
         Ok(agent.clone())
     }
+}
 
-    fn collect_native_transcripts(
-        directory: &Path,
+pub(crate) trait CapturesTranscripts {
+    fn transcript_candidates(
+        &self,
+        pane: &HerdrPaneBinding,
         native_session_id: &str,
         harness: &HarnessKind,
-        depth: usize,
-        found: &mut Vec<PathBuf>,
-    ) -> Result<(), String> {
-        if depth > 8 || found.len() > 1 {
-            return Ok(());
-        }
-        let entries = fs::read_dir(directory)
-            .map_err(|error| format!("native transcript directory is unreadable: {error}"))?;
-        for entry in entries {
-            let entry = entry
-                .map_err(|error| format!("native transcript directory entry failed: {error}"))?;
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|error| format!("native transcript metadata failed: {error}"))?;
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-            if metadata.is_dir() {
-                Self::collect_native_transcripts(
-                    &path,
-                    native_session_id,
-                    harness,
-                    depth + 1,
-                    found,
-                )?;
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let matches = match harness {
-                HarnessKind::Codex => name.ends_with(".jsonl") && name.contains(native_session_id),
-                HarnessKind::Claude => name == format!("{native_session_id}.jsonl"),
-            };
-            if metadata.is_file() && matches {
-                found.push(path);
-            }
-        }
-        Ok(())
-    }
+        model_name: Option<&str>,
+    ) -> Result<(PathBuf, Metadata, Vec<PathBuf>), String>;
+    fn capture_transcript_boundary(
+        &self,
+        binding: &NativeLaunchBinding,
+        model_name: &str,
+    ) -> Result<NativeTranscriptBoundary, String>;
+    fn capture_transcript_start_boundary(
+        &self,
+        binding: &NativeLaunchBinding,
+        model_name: &str,
+    ) -> Result<NativeTranscriptBoundary, String>;
+    fn receipt_input(&self, intent: &PromptDeliveryIntent) -> Result<Option<(File, bool)>, String>;
+}
 
+impl CapturesTranscripts for HerdrCli {
     fn transcript_candidates(
         &self,
         pane: &HerdrPaneBinding,
@@ -533,58 +431,13 @@ impl HerdrCli {
             return Err("configured native transcript root is not a directory".into());
         }
         let mut found = Vec::new();
-        Self::collect_native_transcripts(
-            &canonical_root,
-            native_session_id,
-            harness,
-            0,
-            &mut found,
-        )?;
+        canonical_root.collect_native_transcripts(native_session_id, harness, 0, &mut found)?;
         let root_after = fs::metadata(&canonical_root)
             .map_err(|error| format!("native transcript root metadata failed: {error}"))?;
         if root_before.dev() != root_after.dev() || root_before.ino() != root_after.ino() {
             return Err("configured native transcript root changed during observation".into());
         }
         Ok((canonical_root, root_after, found))
-    }
-
-    fn one_resolved_transcript(root: &Path, found: Vec<PathBuf>) -> Result<PathBuf, String> {
-        if found.len() != 1 {
-            return Err("native transcript identity did not resolve to exactly one file".into());
-        }
-        let resolved = found
-            .into_iter()
-            .next()
-            .expect("one native transcript")
-            .canonicalize()
-            .map_err(|error| format!("native transcript could not be resolved: {error}"))?;
-        resolved
-            .starts_with(root)
-            .then_some(resolved)
-            .ok_or_else(|| "native transcript resolved outside its configured root".into())
-    }
-
-    fn hash_prefix(file: &mut File, length: u64) -> Result<(String, Option<u8>), String> {
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| format!("native transcript seek failed: {error}"))?;
-        let mut remaining = length;
-        let mut hasher = Sha256::new();
-        let mut buffer = [0_u8; 64 * 1024];
-        let mut last_byte = None;
-        while remaining > 0 {
-            let wanted =
-                usize::try_from(remaining.min(buffer.len() as u64)).expect("bounded buffer length");
-            let read = file
-                .read(&mut buffer[..wanted])
-                .map_err(|error| format!("native transcript prefix read failed: {error}"))?;
-            if read == 0 {
-                return Err("native transcript was truncated during prefix observation".into());
-            }
-            hasher.update(&buffer[..read]);
-            last_byte = Some(buffer[read - 1]);
-            remaining -= read as u64;
-        }
-        Ok((format!("{:x}", hasher.finalize()), last_byte))
     }
 
     fn capture_transcript_boundary(
@@ -606,14 +459,14 @@ impl HerdrCli {
                 transcript_root_inode: root_metadata.ino().to_string(),
             }));
         }
-        let transcript = Self::one_resolved_transcript(&root, found)?;
+        let transcript = root.one_resolved_transcript(found)?;
         let mut file = File::open(&transcript)
             .map_err(|error| format!("native transcript is unreadable: {error}"))?;
         let metadata = file
             .metadata()
             .map_err(|error| format!("native transcript metadata failed: {error}"))?;
         let byte_offset = metadata.len();
-        let (prefix_sha256, last_byte) = Self::hash_prefix(&mut file, byte_offset)?;
+        let (prefix_sha256, last_byte) = file.hash_prefix(byte_offset)?;
         if last_byte.is_some_and(|byte| byte != b'\n') {
             return Err("native transcript boundary is not a complete JSONL record".into());
         }
@@ -648,7 +501,7 @@ impl HerdrCli {
             &binding.harness_kind,
             Some(model_name),
         )?;
-        let transcript = Self::one_resolved_transcript(&root, found)?;
+        let transcript = root.one_resolved_transcript(found)?;
         let file = File::open(transcript)
             .map_err(|error| format!("native transcript is unreadable: {error}"))?;
         let metadata = file
@@ -664,18 +517,8 @@ impl HerdrCli {
         }))
     }
 
-    fn decimal_identity(value: &str, label: &str) -> Result<u64, String> {
-        let parsed = value
-            .parse::<u64>()
-            .map_err(|_| format!("native transcript {label} is invalid"))?;
-        if parsed.to_string() != value {
-            return Err(format!("native transcript {label} is not canonical"));
-        }
-        Ok(parsed)
-    }
-
     fn receipt_input(&self, intent: &PromptDeliveryIntent) -> Result<Option<(File, bool)>, String> {
-        if !Self::boundary_matches_intent(intent) {
+        if !intent.boundary_matches_intent() {
             return Err("native transcript boundary does not match prompt intent".into());
         }
         let (root, root_metadata, found) = self.transcript_candidates(
@@ -686,30 +529,32 @@ impl HerdrCli {
         )?;
         match &intent.native_transcript_boundary {
             NativeTranscriptBoundary::Absent(absence) => {
-                let expected_device =
-                    Self::decimal_identity(&absence.transcript_root_device, "root device")?;
-                let expected_inode =
-                    Self::decimal_identity(&absence.transcript_root_inode, "root inode")?;
+                let expected_device = absence
+                    .transcript_root_device
+                    .decimal_identity("root device")?;
+                let expected_inode = absence
+                    .transcript_root_inode
+                    .decimal_identity("root inode")?;
                 if root_metadata.dev() != expected_device || root_metadata.ino() != expected_inode {
                     return Err("configured native transcript root was replaced".into());
                 }
                 if found.is_empty() {
                     return Ok(None);
                 }
-                let transcript = Self::one_resolved_transcript(&root, found)?;
+                let transcript = root.one_resolved_transcript(found)?;
                 File::open(transcript)
                     .map(|file| Some((file, true)))
                     .map_err(|error| format!("native transcript is unreadable: {error}"))
             }
             NativeTranscriptBoundary::Existing(cursor) => {
-                let transcript = Self::one_resolved_transcript(&root, found)?;
+                let transcript = root.one_resolved_transcript(found)?;
                 let mut file = File::open(transcript)
                     .map_err(|error| format!("native transcript is unreadable: {error}"))?;
                 let metadata = file
                     .metadata()
                     .map_err(|error| format!("native transcript metadata failed: {error}"))?;
-                let expected_device = Self::decimal_identity(&cursor.transcript_device, "device")?;
-                let expected_inode = Self::decimal_identity(&cursor.transcript_inode, "inode")?;
+                let expected_device = cursor.transcript_device.decimal_identity("device")?;
+                let expected_inode = cursor.transcript_inode.decimal_identity("inode")?;
                 let byte_offset = u64::try_from(cursor.transcript_byte_offset)
                     .map_err(|_| "native transcript boundary is negative".to_owned())?;
                 if metadata.dev() != expected_device || metadata.ino() != expected_inode {
@@ -718,7 +563,7 @@ impl HerdrCli {
                 if metadata.len() < byte_offset {
                     return Err("native transcript file was truncated".into());
                 }
-                let (prefix_sha256, _) = Self::hash_prefix(&mut file, byte_offset)?;
+                let (prefix_sha256, _) = file.hash_prefix(byte_offset)?;
                 if prefix_sha256 != cursor.transcript_prefix_sha256 {
                     return Err("native transcript prefix changed after intent persistence".into());
                 }
@@ -728,12 +573,343 @@ impl HerdrCli {
             }
         }
     }
+}
 
-    fn assistant_receipt(
-        row: &serde_json::Value,
+pub(crate) trait PreparesClaudeEnvironment {
+    fn claude_environment_preparation(&self) -> String;
+}
+
+impl PreparesClaudeEnvironment for str {
+    fn claude_environment_preparation(&self) -> String {
+        let marker_suffix = self;
+        format!(
+            "unset {} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+            HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
+            marker_suffix
+        )
+    }
+}
+
+pub(crate) trait NamesHerdrHarness {
+    fn expected_harness(&self) -> &'static str;
+}
+
+impl NamesHerdrHarness for HarnessKind {
+    fn expected_harness(&self) -> &'static str {
+        let harness = self;
+        match harness {
+            HarnessKind::Claude => "claude",
+            HarnessKind::Codex => "codex",
+        }
+    }
+}
+
+pub(crate) trait ChecksComposedLaunch {
+    fn launch_agent_name(&self) -> String;
+    fn validate_skill_selections(&self, selections: &[NativeSkillSelection]) -> Result<(), String>;
+    fn binding_matches_launch(&self, pane: &HerdrPaneBinding) -> Result<(), String>;
+    fn prompt_intent_matches_launch(&self, intent: &PromptDeliveryIntent) -> Result<(), String>;
+}
+
+impl ChecksComposedLaunch for ComposedLaunch {
+    fn launch_agent_name(&self) -> String {
+        let launch = self;
+        let hash = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "flow-herdr-agent-v1\0{}",
+                    launch.launch_profile.launch_request_id
+                )
+                .as_bytes()
+            )
+        );
+        format!(
+            "{}-{}",
+            launch.launch_profile.harness_kind.expected_harness(),
+            &hash[..24]
+        )
+    }
+
+    fn validate_skill_selections(&self, selections: &[NativeSkillSelection]) -> Result<(), String> {
+        let launch = self;
+        if selections
+            .iter()
+            .map(|selection| selection.skill_name.as_str())
+            .ne(launch
+                .launch_profile
+                .skill_name_vector
+                .iter()
+                .map(String::as_str))
+        {
+            return Err("native skill selection order differs from launch profile".into());
+        }
+        for selection in selections {
+            let path = Path::new(&selection.native_skill_path);
+            if path.sha256_file()? != selection.native_skill_sha256 {
+                return Err(format!(
+                    "native skill source changed for {}",
+                    selection.skill_name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn binding_matches_launch(&self, pane: &HerdrPaneBinding) -> Result<(), String> {
+        let launch = self;
+        if pane.launch_request_id != launch.launch_profile.launch_request_id
+            || pane.herdr_session_name != launch.launch_profile.herdr_session_name
+            || pane.herdr_agent_name != launch.launch_agent_name()
+        {
+            return Err("Herdr pane binding does not belong to this launch request".into());
+        }
+        Ok(())
+    }
+
+    fn prompt_intent_matches_launch(&self, intent: &PromptDeliveryIntent) -> Result<(), String> {
+        let launch = self;
+        if !launch.has_canonical_first_prompt() {
+            return Err("composed first prompt is not canonical".into());
+        }
+        launch.binding_matches_launch(&intent.herdr_pane_binding)?;
+        if intent.launch_request_id != launch.launch_profile.launch_request_id
+            || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
+            || intent.harness_kind != launch.launch_profile.harness_kind
+            || intent.model_name != launch.launch_profile.model_name
+            || intent.effort != launch.launch_profile.effort
+            || !intent.boundary_matches_intent()
+        {
+            return Err("durable prompt intent does not belong to this composed launch".into());
+        }
+        launch.validate_skill_selections(&intent.native_skill_selection_vector)?;
+        Ok(())
+    }
+}
+
+pub(crate) trait ReadsLaunchFiles {
+    fn sha256_file(&self) -> Result<String, String>;
+    fn collect_native_transcripts(
+        &self,
         native_session_id: &str,
-        expected: &str,
-    ) -> Option<String> {
+        harness: &HarnessKind,
+        depth: usize,
+        found: &mut Vec<PathBuf>,
+    ) -> Result<(), String>;
+    fn one_resolved_transcript(&self, found: Vec<PathBuf>) -> Result<PathBuf, String>;
+}
+
+impl ReadsLaunchFiles for Path {
+    fn sha256_file(&self) -> Result<String, String> {
+        let path = self;
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("native skill source metadata failed: {error}"))?;
+        if !path.is_absolute() || metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("native skill source is not an absolute regular file".into());
+        }
+        let source = fs::read(path)
+            .map_err(|error| format!("native skill source is unreadable: {error}"))?;
+        Ok(format!("{:x}", Sha256::digest(source)))
+    }
+
+    fn collect_native_transcripts(
+        &self,
+        native_session_id: &str,
+        harness: &HarnessKind,
+        depth: usize,
+        found: &mut Vec<PathBuf>,
+    ) -> Result<(), String> {
+        let directory = self;
+        if depth > 8 || found.len() > 1 {
+            return Ok(());
+        }
+        let entries = fs::read_dir(directory)
+            .map_err(|error| format!("native transcript directory is unreadable: {error}"))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| format!("native transcript directory entry failed: {error}"))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("native transcript metadata failed: {error}"))?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                path.collect_native_transcripts(native_session_id, harness, depth + 1, found)?;
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let matches = match harness {
+                HarnessKind::Codex => name.ends_with(".jsonl") && name.contains(native_session_id),
+                HarnessKind::Claude => name == format!("{native_session_id}.jsonl"),
+            };
+            if metadata.is_file() && matches {
+                found.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn one_resolved_transcript(&self, found: Vec<PathBuf>) -> Result<PathBuf, String> {
+        let root = self;
+        if found.len() != 1 {
+            return Err("native transcript identity did not resolve to exactly one file".into());
+        }
+        let resolved = found
+            .into_iter()
+            .next()
+            .expect("one native transcript")
+            .canonicalize()
+            .map_err(|error| format!("native transcript could not be resolved: {error}"))?;
+        resolved
+            .starts_with(root)
+            .then_some(resolved)
+            .ok_or_else(|| "native transcript resolved outside its configured root".into())
+    }
+}
+
+pub(crate) trait ChecksDeliveryIntent {
+    fn boundary_matches_intent(&self) -> bool;
+}
+
+impl ChecksDeliveryIntent for PromptDeliveryIntent {
+    fn boundary_matches_intent(&self) -> bool {
+        let intent = self;
+        let (native_session_id, harness_kind) = match &intent.native_transcript_boundary {
+            NativeTranscriptBoundary::Existing(cursor) => {
+                (&cursor.native_session_id, &cursor.harness_kind)
+            }
+            NativeTranscriptBoundary::Absent(absence) => {
+                (&absence.native_session_id, &absence.harness_kind)
+            }
+        };
+        native_session_id == &intent.native_session_id && harness_kind == &intent.harness_kind
+    }
+}
+
+pub(crate) trait HashesPrefix {
+    fn hash_prefix(&mut self, length: u64) -> Result<(String, Option<u8>), String>;
+}
+
+impl HashesPrefix for File {
+    fn hash_prefix(&mut self, length: u64) -> Result<(String, Option<u8>), String> {
+        let file = self;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| format!("native transcript seek failed: {error}"))?;
+        let mut remaining = length;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut last_byte = None;
+        while remaining > 0 {
+            let wanted =
+                usize::try_from(remaining.min(buffer.len() as u64)).expect("bounded buffer length");
+            let read = file
+                .read(&mut buffer[..wanted])
+                .map_err(|error| format!("native transcript prefix read failed: {error}"))?;
+            if read == 0 {
+                return Err("native transcript was truncated during prefix observation".into());
+            }
+            hasher.update(&buffer[..read]);
+            last_byte = Some(buffer[read - 1]);
+            remaining -= read as u64;
+        }
+        Ok((format!("{:x}", hasher.finalize()), last_byte))
+    }
+}
+
+pub(crate) trait ReadsLaunchText {
+    fn decimal_identity(&self, label: &str) -> Result<u64, String>;
+    /// Whether `text` is the composed first prompt of the intent: its body
+    /// hash under the harness footer. Claude may store the exact text inside
+    /// its native pasted-content wrapper, which is normalized separately.
+    fn prompt_text_matches_intent(&self, intent: &PromptDeliveryIntent) -> bool;
+    /// Returns the exact text inside Claude Code's native paste wrapper.
+    /// Attributes are deliberately opaque but cannot contain tag or line
+    /// delimiters; the wrapper itself is not part of the persisted digest.
+    fn claude_pasted_content(&self) -> Option<&str>;
+    /// The direct form is selected by the composer whenever native command
+    /// expansion would be unavailable. Its exact digest still authenticates
+    /// this transcript row before the observer accepts Skill tool calls.
+    fn claude_direct_skill_prompt(&self) -> bool;
+    /// Reads one command record of a Claude user turn: the harness records
+    /// each head command it loads as its name and the argument that follows
+    /// the whole command stack.
+    fn claude_command_record(&self) -> Option<(String, String)>;
+}
+
+impl ReadsLaunchText for str {
+    fn decimal_identity(&self, label: &str) -> Result<u64, String> {
+        let value = self;
+        let parsed = value
+            .parse::<u64>()
+            .map_err(|_| format!("native transcript {label} is invalid"))?;
+        if parsed.to_string() != value {
+            return Err(format!("native transcript {label} is not canonical"));
+        }
+        Ok(parsed)
+    }
+
+    fn prompt_text_matches_intent(&self, intent: &PromptDeliveryIntent) -> bool {
+        let text = self;
+        text.strip_suffix(&intent.harness_kind.receipt_footer())
+            .is_some_and(|body| {
+                format!("{:x}", Sha256::digest(body.as_bytes())) == intent.prompt_sha256
+            })
+    }
+
+    fn claude_pasted_content(&self) -> Option<&str> {
+        let text = self;
+        let rest = text.strip_prefix("<pasted_content")?;
+        let first = rest.chars().next()?;
+        if first != '>' && !first.is_whitespace() {
+            return None;
+        }
+        let (attributes, body) = rest.split_once(">\n")?;
+        if attributes.contains(['<', '>', '\r', '\n']) {
+            return None;
+        }
+        body.strip_suffix("\n</pasted_content>")
+    }
+
+    fn claude_direct_skill_prompt(&self) -> bool {
+        let text = self;
+        text.starts_with("Read ")
+            && text.contains("then load these skills through the Skill tool in this order:")
+    }
+
+    fn claude_command_record(&self) -> Option<(String, String)> {
+        let text = self;
+        let rest = text.strip_prefix("<command-message>")?;
+        let (message, rest) = rest.split_once("</command-message>\n<command-name>/")?;
+        let (name, rest) = rest.split_once("</command-name>")?;
+        if message != name {
+            return None;
+        }
+        let argument = if rest.is_empty() {
+            ""
+        } else {
+            rest.strip_prefix("\n<command-args>")?
+                .strip_suffix("</command-args>")?
+        };
+        Some((name.to_owned(), argument.to_owned()))
+    }
+}
+
+pub(crate) trait ReadsTranscriptRow {
+    fn assistant_receipt(&self, native_session_id: &str, expected: &str) -> Option<String>;
+    /// Whether a Claude assistant row ran at the intended effort. Claude Code
+    /// 2.1.280 records `effort` (and `perTurnEffort`) only for a model that
+    /// takes one; for Claude Haiku 4.5 it records no `effort` and
+    /// `perTurnEffort: null`. A row that names no effort ran at none, which is
+    /// no evidence against the intent; a row that names another one is.
+    fn claude_effort_matches(&self, effort: &str) -> bool;
+}
+
+impl ReadsTranscriptRow for serde_json::Value {
+    fn assistant_receipt(&self, native_session_id: &str, expected: &str) -> Option<String> {
+        let row = self;
         if row.get("type").and_then(serde_json::Value::as_str) == Some("event_msg")
             && row
                 .pointer("/payload/thread_id")
@@ -774,9 +950,27 @@ impl HerdrCli {
         None
     }
 
-    fn skill_source(selection: &NativeSkillSelection) -> Result<String, String> {
+    fn claude_effort_matches(&self, effort: &str) -> bool {
+        let row = self;
+        ["effort", "perTurnEffort"]
+            .iter()
+            .filter_map(|key| row.get(*key))
+            .filter(|value| !value.is_null())
+            .all(|value| value.as_str() == Some(effort))
+    }
+}
+
+pub(crate) trait ExpandsNativeSkill {
+    fn skill_source(&self) -> Result<String, String>;
+    fn claude_skill_expansion(&self) -> Result<String, String>;
+    fn codex_skill_expansion(&self) -> Result<String, String>;
+}
+
+impl ExpandsNativeSkill for NativeSkillSelection {
+    fn skill_source(&self) -> Result<String, String> {
+        let selection = self;
         let path = Path::new(&selection.native_skill_path);
-        if Self::sha256_file(path)? != selection.native_skill_sha256 {
+        if path.sha256_file()? != selection.native_skill_sha256 {
             return Err(format!(
                 "native skill source changed for {}",
                 selection.skill_name
@@ -790,8 +984,9 @@ impl HerdrCli {
         })
     }
 
-    fn claude_skill_expansion(selection: &NativeSkillSelection) -> Result<String, String> {
-        let source = Self::skill_source(selection)?;
+    fn claude_skill_expansion(&self) -> Result<String, String> {
+        let selection = self;
+        let source = selection.skill_source()?;
         let body = if let Some(after_open) = source.strip_prefix("---\n") {
             let closing = after_open.find("\n---\n").ok_or_else(|| {
                 format!(
@@ -812,83 +1007,25 @@ impl HerdrCli {
         ))
     }
 
-    fn codex_skill_expansion(selection: &NativeSkillSelection) -> Result<String, String> {
-        let source = Self::skill_source(selection)?;
+    fn codex_skill_expansion(&self) -> Result<String, String> {
+        let selection = self;
+        let source = selection.skill_source()?;
         Ok(format!(
             "<skill>\n<name>{}</name>\n<path>{}</path>\n{}\n</skill>",
             selection.skill_name, selection.native_skill_path, source
         ))
     }
+}
 
-    /// Whether `text` is the composed first prompt of the intent: its body
-    /// hash under the harness footer. Claude may store the exact text inside
-    /// its native pasted-content wrapper, which is normalized separately.
-    fn prompt_text_matches_intent(text: &str, intent: &PromptDeliveryIntent) -> bool {
-        text.strip_suffix(&intent.harness_kind.receipt_footer())
-            .is_some_and(|body| {
-                format!("{:x}", Sha256::digest(body.as_bytes())) == intent.prompt_sha256
-            })
-    }
-
-    /// Returns the exact text inside Claude Code's native paste wrapper.
-    /// Attributes are deliberately opaque but cannot contain tag or line
-    /// delimiters; the wrapper itself is not part of the persisted digest.
-    fn claude_pasted_content(text: &str) -> Option<&str> {
-        let rest = text.strip_prefix("<pasted_content")?;
-        let first = rest.chars().next()?;
-        if first != '>' && !first.is_whitespace() {
-            return None;
-        }
-        let (attributes, body) = rest.split_once(">\n")?;
-        if attributes.contains(['<', '>', '\r', '\n']) {
-            return None;
-        }
-        body.strip_suffix("\n</pasted_content>")
-    }
-
-    /// The direct form is selected by the composer whenever native command
-    /// expansion would be unavailable. Its exact digest still authenticates
-    /// this transcript row before the observer accepts Skill tool calls.
-    fn claude_direct_skill_prompt(text: &str) -> bool {
-        text.starts_with("Read ")
-            && text.contains("then load these skills through the Skill tool in this order:")
-    }
-
-    /// Whether a Claude assistant row ran at the intended effort. Claude Code
-    /// 2.1.280 records `effort` (and `perTurnEffort`) only for a model that
-    /// takes one; for Claude Haiku 4.5 it records no `effort` and
-    /// `perTurnEffort: null`. A row that names no effort ran at none, which is
-    /// no evidence against the intent; a row that names another one is.
-    fn claude_effort_matches(row: &serde_json::Value, effort: &str) -> bool {
-        ["effort", "perTurnEffort"]
-            .iter()
-            .filter_map(|key| row.get(*key))
-            .filter(|value| !value.is_null())
-            .all(|value| value.as_str() == Some(effort))
-    }
-
-    /// Reads one command record of a Claude user turn: the harness records
-    /// each head command it loads as its name and the argument that follows
-    /// the whole command stack.
-    fn claude_command_record(text: &str) -> Option<(String, String)> {
-        let rest = text.strip_prefix("<command-message>")?;
-        let (message, rest) = rest.split_once("</command-message>\n<command-name>/")?;
-        let (name, rest) = rest.split_once("</command-name>")?;
-        if message != name {
-            return None;
-        }
-        let argument = if rest.is_empty() {
-            ""
-        } else {
-            rest.strip_prefix("\n<command-args>")?
-                .strip_suffix("</command-args>")?
-        };
-        Some((name.to_owned(), argument.to_owned()))
-    }
-
+pub(crate) trait TypesClaudeStack {
     /// The text that was typed when `names` were stacked at the head of a
     /// block whose remaining text is `argument`.
-    fn claude_stacked_typed_text(names: &[&str], argument: &str) -> String {
+    fn claude_stacked_typed_text(&self, argument: &str) -> String;
+}
+
+impl TypesClaudeStack for [&str] {
+    fn claude_stacked_typed_text(&self, argument: &str) -> String {
+        let names = self;
         let mut typed = names
             .iter()
             .map(|name| format!("/{name}"))
@@ -902,15 +1039,32 @@ impl HerdrCli {
     }
 }
 
-impl HerdrCli {
+pub(crate) trait TitlesClaudeSession {
     const TITLE_READBACK_ATTEMPTS: usize = 40;
     #[cfg(not(test))]
     const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(250);
     #[cfg(test)]
     const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(1);
-
     /// The last title the native Claude transcript records for its session,
     /// or none while no transcript or no title record exists.
+    fn claude_transcript_title(
+        &self,
+        pane: &HerdrPaneBinding,
+        native_session_id: &str,
+    ) -> Result<Option<String>, String>;
+    /// Renames the Claude session with its own `/rename` command and reads
+    /// the title back from the terminal title Claude sets and from the
+    /// session's transcript title record once one exists.
+    fn title_claude_session(
+        &self,
+        binding: &NativeLaunchBinding,
+        title: &NativeTitle,
+    ) -> Result<(), String>;
+    /// Labels the launch pane with the title and reads the label back.
+    fn label_herdr_pane(&self, pane: &HerdrPaneBinding, title: &NativeTitle) -> Result<(), String>;
+}
+
+impl TitlesClaudeSession for HerdrCli {
     fn claude_transcript_title(
         &self,
         pane: &HerdrPaneBinding,
@@ -921,7 +1075,7 @@ impl HerdrCli {
         if found.is_empty() {
             return Ok(None);
         }
-        let transcript = fs::read(Self::one_resolved_transcript(&root, found)?)
+        let transcript = fs::read(root.one_resolved_transcript(found)?)
             .map_err(|error| format!("native transcript is unreadable: {error}"))?;
         Ok(transcript
             .split(|byte| *byte == b'\n')
@@ -940,9 +1094,6 @@ impl HerdrCli {
             .next())
     }
 
-    /// Renames the Claude session with its own `/rename` command and reads
-    /// the title back from the terminal title Claude sets and from the
-    /// session's transcript title record once one exists.
     fn title_claude_session(
         &self,
         binding: &NativeLaunchBinding,
@@ -985,7 +1136,6 @@ impl HerdrCli {
         Err("Claude native title readback differs from the set title".into())
     }
 
-    /// Labels the launch pane with the title and reads the label back.
     fn label_herdr_pane(&self, pane: &HerdrPaneBinding, title: &NativeTitle) -> Result<(), String> {
         self.run_json(&[
             "--session".into(),
@@ -1023,7 +1173,7 @@ impl TitlesNativeFlow for HerdrCli {
         launch: &ComposedLaunch,
         binding: &NativeLaunchBinding,
     ) -> Result<NativeTitle, String> {
-        Self::binding_matches_launch(launch, &binding.herdr_pane_binding)?;
+        launch.binding_matches_launch(&binding.herdr_pane_binding)?;
         if binding.launch_request_id != launch.launch_profile.launch_request_id
             || binding.harness_kind != launch.launch_profile.harness_kind
         {
@@ -1050,7 +1200,7 @@ impl TitlesNativeFlow for HerdrCli {
 
 impl CreatesHerdrLaunchPane for HerdrCli {
     fn create_launch_pane(&self, launch: &ComposedLaunch) -> Result<HerdrPaneBinding, String> {
-        let agent_name = Self::launch_agent_name(launch);
+        let agent_name = launch.launch_agent_name();
         let response = self.run_json(&[
             "--session".into(),
             launch.launch_profile.herdr_session_name.clone(),
@@ -1099,11 +1249,11 @@ impl StartsNativeHerdrHarness for HerdrCli {
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
     ) -> Result<(), String> {
-        Self::binding_matches_launch(launch, pane)?;
+        launch.binding_matches_launch(pane)?;
         if launch.launch_profile.harness_kind == HarnessKind::Claude {
             self.prepare_claude_pane_environment(launch, pane)?;
         }
-        let harness = Self::expected_harness(&launch.launch_profile.harness_kind);
+        let harness = launch.launch_profile.harness_kind.expected_harness();
         let mut arguments = vec![
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -1182,8 +1332,8 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
     ) -> Result<NativeLaunchBinding, String> {
-        Self::binding_matches_launch(launch, pane)?;
-        let expected_harness = Self::expected_harness(&launch.launch_profile.harness_kind);
+        launch.binding_matches_launch(pane)?;
+        let expected_harness = launch.launch_profile.harness_kind.expected_harness();
         let response = self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -1305,7 +1455,7 @@ impl ResolvesClaudeNativeSkills for HerdrCli {
                 })?;
                 Ok(NativeSkillSelection {
                     skill_name: name.clone(),
-                    native_skill_sha256: Self::sha256_file(&path)?,
+                    native_skill_sha256: path.sha256_file()?,
                     native_skill_path: path.to_string_lossy().into_owned(),
                 })
             })
@@ -1321,7 +1471,7 @@ impl AcceptsLaunchRegistration for HerdrCli {
         acknowledgement: &RegistrationAcknowledgement,
         native_skill_selection_vector: Vec<NativeSkillSelection>,
     ) -> Result<PromptDeliveryIntent, String> {
-        Self::binding_matches_launch(launch, &binding.herdr_pane_binding)?;
+        launch.binding_matches_launch(&binding.herdr_pane_binding)?;
         if binding.harness_kind != launch.launch_profile.harness_kind
             || acknowledgement.launch_request_id != binding.launch_request_id
             || acknowledgement.flow_id != binding.flow_id
@@ -1330,7 +1480,7 @@ impl AcceptsLaunchRegistration for HerdrCli {
         {
             return Err("registration acknowledgement does not match native binding".into());
         }
-        Self::validate_skill_selections(launch, &native_skill_selection_vector)?;
+        launch.validate_skill_selections(&native_skill_selection_vector)?;
         let native_transcript_boundary =
             self.capture_transcript_boundary(binding, &launch.launch_profile.model_name)?;
         Ok(PromptDeliveryIntent {
@@ -1354,7 +1504,7 @@ impl SubmitsFirstPromptOnce for HerdrCli {
         launch: &ComposedLaunch,
         durable_intent: &PromptDeliveryIntent,
     ) -> Result<PromptDeliveryResult, String> {
-        Self::prompt_intent_matches_launch(launch, durable_intent)?;
+        launch.prompt_intent_matches_launch(durable_intent)?;
         if durable_intent.harness_kind != HarnessKind::Claude {
             return Err("Codex first turns require the bound native typed-skill controller".into());
         }
@@ -1481,9 +1631,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                 .last()
                                 .and_then(|value| value.get("text"))
                                 .and_then(serde_json::Value::as_str)
-                                .is_some_and(|text| {
-                                    Self::prompt_text_matches_intent(text, durable_intent)
-                                })
+                                .is_some_and(|text| text.prompt_text_matches_intent(durable_intent))
                         {
                             return Err("native Codex first-turn text differs from intent".into());
                         }
@@ -1494,9 +1642,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                             == Some("response_item")
                         && skill_index < durable_intent.native_skill_selection_vector.len()
                     {
-                        let expected_expansion = Self::codex_skill_expansion(
-                            &durable_intent.native_skill_selection_vector[skill_index],
-                        )?;
+                        let expected_expansion = (durable_intent.native_skill_selection_vector
+                            [skill_index])
+                            .codex_skill_expansion()?;
                         let matched = row
                             .pointer("/payload/content")
                             .and_then(serde_json::Value::as_array)
@@ -1578,16 +1726,16 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                 .take(claude_stack)
                                 .map(|selection| selection.skill_name.as_str())
                                 .collect::<Vec<_>>();
-                            match Self::claude_command_record(text) {
+                            match text.claude_command_record() {
                                 Some((command, argument)) if claude_commands_loaded == 0 => {
                                     // The first command record carries the
                                     // argument after the whole stack; the
                                     // typed block is every stacked command
                                     // followed by it.
-                                    let typed = Self::claude_stacked_typed_text(&names, &argument);
+                                    let typed = names.claude_stacked_typed_text(&argument);
                                     if input_verified
                                         || names.first() != Some(&command.as_str())
-                                        || !Self::prompt_text_matches_intent(&typed, durable_intent)
+                                        || !typed.prompt_text_matches_intent(durable_intent)
                                         || row
                                             .get("stackedOriginalInput")
                                             .and_then(serde_json::Value::as_str)
@@ -1618,12 +1766,10 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                     claude_commands_loaded += 1;
                                     claude_command_expansion_pending = true;
                                 }
-                                None if Self::claude_pasted_content(text).is_some_and(
-                                    |original| {
-                                        Self::prompt_text_matches_intent(original, durable_intent)
-                                            && Self::claude_direct_skill_prompt(original)
-                                    },
-                                ) =>
+                                None if text.claude_pasted_content().is_some_and(|original| {
+                                    original.prompt_text_matches_intent(durable_intent)
+                                        && original.claude_direct_skill_prompt()
+                                }) =>
                                 {
                                     // The composer selected this form because native commands
                                     // would remain literal inside the wrapper. All selected
@@ -1631,8 +1777,8 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                     claude_stack = 0;
                                     input_verified = true;
                                 }
-                                None if Self::prompt_text_matches_intent(text, durable_intent)
-                                    && Self::claude_direct_skill_prompt(text) =>
+                                None if text.prompt_text_matches_intent(durable_intent)
+                                    && text.claude_direct_skill_prompt() =>
                                 {
                                     // Claude can also leave the composed
                                     // direct form as a plain user row. Its
@@ -1652,7 +1798,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                 }
                                 None => {
                                     if input_verified
-                                        || !Self::prompt_text_matches_intent(text, durable_intent)
+                                        || !text.prompt_text_matches_intent(durable_intent)
                                     {
                                         return Err(
                                             "native Claude first-turn text differs from intent"
@@ -1702,10 +1848,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                         if companion && claude_command_expansion_pending {
                             // The harness expands each stacked command
                             // itself, appending the argument after the body.
-                            let expected_expansion = Self::claude_skill_expansion(
-                                &durable_intent.native_skill_selection_vector
-                                    [claude_commands_loaded - 1],
-                            )?;
+                            let expected_expansion = (durable_intent.native_skill_selection_vector
+                                [claude_commands_loaded - 1])
+                                .claude_skill_expansion()?;
                             let contents = row
                                 .pointer("/message/content")
                                 .and_then(serde_json::Value::as_array)
@@ -1745,9 +1890,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                                         .into(),
                                 );
                             }
-                            let expected_expansion = Self::claude_skill_expansion(
-                                &durable_intent.native_skill_selection_vector[skill_index],
-                            )?;
+                            let expected_expansion = (durable_intent.native_skill_selection_vector
+                                [skill_index])
+                                .claude_skill_expansion()?;
                             let contents = row
                                 .pointer("/message/content")
                                 .and_then(serde_json::Value::as_array)
@@ -1770,9 +1915,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                     }
                 }
             }
-            if let Some(turn) =
-                Self::assistant_receipt(&row, &durable_intent.native_session_id, expected)
-            {
+            if let Some(turn) = row.assistant_receipt(&durable_intent.native_session_id, expected) {
                 if observed_turn.is_some() {
                     return Err("native transcript contains duplicate target receipts".into());
                 }
@@ -1791,7 +1934,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                         .pointer("/message/model")
                         .and_then(serde_json::Value::as_str)
                         != Some(durable_intent.model_name.as_str())
-                        || !Self::claude_effort_matches(&row, durable_intent.effort.as_str()))
+                        || !row.claude_effort_matches(durable_intent.effort.as_str()))
                 {
                     return Err("native Claude model or effort differs from intent".into());
                 }
@@ -1839,7 +1982,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
 
 #[cfg(test)]
 mod tests {
-    use super::{
+    use crate::herdr::launch::TitlesClaudeSession;
+use crate::herdr::launch::PreparesClaudePane;
+use super::{
         AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
         ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
         SubmitsFirstPromptOnce, TitlesNativeFlow,
@@ -1850,7 +1995,10 @@ mod tests {
         OpensLaunchComposer,
     };
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+    use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::HerdrCli;
+    use crate::herdr::launch::ChecksComposedLaunch;
+    use crate::herdr::launch::PreparesClaudeEnvironment;
     use crate::title::ShowsNativeTitle;
     use signal_flow::{
         ComposedLaunch, Effort, FirstPromptPayload, FlowAspect, HarnessKind, LaunchProfile,
@@ -2016,7 +2164,7 @@ printf '%s\n' 123456
     #[test]
     fn codex_launch_selects_one_exact_executable_and_remote_socket() {
         let launch = launch(HarnessKind::Codex);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "codex",
             "12345678-1234-4abc-8def-123456789abc",
@@ -2057,7 +2205,7 @@ printf '%s\n' 123456
         let mut command = std::process::Command::new("sh");
         command.arg("-c").arg(format!(
             "{}; {checks}",
-            HerdrCli::claude_environment_preparation("test-marker"),
+            ("test-marker").claude_environment_preparation(),
         ));
         for name in HerdrCli::CLAUDE_INHERITED_ENVIRONMENT {
             command.env(name, "/home/li/.claude/jobs/108ab020");
@@ -2078,7 +2226,7 @@ printf '%s\n' 123456
     fn stages_pane_native_claim_registration_and_one_ambiguous_prompt_write() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -2199,7 +2347,7 @@ printf '%s\n' 123456
     fn malformed_full_prompt_is_rejected_before_herdr_prompt_write() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -2236,7 +2384,7 @@ printf '%s\n' 123456
     fn missing_official_identity_and_mismatched_claim_fail_closed() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Codex);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "codex",
             native_session,
@@ -2273,7 +2421,7 @@ printf '%s\n' 123456
     #[test]
     fn unsupported_workspace_roots_are_rejected_before_herdr_creation() {
         let launch = launch(HarnessKind::Codex);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, mut adapter) = fixture_herdr(
             "codex",
             "12345678-1234-4abc-8def-123456789abc",
@@ -2294,7 +2442,7 @@ printf '%s\n' 123456
     fn old_exact_receipt_before_cursor_is_rejected_and_new_receipt_is_observed() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Codex);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "codex",
             native_session,
@@ -2357,7 +2505,7 @@ printf '%s\n' 123456
     fn codex_receipt_rejects_wrong_first_text_with_matching_skills_and_marker() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Codex);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "codex",
             native_session,
@@ -2402,7 +2550,7 @@ printf '%s\n' 123456
     fn absent_or_duplicate_native_receipt_is_never_retried_or_invented() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -2470,7 +2618,7 @@ printf '%s\n' 123456
     fn claude_receipt_of_a_model_without_effort_is_observed() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -2528,7 +2676,7 @@ printf '%s\n' 123456
     fn registered_harness_change_with_same_native_id_is_rejected() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -2550,7 +2698,7 @@ printf '%s\n' 123456
     fn persisted_cursor_rejects_truncation_prefix_change_and_replacement() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Codex);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "codex",
             native_session,
@@ -2624,7 +2772,7 @@ printf '%s\n' 123456
                 <= 800
         );
         launch.target_receipt_request.prompt_sha256 = body_hash;
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -2844,7 +2992,7 @@ printf '%s\n' 123456
         assert!(body.contains(
             "then load these skills through the Skill tool in this order: spirit, main-flow."
         ));
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -3023,7 +3171,7 @@ printf '%s\n' 123456
         use std::io::Write;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let (_composition_root, launch) = composed_multiline_claude_launch();
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -3099,7 +3247,7 @@ printf '%s\n' 123456
         launch.first_prompt_payload.first_prompt_text =
             format!("{body}{}", HarnessKind::Claude.receipt_footer());
         launch.target_receipt_request.prompt_sha256 = body_hash;
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -3285,7 +3433,7 @@ printf '%s\n' 123456
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.flow_aspect = FlowAspect::Psyche;
         launch.launch_profile.model_name = "claude-fable-5-1".into();
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -3351,7 +3499,7 @@ printf '%s\n' 123456
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.flow_aspect = FlowAspect::Psyche;
         launch.launch_profile.model_name = "claude-fable-5-1".into();
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -3381,7 +3529,7 @@ printf '%s\n' 123456
     fn unmapped_model_is_refused_before_any_rename() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
             native_session,
@@ -3407,7 +3555,7 @@ printf '%s\n' 123456
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let mut launch = launch(HarnessKind::Codex);
         launch.launch_profile.model_name = "gpt-6-astra".into();
-        let agent_name = HerdrCli::launch_agent_name(&launch);
+        let agent_name = launch.launch_agent_name();
         let (root, mut adapter) = fixture_herdr(
             "codex",
             native_session,

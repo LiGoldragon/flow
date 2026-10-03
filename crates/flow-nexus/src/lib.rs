@@ -2,6 +2,8 @@
 use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::KeepsLaunchBundles;
+use crate::herdr::ConfiguresHerdrCli;
+use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::AnswersLaunchOutcome;
 pub mod binding;
@@ -757,6 +759,8 @@ mod tests {
     use crate::DispatchesSerially;
     use crate::composition::AsksForLaunchReceipt;
     use crate::composition::KeepsLaunchBundles;
+    use crate::herdr::ConfiguresHerdrCli;
+    use crate::herdr::ReadsHerdrPanes;
     mod delivery;
     mod submission;
 

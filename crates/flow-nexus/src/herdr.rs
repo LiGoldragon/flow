@@ -171,10 +171,10 @@ impl ReadsHerdrRoster for HerdrCli {
             return None;
         }
         let snapshot = self.snapshot(route)?;
-        if !HerdrCli::snapshot_has_route(&snapshot, route, &node.harness_kind) {
+        if !snapshot.has_route(route, &node.harness_kind) {
             return None;
         }
-        let herdr_agent_name = HerdrCli::live_agent_name(&snapshot, route, &node.harness_kind)?;
+        let herdr_agent_name = snapshot.live_agent_name(route, &node.harness_kind)?;
         Some(HerdrRoute {
             herdr_agent_name,
             ..route.clone()
@@ -210,7 +210,7 @@ struct PromptReply {
     output: Output,
 }
 
-impl PromptReply {
+trait ReadsPromptReply {
     /// The wait that observes the recipient react: Herdr 0.8.2 requires a
     /// lifecycle change within five seconds of an accepted prompt to a
     /// non-working agent, else `agent_prompt_stalled`; any observed state
@@ -228,7 +228,6 @@ impl PromptReply {
         "--timeout",
         "10000",
     ];
-
     /// Herdr 0.8.2 error codes answered before any input is sent to the
     /// pane (`handle_agent_prompt` and the pre-prompt `agent get`). Every
     /// other failure may follow typed input and is Uncertain.
@@ -240,7 +239,15 @@ impl PromptReply {
         "empty_agent_prompt",
         "agent_prompt_failed",
     ];
+    fn refused_before_input(&self) -> bool;
+    /// Whether Herdr answered `agent_prompted` for the exact binding the
+    /// route names. The reply carries that pane's own AgentInfo, so the pane
+    /// and terminal it names are the observation itself. The agent's `name`
+    /// is a label the harness need not carry at all, and is never read here.
+    fn prompted_binding(&self, route: &HerdrRoute) -> bool;
+}
 
+impl ReadsPromptReply for PromptReply {
     fn refused_before_input(&self) -> bool {
         !self.output.status.success()
             && serde_json::from_slice::<serde_json::Value>(&self.output.stderr)
@@ -254,10 +261,6 @@ impl PromptReply {
                 .unwrap_or(false)
     }
 
-    /// Whether Herdr answered `agent_prompted` for the exact binding the
-    /// route names. The reply carries that pane's own AgentInfo, so the pane
-    /// and terminal it names are the observation itself. The agent's `name`
-    /// is a label the harness need not carry at all, and is never read here.
     fn prompted_binding(&self, route: &HerdrRoute) -> bool {
         self.output.status.success()
             && serde_json::from_slice::<serde_json::Value>(&self.output.stdout).is_ok_and(|reply| {
@@ -277,25 +280,34 @@ impl PromptReply {
     }
 }
 
-impl HerdrCli {
-    pub fn with_launch_bundles(mut self, launch_bundles: LaunchBundles) -> Self {
+pub trait ConfiguresHerdrCli {
+    fn with_launch_bundles(self, launch_bundles: LaunchBundles) -> Self;
+    /// The per-launch bundle copy the composer wrote for this launch.
+    fn launch_bundle_file(&self, profile: &signal_flow::LaunchProfile) -> PathBuf;
+    fn with_codex_endpoints(self, codex_endpoints: CodexEndpoints) -> Self;
+    /// Re-roots the flows directory and the workspace skill catalog on the
+    /// configured source root.
+    fn with_source_root(self, source_root: &std::path::Path) -> Self;
+    #[cfg(test)]
+    fn at(executable: PathBuf, flows_root: PathBuf) -> Self;
+}
+
+impl ConfiguresHerdrCli for HerdrCli {
+    fn with_launch_bundles(mut self, launch_bundles: LaunchBundles) -> Self {
         self.launch_bundles = launch_bundles;
         self
     }
 
-    /// The per-launch bundle copy the composer wrote for this launch.
-    pub fn launch_bundle_file(&self, profile: &signal_flow::LaunchProfile) -> PathBuf {
+    fn launch_bundle_file(&self, profile: &signal_flow::LaunchProfile) -> PathBuf {
         self.launch_bundles.file_for(profile)
     }
 
-    pub fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
+    fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
         self.codex_endpoints = codex_endpoints;
         self
     }
 
-    /// Re-roots the flows directory and the workspace skill catalog on the
-    /// configured source root.
-    pub fn with_source_root(mut self, source_root: &std::path::Path) -> Self {
+    fn with_source_root(mut self, source_root: &std::path::Path) -> Self {
         let previous_skills = self
             .flows_root
             .parent()
@@ -309,7 +321,7 @@ impl HerdrCli {
     }
 
     #[cfg(test)]
-    pub(crate) fn at(executable: PathBuf, flows_root: PathBuf) -> Self {
+    fn at(executable: PathBuf, flows_root: PathBuf) -> Self {
         let fixture_root = flows_root
             .parent()
             .expect("fixture flows root has a parent")
@@ -350,20 +362,29 @@ impl HerdrCli {
             ),
         }
     }
+}
 
-    pub fn validate_registration(&self, node: &FlowNode) -> bool {
+pub trait ReadsHerdrPanes {
+    fn validate_registration(&self, node: &FlowNode) -> bool;
+    /// Whether the Flow's recorded pane is still in Herdr. An unreadable
+    /// Herdr is `Unknown`, never `Absent`.
+    fn pane_presence(&self, node: &FlowNode) -> PanePresence;
+    fn refresh_route(&self, node: FlowNode) -> FlowNode;
+    fn snapshot(&self, route: &HerdrRoute) -> Option<serde_json::Value>;
+}
+
+impl ReadsHerdrPanes for HerdrCli {
+    fn validate_registration(&self, node: &FlowNode) -> bool {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return false;
         };
         self.identity_is_claimed(node)
-            && self.snapshot(route).is_some_and(|snapshot| {
-                HerdrCli::snapshot_has_binding(&snapshot, route, &node.harness_kind)
-            })
+            && self
+                .snapshot(route)
+                .is_some_and(|snapshot| snapshot.has_binding(route, &node.harness_kind))
     }
 
-    /// Whether the Flow's recorded pane is still in Herdr. An unreadable
-    /// Herdr is `Unknown`, never `Absent`.
-    pub fn pane_presence(&self, node: &FlowNode) -> PanePresence {
+    fn pane_presence(&self, node: &FlowNode) -> PanePresence {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return PanePresence::Absent;
         };
@@ -378,7 +399,7 @@ impl HerdrCli {
         };
         if agents
             .iter()
-            .any(|agent| HerdrCli::agent_matches_binding(agent, route, &node.harness_kind))
+            .any(|agent| agent.matches_binding(route, &node.harness_kind))
         {
             return PanePresence::Present;
         }
@@ -391,7 +412,7 @@ impl HerdrCli {
         PanePresence::Absent
     }
 
-    pub fn refresh_route(&self, mut node: FlowNode) -> FlowNode {
+    fn refresh_route(&self, mut node: FlowNode) -> FlowNode {
         let had_persisted_route = matches!(
             node.herdr_route_selection,
             HerdrRouteSelection::Available(_)
@@ -428,90 +449,90 @@ impl HerdrCli {
             .then(|| serde_json::from_slice(&output.stdout).ok())
             .flatten()
     }
+}
 
-    fn snapshot_has_route(
-        snapshot: &serde_json::Value,
-        route: &HerdrRoute,
-        harness_kind: &HarnessKind,
-    ) -> bool {
-        snapshot
-            .pointer("/result/snapshot/agents")
+/// A Herdr `pane snapshot` reply, read for the agents it shows.
+pub trait ReadsHerdrSnapshot {
+    /// Whether the snapshot shows the bound agent able to take a prompt.
+    fn has_route(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool;
+    /// Whether the snapshot shows the bound agent at all.
+    fn has_binding(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool;
+    /// The name the bound agent carries now.
+    fn live_agent_name(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String>;
+}
+
+impl ReadsHerdrSnapshot for serde_json::Value {
+    fn has_route(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool {
+        self.pointer("/result/snapshot/agents")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|agents| {
                 agents.iter().any(|agent| {
-                    HerdrCli::agent_matches_binding(agent, route, harness_kind)
+                    agent.matches_binding(route, harness_kind)
                         && matches!(
                             agent
                                 .get("agent_status")
                                 .and_then(serde_json::Value::as_str),
                             Some("idle" | "done" | "working")
                         )
-                        && HerdrCli::agent_readiness_permits_prompt(agent)
+                        && agent.permits_prompt()
                 })
             })
     }
 
-    fn snapshot_has_binding(
-        snapshot: &serde_json::Value,
-        route: &HerdrRoute,
-        harness_kind: &HarnessKind,
-    ) -> bool {
-        snapshot
-            .pointer("/result/snapshot/agents")
+    fn has_binding(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool {
+        self.pointer("/result/snapshot/agents")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|agents| {
                 agents
                     .iter()
-                    .any(|agent| HerdrCli::agent_matches_binding(agent, route, harness_kind))
+                    .any(|agent| agent.matches_binding(route, harness_kind))
             })
     }
 
-    /// Herdr 0.8.2 reports a harness at rest after a turn as `done`, the
-    /// same prompt-accepting state as `idle`, and omits `interactive_ready`
-    /// for many live panes (every rested Codex pane observed, some Claude
-    /// panes). The flag therefore gates a prompt only when Herdr reports it:
-    /// absent permits, `true` permits, anything else refuses.
-    fn agent_readiness_permits_prompt(agent: &serde_json::Value) -> bool {
-        match agent.get("interactive_ready") {
-            None | Some(serde_json::Value::Null) => true,
-            Some(reported) => reported.as_bool() == Some(true),
-        }
-    }
-
-    /// The name the bound agent carries now.
-    fn live_agent_name(
-        snapshot: &serde_json::Value,
-        route: &HerdrRoute,
-        harness_kind: &HarnessKind,
-    ) -> Option<String> {
-        snapshot
-            .pointer("/result/snapshot/agents")
+    fn live_agent_name(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String> {
+        self.pointer("/result/snapshot/agents")
             .and_then(serde_json::Value::as_array)?
             .iter()
-            .find(|agent| HerdrCli::agent_matches_binding(agent, route, harness_kind))?
+            .find(|agent| agent.matches_binding(route, harness_kind))?
             .get("name")
             .and_then(serde_json::Value::as_str)
             .filter(|name| !name.is_empty())
             .map(str::to_owned)
     }
+}
 
+/// One agent of a Herdr snapshot.
+pub trait ReadsHerdrAgent {
     /// The binding is the pane id and terminal id Herdr assigned (the
     /// session is the snapshot's own) and the harness kind; the agent name
     /// is not part of it, since a running flow may rename its agent.
-    fn agent_matches_binding(
-        agent: &serde_json::Value,
-        route: &HerdrRoute,
-        harness_kind: &HarnessKind,
-    ) -> bool {
+    fn matches_binding(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool;
+    /// Herdr 0.8.2 reports a harness at rest after a turn as `done`, the
+    /// same prompt-accepting state as `idle`, and omits `interactive_ready`
+    /// for many live panes (every rested Codex pane observed, some Claude
+    /// panes). The flag therefore gates a prompt only when Herdr reports it:
+    /// absent permits, `true` permits, anything else refuses.
+    fn permits_prompt(&self) -> bool;
+}
+
+impl ReadsHerdrAgent for serde_json::Value {
+    fn matches_binding(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool {
         let expected_harness = match harness_kind {
             HarnessKind::Codex => "codex",
             HarnessKind::Claude => "claude",
         };
-        agent.get("pane_id").and_then(serde_json::Value::as_str)
+        self.get("pane_id").and_then(serde_json::Value::as_str)
             == Some(route.herdr_pane_id.as_str())
-            && agent.get("terminal_id").and_then(serde_json::Value::as_str)
+            && self.get("terminal_id").and_then(serde_json::Value::as_str)
                 == Some(route.herdr_terminal_id.as_str())
-            && agent.get("agent").and_then(serde_json::Value::as_str) == Some(expected_harness)
+            && self.get("agent").and_then(serde_json::Value::as_str) == Some(expected_harness)
+    }
+
+    fn permits_prompt(&self) -> bool {
+        match self.get("interactive_ready") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(reported) => reported.as_bool() == Some(true),
+        }
     }
 }
 
@@ -601,6 +622,10 @@ impl DecodesFlowClaim for FlowClaim {
 #[cfg(test)]
 mod tests {
     use super::{HerdrCli, VerifiesFlowClaim};
+    use crate::herdr::ConfiguresHerdrCli;
+    use crate::herdr::ReadsHerdrPanes;
+    use crate::herdr::ReadsHerdrSnapshot;
+    use crate::herdr::pane::ReadsAgentStatus;
     use signal_flow::{
         EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
         OriginClue,
@@ -610,11 +635,10 @@ mod tests {
     /// Whether the snapshot's one agent is at rest, as the writer reads it.
     fn idle(snapshot: &serde_json::Value) -> bool {
         matches!(
-            HerdrCli::agent_state_of(
-                snapshot
-                    .pointer("/result/snapshot/agents/0/agent_status")
-                    .and_then(serde_json::Value::as_str)
-            ),
+            snapshot
+                .pointer("/result/snapshot/agents/0/agent_status")
+                .and_then(serde_json::Value::as_str)
+                .agent_state(),
             signal_flow::AgentState::Idle | signal_flow::AgentState::Done
         )
     }
@@ -634,11 +658,7 @@ mod tests {
             "agent":"claude", "agent_status":"idle", "interactive_ready":true,
             "name":"recipient", "pane_id":"w1:p2", "terminal_id":"term-current"
         }]}}});
-        assert!(HerdrCli::snapshot_has_route(
-            &snapshot,
-            &route(),
-            &HarnessKind::Claude
-        ));
+        assert!(snapshot.has_route(&route(), &HarnessKind::Claude));
     }
 
     #[test]
@@ -647,16 +667,8 @@ mod tests {
             "agent":"claude", "agent_status":"working", "interactive_ready":true,
             "name":"recipient", "pane_id":"w1:p2", "terminal_id":"term-current"
         }]}}});
-        assert!(HerdrCli::snapshot_has_binding(
-            &snapshot,
-            &route(),
-            &HarnessKind::Claude
-        ));
-        assert!(HerdrCli::snapshot_has_route(
-            &snapshot,
-            &route(),
-            &HarnessKind::Claude
-        ));
+        assert!(snapshot.has_binding(&route(), &HarnessKind::Claude));
+        assert!(snapshot.has_route(&route(), &HarnessKind::Claude));
     }
 
     #[test]
@@ -675,11 +687,7 @@ mod tests {
                 "name":"recipient", "pane_id":"w1:p2", "terminal_id":"term-current"
             }]}}}),
         ] {
-            assert!(!HerdrCli::snapshot_has_route(
-                &snapshot,
-                &route(),
-                &HarnessKind::Claude
-            ));
+            assert!(!snapshot.has_route(&route(), &HarnessKind::Claude));
         }
     }
 
@@ -710,26 +718,14 @@ mod tests {
     #[test]
     fn done_codex_pane_without_readiness_flag_is_available() {
         let snapshot = done_codex_snapshot(None);
-        assert!(HerdrCli::snapshot_has_route(
-            &snapshot,
-            &codex_route(),
-            &HarnessKind::Codex
-        ));
+        assert!(snapshot.has_route(&codex_route(), &HarnessKind::Codex));
         assert!(idle(&snapshot));
     }
 
     #[test]
     fn done_codex_pane_with_reported_readiness_follows_the_flag() {
-        assert!(HerdrCli::snapshot_has_route(
-            &done_codex_snapshot(Some(true)),
-            &codex_route(),
-            &HarnessKind::Codex
-        ));
-        assert!(!HerdrCli::snapshot_has_route(
-            &done_codex_snapshot(Some(false)),
-            &codex_route(),
-            &HarnessKind::Codex
-        ));
+        assert!(done_codex_snapshot(Some(true)).has_route(&codex_route(), &HarnessKind::Codex));
+        assert!(!done_codex_snapshot(Some(false)).has_route(&codex_route(), &HarnessKind::Codex));
     }
 
     #[test]
@@ -738,17 +734,9 @@ mod tests {
             "agent":"codex", "agent_status":"done",
             "name":"field-luna-e71dab", "pane_id":"wQ:pV", "terminal_id":"term_65c41cd7bd31479"
         }]}}});
-        assert!(!HerdrCli::snapshot_has_route(
-            &snapshot,
-            &codex_route(),
-            &HarnessKind::Codex
-        ));
+        assert!(!snapshot.has_route(&codex_route(), &HarnessKind::Codex));
         let empty = serde_json::json!({"result":{"snapshot":{"agents":[]}}});
-        assert!(!HerdrCli::snapshot_has_route(
-            &empty,
-            &codex_route(),
-            &HarnessKind::Codex
-        ));
+        assert!(!empty.has_route(&codex_route(), &HarnessKind::Codex));
     }
 
     #[test]
@@ -757,11 +745,7 @@ mod tests {
             "agent":"codex", "agent_status":"working",
             "name":"field-sol-b7da5d", "pane_id":"wQ:pT", "terminal_id":"term_65c41aac961f978"
         }]}}});
-        assert!(HerdrCli::snapshot_has_route(
-            &snapshot,
-            &codex_route(),
-            &HarnessKind::Codex
-        ));
+        assert!(snapshot.has_route(&codex_route(), &HarnessKind::Codex));
         assert!(!idle(&snapshot));
     }
 
@@ -771,11 +755,7 @@ mod tests {
             "agent":"claude", "agent_status":"idle", "interactive_ready":true,
             "name":"recipient", "pane_id":"w1:p2", "terminal_id":"term-current"
         }]}}});
-        assert!(HerdrCli::snapshot_has_route(
-            &snapshot,
-            &route(),
-            &HarnessKind::Claude
-        ));
+        assert!(snapshot.has_route(&route(), &HarnessKind::Claude));
         assert!(idle(&snapshot));
     }
 

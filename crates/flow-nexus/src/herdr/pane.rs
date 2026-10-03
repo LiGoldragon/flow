@@ -10,6 +10,9 @@
 //! next tool call" and is taken in the same turn.
 
 use super::{HerdrCli, PromptReply, VerifiesFlowClaim};
+use crate::herdr::ReadsHerdrAgent;
+use crate::herdr::ReadsHerdrPanes;
+use crate::herdr::ReadsPromptReply;
 use signal_flow::{AgentState, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection};
 use std::process::Command;
 
@@ -42,6 +45,19 @@ pub enum Placement {
 
 /// The pane operations Flow's writer uses, each one Herdr call.
 pub trait WritesPane {
+    /// The composer is read this many times, each `SUBMISSION_SPACING` after
+    /// the last: long enough for Herdr's CR, sent 300 ms after the text, and
+    /// a harness's render of a large paste.
+    const SUBMISSION_READS: usize = 12;
+    const SUBMISSION_SPACING: std::time::Duration = std::time::Duration::from_millis(350);
+    /// Each press is given `INTERRUPT_WAIT_MILLISECONDS` to show.
+    const INTERRUPT_PRESSES: usize = 3;
+    /// How long each interrupt press is given to show: an interrupted turn
+    /// stops within a second or two.
+    const INTERRUPT_WAIT_MILLISECONDS: &'static str = "3000";
+    /// The composer is at the bottom of the screen.
+    const COMPOSER_LINES: &'static str = "12";
+
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent;
     /// Whether the composer holds no text of its own: `None` when the screen
     /// could not be read or shows no composer.
@@ -73,9 +89,9 @@ pub trait WritesPane {
     /// subscribe to.
     fn submission(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Submission {
         let mut submission = Submission::Unreadable;
-        for _ in 0..Submission::READS {
+        for _ in 0..Self::SUBMISSION_READS {
             // The first read waits too, past Herdr's delayed CR.
-            std::thread::sleep(Submission::SPACING);
+            std::thread::sleep(Self::SUBMISSION_SPACING);
             match self.composer_is_blank(route, harness_kind) {
                 Some(true) => return Submission::Seen,
                 Some(false) => submission = Submission::Unseen,
@@ -112,7 +128,7 @@ pub trait WritesPane {
     }
 
     /// Presses the interrupt keys into a working agent until it is seen
-    /// leaving Working, at most `Interruption::PRESSES` times.
+    /// leaving Working, at most `INTERRUPT_PRESSES` times.
     ///
     /// Witnessed of Claude Code 2.1.280 (Haiku 4.5, e167d8 sandbox and a
     /// disposable pane, 2026-09-26): `esc esc` pressed as a turn begins is
@@ -120,7 +136,7 @@ pub trait WritesPane {
     /// same keys pressed again a moment later stop it. The keys go only into
     /// an agent still seen Working, never into a resting one.
     fn interrupt(&self, route: &HerdrRoute, keys: &[String]) -> Interruption {
-        for press in 0..Interruption::PRESSES {
+        for press in 0..Self::INTERRUPT_PRESSES {
             if !self.press(route, keys) {
                 return if press == 0 {
                     Interruption::Refused
@@ -158,27 +174,6 @@ pub enum Submission {
     Unreadable,
 }
 
-impl Submission {
-    /// The composer is read this many times, each `SPACING` after the
-    /// last: long enough for Herdr's CR, sent 300 ms after the text, and a
-    /// harness's render of a large paste.
-    pub const READS: usize = 12;
-    pub const SPACING: std::time::Duration = std::time::Duration::from_millis(350);
-}
-
-impl Interruption {
-    /// Each press is given `HerdrCli::INTERRUPT_WAIT_MILLISECONDS` to show.
-    pub const PRESSES: usize = 3;
-}
-
-impl HerdrCli {
-    /// How long each interrupt press is given to show: an interrupted turn
-    /// stops within a second or two.
-    const INTERRUPT_WAIT_MILLISECONDS: &'static str = "3000";
-    /// The composer is at the bottom of the screen.
-    const COMPOSER_LINES: &'static str = "12";
-}
-
 impl WritesPane for HerdrCli {
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
@@ -198,7 +193,7 @@ impl WritesPane for HerdrCli {
         };
         let Some(agent) = agents
             .iter()
-            .find(|agent| HerdrCli::agent_matches_binding(agent, route, &node.harness_kind))
+            .find(|agent| agent.matches_binding(route, &node.harness_kind))
         else {
             // The pane ID under another binding is not this flow's pane
             // gone: its fate is not known, as `pane_presence` holds too.
@@ -213,12 +208,11 @@ impl WritesPane for HerdrCli {
             };
         };
         PaneAgent::Present {
-            agent_state: HerdrCli::agent_state_of(
-                agent
-                    .get("agent_status")
-                    .and_then(serde_json::Value::as_str),
-            ),
-            ready: HerdrCli::agent_readiness_permits_prompt(agent),
+            agent_state: agent
+                .get("agent_status")
+                .and_then(serde_json::Value::as_str)
+                .agent_state(),
+            ready: agent.permits_prompt(),
         }
     }
 
@@ -311,11 +305,15 @@ impl WritesPane for HerdrCli {
     }
 }
 
-impl HerdrCli {
-    /// Herdr's agent status as Flow's AgentState; a word Herdr adds later is
-    /// Unknown until it is named.
-    pub fn agent_state_of(status: Option<&str>) -> AgentState {
-        match status {
+/// Herdr's agent status, read as Flow's AgentState.
+pub trait ReadsAgentStatus {
+    /// A word Herdr adds later is Unknown until it is named.
+    fn agent_state(self) -> AgentState;
+}
+
+impl ReadsAgentStatus for Option<&str> {
+    fn agent_state(self) -> AgentState {
+        match self {
             Some("idle") => AgentState::Idle,
             Some("working") => AgentState::Working,
             Some("blocked") => AgentState::Blocked,
@@ -341,12 +339,9 @@ enum Retraction {
     LineByLine,
 }
 
-impl Composer {
+trait KeysComposer {
     /// The key that submits the composer, as Herdr's own CR does.
-    fn submit_keys(&self) -> Vec<String> {
-        vec!["enter".to_owned()]
-    }
-
+    fn submit_keys(&self) -> Vec<String>;
     /// Witnessed of Claude Code 2.1.280 and Codex 0.153 (e167d8 sandbox,
     /// 2026-09-26): `ctrl+u` kills from the cursor to the line's start and
     /// `backspace` at a line's start joins it onto the line above; neither
@@ -355,14 +350,22 @@ impl Composer {
     /// See `WritesPane::retract`. Codex has no vim mode: its composer is
     /// taken back line by line, generously, since a restored text's length
     /// is not known and the keys do nothing to an empty composer.
+    fn retract_keys(&self) -> Vec<String>;
+    const RETRACTED_LINES: usize = 32;
+    fn take_back_keys(&self, lines: usize) -> Vec<String>;
+}
+
+impl KeysComposer for Composer {
+    fn submit_keys(&self) -> Vec<String> {
+        vec!["enter".to_owned()]
+    }
+
     fn retract_keys(&self) -> Vec<String> {
         match self.retraction {
             Retraction::Key(key) => vec![key.to_owned()],
             Retraction::LineByLine => self.take_back_keys(Self::RETRACTED_LINES),
         }
     }
-
-    const RETRACTED_LINES: usize = 32;
 
     fn take_back_keys(&self, lines: usize) -> Vec<String> {
         (0..lines.max(1))
@@ -371,7 +374,17 @@ impl Composer {
     }
 }
 
-impl Composer {
+trait ReadsComposer {
+    fn of(harness_kind: &HarnessKind) -> Self;
+    /// The composer is the last line opening with the glyph. It holds no
+    /// text when nothing follows the glyph but a placeholder, which both
+    /// harnesses render dim (SGR 2); text a person typed is not dim.
+    fn text(&self, screen: &str) -> Option<String>;
+    #[cfg(test)]
+    fn is_blank(&self, screen: &str) -> Option<bool>;
+}
+
+impl ReadsComposer for Composer {
     fn of(harness_kind: &HarnessKind) -> Self {
         match harness_kind {
             HarnessKind::Claude => Self {
@@ -385,9 +398,6 @@ impl Composer {
         }
     }
 
-    /// The composer is the last line opening with the glyph. It holds no
-    /// text when nothing follows the glyph but a placeholder, which both
-    /// harnesses render dim (SGR 2); text a person typed is not dim.
     fn text(&self, screen: &str) -> Option<String> {
         let line = screen
             .lines()
@@ -445,7 +455,13 @@ impl From<&str> for StyledLine {
     }
 }
 
-impl StyledLine {
+trait ReadsStyledLine {
+    fn visible(&self) -> String;
+    /// What follows the glyph, trimmed, with dim placeholder text left out.
+    fn text_after(&self, glyph: char) -> String;
+}
+
+impl ReadsStyledLine for StyledLine {
     fn visible(&self) -> String {
         self.characters
             .iter()
@@ -453,7 +469,6 @@ impl StyledLine {
             .collect()
     }
 
-    /// What follows the glyph, trimmed, with dim placeholder text left out.
     fn text_after(&self, glyph: char) -> String {
         self.characters
             .iter()
@@ -470,6 +485,7 @@ impl StyledLine {
 #[cfg(test)]
 mod tests {
     use super::Composer;
+    use crate::herdr::pane::ReadsComposer;
     use signal_flow::HarnessKind;
 
     /// Codex 0.153.4 as `agent read --format ansi` showed it, 2026-09-25.

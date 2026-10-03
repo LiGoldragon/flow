@@ -8,6 +8,7 @@
 
 use crate::RunningNexus;
 use crate::herdr::HerdrCli;
+use crate::herdr::pane::ReadsAgentStatus;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use signal_flow::{
@@ -108,7 +109,7 @@ impl ObservesAgent for RunningNexus {
                 return send(&AgentState::Gone.observed_of(flow_id));
             };
             let agent_state = match event {
-                PaneEvent::Status(status) => HerdrCli::agent_state_of(Some(&status)),
+                PaneEvent::Status(status) => Some(status.as_str()).agent_state(),
                 PaneEvent::Gone => AgentState::Gone,
             };
             if agent_state == last {

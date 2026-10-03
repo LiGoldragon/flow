@@ -6,6 +6,7 @@
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::KeepsLaunchBundles;
 use crate::composition::OpensLaunchComposer;
+use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::AnswersLaunchOutcome;
 use crate::{

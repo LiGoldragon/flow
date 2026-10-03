@@ -1027,6 +1027,9 @@ impl AppliesFlowQuery for FlowStore {
             Query::LaunchStatus(_) | Query::Observe(_) => Ok(Response::LaunchStatusRejected(
                 signal_flow::LaunchStatusRejection::PersistenceRefused,
             )),
+            Query::QueueTurnEnd(_) => Ok(Response::TurnEndRejected(
+                signal_flow::TurnEndRejection::QueueRefused,
+            )),
         }
     }
 }
@@ -1044,7 +1047,8 @@ impl ReservesPendingStart for FlowStore {
             | Query::Replace(_)
             | Query::LaunchStatus(_)
             | Query::Observe(_)
-            | Query::ResolveCaller(_) => Ok(None),
+            | Query::ResolveCaller(_)
+            | Query::QueueTurnEnd(_) => Ok(None),
         }
     }
 }

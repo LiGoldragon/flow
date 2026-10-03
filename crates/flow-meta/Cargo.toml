@@ -7,9 +7,9 @@ name = "flow-meta"
 path = "src/main.rs"
 [dependencies]
 flow-defaults = { path = "../flow-defaults" }
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09e2a9d52bf7f2f11e51d15cb6c3177f72c6c927" }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff16b4f7412febc3b71aac8b49680cd20988cb" }
 meta-signal-flow = { workspace = true, features = ["datom"] }
-protos = { git = "https://github.com/LiGoldragon/protos", rev = "1febca7836bf8d5f5973a302fdd50aa9c84c159b" }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
 rkyv.workspace = true
 signal-flow.workspace = true
 [dev-dependencies]

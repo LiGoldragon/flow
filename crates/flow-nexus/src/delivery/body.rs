@@ -17,7 +17,7 @@
 
 use datom_codec::Datomizable;
 use meta_signal_flow::{BodyRefusal, Content, HarnessProfile, Letter, Message};
-use protos::{Protosizable, Textualizable};
+use protos::{Compactable, Protosizable};
 
 /// The text a Message becomes in a pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +50,7 @@ pub trait RendersPaneText {
 impl RendersPaneText for Message {
     fn pane_text(&self) -> PaneText {
         PaneText {
-            text: self.datomize(Vec::new()).protosize().textualize(),
+            text: self.datomize(Vec::new()).protosize().compact(),
         }
     }
 

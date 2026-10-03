@@ -160,6 +160,11 @@ impl Dispatches for RunningNexus {
             }
             // A dispatch without a connection has no peer to read.
             Query::ResolveCaller(claim) => self.resolve_caller(None, claim),
+            // Flow holds no turn-end queue yet, so nothing is enqueued and
+            // the request is refused rather than acknowledged.
+            Query::QueueTurnEnd(_) => {
+                Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
+            }
             Query::List(_) => self
                 .store
                 .flow_nodes()
@@ -3455,6 +3460,20 @@ mod tests {
         // Herdr reused the pane ID for a new terminal: the binding is gone.
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-new")]);
         assert_eq!(fixture.nexus.resolve_caller(pane("pane-1"), None), unknown);
+    }
+
+    #[test]
+    fn a_turn_end_is_refused_while_flow_holds_no_queue() {
+        let fixture = NexusFixture::new();
+        let request = signal_flow::TurnEndRequest {
+            session_id: "session-1".into(),
+            turn_id: "turn-2".into(),
+            transcript_path_option: None,
+        };
+        assert_eq!(
+            fixture.nexus.dispatch(Query::QueueTurnEnd(request)),
+            Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
+        );
     }
 
     #[test]

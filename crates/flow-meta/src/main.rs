@@ -1,7 +1,7 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
 use meta_signal_flow::{CreditSelection, Query, ResetRequest, Response};
-use protos::{Protosizable, ReaderBudget, Textualizable};
+use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
     env,
     io::{Read, Write},
@@ -149,7 +149,7 @@ fn main() {
         .parse_command(env::args().skip(1))
         .and_then(|query| client.call(&query))
     {
-        Ok(reply) => println!("{}", reply.datomize(vec![]).protosize().textualize()),
+        Ok(reply) => println!("{}", reply.datomize(vec![]).protosize().compact()),
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2)

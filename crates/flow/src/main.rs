@@ -1,6 +1,6 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
-use protos::{Protosizable, ReaderBudget, Textualizable};
+use protos::{Compactable, Protosizable, ReaderBudget};
 use signal_flow::{Query, Response};
 use std::{
     env,
@@ -83,7 +83,7 @@ impl CallsFlowNexus for FlowClient {
 
 impl TextualizesFlowReply for FlowClient {
     fn textualize_reply(&self, reply: &Response) -> String {
-        reply.datomize(vec![]).protosize().textualize()
+        reply.datomize(vec![]).protosize().compact()
     }
 }
 

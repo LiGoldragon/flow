@@ -2628,7 +2628,7 @@ printf '%s\n' 123456
             fs::write(root.path().join("pane-width"), width.to_string()).unwrap();
             let pane = adapter.create_launch_pane(&launch).unwrap();
             adapter
-                .prepare_claude_pane_environment(&launch, &pane)
+                .prepare_claude_pane_environment(&launch, &pane, None)
                 .unwrap();
             let unwrapped = fs::read_to_string(root.path().join("marker-unwrapped")).unwrap();
             let visible = fs::read_to_string(root.path().join("marker-visible")).unwrap();
@@ -2637,7 +2637,9 @@ printf '%s\n' 123456
                 visible.lines().any(|line| line == unwrapped.trim()),
                 width == 160
             );
-            let binding = adapter.observe_native_binding(&launch, &pane).unwrap();
+            let binding = adapter
+                .observe_native_binding(&launch, &pane, None)
+                .unwrap();
             assert_eq!(binding.native_session_id, native_session);
         }
         for (native, claim, reason) in [
@@ -2658,9 +2660,11 @@ printf '%s\n' 123456
             fs::write(root.path().join("pane-width"), "54").unwrap();
             let pane = adapter.create_launch_pane(&launch).unwrap();
             adapter
-                .prepare_claude_pane_environment(&launch, &pane)
+                .prepare_claude_pane_environment(&launch, &pane, None)
                 .unwrap();
-            let refusal = adapter.observe_native_binding(&launch, &pane).unwrap_err();
+            let refusal = adapter
+                .observe_native_binding(&launch, &pane, None)
+                .unwrap_err();
             assert!(refusal.contains(reason), "expected {reason}: {refusal}");
         }
     }

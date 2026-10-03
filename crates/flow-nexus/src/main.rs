@@ -1,7 +1,7 @@
 use flow_nexus::{
     OpensRunningNexus, RunningNexus, ServesMeta, ServesOrdinary,
     launching::PromotesAmbiguousLaunches,
-    store::{ConfiguresFlowStore, DefaultConfiguration, DeploymentOverrides},
+    store::{ConfiguresFlowStore, DefaultConfiguration, LaysOutDefaults, ReadsAnchors},
 };
 use std::{path::Path, process::ExitCode, sync::Arc};
 
@@ -28,7 +28,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let nexus = match RunningNexus::open(&defaults, &DeploymentOverrides::from_environment()) {
+    let nexus = match RunningNexus::open(&defaults) {
         Ok(nexus) => Arc::new(nexus),
         Err(error) => {
             eprintln!(

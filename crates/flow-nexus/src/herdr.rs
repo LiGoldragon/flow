@@ -94,15 +94,16 @@ pub struct HerdrCli {
 
 impl Default for HerdrCli {
     fn default() -> Self {
+        use crate::store::{LaysOutDefaults, ReadsAnchors};
         let defaults = crate::store::DefaultConfiguration::from_environment();
         let home = defaults.home.clone();
-        let codex_home = std::env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".codex"));
+        // The Codex endpoints here are placeholders: the Nexus replaces them
+        // with the configured ones (`with_codex_endpoints`).
+        let codex_home = home.join(".codex");
         let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".claude"));
-        let workspace_root = PathBuf::from(defaults.runtime_configuration().source_root);
+        let workspace_root = defaults.source_root();
         let flows_root = workspace_root.join("flows");
         let mut claude_skill_roots = Vec::new();
         if let Some(enterprise) = std::env::var_os("CLAUDE_ENTERPRISE_SKILLS_DIR") {

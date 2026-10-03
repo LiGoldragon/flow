@@ -444,23 +444,18 @@ impl Dispatches for RunningNexus {
 
 pub trait OpensRunningNexus {
     /// Opens the Nexus from its default configuration: the store at the
-    /// default location seeds or resumes configuration, and deployment
-    /// overrides are laid over the stored runtime configuration.
-    fn open(
-        defaults: &store::DefaultConfiguration,
-        overrides: &store::DeploymentOverrides,
-    ) -> Result<Self, store::StoreError>
+    /// default location seeds or resumes configuration, which changes only
+    /// over the meta socket.
+    fn open(defaults: &store::DefaultConfiguration) -> Result<Self, store::StoreError>
     where
         Self: Sized;
 }
 
 impl OpensRunningNexus for RunningNexus {
-    fn open(
-        defaults: &store::DefaultConfiguration,
-        overrides: &store::DeploymentOverrides,
-    ) -> Result<Self, store::StoreError> {
+    fn open(defaults: &store::DefaultConfiguration) -> Result<Self, store::StoreError> {
+        use store::LaysOutDefaults;
         let store = FlowStore::open_seeded(&defaults.store_path(), defaults)?;
-        let runtime = store.adopt_overrides(overrides)?;
+        let runtime = store.runtime_configuration()?;
         let codex_endpoints = CodexEndpoints::from(&runtime);
         let overlap = codex_endpoints.overlapping_models();
         if !overlap.is_empty() {

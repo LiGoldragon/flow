@@ -8,8 +8,7 @@ pub mod delivery;
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
-    os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Condvar, Mutex},
 };
 
@@ -44,143 +43,71 @@ const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const RUNTIME_CONFIGURATION_KEY: &str = "runtime";
 
-/// The two anchors the default configuration is derived from: the user's
-/// home (`HOME`, else the password database) and runtime directory
-/// (`XDG_RUNTIME_DIR`, else `/run/user/<uid>`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DefaultConfiguration {
-    pub home: PathBuf,
-    pub runtime_directory: PathBuf,
+pub use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
+
+/// The configuration a new store is seeded with, read off the default
+/// layout: every path is anchored on the user's home or runtime directory,
+/// and nothing names a particular user.
+pub trait SeedsConfiguration {
+    fn configuration(&self) -> Configuration;
+    fn socket_configuration(&self) -> FlowStoreConfiguration;
+    fn runtime_configuration(&self) -> RuntimeConfiguration;
+    fn delivery_configuration(&self) -> DeliveryConfiguration;
 }
 
-/// The executable's default configuration: every path is anchored on the
-/// user's home or runtime directory, and nothing names a particular user.
-impl DefaultConfiguration {
-    const STATE_DIRECTORY: &str = ".local/state/flow";
-    const STORE_FILE: &str = "flow.sema";
-    const LAUNCH_BUNDLE_DIRECTORY: &str = "launch-bundles";
-    const SOCKET_DIRECTORY: &str = "flow";
-    const ORDINARY_SOCKET: &str = "flow.sock";
-    const META_SOCKET: &str = "flow-meta.sock";
-    const SOURCE_ROOT: &str = "primary";
-    const STABLE_CODEX_CLIENT: &str = "codex-stable-flow-client";
-    const STABLE_CODEX_HOME: &str = ".codex";
-    const STABLE_CODEX_MODELS: [&str; 3] = ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"];
-    const NEXT_CODEX_CLIENT: &str = "codex-next-flow-client";
-    const NEXT_CODEX_HOME: &str = ".codex-next";
-    const NEXT_CODEX_MODELS: [&str; 3] = ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"];
-    const CODEX_CONTROL_SOCKET: &str = "app-server-control/app-server-control.sock";
-
-    pub fn from_environment() -> Self {
-        let user_id = std::fs::metadata("/proc/self")
-            .map(|metadata| metadata.uid())
-            .unwrap_or(0);
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|home| home.is_absolute())
-            .or_else(|| Self::password_database_home(user_id))
-            .unwrap_or_else(|| PathBuf::from("/"));
-        let runtime_directory = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .filter(|directory| directory.is_absolute())
-            .unwrap_or_else(|| PathBuf::from(format!("/run/user/{user_id}")));
-        Self {
-            home,
-            runtime_directory,
-        }
-    }
-
-    fn password_database_home(user_id: u32) -> Option<PathBuf> {
-        let database = std::fs::read_to_string("/etc/passwd").ok()?;
-        database.lines().find_map(|line| {
-            let fields = line.split(':').collect::<Vec<_>>();
-            (fields.len() >= 6 && fields[2] == user_id.to_string())
-                .then(|| PathBuf::from(fields[5]))
-        })
-    }
-
-    pub fn state_directory(&self) -> PathBuf {
-        self.home.join(Self::STATE_DIRECTORY)
-    }
-
-    /// Where the Nexus writes each launch's own copy of the system-prompt
-    /// bundle.
-    pub fn launch_bundle_directory(&self) -> PathBuf {
-        self.state_directory().join(Self::LAUNCH_BUNDLE_DIRECTORY)
-    }
-
-    pub fn store_path(&self) -> PathBuf {
-        self.state_directory().join(Self::STORE_FILE)
-    }
-
-    pub fn socket_directory(&self) -> PathBuf {
-        self.runtime_directory.join(Self::SOCKET_DIRECTORY)
-    }
-
-    pub fn configuration(&self) -> Configuration {
+impl SeedsConfiguration for DefaultConfiguration {
+    fn configuration(&self) -> Configuration {
         self.socket_configuration().with_runtime(
-            &self.runtime_configuration(),
+            &SeedsConfiguration::runtime_configuration(self),
             &self.delivery_configuration(),
         )
     }
 
     fn socket_configuration(&self) -> FlowStoreConfiguration {
-        let directory = self.socket_directory();
         FlowStoreConfiguration {
-            ordinary_socket_path: directory
-                .join(Self::ORDINARY_SOCKET)
-                .to_string_lossy()
-                .into_owned(),
-            meta_socket_path: directory
-                .join(Self::META_SOCKET)
-                .to_string_lossy()
-                .into_owned(),
+            ordinary_socket_path: self.ordinary_socket_path().to_string_lossy().into_owned(),
+            meta_socket_path: self.meta_socket_path().to_string_lossy().into_owned(),
         }
     }
 
-    pub fn runtime_configuration(&self) -> RuntimeConfiguration {
+    fn runtime_configuration(&self) -> RuntimeConfiguration {
         RuntimeConfiguration {
-            source_root: self
-                .home
-                .join(Self::SOURCE_ROOT)
-                .to_string_lossy()
-                .into_owned(),
-            stable_codex: self.codex_endpoint(
-                Self::STABLE_CODEX_CLIENT,
-                Self::STABLE_CODEX_HOME,
-                &Self::STABLE_CODEX_MODELS,
-            ),
-            next_codex: self.codex_endpoint(
-                Self::NEXT_CODEX_CLIENT,
-                Self::NEXT_CODEX_HOME,
-                &Self::NEXT_CODEX_MODELS,
-            ),
+            source_root: self.source_root().to_string_lossy().into_owned(),
+            stable_codex: CodexEndpointConfiguration::from(self.stable_codex()),
+            next_codex: CodexEndpointConfiguration::from(self.next_codex()),
         }
     }
 
-    fn codex_endpoint(
-        &self,
-        client: &str,
-        home: &str,
-        models: &[&str],
-    ) -> CodexEndpointConfiguration {
-        let home = self.home.join(home);
-        CodexEndpointConfiguration {
-            client_path: client.into(),
-            socket: home
-                .join(Self::CODEX_CONTROL_SOCKET)
-                .to_string_lossy()
-                .into_owned(),
-            home: home.to_string_lossy().into_owned(),
-            model_names: models.iter().map(|model| (*model).to_owned()).collect(),
+    /// Psyche seats deploy and manage flows, so they alone among flows
+    /// reach the meta socket by default. No Message Nexus executable is
+    /// admitted by path until one is configured.
+    fn delivery_configuration(&self) -> DeliveryConfiguration {
+        use delivery::DefaultsHarnessProfile;
+        DeliveryConfiguration {
+            harness_profile_vector: vec![
+                HarnessKind::Claude.default_profile(),
+                HarnessKind::Codex.default_profile(),
+            ],
+            meta_aspects: vec![FlowAspect::Psyche],
+            message_nexus_path: String::new(),
+        }
+    }
+}
+
+impl From<flow_defaults::DefaultCodexEndpoint> for CodexEndpointConfiguration {
+    fn from(endpoint: flow_defaults::DefaultCodexEndpoint) -> Self {
+        Self {
+            client_path: endpoint.client_path,
+            home: endpoint.home,
+            socket: endpoint.socket,
+            model_names: endpoint.model_names,
         }
     }
 }
 
 /// Launch configuration held in the Nexus's Sema store beside the socket
 /// paths. Together they are the meta `Configuration`: seeded from
-/// `DefaultConfiguration`, replaced by meta `Configure`, and still
-/// overridable by the deployment through `DeploymentOverrides`.
+/// `DefaultConfiguration` and replaced only by meta `Configure`.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfiguration {
     pub source_root: String,
@@ -231,87 +158,6 @@ impl From<&Configuration> for RuntimeConfiguration {
 impl EngineRecord for RuntimeConfiguration {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(RUNTIME_CONFIGURATION_KEY)
-    }
-}
-
-/// Deployment-supplied values that replace stored runtime configuration.
-/// Exception to meta-socket-only configuration, taken at this site: the meta
-/// `Configure` contract lacks the source root and Codex endpoint fields, so
-/// the deployment's `FLOW_SOURCE_ROOT` and `FLOW_CODEX_{STABLE,NEXT}_{CLIENT,
-/// SOCKET,HOME,MODELS}` are accepted here until it carries them. Every one is
-/// optional; an absent or malformed value leaves the stored value in force.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DeploymentOverrides {
-    values: Vec<(String, String)>,
-}
-
-impl DeploymentOverrides {
-    pub fn from_environment() -> Self {
-        Self {
-            values: std::env::vars()
-                .filter(|(name, _)| name.starts_with("FLOW_"))
-                .collect(),
-        }
-    }
-
-    pub fn from_values(values: Vec<(String, String)>) -> Self {
-        Self { values }
-    }
-
-    fn value(&self, name: &str) -> Option<&str> {
-        self.values
-            .iter()
-            .find(|(candidate, _)| candidate == name)
-            .map(|(_, value)| value.as_str())
-    }
-
-    fn absolute(&self, name: &str) -> Option<String> {
-        let value = self.value(name)?;
-        if Path::new(value).is_absolute() {
-            Some(value.to_owned())
-        } else {
-            eprintln!("flow-nexus: ignoring {name}: not an absolute path");
-            None
-        }
-    }
-
-    fn models(&self, name: &str) -> Option<Vec<String>> {
-        let models = self
-            .value(name)?
-            .split(',')
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        if models.is_empty() {
-            eprintln!("flow-nexus: ignoring {name}: selects no model");
-            return None;
-        }
-        Some(models)
-    }
-
-    fn apply_endpoint(&self, prefix: &str, endpoint: &mut CodexEndpointConfiguration) {
-        if let Some(client) = self.absolute(&format!("FLOW_CODEX_{prefix}_CLIENT")) {
-            endpoint.client_path = client;
-        }
-        if let Some(socket) = self.absolute(&format!("FLOW_CODEX_{prefix}_SOCKET")) {
-            endpoint.socket = socket;
-        }
-        if let Some(home) = self.absolute(&format!("FLOW_CODEX_{prefix}_HOME")) {
-            endpoint.home = home;
-        }
-        if let Some(models) = self.models(&format!("FLOW_CODEX_{prefix}_MODELS")) {
-            endpoint.model_names = models;
-        }
-    }
-
-    pub fn apply(&self, mut configuration: RuntimeConfiguration) -> RuntimeConfiguration {
-        if let Some(source_root) = self.absolute("FLOW_SOURCE_ROOT") {
-            configuration.source_root = source_root;
-        }
-        self.apply_endpoint("STABLE", &mut configuration.stable_codex);
-        self.apply_endpoint("NEXT", &mut configuration.next_codex);
-        configuration
     }
 }
 
@@ -409,7 +255,7 @@ impl EngineRecord for FlowStoreState {
 /// former two-field `Configuration` record had, so a store written before
 /// the contract grew its runtime fields still reads.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct FlowStoreConfiguration {
+pub struct FlowStoreConfiguration {
     ordinary_socket_path: String,
     meta_socket_path: String,
 }
@@ -846,20 +692,6 @@ pub trait ConfiguresFlowStore {
     fn configure(&self, configuration: Configuration) -> Result<(), StoreError>;
     fn runtime_configuration(&self) -> Result<RuntimeConfiguration, StoreError>;
     fn configure_runtime(&self, configuration: RuntimeConfiguration) -> Result<(), StoreError>;
-
-    /// Lays deployment overrides over the stored runtime configuration,
-    /// persisting the result only when it differs.
-    fn adopt_overrides(
-        &self,
-        overrides: &DeploymentOverrides,
-    ) -> Result<RuntimeConfiguration, StoreError> {
-        let stored = self.runtime_configuration()?;
-        let adopted = overrides.apply(stored.clone());
-        if adopted != stored {
-            self.configure_runtime(adopted.clone())?;
-        }
-        Ok(adopted)
-    }
 }
 
 pub trait RegistersFlowIdentity {
@@ -2657,6 +2489,7 @@ mod tests {
         RecordsRegistrationAcknowledgement, RecordsRestartedFlow, RegistersExistingFlow,
         RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
     };
+    use super::{LaysOutDefaults, SeedsConfiguration};
     use meta_signal_flow::Configuration;
     use signal_flow::{
         ComposedLaunch, FirstPromptPayload, FlowAspect, HarnessKind, HerdrPaneBinding,
@@ -3184,34 +3017,6 @@ mod tests {
                 .source_root,
             "/home/someone/primary",
             "a populated store resumes what it holds"
-        );
-    }
-
-    #[test]
-    fn deployment_overrides_replace_stored_runtime_values_only_when_valid() {
-        let fixture = StoreFixture::new();
-        let store = fixture.store();
-        let overrides = super::DeploymentOverrides::from_values(vec![
-            ("FLOW_SOURCE_ROOT".into(), "/srv/source".into()),
-            (
-                "FLOW_CODEX_STABLE_CLIENT".into(),
-                "/opt/stable-client".into(),
-            ),
-            ("FLOW_CODEX_NEXT_MODELS".into(), "model-a, model-b".into()),
-            ("FLOW_CODEX_NEXT_SOCKET".into(), "relative.sock".into()),
-        ]);
-        let before = store.runtime_configuration().expect("seeded");
-        let adopted = store
-            .adopt_overrides(&overrides)
-            .expect("overrides adopted");
-        assert_eq!(adopted.source_root, "/srv/source");
-        assert_eq!(adopted.stable_codex.client_path, "/opt/stable-client");
-        assert_eq!(adopted.next_codex.model_names, vec!["model-a", "model-b"]);
-        assert_eq!(adopted.next_codex.socket, before.next_codex.socket);
-        drop(store);
-        assert_eq!(
-            fixture.store().runtime_configuration().expect("persisted"),
-            adopted
         );
     }
 

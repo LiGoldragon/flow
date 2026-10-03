@@ -15,7 +15,7 @@ pub mod lease;
 
 use crate::RunningNexus;
 use crate::herdr::pane::{Interruption, PaneAgent, Placement, Submission, WritesPane};
-use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
+use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::{ReadsFlowRows, RecordsFlowLifecycle, RecordsReplacement};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;

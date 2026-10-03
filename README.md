@@ -133,21 +133,26 @@ The Message consumer owns its harness-specific blank-composer guard before it
 submits input. Rows written before the route table was added also resolve with
 an unavailable Herdr route.
 
-The current binary uses these store and socket defaults:
+The binary starts with no arguments and derives every default from two
+anchors, `HOME` and `XDG_RUNTIME_DIR` (`flow-defaults` is their one home):
 
-- store: `/home/li/.local/state/flow/flow.sema`
-- ordinary socket: `/run/user/1001/flow/flow.sock`
-- meta socket: `/run/user/1001/flow/flow-meta.sock`
+- store: `$HOME/.local/state/flow/flow.sema`
+- ordinary socket: `$XDG_RUNTIME_DIR/flow/flow.sock`
+- meta socket: `$XDG_RUNTIME_DIR/flow/flow-meta.sock`
+- source root: `$HOME/primary`
 - Codex control socket:
-  `/home/li/.codex/app-server-control/app-server-control.sock`
+  `$HOME/.codex/app-server-control/app-server-control.sock`
 
-`FLOW_SOURCE_ROOT` is required when starting `flow-nexus`. It selects the
-bounded source root used for exact-byte composition, the Codex native skill
-catalog working directory, the Flow workspace root, and the project Claude
-skill catalog. `CODEX_HOME` and `CLAUDE_CONFIG_DIR` select native transcript
-and personal-skill roots. `CLAUDE_ENTERPRISE_SKILLS_DIR` optionally adds the
-highest-precedence Claude skill catalog. The ordinary client uses
-`FLOW_SOCKET` when set.
+A new store persists these; a populated store resumes what it holds; meta
+`Configure` is the only way to change them. No `FLOW_` variable reaches the
+Nexus's configuration. The source root selects the bounded root used for
+exact-byte composition, the Codex native skill catalog working directory, the
+Flow workspace root, and the project Claude skill catalog. `CODEX_HOME` and
+`CLAUDE_CONFIG_DIR` select native transcript and personal-skill roots, and
+`CLAUDE_ENTERPRISE_SKILLS_DIR` optionally adds the highest-precedence Claude
+skill catalog (see `NON_IDEAL_AGENTS.md`). The clients reach the default
+sockets under the caller's `XDG_RUNTIME_DIR`; `FLOW_SOCKET` and
+`FLOW_META_SOCKET` name another Nexus's socket instead.
 
 A fresh Flow receives exactly one prompt. The harness starts with no
 positional prompt, and the composed first prompt opens with the native skill
@@ -208,7 +213,7 @@ offer without writing any settings file.
 The prompt is lean: no launch request ID, no hash, and no inlined source text.
 Sources are named by absolute path after their bytes are checked against the
 profile hash. A profile may write a source path absolute or relative: an
-absolute path is taken as written, a relative one under `FLOW_SOURCE_ROOT`,
+absolute path is taken as written, a relative one under the configured source root,
 and either is read exactly when what it resolves to lies inside that root. The requested receipt is the fixed line
 `FLOW_LAUNCH_RECEIPT_V2`; the observer binds it to the launch by native
 session, transcript cursor, and the authenticated first turn, whose body

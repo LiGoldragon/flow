@@ -1,0 +1,4 @@
+[package]
+name = "flow-defaults"
+version.workspace = true
+edition.workspace = true

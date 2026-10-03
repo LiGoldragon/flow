@@ -6,6 +6,7 @@ edition.workspace = true
 name = "flow-nexus"
 path = "src/main.rs"
 [dependencies]
+flow-defaults = { path = "../flow-defaults" }
 base64 = "0.22"
 # The Nexus renders one typed value as text, the Message it types into a
 # pane (F6: Flow textualizes the letter so its Priority head comes first).

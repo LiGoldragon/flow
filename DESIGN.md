@@ -164,8 +164,8 @@ terminal lifecycle states before returning `Ready`.
 Fresh stores persist default sockets, source root, and Codex endpoints. Meta
 `Configure` carries all of them, writes the same store, and reports
 `NexusRestartRequired`, since rebinding live sockets and adapters is deferred
-to a Nexus restart. The deployment's `FLOW_SOURCE_ROOT` and `FLOW_CODEX_*`
-overrides are still laid over the stored runtime values at start. The adapter is outside the Signal wire boundary: the
+to a Nexus restart. No environment variable is laid over the stored values;
+`Configure` is their only way in. The adapter is outside the Signal wire boundary: the
 Codex app-server conversation is WebSocket/JSON-RPC through the configured
 control socket. `ConsumeReset` uses the same adapter but is reachable only
 through the meta socket. Both sockets are owner-only (`0600`); this separates

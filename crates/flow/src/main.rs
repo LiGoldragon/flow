@@ -1,4 +1,5 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
 use protos::{Protosizable, ReaderBudget, Textualizable};
 use signal_flow::{Query, Response};
 use std::{
@@ -102,8 +103,15 @@ fn main() {
         println!("{version}");
         return;
     }
+    // The Nexus's default ordinary socket under this caller's runtime
+    // directory, unless the caller names another Nexus's socket.
     let client = FlowClient {
-        socket: env::var("FLOW_SOCKET").unwrap_or_else(|_| "/run/user/1001/flow/flow.sock".into()),
+        socket: env::var("FLOW_SOCKET").unwrap_or_else(|_| {
+            DefaultConfiguration::from_environment()
+                .ordinary_socket_path()
+                .to_string_lossy()
+                .into_owned()
+        }),
     };
     match client
         .parse_command(arguments.into_iter())

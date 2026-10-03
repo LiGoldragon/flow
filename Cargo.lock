@@ -237,20 +237,28 @@ name = "flow"
 version = "0.17.4"
 dependencies = [
  "datom-codec 0.31.0",
+ "flow-defaults",
  "protos 0.31.0",
  "rkyv",
  "signal-flow",
+ "tempfile",
 ]
+
+[[package]]
+name = "flow-defaults"
+version = "0.17.4"
 
 [[package]]
 name = "flow-meta"
 version = "0.17.4"
 dependencies = [
  "datom-codec 0.31.0",
+ "flow-defaults",
  "meta-signal-flow",
  "protos 0.31.0",
  "rkyv",
  "signal-flow",
+ "tempfile",
 ]
 
 [[package]]
@@ -259,6 +267,7 @@ version = "0.17.4"
 dependencies = [
  "base64",
  "datom-codec 0.31.0",
+ "flow-defaults",
  "meta-signal-flow",
  "notify",
  "protos 0.31.0",

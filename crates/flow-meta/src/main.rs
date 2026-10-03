@@ -1,4 +1,5 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
 use meta_signal_flow::{CreditSelection, Query, ResetRequest, Response};
 use protos::{Protosizable, ReaderBudget, Textualizable};
 use std::{
@@ -51,7 +52,7 @@ impl ParsesMetaCommand for FlowMetaClient {
                 };
                 let endpoint_path = endpoint.unwrap_or_else(|| {
                     if harness_kind == signal_flow::HarnessKind::Codex {
-                        "/home/li/.codex/app-server-control/app-server-control.sock".into()
+                        DefaultConfiguration::from_environment().stable_codex().socket
                     } else {
                         String::new()
                     }
@@ -136,9 +137,15 @@ impl CallsMetaNexus for FlowMetaClient {
 }
 
 fn main() {
+    // The Nexus's default meta socket under this caller's runtime
+    // directory, unless the caller names another Nexus's socket.
     let client = FlowMetaClient {
-        socket: env::var("FLOW_META_SOCKET")
-            .unwrap_or_else(|_| "/run/user/1001/flow/flow-meta.sock".into()),
+        socket: env::var("FLOW_META_SOCKET").unwrap_or_else(|_| {
+            DefaultConfiguration::from_environment()
+                .meta_socket_path()
+                .to_string_lossy()
+                .into_owned()
+        }),
     };
     match client
         .parse_command(env::args().skip(1))

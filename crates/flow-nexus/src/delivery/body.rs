@@ -175,7 +175,7 @@ impl CommandLine {
 #[cfg(test)]
 mod tests {
     use super::{RendersPaneText, VetsBody};
-    use crate::store::DefaultConfiguration;
+    use crate::store::delivery::DefaultsHarnessProfile;
     use meta_signal_flow::{BodyRefusal, Content, Letter, Message, Psyche_Data, Sender};
     use signal_flow::HarnessKind;
 
@@ -188,7 +188,7 @@ mod tests {
     }
 
     fn refusal(message: &Message, harness: HarnessKind) -> Option<BodyRefusal> {
-        message.refusal(&DefaultConfiguration::harness_profile(&harness))
+        message.refusal(&harness.default_profile())
     }
 
     #[test]

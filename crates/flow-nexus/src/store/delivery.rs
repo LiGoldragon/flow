@@ -8,7 +8,7 @@
 //! opens is a delivery a crash interrupted: it settles `Uncertain` then and
 //! there and is never retried, since what reached the pane is not known.
 
-use super::{DefaultConfiguration, FlowStore, StoreError};
+use super::{DefaultConfiguration, FlowStore, SeedsConfiguration, StoreError};
 use meta_signal_flow::{
     Delivery, DeliveryGrade, DeliveryId, HarnessProfile, InterruptWitness, MessageNexusPath,
     MetaAspects,
@@ -18,7 +18,7 @@ use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, Retraction,
     SchemaHash, TableDescriptor, TableName, TableReference,
 };
-use signal_flow::{FlowAspect, HarnessKind};
+use signal_flow::HarnessKind;
 
 pub(super) const DELIVERY_TABLE_NAME: TableName = TableName::new("flow_nexus_deliveries");
 pub(super) const PANE_LEASE_TABLE_NAME: TableName = TableName::new("flow_nexus_pane_leases");
@@ -108,26 +108,35 @@ impl From<&meta_signal_flow::Configuration> for DeliveryConfiguration {
     }
 }
 
-impl DeliveryConfiguration {
-    /// The profile Flow types with for a harness. A harness configured with
-    /// no profile falls back to its default one.
-    pub fn profile(&self, harness_kind: &HarnessKind) -> HarnessProfile {
+/// The profile Flow types with for a harness.
+pub trait SelectsHarnessProfile {
+    /// A harness configured with no profile falls back to its default one.
+    fn profile(&self, harness_kind: &HarnessKind) -> HarnessProfile;
+}
+
+impl SelectsHarnessProfile for DeliveryConfiguration {
+    fn profile(&self, harness_kind: &HarnessKind) -> HarnessProfile {
         self.harness_profile_vector
             .iter()
             .find(|profile| &profile.harness_kind == harness_kind)
             .cloned()
-            .unwrap_or_else(|| DefaultConfiguration::harness_profile(harness_kind))
+            .unwrap_or_else(|| harness_kind.default_profile())
     }
 }
 
-impl DefaultConfiguration {
+/// A harness's default keymaps and command sigils.
+pub trait DefaultsHarnessProfile {
+    fn default_profile(&self) -> HarnessProfile;
+}
+
+impl DefaultsHarnessProfile for HarnessKind {
     /// The keymaps and command sigils as witnessed on this cluster: Claude
     /// runs in vim mode, so its interrupt is two Escapes, and a HardAbrupt
     /// prompt is followed by one Enter; Codex interrupts on one Escape and
     /// `agent prompt` submits for it. Claude's `#` is its memory mode.
-    pub fn harness_profile(harness_kind: &HarnessKind) -> HarnessProfile {
+    fn default_profile(&self) -> HarnessProfile {
         let keys = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect();
-        match harness_kind {
+        match self {
             HarnessKind::Claude => HarnessProfile {
                 harness_kind: HarnessKind::Claude,
                 command_sigil_vector: keys(&["/", "!", "#"]),
@@ -140,20 +149,6 @@ impl DefaultConfiguration {
                 interrupt_keys: keys(&["esc"]),
                 submit_keys: Vec::new(),
             },
-        }
-    }
-
-    /// Psyche seats deploy and manage flows, so they alone among flows
-    /// reach the meta socket by default. No Message Nexus executable is
-    /// admitted by path until one is configured.
-    pub fn delivery_configuration(&self) -> DeliveryConfiguration {
-        DeliveryConfiguration {
-            harness_profile_vector: vec![
-                Self::harness_profile(&HarnessKind::Claude),
-                Self::harness_profile(&HarnessKind::Codex),
-            ],
-            meta_aspects: vec![FlowAspect::Psyche],
-            message_nexus_path: String::new(),
         }
     }
 }

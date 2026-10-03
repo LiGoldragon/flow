@@ -112,3 +112,41 @@ fn nexus_starts_from_defaults_and_answers_after_meta_configure() {
     ));
     assert!(home.path().join(".local/state/flow/flow.sema").exists());
 }
+
+/// Configuration reaches the Nexus only over its meta socket: a `FLOW_`
+/// variable in the Nexus's environment changes nothing it stores.
+#[test]
+fn a_flow_variable_in_the_environment_does_not_reach_the_configuration() {
+    use flow_nexus::store::{ConfiguresFlowStore, FlowStore, OpensFlowStore};
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let mut nexus = StartedNexus {
+        child: Command::new(env!("CARGO_BIN_EXE_flow-nexus"))
+            .env_clear()
+            .env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", runtime.path())
+            .env("FLOW_SOURCE_ROOT", "/srv/elsewhere")
+            .env("FLOW_CODEX_STABLE_CLIENT", "/opt/elsewhere-client")
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("flow-nexus spawns"),
+    };
+    drop(connect(
+        &runtime.path().join("flow/flow-meta.sock"),
+        &mut nexus,
+    ));
+    drop(nexus);
+    let store = FlowStore::open(&home.path().join(".local/state/flow/flow.sema"))
+        .expect("the stopped Nexus's store opens");
+    let runtime_configuration = store
+        .runtime_configuration()
+        .expect("runtime configuration reads");
+    assert_eq!(
+        runtime_configuration.source_root,
+        home.path().join("primary").to_string_lossy()
+    );
+    assert_eq!(
+        runtime_configuration.stable_codex.client_path,
+        "codex-stable-flow-client"
+    );
+}

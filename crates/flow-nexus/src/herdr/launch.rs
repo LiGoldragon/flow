@@ -216,7 +216,7 @@ impl PreparesClaudePane for HerdrCli {
             "--match".into(),
             marker.clone(),
             "--source".into(),
-            "visible".into(),
+            "recent-unwrapped".into(),
             "--lines".into(),
             "50".into(),
             "--timeout".into(),

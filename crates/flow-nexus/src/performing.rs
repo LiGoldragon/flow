@@ -24,6 +24,105 @@ use crate::store::{
 };
 use signal_flow::{HarnessKind, LaunchAttemptReservation, Response};
 
+/// The internal stage at which the Herdr adapter refused an operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HerdrFailureStage {
+    Open,
+    Spawn,
+    Bind,
+    Title,
+}
+
+impl HerdrFailureStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Spawn => "spawn",
+            Self::Bind => "bind",
+            Self::Title => "title",
+        }
+    }
+}
+
+/// The fixed, actionable categories Flow may retain from an adapter failure.
+/// Adapter error text and stderr may contain private paths, arguments, or
+/// provider output, so they are deliberately never stored or printed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HerdrFailureCategory {
+    PaneTargetMismatch,
+    NativeSessionMissing,
+    NativeIdentityConflict,
+    FlowClaimUnavailable,
+    HarnessMismatch,
+    AdapterRefused,
+}
+
+impl HerdrFailureCategory {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::PaneTargetMismatch => "pane-target-mismatch",
+            Self::NativeSessionMissing => "native-session-missing",
+            Self::NativeIdentityConflict => "native-identity-conflict",
+            Self::FlowClaimUnavailable => "flow-claim-unavailable",
+            Self::HarnessMismatch => "harness-mismatch",
+            Self::AdapterRefused => "adapter-refused",
+        }
+    }
+
+    fn from_adapter_error(error: &str) -> Self {
+        if error.contains("does not match the created native pane") {
+            Self::PaneTargetMismatch
+        } else if error.contains("no native session") || error.contains("empty native identity") {
+            Self::NativeSessionMissing
+        } else if error.contains("conflicts with the Flow-selected")
+            || error.contains("not the one Flow reserved")
+            || error.contains("observed native identity")
+        {
+            Self::NativeIdentityConflict
+        } else if error.contains("flow claim") || error.contains("flow-id claim") {
+            Self::FlowClaimUnavailable
+        } else if error.contains("harness") {
+            Self::HarnessMismatch
+        } else {
+            Self::AdapterRefused
+        }
+    }
+}
+
+/// A bounded, typed internal diagnostic retained before the public operation
+/// outcome is intentionally reduced to `HerdrRefused`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HerdrFailure {
+    pub(crate) stage: HerdrFailureStage,
+    pub(crate) category: HerdrFailureCategory,
+}
+
+impl HerdrFailure {
+    fn refused(stage: HerdrFailureStage, adapter_error: String) -> Outcome {
+        let failure = Self {
+            stage,
+            category: HerdrFailureCategory::from_adapter_error(&adapter_error),
+        };
+        // This fixed-format line has no adapter text, stderr, paths, IDs, or
+        // request content. Its bounded fields remain useful for diagnosis.
+        eprintln!(
+            "flow-nexus: herdr stage={} category={}",
+            failure.stage.label(),
+            failure.category.label()
+        );
+        Outcome::Failed(Failed_Data::HerdrRefused)
+    }
+
+    #[cfg(test)]
+    fn log_line(self) -> String {
+        format!(
+            "flow-nexus: herdr stage={} category={}",
+            self.stage.label(),
+            self.category.label()
+        )
+    }
+}
+
 /// The Nexus acting: one Operation in, one Outcome out.
 pub trait Performs {
     /// What a seat is told the moment its launch receipt is confirmed.
@@ -65,6 +164,46 @@ impl<E> AnswersRecord for Result<(), E> {
     }
 }
 
+#[cfg(test)]
+mod failure_tests {
+    use super::{HerdrFailure, HerdrFailureCategory, HerdrFailureStage};
+    use crate::generated::operation::{Failed_Data, Outcome};
+
+    #[test]
+    fn binding_failure_keeps_a_useful_allowlisted_category_before_wire_erasure() {
+        let category = HerdrFailureCategory::from_adapter_error(
+            "official Herdr integration reported no native session",
+        );
+        let failure = HerdrFailure {
+            stage: HerdrFailureStage::Bind,
+            category,
+        };
+        assert_eq!(failure.stage, HerdrFailureStage::Bind);
+        assert_eq!(failure.category, HerdrFailureCategory::NativeSessionMissing);
+        assert_eq!(
+            HerdrFailure::refused(
+                failure.stage,
+                "official Herdr integration reported no native session".into()
+            ),
+            Outcome::Failed(Failed_Data::HerdrRefused)
+        );
+    }
+
+    #[test]
+    fn malicious_or_long_adapter_text_is_not_retained_or_rendered() {
+        let attacker_text = format!("secret=/private/socket {}", "x".repeat(20_000));
+        let failure = HerdrFailure {
+            stage: HerdrFailureStage::Spawn,
+            category: HerdrFailureCategory::from_adapter_error(&attacker_text),
+        };
+        let line = failure.log_line();
+        assert_eq!(failure.category, HerdrFailureCategory::AdapterRefused);
+        assert!(!line.contains("secret="));
+        assert!(!line.contains("/private/socket"));
+        assert!(line.len() <= 96, "bounded fixed diagnostic");
+    }
+}
+
 impl Performs for RunningNexus {
     fn perform(&self, operation: Operation) -> Outcome {
         match operation {
@@ -90,7 +229,7 @@ impl Performs for RunningNexus {
             },
             Operation::Open(launch) => match self.herdr.create_launch_pane(&launch) {
                 Ok(pane) => Outcome::Opened(pane),
-                Err(_) => Outcome::Failed(Failed_Data::HerdrRefused),
+                Err(error) => HerdrFailure::refused(HerdrFailureStage::Open, error),
             },
             Operation::Spawn(PaneLaunch {
                 composed_launch,
@@ -102,7 +241,7 @@ impl Performs for RunningNexus {
                 flow_id_option.as_deref(),
             ) {
                 Ok(()) => Outcome::Spawned,
-                Err(_) => Outcome::Failed(Failed_Data::HerdrRefused),
+                Err(error) => HerdrFailure::refused(HerdrFailureStage::Spawn, error),
             },
             Operation::Bind(PaneLaunch {
                 composed_launch,
@@ -114,7 +253,7 @@ impl Performs for RunningNexus {
                 flow_id_option.as_deref(),
             ) {
                 Ok(binding) => Outcome::Bound(binding),
-                Err(_) => Outcome::Failed(Failed_Data::HerdrRefused),
+                Err(error) => HerdrFailure::refused(HerdrFailureStage::Bind, error),
             },
             Operation::Title(Title_Data {
                 composed_launch,
@@ -124,7 +263,7 @@ impl Performs for RunningNexus {
                 .title_native_flow(&composed_launch, &native_launch_binding)
             {
                 Ok(_) => Outcome::Titled,
-                Err(_) => Outcome::Failed(Failed_Data::HerdrRefused),
+                Err(error) => HerdrFailure::refused(HerdrFailureStage::Title, error),
             },
             Operation::Submit(Submit_Data {
                 composed_launch,

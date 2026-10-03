@@ -1436,24 +1436,57 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         if !exact_pane {
             return Err("Herdr agent does not match the created native pane".into());
         }
-        let session = agent
-            .get("agent_session")
-            .ok_or_else(|| "official Herdr integration reported no native session".to_owned())?;
+        // Claude receives the Flow-selected session through `--session-id`.
+        // Herdr may not expose `agent_session` before Claude finishes its own
+        // initialization, so a reserved Claude launch binds that selected value
+        // after exact pane/harness/readiness verification. If Herdr does expose
+        // a session, it must agree exactly; it is never silently substituted.
+        let selected_claude_session =
+            if launch.launch_profile.harness_kind == HarnessKind::Claude && reserved.is_some() {
+                self.reserved_native_session_id(&launch.launch_profile)
+                    .filter(|session| !session.is_empty())
+            } else {
+                None
+            };
         let expected_source = format!("herdr:{expected_harness}");
-        if session.get("source").and_then(serde_json::Value::as_str)
-            != Some(expected_source.as_str())
-            || session.get("agent").and_then(serde_json::Value::as_str) != Some(expected_harness)
-            || session.get("kind").and_then(serde_json::Value::as_str) != Some("id")
-        {
-            return Err("native identity did not come from the official Herdr integration".into());
-        }
-        let native_session_id = session
-            .get("value")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                "official Herdr integration returned an empty native identity".to_owned()
+        let observed_session = agent.get("agent_session");
+        let observed_native_session = |session: &serde_json::Value| -> Result<String, String> {
+            if session.get("source").and_then(serde_json::Value::as_str)
+                != Some(expected_source.as_str())
+                || session.get("agent").and_then(serde_json::Value::as_str)
+                    != Some(expected_harness)
+                || session.get("kind").and_then(serde_json::Value::as_str) != Some("id")
+            {
+                return Err(
+                    "native identity did not come from the official Herdr integration".into(),
+                );
+            }
+            session
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    "official Herdr integration returned an empty native identity".to_owned()
+                })
+        };
+        let native_session_id = if let Some(selected) = selected_claude_session.as_deref() {
+            if let Some(session) = observed_session {
+                let observed = observed_native_session(session)?;
+                if observed != selected {
+                    return Err(
+                        "observed native identity conflicts with the Flow-selected Claude session"
+                            .into(),
+                    );
+                }
+            }
+            selected.to_owned()
+        } else {
+            let session = observed_session.ok_or_else(|| {
+                "official Herdr integration reported no native session".to_owned()
             })?;
+            observed_native_session(session)?
+        };
         let normalized_identity = native_session_id
             .bytes()
             .filter(|byte| *byte != b'-')
@@ -1464,12 +1497,12 @@ impl ObservesNativeLaunchBinding for HerdrCli {
             && self
                 .reserved_native_session_id(&launch.launch_profile)
                 .as_deref()
-                != Some(native_session_id)
+                != Some(native_session_id.as_str())
         {
             return Err("native session is not the one Flow reserved for this launch".into());
         }
         let flow_id =
-            self.claim_flow_identity(&launch.launch_profile.harness_kind, native_session_id)?;
+            self.claim_flow_identity(&launch.launch_profile.harness_kind, &native_session_id)?;
         if reserved.is_some_and(|reserved| reserved != flow_id) {
             return Err("flow claim does not name the FlowId Flow reserved".into());
         }
@@ -2162,7 +2195,7 @@ case "$*" in
   *"pane run"*) sh -c "$6" > '{marker_output}'; width=$(cat '{pane_width}' 2>/dev/null || printf 120); fold -w "$width" '{marker_output}' > '{visible_output}' ;;
   *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
   *"agent start"*) printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
-  *"agent get"*) reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness" ;;
+  *"agent get"*) reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); if [ -f '{missing_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness"; fi ;;
   *"agent prompt"*" /rename "*) title=$(printf '%s' "$*" | sed 's/.* \/rename //'); [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}\n' "$title" >> '{claude_transcript}'; printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"pane rename w7:p1 "*) printf '%s' "$*" | sed 's/.*pane rename w7:p1 //' > '{label_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
@@ -2172,6 +2205,7 @@ esac
 "##,
             calls = calls.display(),
             reported_harness = reported_harness.display(),
+            missing_agent_session = root.path().join("missing-agent-session").display(),
             marker_output = root.path().join("marker-unwrapped").display(),
             visible_output = root.path().join("marker-visible").display(),
             pane_width = root.path().join("pane-width").display(),
@@ -2411,6 +2445,51 @@ printf '%s\n' 123456
     }
 
     #[test]
+    fn reserved_claude_binds_selected_session_without_herdr_session_and_refuses_mismatches() {
+        use crate::herdr::reservation::{ChoosesNativeSession, ReservesFlowIdentity};
+        let launch = launch(HarnessKind::Claude);
+        let session = HerdrCli::default()
+            .with_ordinary_socket(Path::new("/fixture/run/flow-next/flow/flow.sock"))
+            .reserved_native_session_id(&launch.launch_profile)
+            .expect("a reserved Claude launch chooses its session");
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) =
+            fixture_herdr("claude", &session, &session.replace('-', ""), &agent_name);
+        assert_eq!(
+            adapter.reserve_flow_identity(&launch).unwrap().as_deref(),
+            Some("123456")
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter
+            .start_native_harness(&launch, &pane, Some("123456"))
+            .expect("started");
+        fs::write(root.path().join("missing-agent-session"), "absent").unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, Some("123456"))
+            .expect("selected session binds without Herdr session");
+        assert_eq!(binding.native_session_id, session);
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(calls.contains(&format!(" --session-id {session} ")));
+
+        let mut wrong_pane = pane.clone();
+        wrong_pane.herdr_pane_id = "w7:p9".into();
+        assert!(
+            adapter
+                .observe_native_binding(&launch, &wrong_pane, Some("123456"))
+                .unwrap_err()
+                .contains("does not match the created native pane")
+        );
+
+        fs::write(root.path().join("reported-harness"), "codex").unwrap();
+        assert!(
+            adapter
+                .observe_native_binding(&launch, &pane, Some("123456"))
+                .unwrap_err()
+                .contains("does not match the created native pane")
+        );
+    }
+
+    #[test]
     fn a_reserved_claude_launch_that_came_up_as_another_session_is_not_bound() {
         let launch = launch(HarnessKind::Claude);
         let agent_name = launch.launch_agent_name();
@@ -2438,7 +2517,7 @@ printf '%s\n' 123456
             adapter
                 .observe_native_binding(&launch, &pane, Some("123456"))
                 .unwrap_err()
-                .contains("not the one Flow reserved")
+                .contains("conflicts with the Flow-selected Claude session")
         );
     }
 

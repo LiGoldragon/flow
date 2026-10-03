@@ -1982,9 +1982,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
 
 #[cfg(test)]
 mod tests {
-    use crate::herdr::launch::TitlesClaudeSession;
-use crate::herdr::launch::PreparesClaudePane;
-use super::{
+    use super::{
         AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
         ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
         SubmitsFirstPromptOnce, TitlesNativeFlow,
@@ -1999,6 +1997,8 @@ use super::{
     use crate::herdr::HerdrCli;
     use crate::herdr::launch::ChecksComposedLaunch;
     use crate::herdr::launch::PreparesClaudeEnvironment;
+    use crate::herdr::launch::PreparesClaudePane;
+    use crate::herdr::launch::TitlesClaudeSession;
     use crate::title::ShowsNativeTitle;
     use signal_flow::{
         ComposedLaunch, Effort, FirstPromptPayload, FlowAspect, HarnessKind, LaunchProfile,

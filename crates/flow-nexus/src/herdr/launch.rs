@@ -2160,7 +2160,7 @@ printf '%s\n' "$*" >> '{calls}'
 case "$*" in
   *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
   *"pane run"*) ;;
-  *"pane wait-output"*) marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$marker" ;;
+  *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$marker" ;;
   *"agent start"*) printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
   *"agent get"*) reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness" ;;
   *"agent prompt"*" /rename "*) title=$(printf '%s' "$*" | sed 's/.* \/rename //'); [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}\n' "$title" >> '{claude_transcript}'; printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
@@ -2522,6 +2522,8 @@ printf '%s\n' 123456
             .position(|line| line.contains("agent start"))
             .expect("Claude start");
         assert!(pane_run < pane_wait && pane_wait < agent_start);
+        let wait_call = calls_after_start.lines().find(|line| line.contains("pane wait-output")).unwrap();
+        assert!(wait_call.contains("--source recent-unwrapped"));
         assert!(calls_after_start.contains("unset CLAUDE_CODE_CHILD_SESSION"));
         let create_call = calls_after_start
             .lines()

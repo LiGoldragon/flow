@@ -34,10 +34,21 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.17.4";
+            version = "0.18.0";
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          # The two trait laws are read off the Rust text, so their check
+          # needs every `.rs` file plus the shell the check itself is written
+          # in — a different set from what crane compiles.
+          lawSource = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              (type == "directory")
+              || (type == "regular" && pkgs.lib.hasSuffix ".rs" path)
+              || (type == "regular" && pkgs.lib.hasSuffix ".sh" path);
+          };
           exactTest =
             package: testName:
             craneLib.cargoTest (
@@ -56,6 +67,7 @@
             commonArgs
             cargoArtifacts
             exactTest
+            lawSource
             ;
         };
     in
@@ -91,6 +103,14 @@
             }
           );
           fmt = context.craneLib.cargoFmt context.commonArgs;
+          # `fn main()` is the only production free function, and every
+          # production method lives in a trait.
+          no-free-functions =
+            context.pkgs.runCommand "flow-no-free-functions" { src = context.lawSource; }
+              (builtins.readFile ./checks/no-free-functions.sh);
+          no-inherent-methods =
+            context.pkgs.runCommand "flow-no-inherent-methods" { src = context.lawSource; }
+              (builtins.readFile ./checks/no-inherent-methods.sh);
           clippy = context.craneLib.cargoClippy (
             context.commonArgs
             // {
@@ -150,6 +170,12 @@
             "tests::submission::a_draft_claudes_interrupt_put_back_is_never_taken_out";
           flow-caller-pane-from-marks-or-ancestry = context.exactTest "flow-nexus"
             "tests::a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors";
+          flow-client-default-socket = context.exactTest "flow"
+            "the_client_reaches_the_default_ordinary_socket_under_the_runtime_directory";
+          flow-meta-client-default-socket = context.exactTest "flow-meta"
+            "the_meta_client_reaches_the_default_meta_socket_under_the_runtime_directory";
+          flow-configuration-only-over-meta = context.exactTest "flow-nexus"
+            "a_flow_variable_in_the_environment_does_not_reach_the_configuration";
         }
       );
 

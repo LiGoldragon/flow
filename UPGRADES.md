@@ -1,3 +1,30 @@
+# Flow 0.18.0
+
+Deploy beside Message 0.17.0, or do not deploy at all. No wire or storage
+change; deployment and client behaviour change.
+
+- **Configuration reaches the Nexus only over its meta socket.** The
+  `FLOW_SOURCE_ROOT` and `FLOW_CODEX_{STABLE,NEXT}_{CLIENT,SOCKET,HOME,MODELS}`
+  variables are no longer read. A store that adopted them earlier keeps the
+  adopted values; a new store seeds its defaults from `HOME` and must be sent
+  `Configure` for anything else. A next-slot Nexus started under
+  `HOME=~/.local/state/flow-next` from a fresh store therefore needs a
+  `Configure` carrying the real source root and Codex endpoints.
+- **One home for the defaults.** The new `flow-defaults` crate derives the
+  store, socket, source-root and Codex paths from `HOME` and
+  `XDG_RUNTIME_DIR`; the Nexus seeds from it and the clients reach
+  `$XDG_RUNTIME_DIR/flow/flow.sock` and `flow-meta.sock` through it, no
+  longer the hard-coded `/run/user/1001/flow/`. `FLOW_SOCKET` and
+  `FLOW_META_SOCKET` still name another Nexus's socket. `flow-meta
+  register-codex` without an endpoint uses the default stable Codex control
+  socket under `HOME`, not `/home/li/.codex`.
+- **Claude daemon readiness follows Claude's home.** The jobs directory and
+  roster are read under `CLAUDE_CONFIG_DIR` (else `$HOME/.claude`), not
+  `/home/li/.claude`.
+- **Traits first.** Every production method lives in a trait and `fn main()`
+  is the only free function; the `no-free-functions` and
+  `no-inherent-methods` checks hold both.
+
 # Flow 0.17.4
 
 Deploy beside Message 0.17.0, or do not deploy at all.

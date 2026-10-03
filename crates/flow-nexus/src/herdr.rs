@@ -1,5 +1,6 @@
 //! Herdr roster validation for durable Flow routes.
 
+use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::KeepsLaunchBundles;
 pub mod launch;
@@ -87,6 +88,9 @@ pub struct HerdrCli {
     flows_root: PathBuf,
     codex_endpoints: CodexEndpoints,
     claude_transcript_root: PathBuf,
+    /// The Claude daemon's records, read for a daemon-owned session's
+    /// readiness.
+    pub(crate) claude_daemon: crate::claude::ClaudeDaemon,
     /// Native Claude skill catalogs, highest-precedence first.
     claude_skill_roots: Vec<PathBuf>,
     /// Where each launch's own bundle copy lives, the one a Claude launch
@@ -146,6 +150,7 @@ impl Default for HerdrCli {
                 workspace_root: workspace_root.clone(),
             },
             claude_transcript_root: claude_home.join("projects"),
+            claude_daemon: crate::claude::ClaudeDaemon::under(&claude_home),
             claude_skill_roots,
             launch_bundles: LaunchBundles::at(defaults.launch_bundle_directory()),
         }
@@ -335,6 +340,7 @@ impl HerdrCli {
                     .to_path_buf(),
             },
             claude_transcript_root: fixture_root.join("claude"),
+            claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
             claude_skill_roots: vec![fixture_root.join("claude-skills")],
             launch_bundles: LaunchBundles::at(
                 flows_root

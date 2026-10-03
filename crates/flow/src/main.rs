@@ -90,16 +90,22 @@ impl TextualizesFlowReply for FlowClient {
 /// The one invocation that is not a datom: `--version` alone answers the
 /// Cargo package version without reaching Flow Nexus. signal-flow carries no
 /// Version query, so the version is answered at the CLI boundary.
-fn version_answer(arguments: &[String]) -> Option<String> {
-    match arguments {
-        [only] if only == "--version" => Some(format!("flow {}", env!("CARGO_PKG_VERSION"))),
-        _ => None,
+trait AnswersVersion {
+    fn version_answer(&self) -> Option<String>;
+}
+
+impl AnswersVersion for [String] {
+    fn version_answer(&self) -> Option<String> {
+        match self {
+            [only] if only == "--version" => Some(format!("flow {}", env!("CARGO_PKG_VERSION"))),
+            _ => None,
+        }
     }
 }
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
-    if let Some(version) = version_answer(&arguments) {
+    if let Some(version) = arguments.version_answer() {
         println!("{version}");
         return;
     }
@@ -130,18 +136,24 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlowClient, ParsesFlowCommand, TextualizesFlowReply, version_answer};
+    use super::{AnswersVersion, FlowClient, ParsesFlowCommand, TextualizesFlowReply};
     use signal_flow::{Query, Response};
 
     #[test]
     fn version_is_the_one_non_datom_invocation() {
         assert_eq!(
-            version_answer(&["--version".into()]),
+            (&["--version".to_owned()] as &[String]).version_answer(),
             Some(format!("flow {}", env!("CARGO_PKG_VERSION")))
         );
-        assert_eq!(version_answer(&["--version".into(), "extra".into()]), None);
-        assert_eq!(version_answer(&["List.{ }".into()]), None);
-        assert_eq!(version_answer(&[]), None);
+        assert_eq!(
+            (&["--version".to_owned(), "extra".to_owned()] as &[String]).version_answer(),
+            None
+        );
+        assert_eq!(
+            (&["List.{ }".to_owned()] as &[String]).version_answer(),
+            None
+        );
+        assert_eq!((&[] as &[String]).version_answer(), None);
     }
 
     #[test]

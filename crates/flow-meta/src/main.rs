@@ -14,6 +14,10 @@ struct FlowMetaClient {
 
 trait ParsesMetaCommand {
     fn parse_command(&self, arguments: impl Iterator<Item = String>) -> Result<Query, String>;
+
+    fn registration_usage() -> String {
+        "usage: flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint]".into()
+    }
 }
 trait CallsMetaNexus {
     fn call(&self, query: &Query) -> Result<Response, String>;
@@ -108,12 +112,6 @@ impl ParsesMetaCommand for FlowMetaClient {
             }
             _ => Err("usage: flow-meta reset <idempotency-key> [credit-id] | flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint] | flow-meta '<one inline meta Query datom>'".into()),
         }
-    }
-}
-
-impl FlowMetaClient {
-    fn registration_usage() -> String {
-        "usage: flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint]".into()
     }
 }
 

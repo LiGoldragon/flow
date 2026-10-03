@@ -7,17 +7,29 @@ use std::{path::Path, process::ExitCode, sync::Arc};
 
 /// `--version` alone answers the Cargo package version before any
 /// configuration is read; every other argument vector starts the daemon.
-fn version_answer(arguments: &[String]) -> Option<String> {
-    match arguments {
-        [only] if only == "--version" => Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION"))),
-        _ => None,
+trait AnswersVersion {
+    fn version_answer(&self) -> Option<String>;
+}
+
+impl AnswersVersion for [String] {
+    fn version_answer(&self) -> Option<String> {
+        match self {
+            [only] if only == "--version" => {
+                Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
+            }
+            _ => None,
+        }
     }
 }
 
 // Startup failures end the process with a nonzero status so the service
 // manager restarts it; a failing serving thread does the same.
 fn main() -> ExitCode {
-    if let Some(version) = version_answer(&std::env::args().skip(1).collect::<Vec<_>>()) {
+    if let Some(version) = std::env::args()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .version_answer()
+    {
         println!("{version}");
         return ExitCode::SUCCESS;
     }
@@ -82,15 +94,18 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::version_answer;
+    use super::AnswersVersion;
 
     #[test]
     fn version_answers_the_cargo_package_version() {
         assert_eq!(
-            version_answer(&["--version".into()]),
+            (&["--version".to_owned()] as &[String]).version_answer(),
             Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
         );
-        assert_eq!(version_answer(&[]), None);
-        assert_eq!(version_answer(&["--version".into(), "x".into()]), None);
+        assert_eq!((&[] as &[String]).version_answer(), None);
+        assert_eq!(
+            (&["--version".to_owned(), "x".to_owned()] as &[String]).version_answer(),
+            None
+        );
     }
 }

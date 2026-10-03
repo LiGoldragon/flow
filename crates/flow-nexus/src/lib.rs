@@ -1,4 +1,5 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
+use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::KeepsLaunchBundles;
 pub mod binding;
@@ -103,7 +104,8 @@ impl Dispatches for RunningNexus {
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
                     Ok(Response::RecipientResolved(node)) => Response::RecipientResolved(
-                        self.herdr.refresh_route(claude::refresh_readiness(node)),
+                        self.herdr
+                            .refresh_route(self.herdr.claude_daemon.refreshed(node)),
                     ),
                     Ok(response) => response,
                     Err(_) => Response::RecipientResolutionRejected(

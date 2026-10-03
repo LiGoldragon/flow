@@ -10,6 +10,7 @@
 //! requires the agent Idle or Done. The screen read is not atomic with the
 //! typing; that is stated, not solved.
 
+use crate::delivery::body::ShowsPaneText;
 pub mod body;
 pub mod lease;
 

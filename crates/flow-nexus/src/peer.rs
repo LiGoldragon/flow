@@ -12,6 +12,7 @@
 //! mistakes, not an adversary (F4).
 
 use crate::RunningNexus;
+use crate::binding::ChecksProcessIdentity;
 use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ResolvesCaller};
 use crate::store::ReadsFlowRoles;
 use crate::store::delivery::RecordsDeliveries;
@@ -28,7 +29,7 @@ impl ResolvesPeer for RunningNexus {
     fn resolve_peer(&self, identity: &ProcessIdentity) -> Response {
         // The identity must still name the same live process (user and start
         // time), so a reused process ID names no one.
-        if !crate::process_identity_matches(identity) {
+        if !identity.is_live_process() {
             return Response::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
         }
         let Ok(process_id) = u32::try_from(identity.process_id) else {

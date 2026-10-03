@@ -3,6 +3,9 @@
 //! a launch request — its attempt, its outcome, and whether it replaces a
 //! predecessor.
 
+use crate::codex::SelectsCodexEndpoint;
+use crate::composition::KeepsLaunchBundles;
+use crate::composition::OpensLaunchComposer;
 use crate::{
     RunningNexus,
     codex::{ResolvesBoundCodexSkills, SubmitsBoundCodexFirstTurn},
@@ -849,24 +852,20 @@ impl PromotesObservedLaunch for RunningNexus {
     }
 }
 
-/// What a seat is told the moment its launch receipt is confirmed.
-///
-/// The first prompt ends by asking for the receipt marker and nothing else,
-/// which is what makes the receipt verifiable: the seat's first turn is
-/// exactly one known line. That same ending ends the turn, so the brief the
-/// first prompt carries would sit there unstarted, waiting for someone to
-/// say go. Nobody says go. Flow does: the receipt is witnessed, the launch
-/// is Started, and Flow types this one line into the bound pane through its
-/// own writer. No caller and no human follows a launch.
-pub struct BriefContinuation;
-
-impl BriefContinuation {
-    pub const TEXT: &'static str =
-        "Launch receipt confirmed. Begin the brief in your first prompt now.";
-}
-
 /// Sends the continuation once a launch has Started.
 pub trait ContinuesIntoBrief {
+    /// What a seat is told the moment its launch receipt is confirmed.
+    ///
+    /// The first prompt ends by asking for the receipt marker and nothing else,
+    /// which is what makes the receipt verifiable: the seat's first turn is
+    /// exactly one known line. That same ending ends the turn, so the brief the
+    /// first prompt carries would sit there unstarted, waiting for someone to
+    /// say go. Nobody says go. Flow does: the receipt is witnessed, the launch
+    /// is Started, and Flow types this one line into the bound pane through its
+    /// own writer. No caller and no human follows a launch.
+    const BRIEF_CONTINUATION: &'static str =
+        "Launch receipt confirmed. Begin the brief in your first prompt now.";
+
     /// Best effort by design: the flow is Started whatever this does. A
     /// continuation that does not reach the seat is reported to the Nexus
     /// log, never turned into a launch rejection — the seat exists, is
@@ -906,7 +905,7 @@ impl ContinuesIntoBrief for RunningNexus {
         );
         match self
             .herdr
-            .place(&target.route, BriefContinuation::TEXT, observe)
+            .place(&target.route, Self::BRIEF_CONTINUATION, observe)
         {
             // The seat was seen reacting on its exact pane: it is Active.
             Placement::Placed { observed: true } if self.herdr.route_is_available(&target.node) => {

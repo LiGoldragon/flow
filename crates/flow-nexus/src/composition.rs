@@ -41,6 +41,8 @@ pub struct LaunchComposer {
 
 pub trait OpensLaunchComposer {
     fn at(source_root: impl Into<PathBuf>, launch_bundles: LaunchBundles) -> Self;
+    /// Where this composer writes each launch's copy of the bundle.
+    fn launch_bundles(&self) -> &LaunchBundles;
 }
 
 /// Where the Nexus keeps each launch's own copy of the system-prompt bundle.
@@ -62,30 +64,37 @@ pub struct LaunchBundles {
     directory: PathBuf,
 }
 
-impl LaunchBundles {
-    pub fn at(directory: impl Into<PathBuf>) -> Self {
+pub trait KeepsLaunchBundles {
+    fn at(directory: impl Into<PathBuf>) -> Self;
+    /// The per-launch copy a profile's launch receives.
+    fn file_for(&self, profile: &LaunchProfile) -> PathBuf;
+    /// The per-launch copy of the launch request this ID names.
+    fn file_for_request(&self, launch_request_id: &str) -> PathBuf;
+    /// Removes the per-launch copy of a launch request. A copy that was
+    /// never written (a Codex launch, or one refused before composition) is
+    /// already gone; any other failure is reported.
+    fn remove_for_request(&self, launch_request_id: &str) -> std::io::Result<()>;
+}
+
+impl KeepsLaunchBundles for LaunchBundles {
+    fn at(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
         }
     }
 
-    /// The per-launch copy a profile's launch receives.
-    pub fn file_for(&self, profile: &LaunchProfile) -> PathBuf {
+    fn file_for(&self, profile: &LaunchProfile) -> PathBuf {
         self.file_for_request(&profile.launch_request_id)
     }
 
-    /// The per-launch copy of the launch request this ID names.
-    pub fn file_for_request(&self, launch_request_id: &str) -> PathBuf {
+    fn file_for_request(&self, launch_request_id: &str) -> PathBuf {
         self.directory.join(format!(
             "launch-{}.md",
             launch_request_id.launch_request_short_form()
         ))
     }
 
-    /// Removes the per-launch copy of a launch request. A copy that was
-    /// never written (a Codex launch, or one refused before composition) is
-    /// already gone; any other failure is reported.
-    pub fn remove_for_request(&self, launch_request_id: &str) -> std::io::Result<()> {
+    fn remove_for_request(&self, launch_request_id: &str) -> std::io::Result<()> {
         match fs::remove_file(self.file_for_request(launch_request_id)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
@@ -153,24 +162,27 @@ pub trait ValidatesComposedPrompt {
 /// Asking for the marker and nothing else is what makes it verifiable, and
 /// it is also what ends the seat's turn. The brief the same prompt carries
 /// is therefore not begun by this footer; Flow begins it, sending
-/// [`crate::launching::BriefContinuation`] over the seat's bound route the
-/// moment the receipt is witnessed. The footer stays exactly as it is.
-pub struct LaunchReceipt;
-
-impl LaunchReceipt {
-    pub const MARKER: &'static str = "FLOW_LAUNCH_RECEIPT_V2";
+/// [`crate::launching::ContinuesIntoBrief::BRIEF_CONTINUATION`] over the
+/// seat's bound route the moment the receipt is witnessed. The footer stays
+/// exactly as it is.
+pub trait AsksForLaunchReceipt {
+    const LAUNCH_RECEIPT: &'static str = "FLOW_LAUNCH_RECEIPT_V2";
 
     /// The fixed footer that follows every composed body of the harness.
     /// Claude's footer continues its one line; Codex's is its own paragraph.
-    pub fn footer_for(harness: &HarnessKind) -> String {
-        match harness {
+    fn receipt_footer(&self) -> String;
+}
+
+impl AsksForLaunchReceipt for HarnessKind {
+    fn receipt_footer(&self) -> String {
+        match self {
             HarnessKind::Claude => format!(
                 " When every skill has loaded, reply once with exactly {} and nothing else.",
-                Self::MARKER
+                Self::LAUNCH_RECEIPT
             ),
             HarnessKind::Codex => format!(
                 "\n\nWhen every skill has loaded, reply once with exactly this line and nothing else:\n{}",
-                Self::MARKER
+                Self::LAUNCH_RECEIPT
             ),
         }
     }
@@ -179,22 +191,27 @@ impl LaunchReceipt {
 /// Claude Code's observed transition to a pasted-content transcript shape.
 /// This selects the direct Skill-tool wording; it is not a maximum prompt
 /// size. A line with a break is likewise sent in the direct form.
-struct ClaudePasteThreshold;
+pub trait FitsClaudePaste {
+    const CLAUDE_PASTE_LIMIT: usize = 800;
 
-impl ClaudePasteThreshold {
-    pub const LIMIT: usize = 800;
+    fn claude_paste_length(&self) -> usize;
 
-    pub fn length(text: &str) -> usize {
-        text.encode_utf16().count()
+    /// Whether the text keeps Claude's native command expansion shape.
+    fn fits_claude_paste(&self) -> bool;
+}
+
+impl FitsClaudePaste for str {
+    fn claude_paste_length(&self) -> usize {
+        self.encode_utf16().count()
     }
 
-    /// Whether `text` keeps Claude's native command expansion shape.
-    pub fn fits(text: &str) -> bool {
-        !text.contains(['\r', '\n']) && Self::length(text) <= Self::LIMIT
+    fn fits_claude_paste(&self) -> bool {
+        !self.contains(['\r', '\n']) && self.claude_paste_length() <= Self::CLAUDE_PASTE_LIMIT
     }
 }
 
-/// How many `/name` commands Claude loads from the head of one prompt.
+/// How a launch's skills split across Claude's command stack: the `/name`
+/// commands Claude loads from the head of one prompt, and the rest.
 ///
 /// Claude Code 2.1.280 loads stacked head commands until its stack limit,
 /// then logs "Stacked command limit (5) reached — remaining input passed as
@@ -202,14 +219,26 @@ impl ClaudePasteThreshold {
 /// launch therefore stacks at most this many commands and names any further
 /// skill for the Skill tool. Every stacked command receives the same
 /// argument: the text after the last stacked command.
-pub struct ClaudeCommandStack;
+pub trait StacksClaudeCommands {
+    type Skill;
+    const CLAUDE_COMMAND_STACK_LIMIT: usize = 5;
 
-impl ClaudeCommandStack {
-    pub const LIMIT: usize = 5;
+    /// The skills a launch stacks as head commands.
+    fn claude_stacked(&self) -> &[Self::Skill];
 
-    /// The number of commands a launch with `skill_count` skills stacks.
-    pub fn stacked(skill_count: usize) -> usize {
-        skill_count.min(Self::LIMIT)
+    /// The skills past the stack, named for the Skill tool instead.
+    fn claude_unstacked(&self) -> &[Self::Skill];
+}
+
+impl<Skill> StacksClaudeCommands for [Skill] {
+    type Skill = Skill;
+
+    fn claude_stacked(&self) -> &[Skill] {
+        &self[..self.len().min(Self::CLAUDE_COMMAND_STACK_LIMIT)]
+    }
+
+    fn claude_unstacked(&self) -> &[Skill] {
+        &self[self.len().min(Self::CLAUDE_COMMAND_STACK_LIMIT)..]
     }
 }
 
@@ -356,19 +385,16 @@ trait HashesPromptBody {
     fn sha256(&self, bytes: &[u8]) -> String;
 }
 
-impl LaunchComposer {
-    /// Where this composer writes each launch's copy of the bundle.
-    pub fn launch_bundles(&self) -> &LaunchBundles {
-        &self.launch_bundles
-    }
-}
-
 impl OpensLaunchComposer for LaunchComposer {
     fn at(source_root: impl Into<PathBuf>, launch_bundles: LaunchBundles) -> Self {
         Self {
             source_root: source_root.into(),
             launch_bundles,
         }
+    }
+
+    fn launch_bundles(&self) -> &LaunchBundles {
+        &self.launch_bundles
     }
 }
 
@@ -396,7 +422,7 @@ impl ValidatesComposedPrompt for ComposedLaunch {
             == format!(
                 "{}{}",
                 self.first_prompt_payload.first_prompt_body,
-                LaunchReceipt::footer_for(&self.launch_profile.harness_kind)
+                self.launch_profile.harness_kind.receipt_footer()
             )
     }
 }
@@ -579,8 +605,8 @@ impl RendersLaunchProfile for LaunchComposer {
             // them; the first other token ends the stack and the rest of the
             // block is the argument every stacked command receives.
             HarnessKind::Claude => skills
+                .claude_stacked()
                 .iter()
-                .take(ClaudeCommandStack::LIMIT)
                 .map(|skill| format!("/{skill} "))
                 .collect(),
             // Codex keeps its stock base instructions. The main Flow alone
@@ -617,10 +643,11 @@ impl RendersLaunchProfile for LaunchComposer {
             "Read {} for your launch mode",
             bundle_file.display()
         ));
-        if profile.skill_name_vector.len() > ClaudeCommandStack::LIMIT {
+        let unstacked = profile.skill_name_vector.claude_unstacked();
+        if !unstacked.is_empty() {
             line.push_str(&format!(
                 ", load {} through the Skill tool in this order",
-                profile.skill_name_vector[ClaudeCommandStack::LIMIT..].join(", ")
+                unstacked.join(", ")
             ));
         }
         line.push_str(", then: ");
@@ -721,12 +748,8 @@ impl ComposesLaunch for LaunchComposer {
         };
         let mut body = self.render_body(profile, &bundle, &sources);
         if profile.harness_kind == HarnessKind::Claude {
-            let candidate = format!(
-                "{}{}",
-                body,
-                LaunchReceipt::footer_for(&profile.harness_kind)
-            );
-            if !ClaudePasteThreshold::fits(&candidate) {
+            let candidate = format!("{}{}", body, profile.harness_kind.receipt_footer());
+            if !candidate.fits_claude_paste() {
                 let LaunchBundleText::File(bundle_file) = &bundle else {
                     unreachable!("Claude launches always receive a bundle file")
                 };
@@ -738,11 +761,7 @@ impl ComposesLaunch for LaunchComposer {
             launch_request_id: profile.launch_request_id.clone(),
             prompt_sha256: prompt_sha256.clone(),
         };
-        let first_prompt_text = format!(
-            "{}{}",
-            body,
-            LaunchReceipt::footer_for(&profile.harness_kind)
-        );
+        let first_prompt_text = format!("{}{}", body, profile.harness_kind.receipt_footer());
         Ok(ComposedLaunch {
             launch_profile: profile.clone(),
             first_prompt_payload: FirstPromptPayload {
@@ -758,10 +777,11 @@ impl ComposesLaunch for LaunchComposer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeCommandStack, ClaudePasteThreshold, ComposesLaunch, CompositionError, LaunchBundles,
+        AsksForLaunchReceipt, ComposesLaunch, CompositionError, FitsClaudePaste, LaunchBundles,
         LaunchComposer, NamesRemoteControl, OpensLaunchComposer, ShortensLaunchRequest,
         ValidatesComposedPrompt,
     };
+    use crate::composition::KeepsLaunchBundles;
     use sha2::Digest as _;
     use signal_flow::{
         FlowAspect, HarnessKind, LaunchProfile, LaunchSource, PowerLevel, RememberedFlow,
@@ -957,7 +977,7 @@ mod tests {
         let body = composed.first_prompt_payload.first_prompt_body.as_str();
         let head = body.split(" Read ").next().unwrap();
         let commands = head.split(' ').collect::<Vec<_>>();
-        assert!(commands.len() <= ClaudeCommandStack::LIMIT, "{head}");
+        assert!(commands.len() <= 5, "{head}");
         assert_eq!(
             commands,
             ["/spirit", "/psyche", "/main-flow", "/behavior", "/herdr"]
@@ -968,9 +988,12 @@ mod tests {
         assert!(
             body.contains(" for your launch mode, load messaging, datom through the Skill tool in this order, then: ")
         );
-        assert!(ClaudePasteThreshold::fits(
-            &composed.first_prompt_payload.first_prompt_text
-        ));
+        assert!(
+            composed
+                .first_prompt_payload
+                .first_prompt_text
+                .fits_claude_paste()
+        );
         assert!(!body.contains("/messaging"));
         assert!(!body.contains("/datom"));
         assert!(composed.has_canonical_first_prompt());
@@ -1083,7 +1106,7 @@ mod tests {
             .unwrap();
         let text = &composed.first_prompt_payload.first_prompt_text;
         assert!(text.len() > 34_369);
-        assert!(!ClaudePasteThreshold::fits(text));
+        assert!(!text.fits_claude_paste());
         assert!(text.starts_with("Read "));
         assert!(text.contains(
             "then load these skills through the Skill tool in this order: spirit, main-flow."
@@ -1135,10 +1158,8 @@ mod tests {
         );
         composed.first_prompt_payload.prompt_sha256 = hash.clone();
         composed.target_receipt_request.prompt_sha256 = hash;
-        composed.first_prompt_payload.first_prompt_text = format!(
-            "{body}{}",
-            super::LaunchReceipt::footer_for(&HarnessKind::Claude)
-        );
+        composed.first_prompt_payload.first_prompt_text =
+            format!("{body}{}", HarnessKind::Claude.receipt_footer());
         assert!(composed.has_canonical_first_prompt());
     }
 
@@ -1380,7 +1401,7 @@ mod tests {
         assert!(text.contains(&format!("Read {} for your launch mode", copy.display())));
         assert!(!text.contains(&profile.system_prompt_bundle_file));
         assert!(!text.contains("Predecessor") && !text.contains("Remembered"));
-        assert!(ClaudePasteThreshold::fits(text), "{text}");
+        assert!(text.fits_claude_paste(), "{text}");
         assert!(composed.has_canonical_first_prompt());
     }
 

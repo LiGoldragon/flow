@@ -25,8 +25,13 @@ pub struct PaneText {
     text: String,
 }
 
-impl PaneText {
-    pub fn as_str(&self) -> &str {
+/// The pane text as typed.
+pub trait ShowsPaneText {
+    fn as_str(&self) -> &str;
+}
+
+impl ShowsPaneText for PaneText {
+    fn as_str(&self) -> &str {
         &self.text
     }
 }
@@ -89,7 +94,7 @@ impl VetsBody for Message {
         content
             .strings()
             .into_iter()
-            .find_map(|text| CommandLine::of(text, profile))
+            .find_map(|text| profile.command_line(text))
             .map(BodyRefusal::HarnessCommand)
     }
 }
@@ -137,13 +142,17 @@ impl FindsControlCharacters for PaneText {
     }
 }
 
-/// A first line that a harness would read as one of its commands.
-struct CommandLine;
+/// Reads, in a text's first line, a command the harness would run.
+trait ReadsCommandLine {
+    /// The first line, when the harness would read it as one of its
+    /// commands.
+    fn command_line(&self, text: &str) -> Option<String>;
+}
 
-impl CommandLine {
-    fn of(text: &str, profile: &HarnessProfile) -> Option<String> {
+impl ReadsCommandLine for HarnessProfile {
+    fn command_line(&self, text: &str) -> Option<String> {
         let line = text.lines().next().unwrap_or_default().trim_start();
-        let sigil = profile
+        let sigil = self
             .command_sigil_vector
             .iter()
             .find(|sigil| !sigil.is_empty() && line.starts_with(sigil.as_str()))?;
@@ -175,6 +184,7 @@ impl CommandLine {
 #[cfg(test)]
 mod tests {
     use super::{RendersPaneText, VetsBody};
+    use crate::delivery::body::ShowsPaneText;
     use crate::store::delivery::DefaultsHarnessProfile;
     use meta_signal_flow::{BodyRefusal, Content, Letter, Message, Psyche_Data, Sender};
     use signal_flow::HarnessKind;

@@ -1,4 +1,7 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
+use crate::codex::SelectsCodexEndpoint;
+use crate::composition::KeepsLaunchBundles;
+pub mod binding;
 pub mod caller;
 pub mod claude;
 pub mod codex;
@@ -13,6 +16,7 @@ pub mod peer;
 pub mod store;
 pub mod title;
 
+use binding::{ChecksFlowBinding, ChecksFlowContainer, ChecksProcessIdentity, RefusesBinding};
 use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchBundles, LaunchComposer, OpensLaunchComposer};
@@ -30,7 +34,7 @@ use std::{
     fs,
     io::{Read, Write},
     os::unix::{
-        fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        fs::PermissionsExt,
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -42,70 +46,6 @@ use store::{
     OpensFlowStore, ReadsFlowRows, RecordsFlowLifecycle, RecordsLaunchOutcome,
     RegistersExistingFlow, RegistersFlowIdentity,
 };
-
-fn process_identity_matches(identity: &meta_signal_flow::ProcessIdentity) -> bool {
-    let Ok(process_id) = u32::try_from(identity.process_id) else {
-        return false;
-    };
-    let process_root = PathBuf::from(format!("/proc/{process_id}"));
-    let Ok(metadata) = fs::metadata(&process_root) else {
-        return false;
-    };
-    if i64::from(metadata.uid()) != identity.process_user_id {
-        return false;
-    }
-    let Ok(stat) = fs::read_to_string(process_root.join("stat")) else {
-        return false;
-    };
-    let Some((_, fields)) = stat.rsplit_once(") ") else {
-        return false;
-    };
-    fields.split_whitespace().nth(19) == Some(identity.process_start_token.as_str())
-}
-
-fn process_cwd_matches(identity: &meta_signal_flow::ProcessIdentity, expected: &str) -> bool {
-    let Ok(process_id) = u32::try_from(identity.process_id) else {
-        return false;
-    };
-    let expected = Path::new(expected);
-    expected.is_absolute()
-        && fs::canonicalize(format!("/proc/{process_id}/cwd")).ok()
-            == fs::canonicalize(expected).ok()
-}
-
-fn container_is_well_formed(container: &meta_signal_flow::FlowContainer) -> bool {
-    !container.herdr_session_name.is_empty()
-        && !container.meta_flow_owner_id.is_empty()
-        && Path::new(&container.herdr_server_socket_path).is_absolute()
-}
-
-fn container_socket_is_live(container: &meta_signal_flow::FlowContainer) -> bool {
-    fs::metadata(&container.herdr_server_socket_path)
-        .map(|metadata| metadata.file_type().is_socket())
-        .unwrap_or(false)
-}
-
-fn binding_is_well_formed(binding: &meta_signal_flow::FlowBinding) -> bool {
-    !binding.flow_id.is_empty()
-        && !binding.model_name.is_empty()
-        && !binding.native_session_id.is_empty()
-        && !binding.herdr_workspace_id.is_empty()
-        && !binding.herdr_pane_id.is_empty()
-        && !binding.herdr_tab_id.is_empty()
-        && !binding.herdr_terminal_id.is_empty()
-        && !binding.herdr_agent_name.is_empty()
-        && Path::new(&binding.working_directory).is_absolute()
-}
-
-fn refused_binding(
-    flow_id: String,
-    reason: meta_signal_flow::FlowBindingRefusalReason,
-) -> meta_signal_flow::FlowBindingResult {
-    meta_signal_flow::FlowBindingResult::Refused(meta_signal_flow::RefusedFlowBinding {
-        flow_id,
-        flow_binding_refusal_reason: reason,
-    })
-}
 
 pub struct RunningNexus {
     pub store: FlowStore,
@@ -300,12 +240,12 @@ impl Dispatches for RunningNexus {
             }
             meta_signal_flow::Query::MetaBindExisting(request) => {
                 let container = request.flow_container;
-                if !container_is_well_formed(&container) || !container_socket_is_live(&container) {
+                if !container.is_well_formed() || !container.socket_is_live() {
                     return meta_signal_flow::Response::BindExistingRejected(
                         meta_signal_flow::BindExistingRejection::ContainerUnavailable,
                     );
                 }
-                if !process_identity_matches(&container.herdr_server_process_identity) {
+                if !container.herdr_server_process_identity.is_live_process() {
                     return meta_signal_flow::Response::BindExistingRejected(
                         meta_signal_flow::BindExistingRejection::ContainerIdentityMismatch,
                     );
@@ -317,17 +257,17 @@ impl Dispatches for RunningNexus {
                 for binding in request.flow_binding_vector {
                     let flow_id = binding.flow_id.clone();
                     if !seen_flow_ids.insert(flow_id.clone()) {
-                        results.push(refused_binding(
-                            flow_id,
-                            meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId,
-                        ));
+                        results.push(
+                            meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId
+                                .refusal_of(flow_id),
+                        );
                         continue;
                     }
-                    if !binding_is_well_formed(&binding) {
-                        results.push(refused_binding(
-                            flow_id,
-                            meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch,
-                        ));
+                    if !binding.is_well_formed() {
+                        results.push(
+                            meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch
+                                .refusal_of(flow_id),
+                        );
                         continue;
                     }
                     let pane_identity = (
@@ -338,24 +278,27 @@ impl Dispatches for RunningNexus {
                         binding.herdr_agent_name.clone(),
                     );
                     if !seen_panes.insert(pane_identity) {
-                        results.push(refused_binding(
-                            flow_id,
-                            meta_signal_flow::FlowBindingRefusalReason::AmbiguousPane,
-                        ));
+                        results.push(
+                            meta_signal_flow::FlowBindingRefusalReason::AmbiguousPane
+                                .refusal_of(flow_id),
+                        );
                         continue;
                     }
-                    if !process_identity_matches(&binding.process_identity) {
-                        results.push(refused_binding(
-                            flow_id,
-                            meta_signal_flow::FlowBindingRefusalReason::DeadProcess,
-                        ));
+                    if !binding.process_identity.is_live_process() {
+                        results.push(
+                            meta_signal_flow::FlowBindingRefusalReason::DeadProcess
+                                .refusal_of(flow_id),
+                        );
                         continue;
                     }
-                    if !process_cwd_matches(&binding.process_identity, &binding.working_directory) {
-                        results.push(refused_binding(
-                            flow_id,
-                            meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch,
-                        ));
+                    if !binding
+                        .process_identity
+                        .works_in(&binding.working_directory)
+                    {
+                        results.push(
+                            meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch
+                                .refusal_of(flow_id),
+                        );
                         continue;
                     }
                     // A flow already in the store is not imported again: the
@@ -395,12 +338,10 @@ impl Dispatches for RunningNexus {
                                 },
                             ))
                         }
-                        Ok(store::FlowRegistration::ConflictingBinding) => {
-                            results.push(refused_binding(
-                                flow_id,
-                                meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId,
-                            ))
-                        }
+                        Ok(store::FlowRegistration::ConflictingBinding) => results.push(
+                            meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId
+                                .refusal_of(flow_id),
+                        ),
                         Err(_) => {
                             return meta_signal_flow::Response::BindExistingRejected(
                                 meta_signal_flow::BindExistingRejection::StoreRefused,
@@ -487,11 +428,16 @@ pub struct Connection {
     peer: UnixStream,
 }
 
-impl Connection {
+pub trait ServesConnection: Sized {
     const READ_TIMEOUT: Duration = Duration::from_secs(5);
     const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+    fn accepted(peer: UnixStream) -> Result<Self, String>;
+    fn serve_ordinary(self, nexus: &RunningNexus) -> Result<(), String>;
+    fn serve_meta(self, nexus: &RunningNexus) -> Result<(), String>;
+}
 
-    pub fn accepted(peer: UnixStream) -> Result<Self, String> {
+impl ServesConnection for Connection {
+    fn accepted(peer: UnixStream) -> Result<Self, String> {
         peer.set_read_timeout(Some(Self::READ_TIMEOUT))
             .and_then(|_| peer.set_write_timeout(Some(Self::WRITE_TIMEOUT)))
             .map_err(|error| error.to_string())?;
@@ -499,21 +445,20 @@ impl Connection {
     }
 
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
-        let query = Frame::read_query(&mut self.peer)?;
+        let query = self.peer.read_query()?;
         let response = match query {
             // Reads of launch state never wait behind a running launch.
             Query::LaunchStatus(launch_request_id) => nexus.launch_status(&launch_request_id),
             Query::Observe(ObserveSelection::Launch(launch_request_id)) => {
                 let peer = &mut self.peer;
                 return nexus.observe_launch(&launch_request_id, &mut |response| {
-                    Frame::write_response(peer, response)
+                    peer.write_response(response)
                 });
             }
             Query::Observe(ObserveSelection::Agent(flow_id)) => {
                 let peer = &mut self.peer;
-                return nexus.observe_agent(&flow_id, &mut |response| {
-                    Frame::write_response(peer, response)
-                });
+                return nexus
+                    .observe_agent(&flow_id, &mut |response| peer.write_response(response));
             }
             // The caller is the peer of this connection, read from the kernel.
             Query::ResolveCaller(claim) => nexus.resolve_caller(
@@ -524,17 +469,17 @@ impl Connection {
             ),
             query => nexus.dispatch_serially(query),
         };
-        Frame::write_response(&mut self.peer, &response)
+        self.peer.write_response(&response)
     }
 
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
-        let query = Frame::read_meta_query(&mut self.peer)?;
+        let query = self.peer.read_meta_query()?;
         // The peer is read from the kernel; nothing in the query names it.
         let response = match nexus.meta_refusal(self.peer.peer_process()) {
             Some(refusal) => meta_signal_flow::Response::MetaRefused(refusal),
             None => nexus.dispatch_meta_serially(query),
         };
-        Frame::write_meta_response(&mut self.peer, &response)
+        self.peer.write_meta_response(&response)
     }
 }
 
@@ -653,15 +598,13 @@ impl ReconcilesListedFlows for RunningNexus {
 /// it still gets `StartAmbiguous` and can ask again or subscribe with
 /// `Observe.Launch`. The dispatch gate is not held: the promoter needs it.
 pub trait AwaitsLaunchSettlement {
-    /// The settled outcome, or None when nothing settled within the wait.
-    fn settled_launch(&self, launch_request_id: &str) -> Option<Response>;
-}
-
-impl RunningNexus {
     /// How long Start waits for a seat to answer its receipt. A native
     /// harness opens, loads its skills and replies well inside this; it is
     /// the bound on a seat that never will.
     const LAUNCH_SETTLEMENT_WAIT: Duration = Duration::from_secs(180);
+
+    /// The settled outcome, or None when nothing settled within the wait.
+    fn settled_launch(&self, launch_request_id: &str) -> Option<Response>;
 }
 
 impl AwaitsLaunchSettlement for RunningNexus {
@@ -682,9 +625,14 @@ impl AwaitsLaunchSettlement for RunningNexus {
     }
 }
 
-impl RunningNexus {
+trait DispatchesSerially {
     /// Store transitions are read-modify-write; one dispatch runs at a time
     /// across both sockets while frames are read concurrently.
+    fn dispatch_serially(&self, query: Query) -> Response;
+    fn dispatch_meta_serially(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response;
+}
+
+impl DispatchesSerially for RunningNexus {
     fn dispatch_serially(&self, query: Query) -> Response {
         let launch_request_id = match &query {
             Query::Start(request) | Query::Replace(request) => {
@@ -738,62 +686,73 @@ impl ServesMeta for RunningNexus {
     }
 }
 
-pub struct Frame;
+/// A Unix stream carries Signal as length-prefixed rkyv frames of at most
+/// 1 MiB.
+pub trait CarriesSignalFrames {
+    const FRAME_LIMIT: usize = 1024 * 1024;
 
-impl Frame {
-    fn write_bytes(peer: &mut UnixStream, bytes: &[u8]) -> Result<(), String> {
-        peer.write_all(&(bytes.len() as u32).to_be_bytes())
+    fn write_frame(&mut self, bytes: &[u8]) -> Result<(), String>;
+    fn read_frame(&mut self) -> Result<Vec<u8>, String>;
+    fn write_query(&mut self, value: &Query) -> Result<(), String>;
+    fn read_query(&mut self) -> Result<Query, String>;
+    fn write_response(&mut self, value: &Response) -> Result<(), String>;
+    fn read_response(&mut self) -> Result<Response, String>;
+    fn read_meta_query(&mut self) -> Result<meta_signal_flow::Query, String>;
+    fn write_meta_response(&mut self, value: &meta_signal_flow::Response) -> Result<(), String>;
+}
+
+impl CarriesSignalFrames for UnixStream {
+    fn write_frame(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.write_all(&(bytes.len() as u32).to_be_bytes())
             .map_err(|e| e.to_string())?;
-        peer.write_all(bytes).map_err(|e| e.to_string())
+        self.write_all(bytes).map_err(|e| e.to_string())
     }
-    fn read_bytes(peer: &mut UnixStream) -> Result<Vec<u8>, String> {
+
+    fn read_frame(&mut self) -> Result<Vec<u8>, String> {
         let mut length = [0; 4];
-        peer.read_exact(&mut length).map_err(|e| e.to_string())?;
+        self.read_exact(&mut length).map_err(|e| e.to_string())?;
         let length = u32::from_be_bytes(length) as usize;
-        if length > 1024 * 1024 {
+        if length > Self::FRAME_LIMIT {
             return Err("Signal frame exceeds 1 MiB".into());
         }
         let mut bytes = vec![0; length];
-        peer.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+        self.read_exact(&mut bytes).map_err(|e| e.to_string())?;
         Ok(bytes)
     }
-    pub fn write_query(peer: &mut UnixStream, value: &Query) -> Result<(), String> {
-        Self::write_bytes(
-            peer,
-            &rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?,
-        )
+
+    fn write_query(&mut self, value: &Query) -> Result<(), String> {
+        self.write_frame(&rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?)
     }
-    pub fn read_query(peer: &mut UnixStream) -> Result<Query, String> {
-        rkyv::from_bytes::<Query, rkyv::rancor::Error>(&Self::read_bytes(peer)?)
+
+    fn read_query(&mut self) -> Result<Query, String> {
+        rkyv::from_bytes::<Query, rkyv::rancor::Error>(&self.read_frame()?)
             .map_err(|e| e.to_string())
     }
-    pub fn write_response(peer: &mut UnixStream, value: &Response) -> Result<(), String> {
-        Self::write_bytes(
-            peer,
-            &rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?,
-        )
+
+    fn write_response(&mut self, value: &Response) -> Result<(), String> {
+        self.write_frame(&rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?)
     }
-    pub fn read_response(peer: &mut UnixStream) -> Result<Response, String> {
-        rkyv::from_bytes::<Response, rkyv::rancor::Error>(&Self::read_bytes(peer)?)
+
+    fn read_response(&mut self) -> Result<Response, String> {
+        rkyv::from_bytes::<Response, rkyv::rancor::Error>(&self.read_frame()?)
             .map_err(|e| e.to_string())
     }
-    pub fn read_meta_query(peer: &mut UnixStream) -> Result<meta_signal_flow::Query, String> {
-        rkyv::from_bytes::<meta_signal_flow::Query, rkyv::rancor::Error>(&Self::read_bytes(peer)?)
+
+    fn read_meta_query(&mut self) -> Result<meta_signal_flow::Query, String> {
+        rkyv::from_bytes::<meta_signal_flow::Query, rkyv::rancor::Error>(&self.read_frame()?)
             .map_err(|e| e.to_string())
     }
-    pub fn write_meta_response(
-        peer: &mut UnixStream,
-        value: &meta_signal_flow::Response,
-    ) -> Result<(), String> {
-        Self::write_bytes(
-            peer,
-            &rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?,
-        )
+
+    fn write_meta_response(&mut self, value: &meta_signal_flow::Response) -> Result<(), String> {
+        self.write_frame(&rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::DispatchesSerially;
+    use crate::composition::AsksForLaunchReceipt;
+    use crate::composition::KeepsLaunchBundles;
     mod delivery;
     mod submission;
 
@@ -1101,7 +1060,7 @@ mod tests {
 
     #[test]
     fn a_malformed_frame_drops_only_its_connection() {
-        use super::{Frame, ServesOrdinary};
+        use super::{CarriesSignalFrames, ServesOrdinary};
         use std::{io::Write, os::unix::net::UnixStream};
         let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
         let socket = fixture.directory.path().join("ordinary.sock");
@@ -1125,13 +1084,13 @@ mod tests {
             .write_all(&16u32.to_be_bytes())
             .and_then(|_| garbage.write_all(&[0xff; 16]))
             .expect("garbage frame written");
-        assert!(Frame::read_response(&mut garbage).is_err());
+        assert!(garbage.read_response().is_err());
 
         let mut peer = connect();
-        Frame::write_query(&mut peer, &Query::List(signal_flow::ListRequest {}))
+        peer.write_query(&Query::List(signal_flow::ListRequest {}))
             .expect("list written");
         assert!(matches!(
-            Frame::read_response(&mut peer).expect("list answered"),
+            peer.read_response().expect("list answered"),
             Response::Listed(_)
         ));
         idle.write_all(&[0]).expect("idle peer still open");
@@ -2087,7 +2046,7 @@ mod tests {
         }
         .install(&body);
 
-        let marker = crate::composition::LaunchReceipt::MARKER;
+        let marker = HarnessKind::LAUNCH_RECEIPT;
         let transcript = transcript_root.join(format!("rollout-{native_session_id}.jsonl"));
         let mut output = fs::File::create(transcript).unwrap();
         for row in [
@@ -2746,7 +2705,7 @@ mod tests {
 
         /// The harness writes the first turn and the launch receipt.
         fn write_receipt(&self) {
-            let marker = crate::composition::LaunchReceipt::MARKER;
+            let marker = HarnessKind::LAUNCH_RECEIPT;
             let mut rows = String::new();
             for row in [
                 serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-staged"}}),
@@ -3201,7 +3160,7 @@ mod tests {
 
     #[test]
     fn a_launch_observer_receives_each_phase_once_and_the_outcome_last() {
-        use super::{Frame, ServesOrdinary};
+        use super::{CarriesSignalFrames, ServesOrdinary};
         use std::os::unix::net::UnixStream;
         let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
         let calls = fixture.herdr_for_replacement(0);
@@ -3213,12 +3172,9 @@ mod tests {
                 if let Ok(mut peer) = UnixStream::connect(&socket) {
                     peer.set_read_timeout(Some(Duration::from_secs(10)))
                         .expect("observer timeout");
-                    Frame::write_query(
-                        &mut peer,
-                        &Query::Observe(signal_flow::ObserveSelection::Launch(
-                            "observed-request".into(),
-                        )),
-                    )
+                    peer.write_query(&Query::Observe(signal_flow::ObserveSelection::Launch(
+                        "observed-request".into(),
+                    )))
                     .expect("Observe written");
                     return peer;
                 }
@@ -3226,7 +3182,7 @@ mod tests {
             }
             panic!("ordinary socket never listened")
         };
-        let phase = |peer: &mut UnixStream| match Frame::read_response(peer) {
+        let phase = |peer: &mut UnixStream| match peer.read_response() {
             Ok(Response::LaunchPending(attempt)) => attempt.launch_attempt_phase,
             other => panic!("expected a LaunchPending frame, got {other:?}"),
         };
@@ -3257,21 +3213,21 @@ mod tests {
 
         // Only the transcript moves; no one sends Start again.
         launch.write_receipt();
-        let Ok(Response::Started(started)) = Frame::read_response(&mut observer) else {
+        let Ok(Response::Started(started)) = observer.read_response() else {
             panic!("the observer's last frame is the outcome")
         };
         assert_eq!(started.flow_id, "908786");
         assert!(
-            Frame::read_response(&mut observer).is_err(),
+            observer.read_response().is_err(),
             "the exchange ends after the outcome"
         );
 
         let mut late = subscribe();
         assert_eq!(
-            Frame::read_response(&mut late).expect("late observer answered"),
+            late.read_response().expect("late observer answered"),
             Response::Started(started)
         );
-        assert!(Frame::read_response(&mut late).is_err());
+        assert!(late.read_response().is_err());
         let calls = fs::read_to_string(calls).unwrap_or_default();
         only_the_brief_continuation_was_typed(&calls);
         assert!(!calls.contains("pane create"), "{calls}");
@@ -3286,7 +3242,7 @@ mod tests {
         assert!(
             calls.contains(&format!(
                 "--session fixture-session agent prompt w1:p1 {}",
-                crate::launching::BriefContinuation::TEXT
+                <RunningNexus as crate::launching::ContinuesIntoBrief>::BRIEF_CONTINUATION
             )),
             "{calls}"
         );

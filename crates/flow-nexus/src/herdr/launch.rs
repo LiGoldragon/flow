@@ -7,10 +7,11 @@
 
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
 use crate::codex::NamesBoundCodexThread;
+use crate::codex::SelectsCodexEndpoint;
 use crate::composition::{
-    ClaudeCommandStack, LaunchReceipt, NamesRemoteControl, ValidatesComposedPrompt,
+    AsksForLaunchReceipt, NamesRemoteControl, StacksClaudeCommands, ValidatesComposedPrompt,
 };
-use crate::title::NativeTitle;
+use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     ComposedLaunch, HarnessKind, HerdrPaneBinding, NativeLaunchBinding, NativeSkillSelection,
@@ -823,7 +824,7 @@ impl HerdrCli {
     /// hash under the harness footer. Claude may store the exact text inside
     /// its native pasted-content wrapper, which is normalized separately.
     fn prompt_text_matches_intent(text: &str, intent: &PromptDeliveryIntent) -> bool {
-        text.strip_suffix(&LaunchReceipt::footer_for(&intent.harness_kind))
+        text.strip_suffix(&intent.harness_kind.receipt_footer())
             .is_some_and(|body| {
                 format!("{:x}", Sha256::digest(body.as_bytes())) == intent.prompt_sha256
             })
@@ -1028,7 +1029,9 @@ impl TitlesNativeFlow for HerdrCli {
         {
             return Err("native binding does not belong to this launch".into());
         }
-        let title = NativeTitle::for_flow(&launch.launch_profile, &binding.flow_id)
+        let title = launch
+            .launch_profile
+            .native_title(&binding.flow_id)
             .map_err(|refusal| refusal.to_string())?;
         match binding.harness_kind {
             HarnessKind::Claude => self.title_claude_session(binding, &title)?,
@@ -1372,7 +1375,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
         &self,
         durable_intent: &PromptDeliveryIntent,
     ) -> Result<PromptDeliveryResult, String> {
-        let expected = LaunchReceipt::MARKER;
+        let expected = HarnessKind::LAUNCH_RECEIPT;
         let Some((input, adopted_after_absence)) = self.receipt_input(durable_intent)? else {
             return Ok(PromptDeliveryResult::Ambiguous(durable_intent.clone()));
         };
@@ -1385,8 +1388,10 @@ impl ObservesNativeTargetReceipt for HerdrCli {
         let mut claude_command_expansion_pending = false;
         let mut claude_commands_loaded = 0_usize;
         let mut claude_command_argument: Option<String> = None;
-        let mut claude_stack =
-            ClaudeCommandStack::stacked(durable_intent.native_skill_selection_vector.len());
+        let mut claude_stack = durable_intent
+            .native_skill_selection_vector
+            .claude_stacked()
+            .len();
         let mut reader = BufReader::new(input);
         loop {
             let mut record = Vec::new();
@@ -1839,12 +1844,14 @@ mod tests {
         ObservesNativeTargetReceipt, ResolvesClaudeNativeSkills, StartsNativeHerdrHarness,
         SubmitsFirstPromptOnce, TitlesNativeFlow,
     };
+    use crate::composition::KeepsLaunchBundles;
     use crate::composition::{
-        ComposesLaunch, LaunchBundles, LaunchComposer, LaunchReceipt, NamesRemoteControl,
+        AsksForLaunchReceipt, ComposesLaunch, LaunchBundles, LaunchComposer, NamesRemoteControl,
         OpensLaunchComposer,
     };
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use crate::herdr::HerdrCli;
+    use crate::title::ShowsNativeTitle;
     use signal_flow::{
         ComposedLaunch, Effort, FirstPromptPayload, FlowAspect, HarnessKind, LaunchProfile,
         ModelName, NativeLaunchBinding, NativeTargetReceipt, NativeTranscriptBoundary, PowerLevel,
@@ -1856,7 +1863,7 @@ mod tests {
     const PROMPT_HASH: &str = "0cb26cfe0a554e4780aa5af20cafbe3ae3259f823438576026a4ffff58371a67";
 
     fn launch(harness_kind: HarnessKind) -> ComposedLaunch {
-        let footer = LaunchReceipt::footer_for(&harness_kind);
+        let footer = harness_kind.receipt_footer();
         ComposedLaunch {
             launch_profile: LaunchProfile {
                 launch_request_id: "launch-42".into(),
@@ -2295,7 +2302,7 @@ printf '%s\n' 123456
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
-        let marker = LaunchReceipt::MARKER;
+        let marker = HarnessKind::LAUNCH_RECEIPT;
         let transcript = root
             .path()
             .join("native-transcripts/codex")
@@ -2364,7 +2371,7 @@ printf '%s\n' 123456
             .join(format!("rollout-{native_session}.jsonl"));
         fs::write(&transcript, "{\"type\":\"session_meta\"}\n").expect("initial transcript");
         let intent = registered_intent(&adapter, &launch, pane, native_session);
-        let marker = LaunchReceipt::MARKER;
+        let marker = HarnessKind::LAUNCH_RECEIPT;
         let rows = [
             serde_json::json!({"type":"turn_context","payload":{
                 "turn_id":"turn-wrong","model":"model-current","effort":"high"}}),
@@ -2409,7 +2416,7 @@ printf '%s\n' 123456
             NativeTranscriptBoundary::Absent(_)
         ));
         let untrusted_transcript = root.path().join("caller-selected.jsonl");
-        let marker = LaunchReceipt::MARKER;
+        let marker = HarnessKind::LAUNCH_RECEIPT;
         let untrusted_row = serde_json::json!({"type":"assistant","sessionId":native_session,
             "uuid":"untrusted-turn","message":{"content":[{"type":"text","text":marker}]}});
         fs::write(&untrusted_transcript, format!("{}\n", untrusted_row))
@@ -2482,7 +2489,7 @@ printf '%s\n' 123456
             let mut row = serde_json::json!({"type":"assistant","sessionId":native_session,
                 "session_id":native_session,"uuid":"turn-claude","perTurnEffort":null,
                 "message":{"model":"model-current",
-                "content":[{"type":"text","text":LaunchReceipt::MARKER}]}});
+                "content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}});
             if !effort.is_null() {
                 row["effort"] = effort.clone();
                 row["perTurnEffort"] = effort;
@@ -2606,7 +2613,7 @@ printf '%s\n' 123456
         launch.first_prompt_payload.first_prompt_body = body.into();
         launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
         launch.first_prompt_payload.first_prompt_text =
-            format!("{body}{}", LaunchReceipt::footer_for(&HarnessKind::Claude));
+            format!("{body}{}", HarnessKind::Claude.receipt_footer());
         assert!(!launch.first_prompt_payload.first_prompt_text.contains('\n'));
         assert!(
             launch
@@ -2663,9 +2670,9 @@ printf '%s\n' 123456
             "{}{}",
             body.strip_prefix("/spirit /psyche /main-flow /behavior /herdr ")
                 .unwrap(),
-            LaunchReceipt::footer_for(&HarnessKind::Claude)
+            HarnessKind::Claude.receipt_footer()
         );
-        let original = format!("{body}{}", LaunchReceipt::footer_for(&HarnessKind::Claude));
+        let original = format!("{body}{}", HarnessKind::Claude.receipt_footer());
         let command = |name: &str| {
             let mut row = serde_json::json!({"type":"user","sessionId":native_session,"message":{"role":"user",
                 "content":format!("<command-message>{name}</command-message>\n<command-name>/{name}</command-name>\n<command-args>{argument}</command-args>")}});
@@ -2692,7 +2699,7 @@ printf '%s\n' 123456
         };
         let receipt = serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-claude",
             "effort":"high","message":{"model":"model-current",
-            "content":[{"type":"text","text":LaunchReceipt::MARKER}]}});
+            "content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}});
         let mut rows = Vec::new();
         for name in &names[..5] {
             rows.push(command(name));
@@ -2872,7 +2879,7 @@ printf '%s\n' 123456
             "message":{"role":"user","content":original}})];
         rows.extend(tool("spirit", "tool-1"));
         rows.extend(tool("main-flow", "tool-2"));
-        rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-direct","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":LaunchReceipt::MARKER}]}}));
+        rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-direct","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}}));
         let skill_invocations = rows
             .iter()
             .filter_map(|row| row.pointer("/message/content/0"))
@@ -2920,7 +2927,7 @@ printf '%s\n' 123456
         // The accepted direct row above and this same-length, one-byte newline
         // alteration form the refusal oracle. The footer remains intact while
         // the body digest changes.
-        let footer = LaunchReceipt::footer_for(&HarnessKind::Claude);
+        let footer = HarnessKind::Claude.receipt_footer();
         let changed_body = body.replacen('\n', "\r", 1);
         let changed = format!("{changed_body}{footer}");
         assert_eq!(changed_body.len(), body.len());
@@ -3051,7 +3058,7 @@ printf '%s\n' 123456
             "message":{"role":"user","content":format!("<pasted_content id=\"ab12\">\n{original}\n</pasted_content>")}})];
         rows.extend(tool("spirit", "tool-1"));
         rows.extend(tool("main-flow", "tool-2"));
-        rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-wrapped","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":LaunchReceipt::MARKER}]}}));
+        rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-wrapped","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}}));
         let transcript = root
             .path()
             .join("native-transcripts/claude")
@@ -3090,7 +3097,7 @@ printf '%s\n' 123456
         launch.first_prompt_payload.first_prompt_body = body.into();
         launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
         launch.first_prompt_payload.first_prompt_text =
-            format!("{body}{}", LaunchReceipt::footer_for(&HarnessKind::Claude));
+            format!("{body}{}", HarnessKind::Claude.receipt_footer());
         launch.target_receipt_request.prompt_sha256 = body_hash;
         let agent_name = HerdrCli::launch_agent_name(&launch);
         let (root, adapter) = fixture_herdr(
@@ -3126,9 +3133,9 @@ printf '%s\n' 123456
         let argument = format!(
             "{}{}",
             body.strip_prefix("/main-flow /refresh ").unwrap(),
-            LaunchReceipt::footer_for(&HarnessKind::Claude)
+            HarnessKind::Claude.receipt_footer()
         );
-        let original = format!("{body}{}", LaunchReceipt::footer_for(&HarnessKind::Claude));
+        let original = format!("{body}{}", HarnessKind::Claude.receipt_footer());
         let user = |extra: serde_json::Value, content: serde_json::Value| {
             let mut row = serde_json::json!({"type":"user","sessionId":native_session,
                 "origin":{"kind":"human"},"message":{"role":"user","content":content}});
@@ -3246,7 +3253,7 @@ printf '%s\n' 123456
         ));
         let mut receipt = assistant(
             "claude",
-            serde_json::json!([{"type":"text","text":LaunchReceipt::MARKER}]),
+            serde_json::json!([{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]),
         );
         receipt["attributionSkill"] = serde_json::json!("file-editing");
         rows.push(receipt);

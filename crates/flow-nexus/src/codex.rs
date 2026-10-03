@@ -53,11 +53,16 @@ pub struct CodexEndpoints {
     pub workspace_root: PathBuf,
 }
 
-impl CodexEndpoints {
+pub trait SelectsCodexEndpoint {
     const APP_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
-
     /// Models selected by both endpoints select neither.
-    pub fn overlapping_models(&self) -> BTreeSet<String> {
+    fn overlapping_models(&self) -> BTreeSet<String>;
+    fn endpoint_for(&self, model: &str) -> Result<&CodexEndpoint, CodexAdapterUnavailable>;
+    fn adapter_for(&self, model: &str) -> Result<CodexAdapter, CodexAdapterUnavailable>;
+}
+
+impl SelectsCodexEndpoint for CodexEndpoints {
+    fn overlapping_models(&self) -> BTreeSet<String> {
         self.stable
             .model_names
             .intersection(&self.next.model_names)
@@ -65,7 +70,7 @@ impl CodexEndpoints {
             .collect()
     }
 
-    pub fn endpoint_for(&self, model: &str) -> Result<&CodexEndpoint, CodexAdapterUnavailable> {
+    fn endpoint_for(&self, model: &str) -> Result<&CodexEndpoint, CodexAdapterUnavailable> {
         let stable = self.stable.model_names.contains(model);
         let next = self.next.model_names.contains(model);
         match (stable, next) {
@@ -77,7 +82,7 @@ impl CodexEndpoints {
         }
     }
 
-    pub fn adapter_for(&self, model: &str) -> Result<CodexAdapter, CodexAdapterUnavailable> {
+    fn adapter_for(&self, model: &str) -> Result<CodexAdapter, CodexAdapterUnavailable> {
         let endpoint = self.endpoint_for(model)?;
         Ok(CodexAdapter {
             executable: endpoint.client_path.clone(),
@@ -533,9 +538,13 @@ impl StopsCodexProxy for ProxySession {
     }
 }
 
-impl CodexAdapter {
+pub trait LocatesFlowDirectory {
     /// The flow's directory under the configured source root.
-    pub fn flow_directory(&self, flow_id: &str) -> PathBuf {
+    fn flow_directory(&self, flow_id: &str) -> PathBuf;
+}
+
+impl LocatesFlowDirectory for CodexAdapter {
+    fn flow_directory(&self, flow_id: &str) -> PathBuf {
         self.workspace_root.join("flows").join(flow_id)
     }
 }
@@ -558,7 +567,30 @@ impl BuildsCodexTurn for CodexAdapter {
     }
 }
 
-impl CodexAdapter {
+trait OpensBoundCodexSession {
+    fn initialize_bound_session(&self) -> Result<ProxySession, CodexAdapterUnavailable>;
+    fn require_empty_bound_thread(
+        &self,
+        session: &mut ProxySession,
+        request_id: u64,
+        native_session_id: &str,
+    ) -> Result<(), CodexAdapterUnavailable>;
+    fn native_skill_catalog(
+        &self,
+        session: &mut ProxySession,
+        request_id: u64,
+    ) -> Result<Vec<serde_json::Value>, CodexAdapterUnavailable>;
+    fn resolve_catalog_skills(
+        requested: &[String],
+        catalog: &[serde_json::Value],
+    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable>;
+    fn bound_turn_params(
+        launch: &ComposedLaunch,
+        intent: &PromptDeliveryIntent,
+    ) -> serde_json::Value;
+}
+
+impl OpensBoundCodexSession for CodexAdapter {
     fn initialize_bound_session(&self) -> Result<ProxySession, CodexAdapterUnavailable> {
         let mut session = self.open_proxy()?;
         if let Err(error) = (|| {
@@ -930,8 +962,18 @@ impl StartsCodex for CodexAdapter {
         result
     }
 }
-impl CodexAdapter {
-    pub fn start_codex_observed(
+pub trait StartsObservedCodex {
+    fn start_codex_observed(
+        &self,
+        flow_id: &str,
+        goal: &str,
+        origin: &OriginClue,
+        observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
+    ) -> Result<String, CodexAdapterUnavailable>;
+}
+
+impl StartsObservedCodex for CodexAdapter {
+    fn start_codex_observed(
         &self,
         flow_id: &str,
         goal: &str,
@@ -1066,6 +1108,7 @@ impl ConsumesResetCredit for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::composition::KeepsLaunchBundles;
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use std::{fs, sync::Mutex};
 

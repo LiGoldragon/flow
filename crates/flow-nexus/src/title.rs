@@ -13,10 +13,8 @@ use thiserror::Error;
 /// workspace's authoritative model-display map
 /// (`config/model-display-names.json`, version 1); an identifier absent here
 /// has no title.
-pub struct ModelDisplay;
-
-impl ModelDisplay {
-    const NAMES: &'static [(&'static str, &'static str)] = &[
+pub trait NamesModel {
+    const MODEL_DISPLAY_NAMES: &'static [(&'static str, &'static str)] = &[
         ("gpt-6-astra", "Astra"),
         ("gpt-6-sol", "Sol"),
         ("gpt-6-luna", "Luna"),
@@ -35,10 +33,15 @@ impl ModelDisplay {
         ("claude-haiku-4-5-20251001", "Haiku 4.5"),
     ];
 
-    pub fn name(model: &str) -> Option<&'static str> {
-        Self::NAMES
+    /// The display name of this exact model identifier.
+    fn model_display_name(&self) -> Option<&'static str>;
+}
+
+impl NamesModel for str {
+    fn model_display_name(&self) -> Option<&'static str> {
+        Self::MODEL_DISPLAY_NAMES
             .iter()
-            .find(|(identifier, _)| *identifier == model)
+            .find(|(identifier, _)| *identifier == self)
             .map(|(_, name)| *name)
     }
 }
@@ -54,8 +57,13 @@ pub enum TitleRefused {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeTitle(String);
 
-impl NativeTitle {
-    pub fn for_flow(profile: &LaunchProfile, flow_id: &str) -> Result<Self, TitleRefused> {
+/// The title a launch profile gives the Flow it starts.
+pub trait TitlesFlow {
+    fn native_title(&self, flow_id: &str) -> Result<NativeTitle, TitleRefused>;
+}
+
+impl TitlesFlow for LaunchProfile {
+    fn native_title(&self, flow_id: &str) -> Result<NativeTitle, TitleRefused> {
         if flow_id.len() != 6
             || !flow_id
                 .bytes()
@@ -63,24 +71,33 @@ impl NativeTitle {
         {
             return Err(TitleRefused::InvalidFlowId);
         }
-        let model = ModelDisplay::name(&profile.model_name)
-            .ok_or_else(|| TitleRefused::UnmappedModel(profile.model_name.clone()))?;
-        let aspect = match profile.flow_aspect {
+        let model = self
+            .model_name
+            .model_display_name()
+            .ok_or_else(|| TitleRefused::UnmappedModel(self.model_name.clone()))?;
+        let aspect = match self.flow_aspect {
             FlowAspect::Psyche => "Psyche",
             FlowAspect::Mind => "Mind",
             FlowAspect::Field => "Field",
         };
-        Ok(Self(format!("{aspect}.{{ {model} {flow_id} }}")))
+        Ok(NativeTitle(format!("{aspect}.{{ {model} {flow_id} }}")))
     }
+}
 
-    pub fn as_str(&self) -> &str {
+/// The title as written.
+pub trait ShowsNativeTitle {
+    fn as_str(&self) -> &str;
+}
+
+impl ShowsNativeTitle for NativeTitle {
+    fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{NativeTitle, TitleRefused};
+    use super::{ShowsNativeTitle, TitleRefused, TitlesFlow};
     use signal_flow::{FlowAspect, HarnessKind, LaunchProfile, PowerLevel};
 
     fn profile(aspect: FlowAspect, model: &str) -> LaunchProfile {
@@ -104,13 +121,15 @@ mod tests {
     #[test]
     fn title_is_the_datom_of_aspect_model_and_flow() {
         assert_eq!(
-            NativeTitle::for_flow(&profile(FlowAspect::Psyche, "claude-fable-5-1"), "38de5b")
+            profile(FlowAspect::Psyche, "claude-fable-5-1")
+                .native_title("38de5b")
                 .unwrap()
                 .as_str(),
             "Psyche.{ Fable 38de5b }"
         );
         assert_eq!(
-            NativeTitle::for_flow(&profile(FlowAspect::Mind, "gpt-6-sol"), "00f95a")
+            profile(FlowAspect::Mind, "gpt-6-sol")
+                .native_title("00f95a")
                 .unwrap()
                 .as_str(),
             "Mind.{ Sol 00f95a }"
@@ -119,7 +138,7 @@ mod tests {
         let mut low = profile(FlowAspect::Field, "gpt-6-luna");
         low.power_level = PowerLevel::UltraLow;
         assert_eq!(
-            NativeTitle::for_flow(&low, "e71dab").unwrap().as_str(),
+            low.native_title("e71dab").unwrap().as_str(),
             "Field.{ Luna e71dab }"
         );
     }
@@ -127,12 +146,12 @@ mod tests {
     #[test]
     fn unmapped_models_and_malformed_flow_ids_are_refused() {
         assert_eq!(
-            NativeTitle::for_flow(&profile(FlowAspect::Psyche, "fable"), "38de5b"),
+            profile(FlowAspect::Psyche, "fable").native_title("38de5b"),
             Err(TitleRefused::UnmappedModel("fable".into()))
         );
         for flow_id in ["38DE5B", "38de5", "38de5bb", "38de5g", ""] {
             assert_eq!(
-                NativeTitle::for_flow(&profile(FlowAspect::Psyche, "claude-fable-5-1"), flow_id),
+                profile(FlowAspect::Psyche, "claude-fable-5-1").native_title(flow_id),
                 Err(TitleRefused::InvalidFlowId)
             );
         }

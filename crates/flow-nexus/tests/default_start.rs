@@ -1,5 +1,5 @@
 //! The Nexus starts with no arguments, no Flow environment, and a fresh HOME.
-use flow_nexus::Frame;
+use flow_nexus::CarriesSignalFrames;
 use std::{
     io::{Read, Write},
     os::unix::net::UnixStream,
@@ -101,13 +101,11 @@ fn nexus_starts_from_defaults_and_answers_after_meta_configure() {
     ));
 
     let mut ordinary = connect(&ordinary_socket, &mut nexus);
-    Frame::write_query(
-        &mut ordinary,
-        &signal_flow::Query::List(signal_flow::ListRequest {}),
-    )
-    .expect("list written");
+    ordinary
+        .write_query(&signal_flow::Query::List(signal_flow::ListRequest {}))
+        .expect("list written");
     assert!(matches!(
-        Frame::read_response(&mut ordinary).expect("list answered"),
+        ordinary.read_response().expect("list answered"),
         signal_flow::Response::Listed(rows) if rows.is_empty()
     ));
     assert!(home.path().join(".local/state/flow/flow.sema").exists());

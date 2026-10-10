@@ -22,6 +22,9 @@ Library
             Result.String
             Notice.String ]
   Address.{ Aspect.FlowAspect Topic Layer }
+  OrdinarySocketPath.String
+  MetaSocketPath.String
+  Start.{ OrdinarySocketPath MetaSocketPath }
   Recipient.[ Address Up ]
   Metaflow.{ Address
              State.[ Awake.FlowId Asleep Ended ]

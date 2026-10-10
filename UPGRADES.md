@@ -1,3 +1,33 @@
+# Flow 0.25.0
+
+The Signal wire and the launch-outcome archive change. Rebuild and restart
+the Flow Nexus, its CLI, flow-meta, and flow-hook from one immutable package
+closure; an older Signal peer is refused at the contract greeting.
+
+- `signal-flow` is 11.0.0. `LaunchStatus` now returns a `LaunchInspected`
+  record with the attempt, optional settled outcome, and current recorded
+  `FlowNode` or absence. `Observe.Launch` sends these inspections as phases
+  change and sends the settled inspection last. `LaunchPending` remains a
+  possible `Start` reply while its original launch runs.
+- A view whose database markers changed returns `ReadViewChanged`. An outcome
+  without an attempt, or a settled success that disagrees with its recorded
+  native binding, returns `InconsistentRecords`. The read is marker-checked,
+  not a storage transaction.
+- The launch-outcome family advances from v1 to v2. It preserves every v1
+  outcome written against `signal-flow` 10.0.0 at
+  `f95034de0b203d886ba574fcb513c691c64b8498`. Its source
+  `ethos/signal.ethos` declared `BindingRefused` as a unit variant; that
+  value becomes typed `BindingRefused.Unclassified` because the stored
+  outcome did not retain whether Reserve, Bind, or Title refused. Corrupt
+  v1 rows refuse the upgrade without rewriting the predecessor family.
+- `StartRejection.BindingRefused` now carries a `BindingRefusal`. A Reserve
+  claim refusal is `ClaimUnavailable`; aggregate Bind and Title failures keep
+  the broader `NativeLaunchRefused` classification.
+
+Pin `signal-flow` 11.0.0 with `signal` 8.0.0 e0e3c055. Deploy `flow`,
+`flow-meta`, and `flow-hook` together, then restart the Nexus before using
+the changed CLI.
+
 # Flow 0.24.0
 
 No wire change (signal-flow and meta-signal-flow unchanged). The store opens

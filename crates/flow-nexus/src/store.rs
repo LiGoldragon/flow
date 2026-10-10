@@ -17,8 +17,9 @@ use std::{
 use meta_signal_flow::Configuration;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey,
-    Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
+    Assertion, Decision, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation,
+    MemoryDefinition, MemoryUpgrades, MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash,
+    SchemaVersion, TableDescriptor, TableName, TableReference, UpgradeFrom, UpgradeOutcome,
 };
 use signal_flow::{
     Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection, FlowAspect,
@@ -27,7 +28,7 @@ use signal_flow::{
     NativeLaunchBinding, NativeLaunchIntent, OriginClue, PowerLevel, PromptDeliveryIntent,
     PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
     RememberedFlow, ReplaceRejection, Replaced, Response, RestartRejection, Restarted,
-    RouteReadiness, StartRejection,
+    RouteReadiness, StartRejection, StopRejection,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -483,6 +484,14 @@ pub enum LaunchOutcome {
     ReplaceRejected(ReplaceRejection),
 }
 
+/// One marker-consistent read of the persisted launch request and its
+/// currently recorded Flow, if the attempt identifies one.
+pub(crate) struct LaunchInspectionRecords {
+    pub(crate) launch_attempt: LaunchAttempt,
+    pub(crate) launch_outcome_option: Option<LaunchOutcome>,
+    pub(crate) flow_node_option: Option<FlowNode>,
+}
+
 pub trait AnswersLaunchOutcome {
     /// The reply the outcome is on the wire.
     fn response(&self) -> Response;
@@ -518,6 +527,122 @@ struct StoredLaunchOutcome {
 impl EngineRecord for StoredLaunchOutcome {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchOutcome {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v2")
+    }
+}
+
+/// The exact archived outcome shape written with signal-flow 10.0.0
+/// rev f95034de0b203d886ba574fcb513c691c64b8498:
+/// `ethos/signal.ethos` declared `BindingRefused` as a unit variant. This
+/// shape is read only by the v1-to-v2 family upgrade below.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcomeV1 {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcomeV1,
+}
+
+impl EngineRecord for StoredLaunchOutcomeV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchOutcomeV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v1")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LaunchOutcomeV1 {
+    Started(Launched),
+    Replaced(Replaced),
+    StartRejected(StartRejectionV1),
+    ReplaceRejected(ReplaceRejectionV1),
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum StartRejectionV1 {
+    CompositionRefused,
+    LaunchRequestConflict,
+    LaunchPersistenceRefused,
+    NativeLaunchRefused,
+    BindingRefused,
+    RegistrationRefused,
+    IntentPersistenceRefused,
+    OriginUnavailable,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ReplaceRejectionV1 {
+    PredecessorAbsent,
+    UnknownPredecessor,
+    PredecessorStopped,
+    LaunchRefused(StartRejectionV1),
+    ReapRefused(StopRejection),
+}
+
+impl From<StartRejectionV1> for StartRejection {
+    fn from(rejection: StartRejectionV1) -> Self {
+        match rejection {
+            StartRejectionV1::CompositionRefused => Self::CompositionRefused,
+            StartRejectionV1::LaunchRequestConflict => Self::LaunchRequestConflict,
+            StartRejectionV1::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
+            StartRejectionV1::NativeLaunchRefused => Self::NativeLaunchRefused,
+            StartRejectionV1::BindingRefused => {
+                Self::BindingRefused(signal_flow::BindingRefusal::Unclassified)
+            }
+            StartRejectionV1::RegistrationRefused => Self::RegistrationRefused,
+            StartRejectionV1::IntentPersistenceRefused => Self::IntentPersistenceRefused,
+            StartRejectionV1::OriginUnavailable => Self::OriginUnavailable,
+        }
+    }
+}
+
+impl From<ReplaceRejectionV1> for ReplaceRejection {
+    fn from(rejection: ReplaceRejectionV1) -> Self {
+        match rejection {
+            ReplaceRejectionV1::PredecessorAbsent => Self::PredecessorAbsent,
+            ReplaceRejectionV1::UnknownPredecessor => Self::UnknownPredecessor,
+            ReplaceRejectionV1::PredecessorStopped => Self::PredecessorStopped,
+            ReplaceRejectionV1::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
+            ReplaceRejectionV1::ReapRefused(rejection) => Self::ReapRefused(rejection),
+        }
+    }
+}
+
+impl From<LaunchOutcomeV1> for LaunchOutcome {
+    fn from(outcome: LaunchOutcomeV1) -> Self {
+        match outcome {
+            LaunchOutcomeV1::Started(launched) => Self::Started(launched),
+            LaunchOutcomeV1::Replaced(replaced) => Self::Replaced(replaced),
+            LaunchOutcomeV1::StartRejected(rejection) => Self::StartRejected(rejection.into()),
+            LaunchOutcomeV1::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
+        }
+    }
+}
+
+impl UpgradeFrom<StoredLaunchOutcomeV1> for StoredLaunchOutcome {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredLaunchOutcomeV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            launch_request_id: previous.launch_request_id,
+            launch_outcome: previous.launch_outcome.into(),
+        })
     }
 }
 
@@ -607,8 +732,14 @@ impl AnnouncesLaunchChanges for LaunchChanges {
 pub enum StoreError {
     #[error("sema-engine operation failed: {0}")]
     Engine(#[from] sema_engine::Error),
+    #[error("launch outcome family upgrade failed: {0}")]
+    LaunchOutcomeUpgrade(String),
     #[error("flow nexus state record is absent or duplicated")]
     StateInvariant,
+    #[error("launch inspection rows changed while being read")]
+    LaunchStatusReadViewChanged,
+    #[error("launch inspection rows are inconsistent")]
+    LaunchStatusInconsistent,
 }
 
 pub struct FlowStore {
@@ -630,6 +761,130 @@ pub struct FlowStore {
     /// What opening did with launch-attempt rows that no longer read in the
     /// current shape; each is also logged.
     pub opening_settlements: Vec<LaunchAttemptSettlement>,
+}
+
+/// The one-request configuration listener's view of the same Sema store.
+/// It registers only the three rows Configure owns and never seeds the rest
+/// of Flow state, settles launches/deliveries, or upgrades stored families.
+/// Keeping this Engine alive holds redb's exclusive writer lock while that
+/// listener owns the meta socket.
+pub struct ConfigurationOnlyStore {
+    engine: Engine,
+    configuration: TableReference<FlowStoreConfiguration>,
+    runtime_configuration: TableReference<RuntimeConfiguration>,
+    delivery_configuration: TableReference<DeliveryConfiguration>,
+}
+
+impl ConfigurationOnlyStore {
+    /// Opens the same versioned store as normal startup without invoking its
+    /// seeding, settlement, adoption, or family-upgrade path.
+    pub fn open(path: &Path) -> Result<Self, StoreError> {
+        let mut engine = Engine::open(EngineOpen::new(path, SchemaVersion::new(1)))?;
+        let configuration = engine.register_table(TableDescriptor::new(
+            FLOW_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-configuration"),
+            SchemaHash::for_label("flow-nexus-configuration-v1"),
+        ))?;
+        let runtime_configuration = engine.register_table(TableDescriptor::new(
+            FLOW_RUNTIME_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-runtime-configuration"),
+            SchemaHash::for_label("flow-nexus-runtime-configuration-v1"),
+        ))?;
+        let delivery_configuration = engine.register_table(TableDescriptor::new(
+            delivery::DELIVERY_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-delivery-configuration"),
+            SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
+        ))?;
+        Ok(Self {
+            engine,
+            configuration,
+            runtime_configuration,
+            delivery_configuration,
+        })
+    }
+
+    /// Reads either a wholly unconfigured store (using its declared defaults
+    /// without writing them) or all three committed configuration records.
+    /// A partial or duplicated configuration refuses service.
+    pub fn configuration(
+        &self,
+        defaults: &DefaultConfiguration,
+    ) -> Result<Configuration, StoreError> {
+        let socket = self
+            .engine
+            .match_records(QueryPlan::all(self.configuration))?
+            .records()
+            .to_vec();
+        let runtime = self
+            .engine
+            .match_records(QueryPlan::all(self.runtime_configuration))?
+            .records()
+            .to_vec();
+        let delivery = self
+            .engine
+            .match_records(QueryPlan::all(self.delivery_configuration))?
+            .records()
+            .to_vec();
+        match (socket.as_slice(), runtime.as_slice(), delivery.as_slice()) {
+            ([], [], []) => Ok(defaults.configuration()),
+            ([socket], [runtime], [delivery])
+                if socket.record_key() == defaults.socket_configuration().record_key()
+                    && runtime.record_key() == defaults.runtime_configuration().record_key()
+                    && delivery.record_key() == defaults.delivery_configuration().record_key() =>
+            {
+                Ok(socket.clone().with_runtime(runtime, delivery))
+            }
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    /// Commits socket, runtime, and delivery configuration together. Fresh
+    /// stores assert the three records; configured stores replace them. A
+    /// partial/duplicated prior state is refused before any write.
+    pub fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError> {
+        let socket_rows = self
+            .engine
+            .match_records(QueryPlan::all(self.configuration))?
+            .records()
+            .to_vec();
+        let runtime_rows = self
+            .engine
+            .match_records(QueryPlan::all(self.runtime_configuration))?
+            .records()
+            .to_vec();
+        let delivery_rows = self
+            .engine
+            .match_records(QueryPlan::all(self.delivery_configuration))?
+            .records()
+            .to_vec();
+        let socket = FlowStoreConfiguration::from(&configuration);
+        let runtime = RuntimeConfiguration::from(&configuration);
+        let delivery = DeliveryConfiguration::from(&configuration);
+        let commit =
+            if socket_rows.is_empty() && runtime_rows.is_empty() && delivery_rows.is_empty() {
+                self.engine
+                    .begin_atomic_commit()
+                    .assert(self.configuration, socket)
+                    .assert(self.runtime_configuration, runtime)
+                    .assert(self.delivery_configuration, delivery)
+            } else if socket_rows.len() == 1
+                && runtime_rows.len() == 1
+                && delivery_rows.len() == 1
+                && socket_rows[0].record_key() == socket.record_key()
+                && runtime_rows[0].record_key() == runtime.record_key()
+                && delivery_rows[0].record_key() == delivery.record_key()
+            {
+                self.engine
+                    .begin_atomic_commit()
+                    .mutate(self.configuration, socket)
+                    .mutate(self.runtime_configuration, runtime)
+                    .mutate(self.delivery_configuration, delivery)
+            } else {
+                return Err(StoreError::StateInvariant);
+            };
+        self.engine.commit_atomic(commit)?;
+        Ok(configuration)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -899,11 +1154,22 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-attempt"),
             SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
         ))?;
-        let launch_outcomes = engine.register_table(TableDescriptor::new(
+        let launch_outcome_descriptor = TableDescriptor::new(
             FLOW_LAUNCH_OUTCOME_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-outcome"),
-            SchemaHash::for_label("flow-nexus-launch-outcome-v1"),
-        ))?;
+            StoredLaunchOutcome::schema_hash(),
+        )
+        .with_predecessor::<StoredLaunchOutcomeV1>();
+        let launch_outcomes = match engine
+            .upgrade_table::<StoredLaunchOutcomeV1, StoredLaunchOutcome>(launch_outcome_descriptor)
+        {
+            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+            UpgradeOutcome::AlreadyCurrent(table) => table,
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::LaunchOutcomeUpgrade(format!("{failure:?}")));
+            }
+        };
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -2173,29 +2439,173 @@ impl ReadsFlowStore for FlowStore {
     }
 }
 
+impl FlowStore {
+    /// Reads a launch attempt, its outcome and its recorded Flow from one
+    /// unchanged database marker. This is a checked multi-read view, not a
+    /// storage transaction.
+    pub(crate) fn launch_inspection_records(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<LaunchInspectionRecords>, StoreError> {
+        let attempts = self.engine.match_records(QueryPlan::key(
+            self.launch_attempts,
+            RecordKey::new(launch_request_id),
+        ))?;
+        let outcomes = self.engine.match_records(QueryPlan::key(
+            self.launch_outcomes,
+            RecordKey::new(launch_request_id),
+        ))?;
+        let marker = attempts.database_marker();
+        if outcomes.database_marker() != marker {
+            return Err(StoreError::LaunchStatusReadViewChanged);
+        }
+
+        let attempt_rows = attempts.records();
+        let outcome_rows = outcomes.records();
+        if attempt_rows.len() > 1 || outcome_rows.len() > 1 {
+            if self.engine.current_database_marker()? != marker {
+                return Err(StoreError::LaunchStatusReadViewChanged);
+            }
+            return Err(StoreError::LaunchStatusInconsistent);
+        }
+        let Some(stored_attempt) = attempt_rows.first() else {
+            if self.engine.current_database_marker()? != marker {
+                return Err(StoreError::LaunchStatusReadViewChanged);
+            }
+            return if outcome_rows.is_empty() {
+                Ok(None)
+            } else {
+                Err(StoreError::LaunchStatusInconsistent)
+            };
+        };
+
+        let launch_attempt = stored_attempt.attempt.clone();
+        if launch_attempt.launch_request_id != launch_request_id
+            || launch_attempt.launch_profile.launch_request_id != launch_request_id
+        {
+            if self.engine.current_database_marker()? != marker {
+                return Err(StoreError::LaunchStatusReadViewChanged);
+            }
+            return Err(StoreError::LaunchStatusInconsistent);
+        }
+        let launch_outcome_option = outcome_rows
+            .first()
+            .map(|stored| stored.launch_outcome.clone());
+        let mut inconsistent = outcome_rows
+            .first()
+            .is_some_and(|stored| stored.launch_request_id != launch_request_id);
+        let flow_id_option = match launch_outcome_option.as_ref() {
+            Some(LaunchOutcome::Started(launched)) => {
+                let matches_attempt = launch_attempt
+                    .native_launch_binding_option
+                    .as_ref()
+                    .is_some_and(|binding| {
+                        binding.launch_request_id == launch_request_id
+                            && binding.flow_id == launched.flow_id
+                            && binding.native_session_id == launched.session_id
+                    });
+                if matches_attempt {
+                    Some(launched.flow_id.clone())
+                } else {
+                    inconsistent = true;
+                    None
+                }
+            }
+            Some(LaunchOutcome::Replaced(replaced)) => {
+                let successor = &replaced.launched;
+                let matches_attempt = launch_attempt
+                    .native_launch_binding_option
+                    .as_ref()
+                    .is_some_and(|binding| {
+                        binding.launch_request_id == launch_request_id
+                            && binding.flow_id == successor.flow_id
+                            && binding.native_session_id == successor.session_id
+                    });
+                if matches_attempt {
+                    Some(successor.flow_id.clone())
+                } else {
+                    inconsistent = true;
+                    None
+                }
+            }
+            _ => launch_attempt
+                .native_launch_binding_option
+                .as_ref()
+                .map(|binding| binding.flow_id.clone()),
+        };
+
+        let mut flow_node_option = None;
+        if let Some(flow_id) = flow_id_option {
+            let flows = self
+                .engine
+                .match_records(QueryPlan::key(self.flows, RecordKey::new(flow_id.as_str())))?;
+            if flows.database_marker() != marker {
+                return Err(StoreError::LaunchStatusReadViewChanged);
+            }
+            let flow_rows = flows.records();
+            if flow_rows.len() > 1 {
+                inconsistent = true;
+            } else if let Some(flow) = flow_rows.first() {
+                let routes = self.engine.match_records(QueryPlan::key(
+                    self.herdr_routes,
+                    RecordKey::new(flow_id.as_str()),
+                ))?;
+                if routes.database_marker() != marker {
+                    return Err(StoreError::LaunchStatusReadViewChanged);
+                }
+                let route_rows = routes.records();
+                if route_rows.len() > 1 {
+                    inconsistent = true;
+                } else {
+                    flow_node_option = Some(recorded_flow_node(
+                        flow.clone(),
+                        route_rows.first().cloned(),
+                    ));
+                }
+            }
+        }
+
+        if self.engine.current_database_marker()? != marker {
+            return Err(StoreError::LaunchStatusReadViewChanged);
+        }
+        if inconsistent {
+            return Err(StoreError::LaunchStatusInconsistent);
+        }
+
+        Ok(Some(LaunchInspectionRecords {
+            launch_attempt,
+            launch_outcome_option,
+            flow_node_option,
+        }))
+    }
+}
+
+fn recorded_flow_node(flow: FlowRecord, route: Option<FlowHerdrRouteRecord>) -> FlowNode {
+    FlowNode {
+        flow_id: flow.flow_id,
+        session_id: flow.thread_id.unwrap_or_default(),
+        harness_kind: flow.harness_kind,
+        endpoint_selection: flow.endpoint_selection,
+        herdr_route_selection: route
+            .map(|record| HerdrRouteSelection::Available(record.route))
+            .unwrap_or(HerdrRouteSelection::Unavailable),
+        origin_clue: flow.origin,
+        flow_lifecycle: match flow.lifecycle {
+            FlowLifecycle::Pending => SignalFlowLifecycle::Pending,
+            FlowLifecycle::Active => SignalFlowLifecycle::Active,
+            FlowLifecycle::Stopped => SignalFlowLifecycle::Stopped,
+            FlowLifecycle::Retired => SignalFlowLifecycle::Retired,
+            FlowLifecycle::Exited => SignalFlowLifecycle::Exited,
+        },
+    }
+}
+
 impl ReadsFlowRows for FlowStore {
     fn flow_node(&self, flow_id: &str) -> Result<Option<FlowNode>, StoreError> {
         let Some(flow) = self.flow(flow_id)? else {
             return Ok(None);
         };
-        Ok(Some(FlowNode {
-            flow_id: flow.flow_id,
-            session_id: flow.thread_id.unwrap_or_default(),
-            harness_kind: flow.harness_kind,
-            endpoint_selection: flow.endpoint_selection,
-            herdr_route_selection: self
-                .herdr_route(flow_id)?
-                .map(|record| HerdrRouteSelection::Available(record.route))
-                .unwrap_or(HerdrRouteSelection::Unavailable),
-            origin_clue: flow.origin,
-            flow_lifecycle: match flow.lifecycle {
-                FlowLifecycle::Pending => SignalFlowLifecycle::Pending,
-                FlowLifecycle::Active => SignalFlowLifecycle::Active,
-                FlowLifecycle::Stopped => SignalFlowLifecycle::Stopped,
-                FlowLifecycle::Retired => SignalFlowLifecycle::Retired,
-                FlowLifecycle::Exited => SignalFlowLifecycle::Exited,
-            },
-        }))
+        Ok(Some(recorded_flow_node(flow, self.herdr_route(flow_id)?)))
     }
 
     fn flow_nodes(&self) -> Result<Vec<FlowNode>, StoreError> {
@@ -2556,23 +2966,32 @@ impl EarlierLaunchAttemptRows {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, ConfirmsStartedFlow,
-        FlowStore, OpensFlowStore, ReadsFlowRoles, ReadsFlowStore, ReadsLaunchAttempt,
+        AppliesFlowQuery, AuthorizesFlowRestart, ConfigurationOnlyStore, ConfiguresFlowStore,
+        ConfirmsStartedFlow, FlowStore, LaunchOutcome, LaunchOutcomeV1, OpensFlowStore,
+        ReadsFlowRoles, ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome,
         RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPendingThread,
         RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
         RecordsRegistrationAcknowledgement, RecordsRestartedFlow, RegistersExistingFlow,
-        RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
+        RegistersFlowIdentity, ReplaceRejectionV1, ReservesLaunchAttempt, ReservesPendingStart,
+        StartRejectionV1, StoredLaunchOutcomeV1,
     };
     use super::{LaysOutDefaults, SeedsConfiguration};
     use crate::store::RegistersBindings;
+    use crate::store::delivery::{DeliveryTables, LeaseStep, PaneLease, RegistersDeliveryTables};
     use meta_signal_flow::Configuration;
+    use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+    use sema_engine::{
+        Assertion, Engine, EngineOpen, EngineRecord, FamilyName, QueryPlan, SchemaHash,
+        SchemaVersion, TableDescriptor, TableName,
+    };
     use signal_flow::{
-        ComposedLaunch, FirstPromptPayload, FlowAspect, HarnessKind, HerdrPaneBinding,
-        LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, NativeLaunchBinding,
-        NativeLaunchIntent, NativeSkillSelection, NativeTargetReceipt, NativeTranscriptAbsence,
-        NativeTranscriptBoundary, NativeTranscriptCursor, OriginClue, PowerLevel,
-        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
-        Restarted, StartRequest, TargetReceiptRequest,
+        BindingRefusal, ComposedLaunch, FirstPromptPayload, FlowAspect, HarnessKind,
+        HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Launched,
+        NativeLaunchBinding, NativeLaunchIntent, NativeSkillSelection, NativeTargetReceipt,
+        NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, OriginClue,
+        PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
+        ReplaceRejection, Replaced, Response, Restarted, StartRejection, StartRequest,
+        StopRejection, TargetReceiptRequest,
     };
 
     struct StoreFixture {
@@ -2587,6 +3006,27 @@ mod tests {
         fn new() -> Self {
             Self {
                 directory: tempfile::tempdir().expect("temporary store directory"),
+            }
+        }
+
+        fn path(&self) -> std::path::PathBuf {
+            self.directory.path().join("flow.sema")
+        }
+
+        fn seed_v1_outcomes(&self, rows: impl IntoIterator<Item = StoredLaunchOutcomeV1>) {
+            let mut engine = Engine::open(EngineOpen::new(self.path(), SchemaVersion::new(1)))
+                .expect("v1 outcome store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_launch_outcomes"),
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    SchemaHash::for_label("flow-nexus-launch-outcome-v1"),
+                ))
+                .expect("v1 outcome family registers");
+            for row in rows {
+                engine
+                    .assert(Assertion::new(outcomes, row))
+                    .expect("v1 outcome persists");
             }
         }
 
@@ -3097,6 +3537,177 @@ mod tests {
     }
 
     #[test]
+    fn configuration_only_store_defaults_without_seeding_then_commits_all_configuration() {
+        let fixture = StoreFixture::new();
+        let defaults = super::DefaultConfiguration {
+            home: std::path::PathBuf::from("/home/configuration-only"),
+            runtime_directory: std::path::PathBuf::from("/run/user/4243"),
+        };
+        let path = fixture.directory.path().join("configuration-only.sema");
+        let store = ConfigurationOnlyStore::open(&path).expect("configuration store opens");
+        assert_eq!(
+            store
+                .engine
+                .match_records(QueryPlan::all(store.configuration))
+                .expect("socket records read")
+                .records()
+                .len(),
+            0,
+            "reading fresh defaults writes no socket configuration"
+        );
+        assert_eq!(
+            store.configuration(&defaults).expect("fresh defaults"),
+            defaults.configuration()
+        );
+        assert_eq!(
+            store
+                .engine
+                .match_records(QueryPlan::all(store.runtime_configuration))
+                .expect("runtime records read")
+                .records()
+                .len(),
+            0,
+            "reading fresh defaults writes no runtime configuration"
+        );
+        assert_eq!(
+            store
+                .engine
+                .match_records(QueryPlan::all(store.delivery_configuration))
+                .expect("delivery records read")
+                .records()
+                .len(),
+            0,
+            "reading fresh defaults writes no delivery configuration"
+        );
+
+        let mut configured = defaults.configuration();
+        configured.meta_socket_path = "/run/user/4243/flow/custom-meta.sock".into();
+        let persisted = store
+            .configure(configured.clone())
+            .expect("all configuration commits");
+        assert_eq!(persisted, configured);
+        drop(store);
+
+        let reopened = ConfigurationOnlyStore::open(&path).expect("configured store reopens");
+        assert_eq!(
+            reopened
+                .configuration(&defaults)
+                .expect("persisted configuration"),
+            configured,
+            "the next listener reads the committed endpoint instead of defaults"
+        );
+    }
+
+    #[test]
+    fn configuration_only_store_refuses_partial_state_without_filling_it() {
+        let fixture = StoreFixture::new();
+        let defaults = super::DefaultConfiguration {
+            home: std::path::PathBuf::from("/home/configuration-only"),
+            runtime_directory: std::path::PathBuf::from("/run/user/4244"),
+        };
+        let path = fixture.directory.path().join("partial-configuration.sema");
+        let store = ConfigurationOnlyStore::open(&path).expect("configuration store opens");
+        let initial = defaults.configuration();
+        store
+            .engine
+            .assert(Assertion::new(
+                store.configuration,
+                super::FlowStoreConfiguration::from(&initial),
+            ))
+            .expect("one partial row is present");
+
+        assert!(matches!(
+            store.configure(defaults.configuration()),
+            Err(super::StoreError::StateInvariant)
+        ));
+        assert_eq!(
+            store
+                .engine
+                .match_records(QueryPlan::all(store.configuration))
+                .expect("socket records read")
+                .records()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .engine
+                .match_records(QueryPlan::all(store.runtime_configuration))
+                .expect("runtime records read")
+                .records()
+                .len(),
+            0,
+            "a failed configuration does not partially seed the missing rows"
+        );
+        assert_eq!(
+            store
+                .engine
+                .match_records(QueryPlan::all(store.delivery_configuration))
+                .expect("delivery records read")
+                .records()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn configuration_only_open_does_not_settle_or_migrate_other_state() {
+        let fixture = StoreFixture::new();
+        let path = fixture.path();
+        fixture.seed_v1_outcomes(std::iter::empty::<StoredLaunchOutcomeV1>());
+
+        let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1)))
+            .expect("store with v1 outcome family opens");
+        let delivery_tables =
+            DeliveryTables::register(&mut engine).expect("delivery tables register");
+        engine
+            .assert(Assertion::new(
+                delivery_tables.pane_leases,
+                PaneLease {
+                    delivery_id: "interrupted-delivery".into(),
+                    flow_id: "flow-1".into(),
+                    herdr_pane_id: "pane-1".into(),
+                    lease_step: LeaseStep::Placed,
+                },
+            ))
+            .expect("interrupted delivery lease is present");
+        drop(engine);
+
+        let defaults = super::DefaultConfiguration {
+            home: fixture.directory.path().join("home"),
+            runtime_directory: fixture.directory.path().join("runtime"),
+        };
+        let config = ConfigurationOnlyStore::open(&path)
+            .expect("configuration-only store opens without normal startup");
+        assert_eq!(
+            config
+                .configuration(&defaults)
+                .expect("configuration reads"),
+            defaults.configuration()
+        );
+        drop(config);
+
+        let mut reopened = Engine::open(EngineOpen::new(&path, SchemaVersion::new(1)))
+            .expect("store remains readable");
+        reopened
+            .register_table(TableDescriptor::<StoredLaunchOutcomeV1>::new(
+                TableName::new("flow_nexus_launch_outcomes"),
+                FamilyName::new("flow-nexus-launch-outcome"),
+                SchemaHash::for_label("flow-nexus-launch-outcome-v1"),
+            ))
+            .expect("v1 outcome family was not migrated");
+        let delivery_tables =
+            DeliveryTables::register(&mut reopened).expect("delivery families still register");
+        let leases = reopened
+            .match_records(QueryPlan::all(delivery_tables.pane_leases))
+            .expect("pane lease reads")
+            .records()
+            .to_vec();
+        assert_eq!(leases.len(), 1, "configuration open did not settle lease");
+        assert_eq!(leases[0].delivery_id, "interrupted-delivery");
+    }
+
+    #[test]
     fn configured_policy_is_recovered_from_the_same_store() {
         let fixture = StoreFixture::new();
         let store = fixture.store();
@@ -3566,6 +4177,171 @@ mod tests {
         assert_eq!(
             node.herdr_route_selection,
             signal_flow::HerdrRouteSelection::Unavailable
+        );
+    }
+
+    #[test]
+    fn v1_launch_outcomes_upgrade_without_losing_their_settlement() {
+        let fixture = StoreFixture::new();
+        let origin = OriginClue {
+            flow_id: "origin-flow".into(),
+            session_id: "origin-session".into(),
+            turn_id: "origin-turn".into(),
+        };
+        let started = Launched {
+            flow_id: "started-flow".into(),
+            session_id: "started-session".into(),
+            origin_clue: origin.clone(),
+        };
+        let replaced = Replaced {
+            flow_id: "predecessor-flow".into(),
+            launched: Launched {
+                flow_id: "successor-flow".into(),
+                session_id: "successor-session".into(),
+                origin_clue: origin,
+            },
+        };
+        fixture.seed_v1_outcomes([
+            StoredLaunchOutcomeV1 {
+                launch_request_id: "old-binding".into(),
+                launch_outcome: LaunchOutcomeV1::StartRejected(StartRejectionV1::BindingRefused),
+            },
+            StoredLaunchOutcomeV1 {
+                launch_request_id: "old-started".into(),
+                launch_outcome: LaunchOutcomeV1::Started(started.clone()),
+            },
+            StoredLaunchOutcomeV1 {
+                launch_request_id: "old-replaced".into(),
+                launch_outcome: LaunchOutcomeV1::Replaced(replaced.clone()),
+            },
+            StoredLaunchOutcomeV1 {
+                launch_request_id: "old-start-rejection".into(),
+                launch_outcome: LaunchOutcomeV1::StartRejected(
+                    StartRejectionV1::CompositionRefused,
+                ),
+            },
+            StoredLaunchOutcomeV1 {
+                launch_request_id: "old-replace-binding".into(),
+                launch_outcome: LaunchOutcomeV1::ReplaceRejected(
+                    ReplaceRejectionV1::LaunchRefused(StartRejectionV1::BindingRefused),
+                ),
+            },
+            StoredLaunchOutcomeV1 {
+                launch_request_id: "old-reap-rejection".into(),
+                launch_outcome: LaunchOutcomeV1::ReplaceRejected(ReplaceRejectionV1::ReapRefused(
+                    StopRejection::CloseRefused,
+                )),
+            },
+        ]);
+
+        let expected = [
+            (
+                "old-binding",
+                LaunchOutcome::StartRejected(StartRejection::BindingRefused(
+                    BindingRefusal::Unclassified,
+                )),
+            ),
+            ("old-started", LaunchOutcome::Started(started)),
+            ("old-replaced", LaunchOutcome::Replaced(replaced)),
+            (
+                "old-start-rejection",
+                LaunchOutcome::StartRejected(StartRejection::CompositionRefused),
+            ),
+            (
+                "old-replace-binding",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::BindingRefused(BindingRefusal::Unclassified),
+                )),
+            ),
+            (
+                "old-reap-rejection",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::ReapRefused(
+                    StopRejection::CloseRefused,
+                )),
+            ),
+        ];
+
+        let store = fixture.store();
+        for (request, outcome) in &expected {
+            assert_eq!(
+                store
+                    .launch_outcome(request)
+                    .expect("upgraded outcome reads"),
+                Some(outcome.clone()),
+                "the v1 outcome for {request} survives the family upgrade"
+            );
+        }
+        drop(store);
+
+        // Reopening sees v2 and leaves each migrated outcome unchanged.
+        let reopened = fixture.store();
+        for (request, outcome) in &expected {
+            assert_eq!(
+                reopened
+                    .launch_outcome(request)
+                    .expect("reopened outcome reads"),
+                Some(outcome.clone()),
+                "the v1 family migration is idempotent for {request}"
+            );
+        }
+    }
+
+    #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+    struct CorruptOutcomeRow {
+        launch_request_id: String,
+        marker: [u8; 64],
+    }
+
+    impl EngineRecord for CorruptOutcomeRow {
+        fn record_key(&self) -> sema_engine::RecordKey {
+            sema_engine::RecordKey::new(self.launch_request_id.clone())
+        }
+    }
+
+    #[test]
+    fn corrupt_v1_launch_outcome_refuses_upgrade_and_keeps_its_row() {
+        let fixture = StoreFixture::new();
+        let row = CorruptOutcomeRow {
+            launch_request_id: "corrupt-outcome".into(),
+            marker: [u8::MAX; 64],
+        };
+        let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+            .expect("corrupt fixture store opens");
+        let outcomes = engine
+            .register_table(TableDescriptor::new(
+                TableName::new("flow_nexus_launch_outcomes"),
+                FamilyName::new("flow-nexus-launch-outcome"),
+                SchemaHash::for_label("flow-nexus-launch-outcome-v1"),
+            ))
+            .expect("v1 outcome family registers");
+        engine
+            .assert(Assertion::new(outcomes, row.clone()))
+            .expect("corrupt fixture row is stored under the v1 family");
+        drop(engine);
+
+        assert!(matches!(
+            FlowStore::open(&fixture.path()),
+            Err(super::StoreError::LaunchOutcomeUpgrade(_))
+        ));
+
+        // The failed upgrade leaves its predecessor family and bytes
+        // available to the type that wrote them.
+        let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+            .expect("predecessor store remains openable");
+        let outcomes = engine
+            .register_table(TableDescriptor::<CorruptOutcomeRow>::new(
+                TableName::new("flow_nexus_launch_outcomes"),
+                FamilyName::new("flow-nexus-launch-outcome"),
+                SchemaHash::for_label("flow-nexus-launch-outcome-v1"),
+            ))
+            .expect("corrupt predecessor family remains registered");
+        assert_eq!(
+            engine
+                .match_records(QueryPlan::all(outcomes))
+                .expect("the original row remains readable in its own shape")
+                .records()
+                .to_vec(),
+            vec![row]
         );
     }
 }

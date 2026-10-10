@@ -127,7 +127,9 @@ fn a_claude_launch_whose_flow_id_cannot_be_claimed_is_refused_before_any_pane() 
     let log = fixture.herdr_logging_every_call();
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::BindingRefused)
+        Response::StartRejected(StartRejection::BindingRefused(
+            signal_flow::BindingRefusal::ClaimUnavailable,
+        ))
     );
     assert_eq!(fs::read_to_string(log).unwrap_or_default(), "");
 }

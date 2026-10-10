@@ -146,11 +146,17 @@ again.
 
 Every launch request settles into one stored outcome — `Started`, `Replaced`,
 `StartRejected`, or `ReplaceRejected` — once an attempt was reserved for it.
-`LaunchStatus` answers that outcome, else `LaunchPending` with the attempt and
-its phase, without waiting behind a running launch. `Observe.Launch` keeps its
-connection as the subscription: the current answer on open, one
-`LaunchPending` frame per phase change, the outcome last, then the Nexus
-closes the exchange. Phase changes are announced by the store; a launch
+`LaunchStatus` answers a known request with one `LaunchInspected`: its durable
+attempt, optional settled outcome, and current recorded `FlowNode` or explicit
+absence. A request with neither attempt nor outcome is unknown; an outcome
+without its attempt or a binding that disagrees with the outcome is
+`InconsistentRecords`. The reads compare each database marker and recheck the
+current marker; a changed view is `ReadViewChanged`. This is a checked
+multi-read, not a storage transaction. A duplicate `Start` may still answer
+`LaunchPending` while the original launch runs. `Observe.Launch` keeps its
+connection as the subscription: the current inspection on open, one
+`LaunchInspected` frame per phase change, and the settled inspection last,
+then the Nexus closes the exchange. Phase changes are announced by the store; a launch
 waiting on its first prompt is moved by a file-change watch on its native
 transcript root, which promotes it under the dispatch gate. The Nexus holds
 that watch itself for every ambiguous launch, from startup on, so a receipt

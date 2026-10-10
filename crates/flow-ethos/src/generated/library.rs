@@ -81,14 +81,6 @@ pub enum Aspect {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum FlowAspect {
-    Psyche,
-    Mind,
-    Field,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Address {
     pub aspect: Aspect,
     pub topic: Topic,
@@ -222,7 +214,7 @@ pub struct HarnessProfile {
 #[rustfmt::skip]
 pub type HarnessProfiles = std::vec::Vec<HarnessProfile>;
 #[rustfmt::skip]
-pub type MetaAspects = std::vec::Vec<FlowAspect>;
+pub type MetaAspects = std::vec::Vec<Aspect>;
 #[rustfmt::skip]
 pub type MessageNexusPath = String;
 #[rustfmt::skip]

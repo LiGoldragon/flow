@@ -1894,7 +1894,8 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-attempt"),
             SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
         );
-        let quarantined_launch_attempts_descriptor = TableDescriptor::<QuarantinedLaunchAttempt>::new(
+        let quarantined_launch_attempts_descriptor =
+            TableDescriptor::<QuarantinedLaunchAttempt>::new(
             FLOW_QUARANTINED_LAUNCH_ATTEMPT_TABLE_NAME,
             FamilyName::new("flow-nexus-quarantined-launch-attempt"),
             SchemaHash::for_label("flow-nexus-quarantined-launch-attempt-v1"),

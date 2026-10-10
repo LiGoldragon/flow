@@ -345,7 +345,7 @@ mod tests {
     use datom_codec::{Budget, Datomizable, Potential};
     use flow_nexus::{CarriesSignalFrames, store::ConfigurationOnlyStore};
     use meta_signal_flow::{
-        ConfigureNexus, ConfigurationChange, Query as MetaQuery, Response as MetaResponse,
+        ConfigurationChange, ConfigureNexus, Query as MetaQuery, Response as MetaResponse,
     };
     use protos::{Compactable, Protosizable, ReaderBudget};
     use std::{

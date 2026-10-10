@@ -62,6 +62,10 @@
               # Rust and Ethos inputs after stubbing. Keep its build script
               # dummy so this derivation still only primes dependency artifacts.
               extraDummyScript = ''
+                # Crane's stub files are copied from the read-only Nix store.
+                # Replace those two dummy trees before restoring the real leaf
+                # inputs; never change permissions on the source or store.
+                rm -rf "$out/crates/flow-ethos/src" "$out/crates/flow-ethos/ethos"
                 mkdir -p "$out/crates/flow-ethos/src" "$out/crates/flow-ethos/ethos"
                 cp -R ${flowEthosSource}/src/. "$out/crates/flow-ethos/src/"
                 cp -R ${flowEthosSource}/ethos/. "$out/crates/flow-ethos/ethos/"

@@ -11,8 +11,12 @@ Library
   Blake3.String
   Layer.[ Primary Secondary Tertiary Quaternary ]
   Subaspect.[ Vision Intent Knowledge Operation Trial Compensation ]
-  Source.{ Repository.String Hash.Blake3 Path.String }
+  ; Define the component types once. Source refers to these declarations;
+  ; inlining Path.String inside Source would redeclare Path globally.
+  Repository.String
+  Hash.Blake3
   Path.String
+  Source.{ Repository Hash Path }
   Key.{ Subaspect Topic }
   Said.{ Context.String Verbatim.String }
   Request.[ Order.String

@@ -304,6 +304,13 @@ impl RecordsDeliveries for FlowStore {
     }
 
     fn delivery_configuration(&self) -> Result<DeliveryConfiguration, StoreError> {
+        if let Some(snapshot) = self.configuration_snapshot()? {
+            return Ok(DeliveryConfiguration {
+                harness_profile_vector: snapshot.nexus.harness_profiles,
+                meta_aspects: snapshot.nexus.meta_aspects,
+                message_nexus_path: snapshot.nexus.message_nexus_path,
+            });
+        }
         let records = self
             .engine
             .match_records(QueryPlan::key(

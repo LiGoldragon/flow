@@ -2,7 +2,7 @@
 //! settings come from the committed Meta configuration snapshot.
 
 use crate::{OpensRunningNexus, RunningNexus, store::ConfigurationOnlyStore};
-use meta_signal_flow::{ConfigureNexus, ConfigurationChange};
+use meta_signal_flow::{ConfigurationChange, ConfigureNexus};
 use signal_flow::Start;
 
 #[test]
@@ -73,7 +73,10 @@ fn a_launch_receives_the_socket_from_each_typed_start() {
 fn endpoint(root: &std::path::Path, name: &str) -> meta_signal_flow::CodexEndpoint {
     meta_signal_flow::CodexEndpoint {
         client_path: root.join(name).to_string_lossy().into_owned(),
-        home: root.join(format!("{name}-home")).to_string_lossy().into_owned(),
+        home: root
+            .join(format!("{name}-home"))
+            .to_string_lossy()
+            .into_owned(),
         control_socket_path: root
             .join(format!("{name}.sock"))
             .to_string_lossy()

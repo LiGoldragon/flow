@@ -125,9 +125,7 @@ impl Dispatches for RunningNexus {
                             .refresh_route(self.herdr.claude_daemon.refreshed(node)),
                     ),
                     Ok(response) => response,
-                    Err(error) => Response::Refused(signal_flow::Refusal::Store(
-                        error.to_string(),
-                    )),
+                    Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
                 }
             }
             Query::Stop(flow_id) => {
@@ -137,9 +135,7 @@ impl Dispatches for RunningNexus {
                         return Response::StopRejected(signal_flow::StopRejection::UnknownFlow);
                     }
                     Err(error) => {
-                        return Response::Refused(signal_flow::Refusal::Store(
-                            error.to_string(),
-                        ));
+                        return Response::Refused(signal_flow::Refusal::Store(error.to_string()));
                     }
                 };
                 // A Retired seat is gone already, so there is nothing left
@@ -181,12 +177,13 @@ impl Dispatches for RunningNexus {
                 Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
             }
             Query::Report(report) => self.report(report),
-            Query::Current(address) => self
-                .store
-                .current_metaflow(&address)
-                .unwrap_or_else(|error| {
-                    Response::Refused(signal_flow::Refusal::Store(error.to_string()))
-                }),
+            Query::Current(address) => {
+                self.store
+                    .current_metaflow(&address)
+                    .unwrap_or_else(|error| {
+                        Response::Refused(signal_flow::Refusal::Store(error.to_string()))
+                    })
+            }
             Query::Metaflows => self.store.list_metaflows().map_or_else(
                 |error| Response::Refused(signal_flow::Refusal::Store(error.to_string())),
                 Response::Listed,

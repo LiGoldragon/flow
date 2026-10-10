@@ -19,8 +19,8 @@ use std::{
 };
 
 use meta_signal_flow::{
-    ConfigureNexus, ConfigureRejection, ConfigurationChange, MetaRefusal,
-    Query as MetaQuery, Response as MetaResponse,
+    ConfigurationChange, ConfigureNexus, ConfigureRejection, MetaRefusal, Query as MetaQuery,
+    Response as MetaResponse,
 };
 
 /// `--version` is the only command that runs without a typed Start datom.
@@ -46,7 +46,9 @@ trait ParsesStart {
 impl ParsesStart for [String] {
     fn parse_start(&self) -> Result<flow_ethos::Start, String> {
         let [source] = self else {
-            return Err("usage: flow-nexus 'Start.{ <ordinary-socket> <meta-socket> <store-path> }'".into());
+            return Err(
+                "usage: flow-nexus 'Start.{ <ordinary-socket> <meta-socket> <store-path> }'".into(),
+            );
         };
         let mut budget = Budget {
             remaining: 65_536,
@@ -196,8 +198,7 @@ fn open_configuration_listener(
     start: &flow_ethos::Start,
 ) -> Result<(ConfigurationOnlyStore, String, UnixListener), ConfigureOnlyError> {
     let store_path = Path::new(&start.store_path);
-    let store = ConfigurationOnlyStore::open(store_path)
-        .map_err(ConfigureOnlyError::Store)?;
+    let store = ConfigurationOnlyStore::open(store_path).map_err(ConfigureOnlyError::Store)?;
     let message_nexus_binary = store
         .configuration_snapshot()
         .map_err(ConfigureOnlyError::Store)?
@@ -226,9 +227,7 @@ impl std::fmt::Display for ConfigureOnlyError {
     }
 }
 
-fn run_configuration_only(
-    start: &flow_ethos::Start,
-) -> Result<(), ConfigureOnlyError> {
+fn run_configuration_only(start: &flow_ethos::Start) -> Result<(), ConfigureOnlyError> {
     let (store, message_nexus_binary, listener) = open_configuration_listener(start)?;
     serve_one_configuration(listener, &store, &message_nexus_binary)
         .map_err(ConfigureOnlyError::Other)
@@ -265,7 +264,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let defaults = DefaultConfiguration::from_environment();
-    if matches!(arguments.first().map(String::as_str), Some("--configure-only")) {
+    if matches!(
+        arguments.first().map(String::as_str),
+        Some("--configure-only")
+    ) {
         let start = match arguments.get(1..).unwrap_or_default().parse_start() {
             Ok(start) => start,
             Err(error) => {
@@ -275,10 +277,7 @@ fn main() -> ExitCode {
         };
         return match run_configuration_only(&start) {
             Ok(()) => ExitCode::SUCCESS,
-            Err(ConfigureOnlyError::Store(StoreError::UnrecognizedMemory {
-                path,
-                reason,
-            })) => {
+            Err(ConfigureOnlyError::Store(StoreError::UnrecognizedMemory { path, reason })) => {
                 report_unrecognized_store(&path, &reason);
                 ExitCode::FAILURE
             }
@@ -302,10 +301,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         Err(error) => {
-            eprintln!(
-                "flow-nexus: store {}: {error}",
-                start.store_path
-            );
+            eprintln!("flow-nexus: store {}: {error}", start.store_path);
             return ExitCode::FAILURE;
         }
     };
@@ -347,10 +343,7 @@ mod tests {
         open_configuration_listener, serve_one_configuration, start_store_refusal_datom,
     };
     use datom_codec::{Budget, Datomizable, Potential};
-    use flow_nexus::{
-        CarriesSignalFrames,
-        store::ConfigurationOnlyStore,
-    };
+    use flow_nexus::{CarriesSignalFrames, store::ConfigurationOnlyStore};
     use meta_signal_flow::{
         ConfigureNexus, ConfigurationChange, Query as MetaQuery, Response as MetaResponse,
     };
@@ -457,11 +450,9 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
         };
-        let store = ConfigurationOnlyStore::open(Path::new(&start.store_path))
-            .expect("store lock");
+        let store = ConfigurationOnlyStore::open(Path::new(&start.store_path)).expect("store lock");
         let socket = PathBuf::from(&start.meta_socket_path);
-        std::fs::create_dir_all(socket.parent().expect("socket parent"))
-            .expect("socket directory");
+        std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("socket directory");
         let stale = UnixListener::bind(&socket).expect("create socket inode");
         drop(stale);
         assert!(UnixStream::connect(&socket).is_err(), "socket is stale");
@@ -519,9 +510,12 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
         };
-        let (store, message_binary, listener) = open_configuration_listener(&start)
-            .expect("configuration listener opens");
-        assert!(message_binary.is_empty(), "fresh stores have no Message identity");
+        let (store, message_binary, listener) =
+            open_configuration_listener(&start).expect("configuration listener opens");
+        assert!(
+            message_binary.is_empty(),
+            "fresh stores have no Message identity"
+        );
         let socket = PathBuf::from(&start.meta_socket_path);
         let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
         assert!(
@@ -533,12 +527,14 @@ mod tests {
             ConfigurationChange::Nexus(nexus) => nexus.clone(),
             _ => unreachable!(),
         };
-        let server = std::thread::spawn(move || serve_one_configuration(listener, &store, &message_binary));
+        let server =
+            std::thread::spawn(move || serve_one_configuration(listener, &store, &message_binary));
 
         let mut peer = UnixStream::connect(&socket).expect("connect to config-only listener");
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&MetaQuery::Configure(change))
             .expect("encode one Configure request");
-        peer.write_frame(&bytes).expect("send one Configure request");
+        peer.write_frame(&bytes)
+            .expect("send one Configure request");
         let reply = peer.read_frame().expect("read Configure response");
         let response = rkyv::from_bytes::<MetaResponse, rkyv::rancor::Error>(&reply)
             .expect("decode Configure response");
@@ -558,9 +554,8 @@ mod tests {
             "one-request listener has exited"
         );
 
-        let (store, configured_message_binary, listener) =
-            open_configuration_listener(&start)
-                .expect("the same typed Start reopens the configuration listener");
+        let (store, configured_message_binary, listener) = open_configuration_listener(&start)
+            .expect("the same typed Start reopens the configuration listener");
         assert_eq!(
             configured_message_binary,
             executable.to_string_lossy().into_owned()

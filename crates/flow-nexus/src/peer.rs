@@ -68,8 +68,7 @@ impl AdmitsMetaPeer for RunningNexus {
             },
             Err(_) => return Some(MetaRefusal::PeerUnknown),
         };
-        if !message_binary.is_empty()
-            && peer.executable() == fs::canonicalize(&message_binary).ok()
+        if !message_binary.is_empty() && peer.executable() == fs::canonicalize(&message_binary).ok()
         {
             return None;
         }

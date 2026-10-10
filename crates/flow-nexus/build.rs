@@ -11,8 +11,8 @@ fn main() {
     println!("cargo:rerun-if-changed=ethos/library.ethos");
     println!("cargo:rerun-if-changed=src/generated/library.rs");
     for (stem, root_name) in [("operation", "Operation"), ("library", "Library")] {
-        let source = std::fs::read_to_string(root.join(format!("ethos/{stem}.ethos")))
-            .expect("source");
+        let source =
+            std::fs::read_to_string(root.join(format!("ethos/{stem}.ethos"))).expect("source");
         let file = Potential::<File>::from(source)
             .actualize()
             .unwrap_or_else(|_| panic!("read {root_name}"));

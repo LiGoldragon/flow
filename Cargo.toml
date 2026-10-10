@@ -17,3 +17,9 @@ serde_json = "1"
 thiserror = "2"
 signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "a991c1499b201ad75a084a6542d2f110c46720ce" }
 meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "991859f5f121789c6966d542264baccafd000268" }
+
+# Signal and Meta-Signal also depend on flow-ethos by this Git source. Resolve
+# those workspace edges to this exact leaf package so every shared nominal
+# type has one Cargo package identity during the Flow workspace build.
+[patch."https://github.com/LiGoldragon/flow"]
+flow-ethos = { path = "crates/flow-ethos" }

@@ -42,7 +42,8 @@ Library
   StorePath.String
   Start.{ OrdinarySocketPath MetaSocketPath StorePath }
   ; Startup refusal is distinct from the ordinary/meta socket Refusal.Store.String.
-  StartRefusal.[ Refused.Store.{ Path Reason } ]
+  StoreRefusal.{ Path.String Reason.String }
+  StartRefusal.[ Store.StoreRefusal ]
   SourceRoot.String
   ClientPath.String
   Home.String

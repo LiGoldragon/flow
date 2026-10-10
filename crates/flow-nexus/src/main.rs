@@ -237,7 +237,8 @@ fn run_configuration_only(
 fn start_store_refusal_datom(path: &str, reason: &str) -> Result<String, String> {
     let path = path.to_owned().datomize(vec![]).protosize().compact();
     let reason = reason.to_owned().datomize(vec![]).protosize().compact();
-    let source = format!("StartRefusal.Refused.Store.{{ {path} {reason} }}");
+    // StartRefusal is the Rust root type; the Store payload is its datom.
+    let source = format!("Store.{{ {path} {reason} }}");
     let mut budget = Budget {
         remaining: 65_536,
         reader: ReaderBudget { remaining: 65_536 },
@@ -408,6 +409,9 @@ mod tests {
         let parsed = Potential::<flow_ethos::StartRefusal>::from(refusal.clone())
             .actualize(&mut budget)
             .expect("refusal datom parses as the authored type");
+        assert!(refusal.starts_with("Store.{ "));
+        assert!(!refusal.starts_with("StartRefusal."));
+        assert!(!refusal.starts_with("Refused.Store."));
         assert_eq!(
             parsed.datomize(vec![]).protosize().compact(),
             refusal,

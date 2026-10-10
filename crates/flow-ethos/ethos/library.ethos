@@ -1,0 +1,32 @@
+; Flow's shared ordinary Library. It owns the ordinary identity types used by
+; signal-flow, so signal-flow can import this source without a dependency cycle.
+; Meta owns Nexus configuration types and imports these ordinary types.
+
+Library
+[ FlowId.String
+  FlowAspect.[ Psyche Mind Field ]
+  Topic.String
+  Layer.[ Primary Secondary Tertiary Quaternary ]
+  Subaspect.[ Vision Intent Knowledge Operation Trial Compensation ]
+  SourceRepository.String
+  Blake3.String
+  SourceHash.Blake3
+  SourcePath.String
+  Source.{ Repository.SourceRepository Hash.SourceHash Path.SourcePath }
+  Key.{ Subaspect Topic }
+  Said.{ Context.String Verbatim.String }
+  Request.[ Order.String
+            Question.String
+            Psyche.Said
+            Psyches.Vector<Said>
+            Result.String
+            Notice.String ]
+  Address.{ Aspect.FlowAspect Topic Layer }
+  Recipient.[ Address Up ]
+  Metaflow.{ Address
+             State.[ Awake.FlowId Asleep Ended ]
+             Past.Vector<FlowId>
+             Queue.Vector<Request> }
+  Lock.{ Sender Address Until.Integer }
+  Process.{ Pid.Integer Started.Integer }
+  Sender.Address ]

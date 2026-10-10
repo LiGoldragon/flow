@@ -217,6 +217,16 @@ name = "flow-defaults"
 version = "0.25.0"
 
 [[package]]
+name = "flow-ethos"
+version = "0.25.0"
+dependencies = [
+ "datom-codec",
+ "ethos-zero",
+ "protos",
+ "rkyv",
+]
+
+[[package]]
 name = "flow-meta"
 version = "0.25.0"
 dependencies = [

@@ -1,7 +1,11 @@
 //! The service takes an explicit typed Start and configuration reaches it
 //! through the one-request meta listener before normal startup.
-use flow_nexus::{CarriesSignalFrames, generated::startup::Start};
 use datom_codec::Datomizable;
+use flow_nexus::{
+    CarriesSignalFrames,
+    generated::startup::Start,
+    store::OpensConfigurationOnlyStore,
+};
 use protos::{Compactable, Protosizable};
 use std::{
     io::{Read, Write},
@@ -71,7 +75,10 @@ fn connect(socket: &Path, nexus: &mut StartedNexus) -> UnixStream {
 }
 
 fn wait_successfully(nexus: &mut StartedNexus) {
-    let status = nexus.child.wait().expect("flow-nexus exits after Configure");
+    let status = nexus
+        .child
+        .wait()
+        .expect("flow-nexus exits after Configure");
     if !status.success() {
         let mut stderr = String::new();
         if let Some(mut pipe) = nexus.child.stderr.take() {
@@ -107,7 +114,10 @@ fn configuration(start: &Start, home: &Path) -> meta_signal_flow::Configuration 
             interrupt_keys: vec!["esc".into()],
             submit_keys: Vec::new(),
         }],
-        meta_aspects: vec![signal_flow::FlowAspect::Psyche, signal_flow::FlowAspect::Mind],
+        meta_aspects: vec![
+            signal_flow::FlowAspect::Psyche,
+            signal_flow::FlowAspect::Mind,
+        ],
         message_nexus_path: "/opt/message-nexus".into(),
     }
 }
@@ -193,9 +203,8 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
     meta.read_exact(&mut length).expect("Configure length");
     let mut reply = vec![0; u32::from_be_bytes(length) as usize];
     meta.read_exact(&mut reply).expect("Configure reply");
-    let response =
-        rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(&reply)
-            .expect("Configure reply decodes");
+    let response = rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(&reply)
+        .expect("Configure reply decodes");
     assert!(matches!(
         response,
         meta_signal_flow::Response::Configured(configured)

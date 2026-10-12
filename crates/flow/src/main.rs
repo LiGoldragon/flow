@@ -124,7 +124,9 @@ fn main() {
     };
     match client
         .parse_command(arguments.into_iter())
-        .and_then(|query| resolve_launch_skills(query, curriculum_resolve_skills))
+        .and_then(|query| {
+            FlowClient::resolve_launch_skills(query, FlowClient::curriculum_resolve_skills)
+        })
         .and_then(|query| {
             client.call(&query, &mut |reply| {
                 println!("{}", client.textualize_reply(&reply))
@@ -156,75 +158,87 @@ impl Composing for ResolvedSkills {
     }
 }
 
-fn curriculum_resolve_skills_argument(names: &[String]) -> String {
-    names
-        .to_vec()
-        .datomize(vec![])
-        .named_variant(vec![], "ResolveSkills")
-        .protosize()
-        .compact()
+trait ResolvesCurriculumSkills {
+    fn curriculum_resolve_skills_argument(names: &[String]) -> String;
+    fn parse_curriculum_skills_reply(reply: &str) -> Result<Vec<String>, String>;
+    fn curriculum_resolve_skills(names: &[String]) -> Result<Vec<String>, String>;
+    fn resolve_launch_skills(
+        query: Query,
+        resolve: impl FnOnce(&[String]) -> Result<Vec<String>, String>,
+    ) -> Result<Query, String>;
 }
 
-fn parse_curriculum_skills_reply(reply: &str) -> Result<Vec<String>, String> {
-    let mut budget = Budget {
-        remaining: 65_536,
-        reader: ReaderBudget { remaining: 65_536 },
-        depth: 0,
-        maximum_depth: 1_024,
-    };
-    Potential::<ResolvedSkills>::from(reply.trim().to_owned())
-        .actualize(&mut budget)
-        .map(|resolved| resolved.0)
-        .map_err(|error| format!("invalid Curriculum skill resolution reply: {error:?}"))
-}
-
-fn curriculum_resolve_skills(names: &[String]) -> Result<Vec<String>, String> {
-    let argument = curriculum_resolve_skills_argument(names);
-    let output = std::process::Command::new("curriculum")
-        .arg(&argument)
-        .output()
-        .map_err(|error| format!("could not run Curriculum skill resolution: {error}"))?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        let detail = detail.trim();
-        return Err(if detail.is_empty() {
-            format!("Curriculum skill resolution failed with {}", output.status)
-        } else {
-            format!("Curriculum skill resolution failed: {detail}")
-        });
+impl ResolvesCurriculumSkills for FlowClient {
+    fn curriculum_resolve_skills_argument(names: &[String]) -> String {
+        names
+            .to_vec()
+            .datomize(vec![])
+            .named_variant(vec![], "ResolveSkills")
+            .protosize()
+            .compact()
     }
-    let reply = String::from_utf8(output.stdout)
-        .map_err(|error| format!("Curriculum returned non-UTF-8 skill resolution: {error}"))?;
-    parse_curriculum_skills_reply(&reply)
-}
 
-fn resolve_launch_skills(
-    mut query: Query,
-    resolve: impl FnOnce(&[String]) -> Result<Vec<String>, String>,
-) -> Result<Query, String> {
-    let profile = match &mut query {
-        Query::Start(request) | Query::Replace(request) => &mut request.launch_profile,
-        _ => return Ok(query),
-    };
-    let mut names = resolve(&profile.skill_name_vector)?;
-    if names.iter().collect::<std::collections::HashSet<_>>().len() != names.len() {
-        return Err("Curriculum returned duplicate resolved skills".into());
+    fn parse_curriculum_skills_reply(reply: &str) -> Result<Vec<String>, String> {
+        let mut budget = Budget {
+            remaining: 65_536,
+            reader: ReaderBudget { remaining: 65_536 },
+            depth: 0,
+            maximum_depth: 1_024,
+        };
+        Potential::<ResolvedSkills>::from(reply.trim().to_owned())
+            .actualize(&mut budget)
+            .map(|resolved| resolved.0)
+            .map_err(|error| format!("invalid Curriculum skill resolution reply: {error:?}"))
     }
-    if let Some(index) = names.iter().position(|name| name == "operation-main-flow") {
-        if index > 0 {
-            let main_flow = names.remove(index);
-            names.insert(0, main_flow);
+
+    fn curriculum_resolve_skills(names: &[String]) -> Result<Vec<String>, String> {
+        let argument = Self::curriculum_resolve_skills_argument(names);
+        let output = std::process::Command::new("curriculum")
+            .arg(&argument)
+            .output()
+            .map_err(|error| format!("could not run Curriculum skill resolution: {error}"))?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            let detail = detail.trim();
+            return Err(if detail.is_empty() {
+                format!("Curriculum skill resolution failed with {}", output.status)
+            } else {
+                format!("Curriculum skill resolution failed: {detail}")
+            });
         }
+        let reply = String::from_utf8(output.stdout)
+            .map_err(|error| format!("Curriculum returned non-UTF-8 skill resolution: {error}"))?;
+        Self::parse_curriculum_skills_reply(&reply)
     }
-    profile.skill_name_vector = names;
-    Ok(query)
+
+    fn resolve_launch_skills(
+        mut query: Query,
+        resolve: impl FnOnce(&[String]) -> Result<Vec<String>, String>,
+    ) -> Result<Query, String> {
+        let profile = match &mut query {
+            Query::Start(request) | Query::Replace(request) => &mut request.launch_profile,
+            _ => return Ok(query),
+        };
+        let mut names = resolve(&profile.skill_name_vector)?;
+        if names.iter().collect::<std::collections::HashSet<_>>().len() != names.len() {
+            return Err("Curriculum returned duplicate resolved skills".into());
+        }
+        if let Some(index) = names.iter().position(|name| name == "operation-main-flow") {
+            if index > 0 {
+                let main_flow = names.remove(index);
+                names.insert(0, main_flow);
+            }
+        }
+        profile.skill_name_vector = names;
+        Ok(query)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AnswersVersion, FlowClient, ParsesFlowCommand, TextualizesFlowReply,
-        curriculum_resolve_skills_argument, parse_curriculum_skills_reply, resolve_launch_skills,
+        AnswersVersion, FlowClient, ParsesFlowCommand, ResolvesCurriculumSkills,
+        TextualizesFlowReply,
     };
     use signal_flow::{Query, Response};
 
@@ -288,7 +302,7 @@ mod tests {
         let start = client
             .parse_command(["Start.{ { request-7 [] [ spirit operation-main-flow ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into()].into_iter())
             .unwrap();
-        let start = resolve_launch_skills(start, |roots| {
+        let start = FlowClient::resolve_launch_skills(start, |roots| {
             assert_eq!(roots, ["spirit", "operation-main-flow"]);
             Ok(vec![
                 "compensation-behavior".into(),
@@ -308,7 +322,7 @@ mod tests {
         let replace = client
             .parse_command(["Replace.{ { request-8 [] [ spirit ] Field High Claude opus-5-5 high Some.fac697 [] messaging-build /workspace/bundles/flow.md «Carry on from fac697.» } { fac697 session-1 turn-2 } }".into()].into_iter())
             .unwrap();
-        let replace = resolve_launch_skills(replace, |roots| {
+        let replace = FlowClient::resolve_launch_skills(replace, |roots| {
             assert_eq!(roots, ["spirit"]);
             Ok(vec!["compensation-behavior".into(), "spirit".into()])
         })
@@ -325,7 +339,10 @@ mod tests {
     #[test]
     fn skill_resolution_is_typed_and_non_launch_queries_pass_through() {
         assert_eq!(
-            curriculum_resolve_skills_argument(&["spirit".into(), "compensation-behavior".into()]),
+            FlowClient::curriculum_resolve_skills_argument(&[
+                "spirit".into(),
+                "compensation-behavior".into(),
+            ]),
             "ResolveSkills.[ spirit compensation-behavior ]"
         );
         let client = FlowClient {
@@ -334,7 +351,7 @@ mod tests {
         let query = client
             .parse_command(["ResolveRecipient.fac697".into()].into_iter())
             .unwrap();
-        let unchanged = resolve_launch_skills(query.clone(), |_| {
+        let unchanged = FlowClient::resolve_launch_skills(query.clone(), |_| {
             panic!("non-launch queries must not resolve skills")
         })
         .unwrap();
@@ -344,13 +361,13 @@ mod tests {
     #[test]
     fn curriculum_skill_resolution_reply_is_typed_and_ordered() {
         assert_eq!(
-            parse_curriculum_skills_reply(
+            FlowClient::parse_curriculum_skills_reply(
                 "ResolvedSkills.[ compensation-behavior spirit operation-main-flow ]\n"
             )
             .unwrap(),
             ["compensation-behavior", "spirit", "operation-main-flow"]
         );
-        assert!(parse_curriculum_skills_reply("Other.[ spirit ]").is_err());
+        assert!(FlowClient::parse_curriculum_skills_reply("Other.[ spirit ]").is_err());
     }
 
     #[test]
@@ -362,12 +379,13 @@ mod tests {
             .parse_command(["Start.{ { request-7 [] [ spirit ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }".into()].into_iter())
             .unwrap();
         let mut submitted = false;
-        let result = resolve_launch_skills(query, |_| Err("missing dependency".into())).and_then(
-            |resolved| {
-                submitted = true;
-                Ok(resolved)
-            },
-        );
+        let result = FlowClient::resolve_launch_skills(query, |_| {
+            Err("missing dependency".into())
+        })
+        .and_then(|resolved| {
+            submitted = true;
+            Ok(resolved)
+        });
         assert_eq!(result.unwrap_err(), "missing dependency");
         assert!(!submitted);
     }
@@ -380,7 +398,7 @@ mod tests {
         let query = client
             .parse_command(["Start.{ { request-7 [] [ spirit operation-main-flow ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }".into()].into_iter())
             .unwrap();
-        let result = resolve_launch_skills(query, |_| {
+        let result = FlowClient::resolve_launch_skills(query, |_| {
             Ok(vec![
                 "compensation-behavior".into(),
                 "spirit".into(),

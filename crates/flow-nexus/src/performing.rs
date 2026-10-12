@@ -33,8 +33,12 @@ pub(crate) enum HerdrFailureStage {
     Title,
 }
 
-impl HerdrFailureStage {
-    const fn label(self) -> &'static str {
+trait LabelsHerdrFailureStage {
+    fn label(self) -> &'static str;
+}
+
+impl LabelsHerdrFailureStage for HerdrFailureStage {
+    fn label(self) -> &'static str {
         match self {
             Self::Open => "open",
             Self::Spawn => "spawn",
@@ -57,8 +61,13 @@ pub(crate) enum HerdrFailureCategory {
     AdapterRefused,
 }
 
-impl HerdrFailureCategory {
-    const fn label(self) -> &'static str {
+trait ClassifiesHerdrFailureCategory {
+    fn label(self) -> &'static str;
+    fn from_adapter_error(error: &str) -> Self;
+}
+
+impl ClassifiesHerdrFailureCategory for HerdrFailureCategory {
+    fn label(self) -> &'static str {
         match self {
             Self::PaneTargetMismatch => "pane-target-mismatch",
             Self::NativeSessionMissing => "native-session-missing",
@@ -97,7 +106,14 @@ pub(crate) struct HerdrFailure {
     pub(crate) category: HerdrFailureCategory,
 }
 
-impl HerdrFailure {
+trait RefusesHerdrOperation {
+    fn refused(stage: HerdrFailureStage, adapter_error: String) -> Outcome;
+
+    #[cfg(test)]
+    fn log_line(self) -> String;
+}
+
+impl RefusesHerdrOperation for HerdrFailure {
     fn refused(stage: HerdrFailureStage, adapter_error: String) -> Outcome {
         let failure = Self {
             stage,
@@ -166,7 +182,10 @@ impl<E> AnswersRecord for Result<(), E> {
 
 #[cfg(test)]
 mod failure_tests {
-    use super::{HerdrFailure, HerdrFailureCategory, HerdrFailureStage};
+    use super::{
+        ClassifiesHerdrFailureCategory, HerdrFailure, HerdrFailureCategory, HerdrFailureStage,
+        RefusesHerdrOperation,
+    };
     use crate::generated::operation::{Failed_Data, Outcome};
 
     #[test]

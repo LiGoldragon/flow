@@ -1,14 +1,14 @@
+use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow_nexus::{
     CarriesSignalFrames, OpensRunningNexus, RunningNexus, ServesMeta, ServesOrdinary,
     caller::{CallerProcess, IdentifiesPeer, LocatesCallerPane},
     generated::startup::{Start, StartRefusal, StoreRefusal},
     launching::PromotesAmbiguousLaunches,
     store::{
-        ConfigurationOnlyStore, ConfiguresFlowStore, DefaultConfiguration, ReadsAnchors,
-        StoreError,
+        ConfigurationOnlyStore, ConfiguresFlowStore, DefaultConfiguration,
+        OpensConfigurationOnlyStore, ReadsAnchors, StoreError,
     },
 };
-use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
     fs,
@@ -116,8 +116,12 @@ impl CreatesExplicitStoreParent for Path {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .ok_or_else(|| "Start.StorePath must name a file inside a directory".to_owned())?;
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("cannot create store directory {}: {error}", parent.display()))
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "cannot create store directory {}: {error}",
+                parent.display()
+            )
+        })
     }
 }
 
@@ -443,18 +447,18 @@ mod tests {
     use super::{
         AnswersVersion, ConfigurationPeerPolicy, OpensConfigurationListener,
         ParsesStartupArguments, RefusesUnidentifiedConfigurationPeer, ServesOneConfiguration,
-        StartupMode, StartupInvocation,
+        StartupInvocation, StartupMode,
     };
     use flow_nexus::{
         CarriesSignalFrames,
         generated::startup::Start,
         store::{
-            ConfigurationOnlyStore, DefaultConfiguration, LaysOutDefaults, SeedsConfiguration,
+            ConfigurationOnlyStore, DefaultConfiguration, LaysOutDefaults,
+            OpensConfigurationOnlyStore, SeedsConfiguration,
         },
     };
-    use datom_codec::Datomizable;
-    use protos::{Compactable, Protosizable};
     use meta_signal_flow::{Query as MetaQuery, Response as MetaResponse};
+    use protos::{Compactable, Protosizable};
     use std::{
         os::unix::{
             fs::FileTypeExt,
@@ -489,19 +493,15 @@ mod tests {
         assert_eq!(run.mode, StartupMode::Run);
         assert_eq!(run.start, start);
 
-        let configure = StartupInvocation::parse_startup_arguments(&[
-            "--configure-only".into(),
-            datom.clone(),
-        ])
-            .expect("configure-only plus one Start datom");
+        let configure =
+            StartupInvocation::parse_startup_arguments(&["--configure-only".into(), datom.clone()])
+                .expect("configure-only plus one Start datom");
         assert_eq!(configure.mode, StartupMode::ConfigureOnly);
         assert!(StartupInvocation::parse_startup_arguments(&[]).is_err());
         assert!(
             StartupInvocation::parse_startup_arguments(&[datom.clone(), datom.clone()]).is_err()
         );
-        assert!(
-            StartupInvocation::parse_startup_arguments(&[format!("{datom} {datom}")]).is_err()
-        );
+        assert!(StartupInvocation::parse_startup_arguments(&[format!("{datom} {datom}")]).is_err());
         let relative = Start {
             store_path: "flow.sema".into(),
             ..start
@@ -544,8 +544,7 @@ mod tests {
         std::fs::create_dir_all(defaults.state_directory()).expect("state directory");
         let store = ConfigurationOnlyStore::open(&defaults.store_path()).expect("store lock");
         let socket = defaults.meta_socket_path();
-        std::fs::create_dir_all(socket.parent().expect("socket parent"))
-            .expect("socket directory");
+        std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("socket directory");
         let stale = UnixListener::bind(&socket).expect("create socket inode");
         drop(stale);
         assert!(UnixStream::connect(&socket).is_err(), "socket is stale");
@@ -639,10 +638,9 @@ mod tests {
             .expect("test executable")
             .canonicalize()
             .expect("canonical test executable");
-        let (store, message_path, listener) =
-            start
-                .open_configuration_listener()
-                .expect("configuration listener opens");
+        let (store, message_path, listener) = start
+            .open_configuration_listener()
+            .expect("configuration listener opens");
         assert!(store.configured_configuration().unwrap().is_none());
         assert!(message_path.is_empty());
         let socket = PathBuf::from(&start.meta_socket_path);
@@ -655,14 +653,9 @@ mod tests {
         configuration.message_nexus_path = executable.to_string_lossy().into_owned();
         configuration.meta_socket_path = socket.to_string_lossy().into_owned();
         let message_path = configuration.message_nexus_path.clone();
-        let server =
-            std::thread::spawn(move || {
-                ConfigurationOnlyStore::serve_one_configuration(
-                    listener,
-                    &store,
-                    &message_path,
-                )
-            });
+        let server = std::thread::spawn(move || {
+            ConfigurationOnlyStore::serve_one_configuration(listener, &store, &message_path)
+        });
 
         let mut peer = UnixStream::connect(&socket).expect("connect to config-only listener");
         let bytes =

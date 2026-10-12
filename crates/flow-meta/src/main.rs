@@ -31,149 +31,180 @@ trait CallsMetaNexus {
     fn call(&self, query: &Query) -> Result<Response, String>;
 }
 
-fn parse_datom<T: datom_codec::Composing>(source: String, subject: &str) -> Result<T, String> {
-    let mut budget = Budget {
-        remaining: 65_536,
-        reader: ReaderBudget { remaining: 65_536 },
-        depth: 0,
-        maximum_depth: 1_024,
-    };
-    Potential::<T>::from(source)
-        .actualize(&mut budget)
-        .map_err(|error| format!("invalid {subject} datom: {error:?}"))
+trait ComposesConfigurationFiles {
+    fn parse_datom<T: datom_codec::Composing>(source: String, subject: &str) -> Result<T, String>;
+    fn record_assignment<T: PartialEq>(
+        target: &mut Option<(T, String)>,
+        value: T,
+        field: &str,
+        source: &str,
+    ) -> Result<(), String>;
+    fn required_assignment<T>(target: Option<(T, String)>, field: &str) -> Result<T, String>;
+    fn compose_configuration_files(
+        paths: Vec<ConfigurationFilePath>,
+    ) -> Result<Configuration, String>;
 }
 
-fn record_assignment<T: PartialEq>(
-    target: &mut Option<(T, String)>,
-    value: T,
-    field: &str,
-    source: &str,
-) -> Result<(), String> {
-    match target {
-        Some((previous, first_source)) if previous != &value => Err(format!(
-            "conflicting {field} assignments in {first_source} and {source}"
-        )),
-        Some(_) => Ok(()),
-        None => {
-            *target = Some((value, source.to_owned()));
-            Ok(())
-        }
-    }
-}
-
-fn required_assignment<T>(target: Option<(T, String)>, field: &str) -> Result<T, String> {
-    target
-        .map(|(value, _)| value)
-        .ok_or_else(|| format!("configuration fragments omit required field {field}"))
-}
-
-fn compose_configuration_files(paths: Vec<ConfigurationFilePath>) -> Result<Configuration, String> {
-    let mut files = Vec::with_capacity(paths.len());
-    for path in paths {
-        let contents = fs::read_to_string(&path.path).map_err(|error| {
-            format!("cannot read configuration fragment {}: {error}", path.path)
-        })?;
-        let configuration_fragment =
-            parse_datom::<ConfigurationFragment>(contents, "ConfigurationFragment")
-                .map_err(|error| format!("{}: {error}", path.path))?;
-        files.push(ConfigurationFile {
-            configuration_file_path: path,
-            configuration_fragment,
-        });
+impl ComposesConfigurationFiles for FlowMetaClient {
+    fn parse_datom<T: datom_codec::Composing>(source: String, subject: &str) -> Result<T, String> {
+        let mut budget = Budget {
+            remaining: 65_536,
+            reader: ReaderBudget { remaining: 65_536 },
+            depth: 0,
+            maximum_depth: 1_024,
+        };
+        Potential::<T>::from(source)
+            .actualize(&mut budget)
+            .map_err(|error| format!("invalid {subject} datom: {error:?}"))
     }
 
-    let mut ordinary_socket_path = None;
-    let mut meta_socket_path = None;
-    let mut source_root = None;
-    let mut stable_codex = None;
-    let mut next_codex = None;
-    let mut harness_profile_vector: Option<(HarnessProfileVector, String)> = None;
-    let mut meta_aspects = None;
-    let mut message_nexus_path = None;
-
-    for file in files {
-        let source = file.configuration_file_path.path;
-        for assignment in file.configuration_fragment.configuration_assignment_vector {
-            match assignment {
-                ConfigurationAssignment::OrdinarySocketPath(value) => record_assignment(
-                    &mut ordinary_socket_path,
-                    value,
-                    "OrdinarySocketPath",
-                    &source,
-                )?,
-                ConfigurationAssignment::MetaSocketPath(value) => {
-                    record_assignment(&mut meta_socket_path, value, "MetaSocketPath", &source)?
-                }
-                ConfigurationAssignment::SourceRoot(value) => {
-                    record_assignment(&mut source_root, value, "SourceRoot", &source)?
-                }
-                ConfigurationAssignment::StableCodex(value) => {
-                    record_assignment(&mut stable_codex, value, "StableCodex", &source)?
-                }
-                ConfigurationAssignment::NextCodex(value) => {
-                    record_assignment(&mut next_codex, value, "NextCodex", &source)?
-                }
-                ConfigurationAssignment::HarnessProfileVector(value) => record_assignment(
-                    &mut harness_profile_vector,
-                    value,
-                    "HarnessProfileVector",
-                    &source,
-                )?,
-                ConfigurationAssignment::MetaAspects(value) => {
-                    record_assignment(&mut meta_aspects, value, "MetaAspects", &source)?
-                }
-                ConfigurationAssignment::MessageNexusPath(value) => {
-                    record_assignment(&mut message_nexus_path, value, "MessageNexusPath", &source)?
-                }
+    fn record_assignment<T: PartialEq>(
+        target: &mut Option<(T, String)>,
+        value: T,
+        field: &str,
+        source: &str,
+    ) -> Result<(), String> {
+        match target {
+            Some((previous, first_source)) if previous != &value => Err(format!(
+                "conflicting {field} assignments in {first_source} and {source}"
+            )),
+            Some(_) => Ok(()),
+            None => {
+                *target = Some((value, source.to_owned()));
+                Ok(())
             }
         }
     }
 
-    let mut missing = Vec::new();
-    if ordinary_socket_path.is_none() {
-        missing.push("OrdinarySocketPath");
-    }
-    if meta_socket_path.is_none() {
-        missing.push("MetaSocketPath");
-    }
-    if source_root.is_none() {
-        missing.push("SourceRoot");
-    }
-    if stable_codex.is_none() {
-        missing.push("StableCodex");
-    }
-    if next_codex.is_none() {
-        missing.push("NextCodex");
-    }
-    if harness_profile_vector.is_none() {
-        missing.push("HarnessProfileVector");
-    }
-    if meta_aspects.is_none() {
-        missing.push("MetaAspects");
-    }
-    if message_nexus_path.is_none() {
-        missing.push("MessageNexusPath");
-    }
-    if !missing.is_empty() {
-        return Err(format!(
-            "configuration fragments omit required fields: {}",
-            missing.join(", ")
-        ));
+    fn required_assignment<T>(target: Option<(T, String)>, field: &str) -> Result<T, String> {
+        target
+            .map(|(value, _)| value)
+            .ok_or_else(|| format!("configuration fragments omit required field {field}"))
     }
 
-    Ok(Configuration {
-        ordinary_socket_path: required_assignment(ordinary_socket_path, "OrdinarySocketPath")?,
-        meta_socket_path: required_assignment(meta_socket_path, "MetaSocketPath")?,
-        source_root: required_assignment(source_root, "SourceRoot")?,
-        stable_codex: required_assignment(stable_codex, "StableCodex")?,
-        next_codex: required_assignment(next_codex, "NextCodex")?,
-        harness_profile_vector: required_assignment(
-            harness_profile_vector,
-            "HarnessProfileVector",
-        )?,
-        meta_aspects: required_assignment(meta_aspects, "MetaAspects")?,
-        message_nexus_path: required_assignment(message_nexus_path, "MessageNexusPath")?,
-    })
+    fn compose_configuration_files(
+        paths: Vec<ConfigurationFilePath>,
+    ) -> Result<Configuration, String> {
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            let contents = fs::read_to_string(&path.path).map_err(|error| {
+                format!("cannot read configuration fragment {}: {error}", path.path)
+            })?;
+            let configuration_fragment =
+                Self::parse_datom::<ConfigurationFragment>(contents, "ConfigurationFragment")
+                    .map_err(|error| format!("{}: {error}", path.path))?;
+            files.push(ConfigurationFile {
+                configuration_file_path: path,
+                configuration_fragment,
+            });
+        }
+
+        let mut ordinary_socket_path = None;
+        let mut meta_socket_path = None;
+        let mut source_root = None;
+        let mut stable_codex = None;
+        let mut next_codex = None;
+        let mut harness_profile_vector: Option<(HarnessProfileVector, String)> = None;
+        let mut meta_aspects = None;
+        let mut message_nexus_path = None;
+
+        for file in files {
+            let source = file.configuration_file_path.path;
+            for assignment in file.configuration_fragment.configuration_assignment_vector {
+                match assignment {
+                    ConfigurationAssignment::OrdinarySocketPath(value) => Self::record_assignment(
+                        &mut ordinary_socket_path,
+                        value,
+                        "OrdinarySocketPath",
+                        &source,
+                    )?,
+                    ConfigurationAssignment::MetaSocketPath(value) => {
+                        Self::record_assignment(
+                            &mut meta_socket_path,
+                            value,
+                            "MetaSocketPath",
+                            &source,
+                        )?
+                    }
+                    ConfigurationAssignment::SourceRoot(value) => {
+                        Self::record_assignment(&mut source_root, value, "SourceRoot", &source)?
+                    }
+                    ConfigurationAssignment::StableCodex(value) => {
+                        Self::record_assignment(&mut stable_codex, value, "StableCodex", &source)?
+                    }
+                    ConfigurationAssignment::NextCodex(value) => {
+                        Self::record_assignment(&mut next_codex, value, "NextCodex", &source)?
+                    }
+                    ConfigurationAssignment::HarnessProfileVector(value) => Self::record_assignment(
+                        &mut harness_profile_vector,
+                        value,
+                        "HarnessProfileVector",
+                        &source,
+                    )?,
+                    ConfigurationAssignment::MetaAspects(value) => {
+                        Self::record_assignment(&mut meta_aspects, value, "MetaAspects", &source)?
+                    }
+                    ConfigurationAssignment::MessageNexusPath(value) => {
+                        Self::record_assignment(
+                            &mut message_nexus_path,
+                            value,
+                            "MessageNexusPath",
+                            &source,
+                        )?
+                    }
+                }
+            }
+        }
+
+        let mut missing = Vec::new();
+        if ordinary_socket_path.is_none() {
+            missing.push("OrdinarySocketPath");
+        }
+        if meta_socket_path.is_none() {
+            missing.push("MetaSocketPath");
+        }
+        if source_root.is_none() {
+            missing.push("SourceRoot");
+        }
+        if stable_codex.is_none() {
+            missing.push("StableCodex");
+        }
+        if next_codex.is_none() {
+            missing.push("NextCodex");
+        }
+        if harness_profile_vector.is_none() {
+            missing.push("HarnessProfileVector");
+        }
+        if meta_aspects.is_none() {
+            missing.push("MetaAspects");
+        }
+        if message_nexus_path.is_none() {
+            missing.push("MessageNexusPath");
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "configuration fragments omit required fields: {}",
+                missing.join(", ")
+            ));
+        }
+
+        Ok(Configuration {
+            ordinary_socket_path: Self::required_assignment(
+                ordinary_socket_path,
+                "OrdinarySocketPath",
+            )?,
+            meta_socket_path: Self::required_assignment(meta_socket_path, "MetaSocketPath")?,
+            source_root: Self::required_assignment(source_root, "SourceRoot")?,
+            stable_codex: Self::required_assignment(stable_codex, "StableCodex")?,
+            next_codex: Self::required_assignment(next_codex, "NextCodex")?,
+            harness_profile_vector: Self::required_assignment(
+                harness_profile_vector,
+                "HarnessProfileVector",
+            )?,
+            meta_aspects: Self::required_assignment(meta_aspects, "MetaAspects")?,
+            message_nexus_path: Self::required_assignment(message_nexus_path, "MessageNexusPath")?,
+        })
+    }
 }
 
 impl ParsesMetaCommand for FlowMetaClient {
@@ -274,8 +305,9 @@ impl ParsesMetaCommand for FlowMetaClient {
                 if arguments.next().is_some() {
                     return Err(Self::query_usage());
                 }
-                let input = parse_datom::<ConfigureFiles>(datom.to_owned(), "ConfigureFiles")?;
-                compose_configuration_files(input.configuration_file_path_vector)
+                let input =
+                    Self::parse_datom::<ConfigureFiles>(datom.to_owned(), "ConfigureFiles")?;
+                Self::compose_configuration_files(input.configuration_file_path_vector)
                     .map(Query::Configure)
             }
             // A capitalized argument is one inline meta Query datom, the
@@ -284,7 +316,7 @@ impl ParsesMetaCommand for FlowMetaClient {
                 if arguments.next().is_some() {
                     return Err(Self::query_usage());
                 }
-                parse_datom::<Query>(datom.to_owned(), "Flow meta query")
+                Self::parse_datom::<Query>(datom.to_owned(), "Flow meta query")
             }
             _ => Err(format!(
                 "usage: flow-meta reset <idempotency-key> [credit-id] | flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint] | {}",

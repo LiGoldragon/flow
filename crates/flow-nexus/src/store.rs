@@ -4,8 +4,8 @@
 //! owns its single `.sema` store and lowers a closed `signal_flow::Query`
 //! into its typed, durable records.
 
-use crate::store::delivery::RegistersDeliveryTables;
 use crate::generated::startup::Start;
+use crate::store::delivery::RegistersDeliveryTables;
 pub mod delivery;
 pub mod events;
 
@@ -22,8 +22,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, Decision, Engine, EngineOpen, EngineRecord, FamilyIdentity, FamilyName,
     KeyedMutation, MemoryDefinition, MemoryUpgrades, MemoryVersion, QueryPlan, RecordKey,
-    Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference, TableRegistration,
-    UpgradeFrom, UpgradeOutcome,
+    Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
+    TableRegistration, UpgradeFrom, UpgradeOutcome,
 };
 use signal_flow::{
     Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection, FlowAspect,
@@ -491,6 +491,7 @@ impl From<LaunchAttemptBeforeBundle> for LaunchAttempt {
 /// How a launch request settled. It is kept beside the attempt so a
 /// LaunchStatus or an Observe.Launch answers it without re-running the launch.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum LaunchOutcome {
     Started(Launched),
     Replaced(Replaced),
@@ -663,6 +664,7 @@ impl UpgradeFrom<StoredLaunchOutcomeV1> for StoredLaunchOutcome {
 /// A launch request that replaces a predecessor. While it stands without a
 /// Replaced outcome, the flow its launch binds is held out of routing.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Replacement {
     pub launch_request_id: String,
     pub predecessor: String,
@@ -825,7 +827,11 @@ impl RecognizesFlowStore for ConfigurationOnlyStore {
     fn running_flow_families() -> BTreeMap<String, FamilyIdentity> {
         [
             Self::expected_family("flow_nexus_flows", "flow-nexus-flow", "flow-nexus-flow-v5"),
-            Self::expected_family("flow_nexus_state", "flow-nexus-state", "flow-nexus-state-v1"),
+            Self::expected_family(
+                "flow_nexus_state",
+                "flow-nexus-state",
+                "flow-nexus-state-v1",
+            ),
             Self::expected_family(
                 "flow_nexus_configuration",
                 "flow-nexus-configuration",
@@ -898,7 +904,10 @@ impl RecognizesFlowStore for ConfigurationOnlyStore {
             Err(error) => return Err(Self::unrecognized_store(path, error.to_string())),
         };
         if !metadata.file_type().is_file() {
-            return Err(Self::unrecognized_store(path, "store path is not a regular file"));
+            return Err(Self::unrecognized_store(
+                path,
+                "store path is not a regular file",
+            ));
         }
 
         let database = redb::ReadOnlyDatabase::open(path)
@@ -935,7 +944,10 @@ impl RecognizesFlowStore for ConfigurationOnlyStore {
                 .map_err(|error| Self::unrecognized_store(path, error.to_string()))?
                 .map(|value| value.value());
             if version != Some(1) {
-                return Err(Self::unrecognized_store(path, "Sema schema version is not 1"));
+                return Err(Self::unrecognized_store(
+                    path,
+                    "Sema schema version is not 1",
+                ));
             }
         }
         let layout = {
@@ -948,7 +960,10 @@ impl RecognizesFlowStore for ConfigurationOnlyStore {
                 .map(|value| value.value())
         };
         if layout != Some(7) {
-            return Err(Self::unrecognized_store(path, "Sema engine storage layout is not 7"));
+            return Err(Self::unrecognized_store(
+                path,
+                "Sema engine storage layout is not 7",
+            ));
         }
 
         let mut actual = BTreeMap::new();
@@ -960,15 +975,14 @@ impl RecognizesFlowStore for ConfigurationOnlyStore {
                 .iter()
                 .map_err(|error| Self::unrecognized_store(path, error.to_string()))?
             {
-                let (key, value) = entry
-                    .map_err(|error| Self::unrecognized_store(path, error.to_string()))?;
+                let (key, value) =
+                    entry.map_err(|error| Self::unrecognized_store(path, error.to_string()))?;
                 let key = key.value().to_owned();
-                let registration = rkyv::from_bytes::<TableRegistration, rkyv::rancor::Error>(
-                    value.value(),
-                )
-                .map_err(|error| {
-                    Self::unrecognized_store(path, format!("family catalog: {error}"))
-                })?;
+                let registration =
+                    rkyv::from_bytes::<TableRegistration, rkyv::rancor::Error>(value.value())
+                        .map_err(|error| {
+                            Self::unrecognized_store(path, format!("family catalog: {error}"))
+                        })?;
                 if registration.table_name() != key {
                     return Err(Self::unrecognized_store(
                         path,
@@ -978,9 +992,7 @@ impl RecognizesFlowStore for ConfigurationOnlyStore {
                 actual.insert(key, registration.identity().clone());
             }
         }
-        if actual != Self::configuration_only_families()
-            && actual != Self::running_flow_families()
-        {
+        if actual != Self::configuration_only_families() && actual != Self::running_flow_families() {
             return Err(Self::unrecognized_store(
                 path,
                 "family catalog is neither the current configuration-only nor full Flow layout",
@@ -1023,10 +1035,19 @@ pub struct ConfigurationOnlyStore {
     delivery_configuration: TableReference<DeliveryConfiguration>,
 }
 
-impl ConfigurationOnlyStore {
+pub trait OpensConfigurationOnlyStore {
+    fn open(path: &Path) -> Result<Self, StoreError>
+    where
+        Self: Sized;
+    fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError>;
+    fn configured_configuration(&self) -> Result<Option<Configuration>, StoreError>;
+    fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError>;
+}
+
+impl OpensConfigurationOnlyStore for ConfigurationOnlyStore {
     /// Opens the same versioned store as normal startup without invoking its
     /// seeding, settlement, adoption, or family-upgrade path.
-    pub fn open(path: &Path) -> Result<Self, StoreError> {
+    fn open(path: &Path) -> Result<Self, StoreError> {
         ConfigurationOnlyStore::preflight_store(path)?;
         let mut engine = Engine::open(EngineOpen::new(path, SchemaVersion::new(1)))?;
         let configuration = engine.register_table(TableDescriptor::new(
@@ -1055,7 +1076,7 @@ impl ConfigurationOnlyStore {
     /// Reads either a wholly unconfigured store (using its declared defaults
     /// without writing them) or all three committed configuration records.
     /// A partial or duplicated configuration refuses service.
-    pub fn configuration(
+    fn configuration(
         &self,
         defaults: &DefaultConfiguration,
     ) -> Result<Configuration, StoreError> {
@@ -1066,7 +1087,7 @@ impl ConfigurationOnlyStore {
 
     /// Returns the committed whole configuration, or `None` when this
     /// configuration-only store has not yet been configured.
-    pub fn configured_configuration(&self) -> Result<Option<Configuration>, StoreError> {
+    fn configured_configuration(&self) -> Result<Option<Configuration>, StoreError> {
         let socket = self
             .engine
             .match_records(QueryPlan::all(self.configuration))?
@@ -1099,7 +1120,7 @@ impl ConfigurationOnlyStore {
     /// Commits socket, runtime, and delivery configuration together. Fresh
     /// stores assert the three records; configured stores replace them. A
     /// partial/duplicated prior state is refused before any write.
-    pub fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError> {
+    fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError> {
         let socket_rows = self
             .engine
             .match_records(QueryPlan::all(self.configuration))?
@@ -1392,7 +1413,7 @@ trait WritesFlowStore {
 
 impl OpensFlowStore for FlowStore {
     fn open_seeded(path: &Path, defaults: &DefaultConfiguration) -> Result<Self, StoreError> {
-        Self::open_with_start(path, defaults, None)
+        <Self as OpensFlowStoreFromStart>::open_with_start(path, defaults, None)
     }
 
     fn open_started(
@@ -1400,11 +1421,21 @@ impl OpensFlowStore for FlowStore {
         defaults: &DefaultConfiguration,
         start: &Start,
     ) -> Result<Self, StoreError> {
-        Self::open_with_start(path, defaults, Some(start))
+        <Self as OpensFlowStoreFromStart>::open_with_start(path, defaults, Some(start))
     }
 }
 
-impl FlowStore {
+trait OpensFlowStoreFromStart {
+    fn open_with_start(
+        path: &Path,
+        defaults: &DefaultConfiguration,
+        start: Option<&Start>,
+    ) -> Result<Self, StoreError>
+    where
+        Self: Sized;
+}
+
+impl OpensFlowStoreFromStart for FlowStore {
     fn open_with_start(
         path: &Path,
         defaults: &DefaultConfiguration,
@@ -1417,21 +1448,24 @@ impl FlowStore {
             ConfigurationOnlyStore::preflight_store(path)?;
         }
         let mut engine = Engine::open(EngineOpen::new(path, SchemaVersion::new(1)))?;
-        let configuration = engine.register_table(TableDescriptor::new(
-            FLOW_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-configuration"),
-            SchemaHash::for_label("flow-nexus-configuration-v1"),
-        ))?;
-        let runtime_configuration = engine.register_table(TableDescriptor::new(
-            FLOW_RUNTIME_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-runtime-configuration"),
-            SchemaHash::for_label("flow-nexus-runtime-configuration-v1"),
-        ))?;
-        let startup_delivery_configuration = engine.register_table(TableDescriptor::new(
-            delivery::DELIVERY_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-delivery-configuration"),
-            SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
-        ))?;
+        let configuration: TableReference<FlowStoreConfiguration> =
+            engine.register_table(TableDescriptor::new(
+                FLOW_CONFIGURATION_TABLE_NAME,
+                FamilyName::new("flow-nexus-configuration"),
+                SchemaHash::for_label("flow-nexus-configuration-v1"),
+            ))?;
+        let runtime_configuration: TableReference<RuntimeConfiguration> =
+            engine.register_table(TableDescriptor::new(
+                FLOW_RUNTIME_CONFIGURATION_TABLE_NAME,
+                FamilyName::new("flow-nexus-runtime-configuration"),
+                SchemaHash::for_label("flow-nexus-runtime-configuration-v1"),
+            ))?;
+        let startup_delivery_configuration: TableReference<DeliveryConfiguration> =
+            engine.register_table(TableDescriptor::new(
+                delivery::DELIVERY_CONFIGURATION_TABLE_NAME,
+                FamilyName::new("flow-nexus-delivery-configuration"),
+                SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
+            ))?;
 
         if let Some(start) = start {
             let socket_rows = engine
@@ -1455,8 +1489,7 @@ impl FlowStore {
             };
             if socket.record_key() != RecordKey::new(CONFIGURATION_KEY)
                 || runtime.record_key() != RecordKey::new(RUNTIME_CONFIGURATION_KEY)
-                || delivery.record_key()
-                    != RecordKey::new(delivery::DELIVERY_CONFIGURATION_KEY)
+                || delivery.record_key() != RecordKey::new(delivery::DELIVERY_CONFIGURATION_KEY)
             {
                 return Err(StoreError::StateInvariant);
             }
@@ -2772,11 +2805,18 @@ impl ReadsFlowStore for FlowStore {
     }
 }
 
-impl FlowStore {
+pub(crate) trait InspectsLaunchRequests {
+    fn launch_inspection_records(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<LaunchInspectionRecords>, StoreError>;
+}
+
+impl InspectsLaunchRequests for FlowStore {
     /// Reads a launch attempt, its outcome and its recorded Flow from one
     /// unchanged database marker. This is a checked multi-read view, not a
     /// storage transaction.
-    pub(crate) fn launch_inspection_records(
+    fn launch_inspection_records(
         &self,
         launch_request_id: &str,
     ) -> Result<Option<LaunchInspectionRecords>, StoreError> {
@@ -2890,10 +2930,9 @@ impl FlowStore {
                 if route_rows.len() > 1 {
                     inconsistent = true;
                 } else {
-                    flow_node_option = Some(recorded_flow_node(
-                        flow.clone(),
-                        route_rows.first().cloned(),
-                    ));
+                    flow_node_option = Some(
+                        flow.clone().recorded_flow_node(route_rows.first().cloned()),
+                    );
                 }
             }
         }
@@ -2913,23 +2952,29 @@ impl FlowStore {
     }
 }
 
-fn recorded_flow_node(flow: FlowRecord, route: Option<FlowHerdrRouteRecord>) -> FlowNode {
-    FlowNode {
-        flow_id: flow.flow_id,
-        session_id: flow.thread_id.unwrap_or_default(),
-        harness_kind: flow.harness_kind,
-        endpoint_selection: flow.endpoint_selection,
-        herdr_route_selection: route
-            .map(|record| HerdrRouteSelection::Available(record.route))
-            .unwrap_or(HerdrRouteSelection::Unavailable),
-        origin_clue: flow.origin,
-        flow_lifecycle: match flow.lifecycle {
-            FlowLifecycle::Pending => SignalFlowLifecycle::Pending,
-            FlowLifecycle::Active => SignalFlowLifecycle::Active,
-            FlowLifecycle::Stopped => SignalFlowLifecycle::Stopped,
-            FlowLifecycle::Retired => SignalFlowLifecycle::Retired,
-            FlowLifecycle::Exited => SignalFlowLifecycle::Exited,
-        },
+trait BuildsRecordedFlowNode {
+    fn recorded_flow_node(self, route: Option<FlowHerdrRouteRecord>) -> FlowNode;
+}
+
+impl BuildsRecordedFlowNode for FlowRecord {
+    fn recorded_flow_node(self, route: Option<FlowHerdrRouteRecord>) -> FlowNode {
+        FlowNode {
+            flow_id: self.flow_id,
+            session_id: self.thread_id.unwrap_or_default(),
+            harness_kind: self.harness_kind,
+            endpoint_selection: self.endpoint_selection,
+            herdr_route_selection: route
+                .map(|record| HerdrRouteSelection::Available(record.route))
+                .unwrap_or(HerdrRouteSelection::Unavailable),
+            origin_clue: self.origin,
+            flow_lifecycle: match self.lifecycle {
+                FlowLifecycle::Pending => SignalFlowLifecycle::Pending,
+                FlowLifecycle::Active => SignalFlowLifecycle::Active,
+                FlowLifecycle::Stopped => SignalFlowLifecycle::Stopped,
+                FlowLifecycle::Retired => SignalFlowLifecycle::Retired,
+                FlowLifecycle::Exited => SignalFlowLifecycle::Exited,
+            },
+        }
     }
 }
 
@@ -2938,7 +2983,7 @@ impl ReadsFlowRows for FlowStore {
         let Some(flow) = self.flow(flow_id)? else {
             return Ok(None);
         };
-        Ok(Some(recorded_flow_node(flow, self.herdr_route(flow_id)?)))
+        Ok(Some(flow.recorded_flow_node(self.herdr_route(flow_id)?)))
     }
 
     fn flow_nodes(&self) -> Result<Vec<FlowNode>, StoreError> {
@@ -3300,7 +3345,8 @@ impl EarlierLaunchAttemptRows {
 mod tests {
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfigurationOnlyStore, ConfiguresFlowStore,
-        ConfirmsStartedFlow, FlowStore, LaunchOutcome, LaunchOutcomeV1, OpensFlowStore,
+        ConfirmsStartedFlow, FlowStore, LaunchOutcome, LaunchOutcomeV1,
+        OpensConfigurationOnlyStore, OpensFlowStore,
         ReadsFlowRoles, ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome,
         RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPendingThread,
         RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
@@ -3309,8 +3355,8 @@ mod tests {
         StartRejectionV1, StoredLaunchOutcomeV1,
     };
     use super::{LaysOutDefaults, SeedsConfiguration};
-    use crate::store::RegistersBindings;
     use crate::generated::startup::Start;
+    use crate::store::RegistersBindings;
     use crate::store::delivery::{DeliveryTables, LeaseStep, PaneLease, RegistersDeliveryTables};
     use meta_signal_flow::Configuration;
     use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};

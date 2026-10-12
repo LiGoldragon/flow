@@ -22,8 +22,9 @@ use crate::{
         },
     },
     store::{
-        LaunchChanges, LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,
-        RecordsLaunchOutcome, RecordsReplacement, Replacement, StoreError,
+        InspectsLaunchRequests, LaunchChanges, LaunchInspectionRecords, LaunchOutcome,
+        ReadsFlowRows, ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsReplacement, Replacement,
+        StoreError,
     },
 };
 use notify::Watcher;
@@ -555,7 +556,7 @@ impl LaunchesFlows for RunningNexus {
 
     fn launch_status(&self, launch_request_id: &str) -> Response {
         match self.store.launch_inspection_records(launch_request_id) {
-            Ok(Some(records)) => Response::LaunchInspected(launch_inspection(records)),
+            Ok(Some(records)) => Response::LaunchInspected(records.launch_inspection()),
             Ok(None) => Response::LaunchStatusRejected(LaunchStatusRejection::UnknownLaunchRequest),
             Err(StoreError::LaunchStatusReadViewChanged) => {
                 Response::LaunchStatusRejected(LaunchStatusRejection::ReadViewChanged)
@@ -568,19 +569,27 @@ impl LaunchesFlows for RunningNexus {
     }
 }
 
-fn launch_inspection(records: LaunchInspectionRecords) -> LaunchInspection {
-    let launch_status_outcome_option = records.launch_outcome_option.map(|outcome| match outcome {
-        LaunchOutcome::Started(launched) => LaunchStatusOutcome::Started(launched),
-        LaunchOutcome::Replaced(replaced) => LaunchStatusOutcome::Replaced(replaced),
-        LaunchOutcome::StartRejected(rejection) => LaunchStatusOutcome::StartRejected(rejection),
-        LaunchOutcome::ReplaceRejected(rejection) => {
-            LaunchStatusOutcome::ReplaceRejected(rejection)
+trait DescribesLaunchInspection {
+    fn launch_inspection(self) -> LaunchInspection;
+}
+
+impl DescribesLaunchInspection for LaunchInspectionRecords {
+    fn launch_inspection(self) -> LaunchInspection {
+        let launch_status_outcome_option = self.launch_outcome_option.map(|outcome| match outcome {
+            LaunchOutcome::Started(launched) => LaunchStatusOutcome::Started(launched),
+            LaunchOutcome::Replaced(replaced) => LaunchStatusOutcome::Replaced(replaced),
+            LaunchOutcome::StartRejected(rejection) => {
+                LaunchStatusOutcome::StartRejected(rejection)
+            }
+            LaunchOutcome::ReplaceRejected(rejection) => {
+                LaunchStatusOutcome::ReplaceRejected(rejection)
+            }
+        });
+        LaunchInspection {
+            launch_attempt: self.launch_attempt,
+            launch_status_outcome_option,
+            flow_node_option: self.flow_node_option,
         }
-    });
-    LaunchInspection {
-        launch_attempt: records.launch_attempt,
-        launch_status_outcome_option,
-        flow_node_option: records.flow_node_option,
     }
 }
 

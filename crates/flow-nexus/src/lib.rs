@@ -62,8 +62,8 @@ use std::{
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, FlowStore, NamesLiveFlow,
-    OpensFlowStore, ReadsFlowRows, RecordsLaunchOutcome, RegistersExistingFlow,
-    RegistersFlowIdentity,
+    OpensConfigurationOnlyStore, OpensFlowStore, ReadsFlowRows, RecordsLaunchOutcome,
+    RegistersExistingFlow, RegistersFlowIdentity,
 };
 
 pub struct RunningNexus {
@@ -850,11 +850,12 @@ mod tests {
     use crate::{
         codex::{CodexEndpoint, CodexEndpoints},
         composition::{ComposesLaunch, LaunchBundles, LaunchComposer, OpensLaunchComposer},
-        herdr::HerdrCli,
         generated::startup::Start,
+        herdr::HerdrCli,
         store::{
             ConfigurationOnlyStore, ConfiguresFlowStore, DefaultConfiguration, FlowStore,
-            LaunchOutcome, OpensFlowStore, RecordsFlowLifecycle, RecordsLaunchOutcome,
+            LaunchOutcome, OpensConfigurationOnlyStore, OpensFlowStore, RecordsFlowLifecycle,
+            RecordsLaunchOutcome,
             RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
             RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersFlowIdentity,
             ReservesLaunchAttempt, SeedsConfiguration,

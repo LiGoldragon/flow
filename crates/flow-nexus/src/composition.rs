@@ -859,13 +859,22 @@ mod tests {
             root = canonical.display(),
         );
         assert_eq!(composed.first_prompt_payload.first_prompt_body, expected);
-        // One home per meaning: the bundle's trailing section names the
-        // predecessor and the remembered flows, and nothing repeats them.
+        // Predecessor and remembered-flow context belongs to the actual
+        // per-launch SYSTEM file, while the USER body keeps only skills,
+        // launch instructions, and named sources.
         let body = composed.first_prompt_payload.first_prompt_body.as_str();
-        assert_eq!(body.matches("Predecessor").count(), 1, "{body}");
-        assert_eq!(body.matches("Remembered").count(), 1, "{body}");
-        assert_eq!(body.matches("1b8ac0").count(), 1, "{body}");
-        assert_eq!(body.matches("836818").count(), 1, "{body}");
+        let system_file = root.bundles().file_for(&profile);
+        let system = fs::read_to_string(system_file).unwrap();
+        assert_eq!(
+            system,
+            "fixture bundle\n\nPredecessor: 1b8ac0\nRemembered: 836818\n"
+        );
+        assert_eq!(system.matches("Predecessor: 1b8ac0").count(), 1);
+        assert_eq!(system.matches("Remembered: 836818").count(), 1);
+        assert!(!body.contains("Predecessor"), "{body}");
+        assert!(!body.contains("Remembered"), "{body}");
+        assert!(!body.contains("1b8ac0"), "{body}");
+        assert!(!body.contains("836818"), "{body}");
         assert_eq!(
             composed.first_prompt_payload.first_prompt_text,
             format!(

@@ -1335,45 +1335,55 @@ mod tests {
     }
 
     #[test]
-    fn codex_main_flow_first_text_block_opens_with_the_system_prompt_bundle() {
+    fn codex_main_flow_first_text_block_keeps_system_bundle_out_of_user_turn() {
         use crate::composition::{
-            ComposesLaunch, LaunchBundles, LaunchComposer, OpensLaunchComposer,
+            ComposesLaunch, KeepsLaunchBundles, LaunchBundles, LaunchComposer,
+            OpensLaunchComposer,
         };
         let root = tempfile::tempdir().unwrap();
         let bundle = root.path().join("flow-system-prompt.md");
-        fs::write(&bundle, "# Main-flow mode\n\nYou are a main Flow.\n").unwrap();
+        let system_bytes = b"# Main-flow mode\n\nYou are a main Flow.\n";
+        fs::write(&bundle, system_bytes).unwrap();
         let (malformed, mut intent) = malformed_bound_launch();
         let mut profile = malformed.launch_profile;
-        profile.skill_name_vector = vec!["spirit".into()];
+        profile.skill_name_vector = vec!["operation-main-flow".into(), "knowledge-flow".into()];
         profile.system_prompt_bundle_file = bundle.to_string_lossy().into_owned();
-        let launch = LaunchComposer::at(
-            root.path(),
-            LaunchBundles::at(root.path().join("launch-bundles")),
-        )
-        .compose(&profile)
-        .unwrap();
-        intent.prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
-        intent.native_skill_selection_vector = vec![NativeSkillSelection {
-            skill_name: "spirit".into(),
-            native_skill_path: "/skills/spirit/SKILL.md".into(),
-            native_skill_sha256: "0".repeat(64),
-        }];
-        let params = CodexAdapter::bound_turn_params(&launch, &intent);
-        let first_text = params["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| item["type"] == "text")
-            .and_then(|item| item["text"].as_str())
+        let bundles = LaunchBundles::at(root.path().join("launch-bundles"));
+        let launch = LaunchComposer::at(root.path(), bundles.clone())
+            .compose(&profile)
             .unwrap();
-        assert!(
-            first_text.starts_with(
-                "# Main-flow mode\n\nYou are a main Flow.\n\n$operation-main-flow\n$spirit\n\n"
-            ),
-            "{first_text}"
-        );
+        let per_launch_system_file = bundles.file_for(&profile);
+        assert_eq!(fs::read(&per_launch_system_file).unwrap(), system_bytes);
+
+        intent.prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
+        intent.native_skill_selection_vector = vec![
+            NativeSkillSelection {
+                skill_name: "operation-main-flow".into(),
+                native_skill_path: "/skills/operation-main-flow/SKILL.md".into(),
+                native_skill_sha256: "0".repeat(64),
+            },
+            NativeSkillSelection {
+                skill_name: "knowledge-flow".into(),
+                native_skill_path: "/skills/knowledge-flow/SKILL.md".into(),
+                native_skill_sha256: "1".repeat(64),
+            },
+        ];
+        let params = CodexAdapter::bound_turn_params(&launch, &intent);
+        let input = params["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["type"], "skill");
+        assert_eq!(input[0]["name"], "operation-main-flow");
+        assert_eq!(input[1]["type"], "skill");
+        assert_eq!(input[1]["name"], "knowledge-flow");
+        let first_text = input[2]["text"].as_str().unwrap();
+        assert_eq!(first_text, launch.first_prompt_payload.first_prompt_text);
+        assert!(first_text.starts_with(
+            "$operation-main-flow\n$knowledge-flow\n\n# Flow launch\n"
+        ));
+        assert!(!first_text.contains("# Main-flow mode"));
+        assert!(!first_text.contains("You are a main Flow."));
+        assert!(!first_text.contains(per_launch_system_file.to_str().unwrap()));
         assert!(!first_text.contains("System prompt: read"));
-        assert!(!first_text.contains(bundle.to_str().unwrap()));
     }
 
     #[test]

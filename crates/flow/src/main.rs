@@ -29,6 +29,7 @@ trait ParsesFlowCommand {
 
 /// CLI-only selection for a precomposed SYSTEM file. The wire profile remains
 /// unchanged; this list only removes those names from the expanded USER list.
+#[derive(Debug)]
 struct FlowInvocation {
     query: Query,
     selected_system_modules: Option<Vec<String>>,
@@ -78,12 +79,10 @@ impl ParsesFlowCommand for FlowClient {
         }
 
         let (selected_system_modules, query_argument) = match arguments.as_slice() {
-            [flag, modules, query] if flag == "--system-modules" => {
-                (
-                    Some(<Self as ParsesFlowCommand>::parse_system_modules(modules)?),
-                    query.clone(),
-                )
-            }
+            [flag, modules, query] if flag == "--system-modules" => (
+                Some(<Self as ParsesFlowCommand>::parse_system_modules(modules)?),
+                query.clone(),
+            ),
             [flag, ..] if flag.starts_with("--") => {
                 return Err(FLOW_USAGE.into());
             }
@@ -318,9 +317,7 @@ impl ResolvesCurriculumSkills for FlowClient {
             _ => return Err("--system-modules is only valid with Start or Replace".into()),
         };
         let selected_system_modules = selected_system_modules
-            .ok_or(
-                "Start and Replace require --system-modules (use [] when none are selected)",
-            )?;
+            .ok_or("Start and Replace require --system-modules (use [] when none are selected)")?;
         let mut names = resolve(&profile.skill_name_vector)?;
         if names.iter().collect::<std::collections::HashSet<_>>().len() != names.len() {
             return Err("Curriculum returned duplicate resolved skills".into());
@@ -527,13 +524,12 @@ mod tests {
             "Start.{ { request-7 [] [ operation-main-flow ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
         );
         let mut submitted = false;
-        let result = FlowClient::resolve_launch_skills(invocation, |_| {
-            Err("missing dependency".into())
-        })
-            .and_then(|resolved| {
-                submitted = true;
-                Ok(resolved)
-            });
+        let result =
+            FlowClient::resolve_launch_skills(invocation, |_| Err("missing dependency".into()))
+                .and_then(|resolved| {
+                    submitted = true;
+                    Ok(resolved)
+                });
         assert_eq!(result.unwrap_err(), "missing dependency");
         assert!(!submitted);
     }
@@ -649,29 +645,33 @@ mod tests {
             )
             .unwrap_err()
             .contains("require --system-modules"));
-        assert!(client
-            .parse_invocation(
-                [
-                    "--system-modules".into(),
-                    "[ spirit-core ]".into(),
-                    "ResolveRecipient.fac697".into(),
-                ]
-                .into_iter()
-            )
-            .unwrap_err()
-            .contains("only valid with Start or Replace"));
-        assert!(client
-            .parse_invocation(
-                [
-                    "--system-modules".into(),
-                    "[ spirit-core ]".into(),
-                    "--system-modules".into(),
-                    "[]".into(),
-                    "Start.{ { request-7 } }".into(),
-                ]
-                .into_iter()
-            )
-            .is_err());
+        assert!(
+            client
+                .parse_invocation(
+                    [
+                        "--system-modules".into(),
+                        "[ spirit-core ]".into(),
+                        "ResolveRecipient.fac697".into(),
+                    ]
+                    .into_iter()
+                )
+                .unwrap_err()
+                .contains("only valid with Start or Replace")
+        );
+        assert!(
+            client
+                .parse_invocation(
+                    [
+                        "--system-modules".into(),
+                        "[ spirit-core ]".into(),
+                        "--system-modules".into(),
+                        "[]".into(),
+                        "Start.{ { request-7 } }".into(),
+                    ]
+                    .into_iter()
+                )
+                .is_err()
+        );
     }
 
     #[test]

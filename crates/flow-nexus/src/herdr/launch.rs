@@ -2177,7 +2177,9 @@ pub(crate) mod tests {
         let bundle = composition_root.path().join("flow-system-prompt.md");
         fs::write(&bundle, "fixture bundle\n").unwrap();
         let mut profile = launch(HarnessKind::Claude).launch_profile;
-        profile.skill_name_vector = ["operation-main-flow", "knowledge-flow"].map(String::from).to_vec();
+        profile.skill_name_vector = ["operation-main-flow", "knowledge-flow"]
+            .map(String::from)
+            .to_vec();
         profile.system_prompt_bundle_file = bundle.to_string_lossy().into_owned();
         profile.instruction_prompt = "Read the receipt.\nThen report it.".into();
         let launch = LaunchComposer::at(

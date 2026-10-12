@@ -560,9 +560,8 @@ impl WritesLaunchBundle for LaunchComposer {
         let mut bytes = fs::read(&profile.system_prompt_bundle_file)
             .map_err(|_| CompositionError::InvalidProfileField("system_prompt_bundle_file"))?;
         if require_nonempty_utf8 {
-            let text = std::str::from_utf8(&bytes).map_err(|_| {
-                CompositionError::InvalidProfileField("system_prompt_bundle_file")
-            })?;
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| CompositionError::InvalidProfileField("system_prompt_bundle_file"))?;
             if text.trim().is_empty() {
                 return Err(CompositionError::InvalidProfileField(
                     "system_prompt_bundle_file",
@@ -727,10 +726,9 @@ impl ComposesLaunch for LaunchComposer {
             .iter()
             .map(|source| self.read(source))
             .collect::<Result<Vec<_>, _>>()?;
-        let bundle = LaunchBundleText::File(self.write_launch_bundle(
-            profile,
-            profile.harness_kind == HarnessKind::Codex,
-        )?);
+        let bundle = LaunchBundleText::File(
+            self.write_launch_bundle(profile, profile.harness_kind == HarnessKind::Codex)?,
+        );
         let mut body = self.render_body(profile, &bundle, &sources);
         if profile.harness_kind == HarnessKind::Claude {
             let candidate = format!("{}{}", body, profile.harness_kind.receipt_footer());

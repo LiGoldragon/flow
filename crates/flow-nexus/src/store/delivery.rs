@@ -24,7 +24,7 @@ pub(super) const DELIVERY_TABLE_NAME: TableName = TableName::new("flow_nexus_del
 pub(super) const PANE_LEASE_TABLE_NAME: TableName = TableName::new("flow_nexus_pane_leases");
 pub(super) const DELIVERY_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_delivery_configuration");
-const DELIVERY_CONFIGURATION_KEY: &str = "delivery";
+pub(super) const DELIVERY_CONFIGURATION_KEY: &str = "delivery";
 
 /// A settled delivery, keyed by its DeliveryId: what a repeat answers.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]

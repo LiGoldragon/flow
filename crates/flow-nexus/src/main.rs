@@ -1,31 +1,127 @@
 use flow_nexus::{
     CarriesSignalFrames, OpensRunningNexus, RunningNexus, ServesMeta, ServesOrdinary,
-    caller::{IdentifiesPeer, LocatesCallerPane},
+    caller::{CallerProcess, IdentifiesPeer, LocatesCallerPane},
+    generated::startup::{Start, StartRefusal, StoreRefusal},
     launching::PromotesAmbiguousLaunches,
     store::{
-        ConfigurationOnlyStore, ConfiguresFlowStore, DefaultConfiguration, LaysOutDefaults,
-        ReadsAnchors,
+        ConfigurationOnlyStore, ConfiguresFlowStore, DefaultConfiguration, ReadsAnchors,
+        StoreError,
     },
 };
+use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
     fs,
     os::unix::{
         fs::{FileTypeExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
-    path::{Path, PathBuf},
+    path::Path,
     process::ExitCode,
     sync::Arc,
     time::Duration,
 };
 
 use meta_signal_flow::{
-    Activation, Configuration, ConfigureRejection, Configured, MetaRefusal, Query as MetaQuery,
+    Activation, ConfigureRejection, Configured, MetaRefusal, Query as MetaQuery,
     Response as MetaResponse,
 };
 
-/// `--version` answers before configuration is read; `--configure-only`
-/// serves one durable Configure request and exits; other arguments start the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupMode {
+    ConfigureOnly,
+    Run,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupInvocation {
+    mode: StartupMode,
+    start: Start,
+}
+
+trait ParsesStartupArguments {
+    fn parse_startup_arguments(arguments: &[String]) -> Result<StartupInvocation, String>;
+}
+
+impl ParsesStartupArguments for StartupInvocation {
+    fn parse_startup_arguments(arguments: &[String]) -> Result<StartupInvocation, String> {
+        let (mode, datom) = match arguments {
+            [datom] => (StartupMode::Run, datom.as_str()),
+            [only, datom] if only == "--configure-only" => {
+                (StartupMode::ConfigureOnly, datom.as_str())
+            }
+            _ => return Err("usage: flow-nexus [--configure-only] '<one Start datom>'".into()),
+        };
+        let mut budget = Budget {
+            remaining: 65_536,
+            reader: ReaderBudget { remaining: 65_536 },
+            depth: 0,
+            maximum_depth: 1_024,
+        };
+        let start = Potential::<Start>::from(datom.to_owned())
+            .actualize(&mut budget)
+            .map_err(|error| format!("invalid Flow Nexus Start: {error:?}"))?;
+        for (name, path) in [
+            ("OrdinarySocketPath", start.ordinary_socket_path.as_str()),
+            ("MetaSocketPath", start.meta_socket_path.as_str()),
+            ("StorePath", start.store_path.as_str()),
+        ] {
+            if path.is_empty() || !Path::new(path).is_absolute() {
+                return Err(format!("Start.{name} must be a nonempty absolute path"));
+            }
+        }
+        if start.ordinary_socket_path == start.meta_socket_path
+            || start.store_path == start.ordinary_socket_path
+            || start.store_path == start.meta_socket_path
+        {
+            return Err("Start socket paths and StorePath must be distinct".into());
+        }
+        Ok(StartupInvocation { mode, start })
+    }
+}
+
+trait EncodesStartupRefusal {
+    fn refusal_datom(&self) -> Option<String>;
+}
+
+impl EncodesStartupRefusal for StoreError {
+    fn refusal_datom(&self) -> Option<String> {
+        let StoreError::UnrecognizedStore { path, reason } = self else {
+            return None;
+        };
+        Some(
+            StartRefusal::Store(StoreRefusal {
+                path: path.clone(),
+                reason: reason.clone(),
+            })
+            .datomize(vec![])
+            .protosize()
+            .compact(),
+        )
+    }
+}
+
+enum StartupFailure {
+    Store(StoreError),
+    Other(String),
+}
+
+trait CreatesExplicitStoreParent {
+    fn create_store_parent(&self) -> Result<(), String>;
+}
+
+impl CreatesExplicitStoreParent for Path {
+    fn create_store_parent(&self) -> Result<(), String> {
+        let parent = self
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or_else(|| "Start.StorePath must name a file inside a directory".to_owned())?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create store directory {}: {error}", parent.display()))
+    }
+}
+
+/// `--version` is the sole invocation without a typed Start input.
 trait AnswersVersion {
     fn version_answer(&self) -> Option<String>;
 }
@@ -41,168 +137,226 @@ impl AnswersVersion for [String] {
     }
 }
 
-fn admits_configuration_peer(
-    peer_present: bool,
-    configured_message_executable: bool,
-    marked_herdr_pane: bool,
-) -> bool {
-    peer_present && (configured_message_executable || !marked_herdr_pane)
+struct ConfigurationPeerPolicy;
+
+trait RefusesUnidentifiedConfigurationPeer {
+    fn refusal(
+        peer_present: bool,
+        configured_message_executable: bool,
+        marked_herdr_pane: bool,
+    ) -> Option<MetaRefusal>;
 }
 
-fn configuration_peer_refusal(
-    peer_present: bool,
-    configured_message_executable: bool,
-    marked_herdr_pane: bool,
-) -> Option<MetaRefusal> {
-    (!admits_configuration_peer(
-        peer_present,
-        configured_message_executable,
-        marked_herdr_pane,
-    ))
-    .then_some(MetaRefusal::PeerUnknown)
+impl RefusesUnidentifiedConfigurationPeer for ConfigurationPeerPolicy {
+    fn refusal(
+        peer_present: bool,
+        configured_message_executable: bool,
+        marked_herdr_pane: bool,
+    ) -> Option<MetaRefusal> {
+        let admitted = peer_present && (configured_message_executable || !marked_herdr_pane);
+        (!admitted).then_some(MetaRefusal::PeerUnknown)
+    }
 }
 
-fn peer_is_authorized_for_configuration(
-    peer: Option<flow_nexus::caller::CallerProcess>,
-    message_nexus_path: &str,
-) -> Result<Option<MetaRefusal>, String> {
-    let Some(peer) = peer else {
-        return Ok(configuration_peer_refusal(false, false, false));
-    };
-    if !message_nexus_path.is_empty() {
-        let configured = fs::canonicalize(message_nexus_path).ok();
-        let executable = fs::canonicalize(format!("/proc/{}/exe", peer.process_id)).ok();
-        if configured.is_some() && executable == configured {
-            return Ok(configuration_peer_refusal(true, true, false));
+trait AuthorizesConfigurationPeer {
+    fn configuration_refusal(&self, message_nexus_path: &str) -> Option<MetaRefusal>;
+}
+
+impl AuthorizesConfigurationPeer for CallerProcess {
+    fn configuration_refusal(&self, message_nexus_path: &str) -> Option<MetaRefusal> {
+        if !message_nexus_path.is_empty() {
+            let configured = fs::canonicalize(message_nexus_path).ok();
+            let executable = fs::canonicalize(format!("/proc/{}/exe", self.process_id)).ok();
+            if configured.is_some() && executable == configured {
+                return ConfigurationPeerPolicy::refusal(true, true, false);
+            }
         }
+        // The ordinary Nexus resolves a marked Herdr pane to one live,
+        // exactly bound Flow and checks its role against MetaAspects. This
+        // bootstrap has not constructed that runtime, so it cannot prove a
+        // pane peer; preserve the baseline unmarked-owner admission.
+        ConfigurationPeerPolicy::refusal(true, false, self.caller_pane().is_some())
     }
-    // The ordinary Nexus resolves a marked Herdr pane to one live, exactly
-    // bound Flow and checks its role against MetaAspects. This bootstrap has
-    // intentionally not constructed that runtime or its reconciliation
-    // readers, so a pane peer cannot be proved and is refused. An unmarked
-    // peer is the same owner case admitted by the normal meta gate.
-    Ok(configuration_peer_refusal(
-        true,
-        false,
-        peer.caller_pane().is_some(),
-    ))
 }
 
-fn configuration_listener(socket: &Path) -> Result<UnixListener, String> {
-    if let Some(directory) = socket
-        .parent()
-        .filter(|directory| !directory.as_os_str().is_empty())
-    {
-        fs::create_dir_all(directory)
-            .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
-    }
-    match fs::symlink_metadata(socket) {
-        Ok(metadata) if metadata.file_type().is_socket() => match UnixStream::connect(socket) {
-            Ok(_peer) => {
+trait BindsConfigurationSocket {
+    fn configuration_listener(&self) -> Result<UnixListener, String>;
+}
+
+impl BindsConfigurationSocket for Path {
+    fn configuration_listener(&self) -> Result<UnixListener, String> {
+        let socket = self;
+        if let Some(directory) = socket
+            .parent()
+            .filter(|directory| !directory.as_os_str().is_empty())
+        {
+            fs::create_dir_all(directory)
+                .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+        }
+        match fs::symlink_metadata(socket) {
+            Ok(metadata) if metadata.file_type().is_socket() => match UnixStream::connect(socket) {
+                Ok(_peer) => {
+                    return Err(format!(
+                        "meta socket {} is already accepting connections",
+                        socket.display()
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    fs::remove_file(socket).map_err(|error| {
+                        format!("cannot remove stale socket {}: {error}", socket.display())
+                    })?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "cannot establish whether meta socket {} is stale: {error}",
+                        socket.display()
+                    ));
+                }
+            },
+            Ok(_) => {
                 return Err(format!(
-                    "meta socket {} is already accepting connections",
+                    "meta socket path {} exists and is not a socket",
                     socket.display()
                 ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                fs::remove_file(socket).map_err(|error| {
-                    format!("cannot remove stale socket {}: {error}", socket.display())
-                })?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(format!(
-                    "cannot establish whether meta socket {} is stale: {error}",
+                    "cannot inspect meta socket {}: {error}",
                     socket.display()
                 ));
             }
-        },
-        Ok(_) => {
+        }
+        let listener = UnixListener::bind(socket)
+            .map_err(|error| format!("cannot bind meta socket {}: {error}", socket.display()))?;
+        if let Err(error) = fs::set_permissions(socket, fs::Permissions::from_mode(0o600)) {
+            drop(listener);
+            let _ = fs::remove_file(socket);
             return Err(format!(
-                "meta socket path {} exists and is not a socket",
+                "cannot protect meta socket {}: {error}",
                 socket.display()
             ));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "cannot inspect meta socket {}: {error}",
-                socket.display()
-            ));
+        Ok(listener)
+    }
+}
+
+trait ServesOneConfiguration {
+    fn serve_one_configuration(
+        listener: UnixListener,
+        store: &Self,
+        message_nexus_path: &str,
+    ) -> Result<(), String>;
+}
+
+impl ServesOneConfiguration for ConfigurationOnlyStore {
+    fn serve_one_configuration(
+        listener: UnixListener,
+        store: &Self,
+        message_nexus_path: &str,
+    ) -> Result<(), String> {
+        let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
+        peer.set_read_timeout(Some(Duration::from_secs(5)))
+            .and_then(|_| peer.set_write_timeout(Some(Duration::from_secs(5))))
+            .map_err(|error| error.to_string())?;
+        let query = peer.read_meta_query()?;
+        let refusal = peer
+            .peer_process()
+            .map(|process| process.configuration_refusal(message_nexus_path))
+            .unwrap_or(Some(MetaRefusal::PeerUnknown));
+        if let Some(refusal) = refusal {
+            peer.write_meta_response(&MetaResponse::MetaRefused(refusal))?;
+            return Err("meta configuration peer was not provably authorized".into());
+        }
+        let MetaQuery::Configure(configuration) = query else {
+            return Err("configuration-only listener accepts one Configure request".into());
+        };
+        let response = match store.configure(configuration) {
+            Ok(configuration) => MetaResponse::Configured(Configured {
+                configuration,
+                activation: Activation::NexusRestartRequired,
+            }),
+            Err(_) => MetaResponse::ConfigureRejected(ConfigureRejection::StoreRefused),
+        };
+        let configured = matches!(&response, MetaResponse::Configured(_));
+        peer.write_meta_response(&response)?;
+        if configured {
+            Ok(())
+        } else {
+            Err("configuration transaction was refused".into())
         }
     }
-    let listener = UnixListener::bind(socket)
-        .map_err(|error| format!("cannot bind meta socket {}: {error}", socket.display()))?;
-    if let Err(error) = fs::set_permissions(socket, fs::Permissions::from_mode(0o600)) {
-        drop(listener);
-        let _ = fs::remove_file(socket);
-        return Err(format!(
-            "cannot protect meta socket {}: {error}",
-            socket.display()
-        ));
-    }
-    Ok(listener)
 }
 
-fn serve_one_configuration(
-    listener: UnixListener,
-    store: &ConfigurationOnlyStore,
-    message_nexus_path: &str,
-) -> Result<(), String> {
-    let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
-    peer.set_read_timeout(Some(Duration::from_secs(5)))
-        .and_then(|_| peer.set_write_timeout(Some(Duration::from_secs(5))))
-        .map_err(|error| error.to_string())?;
-    let query = peer.read_meta_query()?;
-    let refusal = peer_is_authorized_for_configuration(peer.peer_process(), message_nexus_path)?;
-    if let Some(refusal) = refusal {
-        peer.write_meta_response(&MetaResponse::MetaRefused(refusal))?;
-        return Err("meta configuration peer was not provably authorized".into());
-    }
-    let MetaQuery::Configure(configuration) = query else {
-        return Err("configuration-only listener accepts one Configure request".into());
-    };
-    let response = match store.configure(configuration) {
-        Ok(configuration) => MetaResponse::Configured(Configured {
-            configuration,
-            activation: Activation::NexusRestartRequired,
-        }),
-        Err(_) => MetaResponse::ConfigureRejected(ConfigureRejection::StoreRefused),
-    };
-    let configured = matches!(&response, MetaResponse::Configured(_));
-    peer.write_meta_response(&response)?;
-    if configured {
-        Ok(())
-    } else {
-        Err("configuration transaction was refused".into())
+trait OpensConfigurationListener {
+    fn open_configuration_listener(
+        &self,
+    ) -> Result<(ConfigurationOnlyStore, String, UnixListener), StartupFailure>;
+}
+
+impl OpensConfigurationListener for Start {
+    fn open_configuration_listener(
+        &self,
+    ) -> Result<(ConfigurationOnlyStore, String, UnixListener), StartupFailure> {
+        let store_path = Path::new(&self.store_path);
+        store_path
+            .create_store_parent()
+            .map_err(StartupFailure::Other)?;
+        let store = ConfigurationOnlyStore::open(store_path).map_err(StartupFailure::Store)?;
+        let message_nexus_path = match store
+            .configured_configuration()
+            .map_err(StartupFailure::Store)?
+        {
+            Some(current)
+                if current.ordinary_socket_path == self.ordinary_socket_path
+                    && current.meta_socket_path == self.meta_socket_path =>
+            {
+                current.message_nexus_path
+            }
+            Some(_) => {
+                return Err(StartupFailure::Other(
+                    "typed Start socket paths disagree with committed configuration".into(),
+                ));
+            }
+            None => String::new(),
+        };
+        // The database handle above owns the same-store exclusive writer
+        // before this path may remove a stale socket or bind the listener.
+        // Keep the typed Start endpoint fixed while Configure writes any new
+        // endpoint value.
+        let listener = Path::new(&self.meta_socket_path)
+            .configuration_listener()
+            .map_err(StartupFailure::Other)?;
+        Ok((store, message_nexus_path, listener))
     }
 }
 
-fn open_configuration_listener(
-    defaults: &DefaultConfiguration,
-) -> Result<(ConfigurationOnlyStore, Configuration, UnixListener), String> {
-    fs::create_dir_all(defaults.state_directory()).map_err(|error| {
-        format!(
-            "cannot create {}: {error}",
-            defaults.state_directory().display()
-        )
-    })?;
-    let store = ConfigurationOnlyStore::open(&defaults.store_path())
-        .map_err(|error| format!("store {}: {error}", defaults.store_path().display()))?;
-    let current = store
-        .configuration(defaults)
-        .map_err(|error| format!("configuration: {error}"))?;
-    // The database handle above owns the same-store exclusive writer before
-    // this path may remove a stale socket or bind the listener. Keep the
-    // current endpoint fixed while Configure writes any new endpoint value.
-    let socket = PathBuf::from(&current.meta_socket_path);
-    let listener = configuration_listener(&socket)?;
-    Ok((store, current, listener))
+trait RunsConfigurationOnly {
+    fn run_configuration_only(&self) -> Result<(), StartupFailure>;
 }
 
-fn run_configuration_only(defaults: &DefaultConfiguration) -> Result<(), String> {
-    let (store, current, listener) = open_configuration_listener(defaults)?;
-    serve_one_configuration(listener, &store, &current.message_nexus_path)
+impl RunsConfigurationOnly for Start {
+    fn run_configuration_only(&self) -> Result<(), StartupFailure> {
+        let (store, message_nexus_path, listener) = self.open_configuration_listener()?;
+        ConfigurationOnlyStore::serve_one_configuration(listener, &store, &message_nexus_path)
+            .map_err(StartupFailure::Other)
+    }
+}
+
+trait ReportsStoreFailure {
+    fn report_store_failure(self, store_path: &Path) -> ExitCode;
+}
+
+impl ReportsStoreFailure for StoreError {
+    fn report_store_failure(self, store_path: &Path) -> ExitCode {
+        if let Some(refusal) = self.refusal_datom() {
+            println!("{refusal}");
+        } else {
+            eprintln!("flow-nexus: store {}: {self}", store_path.display());
+        }
+        ExitCode::FAILURE
+    }
 }
 
 // Startup failures end the process with a nonzero status so the service
@@ -213,31 +367,34 @@ fn main() -> ExitCode {
         println!("{version}");
         return ExitCode::SUCCESS;
     }
+    let invocation = match StartupInvocation::parse_startup_arguments(&arguments) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            eprintln!("flow-nexus: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let defaults = DefaultConfiguration::from_environment();
-    if matches!(arguments.as_slice(), [only] if only == "--configure-only") {
-        return match run_configuration_only(&defaults) {
+    if invocation.mode == StartupMode::ConfigureOnly {
+        return match invocation.start.run_configuration_only() {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
+            Err(StartupFailure::Store(error)) => {
+                error.report_store_failure(Path::new(&invocation.start.store_path))
+            }
+            Err(StartupFailure::Other(error)) => {
                 eprintln!("flow-nexus: configuration-only: {error}");
                 ExitCode::FAILURE
             }
         };
     }
-    for directory in [defaults.state_directory(), defaults.socket_directory()] {
-        if let Err(error) = std::fs::create_dir_all(&directory) {
-            eprintln!("flow-nexus: cannot create {}: {error}", directory.display());
-            return ExitCode::FAILURE;
-        }
+    let store_path = Path::new(&invocation.start.store_path);
+    if let Err(error) = store_path.create_store_parent() {
+        eprintln!("flow-nexus: {error}");
+        return ExitCode::FAILURE;
     }
-    let nexus = match RunningNexus::open(&defaults) {
+    let nexus = match RunningNexus::open_started(&defaults, &invocation.start) {
         Ok(nexus) => Arc::new(nexus),
-        Err(error) => {
-            eprintln!(
-                "flow-nexus: store {}: {error}",
-                defaults.store_path().display()
-            );
-            return ExitCode::FAILURE;
-        }
+        Err(error) => return error.report_store_failure(store_path),
     };
     let configuration = match nexus.store.configuration() {
         Ok(configuration) => configuration,
@@ -284,22 +441,26 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        AnswersVersion, configuration_peer_refusal, open_configuration_listener,
-        serve_one_configuration,
+        AnswersVersion, ConfigurationPeerPolicy, OpensConfigurationListener,
+        ParsesStartupArguments, RefusesUnidentifiedConfigurationPeer, ServesOneConfiguration,
+        StartupMode, StartupInvocation,
     };
     use flow_nexus::{
         CarriesSignalFrames,
+        generated::startup::Start,
         store::{
             ConfigurationOnlyStore, DefaultConfiguration, LaysOutDefaults, SeedsConfiguration,
         },
     };
+    use datom_codec::Datomizable;
+    use protos::{Compactable, Protosizable};
     use meta_signal_flow::{Query as MetaQuery, Response as MetaResponse};
     use std::{
         os::unix::{
             fs::FileTypeExt,
             net::{UnixListener, UnixStream},
         },
-        path::PathBuf,
+        path::{Path, PathBuf},
     };
 
     #[test]
@@ -316,17 +477,53 @@ mod tests {
     }
 
     #[test]
+    fn startup_requires_one_typed_start_and_no_trailing_datoms() {
+        let start = Start {
+            ordinary_socket_path: "/tmp/flow/ordinary.sock".into(),
+            meta_socket_path: "/tmp/flow/meta.sock".into(),
+            store_path: "/tmp/flow-state/flow.sema".into(),
+        };
+        let datom = start.datomize(vec![]).protosize().compact();
+        let run = StartupInvocation::parse_startup_arguments(std::slice::from_ref(&datom))
+            .expect("one Start datom");
+        assert_eq!(run.mode, StartupMode::Run);
+        assert_eq!(run.start, start);
+
+        let configure = StartupInvocation::parse_startup_arguments(&[
+            "--configure-only".into(),
+            datom.clone(),
+        ])
+            .expect("configure-only plus one Start datom");
+        assert_eq!(configure.mode, StartupMode::ConfigureOnly);
+        assert!(StartupInvocation::parse_startup_arguments(&[]).is_err());
+        assert!(
+            StartupInvocation::parse_startup_arguments(&[datom.clone(), datom.clone()]).is_err()
+        );
+        assert!(
+            StartupInvocation::parse_startup_arguments(&[format!("{datom} {datom}")]).is_err()
+        );
+        let relative = Start {
+            store_path: "flow.sema".into(),
+            ..start
+        }
+        .datomize(vec![])
+        .protosize()
+        .compact();
+        assert!(StartupInvocation::parse_startup_arguments(&[relative]).is_err());
+    }
+
+    #[test]
     fn configuration_peer_gate_refuses_unknown_and_pane_peers() {
         assert!(matches!(
-            configuration_peer_refusal(false, false, false),
+            ConfigurationPeerPolicy::refusal(false, false, false),
             Some(meta_signal_flow::MetaRefusal::PeerUnknown)
         ));
         assert!(matches!(
-            configuration_peer_refusal(true, false, true),
+            ConfigurationPeerPolicy::refusal(true, false, true),
             Some(meta_signal_flow::MetaRefusal::PeerUnknown)
         ));
-        assert!(configuration_peer_refusal(true, false, false).is_none());
-        assert!(configuration_peer_refusal(true, true, true).is_none());
+        assert!(ConfigurationPeerPolicy::refusal(true, false, false).is_none());
+        assert!(ConfigurationPeerPolicy::refusal(true, true, true).is_none());
     }
 
     #[test]
@@ -336,15 +533,24 @@ mod tests {
             home: directory.path().join("home"),
             runtime_directory: directory.path().join("runtime"),
         };
+        let start = Start {
+            ordinary_socket_path: defaults
+                .ordinary_socket_path()
+                .to_string_lossy()
+                .into_owned(),
+            meta_socket_path: defaults.meta_socket_path().to_string_lossy().into_owned(),
+            store_path: defaults.store_path().to_string_lossy().into_owned(),
+        };
         std::fs::create_dir_all(defaults.state_directory()).expect("state directory");
         let store = ConfigurationOnlyStore::open(&defaults.store_path()).expect("store lock");
         let socket = defaults.meta_socket_path();
-        std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("socket directory");
+        std::fs::create_dir_all(socket.parent().expect("socket parent"))
+            .expect("socket directory");
         let stale = UnixListener::bind(&socket).expect("create socket inode");
         drop(stale);
         assert!(UnixStream::connect(&socket).is_err(), "socket is stale");
 
-        assert!(open_configuration_listener(&defaults).is_err());
+        assert!(start.open_configuration_listener().is_err());
         assert!(
             std::fs::symlink_metadata(&socket)
                 .expect("socket inode remains")
@@ -355,20 +561,92 @@ mod tests {
     }
 
     #[test]
+    fn committed_socket_identity_is_checked_before_stale_socket_removal() {
+        let directory = tempfile::tempdir().expect("temporary state");
+        let defaults = DefaultConfiguration {
+            home: directory.path().join("home"),
+            runtime_directory: directory.path().join("runtime"),
+        };
+        let start = Start {
+            ordinary_socket_path: directory
+                .path()
+                .join("runtime/flow/ordinary.sock")
+                .to_string_lossy()
+                .into_owned(),
+            meta_socket_path: directory
+                .path()
+                .join("runtime/flow/meta.sock")
+                .to_string_lossy()
+                .into_owned(),
+            store_path: directory
+                .path()
+                .join("state/flow.sema")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        std::fs::create_dir_all(Path::new(&start.store_path).parent().unwrap())
+            .expect("store parent");
+        let store = ConfigurationOnlyStore::open(Path::new(&start.store_path))
+            .expect("configuration store opens");
+        let mut configuration = defaults.configuration();
+        configuration.ordinary_socket_path = start.ordinary_socket_path.clone();
+        configuration.meta_socket_path = start.meta_socket_path.clone();
+        store.configure(configuration).expect("config commits");
+        drop(store);
+
+        let different = Start {
+            meta_socket_path: directory
+                .path()
+                .join("runtime/flow/other-meta.sock")
+                .to_string_lossy()
+                .into_owned(),
+            ..start
+        };
+        let socket = Path::new(&different.meta_socket_path);
+        std::fs::create_dir_all(socket.parent().unwrap()).expect("meta socket parent");
+        let stale = UnixListener::bind(socket).expect("create stale socket inode");
+        drop(stale);
+
+        assert!(different.open_configuration_listener().is_err());
+        assert!(
+            std::fs::symlink_metadata(socket)
+                .expect("stale inode remains")
+                .file_type()
+                .is_socket()
+        );
+    }
+
+    #[test]
     fn configuration_listener_answers_one_request_and_exits() {
         let directory = tempfile::tempdir().expect("temporary home");
         let defaults = DefaultConfiguration {
             home: directory.path().join("home"),
             runtime_directory: directory.path().join("runtime"),
         };
+        let start = Start {
+            ordinary_socket_path: defaults
+                .ordinary_socket_path()
+                .to_string_lossy()
+                .into_owned(),
+            meta_socket_path: defaults.meta_socket_path().to_string_lossy().into_owned(),
+            store_path: directory
+                .path()
+                .join("isolated-state/flow.sema")
+                .to_string_lossy()
+                .into_owned(),
+        };
         let executable = std::env::current_exe()
             .expect("test executable")
             .canonicalize()
             .expect("canonical test executable");
-        let (store, current, listener) =
-            open_configuration_listener(&defaults).expect("configuration listener opens");
-        let socket = PathBuf::from(&current.meta_socket_path);
-        let ordinary_socket = PathBuf::from(&current.ordinary_socket_path);
+        let (store, message_path, listener) =
+            start
+                .open_configuration_listener()
+                .expect("configuration listener opens");
+        assert!(store.configured_configuration().unwrap().is_none());
+        assert!(message_path.is_empty());
+        let socket = PathBuf::from(&start.meta_socket_path);
+        let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
         assert!(
             UnixStream::connect(&ordinary_socket).is_err(),
             "configuration-only startup does not expose the ordinary adapter"
@@ -378,7 +656,13 @@ mod tests {
         configuration.meta_socket_path = socket.to_string_lossy().into_owned();
         let message_path = configuration.message_nexus_path.clone();
         let server =
-            std::thread::spawn(move || serve_one_configuration(listener, &store, &message_path));
+            std::thread::spawn(move || {
+                ConfigurationOnlyStore::serve_one_configuration(
+                    listener,
+                    &store,
+                    &message_path,
+                )
+            });
 
         let mut peer = UnixStream::connect(&socket).expect("connect to config-only listener");
         let bytes =

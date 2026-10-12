@@ -243,6 +243,7 @@ dependencies = [
  "redb",
  "rkyv",
  "rustix",
+ "sema",
  "sema-engine",
  "serde_json",
  "sha1",

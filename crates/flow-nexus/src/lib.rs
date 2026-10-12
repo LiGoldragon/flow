@@ -19,8 +19,8 @@ pub mod composition;
 pub mod delivery;
 #[cfg(test)]
 mod fixture_executable;
-/// Generated from `ethos/operation.ethos`; `build.rs` holds it fresh. Its
-/// datom derives sit behind a `datom` feature this Nexus never enables.
+/// Generated from the operation and startup Ethos roots; `build.rs` keeps
+/// both outputs fresh. The `datom` feature enables their textual CLI surface.
 #[allow(unexpected_cfgs, clippy::large_enum_variant)]
 pub mod generated;
 pub mod herdr;
@@ -38,6 +38,7 @@ use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchBundles, LaunchComposer, OpensLaunchComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
 use generated::operation::{Operation, Outcome, Record_Data};
+use generated::startup::Start;
 use launching::{LaunchesFlows, ObservesLaunch, PrunesLaunchBundles};
 use observe_agent::ObservesAgent;
 use peer::{AdmitsMetaPeer, ResolvesPeer};
@@ -417,6 +418,15 @@ pub trait OpensRunningNexus {
     fn open(defaults: &store::DefaultConfiguration) -> Result<Self, store::StoreError>
     where
         Self: Sized;
+
+    /// Opens the declared store only after a complete configuration has been
+    /// committed for the exact socket paths carried by Start.
+    fn open_started(
+        defaults: &store::DefaultConfiguration,
+        start: &Start,
+    ) -> Result<Self, store::StoreError>
+    where
+        Self: Sized;
 }
 
 impl OpensRunningNexus for RunningNexus {
@@ -436,6 +446,44 @@ impl OpensRunningNexus for RunningNexus {
         // The socket this Nexus serves: a changed one takes effect only on
         // restart, so the store's value at open is the one being served.
         let ordinary_socket = PathBuf::from(store.configuration()?.ordinary_socket_path);
+        Ok(Self {
+            store,
+            codex_endpoints: codex_endpoints.clone(),
+            herdr: herdr::HerdrCli::default()
+                .with_source_root(&source_root)
+                .with_codex_endpoints(codex_endpoints)
+                .with_ordinary_socket(&ordinary_socket)
+                .with_launch_bundles(launch_bundles.clone()),
+            composer: LaunchComposer::at(source_root, launch_bundles),
+            dispatch_gate: Mutex::new(()),
+            pane_leases: delivery::lease::PaneLeases::default(),
+        })
+    }
+
+    fn open_started(
+        defaults: &store::DefaultConfiguration,
+        start: &Start,
+    ) -> Result<Self, store::StoreError> {
+        let store_path = PathBuf::from(&start.store_path);
+        if !store_path.is_absolute() || store_path.file_name().is_none() {
+            return Err(store::StoreError::InvalidStorePath);
+        }
+        let launch_bundle_directory = store_path
+            .parent()
+            .ok_or(store::StoreError::InvalidStorePath)?
+            .join(<store::DefaultConfiguration as store::LaysOutDefaults>::LAUNCH_BUNDLE_DIRECTORY);
+        let store = FlowStore::open_started(&store_path, defaults, start)?;
+        let runtime = store.runtime_configuration()?;
+        let codex_endpoints = CodexEndpoints::from(&runtime);
+        let overlap = codex_endpoints.overlapping_models();
+        if !overlap.is_empty() {
+            eprintln!(
+                "flow-nexus: models selected by both Codex endpoints are unavailable: {overlap:?}"
+            );
+        }
+        let source_root = PathBuf::from(&runtime.source_root);
+        let launch_bundles = LaunchBundles::at(launch_bundle_directory);
+        let ordinary_socket = PathBuf::from(&store.configuration()?.ordinary_socket_path);
         Ok(Self {
             store,
             codex_endpoints: codex_endpoints.clone(),
@@ -794,7 +842,7 @@ mod tests {
     mod reservation;
     mod submission;
 
-    use super::{Dispatches, RunningNexus};
+    use super::{Dispatches, OpensRunningNexus, RunningNexus};
     use crate::caller::{
         CallerPane, CallerProcess, IdentifiesPeer, LocatesCallerPane, ReadsProcess, ResolvesCaller,
     };
@@ -803,11 +851,13 @@ mod tests {
         codex::{CodexEndpoint, CodexEndpoints},
         composition::{ComposesLaunch, LaunchBundles, LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
+        generated::startup::Start,
         store::{
-            FlowStore, LaunchOutcome, OpensFlowStore, RecordsFlowLifecycle, RecordsLaunchOutcome,
+            ConfigurationOnlyStore, ConfiguresFlowStore, DefaultConfiguration, FlowStore,
+            LaunchOutcome, OpensFlowStore, RecordsFlowLifecycle, RecordsLaunchOutcome,
             RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
             RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersFlowIdentity,
-            ReservesLaunchAttempt,
+            ReservesLaunchAttempt, SeedsConfiguration,
         },
     };
     use sha2::{Digest, Sha256};
@@ -828,6 +878,47 @@ mod tests {
         path::{Path, PathBuf},
         time::Duration,
     };
+
+    #[test]
+    fn explicit_start_keeps_launch_bundles_beside_its_store() {
+        let directory = tempfile::tempdir().expect("temporary state");
+        let defaults = DefaultConfiguration {
+            home: directory.path().join("home"),
+            runtime_directory: directory.path().join("runtime"),
+        };
+        let store_path = directory.path().join("isolated-state/flow.sema");
+        let start = Start {
+            ordinary_socket_path: directory
+                .path()
+                .join("isolated-sockets/ordinary.sock")
+                .to_string_lossy()
+                .into_owned(),
+            meta_socket_path: directory
+                .path()
+                .join("isolated-sockets/meta.sock")
+                .to_string_lossy()
+                .into_owned(),
+            store_path: store_path.to_string_lossy().into_owned(),
+        };
+        std::fs::create_dir_all(store_path.parent().unwrap()).expect("store parent");
+        let configuration_store =
+            ConfigurationOnlyStore::open(&store_path).expect("configuration store");
+        let mut configuration = defaults.configuration();
+        configuration.ordinary_socket_path = start.ordinary_socket_path.clone();
+        configuration.meta_socket_path = start.meta_socket_path.clone();
+        configuration_store
+            .configure(configuration)
+            .expect("configuration commits");
+        drop(configuration_store);
+
+        let nexus = RunningNexus::open_started(&defaults, &start)
+            .expect("explicit configured store starts");
+        let bundle_path = nexus.composer.launch_bundles().file_for_request("fixture");
+        assert_eq!(
+            bundle_path.parent().unwrap(),
+            store_path.parent().unwrap().join("launch-bundles")
+        );
+    }
 
     struct NexusFixture {
         directory: tempfile::TempDir,

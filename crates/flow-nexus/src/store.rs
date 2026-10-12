@@ -53,7 +53,7 @@ const RUNTIME_CONFIGURATION_KEY: &str = "runtime";
 const SEMA_META: redb::TableDefinition<&str, u64> = redb::TableDefinition::new("__sema_meta");
 const SEMA_HEADERS: redb::TableDefinition<&str, &[u8]> =
     redb::TableDefinition::new("__sema_headers");
-const ENGINE_COUNTERS: redb::TableDefinition<&str, u64> =
+const ENGINE_COUNTERS: redb::TableDefinition<&str, &[u8]> =
     redb::TableDefinition::new("__sema_engine_counters");
 const ENGINE_CATALOG: redb::TableDefinition<&str, &[u8]> =
     redb::TableDefinition::new("__sema_engine_catalog");
@@ -963,7 +963,12 @@ impl RecognizesFlowStore for ConfigurationOnlyStore {
             counters
                 .get(ENGINE_STORAGE_LAYOUT)
                 .map_err(|error| Self::unrecognized_store(path, error.to_string()))?
-                .map(|value| value.value())
+                // Sema's typed counter values are rkyv bytes in redb.
+                .map(|value| rkyv::from_bytes::<u64, rkyv::rancor::Error>(value.value()))
+                .transpose()
+                .map_err(|error| {
+                    Self::unrecognized_store(path, format!("engine storage layout: {error}"))
+                })?
         };
         if layout != Some(7) {
             return Err(Self::unrecognized_store(

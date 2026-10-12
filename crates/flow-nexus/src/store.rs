@@ -491,7 +491,10 @@ impl From<LaunchAttemptBeforeBundle> for LaunchAttempt {
 /// How a launch request settled. It is kept beside the attempt so a
 /// LaunchStatus or an Observe.Launch answers it without re-running the launch.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+#[cfg_attr(
+    feature = "datom",
+    derive(datom_codec::Datomizable, datom_codec::Composing)
+)]
 pub enum LaunchOutcome {
     Started(Launched),
     Replaced(Replaced),
@@ -664,7 +667,10 @@ impl UpgradeFrom<StoredLaunchOutcomeV1> for StoredLaunchOutcome {
 /// A launch request that replaces a predecessor. While it stands without a
 /// Replaced outcome, the flow its launch binds is held out of routing.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+#[cfg_attr(
+    feature = "datom",
+    derive(datom_codec::Datomizable, datom_codec::Composing)
+)]
 pub struct Replacement {
     pub launch_request_id: String,
     pub predecessor: String,
@@ -992,7 +998,8 @@ impl RecognizesFlowStore for ConfigurationOnlyStore {
                 actual.insert(key, registration.identity().clone());
             }
         }
-        if actual != Self::configuration_only_families() && actual != Self::running_flow_families() {
+        if actual != Self::configuration_only_families() && actual != Self::running_flow_families()
+        {
             return Err(Self::unrecognized_store(
                 path,
                 "family catalog is neither the current configuration-only nor full Flow layout",
@@ -1076,10 +1083,7 @@ impl OpensConfigurationOnlyStore for ConfigurationOnlyStore {
     /// Reads either a wholly unconfigured store (using its declared defaults
     /// without writing them) or all three committed configuration records.
     /// A partial or duplicated configuration refuses service.
-    fn configuration(
-        &self,
-        defaults: &DefaultConfiguration,
-    ) -> Result<Configuration, StoreError> {
+    fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError> {
         Ok(self
             .configured_configuration()?
             .unwrap_or_else(|| defaults.configuration()))
@@ -1460,8 +1464,8 @@ impl OpensFlowStoreFromStart for FlowStore {
                 FamilyName::new("flow-nexus-runtime-configuration"),
                 SchemaHash::for_label("flow-nexus-runtime-configuration-v1"),
             ))?;
-        let startup_delivery_configuration: TableReference<DeliveryConfiguration> =
-            engine.register_table(TableDescriptor::new(
+        let startup_delivery_configuration: TableReference<DeliveryConfiguration> = engine
+            .register_table(TableDescriptor::new(
                 delivery::DELIVERY_CONFIGURATION_TABLE_NAME,
                 FamilyName::new("flow-nexus-delivery-configuration"),
                 SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
@@ -2930,9 +2934,8 @@ impl InspectsLaunchRequests for FlowStore {
                 if route_rows.len() > 1 {
                     inconsistent = true;
                 } else {
-                    flow_node_option = Some(
-                        flow.clone().recorded_flow_node(route_rows.first().cloned()),
-                    );
+                    flow_node_option =
+                        Some(flow.clone().recorded_flow_node(route_rows.first().cloned()));
                 }
             }
         }
@@ -3346,13 +3349,12 @@ mod tests {
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfigurationOnlyStore, ConfiguresFlowStore,
         ConfirmsStartedFlow, FlowStore, LaunchOutcome, LaunchOutcomeV1,
-        OpensConfigurationOnlyStore, OpensFlowStore,
-        ReadsFlowRoles, ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome,
-        RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPendingThread,
-        RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
-        RecordsRegistrationAcknowledgement, RecordsRestartedFlow, RegistersExistingFlow,
-        RegistersFlowIdentity, ReplaceRejectionV1, ReservesLaunchAttempt, ReservesPendingStart,
-        StartRejectionV1, StoredLaunchOutcomeV1,
+        OpensConfigurationOnlyStore, OpensFlowStore, ReadsFlowRoles, ReadsFlowStore,
+        ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
+        RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
+        RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsRestartedFlow,
+        RegistersExistingFlow, RegistersFlowIdentity, ReplaceRejectionV1, ReservesLaunchAttempt,
+        ReservesPendingStart, StartRejectionV1, StoredLaunchOutcomeV1,
     };
     use super::{LaysOutDefaults, SeedsConfiguration};
     use crate::generated::startup::Start;

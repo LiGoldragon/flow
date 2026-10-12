@@ -101,6 +101,7 @@ impl EncodesStartupRefusal for StoreError {
     }
 }
 
+#[derive(Debug)]
 enum StartupFailure {
     Store(StoreError),
     Other(String),
@@ -449,6 +450,7 @@ mod tests {
         ParsesStartupArguments, RefusesUnidentifiedConfigurationPeer, ServesOneConfiguration,
         StartupInvocation, StartupMode,
     };
+    use datom_codec::Datomizable;
     use flow_nexus::{
         CarriesSignalFrames,
         generated::startup::Start,

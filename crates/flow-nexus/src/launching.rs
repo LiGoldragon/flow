@@ -575,16 +575,17 @@ trait DescribesLaunchInspection {
 
 impl DescribesLaunchInspection for LaunchInspectionRecords {
     fn launch_inspection(self) -> LaunchInspection {
-        let launch_status_outcome_option = self.launch_outcome_option.map(|outcome| match outcome {
-            LaunchOutcome::Started(launched) => LaunchStatusOutcome::Started(launched),
-            LaunchOutcome::Replaced(replaced) => LaunchStatusOutcome::Replaced(replaced),
-            LaunchOutcome::StartRejected(rejection) => {
-                LaunchStatusOutcome::StartRejected(rejection)
-            }
-            LaunchOutcome::ReplaceRejected(rejection) => {
-                LaunchStatusOutcome::ReplaceRejected(rejection)
-            }
-        });
+        let launch_status_outcome_option =
+            self.launch_outcome_option.map(|outcome| match outcome {
+                LaunchOutcome::Started(launched) => LaunchStatusOutcome::Started(launched),
+                LaunchOutcome::Replaced(replaced) => LaunchStatusOutcome::Replaced(replaced),
+                LaunchOutcome::StartRejected(rejection) => {
+                    LaunchStatusOutcome::StartRejected(rejection)
+                }
+                LaunchOutcome::ReplaceRejected(rejection) => {
+                    LaunchStatusOutcome::ReplaceRejected(rejection)
+                }
+            });
         LaunchInspection {
             launch_attempt: self.launch_attempt,
             launch_status_outcome_option,

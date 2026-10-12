@@ -118,14 +118,12 @@ impl ComposesConfigurationFiles for FlowMetaClient {
                         "OrdinarySocketPath",
                         &source,
                     )?,
-                    ConfigurationAssignment::MetaSocketPath(value) => {
-                        Self::record_assignment(
-                            &mut meta_socket_path,
-                            value,
-                            "MetaSocketPath",
-                            &source,
-                        )?
-                    }
+                    ConfigurationAssignment::MetaSocketPath(value) => Self::record_assignment(
+                        &mut meta_socket_path,
+                        value,
+                        "MetaSocketPath",
+                        &source,
+                    )?,
                     ConfigurationAssignment::SourceRoot(value) => {
                         Self::record_assignment(&mut source_root, value, "SourceRoot", &source)?
                     }
@@ -135,23 +133,23 @@ impl ComposesConfigurationFiles for FlowMetaClient {
                     ConfigurationAssignment::NextCodex(value) => {
                         Self::record_assignment(&mut next_codex, value, "NextCodex", &source)?
                     }
-                    ConfigurationAssignment::HarnessProfileVector(value) => Self::record_assignment(
-                        &mut harness_profile_vector,
-                        value,
-                        "HarnessProfileVector",
-                        &source,
-                    )?,
-                    ConfigurationAssignment::MetaAspects(value) => {
-                        Self::record_assignment(&mut meta_aspects, value, "MetaAspects", &source)?
-                    }
-                    ConfigurationAssignment::MessageNexusPath(value) => {
+                    ConfigurationAssignment::HarnessProfileVector(value) => {
                         Self::record_assignment(
-                            &mut message_nexus_path,
+                            &mut harness_profile_vector,
                             value,
-                            "MessageNexusPath",
+                            "HarnessProfileVector",
                             &source,
                         )?
                     }
+                    ConfigurationAssignment::MetaAspects(value) => {
+                        Self::record_assignment(&mut meta_aspects, value, "MetaAspects", &source)?
+                    }
+                    ConfigurationAssignment::MessageNexusPath(value) => Self::record_assignment(
+                        &mut message_nexus_path,
+                        value,
+                        "MessageNexusPath",
+                        &source,
+                    )?,
                 }
             }
         }

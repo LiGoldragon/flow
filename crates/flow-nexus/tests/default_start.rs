@@ -1,11 +1,7 @@
 //! The service takes an explicit typed Start and configuration reaches it
 //! through the one-request meta listener before normal startup.
 use datom_codec::Datomizable;
-use flow_nexus::{
-    CarriesSignalFrames,
-    generated::startup::Start,
-    store::OpensConfigurationOnlyStore,
-};
+use flow_nexus::{CarriesSignalFrames, generated::startup::Start, store::OpensConfigurationOnlyStore};
 use protos::{Compactable, Protosizable};
 use std::{
     io::{Read, Write},

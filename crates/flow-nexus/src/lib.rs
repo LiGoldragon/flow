@@ -855,10 +855,10 @@ mod tests {
         store::{
             ConfigurationOnlyStore, ConfiguresFlowStore, DefaultConfiguration, FlowStore,
             LaunchOutcome, OpensConfigurationOnlyStore, OpensFlowStore, RecordsFlowLifecycle,
-            RecordsLaunchOutcome,
-            RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
-            RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersFlowIdentity,
-            ReservesLaunchAttempt, SeedsConfiguration,
+            RecordsLaunchOutcome, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
+            RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+            RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
+            SeedsConfiguration,
         },
     };
     use sha2::{Digest, Sha256};

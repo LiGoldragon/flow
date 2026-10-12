@@ -379,13 +379,11 @@ mod tests {
             .parse_command(["Start.{ { request-7 [] [ spirit ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }".into()].into_iter())
             .unwrap();
         let mut submitted = false;
-        let result = FlowClient::resolve_launch_skills(query, |_| {
-            Err("missing dependency".into())
-        })
-        .and_then(|resolved| {
-            submitted = true;
-            Ok(resolved)
-        });
+        let result = FlowClient::resolve_launch_skills(query, |_| Err("missing dependency".into()))
+            .and_then(|resolved| {
+                submitted = true;
+                Ok(resolved)
+            });
         assert_eq!(result.unwrap_err(), "missing dependency");
         assert!(!submitted);
     }

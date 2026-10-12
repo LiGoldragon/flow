@@ -49,10 +49,11 @@ pub trait OpensLaunchComposer {
 ///
 /// The caller's bundle is shared across launches and never edited. At Start
 /// the composer copies it here, byte for byte, and appends the launch's
-/// trailing section (its predecessor and remembered flows); a Claude launch
-/// receives the copy as `--system-prompt-file` and is told to read it. The
-/// file is named by the launch request's short form, as the remote-control
-/// name is, so the request ID itself never enters the prompt.
+/// trailing section (its predecessor and remembered flows). Claude receives
+/// the copy as `--system-prompt-file`; Codex receives it through
+/// `model_instructions_file`, keeping system instructions out of the USER
+/// turn. The file is named by the launch request's short form, as the
+/// remote-control name is, so the request ID itself never enters the prompt.
 ///
 /// A copy lives as long as its launch can still need it: it is removed when
 /// the launch is refused and that outcome is stored, or when the Flow the
@@ -71,8 +72,8 @@ pub trait KeepsLaunchBundles {
     /// The per-launch copy of the launch request this ID names.
     fn file_for_request(&self, launch_request_id: &str) -> PathBuf;
     /// Removes the per-launch copy of a launch request. A copy that was
-    /// never written (a Codex launch, or one refused before composition) is
-    /// already gone; any other failure is reported.
+    /// never written (or one refused before composition) is already gone; any
+    /// other failure is reported.
     fn remove_for_request(&self, launch_request_id: &str) -> std::io::Result<()>;
 }
 
@@ -339,21 +340,18 @@ trait ReadsLaunchSource {
     fn read(&self, source: &LaunchSource) -> Result<PathBuf, CompositionError>;
 }
 
-/// Reads the system-prompt bundle a Codex main Flow receives at the top of
-/// its first block, with the launch section at its end. Claude receives the
-/// per-launch copy as `--system-prompt-file`.
-trait ReadsSystemPromptBundle {
-    fn read_bundle(&self, profile: &LaunchProfile) -> Result<String, CompositionError>;
-}
-
 /// Writes a launch's own copy of the bundle: the caller's bytes unchanged,
 /// then the launch section after a blank line when it has any line.
 trait WritesLaunchBundle {
-    fn write_launch_bundle(&self, profile: &LaunchProfile) -> Result<PathBuf, CompositionError>;
+    fn write_launch_bundle(
+        &self,
+        profile: &LaunchProfile,
+        require_nonempty_utf8: bool,
+    ) -> Result<PathBuf, CompositionError>;
 }
 
 trait RendersLaunchProfile {
-    fn render_native_head(&self, profile: &LaunchProfile, bundle: Option<&str>) -> String;
+    fn render_native_head(&self, profile: &LaunchProfile) -> String;
     fn render_claude_line(
         &self,
         profile: &LaunchProfile,
@@ -374,10 +372,8 @@ trait RendersLaunchProfile {
     ) -> String;
 }
 
-/// What a harness receives of the bundle: Codex its text, Claude the path
-/// of its per-launch copy.
+/// The path of this launch's system-prompt file.
 enum LaunchBundleText {
-    Inline(String),
     File(PathBuf),
 }
 
@@ -463,6 +459,8 @@ impl ValidatesLaunchProfile for LaunchComposer {
                 || !name
                     .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                || name == "spirit"
+                || name.starts_with("spirit-")
         }) {
             return Err(CompositionError::InvalidProfileField("skill_name_vector"));
         }
@@ -553,30 +551,24 @@ impl ReadsLaunchSource for LaunchComposer {
     }
 }
 
-impl ReadsSystemPromptBundle for LaunchComposer {
-    fn read_bundle(&self, profile: &LaunchProfile) -> Result<String, CompositionError> {
-        let bytes = fs::read(&profile.system_prompt_bundle_file)
-            .map_err(|_| CompositionError::InvalidProfileField("system_prompt_bundle_file"))?;
-        let text = String::from_utf8(bytes)
-            .map_err(|_| CompositionError::InvalidProfileField("system_prompt_bundle_file"))?;
-        let text = text.trim();
-        if text.is_empty() {
-            return Err(CompositionError::InvalidProfileField(
-                "system_prompt_bundle_file",
-            ));
-        }
-        let section = profile.launch_section();
-        if section.is_empty() {
-            return Ok(text.to_owned());
-        }
-        Ok(format!("{text}\n\n{}", section.trim_end()))
-    }
-}
-
 impl WritesLaunchBundle for LaunchComposer {
-    fn write_launch_bundle(&self, profile: &LaunchProfile) -> Result<PathBuf, CompositionError> {
+    fn write_launch_bundle(
+        &self,
+        profile: &LaunchProfile,
+        require_nonempty_utf8: bool,
+    ) -> Result<PathBuf, CompositionError> {
         let mut bytes = fs::read(&profile.system_prompt_bundle_file)
             .map_err(|_| CompositionError::InvalidProfileField("system_prompt_bundle_file"))?;
+        if require_nonempty_utf8 {
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                CompositionError::InvalidProfileField("system_prompt_bundle_file")
+            })?;
+            if text.trim().is_empty() {
+                return Err(CompositionError::InvalidProfileField(
+                    "system_prompt_bundle_file",
+                ));
+            }
+        }
         let section = profile.launch_section();
         if !section.is_empty() {
             if !bytes.is_empty() && !bytes.ends_with(b"\n") {
@@ -597,7 +589,7 @@ impl WritesLaunchBundle for LaunchComposer {
 }
 
 impl RendersLaunchProfile for LaunchComposer {
-    fn render_native_head(&self, profile: &LaunchProfile, bundle: Option<&str>) -> String {
+    fn render_native_head(&self, profile: &LaunchProfile) -> String {
         let skills = &profile.skill_name_vector;
         match profile.harness_kind {
             // Claude reads commands only at the head of the block, as
@@ -609,20 +601,16 @@ impl RendersLaunchProfile for LaunchComposer {
                 .iter()
                 .map(|skill| format!("/{skill} "))
                 .collect(),
-            // Codex keeps its stock base instructions. The main Flow alone
-            // receives the system-prompt bundle at the top of its first
-            // block, then its `$name` skill lines; native Codex descendants
-            // never see this block and keep the stock base.
+            // Codex keeps its stock base instructions. Its system prompt is
+            // configured on the native client; this first USER turn carries
+            // only its `$name` skill lines.
             HarnessKind::Codex => {
-                let mut head = bundle.map(|text| format!("{text}\n\n")).unwrap_or_default();
                 let mut lines = Vec::new();
                 if !skills.iter().any(|skill| skill == "operation-main-flow") {
                     lines.push("$operation-main-flow".to_owned());
                 }
                 lines.extend(skills.iter().map(|skill| format!("${skill}")));
-                head.push_str(&lines.join("\n"));
-                head.push_str("\n\n");
-                head
+                format!("{}\n\n", lines.join("\n"))
             }
         }
     }
@@ -638,7 +626,7 @@ impl RendersLaunchProfile for LaunchComposer {
         bundle_file: &Path,
         sources: &[PathBuf],
     ) -> String {
-        let mut line = self.render_native_head(profile, None);
+        let mut line = self.render_native_head(profile);
         line.push_str(&format!(
             "Read {} for your launch mode",
             bundle_file.display()
@@ -702,16 +690,13 @@ impl RendersLaunchProfile for LaunchComposer {
         bundle: &LaunchBundleText,
         sources: &[PathBuf],
     ) -> String {
-        let bundle = match bundle {
-            LaunchBundleText::File(file) => {
-                return self.render_claude_line(profile, file, sources);
-            }
-            LaunchBundleText::Inline(text) => Some(text.as_str()),
-        };
-        // Predecessor and remembered flows are in the bundle text's trailing
-        // section, which opens this block; the launch record does not repeat
-        // them.
-        let mut body = self.render_native_head(profile, bundle);
+        let LaunchBundleText::File(bundle_file) = bundle;
+        if profile.harness_kind == HarnessKind::Claude {
+            return self.render_claude_line(profile, bundle_file, sources);
+        }
+        // Predecessor and remembered flows are in the per-launch system file,
+        // not duplicated in the Codex USER turn.
+        let mut body = self.render_native_head(profile);
         body.push_str(&format!(
             "# Flow launch\n\nRole: {} {}\nHarness: Codex\nModel: {}\nEffort: {}\nHerdr session: {}\nRemote control: {}\n",
             profile.aspect_name(),
@@ -742,10 +727,10 @@ impl ComposesLaunch for LaunchComposer {
             .iter()
             .map(|source| self.read(source))
             .collect::<Result<Vec<_>, _>>()?;
-        let bundle = match profile.harness_kind {
-            HarnessKind::Codex => LaunchBundleText::Inline(self.read_bundle(profile)?),
-            HarnessKind::Claude => LaunchBundleText::File(self.write_launch_bundle(profile)?),
-        };
+        let bundle = LaunchBundleText::File(self.write_launch_bundle(
+            profile,
+            profile.harness_kind == HarnessKind::Codex,
+        )?);
         let mut body = self.render_body(profile, &bundle, &sources);
         if profile.harness_kind == HarnessKind::Claude {
             let candidate = format!("{}{}", body, profile.harness_kind.receipt_footer());
@@ -804,7 +789,7 @@ mod tests {
             LaunchProfile {
                 launch_request_id: "launch-42".into(),
                 launch_source_vector: sources,
-                skill_name_vector: vec!["operation-main-flow".into(), "spirit".into()],
+                skill_name_vector: vec!["operation-main-flow".into(), "knowledge-flow".into()],
                 flow_aspect: FlowAspect::Field,
                 power_level: PowerLevel::High,
                 harness_kind: HarnessKind::Codex,
@@ -859,11 +844,8 @@ mod tests {
         let canonical = root.path().canonicalize().unwrap();
         let expected = format!(
             concat!(
-                "fixture bundle\n\n",
-                "Predecessor: 1b8ac0\n",
-                "Remembered: 836818\n\n",
                 "$operation-main-flow\n",
-                "$spirit\n\n",
+                "$knowledge-flow\n\n",
                 "# Flow launch\n\n",
                 "Role: Field High\n",
                 "Harness: Codex\n",
@@ -937,7 +919,7 @@ mod tests {
         assert_eq!(
             body,
             format!(
-                "/operation-main-flow /spirit Read {} for your launch mode, then: Carry the bounded task.",
+                "/operation-main-flow /knowledge-flow Read {} for your launch mode, then: Carry the bounded task.",
                 root.bundles().file_for(&profile).display()
             ),
         );
@@ -947,7 +929,7 @@ mod tests {
                 "{body} When every skill has loaded, reply once with exactly FLOW_LAUNCH_RECEIPT_V2 and nothing else."
             )
         );
-        assert_eq!(body.matches("/spirit").count(), 1);
+        assert_eq!(body.matches("/knowledge-flow").count(), 1);
         assert_eq!(body.matches("/operation-main-flow").count(), 1);
         assert!(!body.contains("$spirit"));
         assert!(!body.contains("Skill tool"));
@@ -1117,9 +1099,9 @@ mod tests {
         assert!(!text.fits_claude_paste());
         assert!(text.starts_with("Read "));
         assert!(text.contains(
-            "then load these skills through the Skill tool in this order: operation-main-flow, spirit."
+            "then load these skills through the Skill tool in this order: operation-main-flow, knowledge-flow."
         ));
-        assert!(!text.starts_with("/spirit"));
+        assert!(!text.starts_with("/knowledge-flow"));
         assert!(composed.has_canonical_first_prompt());
     }
 
@@ -1158,7 +1140,7 @@ mod tests {
         assert!(composed.has_canonical_first_prompt());
         profile.instruction_prompt = "x".repeat(900);
         composed.launch_profile = profile;
-        let body = format!("/operation-main-flow /spirit {}", "x".repeat(900));
+        let body = format!("/operation-main-flow /knowledge-flow {}", "x".repeat(900));
         composed.first_prompt_payload.first_prompt_body = body.clone();
         let hash = format!(
             "{:x}",
@@ -1312,7 +1294,7 @@ mod tests {
 
         assert_eq!(
             composed.launch_profile.skill_name_vector,
-            vec!["operation-main-flow", "spirit"]
+            vec!["operation-main-flow", "knowledge-flow"]
         );
         assert!(
             !composed
@@ -1323,7 +1305,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_first_block_opens_with_the_bundle_text_and_no_read_line() {
+    fn codex_system_file_keeps_bundle_and_launch_context_out_of_the_user_turn() {
         let root = tempfile::tempdir().unwrap();
         let profile = root.profile(vec![]);
         fs::write(
@@ -1336,13 +1318,16 @@ mod tests {
             .unwrap();
         let text = composed.first_prompt_payload.first_prompt_text.as_str();
         assert!(
-            text.starts_with(concat!(
-                "# Main-flow mode\n\nKeep the stock base.\n\n",
-                "Predecessor: 1b8ac0\nRemembered: 836818\n\n",
-                "$operation-main-flow\n$spirit\n\n"
-            )),
+            text.starts_with("$operation-main-flow\n$knowledge-flow\n\n# Flow launch\n"),
             "{text}"
         );
+        assert_eq!(
+            fs::read_to_string(root.bundles().file_for(&profile)).unwrap(),
+            "\n# Main-flow mode\n\nKeep the stock base.\n\n\nPredecessor: 1b8ac0\nRemembered: 836818\n"
+        );
+        assert!(!text.contains("Keep the stock base."));
+        assert!(!text.contains("Predecessor:"));
+        assert!(!text.contains("Remembered:"));
         assert!(!text.contains("System prompt: read"));
         assert!(!text.contains(&profile.system_prompt_bundle_file));
         assert!(composed.has_canonical_first_prompt());
@@ -1364,10 +1349,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_head_adds_main_flow_when_the_profile_omits_it() {
+    fn codex_user_head_adds_main_flow_when_the_profile_omits_it() {
         let root = tempfile::tempdir().unwrap();
         let mut profile = root.profile(vec![]);
-        profile.skill_name_vector = vec!["spirit".into()];
+        profile.skill_name_vector = vec!["knowledge-flow".into()];
         let composed = LaunchComposer::at(root.path(), root.bundles())
             .compose(&profile)
             .unwrap();
@@ -1375,11 +1360,27 @@ mod tests {
             composed
                 .first_prompt_payload
                 .first_prompt_body
-                .starts_with(concat!(
-                    "fixture bundle\n\nPredecessor: 1b8ac0\nRemembered: 836818\n\n",
-                    "$operation-main-flow\n$spirit\n\n# Flow launch\n"
-                ))
+                .starts_with("$operation-main-flow\n$knowledge-flow\n\n# Flow launch\n")
         );
+        assert!(
+            fs::read_to_string(root.bundles().file_for(&profile))
+                .unwrap()
+                .contains("Remembered: 836818")
+        );
+    }
+
+    #[test]
+    fn system_spirit_modules_are_not_accepted_in_the_user_skill_vector() {
+        let root = tempfile::tempdir().unwrap();
+        for system_module in ["spirit", "spirit-core"] {
+            let mut profile = root.profile(vec![]);
+            profile.skill_name_vector = vec!["operation-main-flow".into(), system_module.into()];
+            assert_eq!(
+                LaunchComposer::at(root.path(), root.bundles()).compose(&profile),
+                Err(CompositionError::InvalidProfileField("skill_name_vector")),
+                "{system_module} is a SYSTEM module, not a USER skill"
+            );
+        }
     }
 
     #[test]
@@ -1437,8 +1438,12 @@ mod tests {
             .unwrap();
         let text = composed.first_prompt_payload.first_prompt_text.as_str();
         assert!(
-            text.starts_with("fixture bundle\n\n$operation-main-flow\n$spirit\n"),
+            text.starts_with("$operation-main-flow\n$knowledge-flow\n"),
             "{text}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.bundles().file_for(&profile)).unwrap(),
+            "fixture bundle\n"
         );
         assert!(!text.contains("Remembered:"));
     }

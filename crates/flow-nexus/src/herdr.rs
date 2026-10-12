@@ -104,8 +104,8 @@ pub struct HerdrCli {
     /// whatever Nexus the default path under the pane's runtime directory
     /// names.
     pub(crate) ordinary_socket: PathBuf,
-    /// Where each launch's own bundle copy lives, the one a Claude launch
-    /// receives as `--system-prompt-file`.
+    /// Where each launch's own bundle copy lives. Claude receives it as
+    /// `--system-prompt-file`; Codex receives it as `model_instructions_file`.
     launch_bundles: LaunchBundles,
 }
 

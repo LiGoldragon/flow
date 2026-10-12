@@ -1392,6 +1392,19 @@ impl StartsNativeHerdrHarness for HerdrCli {
                     "model_reasoning_effort={}",
                     launch.launch_profile.effort
                 ));
+                let system_prompt_file = self.launch_bundle_file(&launch.launch_profile);
+                if !system_prompt_file.is_absolute() {
+                    return Err(
+                        "per-launch Codex system-prompt file must be an absolute path".into(),
+                    );
+                }
+                let system_prompt_path = system_prompt_file
+                    .to_str()
+                    .ok_or("per-launch Codex system-prompt path must be UTF-8")?;
+                let encoded_path = serde_json::to_string(system_prompt_path)
+                    .map_err(|error| format!("cannot encode Codex system-prompt path: {error}"))?;
+                arguments.push("-c".into());
+                arguments.push(format!("model_instructions_file={encoded_path}"));
             }
         }
         // No positional prompt: the composed first prompt is the only one.
@@ -2164,7 +2177,7 @@ pub(crate) mod tests {
         let bundle = composition_root.path().join("flow-system-prompt.md");
         fs::write(&bundle, "fixture bundle\n").unwrap();
         let mut profile = launch(HarnessKind::Claude).launch_profile;
-        profile.skill_name_vector = ["operation-main-flow", "spirit"].map(String::from).to_vec();
+        profile.skill_name_vector = ["operation-main-flow", "knowledge-flow"].map(String::from).to_vec();
         profile.system_prompt_bundle_file = bundle.to_string_lossy().into_owned();
         profile.instruction_prompt = "Read the receipt.\nThen report it.".into();
         let launch = LaunchComposer::at(
@@ -2294,6 +2307,9 @@ printf '%s\n' 123456
             "1234567812344abc8def123456789abc",
             &agent_name,
         );
+        let system_prompt_file = adapter.launch_bundle_file(&launch.launch_profile);
+        fs::create_dir_all(system_prompt_file.parent().unwrap()).unwrap();
+        fs::write(&system_prompt_file, "accepted system prompt").unwrap();
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
             .start_native_harness(&launch, &pane, None)
@@ -2306,13 +2322,20 @@ printf '%s\n' 123456
         assert!(start.contains("--executable /fixture/codex"));
         assert!(start.contains("-- --remote unix:///tmp/stable-codex.sock --model model-current"));
         assert!(start.contains("-c model_reasoning_effort=high"));
+        let encoded_system_prompt =
+            serde_json::to_string(system_prompt_file.to_str().unwrap()).unwrap();
+        assert!(start.contains(&format!(
+            "-c model_instructions_file={encoded_system_prompt}"
+        )));
         assert!(!start.contains("--remote-control"));
         assert_eq!(start.matches("--remote").count(), 1);
         assert!(!calls.contains("pane run"));
         assert!(!start.contains(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG));
         // The harness starts with no positional prompt; the one first prompt
         // travels later in a single app-server turn/start.
-        assert!(start.ends_with("-c model_reasoning_effort=high"));
+        assert!(start.ends_with(&format!(
+            "-c model_instructions_file={encoded_system_prompt}"
+        )));
         assert!(!start.contains('$'));
         assert!(!calls.contains("agent prompt"));
     }
@@ -3336,7 +3359,7 @@ printf '%s\n' 123456
         };
         use std::io::Write;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
-        let names = ["operation-main-flow", "spirit"];
+        let names = ["operation-main-flow", "knowledge-flow"];
         let composition_root = tempfile::tempdir().unwrap();
         let bundle = composition_root.path().join("flow-system-prompt.md");
         fs::write(&bundle, "fixture bundle\n").unwrap();
@@ -3358,7 +3381,7 @@ printf '%s\n' 123456
         );
         assert!(body.starts_with("Read "));
         assert!(body.contains(
-            "then load these skills through the Skill tool in this order: operation-main-flow, spirit."
+            "then load these skills through the Skill tool in this order: operation-main-flow, knowledge-flow."
         ));
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
@@ -3394,7 +3417,7 @@ printf '%s\n' 123456
         let mut rows = vec![serde_json::json!({"type":"user","sessionId":native_session,
             "message":{"role":"user","content":original}})];
         rows.extend(tool("operation-main-flow", "tool-2"));
-        rows.extend(tool("spirit", "tool-1"));
+        rows.extend(tool("knowledge-flow", "tool-1"));
         rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-direct","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}}));
         let skill_invocations = rows
             .iter()
@@ -3547,7 +3570,7 @@ printf '%s\n' 123456
             &agent_name,
         );
         let skills = root.path().join("native-transcripts/claude-skills");
-        for name in ["operation-main-flow", "spirit"] {
+        for name in ["operation-main-flow", "knowledge-flow"] {
             fs::create_dir_all(skills.join(name)).unwrap();
             fs::write(skills.join(name).join("SKILL.md"), format!("{name} body\n")).unwrap();
         }
@@ -3573,7 +3596,7 @@ printf '%s\n' 123456
         let mut rows = vec![serde_json::json!({"type":"user","sessionId":native_session,
             "message":{"role":"user","content":format!("<pasted_content id=\"ab12\">\n{original}\n</pasted_content>")}})];
         rows.extend(tool("operation-main-flow", "tool-2"));
-        rows.extend(tool("spirit", "tool-1"));
+        rows.extend(tool("knowledge-flow", "tool-1"));
         rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-wrapped","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}}));
         let transcript = root
             .path()

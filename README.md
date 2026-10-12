@@ -18,10 +18,16 @@ The wire contracts are independent repositories:
   and the pane writes: `Deliver`, `Vet`, `Command`, plus `ResolvePeer`.
 
 The ordinary client accepts exactly one inline `Query` Datom from the
-`signal-flow` contract:
+`signal-flow` contract. `Start` and `Replace` also require the caller to name
+the selected SYSTEM modules explicitly; use an empty vector when none are
+selected. This CLI-only list filters those exact names from the resolver's
+expanded USER skill vector. It does not change the typed profile or inspect
+the supplied precomposed SYSTEM file.
 
 ```sh
 flow '<one inline Query datom>'
+flow --system-modules '[ spirit-core vision-design ]' '<one inline Start or Replace Query datom>'
+flow --system-modules '[]' '<one inline Start or Replace Query datom>'
 ```
 
 The ordinary pane operations use the same typed edge:

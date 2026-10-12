@@ -1337,8 +1337,7 @@ mod tests {
     #[test]
     fn codex_main_flow_first_text_block_keeps_system_bundle_out_of_user_turn() {
         use crate::composition::{
-            ComposesLaunch, KeepsLaunchBundles, LaunchBundles, LaunchComposer,
-            OpensLaunchComposer,
+            ComposesLaunch, KeepsLaunchBundles, LaunchBundles, LaunchComposer, OpensLaunchComposer,
         };
         let root = tempfile::tempdir().unwrap();
         let bundle = root.path().join("flow-system-prompt.md");
@@ -1377,9 +1376,7 @@ mod tests {
         assert_eq!(input[1]["name"], "knowledge-flow");
         let first_text = input[2]["text"].as_str().unwrap();
         assert_eq!(first_text, launch.first_prompt_payload.first_prompt_text);
-        assert!(first_text.starts_with(
-            "$operation-main-flow\n$knowledge-flow\n\n# Flow launch\n"
-        ));
+        assert!(first_text.starts_with("$operation-main-flow\n$knowledge-flow\n\n# Flow launch\n"));
         assert!(!first_text.contains("# Main-flow mode"));
         assert!(!first_text.contains("You are a main Flow."));
         assert!(!first_text.contains(per_launch_system_file.to_str().unwrap()));

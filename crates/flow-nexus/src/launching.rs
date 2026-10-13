@@ -27,9 +27,8 @@ use crate::{
         },
     },
     store::{
-        InspectsLaunchRequests, LaunchChanges, LaunchInspectionRecords, LaunchOutcome,
-        ReadsFlowRows, ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsReplacement, Replacement,
-        StoreError,
+        LaunchChanges, LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,
+        RecordsLaunchOutcome, RecordsReplacement, Replacement, StoreError,
     },
 };
 use notify::Watcher;

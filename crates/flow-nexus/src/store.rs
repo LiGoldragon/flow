@@ -5724,7 +5724,17 @@ pub(crate) trait ReadsFlowMemory {
         value: T,
     ) -> Result<(), StoreError>
     where
-        T: EngineRecord + PartialEq,
+        T: sema_engine::EngineStoredRecord + PartialEq + Send + Sync + 'static,
+        <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
+            + for<'validation> rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'validation>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
     {
         let rows = engine
             .match_records(QueryPlan::key(table, value.record_key()))?

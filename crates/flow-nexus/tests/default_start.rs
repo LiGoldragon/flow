@@ -49,7 +49,12 @@ fn spawn(home: &Path, runtime: &Path, start: &Start, configure_only: bool) -> St
         command.arg("--configure-only");
     }
     command
-        .arg(start.datomize(vec![]).protosize().compact())
+        // Exercise the operator's literal argv, independently of Start's serializer.
+        // These fixture paths are temporary ASCII paths without string delimiters.
+        .arg(format!(
+            "{{ «{}» «{}» «{}» }}",
+            start.ordinary_socket_path, start.meta_socket_path, start.store_path
+        ))
         .spawn()
         .map(|child| StartedNexus { child })
         .expect("flow-nexus spawns with typed Start")

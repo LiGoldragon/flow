@@ -47,7 +47,8 @@ impl ParsesStart for [String] {
     fn parse_start(&self) -> Result<flow_ethos::Start, String> {
         let [source] = self else {
             return Err(
-                "usage: flow-nexus 'Start.{ <ordinary-socket> <meta-socket> <store-path> }'".into(),
+                "usage: flow-nexus [--configure-only] '{ «ordinary-socket» «meta-socket» «store-path» }'"
+                    .into(),
             );
         };
         let mut budget = Budget {
@@ -206,6 +207,47 @@ mod tests {
         assert!([datom, "ignored.sock".into()].parse_start().is_err());
         assert!(Vec::<String>::new().parse_start().is_err());
         assert!(["Start.{".into()].parse_start().is_err());
+    }
+
+    #[test]
+    fn literal_start_argument_is_an_unheaded_struct() {
+        let expected = flow_ethos::Start {
+            ordinary_socket_path: "/run/flow.sock".into(),
+            meta_socket_path: "/run/flow-meta.sock".into(),
+            store_path: "/state/flow.sema".into(),
+        };
+        for literal in [
+            "{ /run/flow.sock /run/flow-meta.sock /state/flow.sema }",
+            "{ «/run/flow.sock» «/run/flow-meta.sock» «/state/flow.sema» }",
+        ] {
+            assert_eq!([literal.to_owned()].parse_start().unwrap(), expected);
+        }
+        assert!(
+            ["Start.{ /run/flow.sock /run/flow-meta.sock /state/flow.sema }".into()]
+                .parse_start()
+                .is_err()
+        );
+        let spaced = ["{ «/run/o s» «/run/m s» «/state/f s» }".to_owned()]
+            .parse_start()
+            .expect("delimited path strings preserve spaces");
+        assert_eq!(spaced.ordinary_socket_path, "/run/o s");
+        assert_eq!(spaced.meta_socket_path, "/run/m s");
+        assert_eq!(spaced.store_path, "/state/f s");
+    }
+
+    #[test]
+    fn usage_example_can_be_passed_as_one_start_argument() {
+        let usage = Vec::<String>::new().parse_start().unwrap_err();
+        let example = usage
+            .split_once('\'')
+            .and_then(|(_, example)| example.strip_suffix('\''))
+            .expect("usage contains one shell-quoted argument");
+        let parsed = [example.to_owned()]
+            .parse_start()
+            .expect("the advertised argument has the supported Start shape");
+        assert_eq!(parsed.ordinary_socket_path, "ordinary-socket");
+        assert_eq!(parsed.meta_socket_path, "meta-socket");
+        assert_eq!(parsed.store_path, "store-path");
     }
 
     #[test]

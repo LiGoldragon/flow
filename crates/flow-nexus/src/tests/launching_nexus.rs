@@ -1,7 +1,7 @@
 //! The ordinary socket is supplied by the typed Start input. Durable Nexus
 //! settings come from the committed Meta configuration snapshot.
 
-use crate::store::{ConfiguresOnlyStore, ManagesMetaflowState};
+use crate::store::{ConfiguresOnlyStore, LaysOutDefaults};
 use crate::{OpensRunningNexus, RunningNexus, store::ConfigurationOnlyStore};
 use meta_signal_flow::{ConfigurationChange, ConfigureNexus};
 use signal_flow::Start;

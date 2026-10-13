@@ -836,7 +836,7 @@ mod tests {
     mod reservation;
     mod submission;
 
-    use super::{Dispatches, OpensRunningNexus, RunningNexus};
+    use super::{Dispatches, OpensRunningNexus, ReconcilesListedFlows, RunningNexus};
     use crate::caller::{
         CallerPane, CallerProcess, IdentifiesPeer, LocatesCallerPane, ReadsProcess, ResolvesCaller,
     };

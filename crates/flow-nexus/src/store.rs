@@ -3748,7 +3748,7 @@ impl EarlierLaunchAttemptRows {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
+    use super::{Address, ConfigureModel, Layer, ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
     #[test]
     fn created_pane_survives_reopen_and_a_second_failed_binding_is_orphaned() {
         let fixture = StoreFixture::new();
@@ -4701,10 +4701,13 @@ mod tests {
             let mut counters = write
                 .open_table(super::SEMA_ENGINE_COUNTERS_TABLE)
                 .expect("engine counters open");
+            let foreign_layout =
+                rkyv::to_bytes::<rkyv::rancor::Error>(&(super::FLOW_ENGINE_STORAGE_LAYOUT + 1))
+                    .expect("foreign layout encodes with the engine counter representation");
             counters
                 .insert(
                     super::SEMA_ENGINE_STORAGE_LAYOUT_KEY,
-                    super::FLOW_ENGINE_STORAGE_LAYOUT + 1,
+                    foreign_layout.as_slice(),
                 )
                 .expect("foreign layout is planted");
         }

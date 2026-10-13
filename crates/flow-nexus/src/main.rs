@@ -4,7 +4,7 @@ use flow_nexus::{
     CarriesSignalFrames, OpensRunningNexus, RunningNexus, ServesMeta, ServesOrdinary,
     caller::{IdentifiesPeer, LocatesCallerPane},
     launching::PromotesAmbiguousLaunches,
-    store::{ConfigurationOnlyStore, DefaultConfiguration, LaysOutDefaults, StoreError},
+    store::{ConfigurationOnlyStore, DefaultConfiguration, ReadsAnchors, StoreError},
 };
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
@@ -546,7 +546,7 @@ trait RunsConfigurationStartup {
             Err(StoreError::ConfigurationConflict) => {
                 MetaResponse::ConfigureRejected(ConfigureRejection::Conflict)
             }
-            Err(error) => MetaResponse::Refused(error.to_string()),
+            Err(error) => MetaResponse::Refused(meta_signal_flow::Refusal::Store(error.to_string())),
         };
         let configured = matches!(&response, MetaResponse::Configured);
         peer.write_meta_response(&response)?;

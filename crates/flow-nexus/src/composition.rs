@@ -2,7 +2,7 @@
 
 use sha2::{Digest, Sha256};
 use signal_flow::{
-    ComposedLaunch, FirstPromptPayload, FlowAspect, HarnessKind, LaunchProfile, LaunchSource,
+    Aspect, ComposedLaunch, FirstPromptPayload, HarnessKind, LaunchProfile, LaunchSource,
     PowerLevel, TargetReceiptRequest,
 };
 use std::{
@@ -292,10 +292,10 @@ trait NamesRole {
 
 impl NamesRole for LaunchProfile {
     fn aspect_name(&self) -> &'static str {
-        match self.flow_aspect {
-            FlowAspect::Psyche => "Psyche",
-            FlowAspect::Mind => "Mind",
-            FlowAspect::Field => "Field",
+        match self.aspect {
+            Aspect::Psyche => "Psyche",
+            Aspect::Mind => "Mind",
+            Aspect::Field => "Field",
         }
     }
 
@@ -767,7 +767,7 @@ mod tests {
     use crate::composition::KeepsLaunchBundles;
     use sha2::Digest as _;
     use signal_flow::{
-        FlowAspect, HarnessKind, LaunchProfile, LaunchSource, PowerLevel, RememberedFlow,
+        Aspect, HarnessKind, LaunchProfile, LaunchSource, PowerLevel, RememberedFlow,
     };
     use std::fs;
 
@@ -788,7 +788,7 @@ mod tests {
                 launch_request_id: "launch-42".into(),
                 launch_source_vector: sources,
                 skill_name_vector: vec!["operation-main-flow".into(), "knowledge-flow".into()],
-                flow_aspect: FlowAspect::Field,
+                aspect: Aspect::Field,
                 power_level: PowerLevel::High,
                 harness_kind: HarnessKind::Codex,
                 model_name: "gpt-6-astra".into(),

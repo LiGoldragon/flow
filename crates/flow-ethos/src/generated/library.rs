@@ -32,6 +32,8 @@ pub type Hash = Blake3;
 #[rustfmt::skip]
 pub type Path = String;
 #[rustfmt::skip]
+pub type Reason = String;
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Source {
@@ -72,14 +74,6 @@ pub enum Request {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Aspect {
-    Psyche,
-    Mind,
-    Field,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum FlowAspect {
     Psyche,
     Mind,
     Field,
@@ -148,11 +142,27 @@ pub type OrdinarySocketPath = String;
 #[rustfmt::skip]
 pub type MetaSocketPath = String;
 #[rustfmt::skip]
+pub type StorePath = String;
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Start {
     pub ordinary_socket_path: OrdinarySocketPath,
     pub meta_socket_path: MetaSocketPath,
+    pub store_path: StorePath,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct StoreRefusal {
+    pub path: Path,
+    pub reason: Reason,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum StartRefusal {
+    Store(StoreRefusal),
 }
 #[rustfmt::skip]
 pub type SourceRoot = String;
@@ -204,7 +214,7 @@ pub struct HarnessProfile {
 #[rustfmt::skip]
 pub type HarnessProfiles = std::vec::Vec<HarnessProfile>;
 #[rustfmt::skip]
-pub type MetaAspects = std::vec::Vec<FlowAspect>;
+pub type MetaAspects = std::vec::Vec<Aspect>;
 #[rustfmt::skip]
 pub type MessageNexusPath = String;
 #[rustfmt::skip]

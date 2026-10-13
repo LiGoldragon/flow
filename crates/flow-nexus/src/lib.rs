@@ -1,5 +1,7 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
 
+use crate::store::ManagesMetaflowState;
+use crate::store::ReadsFlowMemory;
 // The generated Operation root names the store's own types by this crate's
 // name, as `flow_nexus::LaunchOutcome`; the Memory root is not compiled yet.
 extern crate self as flow_nexus;
@@ -17,6 +19,9 @@ pub mod claude;
 pub mod codex;
 pub mod composition;
 pub mod delivery;
+mod metaflow;
+mod pending_start_recovery;
+use metaflow::DispatchesMetaflowPeer;
 #[cfg(test)]
 mod fixture_executable;
 /// Generated from the operation and startup Ethos roots; `build.rs` keeps
@@ -37,8 +42,8 @@ use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchBundles, LaunchComposer, OpensLaunchComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
+use flow_ethos::Start;
 use generated::operation::{Operation, Outcome, Record_Data};
-use generated::startup::Start;
 use launching::{LaunchesFlows, ObservesLaunch, PrunesLaunchBundles};
 use observe_agent::ObservesAgent;
 use peer::{AdmitsMetaPeer, ResolvesPeer};
@@ -46,7 +51,7 @@ use performing::Performs;
 use reporting::RecordsReports;
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
-    Query, Response, RestartRejection,
+    Process, Query, Response, RestartRejection,
 };
 use std::{
     collections::HashSet,
@@ -62,8 +67,8 @@ use std::{
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, FlowStore, NamesLiveFlow,
-    OpensConfigurationOnlyStore, OpensFlowStore, ReadsFlowRows, RecordsLaunchOutcome,
-    RegistersExistingFlow, RegistersFlowIdentity,
+    OpensFlowStore, ReadsFlowRows, RecordsLaunchOutcome, RegistersExistingFlow,
+    RegistersFlowIdentity,
 };
 
 pub struct RunningNexus {
@@ -126,9 +131,7 @@ impl Dispatches for RunningNexus {
                             .refresh_route(self.herdr.claude_daemon.refreshed(node)),
                     ),
                     Ok(response) => response,
-                    Err(_) => Response::RecipientResolutionRejected(
-                        signal_flow::RecipientResolutionRejection::FlowUnavailable,
-                    ),
+                    Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
                 }
             }
             Query::Stop(flow_id) => {
@@ -137,10 +140,8 @@ impl Dispatches for RunningNexus {
                     Ok(None) => {
                         return Response::StopRejected(signal_flow::StopRejection::UnknownFlow);
                     }
-                    Err(_) => {
-                        return Response::StopRejected(
-                            signal_flow::StopRejection::PersistenceRefused,
-                        );
+                    Err(error) => {
+                        return Response::Refused(signal_flow::Refusal::Store(error.to_string()));
                     }
                 };
                 // A Retired seat is gone already, so there is nothing left
@@ -182,35 +183,47 @@ impl Dispatches for RunningNexus {
                 Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
             }
             Query::Report(report) => self.report(report),
-            Query::List(_) => self
-                .store
-                .flow_nodes()
-                .map(|nodes| Response::Listed(self.reconciled(nodes)))
-                .unwrap_or(Response::ListRejected(
-                    signal_flow::ListRejection::PersistenceRefused,
-                )),
+            Query::Current(address) => {
+                self.store
+                    .current_metaflow(&address)
+                    .unwrap_or_else(|error| {
+                        Response::Refused(signal_flow::Refusal::Store(error.to_string()))
+                    })
+            }
+            Query::Bind(_)
+            | Query::Identify(_)
+            | Query::Lock(_)
+            | Query::Deliver(_)
+            | Query::Release(_)
+            | Query::End(_) => Response::Refused(signal_flow::Refusal::NotMessage),
+            Query::Metaflows => self.store.list_metaflows().map_or_else(
+                |error| Response::Refused(signal_flow::Refusal::Store(error.to_string())),
+                Response::Listed,
+            ),
         }
     }
 
     fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
         match query {
-            meta_signal_flow::Query::Configure(configuration) => {
-                // The Codex adapters and the composer read the runtime
-                // configuration when the Nexus opens, so every change waits
-                // for the next start.
-                let stored = self
-                    .store
-                    .configure(configuration)
-                    .and_then(|_| self.store.configuration());
-                let Ok(configuration) = stored else {
-                    return meta_signal_flow::Response::ConfigureRejected(
-                        meta_signal_flow::ConfigureRejection::StoreRefused,
-                    );
-                };
-                meta_signal_flow::Response::Configured(meta_signal_flow::Configured {
-                    configuration,
-                    activation: meta_signal_flow::Activation::NexusRestartRequired,
-                })
+            meta_signal_flow::Query::Configuration => match self.store.configuration_snapshot() {
+                Ok(Some(snapshot)) => meta_signal_flow::Response::Configuration(snapshot),
+                Ok(None) => meta_signal_flow::Response::Unconfigured,
+                Err(error) => meta_signal_flow::Response::Refused(
+                    meta_signal_flow::Refusal::Store(error.to_string()),
+                ),
+            },
+            meta_signal_flow::Query::Configure(change) => {
+                match self.store.configure_change(change) {
+                    Ok(()) => meta_signal_flow::Response::Configured,
+                    Err(store::StoreError::ConfigurationConflict) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::Conflict,
+                        )
+                    }
+                    Err(error) => meta_signal_flow::Response::Refused(
+                        meta_signal_flow::Refusal::Store(error.to_string()),
+                    ),
+                }
             }
             meta_signal_flow::Query::ConsumeReset(request) => self
                 .codex_endpoints
@@ -351,7 +364,7 @@ impl Dispatches for RunningNexus {
                     };
                     let role = signal_flow::Caller {
                         flow_id: flow_id.clone(),
-                        flow_aspect: binding.flow_aspect,
+                        aspect: binding.aspect,
                         power_level: binding.power_level,
                         model_name: binding.model_name,
                     };
@@ -412,28 +425,31 @@ impl Dispatches for RunningNexus {
 }
 
 pub trait OpensRunningNexus {
-    /// Opens the Nexus from its default configuration: the store at the
-    /// default location seeds or resumes configuration, which changes only
-    /// over the meta socket.
-    fn open(defaults: &store::DefaultConfiguration) -> Result<Self, store::StoreError>
-    where
-        Self: Sized;
-
-    /// Opens the declared store only after a complete configuration has been
-    /// committed for the exact socket paths carried by Start.
-    fn open_started(
+    /// Opens the configured Nexus from one typed Start payload. Durable
+    /// runner values come from the committed Meta configuration snapshot;
+    /// socket paths come only from this Start value.
+    fn open(
         defaults: &store::DefaultConfiguration,
-        start: &Start,
+        start: &flow_ethos::Start,
     ) -> Result<Self, store::StoreError>
     where
         Self: Sized;
 }
 
 impl OpensRunningNexus for RunningNexus {
-    fn open(defaults: &store::DefaultConfiguration) -> Result<Self, store::StoreError> {
-        use store::LaysOutDefaults;
-        let store = FlowStore::open_seeded(&defaults.store_path(), defaults)?;
-        let runtime = store.runtime_configuration()?;
+    fn open(
+        _defaults: &store::DefaultConfiguration,
+        start: &flow_ethos::Start,
+    ) -> Result<Self, store::StoreError> {
+        let store_path = Path::new(&start.store_path);
+        // The configured opener checks the typed store path read-only first,
+        // reads the committed snapshot, and only then registers runtime tables.
+        // It never seeds defaults, upgrades a predecessor, or settles work.
+        let store = FlowStore::open_configured(store_path)?;
+        let snapshot = store
+            .configuration_snapshot()?
+            .ok_or(store::StoreError::NotConfigured)?;
+        let runtime = store::RuntimeConfiguration::from(&snapshot.nexus);
         let codex_endpoints = CodexEndpoints::from(&runtime);
         let overlap = codex_endpoints.overlapping_models();
         if !overlap.is_empty() {
@@ -442,48 +458,13 @@ impl OpensRunningNexus for RunningNexus {
             );
         }
         let source_root = PathBuf::from(&runtime.source_root);
-        let launch_bundles = LaunchBundles::at(defaults.launch_bundle_directory());
+        let launch_bundles = LaunchBundles::at(
+            store_path.parent().ok_or(store::StoreError::InvalidStorePath)?
+                .join(<store::DefaultConfiguration as store::LaysOutDefaults>::LAUNCH_BUNDLE_DIRECTORY),
+        );
         // The socket this Nexus serves: a changed one takes effect only on
         // restart, so the store's value at open is the one being served.
-        let ordinary_socket = PathBuf::from(store.configuration()?.ordinary_socket_path);
-        Ok(Self {
-            store,
-            codex_endpoints: codex_endpoints.clone(),
-            herdr: herdr::HerdrCli::default()
-                .with_source_root(&source_root)
-                .with_codex_endpoints(codex_endpoints)
-                .with_ordinary_socket(&ordinary_socket)
-                .with_launch_bundles(launch_bundles.clone()),
-            composer: LaunchComposer::at(source_root, launch_bundles),
-            dispatch_gate: Mutex::new(()),
-            pane_leases: delivery::lease::PaneLeases::default(),
-        })
-    }
-
-    fn open_started(
-        defaults: &store::DefaultConfiguration,
-        start: &Start,
-    ) -> Result<Self, store::StoreError> {
-        let store_path = PathBuf::from(&start.store_path);
-        if !store_path.is_absolute() || store_path.file_name().is_none() {
-            return Err(store::StoreError::InvalidStorePath);
-        }
-        let launch_bundle_directory = store_path
-            .parent()
-            .ok_or(store::StoreError::InvalidStorePath)?
-            .join(<store::DefaultConfiguration as store::LaysOutDefaults>::LAUNCH_BUNDLE_DIRECTORY);
-        let store = FlowStore::open_started(&store_path, defaults, start)?;
-        let runtime = store.runtime_configuration()?;
-        let codex_endpoints = CodexEndpoints::from(&runtime);
-        let overlap = codex_endpoints.overlapping_models();
-        if !overlap.is_empty() {
-            eprintln!(
-                "flow-nexus: models selected by both Codex endpoints are unavailable: {overlap:?}"
-            );
-        }
-        let source_root = PathBuf::from(&runtime.source_root);
-        let launch_bundles = LaunchBundles::at(launch_bundle_directory);
-        let ordinary_socket = PathBuf::from(&store.configuration()?.ordinary_socket_path);
+        let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
         Ok(Self {
             store,
             codex_endpoints: codex_endpoints.clone(),
@@ -505,6 +486,9 @@ impl OpensRunningNexus for RunningNexus {
 /// a failed write drops only this connection.
 pub struct Connection {
     peer: UnixStream,
+    /// PID and kernel start token captured when this socket was accepted.
+    /// Privileged ordinary operations recheck both before using the peer.
+    process: Option<Process>,
 }
 
 pub trait ServesConnection: Sized {
@@ -520,7 +504,10 @@ impl ServesConnection for Connection {
         peer.set_read_timeout(Some(Self::READ_TIMEOUT))
             .and_then(|_| peer.set_write_timeout(Some(Self::WRITE_TIMEOUT)))
             .map_err(|error| error.to_string())?;
-        Ok(Self { peer })
+        let process = peer
+            .peer_process()
+            .and_then(|peer| FlowStore::process_identity_for_pid(peer.process_id));
+        Ok(Self { peer, process })
     }
 
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
@@ -549,6 +536,12 @@ impl ServesConnection for Connection {
                     .and_then(|process| process.caller_pane()),
                 claim,
             ),
+            query @ (Query::Bind(_)
+            | Query::Identify(_)
+            | Query::Lock(_)
+            | Query::Deliver(_)
+            | Query::Release(_)
+            | Query::End(_)) => nexus.dispatch_metaflow_peer(query, self.process.as_ref()),
             query => nexus.dispatch_serially(query),
         };
         self.peer.write_response(&response)
@@ -627,9 +620,9 @@ impl ListensOnSocket for RunningNexus {}
 /// `Deliver` that finds the pane gone — persists an ended lifecycle. Reading the
 /// truth and recording it are deliberately separate.
 ///
-/// Only a live flow is looked at: one already Stopped, Exited or Retired is
-/// answered from its row, and a pane Herdr cannot be read for is answered
-/// exactly as stored — an unreadable Herdr neither promotes nor ends anything.
+/// This helper is for internal native-flow reconciliation. Metaflows on the
+/// ordinary wire are read from their own durable records and never projected
+/// from these native seat rows.
 pub trait ReconcilesListedFlows {
     fn reconciled(&self, nodes: Vec<FlowNode>) -> Vec<FlowNode>;
     fn reconciled_node(&self, node: FlowNode) -> FlowNode;
@@ -837,6 +830,7 @@ mod tests {
     use crate::composition::KeepsLaunchBundles;
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
+    use crate::store::ConfiguresOnlyStore;
     mod delivery;
     mod launching_nexus;
     mod reservation;
@@ -850,25 +844,23 @@ mod tests {
     use crate::{
         codex::{CodexEndpoint, CodexEndpoints},
         composition::{ComposesLaunch, LaunchBundles, LaunchComposer, OpensLaunchComposer},
-        generated::startup::Start,
         herdr::HerdrCli,
         store::{
             ConfigurationOnlyStore, ConfiguresFlowStore, DefaultConfiguration, FlowStore,
-            LaunchOutcome, OpensConfigurationOnlyStore, OpensFlowStore, RecordsFlowLifecycle,
-            RecordsLaunchOutcome, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
-            RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
-            RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
-            SeedsConfiguration,
+            LaunchOutcome, OpensFlowStore, RecordsFlowLifecycle, RecordsLaunchOutcome,
+            RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
+            RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersFlowIdentity,
+            ReservesLaunchAttempt, SeedsConfiguration,
         },
     };
     use sha2::{Digest, Sha256};
     use signal_flow::{
-        Caller, EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind,
-        HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile,
-        LaunchSource, LaunchStatusOutcome, NativeLaunchBinding, NativeLaunchIntent,
-        NativeTranscriptAbsence, NativeTranscriptBoundary, OriginClue, PowerLevel,
-        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
-        StartRejection, StartRequest,
+        Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding,
+        HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile, LaunchSource,
+        LaunchStatusOutcome, NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence,
+        NativeTranscriptBoundary, OriginClue, PowerLevel, PromptDeliveryIntent,
+        PromptDeliveryResult, Query, RegistrationAcknowledgement, Response, StartRejection,
+        StartRequest,
     };
     use std::{
         collections::BTreeSet,
@@ -888,7 +880,7 @@ mod tests {
             runtime_directory: directory.path().join("runtime"),
         };
         let store_path = directory.path().join("isolated-state/flow.sema");
-        let start = Start {
+        let start = flow_ethos::Start {
             ordinary_socket_path: directory
                 .path()
                 .join("isolated-sockets/ordinary.sock")
@@ -904,16 +896,25 @@ mod tests {
         std::fs::create_dir_all(store_path.parent().unwrap()).expect("store parent");
         let configuration_store =
             ConfigurationOnlyStore::open(&store_path).expect("configuration store");
-        let mut configuration = defaults.configuration();
-        configuration.ordinary_socket_path = start.ordinary_socket_path.clone();
-        configuration.meta_socket_path = start.meta_socket_path.clone();
+        let configuration = defaults.configuration();
         configuration_store
-            .configure(configuration)
+            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+                meta_signal_flow::ConfigureNexus {
+                    source_root: configuration.source_root,
+                    stable_codex: configuration.stable_codex,
+                    next_codex: configuration.next_codex,
+                    harness_profiles: configuration.harness_profile_vector,
+                    meta_aspects: configuration.meta_aspects,
+                    message_nexus_path: configuration.message_nexus_path,
+                    message_nexus_binary: "/fixture/message-nexus".into(),
+                    lease: 60,
+                },
+            ))
             .expect("configuration commits");
         drop(configuration_store);
 
-        let nexus = RunningNexus::open_started(&defaults, &start)
-            .expect("explicit configured store starts");
+        let nexus =
+            RunningNexus::open(&defaults, &start).expect("explicit configured store starts");
         let bundle_path = nexus.composer.launch_bundles().file_for_request("fixture");
         assert_eq!(
             bundle_path.parent().unwrap(),
@@ -1033,7 +1034,7 @@ mod tests {
     fn existing_binding(flow_id: &str, pane: &str) -> meta_signal_flow::FlowBinding {
         meta_signal_flow::FlowBinding {
             flow_id: flow_id.into(),
-            flow_aspect: FlowAspect::Mind,
+            aspect: Aspect::Mind,
             power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
             harness_kind: HarnessKind::Codex,
@@ -1249,8 +1250,8 @@ mod tests {
         assert!(garbage.read_response().is_err());
 
         let mut peer = connect();
-        peer.write_query(&Query::List(signal_flow::ListRequest {}))
-            .expect("list written");
+        peer.write_query(&Query::Metaflows)
+            .expect("metaflows query written");
         assert!(matches!(
             peer.read_response().expect("list answered"),
             Response::Listed(_)
@@ -1322,8 +1323,8 @@ mod tests {
         }
 
         /// The lifecycle as the row holds it, with no reconciliation. This
-        /// is what the Deliver path did or did not write; List answers the
-        /// reconciled truth instead, which is a separate claim.
+        /// is what the Deliver path did or did not write; reconciliation is
+        /// a separate claim from the stored row.
         fn stored_lifecycle(&self) -> FlowLifecycle {
             use crate::store::ReadsFlowRows as _;
             self.nexus
@@ -1335,14 +1336,10 @@ mod tests {
         }
 
         fn only_lifecycle(&self) -> FlowLifecycle {
-            let Response::Listed(rows) = self
-                .nexus
-                .dispatch(Query::List(signal_flow::ListRequest {}))
-            else {
-                panic!("list must return durable Flow rows")
-            };
+            use crate::store::ReadsFlowRows as _;
+            let rows = self.nexus.store.flow_nodes().expect("Flow rows read");
             assert_eq!(rows.len(), 1);
-            rows[0].flow_lifecycle.clone()
+            self.nexus.reconciled_node(rows[0].clone()).flow_lifecycle
         }
     }
 
@@ -1612,12 +1609,8 @@ mod tests {
             fixture.send_to("908786", "stale route prompt"),
             Sent::Refused(meta_signal_flow::DeliveryRejection::RouteUnavailable)
         );
-        let Response::Listed(rows) = fixture
-            .nexus
-            .dispatch(Query::List(signal_flow::ListRequest {}))
-        else {
-            panic!("list must return durable Flow rows")
-        };
+        use crate::store::ReadsFlowRows as _;
+        let rows = fixture.nexus.store.flow_nodes().expect("Flow rows read");
         assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
     }
 
@@ -1782,14 +1775,10 @@ mod tests {
     }
 
     fn listed(fixture: &NexusFixture) -> FlowNode {
-        let Response::Listed(rows) = fixture
-            .nexus
-            .dispatch(Query::List(signal_flow::ListRequest {}))
-        else {
-            panic!("list must return durable Flow rows")
-        };
+        use crate::store::ReadsFlowRows as _;
+        let rows = fixture.nexus.store.flow_nodes().expect("Flow rows read");
         assert_eq!(rows.len(), 1);
-        rows[0].clone()
+        fixture.nexus.reconciled_node(rows[0].clone())
     }
 
     // The fixture's Codex endpoints name sockets that do not exist: an
@@ -1910,7 +1899,7 @@ mod tests {
 
         let role = Caller {
             flow_id: "908786".into(),
-            flow_aspect: FlowAspect::Mind,
+            aspect: Aspect::Mind,
             power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
         };
@@ -1988,7 +1977,7 @@ mod tests {
                 source_sha256: format!("{:x}", Sha256::digest(b"exact source bytes\n")),
             }],
             skill_name_vector: Vec::new(),
-            flow_aspect: FlowAspect::Field,
+            aspect: Aspect::Field,
             power_level: PowerLevel::High,
             harness_kind: HarnessKind::Codex,
             model_name: "fixture-model".into(),
@@ -2049,7 +2038,7 @@ mod tests {
                 source_sha256: format!("{:x}", Sha256::digest(b"delayed exact bytes\n")),
             }],
             skill_name_vector: Vec::new(),
-            flow_aspect: FlowAspect::Field,
+            aspect: Aspect::Field,
             power_level: PowerLevel::High,
             harness_kind: HarnessKind::Codex,
             model_name: "fixture-model".into(),
@@ -2257,12 +2246,9 @@ mod tests {
         // The pane exits. Nothing else changes.
         fixture.set_agents(vec![]);
 
-        let Response::Listed(rows) = fixture
-            .nexus
-            .dispatch(Query::List(signal_flow::ListRequest {}))
-        else {
-            panic!("List answers")
-        };
+        use crate::store::ReadsFlowRows as _;
+        let rows = fixture.nexus.store.flow_nodes().expect("Flow rows read");
+        let rows = fixture.nexus.reconciled(rows);
         assert_eq!(rows.len(), 1, "the row and its history stay");
         assert_eq!(rows[0].flow_id, "908786");
         assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Exited);
@@ -2397,7 +2383,7 @@ mod tests {
     /// The owner reads the events back with ReadEvents.
     #[test]
     fn a_report_is_recorded_for_a_held_flow_and_refused_for_an_unknown_one() {
-        use signal_flow::{Event, Refused_Data, Report_Data};
+        use signal_flow::{Event, Report_Data};
         let fixture = NexusFixture::new();
         fixture.set_agents(vec![fixture.current_agent()]);
         fixture.register_with(FlowLifecycle::Active);
@@ -2410,7 +2396,9 @@ mod tests {
 
         assert_eq!(
             report("0a0a0a", Event::Started),
-            Response::Refused(Refused_Data::UnknownFlow("0a0a0a".into()))
+            Response::Refused(signal_flow::Refusal::Unknown(
+                signal_flow::Unknown_Data::FlowId("0a0a0a".into())
+            ))
         );
         assert_eq!(
             fixture
@@ -2668,7 +2656,7 @@ mod tests {
                     source_sha256: format!("{:x}", Sha256::digest(b"staged exact bytes\n")),
                 }],
                 skill_name_vector: Vec::new(),
-                flow_aspect: FlowAspect::Field,
+                aspect: Aspect::Field,
                 power_level: PowerLevel::High,
                 harness_kind: HarnessKind::Codex,
                 model_name: "fixture-model".into(),
@@ -2830,15 +2818,12 @@ mod tests {
         }
 
         fn lifecycle(&self, flow_id: &str) -> FlowLifecycle {
-            let Response::Listed(rows) = self
-                .nexus
-                .dispatch(Query::List(signal_flow::ListRequest {}))
-            else {
-                panic!("List answers")
-            };
-            rows.into_iter()
-                .find(|row| row.flow_id == flow_id)
-                .expect("listed flow")
+            use crate::store::ReadsFlowRows as _;
+            self.nexus
+                .store
+                .flow_node(flow_id)
+                .expect("Flow row read")
+                .expect("flow row")
                 .flow_lifecycle
         }
     }
@@ -3617,7 +3602,7 @@ mod tests {
     fn mind_live() -> Caller {
         Caller {
             flow_id: "mind-live".into(),
-            flow_aspect: FlowAspect::Mind,
+            aspect: Aspect::Mind,
             power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
         }
@@ -3823,18 +3808,23 @@ mod tests {
         };
         let fixture = NexusFixture::with_store(|path| rows.seed(path));
         assert_eq!(fixture.nexus.store.opening_settlements.len(), 2);
-        assert!(matches!(
+        use crate::store::ReadsFlowRows as _;
+        assert_eq!(
             fixture
                 .nexus
-                .dispatch(Query::List(signal_flow::ListRequest {})),
-            Response::Listed(rows) if rows.len() == 1 && rows[0].flow_id == "launched-earlier"
-        ));
+                .store
+                .flow_node("launched-earlier")
+                .expect("Flow row read")
+                .expect("earlier Flow row")
+                .flow_id,
+            "launched-earlier"
+        );
         assert!(matches!(
             fixture.nexus.dispatch(Query::LaunchStatus(
                 crate::store::EarlierLaunchAttemptRows::EARLIER_REQUEST.into()
             )),
             Response::LaunchInspected(inspection)
-                if inspection.launch_attempt.launch_profile.flow_aspect == FlowAspect::Psyche
+                if inspection.launch_attempt.launch_profile.aspect == Aspect::Psyche
                     && inspection.launch_status_outcome_option.is_none()
         ));
         assert!(matches!(

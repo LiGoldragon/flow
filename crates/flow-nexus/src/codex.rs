@@ -1252,7 +1252,7 @@ mod tests {
                 launch_request_id: "launch-malformed".into(),
                 launch_source_vector: vec![],
                 skill_name_vector: vec![],
-                flow_aspect: signal_flow::FlowAspect::Field,
+                aspect: signal_flow::Aspect::Field,
                 power_level: signal_flow::PowerLevel::Medium,
                 harness_kind: HarnessKind::Codex,
                 model_name: "gpt-5.6".into(),

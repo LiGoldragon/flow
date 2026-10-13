@@ -6,7 +6,7 @@
 //! `Psyche.{ Fable 38de5b }`. Power never enters the title. An unmapped
 //! model identifier is refused; no alias and no fallback is accepted.
 
-use signal_flow::{FlowAspect, LaunchProfile};
+use signal_flow::{Aspect, LaunchProfile};
 use thiserror::Error;
 
 /// Exact native model identifiers and their display names. This mirrors the
@@ -75,10 +75,10 @@ impl TitlesFlow for LaunchProfile {
             .model_name
             .model_display_name()
             .ok_or_else(|| TitleRefused::UnmappedModel(self.model_name.clone()))?;
-        let aspect = match self.flow_aspect {
-            FlowAspect::Psyche => "Psyche",
-            FlowAspect::Mind => "Mind",
-            FlowAspect::Field => "Field",
+        let aspect = match self.aspect {
+            Aspect::Psyche => "Psyche",
+            Aspect::Mind => "Mind",
+            Aspect::Field => "Field",
         };
         Ok(NativeTitle(format!("{aspect}.{{ {model} {flow_id} }}")))
     }
@@ -98,14 +98,14 @@ impl ShowsNativeTitle for NativeTitle {
 #[cfg(test)]
 mod tests {
     use super::{ShowsNativeTitle, TitleRefused, TitlesFlow};
-    use signal_flow::{FlowAspect, HarnessKind, LaunchProfile, PowerLevel};
+    use signal_flow::{Aspect, HarnessKind, LaunchProfile, PowerLevel};
 
-    fn profile(aspect: FlowAspect, model: &str) -> LaunchProfile {
+    fn profile(aspect: Aspect, model: &str) -> LaunchProfile {
         LaunchProfile {
             launch_request_id: "launch-title".into(),
             launch_source_vector: vec![],
             skill_name_vector: vec![],
-            flow_aspect: aspect,
+            aspect: aspect,
             power_level: PowerLevel::High,
             harness_kind: HarnessKind::Claude,
             model_name: model.into(),
@@ -121,21 +121,21 @@ mod tests {
     #[test]
     fn title_is_the_datom_of_aspect_model_and_flow() {
         assert_eq!(
-            profile(FlowAspect::Psyche, "claude-fable-5-1")
+            profile(Aspect::Psyche, "claude-fable-5-1")
                 .native_title("38de5b")
                 .unwrap()
                 .as_str(),
             "Psyche.{ Fable 38de5b }"
         );
         assert_eq!(
-            profile(FlowAspect::Mind, "gpt-6-sol")
+            profile(Aspect::Mind, "gpt-6-sol")
                 .native_title("00f95a")
                 .unwrap()
                 .as_str(),
             "Mind.{ Sol 00f95a }"
         );
         // Power never enters the title.
-        let mut low = profile(FlowAspect::Field, "gpt-6-luna");
+        let mut low = profile(Aspect::Field, "gpt-6-luna");
         low.power_level = PowerLevel::UltraLow;
         assert_eq!(
             low.native_title("e71dab").unwrap().as_str(),
@@ -146,12 +146,12 @@ mod tests {
     #[test]
     fn unmapped_models_and_malformed_flow_ids_are_refused() {
         assert_eq!(
-            profile(FlowAspect::Psyche, "fable").native_title("38de5b"),
+            profile(Aspect::Psyche, "fable").native_title("38de5b"),
             Err(TitleRefused::UnmappedModel("fable".into()))
         );
         for flow_id in ["38DE5B", "38de5", "38de5bb", "38de5g", ""] {
             assert_eq!(
-                profile(FlowAspect::Psyche, "claude-fable-5-1").native_title(flow_id),
+                profile(Aspect::Psyche, "claude-fable-5-1").native_title(flow_id),
                 Err(TitleRefused::InvalidFlowId)
             );
         }

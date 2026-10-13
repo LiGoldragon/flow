@@ -1,13 +1,9 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
-use meta_signal_flow::{
-    Configuration, ConfigurationAssignment, ConfigurationFile, ConfigurationFilePath,
-    ConfigurationFragment, ConfigureFiles, CreditSelection, HarnessProfileVector, Query,
-    ResetRequest, Response,
-};
+use meta_signal_flow::{CreditSelection, Query, ResetRequest, Response};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
-    env, fs,
+    env,
     io::{Read, Write},
     os::unix::net::UnixStream,
 };
@@ -20,7 +16,7 @@ trait ParsesMetaCommand {
     fn parse_command(&self, arguments: impl Iterator<Item = String>) -> Result<Query, String>;
 
     fn query_usage() -> String {
-        "usage: flow-meta '<one inline Query or ConfigureFiles Datom>'".into()
+        "usage: flow-meta '<one inline Query Datom>'".into()
     }
 
     fn registration_usage() -> String {
@@ -31,21 +27,10 @@ trait CallsMetaNexus {
     fn call(&self, query: &Query) -> Result<Response, String>;
 }
 
-trait ComposesConfigurationFiles {
+trait ParsesMetaDatom {
     fn parse_datom<T: datom_codec::Composing>(source: String, subject: &str) -> Result<T, String>;
-    fn record_assignment<T: PartialEq>(
-        target: &mut Option<(T, String)>,
-        value: T,
-        field: &str,
-        source: &str,
-    ) -> Result<(), String>;
-    fn required_assignment<T>(target: Option<(T, String)>, field: &str) -> Result<T, String>;
-    fn compose_configuration_files(
-        paths: Vec<ConfigurationFilePath>,
-    ) -> Result<Configuration, String>;
 }
-
-impl ComposesConfigurationFiles for FlowMetaClient {
+impl ParsesMetaDatom for FlowMetaClient {
     fn parse_datom<T: datom_codec::Composing>(source: String, subject: &str) -> Result<T, String> {
         let mut budget = Budget {
             remaining: 65_536,
@@ -56,152 +41,6 @@ impl ComposesConfigurationFiles for FlowMetaClient {
         Potential::<T>::from(source)
             .actualize(&mut budget)
             .map_err(|error| format!("invalid {subject} datom: {error:?}"))
-    }
-
-    fn record_assignment<T: PartialEq>(
-        target: &mut Option<(T, String)>,
-        value: T,
-        field: &str,
-        source: &str,
-    ) -> Result<(), String> {
-        match target {
-            Some((previous, first_source)) if previous != &value => Err(format!(
-                "conflicting {field} assignments in {first_source} and {source}"
-            )),
-            Some(_) => Ok(()),
-            None => {
-                *target = Some((value, source.to_owned()));
-                Ok(())
-            }
-        }
-    }
-
-    fn required_assignment<T>(target: Option<(T, String)>, field: &str) -> Result<T, String> {
-        target
-            .map(|(value, _)| value)
-            .ok_or_else(|| format!("configuration fragments omit required field {field}"))
-    }
-
-    fn compose_configuration_files(
-        paths: Vec<ConfigurationFilePath>,
-    ) -> Result<Configuration, String> {
-        let mut files = Vec::with_capacity(paths.len());
-        for path in paths {
-            let contents = fs::read_to_string(&path.path).map_err(|error| {
-                format!("cannot read configuration fragment {}: {error}", path.path)
-            })?;
-            let configuration_fragment =
-                Self::parse_datom::<ConfigurationFragment>(contents, "ConfigurationFragment")
-                    .map_err(|error| format!("{}: {error}", path.path))?;
-            files.push(ConfigurationFile {
-                configuration_file_path: path,
-                configuration_fragment,
-            });
-        }
-
-        let mut ordinary_socket_path = None;
-        let mut meta_socket_path = None;
-        let mut source_root = None;
-        let mut stable_codex = None;
-        let mut next_codex = None;
-        let mut harness_profile_vector: Option<(HarnessProfileVector, String)> = None;
-        let mut meta_aspects = None;
-        let mut message_nexus_path = None;
-
-        for file in files {
-            let source = file.configuration_file_path.path;
-            for assignment in file.configuration_fragment.configuration_assignment_vector {
-                match assignment {
-                    ConfigurationAssignment::OrdinarySocketPath(value) => Self::record_assignment(
-                        &mut ordinary_socket_path,
-                        value,
-                        "OrdinarySocketPath",
-                        &source,
-                    )?,
-                    ConfigurationAssignment::MetaSocketPath(value) => Self::record_assignment(
-                        &mut meta_socket_path,
-                        value,
-                        "MetaSocketPath",
-                        &source,
-                    )?,
-                    ConfigurationAssignment::SourceRoot(value) => {
-                        Self::record_assignment(&mut source_root, value, "SourceRoot", &source)?
-                    }
-                    ConfigurationAssignment::StableCodex(value) => {
-                        Self::record_assignment(&mut stable_codex, value, "StableCodex", &source)?
-                    }
-                    ConfigurationAssignment::NextCodex(value) => {
-                        Self::record_assignment(&mut next_codex, value, "NextCodex", &source)?
-                    }
-                    ConfigurationAssignment::HarnessProfileVector(value) => {
-                        Self::record_assignment(
-                            &mut harness_profile_vector,
-                            value,
-                            "HarnessProfileVector",
-                            &source,
-                        )?
-                    }
-                    ConfigurationAssignment::MetaAspects(value) => {
-                        Self::record_assignment(&mut meta_aspects, value, "MetaAspects", &source)?
-                    }
-                    ConfigurationAssignment::MessageNexusPath(value) => Self::record_assignment(
-                        &mut message_nexus_path,
-                        value,
-                        "MessageNexusPath",
-                        &source,
-                    )?,
-                }
-            }
-        }
-
-        let mut missing = Vec::new();
-        if ordinary_socket_path.is_none() {
-            missing.push("OrdinarySocketPath");
-        }
-        if meta_socket_path.is_none() {
-            missing.push("MetaSocketPath");
-        }
-        if source_root.is_none() {
-            missing.push("SourceRoot");
-        }
-        if stable_codex.is_none() {
-            missing.push("StableCodex");
-        }
-        if next_codex.is_none() {
-            missing.push("NextCodex");
-        }
-        if harness_profile_vector.is_none() {
-            missing.push("HarnessProfileVector");
-        }
-        if meta_aspects.is_none() {
-            missing.push("MetaAspects");
-        }
-        if message_nexus_path.is_none() {
-            missing.push("MessageNexusPath");
-        }
-        if !missing.is_empty() {
-            return Err(format!(
-                "configuration fragments omit required fields: {}",
-                missing.join(", ")
-            ));
-        }
-
-        Ok(Configuration {
-            ordinary_socket_path: Self::required_assignment(
-                ordinary_socket_path,
-                "OrdinarySocketPath",
-            )?,
-            meta_socket_path: Self::required_assignment(meta_socket_path, "MetaSocketPath")?,
-            source_root: Self::required_assignment(source_root, "SourceRoot")?,
-            stable_codex: Self::required_assignment(stable_codex, "StableCodex")?,
-            next_codex: Self::required_assignment(next_codex, "NextCodex")?,
-            harness_profile_vector: Self::required_assignment(
-                harness_profile_vector,
-                "HarnessProfileVector",
-            )?,
-            meta_aspects: Self::required_assignment(meta_aspects, "MetaAspects")?,
-            message_nexus_path: Self::required_assignment(message_nexus_path, "MessageNexusPath")?,
-        })
     }
 }
 
@@ -296,18 +135,6 @@ impl ParsesMetaCommand for FlowMetaClient {
                     flow_lifecycle: signal_flow::FlowLifecycle::Active,
                 }))
             }
-            // Ethos declares ConfigureFiles as a struct, whose generated
-            // Datom form is positional and brace-delimited (unlike Query's
-            // named variant forms).
-            Some(datom) if datom.trim_start().starts_with('{') => {
-                if arguments.next().is_some() {
-                    return Err(Self::query_usage());
-                }
-                let input =
-                    Self::parse_datom::<ConfigureFiles>(datom.to_owned(), "ConfigureFiles")?;
-                Self::compose_configuration_files(input.configuration_file_path_vector)
-                    .map(Query::Configure)
-            }
             // A capitalized argument is one inline meta Query datom, the
             // shape every request takes once the word commands retire.
             Some(datom) if datom.starts_with(|first: char| first.is_ascii_uppercase()) => {
@@ -370,186 +197,50 @@ fn main() {
 mod tests {
     use super::{FlowMetaClient, ParsesMetaCommand};
     use datom_codec::Datomizable;
-    use meta_signal_flow::{ConfigurationFilePath, ConfigureFiles, CreditSelection, Query};
+    use meta_signal_flow::{ConfigurationChange, ConfigureNexus, CreditSelection, Query};
     use protos::{Compactable, Protosizable};
-    use std::{fs, path::Path};
-
-    fn write_fragment(directory: &Path, name: &str, fragment: &str) -> String {
-        let path = directory.join(name);
-        fs::write(&path, fragment).expect("write fixture fragment");
-        path.to_string_lossy().into_owned()
-    }
-
-    fn configure_files_datom(paths: &[String]) -> String {
-        ConfigureFiles {
-            configuration_file_path_vector: paths
-                .iter()
-                .map(|path| ConfigurationFilePath { path: path.clone() })
-                .collect(),
-        }
-        .datomize(vec![])
-        .protosize()
-        .compact()
-    }
-
-    fn parse_files(paths: &[String]) -> Result<Query, String> {
-        FlowMetaClient {
-            socket: "unused".into(),
-        }
-        .parse_command([configure_files_datom(paths)].into_iter())
-    }
-
-    fn fragment(assignments: &str) -> String {
-        format!("{{ [ {assignments} ] }}")
-    }
-
-    const SOCKETS_AND_ROOT: &str = "OrdinarySocketPath./run/user/1000/flow.sock MetaSocketPath./run/user/1000/flow-meta.sock SourceRoot./home/test/primary";
-    const CODEX_ENDPOINTS: &str = "StableCodex.{ /usr/bin/codex-stable /home/test/.codex /home/test/.codex/app-server-control/control.sock [ gpt-6-luna ] } NextCodex.{ /usr/bin/codex-next /home/test/.codex-next /home/test/.codex-next/app-server-control/control.sock [ gpt-6-sol ] }";
-    const DELIVERY_SETTINGS: &str = "HarnessProfileVector.[ { Claude [ / «!» # ] [ esc ] [ enter ] } { Codex [ / «!» ] [ esc ] [] } ] MetaAspects.[ Psyche ] MessageNexusPath./usr/bin/message-nexus";
 
     #[test]
-    fn configure_files_compose_multiple_fragments_and_accept_equal_duplicates() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let paths = [
-            write_fragment(
-                directory.path(),
-                "sockets.datom",
-                &fragment(SOCKETS_AND_ROOT),
-            ),
-            write_fragment(
-                directory.path(),
-                "codex.datom",
-                &fragment(
-                    "SourceRoot./home/test/primary ", /* identical assignment */
-                ),
-            ),
-            write_fragment(
-                directory.path(),
-                "endpoints.datom",
-                &fragment(CODEX_ENDPOINTS),
-            ),
-            write_fragment(
-                directory.path(),
-                "delivery.datom",
-                &fragment(DELIVERY_SETTINGS),
-            ),
-        ];
-
-        let Query::Configure(configuration) = parse_files(&paths).expect("complete config") else {
-            panic!("ConfigureFiles must lower to the existing Configure query")
+    fn configuration_uses_the_current_typed_nexus_change() {
+        let endpoint = || meta_signal_flow::CodexEndpoint {
+            client_path: "/opt/codex".into(),
+            home: "/tmp/codex".into(),
+            control_socket_path: "/tmp/codex.sock".into(),
+            model_name_vector: vec!["fixture".into()],
         };
-        assert_eq!(
-            configuration.ordinary_socket_path,
-            "/run/user/1000/flow.sock"
-        );
-        assert_eq!(
-            configuration.meta_socket_path,
-            "/run/user/1000/flow-meta.sock"
-        );
-        assert_eq!(configuration.source_root, "/home/test/primary");
-        assert_eq!(configuration.stable_codex.model_name_vector, ["gpt-6-luna"]);
-        assert_eq!(configuration.next_codex.model_name_vector, ["gpt-6-sol"]);
-        assert_eq!(configuration.harness_profile_vector.len(), 2);
-        assert_eq!(
-            configuration.meta_aspects,
-            [signal_flow::FlowAspect::Psyche]
-        );
-        assert_eq!(configuration.message_nexus_path, "/usr/bin/message-nexus");
-    }
-
-    #[test]
-    fn configure_files_reject_conflicting_assignments_with_both_sources() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let first = write_fragment(
-            directory.path(),
-            "first.datom",
-            &fragment("OrdinarySocketPath./run/first.sock"),
-        );
-        let second = write_fragment(
-            directory.path(),
-            "second.datom",
-            &fragment("OrdinarySocketPath./run/second.sock"),
-        );
-
-        let error = parse_files(&[first.clone(), second.clone()]).expect_err("conflict");
-        assert!(error.contains("OrdinarySocketPath"));
-        assert!(error.contains(&first));
-        assert!(error.contains(&second));
-    }
-
-    #[test]
-    fn configure_files_reject_incomplete_and_trailing_fragment_datoms() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let incomplete = write_fragment(
-            directory.path(),
-            "incomplete.datom",
-            &fragment("OrdinarySocketPath./run/flow.sock"),
-        );
-        let error = parse_files(&[incomplete]).expect_err("missing fields");
-        assert!(error.contains("MetaSocketPath"));
-        assert!(error.contains("MessageNexusPath"));
-
-        let trailing = write_fragment(
-            directory.path(),
-            "trailing.datom",
-            "{ [] } Unexpected.{ value }",
-        );
-        let error = parse_files(&[trailing.clone()]).expect_err("trailing form");
-        assert!(error.contains("invalid ConfigurationFragment datom"));
-        assert!(error.contains(&trailing));
-    }
-
-    #[test]
-    fn configure_files_is_one_cli_datom_without_extra_arguments() {
+        let nexus = ConfigureNexus {
+            source_root: "/source".into(),
+            stable_codex: endpoint(),
+            next_codex: endpoint(),
+            harness_profiles: vec![],
+            meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
+            message_nexus_path: "/run/message.sock".into(),
+            message_nexus_binary: "/opt/message-nexus".into(),
+            lease: 60,
+        };
+        let query = Query::Configure(ConfigurationChange::Nexus(nexus.clone()));
+        let datom = query.datomize(vec![]).protosize().compact();
         let client = FlowMetaClient {
             socket: "unused".into(),
         };
-        assert!(
-            client
-                .parse_command(["{ [] }".into(), "extra".into()].into_iter())
-                .is_err()
-        );
-        assert!(
-            client
-                .parse_command(["configure-files".into(), "/tmp/a".into()].into_iter())
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn configure_is_one_inline_datom_carrying_the_whole_configuration() {
-        let client = FlowMetaClient {
-            socket: "unused".into(),
-        };
-        let Query::Configure(configuration) = client
-            .parse_command(
-                ["Configure.{ /run/user/1001/flow/flow.sock /run/user/1001/flow/flow-meta.sock /home/li/primary { /etc/profiles/per-user/li/bin/codex-stable-flow-client /home/li/.codex /home/li/.codex/app-server-control/app-server-control.sock [ gpt-5.6-terra gpt-5.6-sol gpt-5.6-luna ] } { /etc/profiles/per-user/li/bin/codex-next-flow-client /home/li/.codex-next /home/li/.codex-next/app-server-control/app-server-control.sock [ gpt-6-sol gpt-6-luna gpt-6-astra ] } [ { Claude [ / «!» # ] [ esc esc ] [ enter ] } { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] /etc/profiles/per-user/li/bin/message-nexus }".into()]
-                    .into_iter(),
-            )
-            .expect("configure datom parses")
+        let Query::Configure(ConfigurationChange::Nexus(actual)) = client
+            .parse_command([datom.clone()].into_iter())
+            .expect("typed Nexus Configure")
         else {
-            panic!("Configure datom must stay a Configure query")
+            panic!("wrong configuration variant")
         };
-        assert_eq!(configuration.source_root, "/home/li/primary");
-        assert_eq!(
-            configuration.next_codex.model_name_vector,
-            ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"]
-        );
-        assert_eq!(
-            configuration.harness_profile_vector[0].interrupt_keys,
-            ["esc", "esc"]
-        );
-        assert_eq!(
-            configuration.harness_profile_vector[1].command_sigil_vector,
-            ["/", "!"]
-        );
-        assert_eq!(
-            configuration.meta_aspects,
-            [signal_flow::FlowAspect::Psyche]
-        );
+        assert_eq!(actual, nexus);
         assert!(
             client
-                .parse_command(["configure".into(), "/a".into(), "/b".into()].into_iter())
+                .parse_command([datom, "extra".into()].into_iter())
+                .is_err()
+        );
+        // Sockets and StorePath belong to Start. The removed fragment wire
+        // type cannot silently be lowered into a different Nexus contract.
+        assert!(client.parse_command(["{ [] }".into()].into_iter()).is_err());
+        assert!(
+            client
+                .parse_command(["configure-files".into(), "/tmp/old".into()].into_iter())
                 .is_err()
         );
     }

@@ -1,9 +1,9 @@
 //! The service takes an explicit typed Start and configuration reaches it
 //! through the one-request meta listener before normal startup.
 use datom_codec::Datomizable;
-use flow_nexus::{
-    CarriesSignalFrames, generated::startup::Start, store::OpensConfigurationOnlyStore,
-};
+use flow_ethos::Start;
+use flow_nexus::CarriesSignalFrames;
+use flow_nexus::store::ConfiguresOnlyStore;
 use protos::{Compactable, Protosizable};
 use std::{
     io::{Read, Write},
@@ -99,24 +99,21 @@ fn endpoint(name: &str, home: &Path) -> meta_signal_flow::CodexEndpoint {
     }
 }
 
-fn configuration(start: &Start, home: &Path) -> meta_signal_flow::Configuration {
-    meta_signal_flow::Configuration {
-        ordinary_socket_path: start.ordinary_socket_path.clone(),
-        meta_socket_path: start.meta_socket_path.clone(),
+fn configuration(_start: &Start, home: &Path) -> meta_signal_flow::ConfigureNexus {
+    meta_signal_flow::ConfigureNexus {
         source_root: home.join("source").to_string_lossy().into_owned(),
         stable_codex: endpoint("stable", home),
         next_codex: endpoint("next", home),
-        harness_profile_vector: vec![meta_signal_flow::HarnessProfile {
+        harness_profiles: vec![meta_signal_flow::HarnessProfile {
             harness_kind: signal_flow::HarnessKind::Codex,
             command_sigil_vector: vec!["/".into()],
             interrupt_keys: vec!["esc".into()],
             submit_keys: Vec::new(),
         }],
-        meta_aspects: vec![
-            signal_flow::FlowAspect::Psyche,
-            signal_flow::FlowAspect::Mind,
-        ],
-        message_nexus_path: "/opt/message-nexus".into(),
+        meta_aspects: vec![flow_ethos::Aspect::Psyche, flow_ethos::Aspect::Mind],
+        message_nexus_path: "/run/message.sock".into(),
+        message_nexus_binary: "/opt/message-nexus".into(),
+        lease: 60,
     }
 }
 
@@ -124,7 +121,9 @@ fn configure_fresh(home: &Path, runtime: &Path, start: &Start) {
     let mut nexus = spawn(home, runtime, start, true);
     let mut meta = connect(Path::new(&start.meta_socket_path), &mut nexus);
     let desired = configuration(start, home);
-    let query = meta_signal_flow::Query::Configure(desired.clone());
+    let query = meta_signal_flow::Query::Configure(meta_signal_flow::ConfigurationChange::Nexus(
+        desired.clone(),
+    ));
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&query).expect("Configure encodes");
     meta.write_all(&(bytes.len() as u32).to_be_bytes())
         .and_then(|_| meta.write_all(&bytes))
@@ -135,12 +134,7 @@ fn configure_fresh(home: &Path, runtime: &Path, start: &Start) {
     meta.read_exact(&mut reply).expect("Configure reply");
     let reply = rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(&reply)
         .expect("Configure reply decodes");
-    assert!(matches!(
-        reply,
-        meta_signal_flow::Response::Configured(configured)
-            if configured.configuration == desired
-                && configured.activation == meta_signal_flow::Activation::NexusRestartRequired
-    ));
+    assert!(matches!(reply, meta_signal_flow::Response::Configured));
     drop(meta);
     wait_successfully(&mut nexus);
 }
@@ -162,7 +156,7 @@ fn configure_only_commits_before_normal_start_uses_the_declared_store() {
     let mut nexus = spawn(home.path(), runtime.path(), &start, false);
     let mut ordinary = connect(Path::new(&start.ordinary_socket_path), &mut nexus);
     ordinary
-        .write_query(&signal_flow::Query::List(signal_flow::ListRequest {}))
+        .write_query(&signal_flow::Query::Metaflows)
         .expect("List written");
     assert!(matches!(
         ordinary.read_response().expect("List answered"),
@@ -172,7 +166,7 @@ fn configure_only_commits_before_normal_start_uses_the_declared_store() {
 
 #[test]
 fn environment_overrides_do_not_replace_the_explicit_configuration() {
-    use flow_nexus::store::{ConfigurationOnlyStore, OpensFlowStore};
+    use flow_nexus::store::ConfigurationOnlyStore;
 
     let home = tempfile::tempdir().expect("temporary home");
     let runtime = tempfile::tempdir().expect("temporary runtime directory");
@@ -192,7 +186,9 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
         .expect("flow-nexus spawns");
     let mut meta = connect(Path::new(&start.meta_socket_path), &mut nexus);
     let desired = configuration(&start, home.path());
-    let query = meta_signal_flow::Query::Configure(desired.clone());
+    let query = meta_signal_flow::Query::Configure(meta_signal_flow::ConfigurationChange::Nexus(
+        desired.clone(),
+    ));
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&query).expect("Configure encodes");
     meta.write_all(&(bytes.len() as u32).to_be_bytes())
         .and_then(|_| meta.write_all(&bytes))
@@ -203,19 +199,16 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
     meta.read_exact(&mut reply).expect("Configure reply");
     let response = rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(&reply)
         .expect("Configure reply decodes");
-    assert!(matches!(
-        response,
-        meta_signal_flow::Response::Configured(configured)
-            if configured.configuration == desired
-    ));
+    assert!(matches!(response, meta_signal_flow::Response::Configured));
     drop(meta);
     wait_successfully(&mut nexus);
 
     let stored = ConfigurationOnlyStore::open(Path::new(&start.store_path))
         .expect("typed store reopens")
-        .configured_configuration()
+        .configuration_snapshot()
         .expect("configuration reads")
-        .expect("whole configuration was committed");
+        .expect("whole configuration was committed")
+        .nexus;
     assert_eq!(stored, desired);
     assert_eq!(
         stored.source_root,

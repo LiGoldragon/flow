@@ -9,9 +9,14 @@ use crate::generated::operation::{
     Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::herdr::ReadsHerdrPanes;
+use crate::herdr::launch::ObservesNativeLaunchBinding;
 use crate::performing::Performs;
-use crate::store::AnnouncesLaunchChanges;
 use crate::store::AnswersLaunchOutcome;
+use crate::store::ReadsLaunchInspectionRecords;
+use crate::store::{
+    AnnouncesLaunchChanges, ReadsCreatedLaunchPane, RecordsCreatedLaunchPane,
+    RecordsNativeLaunchBinding,
+};
 use crate::{
     RunningNexus,
     codex::ResolvesBoundCodexSkills,
@@ -89,6 +94,42 @@ impl LaunchesFlows for RunningNexus {
                     return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
                 };
                 return self.confirmed(&binding.flow_id);
+            }
+            if attempt.launch_attempt_phase == LaunchAttemptPhase::NativeLaunchIntentRecorded
+                && attempt.launch_profile.harness_kind == HarnessKind::Codex
+            {
+                let launch = match self.perform(Operation::Compose(attempt.launch_profile.clone()))
+                {
+                    Outcome::Composed(launch) => launch,
+                    _ => return Response::StartRejected(StartRejection::CompositionRefused),
+                };
+                let pane = match self.store.recoverable_launch_pane(&launch_request_id) {
+                    Ok(Some(pane)) => pane,
+                    _ => return Response::LaunchPending(attempt),
+                };
+                let binding = match self.herdr.observe_native_binding(&launch, &pane, None) {
+                    Ok(binding) => binding,
+                    Err(_) => {
+                        let _ = self.store.orphan_launch_pane(&launch_request_id);
+                        return Response::StartRejected(StartRejection::NativeLaunchRefused);
+                    }
+                };
+                if !self
+                    .store
+                    .record_native_launch_binding(binding)
+                    .unwrap_or(false)
+                {
+                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                }
+                return self
+                    .store
+                    .launch_attempt(&launch_request_id)
+                    .ok()
+                    .flatten()
+                    .map(Response::LaunchPending)
+                    .unwrap_or(Response::StartRejected(
+                        StartRejection::LaunchPersistenceRefused,
+                    ));
             }
             if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
                 return Response::LaunchPending(attempt);
@@ -171,6 +212,16 @@ impl LaunchesFlows for RunningNexus {
             Outcome::Opened(pane) => pane,
             _ => return Response::StartRejected(StartRejection::NativeLaunchRefused),
         };
+        if !self.store.record_created_launch_pane(pane).unwrap_or(false) {
+            return persistence();
+        }
+        let Some(pane) = self
+            .store
+            .request_harness_start(&launch.launch_profile.launch_request_id)
+            .unwrap_or(None)
+        else {
+            return persistence();
+        };
         let pane_launch = PaneLaunch {
             composed_launch: launch.clone(),
             herdr_pane_binding: pane,
@@ -207,7 +258,7 @@ impl LaunchesFlows for RunningNexus {
         }
         let caller = signal_flow::Caller {
             flow_id: binding.flow_id.clone(),
-            flow_aspect: launch.launch_profile.flow_aspect.clone(),
+            aspect: launch.launch_profile.aspect.clone(),
             power_level: launch.launch_profile.power_level.clone(),
             model_name: launch.launch_profile.model_name.clone(),
         };

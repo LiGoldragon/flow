@@ -1,6 +1,6 @@
 ; Flow's shared types live in this leaf package. Signal and Meta-Signal
-; import them here and re-export their original Rust paths. The configured
-; FlowAspect and address Aspect are intentionally distinct nominal types.
+; import them here and re-export their original Rust paths. Aspect is one
+; nominal type shared by addresses, launch profiles and meta configuration.
 
 Library
 []
@@ -16,6 +16,7 @@ Library
   Repository.String
   Hash.Blake3
   Path.String
+  Reason.String
   Source.{ Repository Hash Path }
   Key.{ Subaspect Topic }
   Said.{ Context.String Verbatim.String }
@@ -26,7 +27,6 @@ Library
             Result.String
             Notice.String ]
   Aspect.[ Psyche Mind Field ]
-  FlowAspect.[ Psyche Mind Field ]
   Address.{ Aspect Topic Layer }
   Recipient.[ Address Up ]
   Metaflow.{ Address
@@ -38,7 +38,11 @@ Library
   Sender.Address
   OrdinarySocketPath.String
   MetaSocketPath.String
-  Start.{ OrdinarySocketPath MetaSocketPath }
+  StorePath.String
+  Start.{ OrdinarySocketPath MetaSocketPath StorePath }
+  ; Startup refusal is distinct from the ordinary/meta socket Refusal.Store.String.
+  StoreRefusal.{ Path Reason }
+  StartRefusal.[ Store.StoreRefusal ]
   SourceRoot.String
   ClientPath.String
   Home.String
@@ -54,7 +58,7 @@ Library
   SubmitKeys.Vector<KeyName>
   HarnessProfile.{ HarnessKind Vector<CommandSigil> InterruptKeys SubmitKeys }
   HarnessProfiles.Vector<HarnessProfile>
-  MetaAspects.Vector<FlowAspect>
+  MetaAspects.Vector<Aspect>
   MessageNexusPath.String
   MessageNexusBinary.String
   Nexus.{ SourceRoot

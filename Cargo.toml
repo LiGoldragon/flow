@@ -3,7 +3,7 @@ members = ["crates/flow-defaults", "crates/flow-ethos", "crates/flow-nexus", "cr
 resolver = "3"
 
 [workspace.package]
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -11,8 +11,15 @@ repository = "https://github.com/LiGoldragon/flow"
 publish = false
 
 [workspace.dependencies]
+flow-ethos = { path = "crates/flow-ethos", features = ["datom"] }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 serde_json = "1"
 thiserror = "2"
-signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "068f0eae1de5bf271f546e0dbfcb1f84c460263f" }
-meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "88f37592f29a792024be0b30fccc914277d2dcac" }
+signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "d1358d396e96934795a5b2ae2192499b3eaff9c3" }
+meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "6d07b7bb077da8755eae7d1146d9dfd64d7b7d7c" }
+
+# Signal and Meta-Signal also depend on flow-ethos by this Git source. Resolve
+# those workspace edges to this exact leaf package so every shared nominal
+# type has one Cargo package identity during the Flow workspace build.
+[patch."https://github.com/LiGoldragon/flow"]
+flow-ethos = { path = "crates/flow-ethos" }

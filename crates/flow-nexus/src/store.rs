@@ -80,7 +80,7 @@ const SEMA_CATALOG_TABLE: redb::TableDefinition<&str, &[u8]> =
     redb::TableDefinition::new("__sema_engine_catalog");
 const SEMA_ENGINE_COUNTERS_TABLE: redb::TableDefinition<&str, &[u8]> =
     redb::TableDefinition::new("__sema_engine_counters");
-const FLOW_STATE_RAW_TABLE: redb::TableDefinition<&str, &[u8]> =
+const FLOW_STATE_RAW_TABLE: redb::TableDefinition<String, &[u8]> =
     redb::TableDefinition::new("flow_nexus_state");
 const SEMA_SCHEMA_VERSION_KEY: &str = "schema_version";
 const SEMA_ENGINE_STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";

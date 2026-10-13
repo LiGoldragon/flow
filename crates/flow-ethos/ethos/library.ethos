@@ -1,0 +1,69 @@
+; Flow's shared types live in this leaf package. Signal and Meta-Signal
+; import them here and re-export their original Rust paths. The configured
+; FlowAspect and address Aspect are intentionally distinct nominal types.
+
+Library
+[]
+[ FlowId.String
+  ; ethos-zero 16 cannot express Topic:Name yet; check camelCase at input.
+  Topic.String
+  ; The design type is Blake3.Bytes<32>; 16.0 uses a 64-hex-character string.
+  Blake3.String
+  Layer.[ Primary Secondary Tertiary Quaternary ]
+  Subaspect.[ Vision Intent Knowledge Operation Trial Compensation ]
+  ; Define the component types once. Source refers to these declarations;
+  ; inlining Path.String inside Source would redeclare Path globally.
+  Repository.String
+  Hash.Blake3
+  Path.String
+  Source.{ Repository Hash Path }
+  Key.{ Subaspect Topic }
+  Said.{ Context.String Verbatim.String }
+  Request.[ Order.String
+            Question.String
+            Psyche.Said
+            Psyches.Vector<Said>
+            Result.String
+            Notice.String ]
+  Aspect.[ Psyche Mind Field ]
+  FlowAspect.[ Psyche Mind Field ]
+  Address.{ Aspect Topic Layer }
+  Recipient.[ Address Up ]
+  Metaflow.{ Address
+             State.[ Awake.FlowId Asleep Ended ]
+             Past.Vector<FlowId>
+             Queue.Vector<Request> }
+  Lock.{ Sender Address Until.Integer }
+  Process.{ Pid.Integer Started.Integer }
+  Sender.Address
+  OrdinarySocketPath.String
+  MetaSocketPath.String
+  Start.{ OrdinarySocketPath MetaSocketPath }
+  SourceRoot.String
+  ClientPath.String
+  Home.String
+  ControlSocketPath.String
+  ModelName.String
+  CodexEndpoint.{ ClientPath Home ControlSocketPath Vector<ModelName> }
+  StableCodex.CodexEndpoint
+  NextCodex.CodexEndpoint
+  HarnessKind.[ Codex Claude ]
+  KeyName.String
+  CommandSigil.String
+  InterruptKeys.Vector<KeyName>
+  SubmitKeys.Vector<KeyName>
+  HarnessProfile.{ HarnessKind Vector<CommandSigil> InterruptKeys SubmitKeys }
+  HarnessProfiles.Vector<HarnessProfile>
+  MetaAspects.Vector<FlowAspect>
+  MessageNexusPath.String
+  MessageNexusBinary.String
+  Nexus.{ SourceRoot
+          StableCodex
+          NextCodex
+          HarnessProfiles
+          MetaAspects
+          MessageNexusPath
+          MessageNexusBinary
+          Lease.Integer } ] ; Lease seconds; 60 before any Nexus payload.
+[]
+[]

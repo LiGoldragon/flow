@@ -5653,7 +5653,7 @@ pub(crate) trait ReadsFlowMemory {
                 .open_table(FLOW_STATE_RAW_TABLE)
                 .map_err(|error| reject(error.to_string()))?;
             let bytes = table
-                .get(STATE_KEY)
+                .get(STATE_KEY.to_owned())
                 .map_err(|error| reject(error.to_string()))?
                 .ok_or_else(|| reject("Flow state identity record is absent".into()))?;
             let state = rkyv::from_bytes::<FlowStoreState, rkyv::rancor::Error>(bytes.value())

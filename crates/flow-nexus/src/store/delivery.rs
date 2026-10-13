@@ -8,8 +8,8 @@
 //! opens is a delivery a crash interrupted: it settles `Uncertain` then and
 //! there and is never retried, since what reached the pane is not known.
 
-use crate::store::{ManagesMetaflowState};
 use super::{DefaultConfiguration, FlowStore, SeedsConfiguration, StoreError};
+use crate::store::ManagesMetaflowState;
 use meta_signal_flow::{
     Delivery, DeliveryGrade, DeliveryId, HarnessProfile, InterruptWitness, MessageNexusPath,
     MetaAspects,

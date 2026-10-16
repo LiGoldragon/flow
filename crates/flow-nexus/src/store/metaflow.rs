@@ -33,15 +33,19 @@ pub(crate) trait SleepsMetaflows {
     /// Awake as `flow_id` becomes Asleep, and `flow_id` joins Past. The
     /// flow's own row, with its native session, is untouched.
     fn sleep_metaflow(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError>;
-    /// Asleep becomes Awake as the started flow. A resumed flow that ends
-    /// Past is taken out of it, since it is current again.
-    fn awaken_metaflow(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError>;
-    /// The whole queue, oldest first, taken and cleared in one write.
-    fn take_metaflow_queue(&self, address: &Address) -> Result<Vec<Request>, StoreError>;
-    /// Puts requests a wake or drain could not hand over back at the head
-    /// of the queue, ahead of what arrived meanwhile.
-    fn requeue_metaflow(&self, address: &Address, requests: Vec<Request>)
-    -> Result<(), StoreError>;
+    /// Asleep becomes Awake as the started flow, and the `delivered` oldest
+    /// queued requests, which the started flow was handed, leave the queue
+    /// in the same write. A resumed flow that ends Past is taken out of it,
+    /// since it is current again. Refused when fewer are queued.
+    fn awaken_metaflow(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        delivered: usize,
+    ) -> Result<bool, StoreError>;
+    /// Removes the oldest queued request once it was typed into the Awake
+    /// flow; refused unless it is still the oldest.
+    fn remove_oldest_queued(&self, address: &Address, typed: &Request) -> Result<bool, StoreError>;
     /// The metaflow currently Awake as this flow, if any.
     fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Metaflow>, StoreError>;
     /// The metaflow at this Address, if any.
@@ -284,47 +288,38 @@ impl SleepsMetaflows for FlowStore {
         Ok(true)
     }
 
-    fn awaken_metaflow(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError> {
+    fn awaken_metaflow(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        delivered: usize,
+    ) -> Result<bool, StoreError> {
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
-        if stored.metaflow.state != MetaflowState::Asleep {
+        if stored.metaflow.state != MetaflowState::Asleep || stored.metaflow.queue.len() < delivered
+        {
             return Ok(false);
         }
         if stored.metaflow.past.last().map(String::as_str) == Some(flow_id) {
             stored.metaflow.past.pop();
         }
         stored.metaflow.state = MetaflowState::Awake(flow_id.to_owned());
+        stored.metaflow.queue.drain(..delivered);
         self.write_metaflow(stored)?;
         Ok(true)
     }
 
-    fn take_metaflow_queue(&self, address: &Address) -> Result<Vec<Request>, StoreError> {
+    fn remove_oldest_queued(&self, address: &Address, typed: &Request) -> Result<bool, StoreError> {
         let Some(mut stored) = self.stored_metaflow(address)? else {
-            return Ok(Vec::new());
+            return Ok(false);
         };
-        if stored.metaflow.queue.is_empty() {
-            return Ok(Vec::new());
+        if stored.metaflow.queue.first() != Some(typed) {
+            return Ok(false);
         }
-        let taken = std::mem::take(&mut stored.metaflow.queue);
+        stored.metaflow.queue.remove(0);
         self.write_metaflow(stored)?;
-        Ok(taken)
-    }
-
-    fn requeue_metaflow(
-        &self,
-        address: &Address,
-        mut requests: Vec<Request>,
-    ) -> Result<(), StoreError> {
-        if requests.is_empty() {
-            return Ok(());
-        }
-        let Some(mut stored) = self.stored_metaflow(address)? else {
-            return Err(StoreError::StateInvariant);
-        };
-        requests.append(&mut stored.metaflow.queue);
-        stored.metaflow.queue = requests;
-        self.write_metaflow(stored)
+        Ok(true)
     }
 
     fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Metaflow>, StoreError> {

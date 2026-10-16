@@ -396,6 +396,15 @@ pub trait ReadsHerdrPanes {
     fn pane_presence(&self, node: &FlowNode) -> PanePresence;
     fn refresh_route(&self, node: FlowNode) -> FlowNode;
     fn snapshot(&self, route: &HerdrRoute) -> Option<serde_json::Value>;
+    /// The snapshot of one Herdr session.
+    fn session_snapshot(&self, herdr_session_name: &str) -> Option<serde_json::Value>;
+    /// Whether a pane of this Herdr session runs this native session now;
+    /// None when Herdr cannot be read.
+    fn holds_native_session(
+        &self,
+        herdr_session_name: &str,
+        native_session_id: &str,
+    ) -> Option<bool>;
 }
 
 impl ReadsHerdrPanes for HerdrCli {
@@ -459,13 +468,29 @@ impl ReadsHerdrPanes for HerdrCli {
     }
 
     fn snapshot(&self, route: &HerdrRoute) -> Option<serde_json::Value> {
+        self.session_snapshot(&route.herdr_session_name)
+    }
+
+    fn holds_native_session(
+        &self,
+        herdr_session_name: &str,
+        native_session_id: &str,
+    ) -> Option<bool> {
+        let snapshot = self.session_snapshot(herdr_session_name)?;
+        let agents = snapshot
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)?;
+        Some(agents.iter().any(|agent| {
+            agent
+                .pointer("/agent_session/value")
+                .and_then(serde_json::Value::as_str)
+                == Some(native_session_id)
+        }))
+    }
+
+    fn session_snapshot(&self, herdr_session_name: &str) -> Option<serde_json::Value> {
         let output = Command::new(&self.executable)
-            .args([
-                "--session",
-                route.herdr_session_name.as_str(),
-                "api",
-                "snapshot",
-            ])
+            .args(["--session", herdr_session_name, "api", "snapshot"])
             .output()
             .ok()?;
         output

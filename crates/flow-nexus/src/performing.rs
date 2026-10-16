@@ -9,8 +9,8 @@ use crate::codex::{SelectsCodexEndpoint, SubmitsBoundCodexFirstTurn};
 use crate::composition::{ComposesLaunch, KeepsLaunchBundles, OpensLaunchComposer};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
-    Record_Data_Awoken_Data, Record_Data_Harness_Data, Record_Data_Settled_Data, Register_Data,
-    Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
+    Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
+    Record_Data_Settled_Data, Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::herdr::OperatesHerdrPane;
 use crate::herdr::launch::{
@@ -457,9 +457,23 @@ impl PerformsInParts for RunningNexus {
                 use crate::store::metaflow::SleepsMetaflows;
                 self.store.sleep_metaflow(&address, &flow_id).recorded()
             }
-            Record_Data::Awoken(Record_Data_Awoken_Data { address, flow_id }) => {
+            Record_Data::Awoken(Record_Data_Awoken_Data {
+                address,
+                flow_id,
+                delivered,
+            }) => {
                 use crate::store::metaflow::SleepsMetaflows;
-                self.store.awaken_metaflow(&address, &flow_id).recorded()
+                match usize::try_from(delivered) {
+                    Ok(delivered) => self
+                        .store
+                        .awaken_metaflow(&address, &flow_id, delivered)
+                        .recorded(),
+                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
+            Record_Data::Context(Record_Data_Context_Data { flow_id, tokens }) => {
+                use crate::store::context::RecordsContextSize;
+                self.store.record_context_size(&flow_id, tokens).recorded()
             }
             Record_Data::Harness(Record_Data_Harness_Data { flow_id, event }) => {
                 use crate::store::events::{EventRecording, RecordsHarnessEvents};

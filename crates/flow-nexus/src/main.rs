@@ -5,6 +5,7 @@ use flow_nexus::{
     caller::{IdentifiesPeer, LocatesCallerPane},
     launching::PromotesAmbiguousLaunches,
     store::{ConfigurationOnlyStore, DefaultConfiguration, ReadsAnchors, StoreError},
+    waking::SleepsAndWakesSeats,
 };
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
@@ -137,6 +138,9 @@ fn main() -> ExitCode {
     }
     let promoting_nexus = Arc::clone(&nexus);
     std::thread::spawn(move || promoting_nexus.promote_ambiguous_launches());
+    // A wake the last Nexus did not finish left its work queued: wake it.
+    let waking_nexus = Arc::clone(&nexus);
+    std::thread::spawn(move || waking_nexus.recover_wakes());
     let ordinary = start.ordinary_socket_path.clone();
     let ordinary_nexus = Arc::clone(&nexus);
     std::thread::spawn(move || {

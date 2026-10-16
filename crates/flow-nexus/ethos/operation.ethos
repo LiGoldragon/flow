@@ -14,6 +14,8 @@
 ; journal or lifecycle entry; Record.Harness appends the harness event a
 ; Report carried to the events Flow's Memory holds for that flow, and a
 ; flow Flow does not hold fails UnknownFlow and is never adopted.
+; Record.Context writes the tokens a flow's native session carried into
+; its last turn, read from its transcript when its hook reports Stopped.
 ; Register binds a flow's row and role. Confirm makes a Pending launch
 ; Active and answers Started. Open makes the launch pane; Spawn starts
 ; the native harness in it; Bind claims the flow's identity from the
@@ -26,13 +28,16 @@
 ; Sleep, Wake and Drain move a metaflow between Awake and Asleep so a seat
 ; that is not running keeps no harness. Sleep closes the pane of the flow a
 ; metaflow is awake as and records it Asleep (Record.Asleep), keeping the
-; flow's native session so a later wake can resume it. Wake takes the whole
+; flow's native session so a later wake can resume it. Wake reads the whole
 ; queue of an Asleep metaflow, oldest first, and starts a seat that carries
-; it in its first prompt: the last flow resumed when it has a native
-; session, else a fresh launch composed from the configured layer Model and
-; topic modules; Record.Awoken then names the started flow. Drain types
-; what was queued while a wake ran into the woken flow's pane and answers
-; what it typed. Wake runs off the dispatch gate and takes it per step.
+; it in its first prompt: the last flow resumed when its session is under
+; its layer's refresh threshold, else a fresh launch composed from the
+; configured layer Model and topic modules. Record.Awoken then names the
+; started flow and the count of queued requests it was handed, which leave
+; the queue in that same write, so a wake that dies first loses nothing.
+; Drain types the oldest queued request into the Awake flow's pane and
+; removes it once typed, answering what it typed. Wake runs off the
+; dispatch gate and takes it per step.
 ;
 ; LaunchOutcome and Replacement are the store's own types, imported from
 ; the Nexus crate until the Memory root is compiled.
@@ -55,8 +60,9 @@ Operation
            Withdrawn.LaunchRequestId
            Settled.{ LaunchRequestId LaunchOutcome }
            Harness.{ FlowId Event }
+           Context.{ FlowId Tokens.Integer }
            Asleep.{ Address FlowId }
-           Awoken.{ Address FlowId } ]
+           Awoken.{ Address FlowId Delivered.Integer } ]
   Register.{ FlowNode Caller }
   Confirm.FlowId
   Open.ComposedLaunch

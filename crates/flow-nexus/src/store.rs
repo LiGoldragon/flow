@@ -5,6 +5,7 @@
 //! into its typed, durable records.
 
 use crate::store::delivery::RegistersDeliveryTables;
+pub mod context;
 mod created_pane;
 pub mod delivery;
 pub mod events;
@@ -996,6 +997,7 @@ pub struct FlowStore {
     quarantined_launch_attempts: TableReference<QuarantinedLaunchAttempt>,
     delivery_tables: DeliveryTables,
     event_tables: events::EventTables,
+    context_sizes: TableReference<context::FlowContextSize>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows that no longer read in the
     /// current shape; each is also logged.
@@ -1570,6 +1572,8 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-flow-events"),
             SchemaHash::for_label("flow-nexus-flow-events-v1"),
         );
+        let context_sizes_descriptor =
+            <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -1594,7 +1598,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
                 .with_family(&meta_modules_descriptor)
-                .with_family(&events_descriptor),
+                .with_family(&events_descriptor)
+                .with_family(&context_sizes_descriptor),
         )?;
         let flows = engine.register_table(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -1616,6 +1621,7 @@ impl OpensFlowStore for FlowStore {
         let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
+        let context_sizes = engine.register_table(context_sizes_descriptor)?;
         let store = Self {
             engine,
             flows,
@@ -1636,6 +1642,7 @@ impl OpensFlowStore for FlowStore {
             quarantined_launch_attempts,
             delivery_tables,
             event_tables,
+            context_sizes,
             launch_changes: LaunchChanges::default(),
             opening_settlements: Vec::new(),
         };
@@ -1743,6 +1750,9 @@ impl OpensFlowStore for FlowStore {
         let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
+        let context_sizes = engine.register_table(
+            <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor(),
+        )?;
         let mut store = Self {
             engine,
             flows,
@@ -1763,6 +1773,7 @@ impl OpensFlowStore for FlowStore {
             quarantined_launch_attempts,
             delivery_tables,
             event_tables,
+            context_sizes,
             launch_changes: LaunchChanges::default(),
             opening_settlements: Vec::new(),
         };
@@ -1834,6 +1845,9 @@ impl OpensFlowStore for FlowStore {
 pub(crate) trait ManagesMetaflowState: Sized {
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
     fn configure_change(&self, change: ConfigurationChange) -> Result<(), StoreError>;
+    /// The threshold configured for one layer, if any.
+    fn configured_threshold(&self, layer: &Layer)
+    -> Result<Option<ConfigureThreshold>, StoreError>;
     fn wake_preflight(&self, address: &Address)
     -> Result<Option<signal_flow::Refusal>, StoreError>;
     fn stored_metaflow(&self, address: &Address) -> Result<Option<StoredMetaflow>, StoreError>;
@@ -1868,6 +1882,21 @@ impl ManagesMetaflowState for FlowStore {
 
     fn configure_change(&self, change: ConfigurationChange) -> Result<(), StoreError> {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
+    }
+
+    fn configured_threshold(
+        &self,
+        layer: &Layer,
+    ) -> Result<Option<ConfigureThreshold>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.meta_configuration_tables.thresholds,
+            RecordKey::new(FlowStore::layer_key(layer)),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            [stored] => Ok(Some(stored.threshold.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
     }
 
     /// Read the Model prerequisite from one committed configuration view.
@@ -4621,6 +4650,62 @@ mod tests {
         assert_eq!(leases[0].delivery_id, "interrupted-delivery");
     }
 
+    /// A running store written before context sizes were kept (0.27.0)
+    /// is recognized, and its next full open adds the table.
+    #[test]
+    fn a_running_store_from_before_context_sizes_opens_and_gains_the_table() {
+        let fixture = StoreFixture::new();
+        let path = fixture.path();
+        let defaults = super::DefaultConfiguration {
+            home: fixture.directory.path().join("home"),
+            runtime_directory: fixture.directory.path().join("runtime"),
+        };
+        let config = ConfigurationOnlyStore::open(&path).expect("fresh Memory opens");
+        let settings = defaults.configuration();
+        config
+            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+                meta_signal_flow::ConfigureNexus {
+                    source_root: settings.source_root,
+                    stable_codex: settings.stable_codex,
+                    next_codex: settings.next_codex,
+                    harness_profiles: settings.harness_profile_vector,
+                    meta_aspects: settings.meta_aspects,
+                    message_nexus_path: settings.message_nexus_path,
+                    message_nexus_binary: "/fixture/message-nexus".into(),
+                    lease: 60,
+                },
+            ))
+            .expect("configuration commits");
+        drop(config);
+        drop(FlowStore::open_configured(&path).expect("configured Memory opens"));
+
+        // The catalog as 0.27.0 wrote it: no context size family.
+        let database = redb::Database::open(&path).expect("store opens directly");
+        let write = database.begin_write().expect("catalog transaction starts");
+        {
+            let mut catalog = write
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            assert!(
+                catalog
+                    .remove("flow_nexus_flow_context_sizes")
+                    .expect("catalog entry removes")
+                    .is_some()
+            );
+        }
+        write.commit().expect("catalog commits");
+        drop(database);
+
+        let store = FlowStore::open_configured(&path).expect("0.27.0 running Memory opens");
+        use super::context::RecordsContextSize;
+        store
+            .record_context_size("5a4d0b", 90_000)
+            .expect("the added table takes a row");
+        drop(store);
+        let reopened = FlowStore::open_configured(&path).expect("upgraded Memory reopens");
+        assert_eq!(reopened.context_size("5a4d0b").unwrap(), Some(90_000));
+    }
+
     #[test]
     fn configuration_only_refuses_old_memory_without_changing_any_bytes() {
         let fixture = StoreFixture::new();
@@ -5534,6 +5619,10 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-meta-module-configuration-v1",
             ),
             "flow_nexus_flow_events" => ("flow-nexus-flow-events", "flow-nexus-flow-events-v1"),
+            "flow_nexus_flow_context_sizes" => (
+                context::FLOW_CONTEXT_SIZE_FAMILY,
+                context::FLOW_CONTEXT_SIZE_SCHEMA,
+            ),
             _ => return None,
         };
         Some((family, SchemaHash::for_label(version)))
@@ -5584,10 +5673,18 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_meta_module_configuration",
             "flow_nexus_flow_events",
         ];
+        // A running store keeps each flow's context size from 0.28.0 on; a
+        // running store written before then opens, and its first full open
+        // adds the table, as the first full open of a configuration-only
+        // store adds the running tables.
+        const CONTEXT_SIZES: &str = "flow_nexus_flow_context_sizes";
         let is_exact_set = |expected: &[&str]| {
             actual.len() == expected.len() && expected.iter().all(|name| actual.contains(*name))
         };
-        is_exact_set(CONFIGURATION_ONLY) || is_exact_set(RUNNING)
+        let running_with_context_sizes = actual.len() == RUNNING.len() + 1
+            && actual.contains(CONTEXT_SIZES)
+            && RUNNING.iter().all(|name| actual.contains(*name));
+        is_exact_set(CONFIGURATION_ONLY) || is_exact_set(RUNNING) || running_with_context_sizes
     }
 
     fn recognize_flow_memory(path: &Path) -> Result<bool, StoreError> {

@@ -29,6 +29,15 @@ pub struct Record_Data_Harness_Data {
     pub event: signal_flow::Event,
 }
 #[rustfmt::skip]
+pub type Tokens = i64;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Record_Data_Context_Data {
+    pub flow_id: signal_flow::FlowId,
+    pub tokens: Tokens,
+}
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Record_Data_Asleep_Data {
@@ -36,11 +45,14 @@ pub struct Record_Data_Asleep_Data {
     pub flow_id: signal_flow::FlowId,
 }
 #[rustfmt::skip]
+pub type Delivered = i64;
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Record_Data_Awoken_Data {
     pub address: signal_flow::Address,
     pub flow_id: signal_flow::FlowId,
+    pub delivered: Delivered,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -59,6 +71,7 @@ pub enum Record_Data {
     Withdrawn(signal_flow::LaunchRequestId),
     Settled(Record_Data_Settled_Data),
     Harness(Record_Data_Harness_Data),
+    Context(Record_Data_Context_Data),
     Asleep(Record_Data_Asleep_Data),
     Awoken(Record_Data_Awoken_Data),
 }

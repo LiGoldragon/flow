@@ -1,3 +1,41 @@
+# Flow 0.28.0
+
+No wire change (signal-flow d1358d3 and meta-signal-flow 6d07b7b unchanged).
+The store gains one table, `flow_nexus_flow_context_sizes`: a 0.27.0
+running store is recognized and its first open adds the table; no other
+table, family or record shape changes. Rebuild and restart the Nexus;
+`flow`, `flow-meta` and `flow-hook` come from the same package.
+
+- **Context size.** When a flow's hook reports `Stopped`, the Nexus reads
+  the flow's Claude transcript once (`<claude home>/projects/*/<session>.jsonl`)
+  and writes the last main-thread usage entry's `input_tokens +
+  cache_read_input_tokens + cache_creation_input_tokens` for that FlowId
+  (`Record.Context.{ FlowId Tokens }`). Nothing polls the transcript.
+- **Resume or fresh.** A wake resumes the last flow's session when its
+  recorded size is under the layer's configured `Threshold` refresh value,
+  and launches fresh when the size is at or over it. With no recorded size
+  or no configured threshold it resumes.
+- **Only a resumable seat sleeps.** A seat sleeps only when it can be
+  resumed: a Claude flow with a native session. A Codex seat, or a seat
+  without a native session, stays awake whatever it reports. A seat too big
+  to resume still sleeps and wakes fresh.
+- **Idle drain.** A seat whose Stop finds it resting with work queued is
+  handed the oldest request, which then leaves the queue, and stays awake;
+  it sleeps at a later Stop with nothing queued. A Primary is unchanged:
+  it neither sleeps nor drains.
+- **Durable wake.** A wake reads the queue without taking it. The requests
+  it handed over leave the queue in the same write that records the
+  started flow Awake (`Record.Awoken.{ Address FlowId Delivered }`). A wake
+  that fails leaves the queue as it was. At start the Nexus wakes every
+  Asleep, non-Primary metaflow whose queue holds an Order, Question, Psyche
+  or Psyches.
+- **Duplicate guard.** A wake is refused (`Failed.ConflictingBinding`)
+  while a pane in the Herdr session it would use, or the last flow's
+  session, already runs the last flow's native session; an unreadable
+  Herdr refuses it (`Failed.HerdrRefused`).
+- **Drain.** `Drain.Address` types the oldest queued request and answers
+  it; the drain after a wake repeats it until the queue is empty.
+
 # Flow 0.27.0
 
 No wire change (signal-flow d1358d3 and meta-signal-flow 6d07b7b unchanged).

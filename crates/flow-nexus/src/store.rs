@@ -5,11 +5,13 @@
 //! into its typed, durable records.
 
 use crate::store::delivery::RegistersDeliveryTables;
+pub(crate) mod address_hold;
 pub mod context;
 mod created_pane;
 pub mod delivery;
 pub mod events;
 pub(crate) mod metaflow;
+use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
@@ -1065,6 +1067,7 @@ pub struct FlowStore {
     delivery_tables: DeliveryTables,
     event_tables: events::EventTables,
     context_sizes: TableReference<context::FlowContextSize>,
+    address_holds: TableReference<address_hold::AddressHold>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows that no longer read in the
     /// current shape; each is also logged.
@@ -1646,6 +1649,8 @@ impl OpensFlowStore for FlowStore {
         );
         let context_sizes_descriptor =
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
+        let address_holds_descriptor =
+            <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -1671,7 +1676,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_thresholds_descriptor)
                 .with_family(&meta_modules_descriptor)
                 .with_family(&events_descriptor)
-                .with_family(&context_sizes_descriptor),
+                .with_family(&context_sizes_descriptor)
+                .with_family(&address_holds_descriptor),
         )?;
         let flows = engine.register_table(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -1694,6 +1700,7 @@ impl OpensFlowStore for FlowStore {
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let context_sizes = engine.register_table(context_sizes_descriptor)?;
+        let address_holds = engine.register_table(address_holds_descriptor)?;
         let store = Self {
             engine,
             flows,
@@ -1715,6 +1722,7 @@ impl OpensFlowStore for FlowStore {
             delivery_tables,
             event_tables,
             context_sizes,
+            address_holds,
             launch_changes: LaunchChanges::default(),
             opening_settlements: Vec::new(),
         };
@@ -1825,6 +1833,9 @@ impl OpensFlowStore for FlowStore {
         let context_sizes = engine.register_table(
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor(),
         )?;
+        let address_holds = engine.register_table(
+            <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor(),
+        )?;
         let mut store = Self {
             engine,
             flows,
@@ -1846,6 +1857,7 @@ impl OpensFlowStore for FlowStore {
             delivery_tables,
             event_tables,
             context_sizes,
+            address_holds,
             launch_changes: LaunchChanges::default(),
             opening_settlements: Vec::new(),
         };
@@ -2900,9 +2912,24 @@ impl RecordsRegistrationAcknowledgement for FlowStore {
         {
             return Ok(false);
         }
+        // The seat's binding is witnessed and its flow registered: the
+        // launch takes its Address now, before the first prompt, so the
+        // seat's first tool call is identified. A refused taking refuses
+        // the acknowledgement.
+        let flow_id = acknowledgement.flow_id.clone();
+        let commit = match self.held(
+            &stored.attempt.launch_profile,
+            &flow_id,
+            self.engine.begin_atomic_commit(),
+        )? {
+            Ok(commit) => commit,
+            Err(_) => return Ok(false),
+        };
         stored.attempt.launch_attempt_phase = LaunchAttemptPhase::RegistrationAcknowledged;
         stored.attempt.registration_acknowledgement_option = Some(acknowledgement);
-        self.mutate_launch_attempt(stored.attempt)?;
+        self.engine
+            .commit_atomic(commit.mutate(self.launch_attempts, stored))?;
+        self.launch_changes.announce();
         Ok(true)
     }
 }
@@ -3112,20 +3139,31 @@ impl RecordsLaunchOutcome for FlowStore {
         launch_request_id: &str,
         outcome: LaunchOutcome,
     ) -> Result<(), StoreError> {
+        // A launch refused before it was confirmed gives back the Address
+        // its flow held, in the write that settles it.
+        let refused = matches!(
+            outcome,
+            LaunchOutcome::StartRejected(_)
+                | LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(_))
+        );
         let stored = StoredLaunchOutcome {
             launch_request_id: launch_request_id.into(),
             launch_outcome: outcome,
         };
-        if self.launch_outcome(launch_request_id)?.is_some() {
-            self.engine.mutate_keyed(KeyedMutation::new(
-                self.launch_outcomes,
-                RecordKey::new(launch_request_id),
-                stored,
-            ))?;
+        let commit = self.engine.begin_atomic_commit();
+        let mut commit = if self.launch_outcome(launch_request_id)?.is_some() {
+            commit.mutate(self.launch_outcomes, stored)
         } else {
-            self.engine
-                .assert(Assertion::new(self.launch_outcomes, stored))?;
+            commit.assert(self.launch_outcomes, stored)
+        };
+        if refused
+            && let Some(binding) = self
+                .launch_attempt(launch_request_id)?
+                .and_then(|attempt| attempt.native_launch_binding_option)
+        {
+            commit = self.given_back(&binding.flow_id, commit)?;
         }
+        self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(())
     }
@@ -3537,11 +3575,11 @@ impl RecordsFlowLifecycle for FlowStore {
             return Ok(false);
         };
         flow.lifecycle = FlowLifecycle::Stopped;
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.flows,
-            RecordKey::new(flow_id),
-            flow,
-        ))?;
+        // A flow that ends before its launch was confirmed gives back the
+        // Address it held.
+        let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        self.engine
+            .commit_atomic(self.given_back(flow_id, commit)?)?;
         Ok(true)
     }
 
@@ -3553,11 +3591,11 @@ impl RecordsFlowLifecycle for FlowStore {
             return Ok(false);
         }
         flow.lifecycle = FlowLifecycle::Retired;
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.flows,
-            RecordKey::new(flow_id),
-            flow,
-        ))?;
+        // A flow that ends before its launch was confirmed gives back the
+        // Address it held.
+        let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        self.engine
+            .commit_atomic(self.given_back(flow_id, commit)?)?;
         Ok(true)
     }
 
@@ -3569,11 +3607,11 @@ impl RecordsFlowLifecycle for FlowStore {
             return Ok(false);
         }
         flow.lifecycle = FlowLifecycle::Exited;
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.flows,
-            RecordKey::new(flow_id),
-            flow,
-        ))?;
+        // A flow that ends before its launch was confirmed gives back the
+        // Address it held.
+        let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        self.engine
+            .commit_atomic(self.given_back(flow_id, commit)?)?;
         Ok(true)
     }
 
@@ -3683,7 +3721,8 @@ impl WritesFlowStore for FlowStore {
         let origin_clue = flow.origin.clone();
         let session_id = flow.thread_id.clone().expect("checked thread identity");
         // The launch that bound this flow names the Address it takes, in
-        // the same write that makes it Active.
+        // the same write that makes it Active; a launch that held it since
+        // its binding keeps it and drops the hold.
         let mut taken = None;
         if let Some(launch_request_id) = self.launch_requests_bound_to(flow_id)?.pop()
             && let Some(attempt) = self.launch_attempt(&launch_request_id)?
@@ -3711,6 +3750,10 @@ impl WritesFlowStore for FlowStore {
         }
         if let Some(taking) = taken {
             commit = taking.written(self, commit);
+            written = true;
+        }
+        if self.address_hold(flow_id)?.is_some() {
+            commit = self.kept(flow_id, commit)?;
             written = true;
         }
         if written {
@@ -4869,6 +4912,60 @@ mod tests {
         assert_eq!(reopened.context_size("5a4d0b").unwrap(), Some(90_000));
     }
 
+    /// A running store written before Address holds were kept (0.31.0)
+    /// is recognized, and its next full open adds the table.
+    #[test]
+    fn a_running_store_from_before_address_holds_opens_and_gains_the_table() {
+        let fixture = StoreFixture::new();
+        let path = fixture.path();
+        let defaults = super::DefaultConfiguration {
+            home: fixture.directory.path().join("home"),
+            runtime_directory: fixture.directory.path().join("runtime"),
+        };
+        let config = ConfigurationOnlyStore::open(&path).expect("fresh Memory opens");
+        let settings = defaults.configuration();
+        config
+            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+                meta_signal_flow::ConfigureNexus {
+                    source_root: settings.source_root,
+                    stable_codex: settings.stable_codex,
+                    next_codex: settings.next_codex,
+                    harness_profiles: settings.harness_profile_vector,
+                    meta_aspects: settings.meta_aspects,
+                    message_nexus_path: settings.message_nexus_path,
+                    message_nexus_binary: "/fixture/message-nexus".into(),
+                    lease: 60,
+                },
+            ))
+            .expect("configuration commits");
+        drop(config);
+        drop(FlowStore::open_configured(&path).expect("configured Memory opens"));
+
+        // The catalog as 0.31.0 wrote it: no Address hold family.
+        let database = redb::Database::open(&path).expect("store opens directly");
+        let write = database.begin_write().expect("catalog transaction starts");
+        {
+            let mut catalog = write
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            assert!(
+                catalog
+                    .remove("flow_nexus_address_holds")
+                    .expect("catalog entry removes")
+                    .is_some()
+            );
+        }
+        write.commit().expect("catalog commits");
+        drop(database);
+
+        let store = FlowStore::open_configured(&path).expect("0.31.0 running Memory opens");
+        use super::address_hold::HoldsLaunchAddress;
+        assert_eq!(store.address_hold("908786").unwrap(), None);
+        drop(store);
+        let reopened = FlowStore::open_configured(&path).expect("upgraded Memory reopens");
+        assert_eq!(reopened.address_hold("908786").unwrap(), None);
+    }
+
     /// Sets redb's recovery-required flag, as a writer killed before it
     /// closed leaves it.
     fn flag_recovery_required(path: &std::path::Path) {
@@ -5823,6 +5920,10 @@ pub(crate) trait ReadsFlowMemory {
                 context::FLOW_CONTEXT_SIZE_FAMILY,
                 context::FLOW_CONTEXT_SIZE_SCHEMA,
             ),
+            "flow_nexus_address_holds" => (
+                address_hold::ADDRESS_HOLD_FAMILY,
+                address_hold::ADDRESS_HOLD_SCHEMA,
+            ),
             _ => return None,
         };
         Some((family, SchemaHash::for_label(version)))
@@ -5873,18 +5974,20 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_meta_module_configuration",
             "flow_nexus_flow_events",
         ];
-        // A running store keeps each flow's context size from 0.28.0 on; a
-        // running store written before then opens, and its first full open
-        // adds the table, as the first full open of a configuration-only
-        // store adds the running tables.
-        const CONTEXT_SIZES: &str = "flow_nexus_flow_context_sizes";
+        // A running store keeps each flow's context size from 0.28.0 on, and
+        // each launch's Address hold from 0.32.0 on; a running store written
+        // before either opens, and its first full open adds the table, as
+        // the first full open of a configuration-only store adds the running
+        // tables.
+        const ADDED_LATER: &[&str] = &["flow_nexus_flow_context_sizes", "flow_nexus_address_holds"];
         let is_exact_set = |expected: &[&str]| {
             actual.len() == expected.len() && expected.iter().all(|name| actual.contains(*name))
         };
-        let running_with_context_sizes = actual.len() == RUNNING.len() + 1
-            && actual.contains(CONTEXT_SIZES)
-            && RUNNING.iter().all(|name| actual.contains(*name));
-        is_exact_set(CONFIGURATION_ONLY) || is_exact_set(RUNNING) || running_with_context_sizes
+        let running = RUNNING.iter().all(|name| actual.contains(*name))
+            && actual.iter().all(|name| {
+                RUNNING.contains(&name.as_str()) || ADDED_LATER.contains(&name.as_str())
+            });
+        is_exact_set(CONFIGURATION_ONLY) || running
     }
 
     fn recognize_flow_memory(path: &Path) -> Result<bool, StoreError> {

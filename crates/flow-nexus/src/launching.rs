@@ -282,11 +282,17 @@ impl LaunchesFlows for RunningNexus {
             native_session_id: registered.session_id.clone(),
             herdr_pane_binding: binding.herdr_pane_binding.clone(),
         };
+        // The acknowledgement takes the seat's Address in the same write, so
+        // the seat is identified before its first prompt; an Address taken
+        // meanwhile refuses it.
         if self.perform(Operation::Record(Record_Data::Acknowledgement(
             acknowledgement.clone(),
         ))) != Outcome::Recorded
         {
-            return persistence();
+            return match self.store.launch_address_refusal(&launch.launch_profile) {
+                Ok(Some(rejection)) => Response::StartRejected(rejection),
+                _ => persistence(),
+            };
         }
         // The claimed Flow names its own pane before any prompt: a new pane
         // never keeps a title another Flow left behind.

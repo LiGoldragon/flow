@@ -97,8 +97,12 @@ caller claim; its text does not authenticate the caller. A profile names its
 ordered source descriptors and exact SHA-256 values, ordered native skill
 names, the launched seat's Address (aspect, topic, layer), power, harness,
 model, effort, predecessor, remembered flows, Herdr target session, and first
-instruction. A confirmed launch records that Address's metaflow Awake as the
-launched flow, so the seat sleeps at a resting Stop and a queued request wakes
+instruction. Once the seat's native binding is witnessed and its flow
+registered, before its first prompt, the launch records that Address's
+metaflow Awake as the launched flow, so the seat's first tool call is
+identified and sends through Message; confirmation keeps it, so the seat
+sleeps at a resting Stop and a queued request wakes it, and a launch refused,
+or a flow that ends, before confirmation gives the metaflow back as it found
 it; a Start whose Address a live seat holds, or another unsettled launch
 names, answers `StartRejected.AddressAwake`, and one at an ended Address
 `StartRejected.AddressEnded`. Profile producers should use the

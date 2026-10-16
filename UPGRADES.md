@@ -1,3 +1,33 @@
+# Flow 0.32.0
+
+No wire change. The store gains one table; every store opens.
+
+- **A launched seat is registered before its first prompt.** The write that
+  journals a launch's registration acknowledgement, made once the seat's
+  native binding is witnessed (Bind) and its flow registered in its pane,
+  records the profile's Address Awake as the launched FlowId, by the same
+  rules confirmation used. The first prompt is typed after it, so a seat
+  whose first tool call runs `message 'Send.{ … }'` is identified and its
+  request delivered, though no answer of the seat is recorded yet.
+- **Until confirmation the Address is held.** A row in the new
+  `flow_nexus_address_holds` table keeps the metaflow as the launch found
+  it. Confirmation keeps the Address and drops the hold in the write that
+  makes the flow Active; LaunchStatus and confirmation are otherwise as
+  before.
+- **A launch that comes to nothing gives the Address back.** A launch
+  settled `StartRejected` (or `ReplaceRejected.LaunchRefused`), or a flow
+  recorded Stopped, Retired or Exited while it holds its Address, returns a
+  metaflow still Awake as it to what the hold kept (Asleep with its Past, a
+  replaced predecessor Awake again), keeping requests queued meanwhile; one
+  the launch created is removed, or left Asleep when requests were queued.
+  No Awake registration of an unconfirmed flow outlives it.
+- **A held seat neither sleeps nor drains at a Stop** until confirmation.
+- **An Address taken meanwhile** refuses the acknowledgement, and Start
+  answers `StartRejected.AddressAwake` or `.AddressEnded`.
+
+To deploy: install 0.32.0 and restart the Nexus. A store written by 0.31.0
+opens and gains the table at its first full open. Clients are unchanged.
+
 # Flow 0.31.0
 
 The ordinary wire changes: signal-flow 16.0.0 (229933d9) and

@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.31.0";
+            version = "0.32.0";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -233,6 +233,10 @@
             "the_meta_client_reaches_the_default_meta_socket_under_the_runtime_directory";
           flow-configuration-only-over-meta = context.exactTest "flow-nexus"
             "a_flow_variable_in_the_environment_does_not_reach_the_configuration";
+          flow-first-turn-sends-before-any-answer = context.exactTest "flow-nexus"
+            "tests::waking::a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer";
+          flow-unconfirmed-launch-gives-back-its-address = context.exactTest "flow-nexus"
+            "tests::waking::an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration";
         }
       );
 

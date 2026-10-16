@@ -48,6 +48,7 @@ use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
 use crate::herdr::{LocatesNativeTranscripts, ReadsHerdrPanes, ReadsHerdrRoster};
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
+use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::RecordsContextSize;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{ManagesMetaflowState, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle};
@@ -269,6 +270,11 @@ impl SleepsAndWakesSeats for RunningNexus {
         let Ok(Some(metaflow)) = self.store.metaflow_awake_as(flow_id) else {
             return AtStop::Kept;
         };
+        // A seat whose launch is not yet confirmed only holds its Address:
+        // it neither sleeps nor drains until confirmation keeps it.
+        if !matches!(self.store.address_hold(flow_id), Ok(None)) {
+            return AtStop::Kept;
+        }
         let address = metaflow.address.clone();
         if !Self::sleeps_layer(&address.layer) || self.waking.is_waking(&address) {
             return AtStop::Kept;

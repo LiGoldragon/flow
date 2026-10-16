@@ -893,15 +893,13 @@ fn a_launch_takes_its_address_by_binds_rules() {
 /// process, which runs in the launched seat's pane, and Flow identifies it
 /// as the Address its launch took. Its Order to an Asleep seat is queued
 /// and wakes that seat, which is handed the Order.
-#[test]
-fn a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_seat() {
+/// Message, running as its own process and an ancestor of no seat, bound
+/// at Field message Primary as the configured Message Nexus binary.
+fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, signal_flow::Process) {
     use crate::metaflow::DispatchesMetaflowPeer;
-    use crate::store::metaflow::{MutatesMetaflows, TakesLaunchAddress};
+    use crate::store::metaflow::MutatesMetaflows;
     use crate::store::{FlowStore, ReadsFlowMemory};
-    use signal_flow::{Bind_Data, Deliver_Data, Lock_Data, Recipient, Response};
-
-    let fixture = NexusFixture::new();
-    resumable(&fixture);
+    use signal_flow::{Bind_Data, Response};
     // Message runs as its own process, an ancestor of no seat.
     let message_child = super::MarkedProcess::spawn("sleep", &["30"], "w0:p0");
     let message_executable = fs::canonicalize(format!("/proc/{}/exe", message_child.0.id()))
@@ -950,6 +948,19 @@ fn a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_sea
         Response::Bound(_)
     ));
     assert!(fixture.nexus.store.message_peer(&message).unwrap());
+    (message_child, message)
+}
+
+#[test]
+fn a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_seat() {
+    use crate::metaflow::DispatchesMetaflowPeer;
+    use crate::store::metaflow::TakesLaunchAddress;
+    use crate::store::{FlowStore, ReadsFlowMemory};
+    use signal_flow::{Deliver_Data, Lock_Data, Recipient, Response};
+
+    let fixture = NexusFixture::new();
+    resumable(&fixture);
+    let (_message_child, message) = message_peer(&fixture);
 
     // The sending seat: a flow Flow launched into pane w5:p1, its launch
     // having taken the Address Field flow Quaternary.
@@ -1077,4 +1088,161 @@ fn a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_sea
     assert!(woken.queue.is_empty());
     let typed = fs::read_to_string(fixture.directory.path().join("pane-typed.txt")).unwrap();
     assert!(typed.starts_with(&[order].prompt_text()));
+}
+
+/// A seat launched into the pane Message's marked processes name: its
+/// binding witnessed and acknowledged, its first prompt typed, and no answer
+/// of its yet recorded.
+fn launched_unanswered(fixture: &NexusFixture, launch_request_id: &str) -> super::StagedLaunch {
+    let mut launch = fixture.staged_launch(launch_request_id, None);
+    launch.pane.herdr_session_name = "messaging-build".into();
+    launch.pane.herdr_pane_id = "w5:p1".into();
+    launch.pane.herdr_agent_name = "sender-agent".into();
+    launch.pane.herdr_terminal_id = "term-sender".into();
+    launch.binding.herdr_pane_binding = launch.pane.clone();
+    launch.stage_to_ambiguity(&fixture.nexus);
+    fixture.set_agents(vec![serde_json::json!({
+        "agent":"codex","agent_status":"working","name":"sender-agent",
+        "pane_id":"w5:p1","terminal_id":"term-sender","workspace_id":"w5"
+    })]);
+    launch
+}
+
+/// The living's rule is that a seat's first turn does real work: a seat
+/// whose first tool call sends, before any answer of its is recorded, is
+/// already identified at its Address and its Order is queued.
+#[test]
+fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
+    use crate::metaflow::DispatchesMetaflowPeer;
+    use crate::store::{FlowStore, ReadsFlowMemory, ReadsLaunchAttempt};
+    use signal_flow::{Deliver_Data, LaunchAttemptPhase, Lock_Data, Recipient, Response};
+
+    let fixture = NexusFixture::new();
+    let (_message_child, message) = message_peer(&fixture);
+    let launch = launched_unanswered(&fixture, "first-turn-request");
+    let sender_address = launch.profile.address.clone();
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .launch_attempt("first-turn-request")
+            .unwrap()
+            .unwrap()
+            .launch_attempt_phase,
+        LaunchAttemptPhase::PromptAmbiguous,
+        "no answer of the seat is recorded"
+    );
+
+    let first_tool_call = super::MarkedProcess::spawn("sleep", &["30"], "w5:p1");
+    let process = FlowStore::process_identity_for_pid(first_tool_call.0.id()).unwrap();
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(signal_flow::Query::Identify(process), Some(&message))
+            .response,
+        Response::Identified(sender_address.clone())
+    );
+    let at = address(Layer::Secondary);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("abc123".into()),
+        vec![],
+        vec![],
+    ));
+    let Response::Locked(lock) = fixture
+        .nexus
+        .dispatch_metaflow_peer(
+            signal_flow::Query::Lock(Lock_Data {
+                sender: sender_address,
+                recipient: Recipient::Address(at.clone()),
+            }),
+            Some(&message),
+        )
+        .response
+    else {
+        panic!("the identified seat locks its recipient")
+    };
+    let order = Request::Order("Run the tier tests.".into());
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::Deliver(Deliver_Data {
+                    lock,
+                    request: order.clone(),
+                }),
+                Some(&message),
+            )
+            .response,
+        Response::Queued
+    );
+    assert_eq!(stored(&fixture, Layer::Secondary).queue, vec![order]);
+}
+
+/// A launch refused before it was confirmed gives the Address back as it
+/// found it, keeping what was queued meanwhile; a flow that ends unconfirmed
+/// gives back an Address that had no metaflow by removing it.
+#[test]
+fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
+    use crate::launching::LaunchesFlows;
+    use crate::store::address_hold::HoldsLaunchAddress;
+    use signal_flow::{Response, StartRejection};
+
+    let fixture = NexusFixture::new();
+    // An Address that was Asleep: refused, it is Asleep again.
+    let mut asleep = fixture.staged_launch("asleep-request", None);
+    asleep.profile.address = address(Layer::Secondary);
+    asleep.composed.launch_profile.address = address(Layer::Secondary);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![Request::Order("A".into())],
+    ));
+    asleep.stage_to_ambiguity(&fixture.nexus);
+    let held = stored(&fixture, Layer::Secondary);
+    assert_eq!(held.state, State::Awake("908786".into()));
+    assert_eq!(held.past, vec!["abc123".to_owned()]);
+    let mut queued = held.clone();
+    queued.queue.push(Request::Notice("B".into()));
+    fixture.nexus.store.seed_metaflow(queued);
+
+    assert_eq!(
+        fixture.nexus.settle(
+            "asleep-request",
+            Response::StartRejected(StartRejection::NativeLaunchRefused)
+        ),
+        Response::StartRejected(StartRejection::NativeLaunchRefused)
+    );
+    assert_eq!(
+        stored(&fixture, Layer::Secondary),
+        metaflow(
+            Layer::Secondary,
+            State::Asleep,
+            vec!["abc123"],
+            vec![Request::Order("A".into()), Request::Notice("B".into())],
+        )
+    );
+    assert_eq!(
+        fixture.nexus.store.metaflow_awake_as("908786").unwrap(),
+        None
+    );
+    assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
+
+    // An Address with no metaflow: the flow's pane goes before any answer.
+    let fixture = NexusFixture::new();
+    let mut absent = fixture.staged_launch("absent-request", None);
+    let at = absent.profile.address.clone();
+    absent.stage_to_ambiguity(&fixture.nexus);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow_awake_as("908786")
+            .unwrap()
+            .is_some()
+    );
+    assert!(fixture.nexus.store.record_exited("908786").unwrap());
+    assert_eq!(fixture.nexus.store.metaflow(&at).unwrap(), None);
+    assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
 }

@@ -45,9 +45,17 @@ flow, not to the default socket under the pane's runtime directory. A Codex
 launch reserves nothing: its session is
 named by its app server, and Bind claims from it as before.
 
-A launch names the Address of its seat in its profile. When the launch is
-confirmed, Confirm makes the flow Active and records that metaflow Awake as
-the flow in one write, by Bind's rules: a metaflow Awake as a live flow, or
+A launch names the Address of its seat in its profile. The write that
+journals the registration acknowledgement, once the seat's native binding is
+witnessed and its flow registered and before its first prompt is typed,
+records that metaflow Awake as the flow and holds it: an Address hold row
+keeps the metaflow as the launch found it. Confirm makes the flow Active and
+drops the hold in one write, the Address staying taken. A launch settled as
+refused, or a flow recorded Stopped, Retired or Exited, while it holds its
+Address gives it back in that write: a metaflow still Awake as the flow
+returns to what the hold kept, keeping its queue; one the launch created is
+removed, or left Asleep when requests were queued meanwhile. A seat that holds its Address neither sleeps nor drains at a
+Stop. The taking follows Bind's rules: a metaflow Awake as a live flow, or
 bound to a live process, is refused, an Ended one is refused, and an absent
 or Asleep one, or one Awake as a flow no longer live, is taken, a displaced
 flow joining Past; a replacement takes over its predecessor's. Start refuses

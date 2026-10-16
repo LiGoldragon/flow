@@ -3108,23 +3108,34 @@ mod tests {
             );
         }
 
+        /// Registers the bound flow in the role its profile names, as
+        /// Start does, and journals the acknowledgement, which takes the
+        /// launch's Address.
         fn register_and_acknowledge(&self, nexus: &RunningNexus) {
             nexus
                 .store
-                .register_flow(FlowNode {
-                    flow_id: self.binding.flow_id.clone(),
-                    session_id: self.binding.native_session_id.clone(),
-                    harness_kind: HarnessKind::Codex,
-                    endpoint_selection: EndpointSelection::Unavailable,
-                    herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                        herdr_session_name: self.pane.herdr_session_name.clone(),
-                        herdr_agent_name: self.pane.herdr_agent_name.clone(),
-                        herdr_pane_id: self.pane.herdr_pane_id.clone(),
-                        herdr_terminal_id: self.pane.herdr_terminal_id.clone(),
-                    }),
-                    origin_clue: self.origin.clone(),
-                    flow_lifecycle: FlowLifecycle::Pending,
-                })
+                .register_flow_in_role(
+                    FlowNode {
+                        flow_id: self.binding.flow_id.clone(),
+                        session_id: self.binding.native_session_id.clone(),
+                        harness_kind: HarnessKind::Codex,
+                        endpoint_selection: EndpointSelection::Unavailable,
+                        herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                            herdr_session_name: self.pane.herdr_session_name.clone(),
+                            herdr_agent_name: self.pane.herdr_agent_name.clone(),
+                            herdr_pane_id: self.pane.herdr_pane_id.clone(),
+                            herdr_terminal_id: self.pane.herdr_terminal_id.clone(),
+                        }),
+                        origin_clue: self.origin.clone(),
+                        flow_lifecycle: FlowLifecycle::Pending,
+                    },
+                    signal_flow::Caller {
+                        flow_id: self.binding.flow_id.clone(),
+                        aspect: self.profile.address.aspect.clone(),
+                        power_level: self.profile.power_level.clone(),
+                        model_name: self.profile.model_name.clone(),
+                    },
+                )
                 .unwrap();
             assert!(
                 nexus
@@ -3465,23 +3476,36 @@ mod tests {
         );
     }
 
-    /// A launch names the Address of its seat: the confirmed launch records
-    /// that metaflow Awake as the launched flow in the write that makes it
-    /// Active, and a Start at an Address a live seat holds, or one ended, is
-    /// refused before anything launches.
+    /// A launch names the Address of its seat: the write acknowledging the
+    /// seat's witnessed binding records that metaflow Awake as the launched
+    /// flow and holds it, confirmation keeps it in the write that makes the
+    /// flow Active, and a Start at an Address a live seat holds, or one
+    /// ended, is refused before anything launches.
     #[test]
     fn a_confirmed_launch_takes_its_address_and_a_held_address_refuses_the_next_start() {
         use crate::store::ManagesMetaflowState as _;
+        use crate::store::address_hold::HoldsLaunchAddress as _;
         use crate::store::metaflow::SleepsMetaflows as _;
         let fixture = NexusFixture::new();
         let calls = fixture.herdr_for_replacement(0);
         let mut seat = fixture.staged_launch("seat-request", None);
         let address = seat.profile.address.clone();
         seat.stage_to_ambiguity(&fixture.nexus);
-        assert_eq!(
-            fixture.nexus.store.metaflow(&address).unwrap(),
-            None,
-            "nothing is recorded before the launch is confirmed"
+        let held = fixture
+            .nexus
+            .store
+            .metaflow(&address)
+            .unwrap()
+            .expect("the acknowledged binding took the Address");
+        assert_eq!(held.state, flow_ethos::State::Awake("908786".into()));
+        assert!(
+            fixture
+                .nexus
+                .store
+                .address_hold("908786")
+                .unwrap()
+                .is_some(),
+            "until confirmation the launch only holds it"
         );
         let mut second = fixture.staged_launch("second-request", None);
         second.profile.address = address.clone();
@@ -3507,6 +3531,11 @@ mod tests {
             flow_ethos::State::Awake(started.flow_id.clone())
         );
         assert!(metaflow.past.is_empty());
+        assert_eq!(
+            fixture.nexus.store.address_hold(&started.flow_id).unwrap(),
+            None,
+            "confirmation keeps the Address and drops the hold"
+        );
         assert_eq!(
             fixture
                 .nexus

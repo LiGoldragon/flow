@@ -804,6 +804,9 @@ impl ObservesLaunch for RunningNexus {
         let mut watch: Option<TranscriptWatch> = None;
         loop {
             let seen = changes.current();
+            if self.stopping.requested() {
+                return Err("the Nexus is stopping".into());
+            }
             let answer = self.launch_status(launch_request_id);
             let Response::LaunchInspected(inspection) = &answer else {
                 return send(&answer);
@@ -850,15 +853,15 @@ impl ObservesLaunch for RunningNexus {
 /// transcript is watched, and every change of it re-observes the receipt.
 /// It waits on announced changes, never on a timer.
 pub trait PromotesAmbiguousLaunches {
-    /// Runs for the life of the Nexus.
-    fn promote_ambiguous_launches(&self) -> !;
+    /// Runs until the Nexus is told to stop.
+    fn promote_ambiguous_launches(&self);
 }
 
 impl PromotesAmbiguousLaunches for RunningNexus {
-    fn promote_ambiguous_launches(&self) -> ! {
+    fn promote_ambiguous_launches(&self) {
         let changes = self.store.launch_changes.clone();
         let mut watches = AmbiguousLaunchWatches::default();
-        loop {
+        while !self.stopping.requested() {
             let seen = changes.current();
             watches.pass(self);
             changes.after(seen);

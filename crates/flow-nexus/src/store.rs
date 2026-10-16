@@ -4719,6 +4719,82 @@ mod tests {
         assert_eq!(reopened.context_size("5a4d0b").unwrap(), Some(90_000));
     }
 
+    /// Sets redb's recovery-required flag, as a writer killed before it
+    /// closed leaves it.
+    fn flag_recovery_required(path: &std::path::Path) {
+        let mut bytes = std::fs::read(path).expect("store bytes read");
+        bytes[9] |= 2;
+        std::fs::write(path, bytes).expect("flagged store written");
+        assert!(matches!(
+            redb::ReadOnlyDatabase::open(path),
+            Err(redb::DatabaseError::RepairAborted)
+        ));
+    }
+
+    fn directory_entries(path: &std::path::Path) -> Vec<std::ffi::OsString> {
+        let mut names = std::fs::read_dir(path.parent().expect("store directory"))
+            .expect("store directory lists")
+            .map(|entry| entry.expect("directory entry").file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_flagged_flow_memory_is_recognized_through_a_repaired_copy_and_then_opens() {
+        let fixture = StoreFixture::new();
+        let path = fixture.path();
+        drop(ConfigurationOnlyStore::open(&path).expect("fresh Flow Memory opens"));
+        flag_recovery_required(&path);
+        let before = std::fs::read(&path).expect("flagged bytes read");
+        let entries = directory_entries(&path);
+
+        assert!(FlowStore::recognize_flow_memory(&path).expect("flagged Memory recognizes"));
+        assert_eq!(
+            std::fs::read(&path).expect("flagged bytes reread"),
+            before,
+            "recognition never writes the original"
+        );
+        assert_eq!(directory_entries(&path), entries, "the copy is discarded");
+
+        drop(ConfigurationOnlyStore::open(&path).expect("flagged Memory opens and repairs"));
+        assert_eq!(std::fs::read(&path).expect("repaired bytes")[9] & 2, 0);
+        assert!(FlowStore::recognize_flow_memory(&path).expect("repaired Memory recognizes"));
+    }
+
+    #[test]
+    fn a_flagged_foreign_store_is_refused_without_changing_it() {
+        let fixture = StoreFixture::new();
+        let path = fixture.path();
+        let mut engine = Engine::open(EngineOpen::new(
+            &path,
+            SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+        ))
+        .expect("foreign schema-v2 store opens");
+        engine
+            .register_table(TableDescriptor::<super::FlowRecord>::new(
+                super::FLOW_TABLE_NAME,
+                FamilyName::new("flow-nexus-flow"),
+                SchemaHash::for_label("flow-nexus-flow-v5"),
+            ))
+            .expect("foreign occupant has one unrelated Flow family");
+        drop(engine);
+        flag_recovery_required(&path);
+        let before = std::fs::read(&path).expect("flagged foreign bytes read");
+        let entries = directory_entries(&path);
+
+        assert!(matches!(
+            ConfigurationOnlyStore::open(&path),
+            Err(super::StoreError::UnrecognizedMemory { .. })
+        ));
+        assert!(matches!(
+            FlowStore::open_configured(&path),
+            Err(super::StoreError::UnrecognizedMemory { .. })
+        ));
+        assert_eq!(std::fs::read(&path).expect("foreign bytes reread"), before);
+        assert_eq!(directory_entries(&path), entries, "the copy is discarded");
+    }
+
     #[test]
     fn configuration_only_refuses_old_memory_without_changing_any_bytes() {
         let fixture = StoreFixture::new();
@@ -5716,9 +5792,62 @@ pub(crate) trait ReadsFlowMemory {
         // In particular, do not use Database::open here: Sema's normal writer open
         // can stamp schema/layout metadata before a caller discovers this is an
         // old or foreign occupant.
+        match redb::ReadOnlyDatabase::open(path) {
+            Ok(database) => FlowStore::recognize_open_memory(&database, &reject),
+            // A writer that did not close cleanly leaves redb's recovery flag,
+            // and a read-only open refuses to repair. The flagged store is
+            // recognized through a repaired copy, so the original is written
+            // only by the writer open that follows recognition.
+            Err(redb::DatabaseError::RepairAborted) => {
+                FlowStore::recognize_repaired_copy(path, &reject)
+            }
+            Err(error) => Err(reject(error.to_string())),
+        }
+    }
+
+    fn recognize_repaired_copy(
+        path: &Path,
+        reject: &dyn Fn(String) -> StoreError,
+    ) -> Result<bool, StoreError> {
+        /// The repaired copy is removed however recognition ends.
+        struct RecognitionCopy(std::path::PathBuf);
+        impl Drop for RecognitionCopy {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let name = path
+            .file_name()
+            .ok_or(StoreError::InvalidStorePath)?
+            .to_string_lossy();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let copy = RecognitionCopy(path.with_file_name(format!(
+            ".{name}.recognition-{}-{nanos}",
+            std::process::id()
+        )));
+        std::fs::copy(path, &copy.0).map_err(|error| {
+            reject(format!(
+                "cannot copy flagged store for recognition: {error}"
+            ))
+        })?;
+        redb::Database::create(&copy.0)
+            .map(drop)
+            .map_err(|error| reject(format!("flagged store copy cannot be repaired: {error}")))?;
+        let database = redb::ReadOnlyDatabase::open(&copy.0)
+            .map_err(|error| reject(format!("repaired store copy: {error}")))?;
+        let recognized = FlowStore::recognize_open_memory(&database, reject);
+        drop(database);
+        recognized
+    }
+
+    fn recognize_open_memory(
+        database: &redb::ReadOnlyDatabase,
+        reject: &dyn Fn(String) -> StoreError,
+    ) -> Result<bool, StoreError> {
         use redb::{ReadableDatabase as _, ReadableTable as _};
-        let database =
-            redb::ReadOnlyDatabase::open(path).map_err(|error| reject(error.to_string()))?;
         let read = database
             .begin_read()
             .map_err(|error| reject(error.to_string()))?;

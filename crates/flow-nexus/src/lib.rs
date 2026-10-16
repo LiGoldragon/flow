@@ -63,7 +63,10 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use store::{
@@ -85,6 +88,8 @@ pub struct RunningNexus {
     pub pane_leases: delivery::lease::PaneLeases,
     /// The metaflows a wake is running for; see `waking`.
     pub waking: waking::WakingMetaflows,
+    /// Set once the Nexus is told to stop; see [`StopsNexus`].
+    pub stopping: Stopping,
 }
 
 pub trait Dispatches {
@@ -501,6 +506,7 @@ impl OpensRunningNexus for RunningNexus {
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
+            stopping: Stopping::default(),
         })
     }
 }
@@ -612,12 +618,18 @@ pub trait ListensOnSocket {
     where
         Self: Sync + Sized,
     {
-        let _ = fs::remove_file(socket);
-        let listener = UnixListener::bind(socket).map_err(|error| error.to_string())?;
-        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
+        let listener = ClaimedSocket::bind(socket)?;
         std::thread::scope(|scope| {
-            for peer in listener.incoming() {
+            // A stop requested before the bind found no listener to wake.
+            let incoming = listener
+                .incoming()
+                .take(if self.stopping() { 0 } else { usize::MAX });
+            for peer in incoming {
+                // A stop wakes this accept with its own connection; whatever
+                // was accepted with it is closed unanswered.
+                if self.stopping() {
+                    break;
+                }
                 let connection = match peer
                     .map_err(|error| error.to_string())
                     .and_then(Connection::accepted)
@@ -635,11 +647,169 @@ pub trait ListensOnSocket {
                 });
             }
         });
-        Err(format!("{surface} listener closed"))
+        // Every accepted connection has finished: the scope joined them.
+        let _ = fs::remove_file(socket);
+        if self.stopping() {
+            Ok(())
+        } else {
+            Err(format!("{surface} listener closed"))
+        }
+    }
+
+    /// Whether the Nexus has been told to stop.
+    fn stopping(&self) -> bool;
+}
+
+impl ListensOnSocket for RunningNexus {
+    fn stopping(&self) -> bool {
+        self.stopping.requested()
     }
 }
 
-impl ListensOnSocket for RunningNexus {}
+/// The Nexus's stop request: once set it stays set.
+#[derive(Default)]
+pub struct Stopping {
+    requested: AtomicBool,
+}
+
+impl Stopping {
+    pub fn requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    pub fn request(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Stops a running Nexus so that every thread borrowing it returns and the
+/// store closes cleanly: the accept loops stop taking connections and join
+/// the ones in flight, the launch promoter and launch observers return, and
+/// agent observers end at their next read timeout.
+pub trait StopsNexus {
+    fn stop(&self, sockets: &[&Path]);
+}
+
+impl StopsNexus for RunningNexus {
+    fn stop(&self, sockets: &[&Path]) {
+        self.stopping.request();
+        self.store.launch_changes.announce();
+        // Each accept loop is blocked in accept; a connection wakes it. A
+        // listener not yet bound sees the request once it binds.
+        for socket in sockets {
+            let _ = UnixStream::connect(socket);
+        }
+    }
+}
+
+/// A socket path this process binds, after making sure no live listener is
+/// there: a socket file nobody accepts on is stale and removed, a socket
+/// that accepts belongs to a live process and is refused.
+pub struct ClaimedSocket;
+
+impl ClaimedSocket {
+    pub fn bind(socket: &Path) -> Result<UnixListener, String> {
+        use std::os::unix::fs::FileTypeExt;
+        if let Some(directory) = socket
+            .parent()
+            .filter(|directory| !directory.as_os_str().is_empty())
+        {
+            fs::create_dir_all(directory)
+                .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
+        }
+        match fs::symlink_metadata(socket) {
+            Ok(metadata) if metadata.file_type().is_socket() => match UnixStream::connect(socket) {
+                Ok(_peer) => {
+                    return Err(format!(
+                        "socket {} is already accepting connections",
+                        socket.display()
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    fs::remove_file(socket).map_err(|error| {
+                        format!("cannot remove stale socket {}: {error}", socket.display())
+                    })?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "cannot establish whether socket {} is stale: {error}",
+                        socket.display()
+                    ));
+                }
+            },
+            Ok(_) => {
+                return Err(format!(
+                    "socket path {} exists and is not a socket",
+                    socket.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect socket {}: {error}",
+                    socket.display()
+                ));
+            }
+        }
+        let listener = UnixListener::bind(socket)
+            .map_err(|error| format!("cannot bind socket {}: {error}", socket.display()))?;
+        if let Err(error) = fs::set_permissions(socket, fs::Permissions::from_mode(0o600)) {
+            drop(listener);
+            let _ = fs::remove_file(socket);
+            return Err(format!(
+                "cannot protect socket {}: {error}",
+                socket.display()
+            ));
+        }
+        Ok(listener)
+    }
+}
+
+/// SIGTERM and SIGINT, taken by one watching thread instead of killing the
+/// process, so a stop closes the store. The signals are blocked before any
+/// thread starts, so every thread inherits the block; a spawned child
+/// process starts with an empty mask.
+pub struct TerminationSignals {
+    set: libc::sigset_t,
+}
+
+impl TerminationSignals {
+    const POLL: libc::timespec = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 200_000_000,
+    };
+
+    /// Blocks SIGTERM and SIGINT in the calling thread; call before any
+    /// other thread starts.
+    pub fn block() -> Self {
+        // SAFETY: the set is initialized by sigemptyset before use, and
+        // pthread_sigmask only reads it.
+        unsafe {
+            let mut set = std::mem::zeroed::<libc::sigset_t>();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGTERM);
+            libc::sigaddset(&mut set, libc::SIGINT);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            Self { set }
+        }
+    }
+
+    /// Waits for SIGTERM or SIGINT until `finished` holds; true when a
+    /// signal came.
+    pub fn watch(&self, finished: &dyn Fn() -> bool) -> bool {
+        while !finished() {
+            // SAFETY: the set and timeout are valid for the call; no
+            // siginfo is requested.
+            let signal =
+                unsafe { libc::sigtimedwait(&self.set, std::ptr::null_mut(), &Self::POLL) };
+            if signal == libc::SIGTERM || signal == libc::SIGINT {
+                return true;
+            }
+        }
+        false
+    }
+}
 
 /// Reports a listed row as what Herdr shows of it, without writing anything.
 ///
@@ -1159,6 +1329,7 @@ mod tests {
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),
+                stopping: crate::Stopping::default(),
             };
             Self {
                 directory,

@@ -225,3 +225,138 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
         "FLOW_ variables and defaults do not redirect typed StorePath"
     );
 }
+
+fn recovery_flag(store: &Path) -> u8 {
+    std::fs::read(store)
+        .expect("store bytes read")
+        .get(9)
+        .map_or(0, |god| god & 2)
+}
+
+fn terminate(nexus: &mut StartedNexus) -> std::process::ExitStatus {
+    // SAFETY: kill only sends a signal to the child this test started.
+    let sent = unsafe { libc::kill(nexus.child.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(sent, 0, "SIGTERM sent");
+    for _ in 0..1_000 {
+        if let Some(status) = nexus.child.try_wait().expect("child status") {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("flow-nexus did not stop on SIGTERM")
+}
+
+fn plant_stale_socket(socket: &Path) {
+    std::fs::create_dir_all(socket.parent().expect("socket directory")).expect("directory");
+    drop(std::os::unix::net::UnixListener::bind(socket).expect("socket inode"));
+    // A child forked by a concurrent test holds the listener until it execs.
+    for _ in 0..500 {
+        if UnixStream::connect(socket).is_err() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("{} never became stale", socket.display())
+}
+
+#[test]
+fn sigterm_stops_the_daemon_and_closes_its_store_cleanly() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let state = tempfile::tempdir().expect("dedicated state directory");
+    let start = start(runtime.path(), state.path());
+    let store = Path::new(&start.store_path);
+    configure_fresh(home.path(), runtime.path(), &start);
+    plant_stale_socket(Path::new(&start.ordinary_socket_path));
+    plant_stale_socket(Path::new(&start.meta_socket_path));
+
+    let mut nexus = spawn(home.path(), runtime.path(), &start, false);
+    let mut ordinary = connect(Path::new(&start.ordinary_socket_path), &mut nexus);
+    ordinary
+        .write_query(&signal_flow::Query::Metaflows)
+        .expect("List written");
+    assert!(matches!(
+        ordinary
+            .read_response()
+            .expect("List answered past the stale socket"),
+        signal_flow::Response::Listed(_)
+    ));
+    drop(ordinary);
+    connect(Path::new(&start.meta_socket_path), &mut nexus);
+    assert_eq!(recovery_flag(store), 2, "a running writer holds the flag");
+
+    assert!(terminate(&mut nexus).success());
+    assert_eq!(recovery_flag(store), 0, "the store closed cleanly");
+    redb::ReadOnlyDatabase::open(store).expect("read-only recognition opens");
+    flow_nexus::store::ConfigurationOnlyStore::open(store).expect("the store is recognized");
+    assert!(!Path::new(&start.ordinary_socket_path).exists());
+    assert!(!Path::new(&start.meta_socket_path).exists());
+}
+
+#[test]
+fn sigterm_stops_configure_only_and_closes_its_store_cleanly() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let state = tempfile::tempdir().expect("dedicated state directory");
+    let start = start(runtime.path(), state.path());
+    let store = Path::new(&start.store_path);
+    plant_stale_socket(Path::new(&start.meta_socket_path));
+
+    let mut nexus = spawn(home.path(), runtime.path(), &start, true);
+    // A signal that arrives before the listener waits stays pending for the
+    // watching thread, so the store being open is enough.
+    for _ in 0..500 {
+        if store.exists() && recovery_flag(store) == 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(recovery_flag(store), 2, "a running writer holds the flag");
+
+    let _ = terminate(&mut nexus);
+    assert_eq!(recovery_flag(store), 0, "the store closed cleanly");
+    flow_nexus::store::ConfigurationOnlyStore::open(store).expect("the store is recognized");
+    assert!(!Path::new(&start.meta_socket_path).exists());
+}
+
+#[test]
+fn a_live_nexus_socket_is_never_taken_over() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let runtime = tempfile::tempdir().expect("temporary runtime directory");
+    let state = tempfile::tempdir().expect("dedicated state directory");
+    let other_state = tempfile::tempdir().expect("second state directory");
+    let start = start(runtime.path(), state.path());
+    configure_fresh(home.path(), runtime.path(), &start);
+    let mut nexus = spawn(home.path(), runtime.path(), &start, false);
+    drop(connect(Path::new(&start.meta_socket_path), &mut nexus));
+    drop(connect(Path::new(&start.ordinary_socket_path), &mut nexus));
+
+    let mut intruder = spawn(
+        home.path(),
+        runtime.path(),
+        &Start {
+            store_path: other_state
+                .path()
+                .join("flow.sema")
+                .to_string_lossy()
+                .into_owned(),
+            ..start.clone()
+        },
+        true,
+    );
+    assert!(
+        !intruder.child.wait().expect("intruder exits").success(),
+        "a live meta socket is refused"
+    );
+
+    let mut ordinary = connect(Path::new(&start.ordinary_socket_path), &mut nexus);
+    ordinary
+        .write_query(&signal_flow::Query::Metaflows)
+        .expect("List written");
+    assert!(matches!(
+        ordinary
+            .read_response()
+            .expect("the live Nexus still answers"),
+        signal_flow::Response::Listed(_)
+    ));
+}

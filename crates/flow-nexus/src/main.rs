@@ -1,7 +1,8 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow_nexus::store::ConfiguresOnlyStore;
 use flow_nexus::{
-    CarriesSignalFrames, OpensRunningNexus, RunningNexus, ServesMeta, ServesOrdinary,
+    CarriesSignalFrames, ClaimedSocket, OpensRunningNexus, RunningNexus, ServesMeta,
+    ServesOrdinary, StopsNexus, TerminationSignals,
     caller::{IdentifiesPeer, LocatesCallerPane},
     launching::PromotesAmbiguousLaunches,
     store::{ConfigurationOnlyStore, DefaultConfiguration, ReadsAnchors, StoreError},
@@ -10,13 +11,10 @@ use flow_nexus::{
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
     fs,
-    os::unix::{
-        fs::{FileTypeExt, PermissionsExt},
-        net::{UnixListener, UnixStream},
-    },
+    os::unix::net::{UnixListener, UnixStream},
     path::Path,
     process::ExitCode,
-    sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -86,6 +84,8 @@ fn main() -> ExitCode {
         println!("{version}");
         return ExitCode::SUCCESS;
     }
+    // Before any thread starts, so a stop always reaches the watching thread.
+    let signals = TerminationSignals::block();
     let defaults = DefaultConfiguration::from_environment();
     if matches!(
         arguments.first().map(String::as_str),
@@ -98,7 +98,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        return match ConfigurationStartup::run_configuration_only(&start) {
+        return match ConfigurationStartup::run_configuration_only(&start, &signals) {
             Ok(()) => ExitCode::SUCCESS,
             Err(ConfigureOnlyError::Store(StoreError::UnrecognizedMemory { path, reason })) => {
                 ConfigurationStartup::report_unrecognized_store(&path, &reason);
@@ -118,7 +118,7 @@ fn main() -> ExitCode {
         }
     };
     let nexus = match RunningNexus::open(&defaults, &start) {
-        Ok(nexus) => Arc::new(nexus),
+        Ok(nexus) => nexus,
         Err(StoreError::UnrecognizedMemory { path, reason }) => {
             ConfigurationStartup::report_unrecognized_store(&path, &reason);
             return ExitCode::FAILURE;
@@ -137,28 +137,36 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let promoting_nexus = Arc::clone(&nexus);
-    std::thread::spawn(move || promoting_nexus.promote_ambiguous_launches());
-    // A wake the last Nexus did not finish left its work queued: wake it.
-    let waking_nexus = Arc::clone(&nexus);
-    std::thread::spawn(move || waking_nexus.recover_wakes());
-    let ordinary = start.ordinary_socket_path.clone();
-    let ordinary_nexus = Arc::clone(&nexus);
-    std::thread::spawn(move || {
-        if let Err(error) = ordinary_nexus.serve_ordinary(Path::new(&ordinary)) {
-            eprintln!("flow-nexus: ordinary socket {ordinary}: {error}");
-            std::process::exit(1);
+    let ordinary = Path::new(&start.ordinary_socket_path);
+    let meta = Path::new(&start.meta_socket_path);
+    let sockets = [ordinary, meta];
+    let failed = AtomicBool::new(false);
+    let serve = |surface: &str, socket: &Path, served: Result<(), String>| {
+        if let Err(error) = served {
+            eprintln!("flow-nexus: {surface} socket {}: {error}", socket.display());
+            failed.store(true, Ordering::SeqCst);
+            nexus.stop(&sockets);
         }
+    };
+    // Every thread borrows the Nexus inside this scope, so when a stop has
+    // ended them all the Nexus drops here and its store closes cleanly.
+    std::thread::scope(|scope| {
+        scope.spawn(|| nexus.promote_ambiguous_launches());
+        // A wake the last Nexus did not finish left its work queued: wake it.
+        scope.spawn(|| nexus.recover_wakes());
+        scope.spawn(|| {
+            if signals.watch(&|| nexus.stopping.requested()) {
+                nexus.stop(&sockets);
+            }
+        });
+        scope.spawn(|| serve("ordinary", ordinary, nexus.serve_ordinary(ordinary)));
+        serve("meta", meta, nexus.serve_meta(meta));
     });
-    match nexus.serve_meta(Path::new(&start.meta_socket_path)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!(
-                "flow-nexus: meta socket {}: {error}",
-                start.meta_socket_path
-            );
-            ExitCode::FAILURE
-        }
+    drop(nexus);
+    if failed.load(Ordering::SeqCst) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
@@ -398,7 +406,12 @@ mod tests {
             _ => unreachable!(),
         };
         let server = std::thread::spawn(move || {
-            ConfigurationStartup::serve_one_configuration(listener, &store, &message_binary)
+            ConfigurationStartup::serve_one_configuration(
+                listener,
+                &store,
+                &message_binary,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
         });
 
         let mut peer = UnixStream::connect(&socket).expect("connect to config-only listener");
@@ -437,6 +450,7 @@ mod tests {
                 listener,
                 &store,
                 &configured_message_binary,
+                &std::sync::atomic::AtomicBool::new(false),
             )
         });
         let mut peer = UnixStream::connect(&socket).expect("reconnect to same typed Start");
@@ -513,67 +527,20 @@ trait RunsConfigurationStartup {
     }
 
     fn configuration_listener(socket: &Path) -> Result<UnixListener, String> {
-        if let Some(directory) = socket
-            .parent()
-            .filter(|directory| !directory.as_os_str().is_empty())
-        {
-            fs::create_dir_all(directory)
-                .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
-        }
-        match fs::symlink_metadata(socket) {
-            Ok(metadata) if metadata.file_type().is_socket() => match UnixStream::connect(socket) {
-                Ok(_peer) => {
-                    return Err(format!(
-                        "meta socket {} is already accepting connections",
-                        socket.display()
-                    ));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                    fs::remove_file(socket).map_err(|error| {
-                        format!("cannot remove stale socket {}: {error}", socket.display())
-                    })?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(format!(
-                        "cannot establish whether meta socket {} is stale: {error}",
-                        socket.display()
-                    ));
-                }
-            },
-            Ok(_) => {
-                return Err(format!(
-                    "meta socket path {} exists and is not a socket",
-                    socket.display()
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!(
-                    "cannot inspect meta socket {}: {error}",
-                    socket.display()
-                ));
-            }
-        }
-        let listener = UnixListener::bind(socket)
-            .map_err(|error| format!("cannot bind meta socket {}: {error}", socket.display()))?;
-        if let Err(error) = fs::set_permissions(socket, fs::Permissions::from_mode(0o600)) {
-            drop(listener);
-            let _ = fs::remove_file(socket);
-            return Err(format!(
-                "cannot protect meta socket {}: {error}",
-                socket.display()
-            ));
-        }
-        Ok(listener)
+        ClaimedSocket::bind(socket)
     }
 
     fn serve_one_configuration(
         listener: UnixListener,
         store: &ConfigurationOnlyStore,
         message_nexus_binary: &str,
+        stopping: &AtomicBool,
     ) -> Result<(), String> {
         let (mut peer, _) = listener.accept().map_err(|error| error.to_string())?;
+        // A stop wakes this accept with its own connection.
+        if stopping.load(Ordering::SeqCst) {
+            return Err("stopped by signal before any configuration arrived".into());
+        }
         peer.set_read_timeout(Some(Duration::from_secs(5)))
             .and_then(|_| peer.set_write_timeout(Some(Duration::from_secs(5))))
             .map_err(|error| error.to_string())?;
@@ -645,11 +612,35 @@ trait RunsConfigurationStartup {
         Ok((store, message_nexus_binary, listener))
     }
 
-    fn run_configuration_only(start: &flow_ethos::Start) -> Result<(), ConfigureOnlyError> {
+    fn run_configuration_only(
+        start: &flow_ethos::Start,
+        signals: &TerminationSignals,
+    ) -> Result<(), ConfigureOnlyError> {
         let (store, message_nexus_binary, listener) =
             ConfigurationStartup::open_configuration_listener(start)?;
-        ConfigurationStartup::serve_one_configuration(listener, &store, &message_nexus_binary)
-            .map_err(ConfigureOnlyError::Other)
+        let socket = Path::new(&start.meta_socket_path);
+        let stopping = AtomicBool::new(false);
+        let finished = AtomicBool::new(false);
+        let served = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                if signals.watch(&|| finished.load(Ordering::SeqCst)) {
+                    stopping.store(true, Ordering::SeqCst);
+                    let _ = UnixStream::connect(socket);
+                }
+            });
+            let served = ConfigurationStartup::serve_one_configuration(
+                listener,
+                &store,
+                &message_nexus_binary,
+                &stopping,
+            );
+            finished.store(true, Ordering::SeqCst);
+            served
+        });
+        let _ = fs::remove_file(socket);
+        // The store closes here, whether the request committed or not.
+        drop(store);
+        served.map_err(ConfigureOnlyError::Other)
     }
 
     fn start_store_refusal_datom(path: &str, reason: &str) -> Result<String, String> {

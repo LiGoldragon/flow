@@ -1,3 +1,24 @@
+# Flow 0.30.1
+
+No wire or store change.
+
+- **Stop closes the store.** `flow-nexus`, daemon and `--configure-only`,
+  takes SIGTERM and SIGINT as a stop: it accepts no new connection, lets
+  the requests in flight finish, ends launch and agent subscriptions, removes
+  its socket files, and closes the store, so redb's recovery flag is clear
+  after `systemctl stop`.
+- **A flagged store opens.** A store whose writer was killed carries redb's
+  recovery flag, which a read-only open refuses. Recognition now repairs a
+  temporary copy beside the store, runs the same checks on it and deletes
+  it; only a recognized store reaches the writer open, which repairs the
+  original. A flagged foreign or invalid store is refused unchanged.
+- **Sockets.** After recognition, the daemon and `--configure-only` remove a
+  stale socket file at their socket paths and refuse one that accepts a
+  connection; the daemon no longer unlinks a live listener.
+
+To deploy: install 0.30.1 and start the Nexus; a store left flagged by an
+earlier kill opens without hand repair.
+
 # Flow 0.30.0
 
 No wire or store change (signal-flow d1358d3 and meta-signal-flow cd8d5ec

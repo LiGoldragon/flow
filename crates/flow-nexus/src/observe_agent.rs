@@ -104,7 +104,7 @@ impl ObservesAgent for RunningNexus {
             .ok_or("Herdr session socket not found")?;
         let mut events = HerdrEvents::subscribe(&socket, &route.herdr_pane_id)?;
         loop {
-            let Some(event) = events.next_event()? else {
+            let Some(event) = events.next_event(&|| self.stopping.requested())? else {
                 // Herdr closed the subscription: the session is gone.
                 return send(&AgentState::Gone.observed_of(flow_id));
             };
@@ -160,12 +160,17 @@ enum PaneEvent {
 struct HerdrEvents {
     pane_id: String,
     reader: BufReader<UnixStream>,
+    /// What has arrived of the line not yet ended.
+    pending: Vec<u8>,
 }
 
 trait SubscribesHerdrEvents: Sized {
     fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String>;
-    /// The next event about this pane; None when Herdr closes the stream.
-    fn next_event(&mut self) -> Result<Option<PaneEvent>, String>;
+    /// How often a waiting subscription looks whether the Nexus is stopping.
+    const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+    /// The next event about this pane; None when Herdr closes the stream,
+    /// an error once `stopping` holds.
+    fn next_event(&mut self, stopping: &dyn Fn() -> bool) -> Result<Option<PaneEvent>, String>;
 }
 
 impl SubscribesHerdrEvents for HerdrEvents {
@@ -186,6 +191,7 @@ impl SubscribesHerdrEvents for HerdrEvents {
         let mut events = Self {
             pane_id: pane_id.to_owned(),
             reader: BufReader::new(stream),
+            pending: Vec::new(),
         };
         let mut started = String::new();
         events
@@ -204,17 +210,31 @@ impl SubscribesHerdrEvents for HerdrEvents {
         Ok(events)
     }
 
-    fn next_event(&mut self) -> Result<Option<PaneEvent>, String> {
+    fn next_event(&mut self, stopping: &dyn Fn() -> bool) -> Result<Option<PaneEvent>, String> {
+        self.reader
+            .get_ref()
+            .set_read_timeout(Some(Self::STOP_POLL))
+            .map_err(|error| error.to_string())?;
         loop {
-            let mut line = String::new();
-            if self
-                .reader
-                .read_line(&mut line)
-                .map_err(|error| error.to_string())?
-                == 0
-            {
-                return Ok(None);
+            if stopping() {
+                return Err("the Nexus is stopping".into());
             }
+            // A timed-out read keeps what it read in `pending`.
+            match self.reader.read_until(b'\n', &mut self.pending) {
+                Ok(0) => return Ok(None),
+                Ok(_) if self.pending.last() != Some(&b'\n') => return Ok(None),
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+            let line = String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned();
             let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };

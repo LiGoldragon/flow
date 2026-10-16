@@ -16,6 +16,7 @@ use crate::performing::Performs;
 use crate::store::AnswersLaunchOutcome;
 use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
+use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::metaflow::TakesLaunchAddress;
 use crate::store::{
     AnnouncesLaunchChanges, ReadsCreatedLaunchPane, RecordsCreatedLaunchPane,
@@ -140,6 +141,21 @@ impl LaunchesFlows for RunningNexus {
             return self.promote_ambiguous(attempt);
         }
         let persistence = || Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+        // A hold an ended flow still keeps on this Address is given back
+        // first, so the refusal reads what Metaflows reports.
+        match self
+            .store
+            .give_back_ended_holds(&request.launch_profile.address)
+        {
+            Ok(given) => {
+                for flow_id in given {
+                    eprintln!(
+                        "flow-nexus: the Address hold of ended flow {flow_id} was given back"
+                    );
+                }
+            }
+            Err(_) => return persistence(),
+        }
         // A seat whose Address it could not take is never launched.
         match self.store.launch_address_refusal(&request.launch_profile) {
             Ok(None) => {}
@@ -354,12 +370,22 @@ impl LaunchesFlows for RunningNexus {
         {
             return persistence();
         }
+        // A transcript that contradicts the launch (another model, another
+        // first input) refuses it; only an unread receipt stays ambiguous.
         let result = match initial {
             PromptDeliveryResult::Observed(receipt) => PromptDeliveryResult::Observed(receipt),
-            PromptDeliveryResult::Ambiguous(_) => self
-                .herdr
-                .observe_native_target_receipt(&delivery_intent)
-                .unwrap_or_else(|_| PromptDeliveryResult::Ambiguous(delivery_intent.clone())),
+            PromptDeliveryResult::Ambiguous(_) => {
+                match self.herdr.observe_native_target_receipt(&delivery_intent) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        eprintln!(
+                            "flow-nexus: launch {} refused by its receipt: {error}",
+                            delivery_intent.launch_request_id
+                        );
+                        return Response::StartRejected(StartRejection::NativeLaunchRefused);
+                    }
+                }
+            }
         };
         match result {
             PromptDeliveryResult::Ambiguous(intent) => {
@@ -391,10 +417,23 @@ impl LaunchesFlows for RunningNexus {
         ) else {
             return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
         };
-        let observed = self
-            .herdr
-            .observe_native_target_receipt(&intent)
-            .unwrap_or_else(|_| PromptDeliveryResult::Ambiguous(intent.clone()));
+        let observed = match self.herdr.observe_native_target_receipt(&intent) {
+            Ok(observed) => observed,
+            Err(error) => {
+                // The refused launch leaves nothing running, as one refused
+                // before its first prompt does.
+                eprintln!(
+                    "flow-nexus: launch {} refused by its receipt: {error}",
+                    attempt.launch_request_id
+                );
+                self.abandon_refused_launch(
+                    &attempt.launch_request_id,
+                    &attempt.launch_profile.harness_kind,
+                    None,
+                );
+                return Response::StartRejected(StartRejection::NativeLaunchRefused);
+            }
+        };
         let receipt = match observed {
             PromptDeliveryResult::Observed(receipt) => receipt,
             PromptDeliveryResult::Ambiguous(updated) => {

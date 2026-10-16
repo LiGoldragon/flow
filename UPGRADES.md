@@ -1,3 +1,23 @@
+# Flow 0.34.1
+
+No wire change; no store change.
+
+- **A launch whose flow ended is settled.** A launch attempt with no
+  outcome no longer refuses a Start at its Address as `AddressAwake` once
+  the flow its native launch bound is Stopped, Retired or Exited. An attempt
+  not yet bound, or bound to a flow not yet registered, still refuses it.
+  Such an attempt is no longer watched for its receipt.
+- **A stale Address hold is given back at Start.** Before reading its
+  Address, Start gives back every hold there whose flow has ended, restoring
+  the metaflow the hold found. A store that carries such a hold, or an
+  unsettled attempt behind a Stopped flow, needs no hand edit.
+- **A contradicting receipt rejects the launch.** When the first-turn
+  receipt read fails (another model or effort, another first input, an
+  unreadable transcript), Start and the ambiguous-launch promotion answer
+  `StartRejected.NativeLaunchRefused`, close the pane, record the flow
+  Stopped and give back its Address, instead of `StartAmbiguous`. The log
+  line is `flow-nexus: launch <request> refused by its receipt: <reason>`.
+
 # Flow 0.34.0
 
 No wire change; no store change.

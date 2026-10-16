@@ -1465,8 +1465,14 @@ pub trait ReadsLaunchAttempt {
     fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError>;
     /// The launch requests whose native launch bound this Flow ID.
     fn launch_requests_bound_to(&self, flow_id: &str) -> Result<Vec<String>, StoreError>;
-    /// Every attempt whose first prompt is ambiguous and that has no outcome.
+    /// Every attempt whose first prompt is ambiguous and that is unsettled.
     fn ambiguous_launch_attempts(&self) -> Result<Vec<LaunchAttempt>, StoreError>;
+    /// Whether an attempt is still in flight: it has no outcome, and the
+    /// flow its native launch bound, if any, has not ended. A launch whose
+    /// flow was Stopped, Retired or Exited is settled by that end, whatever
+    /// its first prompt showed; one not yet bound, or bound to a flow not
+    /// yet registered, is in flight.
+    fn launch_attempt_unsettled(&self, attempt: &LaunchAttempt) -> Result<bool, StoreError>;
 }
 
 /// Reads durable native Flow seat rows for internal lifecycle handling.
@@ -3276,14 +3282,24 @@ impl ReadsLaunchAttempt for FlowStore {
             .records()
         {
             if stored.attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous
-                && self
-                    .launch_outcome(&stored.attempt.launch_request_id)?
-                    .is_none()
+                && self.launch_attempt_unsettled(&stored.attempt)?
             {
                 ambiguous.push(stored.attempt.clone());
             }
         }
         Ok(ambiguous)
+    }
+
+    fn launch_attempt_unsettled(&self, attempt: &LaunchAttempt) -> Result<bool, StoreError> {
+        if self.launch_outcome(&attempt.launch_request_id)?.is_some() {
+            return Ok(false);
+        }
+        let Some(binding) = attempt.native_launch_binding_option.as_ref() else {
+            return Ok(true);
+        };
+        Ok(self
+            .flow(&binding.flow_id)?
+            .is_none_or(|flow| flow.lifecycle.is_live()))
     }
 }
 

@@ -473,7 +473,7 @@ impl TakesLaunchAddress for FlowStore {
             let attempt = &attempt.attempt;
             if attempt.launch_request_id != profile.launch_request_id
                 && attempt.launch_profile.address == profile.address
-                && self.launch_outcome(&attempt.launch_request_id)?.is_none()
+                && self.launch_attempt_unsettled(attempt)?
             {
                 return Ok(Some(StartRejection::AddressAwake));
             }

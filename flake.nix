@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.34.0";
+            version = "0.34.1";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -237,6 +237,14 @@
             "tests::waking::a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer";
           flow-unconfirmed-launch-gives-back-its-address = context.exactTest "flow-nexus"
             "tests::waking::an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration";
+          flow-stopped-unconfirmed-launch-frees-its-address = context.exactTest "flow-nexus"
+            "tests::an_unconfirmed_launch_stopped_leaves_its_address_to_a_fresh_start";
+          flow-stale-hold-given-back-at-start = context.exactTest "flow-nexus"
+            "tests::a_stale_hold_behind_an_ended_flow_is_given_back_at_start";
+          flow-in-flight-launch-refuses-its-address = context.exactTest "flow-nexus"
+            "tests::a_launch_in_flight_before_binding_refuses_another_start_at_its_address";
+          flow-contradicting-receipt-rejects-the-launch = context.exactTest "flow-nexus"
+            "tests::a_receipt_that_contradicts_the_launch_rejects_it";
         }
       );
 

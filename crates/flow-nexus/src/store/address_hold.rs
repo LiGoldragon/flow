@@ -8,6 +8,9 @@
 //! returning to what the hold kept (absent when there was none) with any
 //! request queued meanwhile still queued.
 //!
+//! A hold behind a flow that ended without giving it back, as an older
+//! Nexus could leave it, is given back by the next Start at its Address.
+//!
 //! The row lives in its own table, so a store written before holds were
 //! kept opens with the table added and holds nothing.
 
@@ -74,6 +77,11 @@ pub(crate) trait HoldsLaunchAddress {
     fn given_back(&self, flow_id: &str, commit: AtomicCommit) -> Result<AtomicCommit, StoreError>;
     /// The hold `flow_id` has, if any.
     fn address_hold(&self, flow_id: &str) -> Result<Option<AddressHold>, StoreError>;
+    /// Gives back, each in its own write, every hold on `address` whose
+    /// flow has ended or was never registered, as an older Nexus that did
+    /// not give a hold back with its flow's end left it; the flows whose
+    /// holds were given back.
+    fn give_back_ended_holds(&self, address: &Address) -> Result<Vec<String>, StoreError>;
 }
 
 impl HoldsLaunchAddress for FlowStore {
@@ -164,5 +172,61 @@ impl HoldsLaunchAddress for FlowStore {
             [hold] => Ok(Some(hold.clone())),
             _ => Err(StoreError::StateInvariant),
         }
+    }
+
+    fn give_back_ended_holds(&self, address: &Address) -> Result<Vec<String>, StoreError> {
+        let holds = self
+            .engine
+            .match_records(QueryPlan::all(self.address_holds))?
+            .records()
+            .to_vec();
+        let mut given = Vec::new();
+        for hold in holds {
+            if &hold.address != address || self.flow_is_live(&hold.flow_id)? {
+                continue;
+            }
+            let commit = self.given_back(&hold.flow_id, self.engine.begin_atomic_commit())?;
+            self.engine.commit_atomic(commit)?;
+            given.push(hold.flow_id);
+        }
+        Ok(given)
+    }
+}
+
+/// Writes a hold and its Awake metaflow as an older Nexus left them behind
+/// a flow it then ended without giving the Address back.
+#[cfg(test)]
+pub(crate) trait LeavesStaleHold {
+    fn leave_stale_hold(&self, flow_id: &str, address: &Address);
+}
+
+#[cfg(test)]
+impl LeavesStaleHold for FlowStore {
+    fn leave_stale_hold(&self, flow_id: &str, address: &Address) {
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .assert(
+                self.metaflows,
+                StoredMetaflow {
+                    metaflow: Metaflow {
+                        address: address.clone(),
+                        state: MetaflowState::Awake(flow_id.to_owned()),
+                        past: vec![],
+                        queue: vec![],
+                    },
+                },
+            )
+            .assert(
+                self.address_holds,
+                AddressHold {
+                    flow_id: flow_id.to_owned(),
+                    address: address.clone(),
+                    found: None,
+                },
+            );
+        self.engine
+            .commit_atomic(commit)
+            .expect("stale hold written");
     }
 }

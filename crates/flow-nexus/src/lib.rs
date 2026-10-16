@@ -3623,6 +3623,193 @@ mod tests {
         );
     }
 
+    /// 42265e: a launch registered at its Address but never confirmed was
+    /// Stopped; the Address came back, yet the unsettled attempt kept
+    /// refusing every fresh Start there. A launch whose flow has ended is
+    /// settled by that end, and the Address takes a fresh launch.
+    #[test]
+    fn an_unconfirmed_launch_stopped_leaves_its_address_to_a_fresh_start() {
+        use crate::store::ManagesMetaflowState as _;
+        use crate::store::ReadsLaunchAttempt as _;
+        use crate::store::address_hold::HoldsLaunchAddress as _;
+        use crate::store::metaflow::SleepsMetaflows as _;
+        use crate::store::metaflow::TakesLaunchAddress as _;
+        let fixture = NexusFixture::new();
+        fixture.herdr_for_replacement(0);
+        let mut seat = fixture.staged_launch("seat-request", None);
+        let address = seat.profile.address.clone();
+        seat.stage_to_ambiguity(&fixture.nexus);
+        let mut fresh = fixture.staged_launch("fresh-request", None);
+        fresh.profile.address = address.clone();
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .launch_address_refusal(&fresh.profile)
+                .unwrap(),
+            Some(StartRejection::AddressAwake),
+            "the unconfirmed launch holds the Address while its flow lives"
+        );
+
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::Stop("908786".into())),
+            Response::Stopped(_)
+        ));
+        assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Stopped);
+        assert_eq!(fixture.nexus.store.metaflow(&address).unwrap(), None);
+        assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
+        assert_eq!(
+            fixture.nexus.store.launch_outcome("seat-request").unwrap(),
+            None,
+            "the stopped launch has no outcome, as the live store holds it"
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .launch_address_refusal(&fresh.profile)
+                .unwrap(),
+            None,
+            "a fresh Start at the Address is not refused"
+        );
+        assert!(
+            fixture
+                .nexus
+                .store
+                .ambiguous_launch_attempts()
+                .unwrap()
+                .is_empty(),
+            "a stopped launch is no longer watched for its receipt"
+        );
+    }
+
+    /// A store an older Nexus left with a hold and an Awake metaflow behind
+    /// an ended flow: the next Start at that Address gives the hold back
+    /// before it reads the Address, with no hand edit.
+    #[test]
+    fn a_stale_hold_behind_an_ended_flow_is_given_back_at_start() {
+        use crate::store::ManagesMetaflowState as _;
+        use crate::store::address_hold::HoldsLaunchAddress as _;
+        use crate::store::address_hold::LeavesStaleHold as _;
+        use crate::store::metaflow::SleepsMetaflows as _;
+        use crate::store::metaflow::TakesLaunchAddress as _;
+        let fixture = NexusFixture::new();
+        fixture.herdr_for_replacement(0);
+        let mut seat = fixture.staged_launch("seat-request", None);
+        let address = seat.profile.address.clone();
+        seat.stage_to_ambiguity(&fixture.nexus);
+        assert!(fixture.nexus.store.record_stopped("908786").unwrap());
+        fixture.nexus.store.leave_stale_hold("908786", &address);
+        assert!(
+            fixture
+                .nexus
+                .store
+                .address_hold("908786")
+                .unwrap()
+                .is_some()
+        );
+
+        let mut fresh = fixture.staged_launch("fresh-request", None);
+        fresh.profile.address = address.clone();
+        // The Start gives the stale hold back before anything launches; the
+        // fixture's Herdr refuses what follows.
+        let response = fixture.nexus.dispatch(Query::Start(fresh.request()));
+        assert!(
+            !matches!(
+                response,
+                Response::StartRejected(
+                    StartRejection::AddressAwake | StartRejection::AddressEnded
+                )
+            ),
+            "the Address is free: {response:?}"
+        );
+        assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
+        assert!(
+            fixture
+                .nexus
+                .store
+                .metaflow(&address)
+                .unwrap()
+                .is_none_or(|metaflow| metaflow.state != flow_ethos::State::Awake("908786".into())),
+            "the ended flow no longer names the Address"
+        );
+    }
+
+    /// A launch at an Address that is in flight before its native binding,
+    /// while no metaflow exists yet, still refuses another Start there.
+    #[test]
+    fn a_launch_in_flight_before_binding_refuses_another_start_at_its_address() {
+        use crate::store::ManagesMetaflowState as _;
+        use crate::store::metaflow::SleepsMetaflows as _;
+        let fixture = NexusFixture::new();
+        let calls = fixture.herdr_for_replacement(0);
+        let seat = fixture.staged_launch("seat-request", None);
+        let address = seat.profile.address.clone();
+        seat.reserve(&fixture.nexus);
+        seat.record_native_intent(&fixture.nexus);
+        assert_eq!(fixture.nexus.store.metaflow(&address).unwrap(), None);
+        let before = fs::read_to_string(&calls).unwrap_or_default();
+        let mut second = fixture.staged_launch("second-request", None);
+        second.profile.address = address;
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Start(second.request())),
+            Response::StartRejected(StartRejection::AddressAwake)
+        );
+        assert_eq!(
+            fs::read_to_string(&calls).unwrap_or_default(),
+            before,
+            "the refused Start touches no pane"
+        );
+    }
+
+    /// A receipt that contradicts the launch, here another model, refuses
+    /// it: the launch is StartRejected, its pane closed, its flow Stopped
+    /// and its Address given back, rather than left ambiguous.
+    #[test]
+    fn a_receipt_that_contradicts_the_launch_rejects_it() {
+        use crate::store::ManagesMetaflowState as _;
+        use crate::store::address_hold::HoldsLaunchAddress as _;
+        use crate::store::metaflow::SleepsMetaflows as _;
+        let fixture = NexusFixture::new();
+        let calls = fixture.herdr_for_replacement(0);
+        let mut seat = fixture.staged_launch("seat-request", None);
+        let address = seat.profile.address.clone();
+        seat.stage_to_ambiguity(&fixture.nexus);
+        let rows = [
+            serde_json::json!({"type":"turn_context","payload":{"model":"other-model","effort":"medium","turn_id":"turn-staged"}}),
+            serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":seat.composed.first_prompt_payload.first_prompt_text}]}}}),
+        ]
+        .iter()
+        .map(|row| format!("{row}\n"))
+        .collect::<String>();
+        fs::write(
+            seat.transcript_root
+                .join(format!("rollout-{STAGED_SESSION}.jsonl")),
+            rows,
+        )
+        .expect("transcript written");
+
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Start(seat.request())),
+            Response::StartRejected(StartRejection::NativeLaunchRefused)
+        );
+        assert_eq!(
+            fixture.nexus.store.launch_outcome("seat-request").unwrap(),
+            Some(LaunchOutcome::StartRejected(
+                StartRejection::NativeLaunchRefused
+            ))
+        );
+        assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Stopped);
+        assert!(
+            fs::read_to_string(&calls)
+                .unwrap_or_default()
+                .contains("pane close"),
+            "the refused launch's pane is closed"
+        );
+        assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
+        assert_eq!(fixture.nexus.store.metaflow(&address).unwrap(), None);
+    }
+
     /// A launch names the Address of its seat: the write acknowledging the
     /// seat's witnessed binding records that metaflow Awake as the launched
     /// flow and holds it, confirmation keeps it in the write that makes the

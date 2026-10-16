@@ -335,11 +335,11 @@ impl ResolvesCurriculumSkills for FlowClient {
                 "SYSTEM module {module:?} remains in the resolved USER skill vector"
             ));
         }
-        if let Some(index) = names.iter().position(|name| name == "operation-main-flow") {
-            if index > 0 {
-                let main_flow = names.remove(index);
-                names.insert(0, main_flow);
-            }
+        if let Some(index) = names.iter().position(|name| name == "operation-main-flow")
+            && index > 0
+        {
+            let main_flow = names.remove(index);
+            names.insert(0, main_flow);
         }
         profile.skill_name_vector = names;
         Ok(query)
@@ -526,9 +526,8 @@ mod tests {
         let mut submitted = false;
         let result =
             FlowClient::resolve_launch_skills(invocation, |_| Err("missing dependency".into()))
-                .and_then(|resolved| {
+                .inspect(|_| {
                     submitted = true;
-                    Ok(resolved)
                 });
         assert_eq!(result.unwrap_err(), "missing dependency");
         assert!(!submitted);

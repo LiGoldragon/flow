@@ -1,13 +1,13 @@
 //! The canonical native title of a started Flow.
 //!
 //! A title is the Datom struct of the seat's Address and the Flow ID claimed
-//! from its native session, `{ <Aspect> <Topic> <Layer> <FlowId> }`:
-//! `{ Field flow Quaternary 2712d3 }`. It is the seat's own datom, so the
+//! from its native session, `{ <Aspect> <topic> <Layer> <FlowId> }`, the topic
+//! always lowercase and always shown: `{ Field flow Quaternary 2712d3 }`. It is the seat's own datom, so the
 //! model a seat runs never enters it, and no model identifier can refuse it.
 
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
-use signal_flow::{Aspect, LaunchProfile, Layer, Topic};
+use signal_flow::LaunchProfile;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -22,10 +22,23 @@ pub struct NativeTitle(String);
 /// The seat a title names, in the order its datom is written.
 #[derive(datom_codec::Datomizable)]
 struct TitledSeat {
-    aspect: Aspect,
-    topic: Topic,
-    layer: Layer,
+    aspect: String,
+    topic: String,
+    layer: String,
     flow_id: String,
+}
+
+/// A typed Address part as its title spelling. The casing of aspect and
+/// layer in every title is the one line marked below.
+trait DisplaySpelling {
+    fn display_spelling(&self) -> String;
+}
+
+impl<Part: Datomizable> DisplaySpelling for Part {
+    fn display_spelling(&self) -> String {
+        // casing choice: append `.to_lowercase()` for lowercase titles
+        self.datomize(Vec::new()).protosize().compact()
+    }
 }
 
 /// The title a launch profile gives the Flow it starts.
@@ -43,9 +56,9 @@ impl TitlesFlow for LaunchProfile {
             return Err(TitleRefused::InvalidFlowId);
         }
         let seat = TitledSeat {
-            aspect: self.address.aspect.clone(),
-            topic: self.address.topic.clone(),
-            layer: self.address.layer.clone(),
+            aspect: self.address.aspect.display_spelling(),
+            topic: self.address.topic.to_lowercase(),
+            layer: self.address.layer.display_spelling(),
             flow_id: flow_id.into(),
         };
         Ok(NativeTitle(seat.datomize(Vec::new()).protosize().compact()))

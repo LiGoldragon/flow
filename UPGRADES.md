@@ -1,3 +1,14 @@
+# Flow 0.34.5
+
+No wire change; no store change.
+
+- **A native title has a lowercase topic.** The title Flow renders for a pane, tab or
+  flow is `{ <Aspect> <topic> <Layer> <FlowId> }` with the topic lowercase, e.g.
+  `{ Psyche core Tertiary 7c89aa }`. The typed Address and registry keys are
+  unchanged. A resumed session whose latest title record is the old
+  capitalized spelling is renamed once on its next wake (a `/rename`, no model
+  turn); the old spelling is no longer accepted.
+
 # Flow 0.34.4
 
 No wire change; no store change.

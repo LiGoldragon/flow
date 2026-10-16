@@ -1,3 +1,16 @@
+# Flow 0.32.1
+
+No wire change; no store change.
+
+- **A Claude seat's first prompt no longer tells it to Read its bundle.** The
+  bundle already reaches Claude as `--system-prompt-file`, so the line
+  «Read <bundle> for your launch mode» is gone from both Claude renderers.
+  The first prompt is the stacked `/skill` commands, the skills past the
+  stack (or, in the direct form, «Load these skills through the Skill tool
+  in this order: …»), then the brief and its sources. Codex is unchanged: its
+  first turn never named the bundle. The first-turn digest is taken over the
+  new text, so launch confirmation matches as before.
+
 # Flow 0.32.0
 
 No wire change. The store gains one table; every store opens.

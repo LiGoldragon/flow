@@ -322,29 +322,9 @@ trait WritesLaunchBundle {
 
 trait RendersLaunchProfile {
     fn render_native_head(&self, profile: &LaunchProfile) -> String;
-    fn render_claude_line(
-        &self,
-        profile: &LaunchProfile,
-        bundle_file: &Path,
-        sources: &[PathBuf],
-    ) -> String;
-    fn render_claude_direct(
-        &self,
-        profile: &LaunchProfile,
-        bundle_file: &Path,
-        sources: &[PathBuf],
-    ) -> String;
-    fn render_body(
-        &self,
-        profile: &LaunchProfile,
-        bundle: &LaunchBundleText,
-        sources: &[PathBuf],
-    ) -> String;
-}
-
-/// The path of this launch's system-prompt file.
-enum LaunchBundleText {
-    File(PathBuf),
+    fn render_claude_line(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String;
+    fn render_claude_direct(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String;
+    fn render_body(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String;
 }
 
 trait HashesPromptBody {
@@ -578,30 +558,20 @@ impl RendersLaunchProfile for LaunchComposer {
         }
     }
 
-    /// Claude's one line: the stacked commands, then one sentence naming
-    /// the per-launch bundle to read, the skills past the stack, the goal,
-    /// and the sources. Predecessor and remembered flows are in that bundle;
-    /// role, model, effort and remote control reach Claude through its argv
-    /// and stay in the store.
-    fn render_claude_line(
-        &self,
-        profile: &LaunchProfile,
-        bundle_file: &Path,
-        sources: &[PathBuf],
-    ) -> String {
+    /// Claude's one line: the stacked commands, the skills past the stack,
+    /// the goal, and the sources. The per-launch bundle reaches Claude as its
+    /// system prompt file, so the line never names it; predecessor and
+    /// remembered flows are in that bundle, and role, model, effort and remote
+    /// control reach Claude through its argv and stay in the store.
+    fn render_claude_line(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String {
         let mut line = self.render_native_head(profile);
-        line.push_str(&format!(
-            "Read {} for your launch mode",
-            bundle_file.display()
-        ));
         let unstacked = profile.skill_name_vector.claude_unstacked();
         if !unstacked.is_empty() {
             line.push_str(&format!(
-                ", load {} through the Skill tool in this order",
+                "load {} through the Skill tool in this order, then: ",
                 unstacked.join(", ")
             ));
         }
-        line.push_str(", then: ");
         line.push_str(&profile.instruction_prompt);
         if !sources.is_empty() {
             line.push_str(" Sources: ");
@@ -621,18 +591,15 @@ impl RendersLaunchProfile for LaunchComposer {
     /// native `/skill` commands: they remain literal text. Ask the Skill tool
     /// for every selected skill instead, preserving the exact selection order
     /// that the durable prompt intent binds.
-    fn render_claude_direct(
-        &self,
-        profile: &LaunchProfile,
-        bundle_file: &Path,
-        sources: &[PathBuf],
-    ) -> String {
-        let mut text = format!(
-            "Read {} for your launch mode, then load these skills through the Skill tool in this order: {}. Then: {}",
-            bundle_file.display(),
-            profile.skill_name_vector.join(", "),
-            profile.instruction_prompt,
-        );
+    fn render_claude_direct(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String {
+        let mut text = String::new();
+        if !profile.skill_name_vector.is_empty() {
+            text.push_str(&format!(
+                "Load these skills through the Skill tool in this order: {}. Then: ",
+                profile.skill_name_vector.join(", ")
+            ));
+        }
+        text.push_str(&profile.instruction_prompt);
         if !sources.is_empty() {
             text.push_str(" Sources: ");
             text.push_str(
@@ -647,15 +614,9 @@ impl RendersLaunchProfile for LaunchComposer {
         text
     }
 
-    fn render_body(
-        &self,
-        profile: &LaunchProfile,
-        bundle: &LaunchBundleText,
-        sources: &[PathBuf],
-    ) -> String {
-        let LaunchBundleText::File(bundle_file) = bundle;
+    fn render_body(&self, profile: &LaunchProfile, sources: &[PathBuf]) -> String {
         if profile.harness_kind == HarnessKind::Claude {
-            return self.render_claude_line(profile, bundle_file, sources);
+            return self.render_claude_line(profile, sources);
         }
         // Predecessor and remembered flows are in the per-launch system file,
         // not duplicated in the Codex USER turn.
@@ -690,16 +651,11 @@ impl ComposesLaunch for LaunchComposer {
             .iter()
             .map(|source| self.read(source))
             .collect::<Result<Vec<_>, _>>()?;
-        let bundle = LaunchBundleText::File(
-            self.write_launch_bundle(profile, profile.harness_kind == HarnessKind::Codex)?,
-        );
-        let mut body = self.render_body(profile, &bundle, &sources);
+        self.write_launch_bundle(profile, profile.harness_kind == HarnessKind::Codex)?;
+        let mut body = self.render_body(profile, &sources);
         if profile.harness_kind == HarnessKind::Claude {
             if !body.fits_claude_paste() {
-                let LaunchBundleText::File(bundle_file) = &bundle else {
-                    unreachable!("Claude launches always receive a bundle file")
-                };
-                body = self.render_claude_direct(profile, bundle_file, &sources);
+                body = self.render_claude_direct(profile, &sources);
             }
         }
         let prompt_sha256 = self.sha256(body.as_bytes());
@@ -1056,10 +1012,7 @@ mod tests {
         let body = composed.first_prompt_payload.first_prompt_body.as_str();
         assert_eq!(
             body,
-            format!(
-                "/operation-main-flow /knowledge-flow Read {} for your launch mode, then: Carry the bounded task.",
-                root.bundles().file_for(&profile).display()
-            ),
+            "/operation-main-flow /knowledge-flow Carry the bounded task."
         );
         assert_eq!(composed.first_prompt_payload.first_prompt_text, body);
         assert_eq!(body.matches("/knowledge-flow").count(), 1);
@@ -1090,7 +1043,7 @@ mod tests {
             .compose(&profile)
             .unwrap();
         let body = composed.first_prompt_payload.first_prompt_body.as_str();
-        let head = body.split(" Read ").next().unwrap();
+        let head = body.split(" load ").next().unwrap();
         let commands = head.split(' ').collect::<Vec<_>>();
         assert!(commands.len() <= 5, "{head}");
         assert_eq!(
@@ -1104,13 +1057,11 @@ mod tests {
             ]
         );
         assert!(body.starts_with(
-            "/operation-main-flow /knowledge-psyche /compensation-behavior /knowledge-vocabulary /compensation-messenger-clj Read "
+            "/operation-main-flow /knowledge-psyche /compensation-behavior /knowledge-vocabulary /compensation-messenger-clj load knowledge-datom, operation-file-editing through the Skill tool in this order, then: "
         ));
         // The sixth and seventh skills arrive as text for the Skill tool in
         // the same line, never as a sixth `/name` command.
-        assert!(
-            body.contains(" for your launch mode, load knowledge-datom, operation-file-editing through the Skill tool in this order, then: ")
-        );
+        assert!(!body.contains("Read ") && !body.contains("launch mode"));
         assert!(
             composed
                 .first_prompt_payload
@@ -1230,9 +1181,9 @@ mod tests {
         let text = &composed.first_prompt_payload.first_prompt_text;
         assert!(text.len() > 34_369);
         assert!(!text.fits_claude_paste());
-        assert!(text.starts_with("Read "));
+        assert!(!text.contains("Read "));
         assert!(text.contains(
-            "then load these skills through the Skill tool in this order: operation-main-flow, knowledge-flow."
+            "Load these skills through the Skill tool in this order: operation-main-flow, knowledge-flow."
         ));
         assert!(!text.starts_with("/knowledge-flow"));
         assert!(composed.has_canonical_first_prompt());
@@ -1257,7 +1208,7 @@ mod tests {
             composed
                 .first_prompt_payload
                 .first_prompt_text
-                .starts_with("Read ")
+                .starts_with("Load these skills through the Skill tool")
         );
         assert!(composed.has_canonical_first_prompt());
     }
@@ -1539,7 +1490,8 @@ mod tests {
             caller
         );
         let text = composed.first_prompt_payload.first_prompt_text.as_str();
-        assert!(text.contains(&format!("Read {} for your launch mode", copy.display())));
+        assert!(!text.contains("Read ") && !text.contains("launch mode"));
+        assert!(!text.contains(&copy.to_string_lossy().into_owned()));
         assert!(!text.contains(&profile.system_prompt_bundle_file));
         assert!(!text.contains("Predecessor") && !text.contains("Remembered"));
         assert!(text.fits_claude_paste(), "{text}");

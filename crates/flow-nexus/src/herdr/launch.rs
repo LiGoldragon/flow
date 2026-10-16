@@ -974,8 +974,7 @@ impl ReadsLaunchText for str {
 
     fn claude_direct_skill_prompt(&self) -> bool {
         let text = self;
-        text.starts_with("Read ")
-            && text.contains("then load these skills through the Skill tool in this order:")
+        text.starts_with("Load these skills through the Skill tool in this order:")
     }
 
     fn claude_command_record(&self) -> Option<(String, String)> {
@@ -3208,7 +3207,7 @@ printf '%s\n' 123456
         ];
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.skill_name_vector = names.map(String::from).to_vec();
-        let body = "/operation-main-flow /knowledge-psyche /compensation-behavior /knowledge-vocabulary /compensation-messenger-clj Read /tmp/flow-system-prompt.md for your launch mode, load knowledge-datom, operation-file-editing through the Skill tool in this order, then: do the work";
+        let body = "/operation-main-flow /knowledge-psyche /compensation-behavior /knowledge-vocabulary /compensation-messenger-clj load knowledge-datom, operation-file-editing through the Skill tool in this order, then: do the work";
         let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
         launch.first_prompt_payload.first_prompt_body = body.into();
         launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
@@ -3250,7 +3249,7 @@ printf '%s\n' 123456
         let calls = fs::read_to_string(root.path().join("calls")).expect("launch calls");
         let prompt_bearing = calls
             .lines()
-            .filter(|line| line.contains("agent prompt") || line.contains("for your launch mode"))
+            .filter(|line| line.contains("agent prompt"))
             .collect::<Vec<_>>();
         assert_eq!(prompt_bearing.len(), 1, "{calls}");
         assert!(prompt_bearing[0].contains("agent prompt"));
@@ -3435,9 +3434,8 @@ printf '%s\n' 123456
             1,
             "the instruction has one line break"
         );
-        assert!(body.starts_with("Read "));
-        assert!(body.contains(
-            "then load these skills through the Skill tool in this order: operation-main-flow, knowledge-flow."
+        assert!(body.starts_with(
+            "Load these skills through the Skill tool in this order: operation-main-flow, knowledge-flow."
         ));
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
@@ -3682,7 +3680,7 @@ printf '%s\n' 123456
         let names = ["operation-main-flow", "operation-file-editing"];
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.skill_name_vector = names.map(String::from).to_vec();
-        let body = "/operation-main-flow /operation-file-editing Read /tmp/flow-system-prompt.md for your launch mode, then: You are Psyche Opus. Load through the Skill tool: spirit, knowledge-psyche, knowledge-flow, compensation-prose. Read the handover whole.";
+        let body = "/operation-main-flow /operation-file-editing You are Psyche Opus. Load through the Skill tool: spirit, knowledge-psyche, knowledge-flow, compensation-prose. Read the handover whole.";
         let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
         launch.first_prompt_payload.first_prompt_body = body.into();
         launch.first_prompt_payload.prompt_sha256 = body_hash.clone();

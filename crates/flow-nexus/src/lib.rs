@@ -15,10 +15,11 @@ pub use caller::CallerProcess;
 pub use composition::CompositionError;
 pub use context::VerifiedContext;
 pub use generated::curriculum::{
-    ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery, StartupComposition,
-    StartupSelection,
+    ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery, RoleComposition,
+    RoleSelection, StartupComposition, StartupSelection,
 };
 pub use generated::operation::Outcome as OperationOutcome;
+pub use role::VerifiedRole;
 pub use store::{LaunchOutcome, Replacement};
 pub mod binding;
 pub mod caller;
@@ -43,6 +44,7 @@ pub mod observe_agent;
 pub mod peer;
 pub mod performing;
 pub mod reporting;
+pub mod role;
 pub mod send_tool;
 pub mod store;
 pub mod title;

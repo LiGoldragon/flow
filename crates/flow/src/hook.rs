@@ -13,10 +13,35 @@
 //! flow f1c841). With no FLOW_ID, or on any other event, it reports
 //! nothing.
 //!
-//! It never blocks the harness: whatever happens it exits 0, and it writes
-//! one tab-separated line on stderr (event, datom, the CLI's exit code, the
-//! CLI's whole output) for whoever reads it.
+//! Claude Code also runs it on every PreToolUse of the Agent tool, where it
+//! guards the subagent roles Flow selects (`flow_nexus::role`). A call
+//! naming one is denied unless it is made by the flow's main thread (no
+//! `agent_id` in the event), sets neither `model` nor `effort`, and the
+//! calling flow is one the role's caller policy names. The calling flow is
+//! never read from `FLOW_ID` or the call: the `flow` CLI asks the Nexus
+//! `ResolveCaller.None`, which the Nexus answers from the kernel-named
+//! process at the other end of its socket and that process's Herdr pane,
+//! and `Metaflows` then names the one Address awake as that flow. A denial
+//! is Claude Code's PreToolUse decision on stdout:
+//!
+//!   {"hookSpecificOutput":{"hookEventName":"PreToolUse",
+//!    "permissionDecision":"deny","permissionDecisionReason":"…"}}
+//!
+//! A permitted or ungoverned call gets no decision, and Claude Code's own
+//! permission mode goes on.
+//!
+//! It never blocks the harness but by that decision: whatever happens it
+//! exits 0, and it writes one tab-separated line on stderr (event, datom or
+//! decision, the CLI's exit code, the CLI's whole output) for whoever reads
+//! it.
 
+use datom_codec::{Actualizing, Budget, Potential};
+use flow_nexus::role::{
+    AgentCall, AgentCaller, AgentDecision, AgentDenial, AuthorizesAgentCall, OpensSubagentRoles,
+    ResolvesAgentCaller, SubagentRoles,
+};
+use protos::ReaderBudget;
+use signal_flow::Response;
 use std::{
     env,
     io::Read,
@@ -34,7 +59,32 @@ struct HarnessHook {
 #[derive(Debug, PartialEq, Eq)]
 enum HookCall {
     Report(String),
+    Decide(AgentCall),
     Nothing(&'static str),
+}
+
+/// What one invocation writes: a PreToolUse decision for stdout, if any,
+/// and the line for stderr.
+#[derive(Debug, PartialEq, Eq)]
+struct HookOutput {
+    decision: Option<String>,
+    log: String,
+}
+
+/// The calling flow as the Nexus resolves the `flow` CLI's own process.
+struct FlowCliCaller {
+    client: PathBuf,
+}
+
+/// Claude Code's PreToolUse decision for a denied Agent call.
+trait RendersDenial {
+    fn reason(&self) -> &'static str;
+    fn decision(&self) -> String;
+}
+
+/// One reply of the Nexus to one inline Query datom, through the CLI.
+trait AsksFlowNexus {
+    fn ask(&self, query: &str) -> Option<Response>;
 }
 
 trait ReadsHookInput: Sized {
@@ -53,7 +103,9 @@ trait QuotesDatomString {
 }
 
 trait ReportsThroughCli {
-    fn run(&self) -> String;
+    /// The `flow` CLI installed beside this executable, else on PATH.
+    fn client(&self) -> PathBuf;
+    fn run(&self) -> HookOutput;
 }
 
 impl ReadsHookInput for HarnessHook {
@@ -85,6 +137,35 @@ impl ChoosesHookCall for HarnessHook {
     }
 
     fn call(&self) -> HookCall {
+        if self.event_name() == "PreToolUse" {
+            if self
+                .input
+                .get("tool_name")
+                .and_then(serde_json::Value::as_str)
+                != Some("Agent")
+            {
+                return HookCall::Nothing("PreToolUse of another tool");
+            }
+            let tool_input = self.input.get("tool_input");
+            let set = |field: &str| {
+                tool_input
+                    .and_then(|tool_input| tool_input.get(field))
+                    .is_some_and(|value| !value.is_null())
+            };
+            return HookCall::Decide(AgentCall {
+                subagent_type: tool_input
+                    .and_then(|tool_input| tool_input.get("subagent_type"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                nested: self
+                    .input
+                    .get("agent_id")
+                    .is_some_and(|agent_id| !agent_id.is_null()),
+                requests_model: set("model"),
+                requests_effort: set("effort"),
+            });
+        }
         let Some(flow_id) = &self.flow_id else {
             return HookCall::Nothing("no FLOW_ID in the harness environment");
         };
@@ -105,19 +186,112 @@ impl ChoosesHookCall for HarnessHook {
     }
 }
 
-impl ReportsThroughCli for HarnessHook {
-    fn run(&self) -> String {
-        let datom = match self.call() {
-            HookCall::Report(datom) => datom,
-            HookCall::Nothing(reason) => return format!("{}\t-\t-\t{reason}", self.event_name()),
+impl RendersDenial for AgentDenial {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::NestedCaller => "Flow refuses this role from inside a subagent",
+            Self::ModelOverridden => "Flow refuses a model override for this role",
+            Self::EffortOverridden => "Flow refuses an effort override for this role",
+            Self::CallerUnresolved => "Flow could not resolve the calling flow from its process",
+            Self::PolicyUnavailable => "Flow could not read this role's verified policy",
+            Self::CallerNotPermitted => "this role's caller policy does not name the calling flow",
+        }
+    }
+
+    fn decision(&self) -> String {
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": self.reason(),
+            }
+        })
+        .to_string()
+    }
+}
+
+impl AsksFlowNexus for FlowCliCaller {
+    fn ask(&self, query: &str) -> Option<Response> {
+        let output = Command::new(&self.client).arg(query).output().ok()?;
+        let reply = String::from_utf8(output.stdout).ok()?;
+        let mut budget = Budget {
+            remaining: 16 * 1024 * 1024,
+            reader: ReaderBudget {
+                remaining: 16 * 1024 * 1024,
+            },
+            depth: 0,
+            maximum_depth: 1024,
         };
-        // The `flow` CLI installed beside this executable, else on PATH.
-        let client = env::current_exe()
+        Potential::<Response>::from(reply.trim().to_owned())
+            .actualize(&mut budget)
+            .ok()
+    }
+}
+
+/// The caller the Nexus resolves from the CLI's process, then the one
+/// metaflow awake as that flow, of the caller's aspect. Anything else
+/// (no caller, a mismatch, none or more than one such metaflow) is
+/// unresolved.
+impl ResolvesAgentCaller for FlowCliCaller {
+    fn agent_caller(&self) -> AgentCaller {
+        let Some(Response::CallerResolved(caller)) = self.ask("ResolveCaller.None") else {
+            return AgentCaller::Unresolved;
+        };
+        let Some(Response::Listed(metaflows)) = self.ask("Metaflows") else {
+            return AgentCaller::Unresolved;
+        };
+        let awake = flow_ethos::State::Awake(caller.flow_id.clone());
+        let mut held = metaflows
+            .into_iter()
+            .filter(|metaflow| metaflow.state == awake);
+        match (held.next(), held.next()) {
+            (Some(metaflow), None) if metaflow.address.aspect == caller.aspect => {
+                AgentCaller::Resolved(metaflow.address)
+            }
+            _ => AgentCaller::Unresolved,
+        }
+    }
+}
+
+impl ReportsThroughCli for HarnessHook {
+    fn client(&self) -> PathBuf {
+        env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(|directory| directory.join("flow")))
             .filter(|path| path.is_file())
-            .unwrap_or_else(|| PathBuf::from("flow"));
-        match Command::new(client).arg(&datom).output() {
+            .unwrap_or_else(|| PathBuf::from("flow"))
+    }
+
+    fn run(&self) -> HookOutput {
+        let datom = match self.call() {
+            HookCall::Report(datom) => datom,
+            HookCall::Decide(call) => {
+                let decision = SubagentRoles::from_environment().decide(
+                    &call,
+                    FlowCliCaller {
+                        client: self.client(),
+                    },
+                );
+                return HookOutput {
+                    decision: match &decision {
+                        AgentDecision::Denied(denial) => Some(denial.decision()),
+                        AgentDecision::Ungoverned | AgentDecision::Permitted => None,
+                    },
+                    log: format!(
+                        "{}\t{}\t{decision:?}\t-",
+                        self.event_name(),
+                        call.subagent_type
+                    ),
+                };
+            }
+            HookCall::Nothing(reason) => {
+                return HookOutput {
+                    decision: None,
+                    log: format!("{}\t-\t-\t{reason}", self.event_name()),
+                };
+            }
+        };
+        let log = match Command::new(self.client()).arg(&datom).output() {
             Ok(output) => {
                 let reply = format!(
                     "{}{}",
@@ -132,18 +306,27 @@ impl ReportsThroughCli for HarnessHook {
                 )
             }
             Err(error) => format!("{}\t{datom}\t-\t{error}", self.event_name()),
+        };
+        HookOutput {
+            decision: None,
+            log,
         }
     }
 }
 
 fn main() -> ExitCode {
-    eprintln!("{}", HarnessHook::from_environment().run());
+    let output = HarnessHook::from_environment().run();
+    if let Some(decision) = output.decision {
+        println!("{decision}");
+    }
+    eprintln!("{}", output.log);
     ExitCode::SUCCESS
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChoosesHookCall, HarnessHook, HookCall};
+    use super::{ChoosesHookCall, HarnessHook, HookCall, RendersDenial};
+    use flow_nexus::role::{AgentCall, AgentDenial};
 
     fn hook(input: serde_json::Value, flow_id: Option<&str>) -> HarnessHook {
         HarnessHook {
@@ -224,6 +407,72 @@ mod tests {
                 flow_id: "5a4d0b".into(),
                 event: signal_flow::Event::ToolUsed("Bash".into()),
             })
+        );
+    }
+
+    /// An Agent call is read from the event alone: the role it names,
+    /// whether a subagent made it, and whether it sets a model or an
+    /// effort. FLOW_ID plays no part.
+    #[test]
+    fn an_agent_pre_tool_use_is_read_for_its_role_caller_thread_and_overrides() {
+        assert_eq!(
+            hook(
+                serde_json::json!({
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Agent",
+                    "tool_input": {"subagent_type": "comment-relay", "prompt": "p", "description": "d"}
+                }),
+                None
+            )
+            .call(),
+            HookCall::Decide(AgentCall {
+                subagent_type: "comment-relay".into(),
+                nested: false,
+                requests_model: false,
+                requests_effort: false,
+            })
+        );
+        assert_eq!(
+            hook(
+                serde_json::json!({
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Agent",
+                    "agent_id": "a1b2",
+                    "agent_type": "general-purpose",
+                    "tool_input": {"subagent_type": "comment-relay", "model": "opus", "effort": "high"}
+                }),
+                Some("5a4d0b")
+            )
+            .call(),
+            HookCall::Decide(AgentCall {
+                subagent_type: "comment-relay".into(),
+                nested: true,
+                requests_model: true,
+                requests_effort: true,
+            })
+        );
+        assert!(matches!(
+            hook(
+                serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}),
+                Some("5a4d0b")
+            )
+            .call(),
+            HookCall::Nothing(_)
+        ));
+    }
+
+    /// The denial is Claude Code 2.1.294's PreToolUse hook output:
+    /// hookSpecificOutput with hookEventName, permissionDecision and
+    /// permissionDecisionReason.
+    #[test]
+    fn a_denial_is_the_native_pre_tool_use_deny_decision() {
+        assert_eq!(
+            AgentDenial::CallerNotPermitted.decision(),
+            concat!(
+                r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","#,
+                r#""permissionDecision":"deny","#,
+                r#""permissionDecisionReason":"this role's caller policy does not name the calling flow"}}"#
+            )
         );
     }
 }

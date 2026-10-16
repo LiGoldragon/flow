@@ -7,7 +7,12 @@ use crate::caller::CallerProcess;
 use crate::generated::curriculum::{
     ContextProvenance, Query as CurriculumQuery, StartupComposition,
 };
+use crate::generated::curriculum::{RoleComposition, RoleSelection};
 use crate::generated::operation::Outcome;
+use crate::generated::role::{
+    Addressed, AgentCall, AgentCaller, AgentCalling, ResolvesAgentCaller, RoleComposing,
+    RoleSelecting,
+};
 use crate::generated::starter::{
     CallerProcessing, ContextRequest, ContextRequesting, CurriculumQuerying, DeliveryIntended,
     HarnessedProfile, JsonRow, LaunchedRecord, LaunchedRecording, LeaveOutListing, OutcomeCarrying,
@@ -15,7 +20,8 @@ use crate::generated::starter::{
     StartupComposing, StartupProgress, SystemPrompted, Textual,
 };
 use signal_flow::{
-    HarnessKind, HerdrPaneBinding, LaunchProfile, LeaveOut, PromptDeliveryIntent, SystemPrompt,
+    Address, HarnessKind, HerdrPaneBinding, LaunchProfile, LeaveOut, PromptDeliveryIntent,
+    SystemPrompt,
 };
 
 impl Textual for str {
@@ -107,6 +113,12 @@ impl CurriculumQuerying for CurriculumQuery {
 impl<T: CurriculumQuerying + ?Sized> CurriculumQuerying for &T {
     fn query(&self) -> CurriculumQuery {
         (**self).query()
+    }
+}
+
+impl ProvenanceListing for [ContextProvenance] {
+    fn provenance(&self) -> Vec<ContextProvenance> {
+        self.to_vec()
     }
 }
 
@@ -260,5 +272,65 @@ impl<T: crate::generated::starter::ReadsVerifiedContext + ?Sized>
 
     fn user_segments(&self) -> Vec<String> {
         (**self).user_segments()
+    }
+}
+
+impl RoleSelecting for RoleSelection {
+    fn role_selection(&self) -> RoleSelection {
+        self.clone()
+    }
+}
+
+impl<T: RoleSelecting + ?Sized> RoleSelecting for &T {
+    fn role_selection(&self) -> RoleSelection {
+        (**self).role_selection()
+    }
+}
+
+impl RoleComposing for RoleComposition {
+    fn role_composition(&self) -> RoleComposition {
+        self.clone()
+    }
+}
+
+impl<T: RoleComposing + ?Sized> RoleComposing for &T {
+    fn role_composition(&self) -> RoleComposition {
+        (**self).role_composition()
+    }
+}
+
+impl Addressed for Address {
+    fn addressed(&self) -> Address {
+        self.clone()
+    }
+}
+
+impl<T: Addressed + ?Sized> Addressed for &T {
+    fn addressed(&self) -> Address {
+        (**self).addressed()
+    }
+}
+
+impl AgentCalling for AgentCall {
+    fn agent_call(&self) -> AgentCall {
+        self.clone()
+    }
+}
+
+impl<T: AgentCalling + ?Sized> AgentCalling for &T {
+    fn agent_call(&self) -> AgentCall {
+        (**self).agent_call()
+    }
+}
+
+impl ResolvesAgentCaller for AgentCaller {
+    fn agent_caller(&self) -> AgentCaller {
+        self.clone()
+    }
+}
+
+impl<T: ResolvesAgentCaller + ?Sized> ResolvesAgentCaller for &T {
+    fn agent_caller(&self) -> AgentCaller {
+        (**self).agent_caller()
     }
 }

@@ -30,6 +30,24 @@ appending the event to that flow's events in its Memory, and answers
 `Reported`, or `Refused.UnknownFlow` for a flow it does not hold, which it
 never adopts. The owner reads a flow's events with meta `ReadEvents`.
 
+A Claude flow's subagent roles come from Curriculum. Flow selects each role by
+name (`LaysOutDefaults::SUBAGENT_ROLES`), asks Curriculum `ComposeRole` for it
+on the `ClaudeAgent` surface at every spawn (a start, a fresh wake and a
+resume), and verifies the answer (`role::VerifiedRole`): the role and surface
+asked for, both payload SHA-256s, a manifest of unique modules in order whose
+renderings are exactly the description and the prompt, and one full revision
+per context repository across every role. The roles whose caller policy names
+the flow's Address exactly, case preserved, are given to the harness in one
+inline `--agents` JSON argument, each as `description`, `prompt`, `model`,
+`effort`, `permissionMode` and, for an explicit list, `tools`; a policy field
+with no native counterpart, or an unavailable Curriculum, refuses the spawn.
+The offer is not the guard: `flow-hook` also runs on every PreToolUse of the
+Agent tool and denies a call naming a selected role unless it comes from the
+flow's main thread, sets neither `model` nor `effort`, and the calling flow,
+resolved by the Nexus from the kernel-named calling process
+(`ResolveCaller.None`, then the one metaflow awake as that flow), is one the
+role's caller policy names.
+
 A Claude flow's FlowId exists before its harness. Reserve chooses the Claude
 session id from the launch request id (UUIDv5-shaped, so one request names
 one session), claims the FlowId for it through `flow-id`, and holds the flow

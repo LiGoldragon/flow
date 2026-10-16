@@ -7,12 +7,12 @@ After=codex-remote-control.service
 
 [Service]
 Type=simple
-# No configuration arguments or variables: the executable derives its
-# defaults from HOME and XDG_RUNTIME_DIR, persists them in
-# ~/.local/state/flow/flow.sema, and takes changes over the meta socket.
-# PATH only locates the herdr, codex and Codex flow client executables.
+# One unheaded Start argument names the ordinary socket, the meta socket
+# and the store, in that order; durable settings live in that store and
+# change only over the meta socket. PATH only locates the herdr, codex and
+# Codex flow client executables.
 Environment=PATH=%h/.local/bin:%h/.nix-profile/bin:/etc/profiles/per-user/%u/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/flow-nexus
+ExecStart=%h/.local/bin/flow-nexus "{ %t/flow/flow.sock %t/flow/flow-meta.sock %h/.local/state/flow-production/flow.sema }"
 Restart=on-failure
 RestartSec=2
 

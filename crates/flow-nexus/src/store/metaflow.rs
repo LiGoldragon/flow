@@ -1,13 +1,54 @@
 //! Ordinary metaflow mutations. The connection supplies the witnessed peer;
 //! the serial dispatcher holds exclusion across authorization and mutation.
 use super::*;
-use signal_flow::{Bind_Data, Deliver_Data, Lock_Data, Recipient, Refusal, Unknown_Data};
+use signal_flow::{Bind_Data, Deliver_Data, FlowId, Lock_Data, Recipient, Refusal, Unknown_Data};
+
+/// What a Deliver did to its recipient's queue: the wire answer, and
+/// whether the recipient was Asleep when the request was queued, which is
+/// what a wake is decided on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Enqueuing {
+    pub response: Response,
+    pub recipient_asleep: bool,
+}
 
 pub(crate) trait MutatesMetaflows {
     fn message_peer(&self, peer: &Process) -> Result<bool, StoreError>;
-    fn bind_metaflow(&self, binding: Bind_Data, peer: &Process) -> Result<Response, StoreError>;
+    /// Binds the peer to its Address. `launched` is the FlowId of the
+    /// launched flow the peer runs in, when Flow can name it; the metaflow
+    /// is then Awake as that flow, so its Stop can put it to sleep.
+    fn bind_metaflow(
+        &self,
+        binding: Bind_Data,
+        peer: &Process,
+        launched: Option<FlowId>,
+    ) -> Result<Response, StoreError>;
     fn lock_metaflow(&self, request: Lock_Data, now: i64) -> Result<Response, StoreError>;
-    fn queue_metaflow(&self, request: Deliver_Data, now: i64) -> Result<Response, StoreError>;
+    fn queue_metaflow(&self, request: Deliver_Data, now: i64) -> Result<Enqueuing, StoreError>;
+}
+
+/// The sleep and wake transitions of a metaflow. Each is one atomic write
+/// and refuses (`Ok(false)`) a metaflow not in the state it expects.
+pub(crate) trait SleepsMetaflows {
+    /// Awake as `flow_id` becomes Asleep, and `flow_id` joins Past. The
+    /// flow's own row, with its native session, is untouched.
+    fn sleep_metaflow(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError>;
+    /// Asleep becomes Awake as the started flow. A resumed flow that ends
+    /// Past is taken out of it, since it is current again.
+    fn awaken_metaflow(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError>;
+    /// The whole queue, oldest first, taken and cleared in one write.
+    fn take_metaflow_queue(&self, address: &Address) -> Result<Vec<Request>, StoreError>;
+    /// Puts requests a wake or drain could not hand over back at the head
+    /// of the queue, ahead of what arrived meanwhile.
+    fn requeue_metaflow(&self, address: &Address, requests: Vec<Request>)
+    -> Result<(), StoreError>;
+    /// The metaflow currently Awake as this flow, if any.
+    fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Metaflow>, StoreError>;
+    /// The metaflow at this Address, if any.
+    fn metaflow(&self, address: &Address) -> Result<Option<Metaflow>, StoreError>;
+    /// Whether a sender holds an unexpired lock on this recipient: it is
+    /// about to deliver.
+    fn lock_held(&self, address: &Address, now: i64) -> Result<bool, StoreError>;
 }
 
 impl MutatesMetaflows for FlowStore {
@@ -23,7 +64,12 @@ impl MutatesMetaflows for FlowStore {
         )
     }
 
-    fn bind_metaflow(&self, binding: Bind_Data, peer: &Process) -> Result<Response, StoreError> {
+    fn bind_metaflow(
+        &self,
+        binding: Bind_Data,
+        peer: &Process,
+        launched: Option<FlowId>,
+    ) -> Result<Response, StoreError> {
         if binding.process != *peer || !FlowStore::process_is_live(peer) {
             return Ok(Response::Refused(Refusal::Unidentified(binding.process)));
         }
@@ -73,7 +119,7 @@ impl MutatesMetaflows for FlowStore {
         let Some(next) = state.next_flow_number.checked_add(1) else {
             return Err(StoreError::StateInvariant);
         };
-        let flow_id = format!("flow-{:016x}", state.next_flow_number);
+        let flow_id = launched.unwrap_or_else(|| format!("flow-{:016x}", state.next_flow_number));
         let new_metaflow = existing.is_none();
         let new_binding = self.bound_process(&address)?.is_none();
         let mut metaflow = existing.map(|row| row.metaflow).unwrap_or(Metaflow {
@@ -177,28 +223,35 @@ impl MutatesMetaflows for FlowStore {
         Ok(Response::Locked(lock))
     }
 
-    fn queue_metaflow(&self, request: Deliver_Data, now: i64) -> Result<Response, StoreError> {
+    fn queue_metaflow(&self, request: Deliver_Data, now: i64) -> Result<Enqueuing, StoreError> {
+        let refused = |response| Enqueuing {
+            response,
+            recipient_asleep: false,
+        };
         let Some(held) = self.stored_metaflow_lock(&request.lock.address)? else {
-            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Lock(
-                request.lock,
+            return Ok(refused(Response::Refused(Refusal::Unknown(
+                Unknown_Data::Lock(request.lock),
             ))));
         };
         if held.lock != request.lock {
-            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Lock(
-                request.lock,
+            return Ok(refused(Response::Refused(Refusal::Unknown(
+                Unknown_Data::Lock(request.lock),
             ))));
         }
         if held.lock.until <= now {
-            return Ok(Response::Refused(Refusal::Lapsed));
+            return Ok(refused(Response::Refused(Refusal::Lapsed)));
         }
         let Some(mut stored) = self.stored_metaflow(&request.lock.address)? else {
-            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
-                request.lock.address,
+            return Ok(refused(Response::Refused(Refusal::Unknown(
+                Unknown_Data::Address(request.lock.address),
             ))));
         };
         if stored.metaflow.state == MetaflowState::Ended {
-            return Ok(Response::Refused(Refusal::Ended(request.lock.address)));
+            return Ok(refused(Response::Refused(Refusal::Ended(
+                request.lock.address,
+            ))));
         }
+        let recipient_asleep = stored.metaflow.state == MetaflowState::Asleep;
         stored.metaflow.queue.push(request.request);
         let commit = self
             .engine
@@ -210,7 +263,128 @@ impl MutatesMetaflows for FlowStore {
             );
         self.engine.commit_atomic(commit)?;
         // This is durable enqueue, never a claim of native delivery or wake.
-        Ok(Response::Queued)
+        Ok(Enqueuing {
+            response: Response::Queued,
+            recipient_asleep,
+        })
+    }
+}
+
+impl SleepsMetaflows for FlowStore {
+    fn sleep_metaflow(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Ok(false);
+        };
+        if stored.metaflow.state != MetaflowState::Awake(flow_id.to_owned()) {
+            return Ok(false);
+        }
+        stored.metaflow.state = MetaflowState::Asleep;
+        stored.metaflow.past.push(flow_id.to_owned());
+        self.write_metaflow(stored)?;
+        Ok(true)
+    }
+
+    fn awaken_metaflow(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Ok(false);
+        };
+        if stored.metaflow.state != MetaflowState::Asleep {
+            return Ok(false);
+        }
+        if stored.metaflow.past.last().map(String::as_str) == Some(flow_id) {
+            stored.metaflow.past.pop();
+        }
+        stored.metaflow.state = MetaflowState::Awake(flow_id.to_owned());
+        self.write_metaflow(stored)?;
+        Ok(true)
+    }
+
+    fn take_metaflow_queue(&self, address: &Address) -> Result<Vec<Request>, StoreError> {
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Ok(Vec::new());
+        };
+        if stored.metaflow.queue.is_empty() {
+            return Ok(Vec::new());
+        }
+        let taken = std::mem::take(&mut stored.metaflow.queue);
+        self.write_metaflow(stored)?;
+        Ok(taken)
+    }
+
+    fn requeue_metaflow(
+        &self,
+        address: &Address,
+        mut requests: Vec<Request>,
+    ) -> Result<(), StoreError> {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Err(StoreError::StateInvariant);
+        };
+        requests.append(&mut stored.metaflow.queue);
+        stored.metaflow.queue = requests;
+        self.write_metaflow(stored)
+    }
+
+    fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Metaflow>, StoreError> {
+        let awake = MetaflowState::Awake(flow_id.to_owned());
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.metaflows))?
+            .records()
+            .iter()
+            .find(|stored| stored.metaflow.state == awake)
+            .map(|stored| stored.metaflow.clone()))
+    }
+
+    fn metaflow(&self, address: &Address) -> Result<Option<Metaflow>, StoreError> {
+        Ok(self.stored_metaflow(address)?.map(|stored| stored.metaflow))
+    }
+
+    fn lock_held(&self, address: &Address, now: i64) -> Result<bool, StoreError> {
+        Ok(self
+            .stored_metaflow_lock(address)?
+            .is_some_and(|held| held.lock.until > now))
+    }
+}
+
+/// One metaflow row written back in its own atomic commit.
+trait WritesMetaflow {
+    fn write_metaflow(&self, stored: StoredMetaflow) -> Result<(), StoreError>;
+}
+
+impl WritesMetaflow for FlowStore {
+    fn write_metaflow(&self, stored: StoredMetaflow) -> Result<(), StoreError> {
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, stored);
+        self.engine.commit_atomic(commit)?;
+        Ok(())
+    }
+}
+
+/// Seeds a metaflow row directly, for tests of what reads and moves it.
+#[cfg(test)]
+pub(crate) trait SeedsMetaflow {
+    fn seed_metaflow(&self, metaflow: Metaflow);
+}
+
+#[cfg(test)]
+impl SeedsMetaflow for FlowStore {
+    fn seed_metaflow(&self, metaflow: Metaflow) {
+        let exists = self
+            .stored_metaflow(&metaflow.address)
+            .expect("metaflow readable")
+            .is_some();
+        let commit = self.engine.begin_atomic_commit();
+        let commit = if exists {
+            commit.mutate(self.metaflows, StoredMetaflow { metaflow })
+        } else {
+            commit.assert(self.metaflows, StoredMetaflow { metaflow })
+        };
+        self.engine.commit_atomic(commit).expect("metaflow seeded");
     }
 }
 
@@ -274,14 +448,17 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .bind_metaflow(binding.clone(), &fixture.peer)
+                .bind_metaflow(binding.clone(), &fixture.peer, None)
                 .unwrap(),
             Response::Refused(Refusal::NotMessage)
         );
         let mut forged = binding;
         forged.process.started += 1;
         assert!(matches!(
-            fixture.store.bind_metaflow(forged, &fixture.peer).unwrap(),
+            fixture
+                .store
+                .bind_metaflow(forged, &fixture.peer, None)
+                .unwrap(),
             Response::Refused(Refusal::Unidentified(_))
         ));
         assert!(fixture.store.list_metaflows().unwrap().is_empty());
@@ -301,11 +478,14 @@ mod tests {
         };
         let first = fixture
             .store
-            .bind_metaflow(binding.clone(), &fixture.peer)
+            .bind_metaflow(binding.clone(), &fixture.peer, None)
             .unwrap();
         assert!(matches!(&first, Response::Bound(_)));
         assert_eq!(
-            fixture.store.bind_metaflow(binding, &fixture.peer).unwrap(),
+            fixture
+                .store
+                .bind_metaflow(binding, &fixture.peer, None)
+                .unwrap(),
             first
         );
         assert!(fixture.store.message_peer(&fixture.peer).unwrap());
@@ -338,7 +518,8 @@ mod tests {
                     },
                     101
                 )
-                .unwrap(),
+                .unwrap()
+                .response,
             Response::Refused(Refusal::Unknown(_))
         ));
         assert!(fixture.store.list_metaflows().unwrap()[0].queue.is_empty());
@@ -352,7 +533,8 @@ mod tests {
                     },
                     101
                 )
-                .unwrap(),
+                .unwrap()
+                .response,
             Response::Queued
         );
         assert_eq!(fixture.store.list_metaflows().unwrap()[0].queue, vec![body]);
@@ -373,7 +555,8 @@ mod tests {
                     },
                     102
                 )
-                .unwrap(),
+                .unwrap()
+                .response,
             Response::Refused(Refusal::Unknown(_))
         ));
     }
@@ -402,6 +585,7 @@ mod tests {
                     process: fixture.peer.clone(),
                 },
                 &fixture.peer,
+                None,
             )
             .unwrap();
         let Response::Locked(lock) = fixture.store.lock_metaflow(request, 10).unwrap() else {
@@ -417,7 +601,8 @@ mod tests {
                     },
                     40
                 )
-                .unwrap(),
+                .unwrap()
+                .response,
             Response::Refused(Refusal::Lapsed)
         );
         assert!(fixture.store.list_metaflows().unwrap()[0].queue.is_empty());

@@ -201,7 +201,7 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flow"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "datom-codec",
  "flow-defaults",
@@ -214,11 +214,11 @@ dependencies = [
 
 [[package]]
 name = "flow-defaults"
-version = "0.26.0"
+version = "0.27.0"
 
 [[package]]
 name = "flow-ethos"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "flow-meta"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "datom-codec",
  "flow-defaults",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "flow-nexus"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "base64",
  "datom-codec",
@@ -421,9 +421,9 @@ version = "18.0.0"
 source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=6d07b7bb077da8755eae7d1146d9dfd64d7b7d7c#6d07b7bb077da8755eae7d1146d9dfd64d7b7d7c"
 dependencies = [
  "datom-codec",
- "protos",
  "ethos-zero",
  "flow-ethos",
+ "protos",
  "rkyv",
  "signal",
  "signal-flow",
@@ -650,7 +650,7 @@ dependencies = [
 [[package]]
 name = "sema"
 version = "0.1.1"
-source = "git+https://github.com/LiGoldragon/sema.git?rev=51d7927c872f0df12791bad8d39a4db6433b01a1#51d7927c872f0df12791bad8d39a4db6433b01a1"
+source = "git+https://github.com/LiGoldragon/sema?rev=51d7927c872f0df12791bad8d39a4db6433b01a1#51d7927c872f0df12791bad8d39a4db6433b01a1"
 dependencies = [
  "redb",
  "rkyv",

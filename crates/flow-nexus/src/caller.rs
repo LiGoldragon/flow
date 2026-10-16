@@ -129,7 +129,7 @@ impl ResolvesCaller for RunningNexus {
 }
 
 /// The one flow a pane holds, with its role.
-trait BindsCallerPane {
+pub(crate) trait BindsCallerPane {
     fn bound_caller(&self, pane: &CallerPane) -> Result<Caller, CallerResolutionRejection>;
 }
 

@@ -1,0 +1,574 @@
+//! Sleep and wake against the fixture Herdr: a resting seat's pane is
+//! closed and its native session kept; a queued request resumes that session
+//! in a new pane with the same FlowId and the whole queue in one prompt; what
+//! arrives during the wake is typed after it.
+
+use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
+use crate::RunningNexus;
+use crate::composition::{ComposesFreshSeat, ComposesLaunch, FreshSeat, RendersQueuedWork};
+use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::generated::operation::{Operation, Outcome};
+use crate::herdr::launch::ChecksComposedLaunch;
+use crate::herdr::reservation::ChoosesNativeSession;
+use crate::performing::Performs;
+use crate::reporting::RecordsReports;
+use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+use crate::store::{
+    ReadsFlowRows, RecordsFlowLifecycle, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
+    RegistersFlowIdentity, ReservesLaunchAttempt,
+};
+use crate::waking::{HoldsWakingMetaflows, SleepsAndWakesSeats, WakePlan, WakePolicy};
+use flow_ethos::State;
+use sha2::{Digest, Sha256};
+use signal_flow::{
+    Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
+    HerdrRouteSelection, LaunchProfile, Layer, Metaflow, NativeLaunchBinding, NativeLaunchIntent,
+    OriginClue, PowerLevel, Request, Source,
+};
+use std::fs;
+
+fn address(layer: Layer) -> Address {
+    Address {
+        aspect: Aspect::Mind,
+        topic: "flow".into(),
+        layer,
+    }
+}
+
+fn metaflow(layer: Layer, state: State, past: Vec<&str>, queue: Vec<Request>) -> Metaflow {
+    Metaflow {
+        address: address(layer),
+        state,
+        past: past.into_iter().map(String::from).collect(),
+        queue,
+    }
+}
+
+fn stored(fixture: &NexusFixture, layer: Layer) -> Metaflow {
+    fixture
+        .nexus
+        .store
+        .metaflow(&address(layer))
+        .expect("metaflow readable")
+        .expect("metaflow held")
+}
+
+fn closes(fixture: &NexusFixture) -> bool {
+    fs::read_to_string(fixture.directory.path().join("herdr-operations.log"))
+        .unwrap_or_default()
+        .contains("pane close w1:p3")
+}
+
+#[test]
+fn a_resting_flow_that_stopped_sleeps_closing_its_pane_and_keeping_its_session() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("908786".into()),
+        vec![],
+        vec![],
+    ));
+
+    fixture
+        .nexus
+        .after_report(&"908786".to_owned(), &signal_flow::Event::Stopped);
+
+    assert!(closes(&fixture), "the seat's pane is closed");
+    let slept = stored(&fixture, Layer::Secondary);
+    assert_eq!(slept.state, State::Asleep);
+    assert_eq!(slept.past, vec!["908786".to_owned()]);
+    let node = fixture
+        .nexus
+        .store
+        .flow_node("908786")
+        .unwrap()
+        .expect("flow row kept");
+    assert_eq!(node.flow_lifecycle, FlowLifecycle::Stopped);
+    assert_eq!(
+        node.session_id, "01a0b22c-e24f-7452-9940-64490878680f",
+        "the native session a wake resumes is kept"
+    );
+}
+
+#[test]
+fn a_flow_that_stopped_while_working_or_awaited_does_not_sleep() {
+    // Herdr still shows the seat Working.
+    let working = NexusFixture::new();
+    working.accept_pane_operations(
+        vec![working.current_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    working.register_with(FlowLifecycle::Active);
+    working.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("908786".into()),
+        vec![],
+        vec![],
+    ));
+    assert!(!working.nexus.sleep_if_idle("908786"));
+    assert_eq!(
+        stored(&working, Layer::Secondary).state,
+        State::Awake("908786".into())
+    );
+    assert!(!closes(&working));
+
+    // Resting, but work is queued for it.
+    let queued = NexusFixture::new();
+    queued.accept_pane_operations(
+        vec![queued.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    queued.register_with(FlowLifecycle::Active);
+    queued.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("908786".into()),
+        vec![],
+        vec![Request::Notice("waiting".into())],
+    ));
+    assert!(!queued.nexus.sleep_if_idle("908786"));
+    assert!(!closes(&queued));
+
+    // Resting and unawaited, but a Primary.
+    let primary = NexusFixture::new();
+    primary.accept_pane_operations(
+        vec![primary.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    primary.register_with(FlowLifecycle::Active);
+    primary.nexus.store.seed_metaflow(metaflow(
+        Layer::Primary,
+        State::Awake("908786".into()),
+        vec![],
+        vec![],
+    ));
+    assert!(!primary.nexus.sleep_if_idle("908786"));
+    assert!(!closes(&primary));
+
+    // Resting and unawaited, but a wake holds its metaflow.
+    let waking = NexusFixture::new();
+    waking.accept_pane_operations(
+        vec![waking.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    waking.register_with(FlowLifecycle::Active);
+    waking.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("908786".into()),
+        vec![],
+        vec![],
+    ));
+    let _lease = waking.nexus.waking.hold(&address(Layer::Secondary));
+    assert!(!waking.nexus.sleep_if_idle("908786"));
+    assert!(!closes(&waking));
+}
+
+#[test]
+fn work_and_words_wake_a_secondary_and_nothing_wakes_a_primary() {
+    assert!(RunningNexus::wakes_for(&Request::Order("go".into())));
+    assert!(RunningNexus::wakes_for(&Request::Question("why".into())));
+    assert!(RunningNexus::wakes_for(&Request::Psyche(
+        flow_ethos::Said {
+            context: "c".into(),
+            verbatim: "v".into(),
+        }
+    )));
+    assert!(!RunningNexus::wakes_for(&Request::Result("done".into())));
+    assert!(!RunningNexus::wakes_for(&Request::Notice("fyi".into())));
+    assert!(!RunningNexus::wakes_layer(&Layer::Primary));
+    assert!(RunningNexus::wakes_layer(&Layer::Secondary));
+    assert!(RunningNexus::sleeps_at(&signal_flow::AgentState::Idle));
+    assert!(RunningNexus::sleeps_at(&signal_flow::AgentState::Done));
+    assert!(!RunningNexus::sleeps_at(&signal_flow::AgentState::Working));
+}
+
+#[test]
+fn the_store_sleeps_awakens_takes_and_requeues_exactly() {
+    let fixture = NexusFixture::new();
+    let store = &fixture.nexus.store;
+    let at = address(Layer::Tertiary);
+    store.seed_metaflow(metaflow(
+        Layer::Tertiary,
+        State::Awake("aaaaaa".into()),
+        vec![],
+        vec![],
+    ));
+    assert!(
+        !store.sleep_metaflow(&at, "bbbbbb").unwrap(),
+        "not Awake as it"
+    );
+    assert!(store.sleep_metaflow(&at, "aaaaaa").unwrap());
+    assert!(
+        !store.sleep_metaflow(&at, "aaaaaa").unwrap(),
+        "already Asleep"
+    );
+    store
+        .requeue_metaflow(&at, vec![Request::Order("B".into())])
+        .unwrap();
+    store
+        .requeue_metaflow(&at, vec![Request::Order("A".into())])
+        .unwrap();
+    assert_eq!(
+        store.take_metaflow_queue(&at).unwrap(),
+        vec![Request::Order("A".into()), Request::Order("B".into())]
+    );
+    assert!(store.take_metaflow_queue(&at).unwrap().is_empty());
+    assert!(store.awaken_metaflow(&at, "aaaaaa").unwrap());
+    let woken = store.metaflow(&at).unwrap().unwrap();
+    assert_eq!(woken.state, State::Awake("aaaaaa".into()));
+    assert!(woken.past.is_empty(), "a resumed flow is current, not Past");
+    assert_eq!(
+        store.metaflow_awake_as("aaaaaa").unwrap().unwrap().address,
+        at
+    );
+}
+
+#[test]
+fn a_fresh_wake_composes_the_topic_modules_and_the_queued_work() {
+    let fixture = NexusFixture::new();
+    let module = fixture.directory.path().join("modules/vision-flow.md");
+    fs::create_dir_all(module.parent().unwrap()).unwrap();
+    fs::write(&module, b"module bytes\n").unwrap();
+    let queue = [
+        Request::Order("first".into()),
+        Request::Question("second".into()),
+    ];
+    let text = queue.prompt_text();
+    let seat = FreshSeat {
+        address: address(Layer::Secondary),
+        launch_request_id: "wake-0-1".into(),
+        model_name: "claude-fixture".into(),
+        harness_kind: HarnessKind::Claude,
+        power_level: PowerLevel::Medium,
+        effort: "medium".into(),
+        herdr_session_name: "fixture-session".into(),
+        modules: vec![Source {
+            repository: "modules".into(),
+            hash: "unchecked".into(),
+            path: "vision-flow.md".into(),
+        }],
+        prompt: text.clone(),
+    };
+    let profile = fixture.nexus.composer.fresh_profile(&seat).unwrap();
+    assert_eq!(profile.aspect, Aspect::Mind);
+    assert_eq!(profile.instruction_prompt, text);
+    assert_eq!(profile.launch_source_vector.len(), 1);
+    assert_eq!(
+        profile.launch_source_vector[0].source_path,
+        "modules/vision-flow.md"
+    );
+    assert_eq!(
+        profile.launch_source_vector[0].source_sha256,
+        format!("{:x}", Sha256::digest(b"module bytes\n"))
+    );
+    let bundle = fs::read_to_string(&profile.system_prompt_bundle_file).unwrap();
+    assert!(bundle.contains("Mind flow Secondary seat"));
+    let composed = fixture.nexus.composer.compose(&profile).unwrap();
+    let prompt = composed.first_prompt_payload.first_prompt_text;
+    assert!(
+        prompt.contains(
+            &module
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
+    let first = prompt.find("Order.first").expect("first request");
+    let second = prompt.find("Question.second").expect("second request");
+    assert!(first < second, "oldest first");
+}
+
+#[test]
+fn an_asleep_codex_seat_without_a_resumable_session_wakes_fresh_in_its_session() {
+    let fixture = NexusFixture::new();
+    fixture.set_agents(vec![fixture.current_agent()]);
+    fixture.register_with(FlowLifecycle::Active);
+    let plan = fixture.nexus.wake_plan(&metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["908786"],
+        vec![],
+    ));
+    assert_eq!(
+        plan,
+        WakePlan::Fresh {
+            herdr_session_name: "messaging-build".into()
+        }
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .wake_plan(&metaflow(Layer::Secondary, State::Asleep, vec![], vec![])),
+        WakePlan::Unplaceable
+    );
+}
+
+/// The resumed seat: a Claude flow `abc123` that slept, its launch kept.
+struct Resumable {
+    profile: LaunchProfile,
+    session: String,
+}
+
+const RESUMED_AGENT: &str = r#"{"agent":"claude","agent_status":"idle","interactive_ready":true,"name":"AGENT","pane_id":"w9:p1","tab_id":"w9:t1","terminal_id":"term-resumed","workspace_id":"w9","revision":1}"#;
+
+fn resumable(fixture: &NexusFixture) -> Resumable {
+    let bundle = fixture.directory.path().join("resumed-bundle.md");
+    fs::write(&bundle, b"resumed bundle\n").unwrap();
+    let profile = LaunchProfile {
+        launch_request_id: "resumed-request".into(),
+        launch_source_vector: vec![],
+        skill_name_vector: vec![],
+        aspect: Aspect::Mind,
+        power_level: PowerLevel::Medium,
+        harness_kind: HarnessKind::Claude,
+        model_name: "claude-fixture".into(),
+        effort: "medium".into(),
+        flow_id_option: None,
+        remembered_flow_vector: vec![],
+        herdr_session_name: "fixture-session".into(),
+        system_prompt_bundle_file: bundle.to_string_lossy().into_owned(),
+        instruction_prompt: "fixture instruction".into(),
+    };
+    let session = fixture
+        .nexus
+        .herdr
+        .reserved_native_session_id(&profile)
+        .expect("a Claude launch has a Flow-chosen session");
+    // The launch that bound abc123, with its bundle copy.
+    let composed = fixture.nexus.composer.compose(&profile).expect("composes");
+    let origin = OriginClue {
+        flow_id: "caller".into(),
+        session_id: "caller-session".into(),
+        turn_id: "caller-turn".into(),
+    };
+    fixture
+        .nexus
+        .store
+        .reserve_launch_attempt(&composed, origin.clone())
+        .expect("reserved");
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_intent(NativeLaunchIntent {
+                launch_request_id: profile.launch_request_id.clone(),
+                prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: HarnessKind::Claude,
+                model_name: profile.model_name.clone(),
+                effort: profile.effort.clone(),
+                skill_name_vector: vec![],
+            })
+            .unwrap()
+    );
+    let old_pane = signal_flow::HerdrPaneBinding {
+        launch_request_id: profile.launch_request_id.clone(),
+        herdr_session_name: "fixture-session".into(),
+        herdr_agent_name: composed.launch_agent_name(),
+        herdr_workspace_id: "w1".into(),
+        herdr_pane_id: "w1:p3".into(),
+        herdr_terminal_id: "term-old".into(),
+    };
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_binding(NativeLaunchBinding {
+                launch_request_id: profile.launch_request_id.clone(),
+                flow_id: "abc123".into(),
+                native_session_id: session.clone(),
+                harness_kind: HarnessKind::Claude,
+                herdr_pane_binding: old_pane,
+            })
+            .unwrap()
+    );
+    fixture
+        .nexus
+        .store
+        .register_flow(FlowNode {
+            flow_id: "abc123".into(),
+            session_id: session.clone(),
+            harness_kind: HarnessKind::Claude,
+            endpoint_selection: EndpointSelection::Unavailable,
+            herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                herdr_session_name: "fixture-session".into(),
+                herdr_agent_name: composed.launch_agent_name(),
+                herdr_pane_id: "w1:p3".into(),
+                herdr_terminal_id: "term-old".into(),
+            }),
+            origin_clue: origin,
+            flow_lifecycle: FlowLifecycle::Active,
+        })
+        .expect("registered");
+    assert!(fixture.nexus.store.record_stopped("abc123").unwrap());
+    fs::write(
+        fixture.directory.path().join("flows/.abc123.flow-id"),
+        format!(
+            "version=1\nharness=claude\nidentity={}\nalias=abc123\nuuid-version=uuid-v5\n",
+            session.replace('-', "")
+        ),
+    )
+    .unwrap();
+    let agent = RESUMED_AGENT.replace("AGENT", &composed.launch_agent_name());
+    let agent_record = format!(
+        r#"{{"result":{{"agent":{}}}}}"#,
+        agent.replace(
+            r#""revision":1}"#,
+            &format!(
+                r#""revision":1,"agent_session":{{"source":"herdr:claude","agent":"claude","kind":"id","value":"{session}"}}}}"#
+            )
+        )
+    );
+    let calls = fixture.directory.path().join("herdr-calls.log");
+    let typed = fixture.directory.path().join("pane-typed.txt");
+    let marker = fixture.directory.path().join("marker-output");
+    let script = r#"#!/bin/sh
+printf '%s\n' "$*" >> 'CALLS'
+case "$*" in
+  *"workspace create"*) printf '%s\n' '{"result":{"workspace":{"workspace_id":"w9"},"root_pane":{"pane_id":"w9:p1","terminal_id":"term-resumed"}}}' ;;
+  *"pane run"*) sh -c "$6" > 'MARKER' ;;
+  *"pane wait-output"*) line=$(grep -F FLOW_CLAUDE_ENV_READY_ 'MARKER'); printf '{"result":{"pane_id":"w9:p1","matched_line":"%s"}}\n' "$line" ;;
+  *"agent start"*) printf '%s\n' '{"result":{"agent":{"name":"x"}}}' ;;
+  *"agent get"*) printf '%s\n' 'RECORD' ;;
+  *"api snapshot"*) printf '%s\n' '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":[AGENT],"protocol":20,"version":"0.8.2"},"type":"session_snapshot"}}' ;;
+  *"agent read"*) printf '%s\n' '❯ ' ;;
+  *"agent prompt"*) printf '%s\n--\n' "$6" >> 'TYPED'; printf '%s\n' '{"id":"cli:agent:prompt","result":{"type":"agent_prompted","agent":AGENT}}' ;;
+  *) exit 64 ;;
+esac
+"#
+    .replace("CALLS", &calls.display().to_string())
+    .replace("MARKER", &marker.display().to_string())
+    .replace("TYPED", &typed.display().to_string())
+    .replace("RECORD", &agent_record)
+    .replace("AGENT", &agent);
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script);
+    let transcripts = fixture.directory.path().join("native-transcripts");
+    fs::create_dir_all(&transcripts).unwrap();
+    FixtureExecutable {
+        path: transcripts.join("flow-id"),
+    }
+    .install("#!/bin/sh\nprintf '%s\\n' abc123\n");
+    Resumable { profile, session }
+}
+
+#[test]
+fn a_queued_order_resumes_the_sleeping_session_with_its_flow_id_and_the_whole_queue() {
+    let fixture = NexusFixture::new();
+    let seat = resumable(&fixture);
+    let at = address(Layer::Secondary);
+    let queue = vec![
+        Request::Order("A".into()),
+        Request::Notice("B".into()),
+        Request::Question("C".into()),
+    ];
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        queue.clone(),
+    ));
+    let lease = fixture.nexus.waking.hold(&at).expect("the wake holds it");
+    assert!(
+        fixture.nexus.waking.hold(&at).is_none(),
+        "a second request starts no second wake"
+    );
+
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Woken("abc123".into()),
+        "the sleeping flow resumes as itself"
+    );
+    // D arrives while the wake holds the metaflow.
+    fixture
+        .nexus
+        .store
+        .requeue_metaflow(&at, vec![Request::Order("D".into())])
+        .unwrap();
+    fixture.nexus.drain_woken(&at, lease);
+    assert!(!fixture.nexus.waking.is_waking(&at), "the hold is released");
+
+    let calls = fs::read_to_string(fixture.directory.path().join("herdr-calls.log")).unwrap();
+    let start = calls
+        .lines()
+        .find(|line| line.contains("agent start"))
+        .expect("the harness started again");
+    assert!(start.contains(&format!(" --resume {} ", seat.session)));
+    assert!(!start.contains("--session-id"));
+    assert!(
+        calls
+            .lines()
+            .any(|line| line.contains("pane run") && line.contains("export FLOW_ID=abc123 "))
+    );
+
+    let typed = fs::read_to_string(fixture.directory.path().join("pane-typed.txt")).unwrap();
+    let prompts = typed
+        .split("\n--\n")
+        .filter(|prompt| !prompt.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prompts.len(),
+        2,
+        "the queue in one prompt, then D: {prompts:?}"
+    );
+    assert_eq!(prompts[0], queue.prompt_text());
+    assert_eq!(prompts[1], [Request::Order("D".into())].prompt_text());
+
+    let woken = stored(&fixture, Layer::Secondary);
+    assert_eq!(woken.state, State::Awake("abc123".into()));
+    assert!(woken.past.is_empty());
+    assert!(woken.queue.is_empty());
+    let node = fixture.nexus.store.flow_node("abc123").unwrap().unwrap();
+    assert_eq!(node.session_id, seat.session);
+    assert!(node.flow_lifecycle.is_live_for_tests());
+    assert_eq!(
+        node.herdr_route_selection,
+        HerdrRouteSelection::Available(HerdrRoute {
+            herdr_session_name: "fixture-session".into(),
+            herdr_agent_name: fixture
+                .nexus
+                .composer
+                .compose(&seat.profile)
+                .unwrap()
+                .launch_agent_name(),
+            herdr_pane_id: "w9:p1".into(),
+            herdr_terminal_id: "term-resumed".into(),
+        })
+    );
+}
+
+#[test]
+fn a_wake_that_cannot_start_puts_the_work_back_and_stays_asleep() {
+    let fixture = NexusFixture::new();
+    let at = address(Layer::Secondary);
+    let queue = vec![Request::Order("A".into())];
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec![],
+        queue.clone(),
+    ));
+    assert!(matches!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Failed(_)
+    ));
+    let asleep = stored(&fixture, Layer::Secondary);
+    assert_eq!(asleep.state, State::Asleep);
+    assert_eq!(asleep.queue, queue);
+}
+
+trait ReadsLiveness {
+    fn is_live_for_tests(&self) -> bool;
+}
+
+impl ReadsLiveness for FlowLifecycle {
+    fn is_live_for_tests(&self) -> bool {
+        matches!(self, FlowLifecycle::Pending | FlowLifecycle::Active)
+    }
+}

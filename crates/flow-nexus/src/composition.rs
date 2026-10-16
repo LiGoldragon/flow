@@ -1,9 +1,11 @@
 //! Exact-byte first-prompt composition for an authored Flow launch profile.
 
+use datom_codec::Datomizable;
+use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
-    Aspect, ComposedLaunch, FirstPromptPayload, HarnessKind, LaunchProfile, LaunchSource,
-    PowerLevel, TargetReceiptRequest,
+    Address, Aspect, ComposedLaunch, FirstPromptPayload, HarnessKind, LaunchProfile, LaunchSource,
+    Layer, PowerLevel, Request, Source, TargetReceiptRequest,
 };
 use std::{
     collections::HashSet,
@@ -753,6 +755,175 @@ impl ComposesLaunch for LaunchComposer {
                 first_prompt_text,
             },
             target_receipt_request,
+        })
+    }
+}
+
+/// The text a metaflow's queued requests become in a seat's prompt: one
+/// opening line, then each Request as its own datom, oldest first, each on
+/// a line of its own. A Request is typed as the datom it is, as a Message
+/// is; a control character other than LF and TAB is a key to a harness, not
+/// a word, and is typed as U+FFFD.
+pub trait RendersQueuedWork {
+    const QUEUED_WORK_OPENING: &'static str =
+        "Work queued for you while no seat of yours was running, oldest first:";
+    fn prompt_text(&self) -> String;
+}
+
+impl RendersQueuedWork for [Request] {
+    fn prompt_text(&self) -> String {
+        let mut text = String::from(Self::QUEUED_WORK_OPENING);
+        for request in self {
+            text.push('\n');
+            text.extend(
+                request
+                    .datomize(Vec::new())
+                    .protosize()
+                    .compact()
+                    .chars()
+                    .map(|glyph| match glyph {
+                        '\n' | '\t' => glyph,
+                        glyph if glyph.is_control() => '\u{fffd}',
+                        glyph => glyph,
+                    }),
+            );
+        }
+        text
+    }
+}
+
+/// A resumed flow's launch: its original profile, which names its pane
+/// agent, its session and its bundle copy, carrying the queued work as the
+/// text Flow types once the harness is back. No receipt is asked of a
+/// resumed seat; the hash only names the text.
+pub trait ResumesLaunch {
+    fn resumption(&self, text: &str) -> ComposedLaunch;
+}
+
+impl ResumesLaunch for LaunchProfile {
+    fn resumption(&self, text: &str) -> ComposedLaunch {
+        let prompt_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+        ComposedLaunch {
+            launch_profile: self.clone(),
+            first_prompt_payload: FirstPromptPayload {
+                first_prompt_body: text.to_owned(),
+                prompt_sha256: prompt_sha256.clone(),
+                first_prompt_text: text.to_owned(),
+            },
+            target_receipt_request: TargetReceiptRequest {
+                launch_request_id: self.launch_request_id.clone(),
+                prompt_sha256,
+            },
+        }
+    }
+}
+
+/// Everything a fresh wake knows of the seat it starts, all of it read from
+/// the meta configuration and the seat's last flow: its Address, the
+/// layer's Model and the harness that serves it, the topic's modules, the
+/// Herdr session its last flow ran in, and the queued work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshSeat {
+    pub address: Address,
+    pub launch_request_id: String,
+    pub model_name: String,
+    pub harness_kind: HarnessKind,
+    pub power_level: PowerLevel,
+    pub effort: String,
+    pub herdr_session_name: String,
+    pub modules: Vec<Source>,
+    pub prompt: String,
+}
+
+/// Composes the LaunchProfile of a seat woken fresh. Its system-prompt
+/// bundle is written beside the launch copies and names the seat; each
+/// configured module is a launch source, named by its path under the source
+/// root, as `Repository/Path` when it names a repository. The module's
+/// Blake3 hash is not checked here: the source is pinned by the SHA-256 of
+/// the bytes read at the wake.
+pub trait ComposesFreshSeat {
+    fn fresh_profile(&self, seat: &FreshSeat) -> Result<LaunchProfile, CompositionError>;
+}
+
+trait NamesSeat {
+    fn seat_name(&self) -> String;
+}
+
+impl NamesSeat for Address {
+    fn seat_name(&self) -> String {
+        let aspect = match self.aspect {
+            Aspect::Psyche => "Psyche",
+            Aspect::Mind => "Mind",
+            Aspect::Field => "Field",
+        };
+        let layer = match self.layer {
+            Layer::Primary => "Primary",
+            Layer::Secondary => "Secondary",
+            Layer::Tertiary => "Tertiary",
+            Layer::Quaternary => "Quaternary",
+        };
+        format!("{aspect} {} {layer}", self.topic)
+    }
+}
+
+impl ComposesFreshSeat for LaunchComposer {
+    fn fresh_profile(&self, seat: &FreshSeat) -> Result<LaunchProfile, CompositionError> {
+        let root = self.source_root.canonicalize().map_err(|_| {
+            CompositionError::UnreadableSource(self.source_root.display().to_string())
+        })?;
+        let mut launch_source_vector: Vec<LaunchSource> = Vec::new();
+        for module in &seat.modules {
+            let source_path = if module.repository.is_empty() {
+                module.path.clone()
+            } else {
+                format!(
+                    "{}/{}",
+                    module.repository.trim_end_matches('/'),
+                    module.path
+                )
+            };
+            if launch_source_vector
+                .iter()
+                .any(|source| source.source_path == source_path)
+            {
+                continue;
+            }
+            let bytes = fs::read(root.join(&source_path))
+                .map_err(|_| CompositionError::MissingSource(source_path.clone()))?;
+            launch_source_vector.push(LaunchSource {
+                source_path,
+                source_sha256: self.sha256(&bytes),
+            });
+        }
+        let bundle = self.launch_bundles.directory.join(format!(
+            "wake-{}.md",
+            seat.launch_request_id.launch_request_short_form()
+        ));
+        let unwritable =
+            |error: std::io::Error| CompositionError::LaunchBundleUnwritable(error.to_string());
+        fs::create_dir_all(&self.launch_bundles.directory).map_err(unwritable)?;
+        fs::write(
+            &bundle,
+            format!(
+                "You are the {} seat. Flow started you because work arrived for you while no seat of yours was running. The work is in your first prompt, oldest first.\n",
+                seat.address.seat_name()
+            ),
+        )
+        .map_err(unwritable)?;
+        Ok(LaunchProfile {
+            launch_request_id: seat.launch_request_id.clone(),
+            launch_source_vector,
+            skill_name_vector: Vec::new(),
+            aspect: seat.address.aspect.clone(),
+            power_level: seat.power_level.clone(),
+            harness_kind: seat.harness_kind.clone(),
+            model_name: seat.model_name.clone(),
+            effort: seat.effort.clone(),
+            flow_id_option: None,
+            remembered_flow_vector: Vec::new(),
+            herdr_session_name: seat.herdr_session_name.clone(),
+            system_prompt_bundle_file: bundle.to_string_lossy().into_owned(),
+            instruction_prompt: seat.prompt.clone(),
         })
     }
 }

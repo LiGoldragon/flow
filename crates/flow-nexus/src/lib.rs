@@ -36,6 +36,7 @@ pub mod performing;
 pub mod reporting;
 pub mod store;
 pub mod title;
+pub mod waking;
 
 use binding::{ChecksFlowBinding, ChecksFlowContainer, ChecksProcessIdentity, RefusesBinding};
 use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
@@ -70,6 +71,7 @@ use store::{
     OpensFlowStore, ReadsFlowRows, RecordsLaunchOutcome, RegistersExistingFlow,
     RegistersFlowIdentity,
 };
+use waking::SleepsAndWakesSeats;
 
 pub struct RunningNexus {
     pub store: FlowStore,
@@ -81,6 +83,8 @@ pub struct RunningNexus {
     /// The exclusive hold on each pane Flow is writing; see
     /// `delivery::lease`.
     pub pane_leases: delivery::lease::PaneLeases,
+    /// The metaflows a wake is running for; see `waking`.
+    pub waking: waking::WakingMetaflows,
 }
 
 pub trait Dispatches {
@@ -476,6 +480,7 @@ impl OpensRunningNexus for RunningNexus {
             composer: LaunchComposer::at(source_root, launch_bundles),
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),
+            waking: waking::WakingMetaflows::default(),
         })
     }
 }
@@ -528,7 +533,16 @@ impl ServesConnection for Connection {
             }
             // A hook's Report never waits behind a running launch: the
             // launch may itself be waiting on the harness whose hook this is.
-            Query::Report(report) => nexus.report(report),
+            // What the report sets going runs after the hook has its answer.
+            Query::Report(report) => {
+                let (flow_id, event) = (report.flow_id.clone(), report.event.clone());
+                let response = nexus.report(report);
+                self.peer.write_response(&response)?;
+                if response == Response::Reported {
+                    nexus.after_report(&flow_id, &event);
+                }
+                return Ok(());
+            }
             // The caller is the peer of this connection, read from the kernel.
             Query::ResolveCaller(claim) => nexus.resolve_caller(
                 self.peer
@@ -541,7 +555,16 @@ impl ServesConnection for Connection {
             | Query::Lock(_)
             | Query::Deliver(_)
             | Query::Release(_)
-            | Query::End(_)) => nexus.dispatch_metaflow_peer(query, self.process.as_ref()),
+            | Query::End(_)) => {
+                // A request queued for an Asleep seat wakes it once the
+                // sender has its answer, off the dispatch gate.
+                let answer = nexus.dispatch_metaflow_peer(query, self.process.as_ref());
+                self.peer.write_response(&answer.response)?;
+                if let Some(address) = answer.wake {
+                    nexus.wake_due(address);
+                }
+                return Ok(());
+            }
             query => nexus.dispatch_serially(query),
         };
         self.peer.write_response(&response)
@@ -835,6 +858,7 @@ mod tests {
     mod launching_nexus;
     mod reservation;
     mod submission;
+    mod waking;
 
     use super::{Dispatches, OpensRunningNexus, ReconcilesListedFlows, RunningNexus};
     use crate::caller::{
@@ -1114,6 +1138,7 @@ mod tests {
                 ),
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
+                waking: crate::waking::WakingMetaflows::default(),
             };
             Self {
                 directory,

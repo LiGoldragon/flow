@@ -48,6 +48,43 @@ pub trait StartsNativeHerdrHarness {
     ) -> Result<(), String>;
 }
 
+/// Starts a Claude flow's harness again, in a new pane, as the native
+/// session it already had: `--resume <session>` where a launch passes
+/// `--session-id`. Claude Code 2.1.294's own help says resuming reuses the
+/// original session ID unless `--fork-session` is given, so the resumed
+/// harness writes the same transcript and the flow keeps its FlowId, which
+/// is exported as FLOW_ID exactly as at launch. Codex is not resumed here.
+pub trait ResumesNativeHerdrHarness {
+    fn resume_native_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        flow_id: &str,
+        native_session_id: &str,
+    ) -> Result<(), String>;
+}
+
+/// How a Claude harness is told its native session at spawn.
+enum ClaudeSession {
+    /// Claude chooses its own session.
+    Unchosen,
+    /// The session Flow chose for a reserved launch: `--session-id`.
+    Chosen(String),
+    /// The session a sleeping flow had: `--resume`.
+    Resumed(String),
+}
+
+/// The one Herdr `agent start` both a launch and a resume run.
+trait SpawnsNativeHarness {
+    fn spawn_native_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        flow_id: Option<&str>,
+        session: ClaudeSession,
+    ) -> Result<(), String>;
+}
+
 /// Observes an official Herdr integration report and binds it to an exact
 /// native identity claim. Screen detection and caller metadata are rejected.
 /// With a `reserved` FlowId, the observed native session must be the one
@@ -1314,6 +1351,48 @@ impl StartsNativeHerdrHarness for HerdrCli {
         pane: &HerdrPaneBinding,
         reserved: Option<&str>,
     ) -> Result<(), String> {
+        // A reserved FlowId was claimed for the session Flow chose; the
+        // harness runs as that session.
+        let session =
+            match reserved.and_then(|_| self.reserved_native_session_id(&launch.launch_profile)) {
+                Some(session) => ClaudeSession::Chosen(session),
+                None => ClaudeSession::Unchosen,
+            };
+        self.spawn_native_harness(launch, pane, reserved, session)
+    }
+}
+
+impl ResumesNativeHerdrHarness for HerdrCli {
+    fn resume_native_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        flow_id: &str,
+        native_session_id: &str,
+    ) -> Result<(), String> {
+        if launch.launch_profile.harness_kind != HarnessKind::Claude {
+            return Err("only a Claude harness is resumed in a pane".into());
+        }
+        if native_session_id.is_empty() {
+            return Err("a resumed harness needs its native session".into());
+        }
+        self.spawn_native_harness(
+            launch,
+            pane,
+            Some(flow_id),
+            ClaudeSession::Resumed(native_session_id.to_owned()),
+        )
+    }
+}
+
+impl SpawnsNativeHarness for HerdrCli {
+    fn spawn_native_harness(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
+        session: ClaudeSession,
+    ) -> Result<(), String> {
         launch.binding_matches_launch(pane)?;
         if launch.launch_profile.harness_kind == HarnessKind::Claude {
             self.prepare_claude_pane_environment(launch, pane, reserved)?;
@@ -1370,13 +1449,16 @@ impl StartsNativeHerdrHarness for HerdrCli {
                     .to_string_lossy()
                     .into_owned(),
             );
-            // A reserved FlowId was claimed for the session Flow chose; the
-            // harness runs as that session.
-            if reserved.is_some()
-                && let Some(session) = self.reserved_native_session_id(&launch.launch_profile)
-            {
-                arguments.push("--session-id".into());
-                arguments.push(session);
+            match session {
+                ClaudeSession::Unchosen => {}
+                ClaudeSession::Chosen(session) => {
+                    arguments.push("--session-id".into());
+                    arguments.push(session);
+                }
+                ClaudeSession::Resumed(session) => {
+                    arguments.push("--resume".into());
+                    arguments.push(session);
+                }
             }
         }
         arguments.push("--model".into());

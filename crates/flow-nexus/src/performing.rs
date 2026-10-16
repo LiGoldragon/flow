@@ -8,8 +8,9 @@ use crate::RunningNexus;
 use crate::codex::{SelectsCodexEndpoint, SubmitsBoundCodexFirstTurn};
 use crate::composition::{ComposesLaunch, KeepsLaunchBundles, OpensLaunchComposer};
 use crate::generated::operation::{
-    Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Harness_Data,
-    Record_Data_Settled_Data, Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
+    Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
+    Record_Data_Awoken_Data, Record_Data_Harness_Data, Record_Data_Settled_Data, Register_Data,
+    Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::herdr::OperatesHerdrPane;
 use crate::herdr::launch::{
@@ -22,6 +23,7 @@ use crate::store::{
     RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsReplacement,
     RegistersFlowIdentity, ReservesLaunchAttempt,
 };
+use crate::waking::PerformsSleepAndWake;
 use signal_flow::{HarnessKind, LaunchAttemptReservation, Response};
 
 /// The internal stage at which the Herdr adapter refused an operation.
@@ -317,6 +319,9 @@ impl Performs for RunningNexus {
                 true => Outcome::Closed,
                 false => Outcome::Failed(Failed_Data::HerdrRefused),
             },
+            Operation::Sleep(sleep) => self.sleep(sleep),
+            Operation::Wake(address) => self.wake(address),
+            Operation::Drain(address) => self.drain(address),
             Operation::Prune(launch_request_id) => match self
                 .composer
                 .launch_bundles()
@@ -448,6 +453,14 @@ impl PerformsInParts for RunningNexus {
                 .store
                 .record_launch_outcome(&launch_request_id, launch_outcome)
                 .recorded(),
+            Record_Data::Asleep(Record_Data_Asleep_Data { address, flow_id }) => {
+                use crate::store::metaflow::SleepsMetaflows;
+                self.store.sleep_metaflow(&address, &flow_id).recorded()
+            }
+            Record_Data::Awoken(Record_Data_Awoken_Data { address, flow_id }) => {
+                use crate::store::metaflow::SleepsMetaflows;
+                self.store.awaken_metaflow(&address, &flow_id).recorded()
+            }
             Record_Data::Harness(Record_Data_Harness_Data { flow_id, event }) => {
                 use crate::store::events::{EventRecording, RecordsHarnessEvents};
                 match self.store.record_event(&flow_id, event) {

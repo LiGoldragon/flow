@@ -3,7 +3,8 @@
 //! which appends the event to the events Flow's Memory holds for that flow.
 //! A FlowId Flow does not hold is refused as `Refused.UnknownFlow`, never
 //! adopted. The owner reads the events back over the meta socket with
-//! `ReadEvents`.
+//! `ReadEvents`. A `Stopped` event, once answered, may put the flow's
+//! metaflow to sleep (`after_report`).
 
 use crate::RunningNexus;
 use crate::generated::operation::{
@@ -11,11 +12,16 @@ use crate::generated::operation::{
 };
 use crate::performing::Performs;
 use crate::store::events::RecordsHarnessEvents;
+use crate::waking::SleepsAndWakesSeats;
 use meta_signal_flow::{EventsRead_Data, ReadEventsRejected_Data};
-use signal_flow::{FlowId, Report_Data, Response};
+use signal_flow::{Event, FlowId, Report_Data, Response};
 
 pub trait RecordsReports {
     fn report(&self, report: Report_Data) -> Response;
+    /// What a recorded report sets going once it is answered: a `Stopped`
+    /// flow sleeps when nothing waits for it (see `waking`). Runs after the
+    /// hook has its answer, so the harness never waits on it.
+    fn after_report(&self, flow_id: &FlowId, event: &Event);
     fn read_events(&self, flow_id: FlowId) -> meta_signal_flow::Response;
 }
 
@@ -41,6 +47,12 @@ impl RecordsReports for RunningNexus {
                     signal_flow::Unknown_Data::FlowId(flow_id),
                 ))
             }
+        }
+    }
+
+    fn after_report(&self, flow_id: &FlowId, event: &Event) {
+        if *event == Event::Stopped {
+            self.sleep_if_idle(flow_id);
         }
     }
 

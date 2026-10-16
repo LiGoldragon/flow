@@ -23,11 +23,22 @@
 ; gives back what Reserve took for a launch then refused: the held flow
 ; and its FlowId claim, answered Released.
 ;
+; Sleep, Wake and Drain move a metaflow between Awake and Asleep so a seat
+; that is not running keeps no harness. Sleep closes the pane of the flow a
+; metaflow is awake as and records it Asleep (Record.Asleep), keeping the
+; flow's native session so a later wake can resume it. Wake takes the whole
+; queue of an Asleep metaflow, oldest first, and starts a seat that carries
+; it in its first prompt: the last flow resumed when it has a native
+; session, else a fresh launch composed from the configured layer Model and
+; topic modules; Record.Awoken then names the started flow. Drain types
+; what was queued while a wake ran into the woken flow's pane and answers
+; what it typed. Wake runs off the dispatch gate and takes it per step.
+;
 ; LaunchOutcome and Replacement are the store's own types, imported from
 ; the Nexus crate until the Memory root is compiled.
 
 Operation
-[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch OriginClue LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event ]
+[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch OriginClue LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request ]
   flow_nexus:[ LaunchOutcome Replacement ] ]
 [ Compose.LaunchProfile
   Reserve.{ ComposedLaunch OriginClue }
@@ -43,7 +54,9 @@ Operation
            Replacing.Replacement
            Withdrawn.LaunchRequestId
            Settled.{ LaunchRequestId LaunchOutcome }
-           Harness.{ FlowId Event } ]
+           Harness.{ FlowId Event }
+           Asleep.{ Address FlowId }
+           Awoken.{ Address FlowId } ]
   Register.{ FlowNode Caller }
   Confirm.FlowId
   Open.ComposedLaunch
@@ -54,7 +67,10 @@ Operation
   Continue.FlowId
   Close.FlowNode
   Prune.LaunchRequestId
-  Release.FlowId ]
+  Release.FlowId
+  Sleep.{ Address FlowNode }
+  Wake.Address
+  Drain.Address ]
 [ Composed.ComposedLaunch
   Reserved.{ LaunchAttemptReservation Option<FlowId> }
   Recorded
@@ -69,6 +85,9 @@ Operation
   Closed
   Pruned
   Released
+  Slept
+  Woken.FlowId
+  Drained.Vector<Request>
   Failed.[ CompositionRefused
            StoreRefused
            ConflictingBinding
@@ -77,5 +96,8 @@ Operation
            CodexRefused
            BundleRefused
            UnknownFlow
-           ClaimRefused ] ]
+           ClaimRefused
+           NotAsleep
+           NotAwake
+           NothingQueued ] ]
 [ PaneLaunch.{ ComposedLaunch HerdrPaneBinding Option<FlowId> } ]

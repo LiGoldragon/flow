@@ -1411,6 +1411,10 @@ pub trait RecordsFlowLifecycle {
     /// its history stay, and it is live no longer. This is what a witnessed
     /// exit records — never Retired, which only authority writes.
     fn record_exited(&self, flow_id: &str) -> Result<bool, StoreError>;
+    /// A Stopped flow whose native session was resumed in a new pane is
+    /// Pending again on that pane's route. Only a Stopped flow resumes: an
+    /// exited or retired one stays as it went.
+    fn record_resumed(&self, flow_id: &str, route: HerdrRoute) -> Result<bool, StoreError>;
 }
 
 trait ReadsFlowStore {
@@ -3466,6 +3470,28 @@ impl RecordsFlowLifecycle for FlowStore {
             RecordKey::new(flow_id),
             flow,
         ))?;
+        Ok(true)
+    }
+
+    fn record_resumed(&self, flow_id: &str, route: HerdrRoute) -> Result<bool, StoreError> {
+        let Some(mut flow) = self.flow(flow_id)? else {
+            return Ok(false);
+        };
+        if !matches!(flow.lifecycle, FlowLifecycle::Stopped) {
+            return Ok(false);
+        }
+        flow.lifecycle = FlowLifecycle::Pending;
+        let route = FlowHerdrRouteRecord {
+            flow_id: flow_id.to_owned(),
+            route,
+        };
+        let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        let commit = if self.herdr_route(flow_id)?.is_some() {
+            commit.mutate(self.herdr_routes, route)
+        } else {
+            commit.assert(self.herdr_routes, route)
+        };
+        self.engine.commit_atomic(commit)?;
         Ok(true)
     }
 }

@@ -1,3 +1,69 @@
+# Flow 0.27.0
+
+No wire change (signal-flow d1358d3 and meta-signal-flow 6d07b7b unchanged).
+The store opens as 0.26.0 left it: no table, family or record shape
+changes. Rebuild and restart the Nexus; `flow`, `flow-meta` and `flow-hook`
+come from the same package.
+
+- **Sleep.** When a flow's Claude Stop hook reports `Stopped`, the Nexus
+  answers the hook first, then puts the metaflow Awake as that flow to
+  sleep if Herdr shows the seat Idle or Done, its queue is empty, no sender
+  holds a lock on it, no wake holds it, and it is not a Primary. Sleeping
+  closes the pane (the flow is recorded Stopped), records the metaflow
+  Asleep and appends the flow to Past. The flow's row keeps its native
+  session and its launch bundle copy, so it can be resumed.
+- **Wake.** A Deliver that queues an Order, Question, Psyche or Psyches for
+  an Asleep metaflow that is not a Primary wakes it after Message has its
+  `Queued` answer, off the dispatch gate. The whole queue goes to the seat,
+  oldest first, in one prompt, each Request as its datom. A Claude flow
+  with a native session is resumed: a new pane runs Claude with
+  `--resume <session>` and FLOW_ID set to the same FlowId, and the binding
+  must show the same session and claim or the wake fails. Otherwise the
+  seat is launched fresh through Start, from the layer's configured Model
+  and the topic's configured modules (as launch sources), in the Herdr
+  session the last flow ran in. Results and Notices wait queued. A failed
+  wake puts the work back at the head of the queue and the metaflow stays
+  Asleep.
+- **Drain.** Requests queued while a wake runs are typed into the woken
+  flow's pane once it is up; a second request starts no second wake.
+- **Bind.** A peer that runs in a flow Flow launched binds its Address
+  Awake as that flow's FlowId, instead of an invented `flow-…` id, so that
+  flow's Stop can put the seat to sleep.
+- **Operations.** `Sleep.{ Address FlowNode }`, `Wake.Address` and
+  `Drain.Address`, answered `Slept`, `Woken.FlowId` and
+  `Drained.Vector<Request>`; `Record.Asleep` and `Record.Awoken`; `Failed`
+  gains `NotAsleep`, `NotAwake` and `NothingQueued`.
+- **Unchanged.** Codex flows get no FLOW_ID and send no Stop report, so they
+  never sleep; an Asleep Codex flow is not resumed but woken fresh. A wake
+  in flight when the Nexus stops is not resumed on restart; its taken
+  queue is lost only if the Nexus dies between taking it and handing it
+  over or putting it back.
+- **Deploy.** `deployment/flow-nexus.service` now passes the one unheaded
+  Start argument the binary requires.
+
+# Flow 0.26.0
+
+No wire change from the paired contracts named here: signal-flow
+d1358d396e96934795a5b2ae2192499b3eaff9c3 and meta-signal-flow
+6d07b7bb077da8755eae7d1146d9dfd64d7b7d7c, with Flow patching the shared
+`flow-ethos` leaf to its own workspace definition.
+
+- **Start argument.** Flow Nexus requires one unheaded struct argument,
+  `'{ «ordinary-socket» «meta-socket» «store-path» }'`. A `Start.` head is
+  refused. `--configure-only` with the same value opens only a recognized
+  or fresh store, serves one typed `Configure.Nexus`, and exits.
+- **Configuration.** `Configure.Model`, `.Threshold` and `.Module` join
+  `.Nexus` in one typed configuration family; an identical value is
+  idempotent and a conflicting replacement is refused. Production startup
+  requires the Nexus snapshot and uses the explicit store and sockets;
+  there is no HOME store fallback.
+- **Metaflows.** The ordinary socket carries `Bind`, `Identify`, `Lock`,
+  `Deliver`, `Release`, `End`, `Current` and `Metaflows`. `Deliver` queues
+  durably and consumes the lock atomically; 0.26.0 neither drains the
+  queue nor wakes a seat.
+- **Aspect.** One shared `Aspect` type serves addresses, launch profiles
+  and meta configuration.
+
 # Flow 0.25.0
 
 The Signal wire and the launch-outcome archive change. Rebuild and restart

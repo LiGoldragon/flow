@@ -22,6 +22,7 @@ use crate::store::{
     AnnouncesLaunchChanges, ReadsCreatedLaunchPane, RecordsCreatedLaunchPane,
     RecordsNativeLaunchBinding,
 };
+use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation};
 use crate::{
     RunningNexus,
     codex::ResolvesBoundCodexSkills,
@@ -156,6 +157,8 @@ impl LaunchesFlows for RunningNexus {
             }
             Err(_) => return persistence(),
         }
+        // A metaflow an older Nexus left Awake as an ended flow is Asleep.
+        self.rest_ended_awake(&request.launch_profile.address);
         // A seat whose Address it could not take is never launched.
         match self.store.launch_address_refusal(&request.launch_profile) {
             Ok(None) => {}
@@ -860,7 +863,13 @@ impl ResumesReplacement for RunningNexus {
 
     fn confirmed(&self, flow_id: &str) -> Response {
         match self.perform(Operation::Confirm(flow_id.into())) {
-            Outcome::Started(started) => Response::Started(started),
+            Outcome::Started(started) => {
+                // A Stop that landed before this commit found the seat
+                // unconfirmed and left it; it is settled once the gate is
+                // released.
+                self.note_stop_at_confirmation(flow_id);
+                Response::Started(started)
+            }
             Outcome::Failed(Failed_Data::Unstarted) => {
                 Response::StartRejected(StartRejection::NativeLaunchRefused)
             }
@@ -1088,7 +1097,10 @@ impl WatchesAmbiguousLaunches for AmbiguousLaunchWatches {
 
 trait PromotesObservedLaunch {
     fn watch_transcript(&self, intent: &PromptDeliveryIntent) -> Result<TranscriptWatch, String>;
+    /// Promotes under the dispatch gate, then settles any Stop the
+    /// confirmation found waiting.
     fn promote_serially(&self, launch_request_id: &str);
+    fn promote_under_gate(&self, launch_request_id: &str);
 }
 
 impl PromotesObservedLaunch for RunningNexus {
@@ -1104,6 +1116,11 @@ impl PromotesObservedLaunch for RunningNexus {
     }
 
     fn promote_serially(&self, launch_request_id: &str) {
+        self.promote_under_gate(launch_request_id);
+        self.settle_stops_at_confirmation();
+    }
+
+    fn promote_under_gate(&self, launch_request_id: &str) {
         let _turn = self
             .dispatch_gate
             .lock()

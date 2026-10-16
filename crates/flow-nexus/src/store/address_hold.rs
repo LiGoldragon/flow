@@ -11,10 +11,14 @@
 //! A hold behind a flow that ended without giving it back, as an older
 //! Nexus could leave it, is given back by the next Start at its Address.
 //!
+//! A confirmed flow that ends (Stopped, Retired or Exited) while its
+//! metaflow is Awake as it puts the metaflow to sleep in the same write,
+//! the flow joining Past: a topic never dies, its flows are turned off.
+//!
 //! The row lives in its own table, so a store written before holds were
 //! kept opens with the table added and holds nothing.
 
-use super::metaflow::{AddressTaking, TakesLaunchAddress, WritesTakenAddress};
+use super::metaflow::{AddressTaking, SleepsMetaflows, TakesLaunchAddress, WritesTakenAddress};
 use super::{
     FlowStore, ManagesMetaflowState, MetaflowState, ReadsFlowMemory, StoreError, StoredMetaflow,
 };
@@ -75,6 +79,13 @@ pub(crate) trait HoldsLaunchAddress {
     /// it returns to what the hold found, keeping its queue, and the hold
     /// goes. Without a hold nothing is written.
     fn given_back(&self, flow_id: &str, commit: AtomicCommit) -> Result<AtomicCommit, StoreError>;
+    /// `flow_id` ended: its hold is given back when it has one; otherwise a
+    /// metaflow Awake as it is recorded Asleep, the flow joining Past.
+    fn ended_at_address(
+        &self,
+        flow_id: &str,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
     /// The hold `flow_id` has, if any.
     fn address_hold(&self, flow_id: &str) -> Result<Option<AddressHold>, StoreError>;
     /// Gives back, each in its own write, every hold on `address` whose
@@ -159,6 +170,23 @@ impl HoldsLaunchAddress for FlowStore {
                 },
             ),
         })
+    }
+
+    fn ended_at_address(
+        &self,
+        flow_id: &str,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        if self.address_hold(flow_id)?.is_some() {
+            return self.given_back(flow_id, commit);
+        }
+        let Some(mut metaflow) = self.metaflow_awake_as(flow_id)? else {
+            return Ok(commit);
+        };
+        metaflow.state = MetaflowState::Asleep;
+        metaflow.past.retain(|past| past != flow_id);
+        metaflow.past.push(flow_id.to_owned());
+        Ok(commit.mutate(self.metaflows, StoredMetaflow { metaflow }))
     }
 
     fn address_hold(&self, flow_id: &str) -> Result<Option<AddressHold>, StoreError> {

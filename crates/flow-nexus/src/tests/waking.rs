@@ -9,6 +9,7 @@ use crate::composition::{ComposesFreshSeat, ComposesLaunch, FreshSeat, RendersQu
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::operation::{Operation, Outcome};
 use crate::herdr::launch::ChecksComposedLaunch;
+use crate::herdr::pane::PaneAgent;
 use crate::herdr::reservation::ChoosesNativeSession;
 use crate::performing::Performs;
 use crate::reporting::RecordsReports;
@@ -19,7 +20,9 @@ use crate::store::{
     ReadsFlowRows, RecordsFlowLifecycle, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
     RegistersFlowIdentity, ReservesLaunchAttempt,
 };
-use crate::waking::{AtStop, HoldsWakingMetaflows, SleepsAndWakesSeats, WakePlan, WakePolicy};
+use crate::waking::{
+    AtStop, HoldsWakingMetaflows, KeptAtStop, SleepsAndWakesSeats, WakePlan, WakePolicy,
+};
 use flow_ethos::State;
 use sha2::{Digest, Sha256};
 use signal_flow::{
@@ -186,7 +189,10 @@ fn a_resting_codex_seat_with_nothing_queued_stays_awake() {
         vec![],
         vec![],
     ));
-    assert_eq!(fixture.nexus.settle_stopped("908786"), AtStop::Kept);
+    assert_eq!(
+        fixture.nexus.settle_stopped("908786"),
+        AtStop::Kept(KeptAtStop::NotResumable)
+    );
     assert_eq!(
         stored(&fixture, Layer::Secondary).state,
         State::Awake("908786".into())
@@ -248,7 +254,13 @@ fn a_flow_that_stopped_while_working_or_awaited_does_not_sleep() {
         vec![],
         vec![],
     ));
-    assert_eq!(working.nexus.settle_stopped("908786"), AtStop::Kept);
+    assert!(matches!(
+        working.nexus.settle_stopped("908786"),
+        AtStop::Kept(KeptAtStop::NotResting(PaneAgent::Present {
+            agent_state: signal_flow::AgentState::Working,
+            ..
+        }))
+    ));
     assert_eq!(
         stored(&working, Layer::Secondary).state,
         State::Awake("908786".into())
@@ -268,7 +280,10 @@ fn a_flow_that_stopped_while_working_or_awaited_does_not_sleep() {
         vec![],
         vec![],
     ));
-    assert_eq!(primary.nexus.settle_stopped("908786"), AtStop::Kept);
+    assert_eq!(
+        primary.nexus.settle_stopped("908786"),
+        AtStop::Kept(KeptAtStop::LayerNeverSleeps)
+    );
     assert!(!closes(&primary));
 
     // Resting and unawaited, but a wake holds its metaflow.
@@ -285,7 +300,10 @@ fn a_flow_that_stopped_while_working_or_awaited_does_not_sleep() {
         vec![],
     ));
     let _lease = waking.nexus.waking.hold(&address(Layer::Secondary));
-    assert_eq!(waking.nexus.settle_stopped("908786"), AtStop::Kept);
+    assert_eq!(
+        waking.nexus.settle_stopped("908786"),
+        AtStop::Kept(KeptAtStop::Waking)
+    );
     assert!(!closes(&waking));
 }
 
@@ -491,6 +509,14 @@ struct Resumable {
 const RESUMED_AGENT: &str = r#"{"agent":"claude","agent_status":"idle","interactive_ready":true,"name":"AGENT","pane_id":"w9:p1","tab_id":"w9:t1","terminal_id":"term-resumed","workspace_id":"w9","revision":1}"#;
 
 fn resumable(fixture: &NexusFixture) -> Resumable {
+    resumable_ended_by(fixture, |store| store.record_stopped("abc123").unwrap())
+}
+
+/// The resumable Claude flow abc123, ended by `end` rather than Stopped.
+fn resumable_ended_by(
+    fixture: &NexusFixture,
+    end: impl FnOnce(&crate::store::FlowStore) -> bool,
+) -> Resumable {
     let bundle = fixture.directory.path().join("resumed-bundle.md");
     fs::write(&bundle, b"resumed bundle\n").unwrap();
     let profile = LaunchProfile {
@@ -582,7 +608,7 @@ fn resumable(fixture: &NexusFixture) -> Resumable {
             flow_lifecycle: FlowLifecycle::Active,
         })
         .expect("registered");
-    assert!(fixture.nexus.store.record_stopped("abc123").unwrap());
+    assert!(end(&fixture.nexus.store));
     fs::write(
         fixture.directory.path().join("flows/.abc123.flow-id"),
         format!(
@@ -955,6 +981,18 @@ fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, signal_flow::P
 
 #[test]
 fn a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_seat() {
+    identifies_and_wakes_by_an_order(State::Asleep);
+}
+
+/// A metaflow an older Nexus left Awake as its Stopped flow is read as
+/// Asleep: the Order queued for it is recorded against an Asleep metaflow
+/// and wakes it, resuming the Stopped session.
+#[test]
+fn a_metaflow_left_awake_as_an_ended_flow_is_woken_by_an_order() {
+    identifies_and_wakes_by_an_order(State::Awake("abc123".into()));
+}
+
+fn identifies_and_wakes_by_an_order(recipient: State) {
     use crate::metaflow::DispatchesMetaflowPeer;
     use crate::store::metaflow::TakesLaunchAddress;
     use crate::store::{FlowStore, ReadsFlowMemory};
@@ -1052,14 +1090,17 @@ fn a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_sea
         Response::Refused(signal_flow::Refusal::Unidentified(_))
     ));
 
-    // The Asleep seat the Order is for.
+    // The seat the Order is for: Asleep, or left Awake as its Stopped flow.
     let at = address(Layer::Secondary);
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["abc123"],
-        vec![],
-    ));
+    let past = if recipient == State::Asleep {
+        vec!["abc123"]
+    } else {
+        vec![]
+    };
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Layer::Secondary, recipient, past, vec![]));
     let Response::Locked(lock) = fixture
         .nexus
         .dispatch_metaflow_peer(
@@ -1247,4 +1288,361 @@ fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
     assert!(fixture.nexus.store.record_exited("908786").unwrap());
     assert_eq!(fixture.nexus.store.metaflow(&at).unwrap(), None);
     assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
+}
+
+/// A Herdr stand-in for the Claude seat in pane w1:p3 that shows it working
+/// until an `agent wait` has run, and resting (`done`) after: Claude runs
+/// its Stop hook while its spinner is still on screen. The wait first
+/// waits, boundedly, for `released` to exist. Every call is logged.
+fn herdr_working_until_waited(
+    fixture: &NexusFixture,
+    released: &std::path::Path,
+) -> std::path::PathBuf {
+    let log = fixture.directory.path().join("herdr-operations.log");
+    let waited = fixture.directory.path().join("herdr-waited");
+    let snapshot = |status: &str| {
+        let mut agent = claude_agent(fixture);
+        agent["agent_status"] = serde_json::Value::String(status.into());
+        serde_json::json!({
+            "id":"cli:api:snapshot",
+            "result":{"snapshot":{"agents":[agent],"protocol":20,"version":"0.8.2"},
+            "type":"session_snapshot"}
+        })
+    };
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$3 $4\" in\n  \"api snapshot\") if [ -e '{waited}' ]; then printf '%s\\n' '{done}'; else printf '%s\\n' '{working}'; fi ;;\n  \"agent wait\") i=0; while [ ! -e '{released}' ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; if [ -e '{released}' ]; then echo 'wait released by the closed hook' >> '{log}'; else echo 'wait timed out' >> '{log}'; fi; : > '{waited}' ;;\n  \"pane close\") ;;\n  \"agent read\") printf '%s\\n' '❯ ' ;;\n  *) exit 64 ;;\nesac\n",
+        log = log.display(),
+        waited = waited.display(),
+        released = released.display(),
+        done = snapshot("done"),
+        working = snapshot("working"),
+    );
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&body);
+    log
+}
+
+/// The live defect: a Claude seat's Stop hook runs while Herdr still shows
+/// it working, and it shows done only a moment later, with no event. The
+/// Stop waits, boundedly, for the seat to rest, then puts it to sleep.
+#[test]
+fn a_seat_herdr_shows_working_at_its_stop_sleeps_once_herdr_shows_it_done() {
+    let fixture = NexusFixture::new();
+    let released = fixture.directory.path().join("released");
+    fs::write(&released, b"").unwrap();
+    let log = herdr_working_until_waited(&fixture, &released);
+    claude_seat(&fixture, 40_000);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake(CLAUDE_SEAT.into()),
+        vec![],
+        vec![],
+    ));
+
+    assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Slept);
+    assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
+    let calls = fs::read_to_string(log).unwrap();
+    let wait = calls
+        .find("agent wait w1:p3 --until idle --until done --timeout")
+        .expect("the Stop waited for the seat to rest");
+    let close = calls.find("pane close w1:p3").expect("the pane closed");
+    assert!(wait < close, "the wait comes before the sleep: {calls}");
+}
+
+/// Every early exit names its reason: a seat still working after the wait
+/// says so, as does a seat nothing holds Awake.
+#[test]
+fn a_stop_that_leaves_its_seat_names_why() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![{
+            let mut agent = claude_agent(&fixture);
+            agent["agent_status"] = serde_json::Value::String("working".into());
+            agent
+        }],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 40_000);
+    assert_eq!(
+        fixture.nexus.settle_stopped(CLAUDE_SEAT),
+        AtStop::Kept(KeptAtStop::NotAwake)
+    );
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake(CLAUDE_SEAT.into()),
+        vec![],
+        vec![],
+    ));
+    assert!(matches!(
+        fixture.nexus.settle_stopped(CLAUDE_SEAT),
+        AtStop::Kept(KeptAtStop::NotResting(PaneAgent::Present {
+            agent_state: signal_flow::AgentState::Working,
+            ..
+        }))
+    ));
+    assert_eq!(
+        stored(&fixture, Layer::Secondary).state,
+        State::Awake(CLAUDE_SEAT.into())
+    );
+}
+
+/// The hook's Report is answered and its connection closed before the
+/// settling waits on Herdr: the harness waits on its hook, so a wait on
+/// the harness while the hook is connected would wait on itself. Here the
+/// wait cannot finish until the hook has seen its answer and the close.
+#[test]
+fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends() {
+    use crate::{CarriesSignalFrames, ServesOrdinary};
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+    let released = fixture.directory.path().join("hook-closed");
+    let log = herdr_working_until_waited(fixture, &released);
+    claude_seat(fixture, 40_000);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake(CLAUDE_SEAT.into()),
+        vec![],
+        vec![],
+    ));
+    let socket = fixture.directory.path().join("ordinary.sock");
+    let served = socket.clone();
+    std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
+    let mut hook = (0..200)
+        .find_map(|_| {
+            UnixStream::connect(&socket).ok().or_else(|| {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            })
+        })
+        .expect("ordinary socket listens");
+    hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    hook.write_query(&signal_flow::Query::Report(signal_flow::Report_Data {
+        flow_id: CLAUDE_SEAT.into(),
+        event: signal_flow::Event::Stopped,
+    }))
+    .unwrap();
+    assert_eq!(
+        hook.read_response().expect("the hook has its answer"),
+        signal_flow::Response::Reported
+    );
+    let mut rest = Vec::new();
+    assert_eq!(
+        hook.read_to_end(&mut rest)
+            .expect("the connection closes while the wait still runs"),
+        0
+    );
+    fs::write(&released, b"").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while stored(fixture, Layer::Secondary).state != State::Asleep {
+        assert!(Instant::now() < deadline, "the seat never slept");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let calls = fs::read_to_string(log).unwrap();
+    assert!(
+        calls.contains("wait released by the closed hook"),
+        "{calls}"
+    );
+}
+
+/// A Stop that lands before its launch is confirmed finds the seat holding
+/// only its Address and leaves it; the confirmation settles it.
+#[test]
+fn a_stop_before_confirmation_is_settled_when_the_launch_is_confirmed() {
+    use crate::launching::PromotesAmbiguousLaunches;
+    use crate::store::address_hold::HoldsLaunchAddress;
+    use std::time::{Duration, Instant};
+
+    let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+    let log = fixture.directory.path().join("herdr-calls.log");
+    let typed = fixture.directory.path().join("pane-typed.txt");
+    let resting = serde_json::json!({
+        "agent":"codex",
+        "agent_status":"idle",
+        "interactive_ready":true,
+        "name":"fixture-agent",
+        "pane_id":"w1:p1",
+        "revision":1,
+        "terminal_id":"fixture-terminal",
+        "workspace_id":"fixture-workspace"
+    });
+    let agent = serde_json::json!({"result":{"agent":{
+        "name":"fixture-agent",
+        "agent":"codex",
+        "workspace_id":"fixture-workspace",
+        "pane_id":"w1:p1",
+        "terminal_id":"fixture-terminal",
+        "agent_session":{
+            "source":"herdr:codex",
+            "agent":"codex",
+            "kind":"id",
+            "value":super::STAGED_SESSION
+        }
+    }}});
+    let snapshot = serde_json::json!({
+        "id":"cli:api:snapshot",
+        "result":{"snapshot":{"agents":[resting.clone()],"protocol":20,"version":"0.8.2"},
+        "type":"session_snapshot"}
+    });
+    let prompted = serde_json::json!({
+        "id":"cli:agent:prompt",
+        "result":{ "type":"agent_prompted", "agent":resting }
+    });
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{agent}' ;;\n  *\" api snapshot\") printf '%s\\n' '{snapshot}' ;;\n  *\" agent wait \"*) ;;\n  *\" agent prompt \"*) printf '%s' \"$6\" >> '{typed}'; printf '%s\\n' '{prompted}' ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
+        log = log.display(),
+        typed = typed.display(),
+    ));
+    let mut launch = fixture.staged_launch("stopped-early-request", None);
+    let at = launch.profile.address.clone();
+    launch.stage_to_ambiguity(&fixture.nexus);
+    let mut held = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
+    assert_eq!(held.state, State::Awake("908786".into()));
+    held.queue
+        .push(Request::Notice("queued before confirmation".into()));
+    fixture.nexus.store.seed_metaflow(held);
+
+    assert_eq!(
+        fixture.nexus.report(signal_flow::Report_Data {
+            flow_id: "908786".into(),
+            event: signal_flow::Event::Stopped,
+        }),
+        signal_flow::Response::Reported
+    );
+    assert_eq!(
+        fixture.nexus.settle_stopped("908786"),
+        AtStop::Kept(KeptAtStop::Unconfirmed),
+        "the Stop finds the launch unconfirmed"
+    );
+
+    launch.write_receipt();
+    std::thread::spawn(move || fixture.nexus.promote_ambiguous_launches());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !fixture
+        .nexus
+        .store
+        .metaflow(&at)
+        .unwrap()
+        .unwrap()
+        .queue
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the confirmation never settled the Stop: {}",
+            fs::read_to_string(&log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        fs::read_to_string(&typed)
+            .unwrap_or_default()
+            .contains("queued before confirmation")
+    );
+    assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
+}
+
+/// A topic never dies: the Stop of the flow its metaflow is Awake as
+/// records the metaflow Asleep in the same write, the flow in Past and its
+/// session kept, so a wake resumes it and a fresh Start may take the
+/// Address.
+#[test]
+fn the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_and_resumable() {
+    use crate::store::metaflow::TakesLaunchAddress;
+    let fixture = NexusFixture::new();
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("abc123".into()),
+        vec![],
+        vec![],
+    ));
+    let resumable = resumable(&fixture);
+    let slept = stored(&fixture, Layer::Secondary);
+    assert_eq!(slept.state, State::Asleep);
+    assert_eq!(slept.past, vec!["abc123".to_owned()]);
+    assert!(matches!(
+        fixture.nexus.wake_plan(&slept),
+        WakePlan::Resume { .. }
+    ));
+    let mut fresh = resumable.profile.clone();
+    fresh.launch_request_id = "fresh-after-stop".into();
+    assert_eq!(
+        fixture.nexus.store.launch_address_refusal(&fresh).unwrap(),
+        None,
+        "a fresh Start may take the Address"
+    );
+}
+
+/// A Retired flow joins Past as provenance, its metaflow Asleep, but its
+/// native session is never resumed: the queued Order wakes the seat fresh.
+#[test]
+fn a_retired_seat_sleeps_its_metaflow_and_its_order_wakes_it_fresh() {
+    let fixture = NexusFixture::new();
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("abc123".into()),
+        vec![],
+        vec![],
+    ));
+    resumable_ended_by(&fixture, |store| {
+        store.record_active("abc123").unwrap() && store.record_retired("abc123").unwrap()
+    });
+    let mut retired = stored(&fixture, Layer::Secondary);
+    assert_eq!(retired.state, State::Asleep);
+    assert_eq!(retired.past, vec!["abc123".to_owned()]);
+    retired.queue.push(Request::Order("Carry on.".into()));
+    fixture.nexus.store.seed_metaflow(retired.clone());
+    assert_eq!(
+        fixture.nexus.wake_plan(&retired),
+        WakePlan::Fresh {
+            herdr_session_name: "fixture-session".into()
+        },
+        "a retired session wakes fresh, never resumed"
+    );
+    let mut node = fixture.node();
+    node.harness_kind = HarnessKind::Claude;
+    node.flow_lifecycle = FlowLifecycle::Exited;
+    assert!(
+        !RunningNexus::can_resume(&node),
+        "an Exited flow wakes fresh"
+    );
+    node.flow_lifecycle = FlowLifecycle::Stopped;
+    assert!(RunningNexus::can_resume(&node));
+}
+
+/// At the Nexus's start every metaflow left Awake as an ended flow is
+/// recorded Asleep; one Awake as a flow Flow holds no row for, as Bind
+/// names, is left as it is.
+#[test]
+fn a_nexus_start_puts_every_metaflow_left_awake_as_an_ended_flow_to_sleep() {
+    let fixture = NexusFixture::new();
+    resumable(&fixture);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("abc123".into()),
+        vec![],
+        vec![],
+    ));
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Tertiary,
+        State::Awake("flow-0000000000000001".into()),
+        vec![],
+        vec![],
+    ));
+    fixture.nexus.recover_wakes();
+    let rested = stored(&fixture, Layer::Secondary);
+    assert_eq!(rested.state, State::Asleep);
+    assert_eq!(rested.past, vec!["abc123".to_owned()]);
+    assert_eq!(
+        stored(&fixture, Layer::Tertiary).state,
+        State::Awake("flow-0000000000000001".into())
+    );
 }

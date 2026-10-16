@@ -57,6 +57,11 @@ pub trait WritesPane {
     const INTERRUPT_WAIT_MILLISECONDS: &'static str = "3000";
     /// The composer is at the bottom of the screen.
     const COMPOSER_LINES: &'static str = "12";
+    /// How long a Stopped seat is given to show resting. Claude runs its
+    /// Stop hook while its spinner is still on screen, and Herdr reads its
+    /// state from the screen, so Herdr shows it working for a moment after
+    /// the turn has ended.
+    const REST_WAIT_MILLISECONDS: &'static str = "15000";
 
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent;
     /// Whether the composer holds no text of its own: `None` when the screen
@@ -77,6 +82,9 @@ pub trait WritesPane {
     fn place(&self, route: &HerdrRoute, text: &str, observe: bool) -> Placement;
     /// Waits, boundedly, for a working agent to leave Working.
     fn left_working(&self, route: &HerdrRoute) -> bool;
+    /// Waits, boundedly, for the agent to show Idle or Done. False when the
+    /// wait timed out or Herdr refused it.
+    fn rested(&self, route: &HerdrRoute) -> bool;
 
     /// Whether the text just placed is seen to leave the composer: the
     /// submission itself. `agent prompt` sends its submitting CR as a
@@ -299,6 +307,25 @@ impl WritesPane for HerdrCli {
                 "blocked",
                 "--timeout",
                 Self::INTERRUPT_WAIT_MILLISECONDS,
+            ])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn rested(&self, route: &HerdrRoute) -> bool {
+        Command::new(&self.executable)
+            .args([
+                "--session",
+                route.herdr_session_name.as_str(),
+                "agent",
+                "wait",
+                route.herdr_pane_id.as_str(),
+                "--until",
+                "idle",
+                "--until",
+                "done",
+                "--timeout",
+                Self::REST_WAIT_MILLISECONDS,
             ])
             .output()
             .is_ok_and(|output| output.status.success())

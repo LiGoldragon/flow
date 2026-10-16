@@ -3,6 +3,8 @@
 //! A metaflow is Awake as one flow. When that flow's harness reports
 //! `Stopped`, its turn has ended, and Flow first writes how big the flow's
 //! context was (`Record.Context`, read once from its native transcript).
+//! It gives Herdr a bounded wait to show the seat Idle or Done, since a
+//! harness's Stop hook can run while its screen still shows it working.
 //! Then, if Herdr shows the seat resting: with work queued, the oldest
 //! request is typed into it (`Operation::Drain`), and the seat stays awake
 //! until it stops again with nothing queued; with nothing queued, Flow
@@ -50,11 +52,15 @@ use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::RecordsContextSize;
+use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SleepsMetaflows;
-use crate::store::{ManagesMetaflowState, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle};
+use crate::store::{
+    ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle,
+};
 use signal_flow::{
-    Address, AgentState, FlowId, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-    LaunchProfile, Layer, Metaflow, OriginClue, PowerLevel, Request, Response, StartRequest,
+    Address, AgentState, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
+    HerdrRouteSelection, LaunchProfile, Layer, Metaflow, OriginClue, PowerLevel, Request, Response,
+    StartRequest,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -90,9 +96,17 @@ pub trait WakePolicy {
     }
 
     /// A seat can be resumed when it is a Claude flow with a native session
-    /// (its transcript). Codex seats cannot be resumed yet.
+    /// (its transcript) that was not retired. Codex seats cannot be resumed
+    /// yet. A Retired flow, and an Exited one, whose pane went away without
+    /// Flow closing it, stay in Past as provenance, and their seat wakes
+    /// fresh: only a Stopped flow is resumed (`record_resumed`).
     fn can_resume(node: &FlowNode) -> bool {
-        node.harness_kind == HarnessKind::Claude && !node.session_id.is_empty()
+        node.harness_kind == HarnessKind::Claude
+            && !node.session_id.is_empty()
+            && !matches!(
+                node.flow_lifecycle,
+                FlowLifecycle::Retired | FlowLifecycle::Exited
+            )
     }
 
     /// A seat sleeps only if it can be resumed, so no saved context is
@@ -175,6 +189,120 @@ impl Drop for WakingLease<'_> {
     }
 }
 
+/// A metaflow left Awake as a flow that has ended. A flow's end records its
+/// metaflow Asleep in the same write; an older Nexus did not, so wherever
+/// Awake is read for a decision, such a metaflow is recorded Asleep first
+/// and read as it.
+pub trait RestsEndedAwake {
+    /// Records the metaflow at `address` Asleep (`Record.Asleep`), its flow
+    /// joining Past, when it is Awake as a flow whose row is Stopped,
+    /// Retired or Exited and that holds no Address hold. True when it was.
+    fn rest_ended_awake(&self, address: &Address) -> bool;
+    /// The same for every metaflow, at the Nexus's start.
+    fn rest_every_ended_awake(&self);
+}
+
+impl RestsEndedAwake for RunningNexus {
+    fn rest_ended_awake(&self, address: &Address) -> bool {
+        let Ok(Some(metaflow)) = self.store.metaflow(address) else {
+            return false;
+        };
+        let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+            return false;
+        };
+        let ended = matches!(
+            self.store.flow_node(&flow_id),
+            Ok(Some(node)) if !node.flow_lifecycle.is_live()
+        );
+        if !ended || !matches!(self.store.address_hold(&flow_id), Ok(None)) {
+            return false;
+        }
+        match self.perform(Operation::Record(Record_Data::Asleep(
+            Record_Data_Asleep_Data {
+                address: address.clone(),
+                flow_id: flow_id.clone(),
+            },
+        ))) {
+            Outcome::Recorded => {
+                eprintln!("flow-nexus: metaflow Awake as ended flow {flow_id} was recorded Asleep");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn rest_every_ended_awake(&self) {
+        let Ok(metaflows) = self.store.list_metaflows() else {
+            return;
+        };
+        for metaflow in metaflows {
+            self.rest_ended_awake(&metaflow.address);
+        }
+    }
+}
+
+/// The flows whose launch was confirmed after their harness had already
+/// reported `Stopped`. Confirmation runs under the dispatch gate, which
+/// `settle_stopped` takes, so such a flow is noted here and settled once the
+/// gate is released and the confirming answer is written.
+#[derive(Debug, Default)]
+pub struct StoppedAtConfirmation {
+    flows: Mutex<Vec<FlowId>>,
+}
+
+pub trait NotesStopsAtConfirmation {
+    fn note(&self, flow_id: &str);
+    /// Takes every flow noted so far, oldest first.
+    fn take(&self) -> Vec<FlowId>;
+}
+
+impl NotesStopsAtConfirmation for StoppedAtConfirmation {
+    fn note(&self, flow_id: &str) {
+        let mut flows = self
+            .flows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !flows.iter().any(|noted| noted == flow_id) {
+            flows.push(flow_id.to_owned());
+        }
+    }
+
+    fn take(&self) -> Vec<FlowId> {
+        std::mem::take(
+            &mut *self
+                .flows
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+}
+
+/// A Stop that landed before its flow's launch was confirmed is settled
+/// once confirmation commits.
+pub trait SettlesStopsAtConfirmation {
+    /// Under the dispatch gate, as confirmation commits: notes the flow when
+    /// the last event its harness reported is `Stopped`.
+    fn note_stop_at_confirmation(&self, flow_id: &str);
+    /// Off the dispatch gate: settles every noted flow's Stop.
+    fn settle_stops_at_confirmation(&self);
+}
+
+impl SettlesStopsAtConfirmation for RunningNexus {
+    fn note_stop_at_confirmation(&self, flow_id: &str) {
+        if let Ok(Some(events)) = self.store.events(flow_id)
+            && events.last() == Some(&Event::Stopped)
+        {
+            self.stopped_at_confirmation.note(flow_id);
+        }
+    }
+
+    fn settle_stops_at_confirmation(&self) {
+        for flow_id in self.stopped_at_confirmation.take() {
+            self.settle_stopped(&flow_id);
+        }
+    }
+}
+
 /// How an Asleep metaflow is woken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WakePlan {
@@ -196,8 +324,36 @@ pub enum AtStop {
     Slept,
     /// The seat rested with work queued: the oldest request was typed in.
     Drained(Request),
-    /// The seat stays as it is.
-    Kept,
+    /// The seat stays as it is, for the reason named.
+    Kept(KeptAtStop),
+}
+
+/// Why a Stop left its seat as it was. Every early exit of `settle_stopped`
+/// names one, and the Nexus logs it, so a seat that does not sleep says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeptAtStop {
+    /// The store could not be read.
+    StoreUnreadable,
+    /// No metaflow is Awake as this flow.
+    NotAwake,
+    /// The flow's launch is not confirmed: it only holds its Address.
+    Unconfirmed,
+    /// The metaflow's layer never sleeps.
+    LayerNeverSleeps,
+    /// A wake holds the metaflow.
+    Waking,
+    /// Flow holds no row for the flow.
+    UnknownFlow,
+    /// After the bounded wait, Herdr does not show the seat resting.
+    NotResting(PaneAgent),
+    /// Work is queued and the Drain did not type it.
+    DrainRefused(Box<Outcome>),
+    /// The seat cannot be resumed, so it is not put to sleep.
+    NotResumable,
+    /// A lock is held for the metaflow, or the locks could not be read.
+    LockHeld,
+    /// The Sleep did not complete.
+    SleepRefused(Box<Outcome>),
 }
 
 /// The triggers: what a Stopped report, a queued request and a Nexus start
@@ -258,62 +414,18 @@ trait WakesInParts {
     /// unreadable.
     fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), Failed_Data>;
     fn now() -> i64;
+    /// The body of `settle_stopped`: waits, boundedly and off the dispatch
+    /// gate, for Herdr to show the seat resting, then drains or sleeps it.
+    fn settle_rested(&self, flow_id: &str) -> AtStop;
 }
 
 impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
-        self.record_context_at_stop(flow_id);
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Ok(Some(metaflow)) = self.store.metaflow_awake_as(flow_id) else {
-            return AtStop::Kept;
-        };
-        // A seat whose launch is not yet confirmed only holds its Address:
-        // it neither sleeps nor drains until confirmation keeps it.
-        if !matches!(self.store.address_hold(flow_id), Ok(None)) {
-            return AtStop::Kept;
+        let at_stop = self.settle_rested(flow_id);
+        if let AtStop::Kept(reason) = &at_stop {
+            eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
         }
-        let address = metaflow.address.clone();
-        if !Self::sleeps_layer(&address.layer) || self.waking.is_waking(&address) {
-            return AtStop::Kept;
-        }
-        let node = match self.store.flow_node(flow_id) {
-            Ok(Some(node)) => self.herdr.refresh_route(node),
-            _ => return AtStop::Kept,
-        };
-        match self.herdr.pane_agent(&node) {
-            PaneAgent::Present { agent_state, .. } if Self::sleeps_at(&agent_state) => {}
-            _ => return AtStop::Kept,
-        }
-        if !metaflow.queue.is_empty() {
-            return match self.perform(Operation::Drain(address)) {
-                Outcome::Drained(mut typed) if !typed.is_empty() => {
-                    AtStop::Drained(typed.remove(0))
-                }
-                outcome => {
-                    eprintln!(
-                        "flow-nexus: work queued for flow {flow_id} stays queued: {outcome:?}"
-                    );
-                    AtStop::Kept
-                }
-            };
-        }
-        if !Self::sleeps_seat(&node) || self.store.lock_held(&address, Self::now()).unwrap_or(true)
-        {
-            return AtStop::Kept;
-        }
-        match self.perform(Operation::Sleep(Sleep_Data {
-            address,
-            flow_node: node,
-        })) {
-            Outcome::Slept => AtStop::Slept,
-            outcome => {
-                eprintln!("flow-nexus: flow {flow_id} did not sleep: {outcome:?}");
-                AtStop::Kept
-            }
-        }
+        at_stop
     }
 
     fn wake_due(&self, address: Address) {
@@ -324,6 +436,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             Outcome::Woken(_) => self.drain_woken(&address, lease),
             outcome => eprintln!("flow-nexus: a queued request did not wake its seat: {outcome:?}"),
         }
+        self.settle_stops_at_confirmation();
     }
 
     fn drain_woken(&self, address: &Address, lease: WakingLease<'_>) {
@@ -383,6 +496,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.rest_every_ended_awake();
             match self.store.list_metaflows() {
                 Ok(metaflows) => metaflows
                     .into_iter()
@@ -420,15 +534,19 @@ impl PerformsSleepAndWake for RunningNexus {
         if closed != Outcome::Closed {
             return closed;
         }
+        // The flow's Stop records its metaflow Asleep in the same write.
         if self.perform(Operation::Record(Record_Data::Stopped(flow_id.clone())))
             != Outcome::Recorded
         {
             return Outcome::Failed(Failed_Data::StoreRefused);
         }
-        match self.perform(Operation::Record(Record_Data::Asleep(
-            Record_Data_Asleep_Data { address, flow_id },
-        ))) {
-            Outcome::Recorded => Outcome::Slept,
+        match self.store.metaflow(&address) {
+            Ok(Some(metaflow))
+                if metaflow.state == flow_ethos::State::Asleep
+                    && metaflow.past.last() == Some(&flow_id) =>
+            {
+                Outcome::Slept
+            }
             _ => Outcome::Failed(Failed_Data::NotAwake),
         }
     }
@@ -439,6 +557,7 @@ impl PerformsSleepAndWake for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.rest_ended_awake(&address);
             match self.store.metaflow(&address) {
                 Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => {
                     if metaflow.queue.is_empty() {
@@ -780,6 +899,72 @@ impl WakesInParts for RunningNexus {
             }
         }
         Ok(())
+    }
+
+    fn settle_rested(&self, flow_id: &str) -> AtStop {
+        self.record_context_at_stop(flow_id);
+        // Claude runs its Stop hook while its spinner is still on screen,
+        // and Herdr reads its state from the screen: the seat is given a
+        // bounded wait to show resting before the gate is taken.
+        if let Ok(Some(node)) = self.store.flow_node(flow_id)
+            && let HerdrRouteSelection::Available(route) =
+                &self.herdr.refresh_route(node).herdr_route_selection
+        {
+            self.herdr.rested(route);
+        }
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let metaflow = match self.store.metaflow_awake_as(flow_id) {
+            Ok(Some(metaflow)) => metaflow,
+            Ok(None) => return AtStop::Kept(KeptAtStop::NotAwake),
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
+        // A seat whose launch is not yet confirmed only holds its Address:
+        // it neither sleeps nor drains until confirmation keeps it.
+        match self.store.address_hold(flow_id) {
+            Ok(None) => {}
+            Ok(Some(_)) => return AtStop::Kept(KeptAtStop::Unconfirmed),
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        }
+        let address = metaflow.address.clone();
+        if !Self::sleeps_layer(&address.layer) {
+            return AtStop::Kept(KeptAtStop::LayerNeverSleeps);
+        }
+        if self.waking.is_waking(&address) {
+            return AtStop::Kept(KeptAtStop::Waking);
+        }
+        let node = match self.store.flow_node(flow_id) {
+            Ok(Some(node)) => self.herdr.refresh_route(node),
+            Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
+        match self.herdr.pane_agent(&node) {
+            PaneAgent::Present { agent_state, .. } if Self::sleeps_at(&agent_state) => {}
+            pane_agent => return AtStop::Kept(KeptAtStop::NotResting(pane_agent)),
+        }
+        if !metaflow.queue.is_empty() {
+            return match self.perform(Operation::Drain(address)) {
+                Outcome::Drained(mut typed) if !typed.is_empty() => {
+                    AtStop::Drained(typed.remove(0))
+                }
+                outcome => AtStop::Kept(KeptAtStop::DrainRefused(Box::new(outcome))),
+            };
+        }
+        if !Self::sleeps_seat(&node) {
+            return AtStop::Kept(KeptAtStop::NotResumable);
+        }
+        if self.store.lock_held(&address, Self::now()).unwrap_or(true) {
+            return AtStop::Kept(KeptAtStop::LockHeld);
+        }
+        match self.perform(Operation::Sleep(Sleep_Data {
+            address,
+            flow_node: node,
+        })) {
+            Outcome::Slept => AtStop::Slept,
+            outcome => AtStop::Kept(KeptAtStop::SleepRefused(Box::new(outcome))),
+        }
     }
 
     fn now() -> i64 {

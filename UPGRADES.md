@@ -1,3 +1,37 @@
+# Flow 0.34.2
+
+No wire change; no store change.
+
+- **A Stop waits for the seat to rest.** Before taking the dispatch gate,
+  the settling of a `Stopped` report runs Herdr's `agent wait <pane> --until
+  idle --until done --timeout 15000`. Claude runs its Stop hook while its
+  spinner is on screen, so Herdr showed the seat working at the Stop and it
+  never slept.
+- **The hook's connection closes first.** A Report is answered and its
+  connection closed before what it sets going runs, so no Herdr wait begins
+  while the hook is still connected.
+- **A Stop before confirmation is settled.** When a launch is confirmed and
+  the last event its harness reported is `Stopped`, the Stop is settled once
+  the dispatch gate is released and the confirming answer is written.
+- **A flow's end puts its metaflow to sleep.** Stop, Retire or Exit of the
+  confirmed flow a metaflow is Awake as records the metaflow Asleep in the
+  same write, the flow joining Past. A queued request wakes it as usual. The
+  Sleep operation now reads that write instead of recording Asleep itself.
+- **A retired seat wakes fresh.** A last Past flow that is Retired or Exited
+  is never resumed; its seat wakes fresh. Exited is a pane that went away
+  without Flow closing it, which `record_resumed` already refused to resume.
+- **A metaflow left Awake as an ended flow is Asleep.** Start, Wake,
+  Deliver and Identify, and the Nexus at its start, record such a metaflow
+  Asleep (`Record.Asleep`) before reading it, logging `flow-nexus: metaflow
+  Awake as ended flow <id> was recorded Asleep`. A store an older Nexus
+  left needs no hand edit. A metaflow Awake as a Bind flow with no flow row
+  is left as it is.
+- **A seat kept awake says why.** Every early exit of the Stop settling logs
+  `flow-nexus: flow <id> kept at its Stop: <reason>`, the reason one of
+  `StoreUnreadable`, `NotAwake`, `Unconfirmed`, `LayerNeverSleeps`,
+  `Waking`, `UnknownFlow`, `NotResting(<pane agent>)`, `DrainRefused`,
+  `NotResumable`, `LockHeld` or `SleepRefused`.
+
 # Flow 0.34.1
 
 No wire change; no store change.

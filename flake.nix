@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.34.1";
+            version = "0.34.2";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -245,6 +245,22 @@
             "tests::a_launch_in_flight_before_binding_refuses_another_start_at_its_address";
           flow-contradicting-receipt-rejects-the-launch = context.exactTest "flow-nexus"
             "tests::a_receipt_that_contradicts_the_launch_rejects_it";
+          flow-stop-waits-for-the-seat-to-rest = context.exactTest "flow-nexus"
+            "tests::waking::a_seat_herdr_shows_working_at_its_stop_sleeps_once_herdr_shows_it_done";
+          flow-stop-names-why-a-seat-is-kept = context.exactTest "flow-nexus"
+            "tests::waking::a_stop_that_leaves_its_seat_names_why";
+          flow-hook-closed-before-the-rest-wait = context.exactTest "flow-nexus"
+            "tests::waking::the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends";
+          flow-stop-before-confirmation-settled = context.exactTest "flow-nexus"
+            "tests::waking::a_stop_before_confirmation_is_settled_when_the_launch_is_confirmed";
+          flow-stop-sleeps-the-metaflow = context.exactTest "flow-nexus"
+            "tests::waking::the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_and_resumable";
+          flow-retired-seat-wakes-fresh = context.exactTest "flow-nexus"
+            "tests::waking::a_retired_seat_sleeps_its_metaflow_and_its_order_wakes_it_fresh";
+          flow-ended-awake-woken-by-an-order = context.exactTest "flow-nexus"
+            "tests::waking::a_metaflow_left_awake_as_an_ended_flow_is_woken_by_an_order";
+          flow-ended-awake-rested-at-start = context.exactTest "flow-nexus"
+            "tests::waking::a_nexus_start_puts_every_metaflow_left_awake_as_an_ended_flow_to_sleep";
         }
       );
 

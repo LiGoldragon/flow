@@ -74,6 +74,7 @@ use store::{
     OpensFlowStore, ReadsFlowRows, RecordsLaunchOutcome, RegistersExistingFlow,
     RegistersFlowIdentity,
 };
+use waking::SettlesStopsAtConfirmation;
 use waking::SleepsAndWakesSeats;
 
 pub struct RunningNexus {
@@ -88,6 +89,8 @@ pub struct RunningNexus {
     pub pane_leases: delivery::lease::PaneLeases,
     /// The metaflows a wake is running for; see `waking`.
     pub waking: waking::WakingMetaflows,
+    /// Flows confirmed after their Stop, awaiting settlement; see `waking`.
+    pub stopped_at_confirmation: waking::StoppedAtConfirmation,
     /// Set once the Nexus is told to stop; see [`StopsNexus`].
     pub stopping: Stopping,
 }
@@ -505,6 +508,7 @@ impl OpensRunningNexus for RunningNexus {
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
+            stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
             stopping: Stopping::default(),
         })
     }
@@ -558,11 +562,14 @@ impl ServesConnection for Connection {
             }
             // A hook's Report never waits behind a running launch: the
             // launch may itself be waiting on the harness whose hook this is.
-            // What the report sets going runs after the hook has its answer.
+            // What the report sets going runs after the hook has its answer
+            // and the connection is closed: the harness waits on its hook,
+            // and the settling waits on the harness.
             Query::Report(report) => {
                 let (flow_id, event) = (report.flow_id.clone(), report.event.clone());
                 let response = nexus.report(report);
                 self.peer.write_response(&response)?;
+                drop(self);
                 if response == Response::Reported {
                     nexus.after_report(&flow_id, &event);
                 }
@@ -592,7 +599,10 @@ impl ServesConnection for Connection {
             }
             query => nexus.dispatch_serially(query),
         };
-        self.peer.write_response(&response)
+        self.peer.write_response(&response)?;
+        drop(self);
+        nexus.settle_stops_at_confirmation();
+        Ok(())
     }
 
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
@@ -602,7 +612,10 @@ impl ServesConnection for Connection {
             Some(refusal) => meta_signal_flow::Response::MetaRefused(refusal),
             None => nexus.dispatch_meta_serially(query),
         };
-        self.peer.write_meta_response(&response)
+        self.peer.write_meta_response(&response)?;
+        drop(self);
+        nexus.settle_stops_at_confirmation();
+        Ok(())
     }
 }
 
@@ -1344,6 +1357,7 @@ mod tests {
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),
+                stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
                 stopping: crate::Stopping::default(),
             };
             Self {

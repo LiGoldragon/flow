@@ -2,7 +2,7 @@
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
-use crate::waking::WakePolicy;
+use crate::waking::{RestsEndedAwake, WakePolicy};
 use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
 use signal_flow::{Address, Process, Query, Refusal, Response};
 
@@ -59,8 +59,10 @@ impl IdentifiesPeerProcess for RunningNexus {
             return unidentified();
         };
         match self.store.metaflow_awake_as(&caller.flow_id)? {
-            Some(metaflow) => Ok(Response::Identified(metaflow.address)),
-            None => unidentified(),
+            Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
+                Ok(Response::Identified(metaflow.address))
+            }
+            _ => unidentified(),
         }
     }
 }
@@ -120,6 +122,9 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Query::Deliver(request) => {
                     let address = request.lock.address.clone();
                     let wakes = Self::wakes_for(&request.request);
+                    // Queued for a metaflow left Awake as an ended flow, the
+                    // request wakes it as it would an Asleep one.
+                    self.rest_ended_awake(&address);
                     return match self.store.queue_metaflow(request, now) {
                         Ok(enqueuing) => MetaflowAnswer {
                             wake: (enqueuing.response == Response::Queued

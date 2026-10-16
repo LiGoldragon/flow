@@ -3592,10 +3592,10 @@ impl RecordsFlowLifecycle for FlowStore {
         };
         flow.lifecycle = FlowLifecycle::Stopped;
         // A flow that ends before its launch was confirmed gives back the
-        // Address it held.
+        // Address it held; a confirmed one puts its metaflow to sleep.
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         self.engine
-            .commit_atomic(self.given_back(flow_id, commit)?)?;
+            .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
         Ok(true)
     }
 
@@ -3608,10 +3608,10 @@ impl RecordsFlowLifecycle for FlowStore {
         }
         flow.lifecycle = FlowLifecycle::Retired;
         // A flow that ends before its launch was confirmed gives back the
-        // Address it held.
+        // Address it held; a confirmed one puts its metaflow to sleep.
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         self.engine
-            .commit_atomic(self.given_back(flow_id, commit)?)?;
+            .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
         Ok(true)
     }
 
@@ -3624,10 +3624,10 @@ impl RecordsFlowLifecycle for FlowStore {
         }
         flow.lifecycle = FlowLifecycle::Exited;
         // A flow that ends before its launch was confirmed gives back the
-        // Address it held.
+        // Address it held; a confirmed one puts its metaflow to sleep.
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         self.engine
-            .commit_atomic(self.given_back(flow_id, commit)?)?;
+            .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
         Ok(true)
     }
 

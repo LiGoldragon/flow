@@ -2,13 +2,11 @@
 
 use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
-use crate::composition::KeepsLaunchBundles;
 pub mod launch;
 pub mod pane;
 pub mod reservation;
 
 use crate::codex::{CodexEndpoint, CodexEndpoints};
-use crate::composition::LaunchBundles;
 use std::collections::BTreeSet;
 use std::{
     fs,
@@ -98,8 +96,6 @@ pub struct HerdrCli {
     /// The Claude daemon's records, read for a daemon-owned session's
     /// readiness.
     pub(crate) claude_daemon: crate::claude::ClaudeDaemon,
-    /// Native Claude skill catalogs, highest-precedence first.
-    claude_skill_roots: Vec<PathBuf>,
     /// The `flow-hook` Claude Code runs on SessionStart, PostToolUse and
     /// Stop in every Claude flow Flow launches: the one installed beside
     /// this Nexus's own executable.
@@ -110,9 +106,6 @@ pub struct HerdrCli {
     /// whatever Nexus the default path under the pane's runtime directory
     /// names.
     pub(crate) ordinary_socket: PathBuf,
-    /// Where each launch's own bundle copy lives. Claude receives it as
-    /// `--system-prompt-file`; Codex receives it as `model_instructions_file`.
-    launch_bundles: LaunchBundles,
 }
 
 impl Default for HerdrCli {
@@ -128,12 +121,6 @@ impl Default for HerdrCli {
             .unwrap_or_else(|| home.join(".claude"));
         let workspace_root = defaults.source_root();
         let flows_root = workspace_root.join("flows");
-        let mut claude_skill_roots = Vec::new();
-        if let Some(enterprise) = std::env::var_os("CLAUDE_ENTERPRISE_SKILLS_DIR") {
-            claude_skill_roots.push(PathBuf::from(enterprise));
-        }
-        claude_skill_roots.push(claude_home.join("skills"));
-        claude_skill_roots.push(workspace_root.join(".claude/skills"));
         Self {
             executable: PathBuf::from("herdr"),
             server_binary: None,
@@ -169,13 +156,11 @@ impl Default for HerdrCli {
             },
             claude_transcript_root: claude_home.join("projects"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&claude_home),
-            claude_skill_roots,
             harness_hook: std::env::current_exe()
                 .ok()
                 .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
                 .unwrap_or_else(|| PathBuf::from("flow-hook")),
             ordinary_socket: defaults.ordinary_socket_path(),
-            launch_bundles: LaunchBundles::at(defaults.launch_bundle_directory()),
         }
     }
 }
@@ -310,29 +295,16 @@ impl ReadsPromptReply for PromptReply {
 }
 
 pub trait ConfiguresHerdrCli {
-    fn with_launch_bundles(self, launch_bundles: LaunchBundles) -> Self;
-    /// The per-launch bundle copy the composer wrote for this launch.
-    fn launch_bundle_file(&self, profile: &signal_flow::LaunchProfile) -> PathBuf;
     fn with_codex_endpoints(self, codex_endpoints: CodexEndpoints) -> Self;
     /// The ordinary socket this Nexus serves, as its store configures it.
     fn with_ordinary_socket(self, ordinary_socket: &std::path::Path) -> Self;
-    /// Re-roots the flows directory and the workspace skill catalog on the
-    /// configured source root.
+    /// Re-roots the flows directory on the configured source root.
     fn with_source_root(self, source_root: &std::path::Path) -> Self;
     #[cfg(test)]
     fn at(executable: PathBuf, flows_root: PathBuf) -> Self;
 }
 
 impl ConfiguresHerdrCli for HerdrCli {
-    fn with_launch_bundles(mut self, launch_bundles: LaunchBundles) -> Self {
-        self.launch_bundles = launch_bundles;
-        self
-    }
-
-    fn launch_bundle_file(&self, profile: &signal_flow::LaunchProfile) -> PathBuf {
-        self.launch_bundles.file_for(profile)
-    }
-
     fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
         self.codex_endpoints = codex_endpoints;
         self
@@ -344,14 +316,6 @@ impl ConfiguresHerdrCli for HerdrCli {
     }
 
     fn with_source_root(mut self, source_root: &std::path::Path) -> Self {
-        let previous_skills = self
-            .flows_root
-            .parent()
-            .map(|root| root.join(".claude/skills"));
-        self.claude_skill_roots
-            .retain(|root| Some(root) != previous_skills.as_ref());
-        self.claude_skill_roots
-            .push(source_root.join(".claude/skills"));
         self.flows_root = source_root.join("flows");
         self
     }
@@ -393,15 +357,8 @@ impl ConfiguresHerdrCli for HerdrCli {
             },
             claude_transcript_root: fixture_root.join("claude"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
-            claude_skill_roots: vec![fixture_root.join("claude-skills")],
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
-            launch_bundles: LaunchBundles::at(
-                flows_root
-                    .parent()
-                    .expect("fixture flows root has a parent")
-                    .join("launch-bundles"),
-            ),
         }
     }
 }

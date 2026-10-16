@@ -5,8 +5,8 @@
 //! paths decide what to do next; this is the only place they act.
 
 use crate::RunningNexus;
-use crate::codex::{SelectsCodexEndpoint, SubmitsBoundCodexFirstTurn};
-use crate::composition::{ComposesLaunch, KeepsLaunchBundles, OpensLaunchComposer};
+use crate::codex::{SelectsCodexEndpoint, SubmitsBoundCodexPart};
+use crate::composition::{ComposesLaunch, CompositionError};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
     Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
@@ -15,8 +15,9 @@ use crate::generated::operation::{
 use crate::herdr::OperatesHerdrPane;
 use crate::herdr::launch::{
     CreatesHerdrLaunchPane, NativeTargetRefusal, ObservesNativeLaunchBinding,
-    StartsNativeHerdrHarness, SubmitsFirstPromptOnce, TitleRefusal, TitlesNativeFlow,
+    StartsNativeHerdrHarness, SubmitsStartupPart, TitleRefusal, TitlesNativeFlow,
 };
+use crate::store::ManagesMetaflowState;
 use crate::store::{
     ConfirmsStartedFlow, FlowRegistration, RecordsFlowLifecycle, RecordsLaunchOutcome,
     RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
@@ -226,9 +227,34 @@ impl<E> AnswersRecord for Result<(), E> {
 impl Performs for RunningNexus {
     fn perform(&self, operation: Operation) -> Outcome {
         match operation {
-            Operation::Compose(profile) => match self.composer.compose(&profile) {
+            Operation::Compose(profile) => match self.composer.compose_leaving_out(
+                &profile,
+                self.store
+                    .default_leave_outs(&profile.address)
+                    .unwrap_or_default(),
+            ) {
                 Ok(launch) => Outcome::Composed(launch),
-                Err(_) => Outcome::Failed(Failed_Data::CompositionRefused),
+                Err(CompositionError::LeaveOut(refusal)) => {
+                    eprintln!(
+                        "flow-nexus: launch {} leave-outs refused: {refusal:?}",
+                        profile.launch_request_id
+                    );
+                    Outcome::Failed(Failed_Data::LeaveOutRefused(refusal))
+                }
+                Err(CompositionError::Context(refusal)) => {
+                    eprintln!(
+                        "flow-nexus: launch {} context refused: {refusal:?}",
+                        profile.launch_request_id
+                    );
+                    Outcome::Failed(Failed_Data::ContextRefused(refusal))
+                }
+                Err(error) => {
+                    eprintln!(
+                        "flow-nexus: launch {} not composed: {error}",
+                        profile.launch_request_id
+                    );
+                    Outcome::Failed(Failed_Data::CompositionRefused)
+                }
             },
             Operation::Reserve(reserve) => self.reserve(reserve),
             Operation::Record(record) => self.record(record),
@@ -301,15 +327,12 @@ impl Performs for RunningNexus {
                         .map_err(|_| Failed_Data::CodexRefused)
                         .and_then(|adapter| {
                             adapter
-                                .submit_bound_codex_first_turn(
-                                    &composed_launch,
-                                    &prompt_delivery_intent,
-                                )
+                                .submit_bound_codex_part(&composed_launch, &prompt_delivery_intent)
                                 .map_err(|_| Failed_Data::CodexRefused)
                         }),
                     HarnessKind::Claude => self
                         .herdr
-                        .submit_first_prompt_once(&composed_launch, &prompt_delivery_intent)
+                        .submit_startup_part(&composed_launch, &prompt_delivery_intent)
                         .map_err(|_| Failed_Data::HerdrRefused),
                 };
                 match submission {
@@ -325,19 +348,6 @@ impl Performs for RunningNexus {
             Operation::Sleep(sleep) => self.sleep(sleep),
             Operation::Wake(address) => self.wake(address),
             Operation::Drain(address) => self.drain(address),
-            Operation::Prune(launch_request_id) => match self
-                .composer
-                .launch_bundles()
-                .remove_for_request(&launch_request_id)
-            {
-                Ok(()) => Outcome::Pruned,
-                Err(error) => {
-                    eprintln!(
-                        "flow-nexus: launch {launch_request_id} bundle copy not removed: {error}"
-                    );
-                    Outcome::Failed(Failed_Data::BundleRefused)
-                }
-            },
         }
     }
 }

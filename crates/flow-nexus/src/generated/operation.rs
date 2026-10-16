@@ -118,7 +118,6 @@ pub enum Operation {
     Title(Title_Data),
     Submit(Submit_Data),
     Close(signal_flow::FlowNode),
-    Prune(signal_flow::LaunchRequestId),
     Release(signal_flow::FlowId),
     Sleep(Sleep_Data),
     Wake(signal_flow::Address),
@@ -141,7 +140,6 @@ pub enum Failed_Data {
     Unstarted,
     HerdrRefused,
     CodexRefused,
-    BundleRefused,
     UnknownFlow,
     ClaimRefused,
     NotAsleep,
@@ -149,7 +147,8 @@ pub enum Failed_Data {
     NothingQueued,
     AddressAwake,
     AddressEnded,
-    StartBundleMissing,
+    ContextRefused(signal_flow::ContextRefusal),
+    LeaveOutRefused(signal_flow::LeaveOutRefusal),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -166,7 +165,6 @@ pub enum Outcome {
     Titled,
     Submitted(signal_flow::PromptDeliveryResult),
     Closed,
-    Pruned,
     Released,
     Slept,
     Woken(signal_flow::FlowId),

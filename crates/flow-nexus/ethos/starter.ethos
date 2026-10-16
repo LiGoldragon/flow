@@ -1,0 +1,57 @@
+; The direct-text starter: a launch names its flow's context by module
+; identity; the context composer composes it and Flow verifies it; the
+; first USER message is the composed USER text then the brief, sent whole
+; through Herdr's socket or the Codex app-server, or in parts split where
+; modules begin, each part after the first sent once the flow has answered
+; the one before; the receipt is every part seen in order, then the flow's
+; first answer.
+;
+; VerifiedContext is the guard: its fields are private and its one
+; constructor is VerifiesContext.verified, so no text but the composer's
+; verified answer reaches a prompt. It stays a Rust type of its own because
+; a generated type's fields are public.
+;
+; The starter's traits whose methods take an input are hand-written: an
+; ethos-zero capability takes only traits as inputs, and the values these
+; methods take (a request, a profile, a text) are concrete types.
+
+Library
+[ signal_flow:[ Address HarnessKind LaunchProfile PromptDeliveryIntent NativeTargetReceipt FlowId SessionId OriginClue SystemModules UserModules HerdrSessionName LeaveOuts LeaveOutRefusal ]
+  flow_nexus:[ StartupSelection ] ]
+[ ; What a launch asks of the context composer.
+  ContextRequest.{ Address HarnessKind SystemModules UserModules }
+  ; What a fresh wake takes from the metaflow's last launch.
+  FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> }
+  ; A Started launch as its outcome row keeps it; the flow's route is read
+  ; from the flow's own row when the reply is made.
+  LaunchedRecord.{ FlowId SessionId OriginClue }
+  ReplacedRecord.{ FlowId LaunchedRecord }
+  ; What the native transcript shows of a first USER message: Received is
+  ; every part in order then the first answer; Waiting is not yet; and
+  ; PartAnswered is every submitted part seen, the last answered, and parts
+  ; left to send.
+  StartupProgress.[ Received.NativeTargetReceipt
+                    Waiting.PromptDeliveryIntent
+                    PartAnswered.PromptDeliveryIntent ]
+  ; Where one reading of the transcript stands.
+  SeenParts.Integer
+  LastPartAnswered.Boolean
+  NativeTurn.String
+  PartTurn.String
+  StartupReading.{ SeenParts LastPartAnswered Option<NativeTurn> Option<PartTurn> }
+  ; A harness start and the parts it leaves out.
+  LeanStart.{ HarnessKind LeaveOuts } ]
+[ SelectsStartup.[ startup_selection.[ StartupSelection ] ]
+  ReadsVerifiedContext.[ address.[ Address ]
+                         system_text.[ String ]
+                         user_segments.[ Vector<String> ] ]
+  RendersBrief.[ brief.[ String ] ]
+  ProfilesFreshSeat.[ fresh_profile.[ LaunchProfile ] ]
+  ReadsTypedUserText.[ claude_typed_text.[ Option<String> ] ]
+  RendersLeanStart.[ refusal.[ Option<LeaveOutRefusal> ]
+                     arguments.[ Vector<String> ]
+                     environment.[ Vector<String> ]
+                     disallowed_tools.[ Vector<String> ]
+                     attribution_off.[ Boolean ]
+                     skill_listing_off.[ Boolean ] ] ]
+[]

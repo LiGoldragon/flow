@@ -7,18 +7,20 @@ use crate::store::ReadsFlowMemory;
 extern crate self as flow_nexus;
 use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
-use crate::composition::KeepsLaunchBundles;
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::AnswersLaunchOutcome;
+pub use generated::curriculum::StartupSelection;
 pub use store::{LaunchOutcome, Replacement};
 pub mod binding;
 pub mod caller;
 pub mod claude;
 pub mod codex;
 pub mod composition;
+pub mod context;
 pub mod delivery;
+pub mod lean;
 mod metaflow;
 pub mod recovery;
 use metaflow::DispatchesMetaflowPeer;
@@ -41,10 +43,11 @@ pub mod waking;
 use binding::{ChecksFlowBinding, ChecksFlowContainer, ChecksProcessIdentity, RefusesBinding};
 use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
-use composition::{LaunchBundles, LaunchComposer, OpensLaunchComposer};
+use composition::{LaunchComposer, OpensLaunchComposer};
+use context::{CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
 use generated::operation::{Operation, Outcome, Record_Data};
-use launching::{LaunchesFlows, ObservesLaunch, PrunesLaunchBundles};
+use launching::{LaunchesFlows, ObservesLaunch};
 use observe_agent::ObservesAgent;
 use peer::{AdmitsMetaPeer, ResolvesPeer};
 use performing::Performs;
@@ -181,7 +184,6 @@ impl Dispatches for RunningNexus {
                 {
                     return Response::StopRejected(signal_flow::StopRejection::PersistenceRefused);
                 }
-                self.prune_launch_bundles_of(&flow_id);
                 Response::Stopped(flow_id)
             }
             // A dispatch without a connection has no peer to read.
@@ -297,9 +299,6 @@ impl Dispatches for RunningNexus {
                         meta_signal_flow::RetireRejection::StoreRefused,
                     );
                 }
-                // No launch can still need the bundle copy of a seat that
-                // is gone.
-                self.prune_launch_bundles_of(&flow_id);
                 match self.store.flow_node(&flow_id) {
                     Ok(Some(retired)) => meta_signal_flow::Response::FlowRetired(retired),
                     Ok(None) | Err(_) => meta_signal_flow::Response::RetireRejected(
@@ -487,10 +486,6 @@ impl OpensRunningNexus for RunningNexus {
             );
         }
         let source_root = PathBuf::from(&runtime.source_root);
-        let launch_bundles = LaunchBundles::at(
-            store_path.parent().ok_or(store::StoreError::InvalidStorePath)?
-                .join(<store::DefaultConfiguration as store::LaysOutDefaults>::LAUNCH_BUNDLE_DIRECTORY),
-        );
         // The socket this Nexus serves: a changed one takes effect only on
         // restart, so the store's value at open is the one being served.
         let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
@@ -500,9 +495,11 @@ impl OpensRunningNexus for RunningNexus {
             herdr: herdr::HerdrCli::default()
                 .with_source_root(&source_root)
                 .with_codex_endpoints(codex_endpoints)
-                .with_ordinary_socket(&ordinary_socket)
-                .with_launch_bundles(launch_bundles.clone()),
-            composer: LaunchComposer::at(source_root, launch_bundles),
+                .with_ordinary_socket(&ordinary_socket),
+            // A launch's context is composed by the Curriculum Nexus.
+            composer: LaunchComposer::with_context(std::sync::Arc::new(
+                CurriculumComposer::from_environment(),
+            )),
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
@@ -928,7 +925,7 @@ impl AwaitsLaunchSettlement for RunningNexus {
         loop {
             let seen = changes.current();
             match self.store.launch_outcome(launch_request_id) {
-                Ok(Some(outcome)) => return Some(outcome.response()),
+                Ok(Some(outcome)) => return Some(outcome.response(&self.store)),
                 Ok(None) => {}
                 Err(_) => return None,
             }
@@ -1065,10 +1062,8 @@ impl CarriesSignalFrames for UnixStream {
 #[cfg(test)]
 mod tests {
     use crate::DispatchesSerially;
-    use crate::composition::KeepsLaunchBundles;
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
-    use crate::store::ConfiguresOnlyStore;
     mod delivery;
     mod launching_nexus;
     mod reconfiguring;
@@ -1076,31 +1071,29 @@ mod tests {
     mod submission;
     mod waking;
 
-    use super::{Dispatches, OpensRunningNexus, ReconcilesListedFlows, RunningNexus};
+    use super::{Dispatches, ReconcilesListedFlows, RunningNexus};
     use crate::caller::{
         CallerPane, CallerProcess, IdentifiesPeer, LocatesCallerPane, ReadsProcess, ResolvesCaller,
     };
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use crate::{
         codex::{CodexEndpoint, CodexEndpoints},
-        composition::{ComposesLaunch, LaunchBundles, LaunchComposer, OpensLaunchComposer},
+        composition::{ComposesLaunch, LaunchComposer, OpensLaunchComposer},
+        context::FixtureComposer,
         herdr::HerdrCli,
         store::{
-            ConfigurationOnlyStore, DefaultConfiguration, FlowStore, LaunchOutcome, OpensFlowStore,
-            RecordsFlowLifecycle, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
-            RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
-            RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
-            SeedsConfiguration,
+            FlowStore, LaunchOutcome, OpensFlowStore, RecordsFlowLifecycle, RecordsLaunchOutcome,
+            RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
+            RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersFlowIdentity,
+            ReservesLaunchAttempt,
         },
     };
-    use sha2::{Digest, Sha256};
     use signal_flow::{
         Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding,
-        HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile, LaunchSource,
-        LaunchStatusOutcome, NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence,
-        NativeTranscriptBoundary, OriginClue, PowerLevel, PromptDeliveryIntent,
-        PromptDeliveryResult, Query, RegistrationAcknowledgement, Response, StartRejection,
-        StartRequest,
+        HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile, LaunchStatusOutcome,
+        NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence, NativeTranscriptBoundary,
+        OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query,
+        RegistrationAcknowledgement, Response, StartRejection, StartRequest,
     };
     use std::{
         collections::BTreeSet,
@@ -1111,56 +1104,6 @@ mod tests {
         path::{Path, PathBuf},
         time::Duration,
     };
-
-    #[test]
-    fn explicit_start_keeps_launch_bundles_beside_its_store() {
-        let directory = tempfile::tempdir().expect("temporary state");
-        let defaults = DefaultConfiguration {
-            home: directory.path().join("home"),
-            runtime_directory: directory.path().join("runtime"),
-        };
-        let store_path = directory.path().join("isolated-state/flow.sema");
-        let start = flow_ethos::Start {
-            ordinary_socket_path: directory
-                .path()
-                .join("isolated-sockets/ordinary.sock")
-                .to_string_lossy()
-                .into_owned(),
-            meta_socket_path: directory
-                .path()
-                .join("isolated-sockets/meta.sock")
-                .to_string_lossy()
-                .into_owned(),
-            store_path: store_path.to_string_lossy().into_owned(),
-        };
-        std::fs::create_dir_all(store_path.parent().unwrap()).expect("store parent");
-        let configuration_store =
-            ConfigurationOnlyStore::open(&store_path).expect("configuration store");
-        let configuration = defaults.configuration();
-        configuration_store
-            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
-                meta_signal_flow::ConfigureNexus {
-                    source_root: configuration.source_root,
-                    stable_codex: configuration.stable_codex,
-                    next_codex: configuration.next_codex,
-                    harness_profiles: configuration.harness_profile_vector,
-                    meta_aspects: configuration.meta_aspects,
-                    message_nexus_path: configuration.message_nexus_path,
-                    message_nexus_binary: "/fixture/message-nexus".into(),
-                    lease: 60,
-                },
-            ))
-            .expect("configuration commits");
-        drop(configuration_store);
-
-        let nexus =
-            RunningNexus::open(&defaults, &start).expect("explicit configured store starts");
-        let bundle_path = nexus.composer.launch_bundles().file_for_request("fixture");
-        assert_eq!(
-            bundle_path.parent().unwrap(),
-            store_path.parent().unwrap().join("launch-bundles")
-        );
-    }
 
     struct NexusFixture {
         directory: tempfile::TempDir,
@@ -1348,14 +1291,15 @@ mod tests {
                 store: FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store"),
                 codex_endpoints: codex_endpoints.clone(),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
-                    .with_codex_endpoints(codex_endpoints)
-                    .with_launch_bundles(LaunchBundles::at(
-                        directory.path().join("launch-bundles"),
-                    )),
-                composer: LaunchComposer::at(
-                    directory.path().to_path_buf(),
-                    LaunchBundles::at(directory.path().join("launch-bundles")),
-                ),
+                    .with_codex_endpoints(codex_endpoints),
+                composer: LaunchComposer::with_context(std::sync::Arc::new(FixtureComposer::from(
+                    &[
+                        ("spirit-core", "Spirit body."),
+                        ("intent-flow", "Intent body."),
+                        ("operation-main-flow", "Main flow body."),
+                        ("knowledge-flow", "Knowledge body."),
+                    ][..],
+                ))),
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),
@@ -1693,39 +1637,6 @@ mod tests {
         assert!(operations.contains("pane close w1:p3"));
         assert!(!operations.contains("pane wait-output"));
         assert!(!operations.contains("pane read"));
-    }
-
-    #[test]
-    fn stop_removes_the_bundle_copy_of_the_launch_that_bound_the_flow() {
-        let fixture = NexusFixture::new();
-        fixture.accept_pane_operations(
-            vec![fixture.current_agent()],
-            PromptFixture::Prompted("w1:p3"),
-        );
-        let node = fixture.node();
-        assert_eq!(
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Query::RegisterFlow(node.clone())),
-            meta_signal_flow::Response::FlowRegistered(node)
-        );
-        let launch = fixture.staged_launch("stopped-request", None);
-        launch.reserve(&fixture.nexus);
-        launch.record_native_intent(&fixture.nexus);
-        launch.bind(&fixture.nexus);
-        let bundles = fixture.nexus.composer.launch_bundles().clone();
-        let bound_copy = bundles.file_for_request("stopped-request");
-        let other_copy = bundles.file_for_request("another-request");
-        fs::create_dir_all(bound_copy.parent().unwrap()).unwrap();
-        fs::write(&bound_copy, b"bound copy\n").unwrap();
-        fs::write(&other_copy, b"other copy\n").unwrap();
-
-        assert_eq!(
-            fixture.nexus.dispatch(Query::Stop("908786".into())),
-            Response::Stopped("908786".into())
-        );
-        assert!(!bound_copy.exists(), "the stopped Flow's copy is removed");
-        assert!(other_copy.exists(), "another launch's copy is kept");
     }
 
     /// The pane a staged launch registered, as Herdr shows a seat not yet
@@ -2398,17 +2309,10 @@ mod tests {
     #[test]
     fn identical_launch_retry_reads_the_journal_before_a_deleted_source() {
         let fixture = NexusFixture::new();
-        let source_path = fixture.directory.path().join("launch-source.md");
-        let bundle_path = fixture.directory.path().join("flow-system-prompt.md");
-        fs::write(&source_path, b"exact source bytes\n").expect("fixture source");
-        fs::write(&bundle_path, b"fixture bundle\n").expect("fixture bundle");
         let profile = LaunchProfile {
             launch_request_id: "retry-request".into(),
-            launch_source_vector: vec![LaunchSource {
-                source_path: "launch-source.md".into(),
-                source_sha256: format!("{:x}", Sha256::digest(b"exact source bytes\n")),
-            }],
-            skill_name_vector: Vec::new(),
+            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+            user_modules: vec!["operation-main-flow".into()],
             address: signal_flow::Address {
                 aspect: Aspect::Field,
                 topic: "flow".into(),
@@ -2421,7 +2325,7 @@ mod tests {
             flow_id_option: None,
             remembered_flow_vector: Vec::new(),
             herdr_session_name: "fixture-session".into(),
-            system_prompt_bundle_file: bundle_path.to_string_lossy().into_owned(),
+            leave_outs_option: None,
             instruction_prompt: "fixture instruction".into(),
         };
         let origin = OriginClue {
@@ -2439,7 +2343,6 @@ mod tests {
             .store
             .reserve_launch_attempt(&composed, origin.clone())
             .expect("reservation persists");
-        fs::remove_file(source_path).expect("source removed after reservation");
 
         assert!(matches!(
             fixture.nexus.dispatch(Query::Start(StartRequest {
@@ -2463,17 +2366,10 @@ mod tests {
     #[test]
     fn delayed_receipt_after_source_deletion_promotes_without_a_second_external_write() {
         let fixture = NexusFixture::new();
-        let source_path = fixture.directory.path().join("delayed-source.md");
-        let bundle_path = fixture.directory.path().join("flow-system-prompt.md");
-        fs::write(&source_path, b"delayed exact bytes\n").expect("fixture source");
-        fs::write(&bundle_path, b"fixture bundle\n").expect("fixture bundle");
         let profile = LaunchProfile {
             launch_request_id: "delayed-request".into(),
-            launch_source_vector: vec![LaunchSource {
-                source_path: "delayed-source.md".into(),
-                source_sha256: format!("{:x}", Sha256::digest(b"delayed exact bytes\n")),
-            }],
-            skill_name_vector: Vec::new(),
+            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+            user_modules: vec!["operation-main-flow".into()],
             address: signal_flow::Address {
                 aspect: Aspect::Field,
                 topic: "flow".into(),
@@ -2486,7 +2382,7 @@ mod tests {
             flow_id_option: None,
             remembered_flow_vector: Vec::new(),
             herdr_session_name: "fixture-session".into(),
-            system_prompt_bundle_file: bundle_path.to_string_lossy().into_owned(),
+            leave_outs_option: None,
             instruction_prompt: "fixture instruction".into(),
         };
         let origin = OriginClue {
@@ -2506,10 +2402,16 @@ mod tests {
             .record_native_launch_intent(NativeLaunchIntent {
                 launch_request_id: profile.launch_request_id.clone(),
                 prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+                system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
                 harness_kind: HarnessKind::Codex,
                 model_name: profile.model_name.clone(),
                 effort: profile.effort.clone(),
-                skill_name_vector: Vec::new(),
+                prompt_sha256_vector: composed
+                    .first_prompt_payload
+                    .prompt_part_vector
+                    .iter()
+                    .map(|part| part.prompt_sha256.clone())
+                    .collect(),
             })
             .unwrap();
         let native_session_id = "01a0b22c-e24f-7452-9940-64490878680f";
@@ -2573,7 +2475,15 @@ mod tests {
             harness_kind: HarnessKind::Codex,
             model_name: profile.model_name.clone(),
             effort: profile.effort.clone(),
-            native_skill_selection_vector: Vec::new(),
+            prompt_sha256_vector: composed
+                .first_prompt_payload
+                .prompt_part_vector
+                .iter()
+                .map(|part| part.prompt_sha256.clone())
+                .collect(),
+            parts_submitted: 1,
+            stops_reported: 0,
+            leave_outs: Vec::new(),
             herdr_pane_binding: pane,
             native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
                 native_session_id: binding.native_session_id.clone(),
@@ -2592,7 +2502,6 @@ mod tests {
             .store
             .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(intent.clone()))
             .unwrap();
-        fs::remove_file(source_path).unwrap();
 
         let herdr_calls = fixture.directory.path().join("delayed-herdr-calls");
         let agent = serde_json::json!({"result":{"agent":{
@@ -2639,7 +2548,8 @@ mod tests {
         let mut output = fs::File::create(transcript).unwrap();
         for row in [
             serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-delayed"}}),
-            serde_json::json!({"type":"event_msg","payload":{"thread_id":native_session_id,"turn_id":"turn-delayed","item":{"type":"UserMessage","content":[{"type":"text","text":composed.first_prompt_payload.first_prompt_text}]}}}),
+            serde_json::json!({"type":"event_msg","payload":{"thread_id":native_session_id,"turn_id":"turn-delayed","item":{"type":"UserMessage","content":[{"type":"text","text":composed.first_prompt_payload.first_prompt_body}]}}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Beginning."}]}}),
         ] {
             writeln!(output, "{row}").unwrap();
         }
@@ -3080,17 +2990,10 @@ mod tests {
             launch_request_id: &str,
             predecessor: Option<&str>,
         ) -> StagedLaunch {
-            let source_path = self.directory.path().join("staged-source.md");
-            let bundle_path = self.directory.path().join("flow-system-prompt.md");
-            fs::write(&source_path, b"staged exact bytes\n").expect("fixture source");
-            fs::write(&bundle_path, b"fixture bundle\n").expect("fixture bundle");
             let profile = LaunchProfile {
                 launch_request_id: launch_request_id.into(),
-                launch_source_vector: vec![LaunchSource {
-                    source_path: "staged-source.md".into(),
-                    source_sha256: format!("{:x}", Sha256::digest(b"staged exact bytes\n")),
-                }],
-                skill_name_vector: Vec::new(),
+                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+                user_modules: vec!["operation-main-flow".into()],
                 // Each staged launch is the seat of its own Address.
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
@@ -3104,7 +3007,7 @@ mod tests {
                 flow_id_option: predecessor.map(str::to_owned),
                 remembered_flow_vector: Vec::new(),
                 herdr_session_name: "fixture-session".into(),
-                system_prompt_bundle_file: bundle_path.to_string_lossy().into_owned(),
+                leave_outs_option: None,
                 instruction_prompt: "fixture instruction".into(),
             };
             let composed = self
@@ -3290,10 +3193,21 @@ mod tests {
                     .record_native_launch_intent(NativeLaunchIntent {
                         launch_request_id: self.profile.launch_request_id.clone(),
                         prompt_sha256: self.composed.first_prompt_payload.prompt_sha256.clone(),
+                        system_prompt_sha256: self
+                            .composed
+                            .system_prompt
+                            .system_prompt_sha256
+                            .clone(),
                         harness_kind: HarnessKind::Codex,
                         model_name: self.profile.model_name.clone(),
                         effort: self.profile.effort.clone(),
-                        skill_name_vector: Vec::new(),
+                        prompt_sha256_vector: self
+                            .composed
+                            .first_prompt_payload
+                            .prompt_part_vector
+                            .iter()
+                            .map(|part| part.prompt_sha256.clone())
+                            .collect(),
                     })
                     .unwrap()
             );
@@ -3360,7 +3274,16 @@ mod tests {
                 harness_kind: HarnessKind::Codex,
                 model_name: self.profile.model_name.clone(),
                 effort: self.profile.effort.clone(),
-                native_skill_selection_vector: Vec::new(),
+                prompt_sha256_vector: self
+                    .composed
+                    .first_prompt_payload
+                    .prompt_part_vector
+                    .iter()
+                    .map(|part| part.prompt_sha256.clone())
+                    .collect(),
+                parts_submitted: 1,
+                stops_reported: 0,
+                leave_outs: Vec::new(),
                 herdr_pane_binding: self.pane.clone(),
                 native_transcript_boundary: NativeTranscriptBoundary::Absent(
                     NativeTranscriptAbsence {
@@ -3405,7 +3328,9 @@ mod tests {
             let mut rows = String::new();
             for row in [
                 serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-staged"}}),
-                serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":self.composed.first_prompt_payload.first_prompt_text}]}}}),
+                serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":self.composed.first_prompt_payload.first_prompt_body}]}}}),
+                // The flow's first answer: the receipt.
+                serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Beginning."}]}}),
             ] {
                 rows.push_str(&format!("{row}\n"));
             }
@@ -3451,20 +3376,10 @@ mod tests {
         ));
 
         launch.write_receipt();
-        // A stand-in for the successor's per-launch copy: a Started Flow
-        // keeps it, since its harness was told to read it.
-        let successor_copy = fixture
-            .nexus
-            .composer
-            .launch_bundles()
-            .file_for_request("replace-request");
-        fs::create_dir_all(successor_copy.parent().unwrap()).unwrap();
-        fs::write(&successor_copy, b"successor copy\n").unwrap();
         let Response::Replaced(replaced) = fixture.nexus.dispatch(Query::Replace(launch.request()))
         else {
             panic!("the observed successor replaces its predecessor")
         };
-        assert!(successor_copy.exists(), "a Started Flow keeps its copy");
         assert_eq!(replaced.flow_id, "fac697");
         assert_eq!(replaced.launched.flow_id, "908786");
         assert_eq!(replaced.launched.session_id, STAGED_SESSION);
@@ -3825,7 +3740,7 @@ mod tests {
         seat.stage_to_ambiguity(&fixture.nexus);
         let rows = [
             serde_json::json!({"type":"turn_context","payload":{"model":"other-model","effort":"medium","turn_id":"turn-staged"}}),
-            serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":seat.composed.first_prompt_payload.first_prompt_text}]}}}),
+            serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":seat.composed.first_prompt_payload.first_prompt_body}]}}}),
         ]
         .iter()
         .map(|row| format!("{row}\n"))
@@ -4017,11 +3932,8 @@ mod tests {
             rejection,
             "a settled rejection is not launched again"
         );
-        // The refused Claude launch wrote its copy at compose time; with the
-        // rejection stored, the copy is gone.
-        let bundles = fixture.nexus.composer.launch_bundles().clone();
-        assert!(fixture.directory.path().join("launch-bundles").is_dir());
-        assert!(!bundles.file_for_request("rejected-request").exists());
+        // Nothing composed was written to disk for it.
+        assert!(!fixture.directory.path().join("launch-bundles").exists());
 
         // ReplaceRejected: the successor's launch is refused; the
         // predecessor keeps receiving.
@@ -4046,7 +3958,6 @@ mod tests {
             None,
         );
         assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Active);
-        assert!(!bundles.file_for_request("refused-request").exists());
         // Replaced is answered by the replacement fixture above.
     }
 

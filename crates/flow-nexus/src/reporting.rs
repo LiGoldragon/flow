@@ -4,14 +4,15 @@
 //! A FlowId Flow does not hold is refused as `Refused.UnknownFlow`, never
 //! adopted. The owner reads the events back over the meta socket with
 //! `ReadEvents`. A `Stopped` event, once answered, writes the flow's
-//! context size and may drain its queue or put its metaflow to sleep
-//! (`after_report`).
+//! context size, lets a launch waiting on it send its next part, and may
+//! drain its queue or put its metaflow to sleep (`after_report`).
 
 use crate::RunningNexus;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Harness_Data,
 };
 use crate::performing::Performs;
+use crate::store::AnnouncesLaunchChanges;
 use crate::store::events::RecordsHarnessEvents;
 use crate::waking::SleepsAndWakesSeats;
 use meta_signal_flow::{EventsRead_Data, ReadEventsRejected_Data};
@@ -55,6 +56,9 @@ impl RecordsReports for RunningNexus {
 
     fn after_report(&self, flow_id: &FlowId, event: &Event) {
         if *event == Event::Stopped {
+            // A launch sending its first message in parts waits on this
+            // Stop before its next part.
+            self.store.launch_changes.announce();
             self.settle_stopped(flow_id);
         }
     }

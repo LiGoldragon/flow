@@ -84,8 +84,8 @@ mod tests {
     fn profile(aspect: Aspect, layer: Layer, model: &str) -> LaunchProfile {
         LaunchProfile {
             launch_request_id: "launch-title".into(),
-            launch_source_vector: vec![],
-            skill_name_vector: vec![],
+            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+            user_modules: vec!["operation-main-flow".into()],
             address: signal_flow::Address {
                 aspect,
                 topic: "flow".into(),
@@ -98,7 +98,7 @@ mod tests {
             flow_id_option: None,
             remembered_flow_vector: vec![],
             herdr_session_name: "session".into(),
-            system_prompt_bundle_file: "/tmp/bundle".into(),
+            leave_outs_option: None,
             instruction_prompt: "work".into(),
         }
     }

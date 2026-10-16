@@ -1,10 +1,13 @@
 ; Flow Nexus Operation: what the Nexus does. Every effect its launch and
 ; record paths perform is one operation, and each is answered by one
 ; Outcome. An effect changes something: Herdr's panes, a harness, the
-; launch bundle copies, or the store. A read of the world (a pane's
-; presence, a transcript receipt, a skill catalog) is not an operation.
+; or the store. A read of the world (a pane's presence, a transcript
+; receipt, a seat's composed context) is not an operation.
 ;
-; Compose writes the per-launch bundle copy and composes the first prompt.
+; Compose has the context composer compose the seat's system and USER
+; context from the module identities its profile names, verifies it, and
+; composes the system prompt and the first USER message, split into parts
+; when it does not fit one message; nothing is written to disk.
 ; Reserve opens the launch attempt in the journal and, for a Claude launch,
 ; claims the flow's FlowId for the native session id Flow chooses for it,
 ; and holds that flow in Memory before any harness runs: Reserved carries
@@ -22,8 +25,8 @@
 ; AddressAwake, an Ended one AddressEnded, and the launch stays Pending. Open makes the launch pane; Spawn starts
 ; the native harness in it; Bind claims the flow's identity from the
 ; harness's integration report; Title names the claimed flow; Submit types
-; the first prompt once, which carries the brief; Close closes a flow's
-; pane; Prune removes a launch's bundle copy. Release gives back what
+; the next part of the first USER message once (the last part carries the
+; brief); Close closes a flow's pane. Release gives back what
 ; Reserve took for a launch then refused: the held flow and its FlowId
 ; claim, answered Released.
 ;
@@ -34,7 +37,8 @@
 ; queue of an Asleep metaflow, oldest first, and starts a seat that carries
 ; it in its first prompt: the last flow resumed when its session is under
 ; its layer's refresh threshold, else a fresh launch composed from the
-; configured layer Model and topic modules. Record.Awoken then names the
+; configured layer Model and the module identities the seat's last launch
+; named. Record.Awoken then names the
 ; started flow and the count of queued requests it was handed, which leave
 ; the queue in that same write, so a wake that dies first loses nothing.
 ; Drain types the oldest queued request into the Awake flow's pane and
@@ -45,7 +49,7 @@
 ; the Nexus crate until the Memory root is compiled.
 
 Operation
-[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch OriginClue LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request ]
+[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch OriginClue LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request ContextRefusal LeaveOutRefusal ]
   flow_nexus:[ LaunchOutcome Replacement ] ]
 [ Compose.LaunchProfile
   Reserve.{ ComposedLaunch OriginClue }
@@ -73,7 +77,6 @@ Operation
   Title.{ ComposedLaunch NativeLaunchBinding }
   Submit.{ ComposedLaunch PromptDeliveryIntent }
   Close.FlowNode
-  Prune.LaunchRequestId
   Release.FlowId
   Sleep.{ Address FlowNode }
   Wake.Address
@@ -89,7 +92,6 @@ Operation
   Titled
   Submitted.PromptDeliveryResult
   Closed
-  Pruned
   Released
   Slept
   Woken.FlowId
@@ -100,7 +102,6 @@ Operation
            Unstarted
            HerdrRefused
            CodexRefused
-           BundleRefused
            UnknownFlow
            ClaimRefused
            NotAsleep
@@ -108,5 +109,6 @@ Operation
            NothingQueued
            AddressAwake
            AddressEnded
-           StartBundleMissing ] ]
+           ContextRefused.ContextRefusal
+           LeaveOutRefused.LeaveOutRefusal ] ]
 [ PaneLaunch.{ ComposedLaunch HerdrPaneBinding Option<FlowId> } ]

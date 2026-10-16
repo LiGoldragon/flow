@@ -18,7 +18,7 @@ protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e7
 rkyv.workspace = true
 
 [build-dependencies]
-ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "c2653dd82adbdb1f1f2f654405c6620e0d06fd58" }
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "07714b0171802787bea1eefe4caa2d826d9c4030" }
 
 [lints.rust]
 unsafe_code = "forbid"

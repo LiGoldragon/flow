@@ -5,9 +5,10 @@
 
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::RunningNexus;
-use crate::composition::{ComposesFreshSeat, ComposesLaunch, FreshSeat, RendersQueuedWork};
+use crate::composition::{ComposesLaunch, FreshSeat, RendersQueuedWork};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::operation::{Operation, Outcome};
+use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::launch::ChecksComposedLaunch;
 use crate::herdr::pane::PaneAgent;
 use crate::herdr::reservation::ChoosesNativeSession;
@@ -21,14 +22,14 @@ use crate::store::{
     RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 use crate::waking::{
-    AtStop, HoldsWakingMetaflows, KeptAtStop, SleepsAndWakesSeats, WakePlan, WakePolicy,
+    AtStop, FreshContext, HoldsWakingMetaflows, KeptAtStop, SleepsAndWakesSeats, WakePlan,
+    WakePolicy,
 };
 use flow_ethos::State;
-use sha2::{Digest, Sha256};
 use signal_flow::{
     Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
     HerdrRouteSelection, LaunchProfile, Layer, Metaflow, NativeLaunchBinding, NativeLaunchIntent,
-    OriginClue, PowerLevel, Request, Source,
+    OriginClue, PowerLevel, Request,
 };
 use std::fs;
 
@@ -412,19 +413,19 @@ fn the_context_size_against_the_refresh_threshold_chooses_resume_or_fresh() {
         .unwrap();
     assert_eq!(
         fixture.nexus.wake_plan(&asleep),
-        WakePlan::Fresh {
-            herdr_session_name: "fixture-session".into()
-        },
+        WakePlan::Fresh(FreshContext {
+            herdr_session_name: "fixture-session".into(),
+            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+            user_modules: vec!["operation-main-flow".into()],
+            leave_outs_option: None,
+        }),
         "too big to resume: it wakes fresh"
     );
 }
 
 #[test]
-fn a_fresh_wake_composes_the_topic_modules_and_the_queued_work() {
+fn a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work() {
     let fixture = NexusFixture::new();
-    let module = fixture.directory.path().join("modules/vision-flow.md");
-    fs::create_dir_all(module.parent().unwrap()).unwrap();
-    fs::write(&module, b"module bytes\n").unwrap();
     let queue = [
         Request::Order("first".into()),
         Request::Question("second".into()),
@@ -438,69 +439,48 @@ fn a_fresh_wake_composes_the_topic_modules_and_the_queued_work() {
         power_level: PowerLevel::Medium,
         effort: "medium".into(),
         herdr_session_name: "fixture-session".into(),
-        modules: vec![Source {
-            repository: "modules".into(),
-            hash: "unchecked".into(),
-            path: "vision-flow.md".into(),
-        }],
-        system_bundle: b"the launcher's spirit and intent\n".to_vec(),
+        system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+        user_modules: vec!["operation-main-flow".into(), "knowledge-flow".into()],
+        leave_outs_option: None,
         prompt: text.clone(),
     };
-    let profile = fixture.nexus.composer.fresh_profile(&seat).unwrap();
+    let profile = seat.fresh_profile();
     assert_eq!(profile.address, address(Layer::Secondary));
-    assert!(
-        profile
-            .instruction_prompt
-            .starts_with("You are the { Mind flow Secondary } metaflow;"),
-        "the metaflow line opens the first prompt"
-    );
-    assert!(profile.instruction_prompt.ends_with(&text));
-    assert_eq!(profile.launch_source_vector.len(), 1);
-    assert_eq!(
-        profile.launch_source_vector[0].source_path,
-        "modules/vision-flow.md"
-    );
-    assert_eq!(
-        profile.launch_source_vector[0].source_sha256,
-        format!("{:x}", Sha256::digest(b"module bytes\n"))
-    );
-    assert_eq!(
-        fs::read(&profile.system_prompt_bundle_file).unwrap(),
-        b"the launcher's spirit and intent\n",
-        "the system prompt is the Start bundle, byte for byte"
-    );
+    assert_eq!(profile.instruction_prompt, text);
+    assert_eq!(profile.user_modules, seat.user_modules);
     let composed = fixture.nexus.composer.compose(&profile).unwrap();
-    let prompt = composed.first_prompt_payload.first_prompt_text;
+    // The same full module text a Start of these identities carries, then
+    // the queued work as the brief.
+    let body = composed.first_prompt_payload.first_prompt_body;
+    assert!(body.starts_with("These are your skills, given here; do not reload them."));
+    assert!(body.contains("Main flow body.") && body.contains("Knowledge body."));
     assert!(
-        prompt.contains(
-            &module
-                .canonicalize()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
-        )
+        composed
+            .system_prompt
+            .system_prompt_text
+            .contains("Spirit body.")
     );
-    let first = prompt.find("Order.first").expect("first request");
-    let second = prompt.find("Question.second").expect("second request");
+    let first = body.find("Order.first").expect("first request");
+    let second = body.find("Question.second").expect("second request");
     assert!(first < second, "oldest first");
+    assert!(!body.contains("seat"));
 }
 
 #[test]
-fn an_asleep_codex_seat_without_a_resumable_session_wakes_fresh_in_its_session() {
+fn an_asleep_seat_no_launch_of_record_names_is_unplaceable() {
+    // A flow Flow holds with no launch of record (registered, not launched)
+    // names no context to wake its metaflow with.
     let fixture = NexusFixture::new();
     fixture.set_agents(vec![fixture.current_agent()]);
     fixture.register_with(FlowLifecycle::Active);
-    let plan = fixture.nexus.wake_plan(&metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["908786"],
-        vec![],
-    ));
     assert_eq!(
-        plan,
-        WakePlan::Fresh {
-            herdr_session_name: "messaging-build".into()
-        }
+        fixture.nexus.wake_plan(&metaflow(
+            Layer::Secondary,
+            State::Asleep,
+            vec!["908786"],
+            vec![],
+        )),
+        WakePlan::Unplaceable
     );
     assert_eq!(
         fixture
@@ -527,12 +507,10 @@ fn resumable_ended_by(
     fixture: &NexusFixture,
     end: impl FnOnce(&crate::store::FlowStore) -> bool,
 ) -> Resumable {
-    let bundle = fixture.directory.path().join("resumed-bundle.md");
-    fs::write(&bundle, b"resumed bundle\n").unwrap();
     let profile = LaunchProfile {
         launch_request_id: "resumed-request".into(),
-        launch_source_vector: vec![],
-        skill_name_vector: vec![],
+        system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+        user_modules: vec!["operation-main-flow".into()],
         address: signal_flow::Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
@@ -545,7 +523,7 @@ fn resumable_ended_by(
         flow_id_option: None,
         remembered_flow_vector: vec![],
         herdr_session_name: "fixture-session".into(),
-        system_prompt_bundle_file: bundle.to_string_lossy().into_owned(),
+        leave_outs_option: None,
         instruction_prompt: "fixture instruction".into(),
     };
     let session = fixture
@@ -553,7 +531,7 @@ fn resumable_ended_by(
         .herdr
         .reserved_native_session_id(&profile)
         .expect("a Claude launch has a Flow-chosen session");
-    // The launch that bound abc123, with its bundle copy.
+    // The launch that bound abc123.
     let composed = fixture.nexus.composer.compose(&profile).expect("composes");
     let origin = OriginClue {
         flow_id: "caller".into(),
@@ -575,7 +553,13 @@ fn resumable_ended_by(
                 harness_kind: HarnessKind::Claude,
                 model_name: profile.model_name.clone(),
                 effort: profile.effort.clone(),
-                skill_name_vector: vec![],
+                system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: composed
+                    .first_prompt_payload
+                    .prompt_part_vector
+                    .iter()
+                    .map(|part| part.prompt_sha256.clone())
+                    .collect(),
             })
             .unwrap()
     );
@@ -730,12 +714,12 @@ fn a_queued_order_resumes_the_sleeping_session_with_its_flow_id_and_the_whole_qu
     assert!(!fixture.nexus.waking.is_waking(&at), "the hold is released");
 
     let calls = fs::read_to_string(fixture.directory.path().join("herdr-calls.log")).unwrap();
-    let start = calls
-        .lines()
-        .find(|line| line.contains("agent start"))
-        .expect("the harness started again");
-    assert!(start.contains(&format!(" --resume {} ", seat.session)));
-    assert!(!start.contains("--session-id"));
+    // The composed system prompt spans lines, so the start's arguments are
+    // read from the whole log.
+    assert!(calls.contains("agent start"), "the harness started again");
+    assert!(calls.contains(&format!(" --resume {} ", seat.session)));
+    assert!(calls.contains("--system-prompt These are your skills"));
+    assert!(!calls.contains("--session-id"));
     assert!(
         calls
             .lines()
@@ -1815,9 +1799,12 @@ fn a_retired_seat_sleeps_its_metaflow_and_its_order_wakes_it_fresh() {
     fixture.nexus.store.seed_metaflow(retired.clone());
     assert_eq!(
         fixture.nexus.wake_plan(&retired),
-        WakePlan::Fresh {
-            herdr_session_name: "fixture-session".into()
-        },
+        WakePlan::Fresh(FreshContext {
+            herdr_session_name: "fixture-session".into(),
+            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+            user_modules: vec!["operation-main-flow".into()],
+            leave_outs_option: None,
+        }),
         "a retired session wakes fresh, never resumed"
     );
     let mut node = fixture.node();
@@ -1857,100 +1844,5 @@ fn a_nexus_start_puts_every_metaflow_left_awake_as_an_ended_flow_to_sleep() {
     assert_eq!(
         stored(&fixture, Layer::Tertiary).state,
         State::Awake("flow-0000000000000001".into())
-    );
-}
-
-/// A Start at an Address keeps the caller's bundle bytes, and the next fresh
-/// wake of that Address takes them as its system prompt.
-#[test]
-fn a_start_keeps_its_bundle_for_the_address_and_a_fresh_wake_reuses_it() {
-    use crate::Dispatches;
-    use crate::store::start_bundle::RecordsStartBundle;
-    let fixture = NexusFixture::new();
-    let bundle = fixture.directory.path().join("caller-bundle.md");
-    fs::write(&bundle, b"spirit\nintent\n").unwrap();
-    let profile = LaunchProfile {
-        launch_request_id: "start-bundle-request".into(),
-        launch_source_vector: vec![],
-        skill_name_vector: vec![],
-        address: address(Layer::Tertiary),
-        power_level: PowerLevel::Medium,
-        harness_kind: HarnessKind::Claude,
-        model_name: "claude-fixture".into(),
-        effort: "medium".into(),
-        flow_id_option: Some("1b8ac0".into()),
-        remembered_flow_vector: vec![],
-        herdr_session_name: "fixture-session".into(),
-        system_prompt_bundle_file: bundle.to_string_lossy().into_owned(),
-        instruction_prompt: "fixture instruction".into(),
-    };
-    let _ = fixture
-        .nexus
-        .dispatch(signal_flow::Query::Start(signal_flow::StartRequest {
-            launch_profile: profile,
-            origin_clue: OriginClue {
-                flow_id: "caller".into(),
-                session_id: "caller-session".into(),
-                turn_id: "caller-turn".into(),
-            },
-        }));
-    let kept = fixture
-        .nexus
-        .store
-        .start_bundle(&address(Layer::Tertiary))
-        .unwrap()
-        .expect("the Start kept the caller's bundle");
-    assert_eq!(
-        kept, b"spirit\nintent\n",
-        "the caller's bytes, without the Predecessor line"
-    );
-    let seat = FreshSeat {
-        address: address(Layer::Tertiary),
-        launch_request_id: "wake-0-2".into(),
-        model_name: "claude-fixture".into(),
-        harness_kind: HarnessKind::Claude,
-        power_level: PowerLevel::Medium,
-        effort: "medium".into(),
-        herdr_session_name: "fixture-session".into(),
-        modules: vec![],
-        system_bundle: kept.clone(),
-        prompt: "work".into(),
-    };
-    let woken = fixture.nexus.composer.fresh_profile(&seat).unwrap();
-    assert_eq!(fs::read(&woken.system_prompt_bundle_file).unwrap(), kept);
-    assert_eq!(woken.flow_id_option, None);
-}
-
-/// An Address no Start kept a bundle for is not woken fresh.
-#[test]
-fn a_fresh_wake_of_an_address_without_a_start_bundle_is_refused() {
-    let fixture = NexusFixture::new();
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Awake("abc123".into()),
-        vec![],
-        vec![],
-    ));
-    resumable_ended_by(&fixture, |store| {
-        store.record_active("abc123").unwrap() && store.record_retired("abc123").unwrap()
-    });
-    let mut retired = stored(&fixture, Layer::Secondary);
-    retired.queue.push(Request::Order("Carry on.".into()));
-    fixture.nexus.store.seed_metaflow(retired);
-    let at = address(Layer::Secondary);
-    assert_eq!(
-        crate::store::start_bundle::RecordsStartBundle::start_bundle(&fixture.nexus.store, &at)
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        fixture.nexus.perform(Operation::Wake(at.clone())),
-        Outcome::Failed(crate::generated::operation::Failed_Data::StartBundleMissing),
-        "no one-line fallback: the wake is refused"
-    );
-    assert_eq!(
-        stored(&fixture, Layer::Secondary).state,
-        State::Asleep,
-        "the seat stays asleep with its work queued"
     );
 }

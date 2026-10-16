@@ -14,7 +14,8 @@
 //! (`Operation::Wake`): the whole queue, oldest first, is handed to a seat in
 //! one prompt, by resuming the last flow's native session in a new pane when
 //! its context was under its layer's refresh threshold, or else by a fresh
-//! launch composed from the configured layer Model and topic modules. The
+//! launch from the configured layer Model and the module identities the
+//! metaflow's last launch named, composed again as any Start is. The
 //! requests leave the queue only in the write that records the started flow
 //! Awake, so a Nexus that dies mid-wake loses none: at its next start it
 //! wakes every Asleep metaflow still holding work. Requests that arrive while
@@ -35,16 +36,14 @@ use crate::AwaitsLaunchSettlement;
 use crate::RunningNexus;
 use crate::claude::MeasuresClaudeContext;
 use crate::codex::SelectsCodexEndpoint;
-use crate::composition::{
-    ComposesFreshSeat, FreshSeat, KeepsLaunchBundles, OpensLaunchComposer, RendersQueuedWork,
-    ResumesLaunch,
-};
+use crate::composition::{ComposesLaunch, CompositionError, FreshSeat, RendersQueuedWork};
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data, Sleep_Data, Title_Data,
 };
+use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::launch::{
     ObservesNativeLaunchBinding, ResumesNativeHerdrHarness, WaitsForPaneRest,
 };
@@ -56,14 +55,13 @@ use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::RecordsContextSize;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SleepsMetaflows;
-use crate::store::start_bundle::RecordsStartBundle;
 use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle,
 };
 use signal_flow::{
-    Address, AgentState, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding,
-    HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow, OriginClue, PowerLevel,
-    Request, Response, StartRequest,
+    Address, AgentState, ContextRefusal, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind,
+    HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow, OriginClue,
+    PowerLevel, Request, Response, StartRequest,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -314,11 +312,15 @@ pub enum WakePlan {
         node: Box<FlowNode>,
         profile: Box<LaunchProfile>,
     },
-    /// A new flow, launched from configuration.
-    Fresh { herdr_session_name: String },
-    /// Nothing names a Herdr session to wake the seat in.
+    /// A new flow, launched from configuration and the context the
+    /// metaflow's last launch named.
+    Fresh(FreshContext),
+    /// No launch of the metaflow names a Herdr session and a context to
+    /// wake it with.
     Unplaceable,
 }
+
+pub use crate::generated::starter::FreshContext;
 
 /// What a flow's Stop did to its seat.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,8 +391,10 @@ pub enum WakeRefusal {
     HerdrUnreadable,
     /// Nothing names a Herdr session to wake the seat in.
     Unplaceable,
-    /// The bundle copy the flow was launched with is gone.
-    BundleMissing,
+    /// The resumed flow's system prompt was not composed again.
+    ContextRefused(ContextRefusal),
+    /// The resumed flow's launch profile no longer composes.
+    NotComposed,
     /// No pane was opened for the resumed session.
     PaneNotOpened(Failed_Data),
     /// Herdr did not start the native session again in the new pane.
@@ -428,7 +432,8 @@ impl AnswersWakeRefusal for WakeRefusal {
             Self::SessionLive | Self::BindingUnread | Self::BindingDiffers => {
                 Failed_Data::ConflictingBinding
             }
-            Self::BundleMissing => Failed_Data::BundleRefused,
+            Self::ContextRefused(refusal) => Failed_Data::ContextRefused(refusal.clone()),
+            Self::NotComposed => Failed_Data::CompositionRefused,
             Self::PaneNotOpened(failure) | Self::FreshNotStarted(failure) => failure.clone(),
             Self::HerdrUnreadable
             | Self::Unplaceable
@@ -503,7 +508,7 @@ trait WakesInParts {
     fn start_fresh(
         &self,
         metaflow: &Metaflow,
-        herdr_session_name: String,
+        fresh: FreshContext,
         text: &str,
     ) -> Result<FlowId, Failed_Data>;
     /// Types text into a live flow's pane under its lease, as Flow's own
@@ -582,15 +587,13 @@ impl SleepsAndWakesSeats for RunningNexus {
                 profile: Box::new(profile.clone()),
             };
         }
-        let route_session = node.and_then(|node| match node.herdr_route_selection {
-            HerdrRouteSelection::Available(route) => Some(route.herdr_session_name),
-            HerdrRouteSelection::Unavailable => None,
-        });
-        match profile
-            .map(|profile| profile.herdr_session_name)
-            .or(route_session)
-        {
-            Some(herdr_session_name) => WakePlan::Fresh { herdr_session_name },
+        match profile {
+            Some(profile) => WakePlan::Fresh(FreshContext {
+                herdr_session_name: profile.herdr_session_name,
+                system_modules: profile.system_modules,
+                user_modules: profile.user_modules,
+                leave_outs_option: profile.leave_outs_option,
+            }),
             None => WakePlan::Unplaceable,
         }
     }
@@ -746,8 +749,8 @@ impl WakesInParts for RunningNexus {
             if let WakePlan::Resume { profile, .. } = &plan {
                 sessions.push(profile.herdr_session_name.clone());
             }
-            if let WakePlan::Fresh { herdr_session_name } = &plan {
-                sessions.push(herdr_session_name.clone());
+            if let WakePlan::Fresh(fresh) = &plan {
+                sessions.push(fresh.herdr_session_name.clone());
             }
             if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection {
                 sessions.push(route.herdr_session_name.clone());
@@ -762,8 +765,8 @@ impl WakesInParts for RunningNexus {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 self.resume(*node, *profile, &text)?
             }
-            WakePlan::Fresh { herdr_session_name } => self
-                .start_fresh(&metaflow, herdr_session_name, &text)
+            WakePlan::Fresh(fresh) => self
+                .start_fresh(&metaflow, fresh, &text)
                 .map_err(WakeRefusal::FreshNotStarted)?,
             WakePlan::Unplaceable => return Err(WakeRefusal::Unplaceable),
         };
@@ -819,11 +822,21 @@ impl WakesInParts for RunningNexus {
         profile: LaunchProfile,
         text: &str,
     ) -> Result<FlowId, WakeRefusal> {
-        // The bundle copy the flow was launched with is kept while it sleeps.
-        if !self.composer.launch_bundles().file_for(&profile).is_file() {
-            return Err(WakeRefusal::BundleMissing);
-        }
-        let launch = profile.resumption(text);
+        // The system prompt is composed again from the module identities
+        // the flow was launched with; nothing of it was kept on disk.
+        let default = self
+            .store
+            .default_leave_outs(&profile.address)
+            .unwrap_or_default();
+        let launch = match self.composer.resumption(&profile, default, text) {
+            Ok(launch) => launch,
+            Err(CompositionError::Context(refusal)) => {
+                return Err(WakeRefusal::ContextRefused(refusal));
+            }
+            Err(CompositionError::InvalidProfileField(_) | CompositionError::LeaveOut(_)) => {
+                return Err(WakeRefusal::NotComposed);
+            }
+        };
         let pane = match self.perform(Operation::Open(launch.clone())) {
             Outcome::Opened(pane) => pane,
             Outcome::Failed(failure) => return Err(WakeRefusal::PaneNotOpened(failure)),
@@ -937,15 +950,10 @@ impl WakesInParts for RunningNexus {
     fn start_fresh(
         &self,
         metaflow: &Metaflow,
-        herdr_session_name: String,
+        fresh: FreshContext,
         text: &str,
     ) -> Result<FlowId, Failed_Data> {
         let address = &metaflow.address;
-        let system_bundle = match self.store.start_bundle(address) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Err(Failed_Data::StartBundleMissing),
-            Err(_) => return Err(Failed_Data::StoreRefused),
-        };
         let snapshot = match self.store.configuration_snapshot() {
             Ok(Some(snapshot)) => snapshot,
             _ => return Err(Failed_Data::StoreRefused),
@@ -976,20 +984,13 @@ impl WakesInParts for RunningNexus {
             harness_kind,
             power_level: Self::power_of(&address.layer),
             effort: Self::WAKE_EFFORT.into(),
-            herdr_session_name,
-            modules: snapshot
-                .modules
-                .iter()
-                .filter(|module| module.key.topic == address.topic)
-                .map(|module| module.source.clone())
-                .collect(),
-            system_bundle,
+            herdr_session_name: fresh.herdr_session_name,
+            system_modules: fresh.system_modules,
+            user_modules: fresh.user_modules,
+            leave_outs_option: fresh.leave_outs_option,
             prompt: text.to_owned(),
         };
-        let profile = self
-            .composer
-            .fresh_profile(&seat)
-            .map_err(|_| Failed_Data::CompositionRefused)?;
+        let profile = seat.fresh_profile();
         let request = StartRequest {
             launch_profile: profile,
             origin_clue: OriginClue {

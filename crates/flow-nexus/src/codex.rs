@@ -6,16 +6,13 @@ use crate::composition::ValidatesComposedPrompt;
 use crate::store::{CodexEndpointConfiguration, RuntimeConfiguration};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
-use sha2::Sha256;
 use signal_flow::{
-    ComposedLaunch, HarnessKind, NativeLaunchBinding, NativeSkillSelection, OriginClue,
-    PromptDeliveryIntent, PromptDeliveryResult,
+    ComposedLaunch, HarnessKind, OriginClue, PromptDeliveryIntent, PromptDeliveryResult,
 };
 use std::{
     collections::BTreeSet,
-    fs,
     io::{BufRead, BufReader, Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -159,21 +156,13 @@ pub trait ConsumesResetCredit {
     ) -> Result<meta_signal_flow::ResetOutcome, CodexAdapterUnavailable>;
 }
 
-/// Resolves skills through the native app-server catalog only after proving
-/// that the exact Herdr-bound thread exists and still has no turns.
-pub trait ResolvesBoundCodexSkills {
-    fn resolve_bound_codex_skills(
-        &self,
-        launch: &ComposedLaunch,
-        binding: &NativeLaunchBinding,
-    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable>;
-}
-
-/// Submits one typed skill vector and the composed text as one first native
-/// turn. Durable one-shot gating belongs to the caller; this never creates,
-/// resumes, or replaces the Herdr-owned thread.
-pub trait SubmitsBoundCodexFirstTurn {
-    fn submit_bound_codex_first_turn(
+/// Submits the part of the first USER message the durable intent last
+/// counted as submitted, as one native turn of one text item. The first part
+/// goes only to a thread with no turn yet; a later part follows the turn the
+/// transcript showed completed. Durable one-shot gating belongs to the
+/// caller; this never creates, resumes, or replaces the Herdr-owned thread.
+pub trait SubmitsBoundCodexPart {
+    fn submit_bound_codex_part(
         &self,
         launch: &ComposedLaunch,
         durable_intent: &PromptDeliveryIntent,
@@ -494,6 +483,22 @@ impl ExchangesCodexRpc for ProxySession {
 }
 
 trait WritesCodexProxy {
+    /// The masked payload length of a client WebSocket frame (RFC 6455
+    /// 5.2): seven bits, else 126 and sixteen bits, else 127 and sixty-four
+    /// bits, so one text frame carries a whole part.
+    fn masked_length(length: usize) -> Vec<u8> {
+        if length < 126 {
+            vec![0x80 | length as u8]
+        } else if let Ok(short) = u16::try_from(length) {
+            let mut bytes = vec![0x80 | 126];
+            bytes.extend_from_slice(&short.to_be_bytes());
+            bytes
+        } else {
+            let mut bytes = vec![0x80 | 127];
+            bytes.extend_from_slice(&(length as u64).to_be_bytes());
+            bytes
+        }
+    }
     fn write_json(&mut self, value: serde_json::Value) -> Result<(), CodexAdapterUnavailable>;
 }
 
@@ -501,18 +506,8 @@ impl WritesCodexProxy for ProxySession {
     fn write_json(&mut self, value: serde_json::Value) -> Result<(), CodexAdapterUnavailable> {
         let payload = serde_json::to_vec(&value)
             .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
-        if payload.len() > u16::MAX as usize {
-            return Err(CodexAdapterUnavailable::Protocol(
-                "outbound WebSocket message exceeds limit".into(),
-            ));
-        }
         let mut frame = vec![0x81];
-        if payload.len() < 126 {
-            frame.push(0x80 | payload.len() as u8);
-        } else {
-            frame.push(0x80 | 126);
-            frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-        }
+        frame.extend(Self::masked_length(payload.len()));
         let mut mask = [0; 4];
         std::fs::File::open("/dev/urandom")
             .and_then(|mut source| source.read_exact(&mut mask))
@@ -575,19 +570,12 @@ trait OpensBoundCodexSession {
         request_id: u64,
         native_session_id: &str,
     ) -> Result<(), CodexAdapterUnavailable>;
-    fn native_skill_catalog(
-        &self,
-        session: &mut ProxySession,
-        request_id: u64,
-    ) -> Result<Vec<serde_json::Value>, CodexAdapterUnavailable>;
-    fn resolve_catalog_skills(
-        requested: &[String],
-        catalog: &[serde_json::Value],
-    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable>;
+    /// The `turn/start` of the part the intent last counted as submitted:
+    /// its text as the one input item.
     fn bound_turn_params(
         launch: &ComposedLaunch,
         intent: &PromptDeliveryIntent,
-    ) -> serde_json::Value;
+    ) -> Option<serde_json::Value>;
 }
 
 impl OpensBoundCodexSession for CodexAdapter {
@@ -651,221 +639,67 @@ impl OpensBoundCodexSession for CodexAdapter {
         Ok(())
     }
 
-    fn native_skill_catalog(
-        &self,
-        session: &mut ProxySession,
-        request_id: u64,
-    ) -> Result<Vec<serde_json::Value>, CodexAdapterUnavailable> {
-        let workspace = self.workspace_root.canonicalize().map_err(|error| {
-            CodexAdapterUnavailable::Protocol(format!(
-                "configured Codex workspace is unavailable: {error}"
-            ))
-        })?;
-        if !workspace.is_dir() || workspace != self.workspace_root {
-            return Err(CodexAdapterUnavailable::Protocol(
-                "configured Codex workspace must be an exact canonical directory".into(),
-            ));
-        }
-        let reply = session.request(
-            request_id,
-            "skills/list",
-            serde_json::json!({ "cwds": [workspace] }),
-            self.timeout,
-        )?;
-        let available = reply
-            .get("skills")
-            .or_else(|| reply.pointer("/data/skills"))
-            .or_else(|| reply.pointer("/data/items"))
-            .or_else(|| reply.get("data"))
-            .or_else(|| reply.pointer("/result/skills"))
-            .unwrap_or(&reply)
-            .as_array()
-            .ok_or_else(|| {
-                CodexAdapterUnavailable::Protocol("skills/list did not return an array".into())
-            })?;
-        let mut flattened = Vec::new();
-        for item in available {
-            if let Some(skills) = item.get("skills").and_then(serde_json::Value::as_array) {
-                flattened.extend(skills.iter().cloned());
-            } else if let Some(skill) = item.get("skill") {
-                flattened.push(skill.clone());
-            } else {
-                flattened.push(item.clone());
-            }
-        }
-        Ok(flattened)
-    }
-
-    fn resolve_catalog_skills(
-        requested: &[String],
-        catalog: &[serde_json::Value],
-    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable> {
-        requested
-            .iter()
-            .map(|name| {
-                let matches = catalog
-                    .iter()
-                    .filter(|skill| {
-                        skill.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str())
-                    })
-                    .collect::<Vec<_>>();
-                if matches.len() != 1 {
-                    return Err(CodexAdapterUnavailable::Protocol(format!(
-                        "native Codex catalog did not resolve {name} exactly once"
-                    )));
-                }
-                let path = matches[0]
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .map(Path::new)
-                    .ok_or_else(|| {
-                        CodexAdapterUnavailable::Protocol(format!(
-                            "native Codex skill {name} has no path"
-                        ))
-                    })?;
-                let metadata = fs::symlink_metadata(path).map_err(|error| {
-                    CodexAdapterUnavailable::Protocol(format!(
-                        "native Codex skill {name} is unreadable: {error}"
-                    ))
-                })?;
-                if !path.is_absolute() || metadata.file_type().is_symlink() || !metadata.is_file() {
-                    return Err(CodexAdapterUnavailable::Protocol(format!(
-                        "native Codex skill {name} is not an absolute regular source"
-                    )));
-                }
-                let canonical = path.canonicalize().map_err(|error| {
-                    CodexAdapterUnavailable::Protocol(format!(
-                        "native Codex skill {name} cannot be canonicalized: {error}"
-                    ))
-                })?;
-                if canonical != path {
-                    return Err(CodexAdapterUnavailable::Protocol(format!(
-                        "native Codex skill {name} path is not canonical"
-                    )));
-                }
-                let source = fs::read(path).map_err(|error| {
-                    CodexAdapterUnavailable::Protocol(format!(
-                        "native Codex skill {name} is unreadable: {error}"
-                    ))
-                })?;
-                Ok(NativeSkillSelection {
-                    skill_name: name.clone(),
-                    native_skill_path: path.to_string_lossy().into_owned(),
-                    native_skill_sha256: format!("{:x}", Sha256::digest(source)),
-                })
-            })
-            .collect()
-    }
-
     fn bound_turn_params(
         launch: &ComposedLaunch,
         intent: &PromptDeliveryIntent,
-    ) -> serde_json::Value {
-        let mut input = intent
-            .native_skill_selection_vector
-            .iter()
-            .map(|skill| {
-                serde_json::json!({
-                    "type": "skill",
-                    "name": skill.skill_name,
-                    "path": skill.native_skill_path
-                })
-            })
-            .collect::<Vec<_>>();
-        input.push(serde_json::json!({
-            "type": "text",
-            "text": launch.first_prompt_payload.first_prompt_text,
-            "text_elements": []
-        }));
-        serde_json::json!({
+    ) -> Option<serde_json::Value> {
+        let index = usize::try_from(intent.parts_submitted.checked_sub(1)?).ok()?;
+        let part = launch.first_prompt_payload.prompt_part_vector.get(index)?;
+        Some(serde_json::json!({
             "threadId": intent.native_session_id,
             "effort": intent.effort,
             "model": intent.model_name,
-            "input": input,
+            "input": [{
+                "type": "text",
+                "text": part.prompt_part_text,
+                "text_elements": []
+            }],
             "turnTrigger": "flow-nexus"
-        })
+        }))
     }
 }
 
-impl ResolvesBoundCodexSkills for CodexAdapter {
-    fn resolve_bound_codex_skills(
-        &self,
-        launch: &ComposedLaunch,
-        binding: &NativeLaunchBinding,
-    ) -> Result<Vec<NativeSkillSelection>, CodexAdapterUnavailable> {
-        if launch.launch_profile.harness_kind != HarnessKind::Codex
-            || binding.harness_kind != HarnessKind::Codex
-            || binding.launch_request_id != launch.launch_profile.launch_request_id
-            || self.model != launch.launch_profile.model_name
-        {
-            return Err(CodexAdapterUnavailable::Protocol(
-                "Codex skill resolution profile does not match its native binding".into(),
-            ));
-        }
-        let mut session = self.initialize_bound_session()?;
-        let result = (|| {
-            self.require_empty_bound_thread(&mut session, 2, &binding.native_session_id)?;
-            let catalog = self.native_skill_catalog(&mut session, 3)?;
-            Self::resolve_catalog_skills(&launch.launch_profile.skill_name_vector, &catalog)
-        })();
-        session.stop_proxy();
-        result
-    }
-}
-
-impl SubmitsBoundCodexFirstTurn for CodexAdapter {
-    fn submit_bound_codex_first_turn(
+impl SubmitsBoundCodexPart for CodexAdapter {
+    fn submit_bound_codex_part(
         &self,
         launch: &ComposedLaunch,
         intent: &PromptDeliveryIntent,
     ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable> {
+        let part_hashes = launch
+            .first_prompt_payload
+            .prompt_part_vector
+            .iter()
+            .map(|part| part.prompt_sha256.clone())
+            .collect::<Vec<_>>();
+        let params = Self::bound_turn_params(launch, intent);
         if !launch.has_canonical_first_prompt()
             || launch.launch_profile.harness_kind != HarnessKind::Codex
             || intent.harness_kind != HarnessKind::Codex
             || intent.launch_request_id != launch.launch_profile.launch_request_id
             || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
+            || intent.prompt_sha256_vector != part_hashes
             || intent.model_name != launch.launch_profile.model_name
             || intent.effort != launch.launch_profile.effort
             || self.model != intent.model_name
         {
             return Err(CodexAdapterUnavailable::Protocol(
-                "Codex first-turn intent does not match the composed launch".into(),
+                "Codex part intent does not match the composed launch".into(),
             ));
         }
-        let expected_names = intent
-            .native_skill_selection_vector
-            .iter()
-            .map(|skill| skill.skill_name.as_str())
-            .collect::<Vec<_>>();
-        if expected_names
-            != launch
-                .launch_profile
-                .skill_name_vector
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-        {
+        let Some(params) = params else {
             return Err(CodexAdapterUnavailable::Protocol(
-                "Codex first-turn skill order differs from the launch profile".into(),
+                "no part is counted as submitted".into(),
             ));
-        }
+        };
         let mut session = self.initialize_bound_session()?;
         let result = (|| {
-            self.require_empty_bound_thread(&mut session, 2, &intent.native_session_id)?;
-            let catalog = self.native_skill_catalog(&mut session, 3)?;
-            let selected =
-                Self::resolve_catalog_skills(&launch.launch_profile.skill_name_vector, &catalog)?;
-            if selected != intent.native_skill_selection_vector {
-                return Err(CodexAdapterUnavailable::Protocol(
-                    "native Codex skill selection changed after durable intent".into(),
-                ));
+            // The first part opens the thread's first turn. A later part
+            // follows the turn the transcript showed completed; the thread
+            // is not read again, since its turns now carry whole parts.
+            if intent.parts_submitted == 1 {
+                self.require_empty_bound_thread(&mut session, 2, &intent.native_session_id)?;
             }
-            session.request(
-                4,
-                "turn/start",
-                Self::bound_turn_params(launch, intent),
-                self.timeout,
-            )?;
+            session.request(3, "turn/start", params, self.timeout)?;
             Ok(PromptDeliveryResult::Ambiguous(intent.clone()))
         })();
         session.stop_proxy();
@@ -1109,7 +943,7 @@ impl ConsumesResetCredit for CodexAdapter {
 mod tests {
     use super::*;
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-    use std::{fs, sync::Mutex};
+    use std::sync::Mutex;
 
     static FAKE_PROXY_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1249,8 +1083,8 @@ mod tests {
         let launch = ComposedLaunch {
             launch_profile: signal_flow::LaunchProfile {
                 launch_request_id: "launch-malformed".into(),
-                launch_source_vector: vec![],
-                skill_name_vector: vec![],
+                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+                user_modules: vec![],
                 address: signal_flow::Address {
                     aspect: signal_flow::Aspect::Field,
                     topic: "flow".into(),
@@ -1263,18 +1097,27 @@ mod tests {
                 flow_id_option: None,
                 remembered_flow_vector: vec![],
                 herdr_session_name: "session".into(),
-                system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
+                leave_outs_option: None,
                 instruction_prompt: "body".into(),
+            },
+            system_prompt: signal_flow::SystemPrompt {
+                system_prompt_text: String::new(),
+                system_prompt_sha256:
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
             },
             first_prompt_payload: signal_flow::FirstPromptPayload {
                 first_prompt_body: "body".into(),
                 prompt_sha256: prompt_sha256.into(),
-                first_prompt_text: "body with a malformed footer".into(),
+                prompt_part_vector: vec![signal_flow::PromptPart {
+                    prompt_part_text: "body with a malformed footer".into(),
+                    prompt_sha256: prompt_sha256.into(),
+                }],
             },
             target_receipt_request: signal_flow::TargetReceiptRequest {
                 launch_request_id: "launch-malformed".into(),
                 prompt_sha256: prompt_sha256.into(),
             },
+            leave_outs: Vec::new(),
         };
         let intent = PromptDeliveryIntent {
             launch_request_id: "launch-malformed".into(),
@@ -1284,7 +1127,10 @@ mod tests {
             harness_kind: HarnessKind::Codex,
             model_name: "gpt-5.6".into(),
             effort: "medium".into(),
-            native_skill_selection_vector: vec![],
+            prompt_sha256_vector: vec![prompt_sha256.into()],
+            parts_submitted: 1,
+            stops_reported: 0,
+            leave_outs: Vec::new(),
             herdr_pane_binding: pane,
             native_transcript_boundary: signal_flow::NativeTranscriptBoundary::Absent(
                 signal_flow::NativeTranscriptAbsence {
@@ -1315,82 +1161,60 @@ mod tests {
     }
 
     #[test]
-    fn bound_first_turn_is_one_text_beside_its_typed_skills() {
-        let (mut launch, mut intent) = malformed_bound_launch();
-        launch.first_prompt_payload.first_prompt_text =
-            "$operation-main-flow\n$spirit\n\nbody".into();
-        intent.native_skill_selection_vector = vec![NativeSkillSelection {
-            skill_name: "spirit".into(),
-            native_skill_path: "/skills/spirit/SKILL.md".into(),
-            native_skill_sha256: "0".repeat(64),
-        }];
-        let params = CodexAdapter::bound_turn_params(&launch, &intent);
+    fn a_codex_part_is_one_text_item_and_nothing_else() {
+        use crate::composition::ComposesLaunch;
+        use crate::composition::tests::{fixture_composer, fixture_profile};
+        let mut profile = fixture_profile();
+        profile.harness_kind = HarnessKind::Codex;
+        let launch = fixture_composer().compose(&profile).unwrap();
+        let (_, mut intent) = malformed_bound_launch();
+        intent.prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
+        intent.prompt_sha256_vector = vec![
+            launch.first_prompt_payload.prompt_part_vector[0]
+                .prompt_sha256
+                .clone(),
+        ];
+        let params = CodexAdapter::bound_turn_params(&launch, &intent).unwrap();
         let input = params["input"].as_array().unwrap();
-        assert_eq!(input.len(), 2);
-        assert_eq!(input[0]["type"], "skill");
-        assert_eq!(input[0]["name"], "spirit");
-        let texts = input
-            .iter()
-            .filter(|item| item["type"] == "text")
-            .collect::<Vec<_>>();
-        assert_eq!(texts.len(), 1);
-        assert_eq!(texts[0]["text"], "$operation-main-flow\n$spirit\n\nbody");
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "text");
+        assert_eq!(
+            input[0]["text"],
+            launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text
+        );
+        let text = input[0]["text"].as_str().unwrap();
+        assert!(text.starts_with("These are your skills, given here; do not reload them."));
+        assert!(
+            !text.contains("Spirit body."),
+            "system text stays out of the USER turn"
+        );
+        assert!(!input.iter().any(|item| item["type"] == "skill"));
+        intent.parts_submitted = 0;
+        assert!(CodexAdapter::bound_turn_params(&launch, &intent).is_none());
     }
 
     #[test]
-    fn codex_main_flow_first_text_block_keeps_system_bundle_out_of_user_turn() {
-        use crate::composition::{
-            ComposesLaunch, KeepsLaunchBundles, LaunchBundles, LaunchComposer, OpensLaunchComposer,
-        };
-        let root = tempfile::tempdir().unwrap();
-        let bundle = root.path().join("flow-system-prompt.md");
-        let system_bytes = b"# Main-flow mode\n\nYou are a main Flow.\n";
-        fs::write(&bundle, system_bytes).unwrap();
-        let (malformed, mut intent) = malformed_bound_launch();
-        let mut profile = malformed.launch_profile;
-        profile.skill_name_vector = vec!["operation-main-flow".into(), "knowledge-flow".into()];
-        profile.system_prompt_bundle_file = bundle.to_string_lossy().into_owned();
-        let bundles = LaunchBundles::at(root.path().join("launch-bundles"));
-        let launch = LaunchComposer::at(root.path(), bundles.clone())
-            .compose(&profile)
-            .unwrap();
-        let per_launch_system_file = bundles.file_for(&profile);
-        assert_eq!(fs::read(&per_launch_system_file).unwrap(), system_bytes);
-
-        intent.prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
-        intent.native_skill_selection_vector = vec![
-            NativeSkillSelection {
-                skill_name: "operation-main-flow".into(),
-                native_skill_path: "/skills/operation-main-flow/SKILL.md".into(),
-                native_skill_sha256: "0".repeat(64),
-            },
-            NativeSkillSelection {
-                skill_name: "knowledge-flow".into(),
-                native_skill_path: "/skills/knowledge-flow/SKILL.md".into(),
-                native_skill_sha256: "1".repeat(64),
-            },
-        ];
-        let params = CodexAdapter::bound_turn_params(&launch, &intent);
-        let input = params["input"].as_array().unwrap();
-        assert_eq!(input.len(), 3);
-        assert_eq!(input[0]["type"], "skill");
-        assert_eq!(input[0]["name"], "operation-main-flow");
-        assert_eq!(input[1]["type"], "skill");
-        assert_eq!(input[1]["name"], "knowledge-flow");
-        let first_text = input[2]["text"].as_str().unwrap();
-        assert_eq!(first_text, launch.first_prompt_payload.first_prompt_text);
-        assert!(first_text.starts_with("$operation-main-flow\n$knowledge-flow\n\n# Flow launch\n"));
-        assert!(!first_text.contains("# Main-flow mode"));
-        assert!(!first_text.contains("You are a main Flow."));
-        assert!(!first_text.contains(per_launch_system_file.to_str().unwrap()));
-        assert!(!first_text.contains("System prompt: read"));
+    fn an_outbound_frame_past_sixty_five_kilobytes_takes_the_sixty_four_bit_length() {
+        assert_eq!(ProxySession::masked_length(125), vec![0x80 | 125]);
+        assert_eq!(ProxySession::masked_length(126), vec![0x80 | 126, 0, 126]);
+        assert_eq!(
+            ProxySession::masked_length(65_535),
+            vec![0x80 | 126, 0xff, 0xff]
+        );
+        let long = ProxySession::masked_length(1_048_576);
+        assert_eq!(long[0], 0x80 | 127);
+        assert_eq!(
+            u64::from_be_bytes(long[1..9].try_into().unwrap()),
+            1_048_576
+        );
+        assert_eq!(long.len(), 9);
     }
 
     #[test]
     fn malformed_full_prompt_is_rejected_before_codex_proxy_open() {
         let (launch, intent) = malformed_bound_launch();
         assert!(matches!(
-            adapter().submit_bound_codex_first_turn(&launch, &intent),
+            adapter().submit_bound_codex_part(&launch, &intent),
             Err(CodexAdapterUnavailable::Protocol(detail))
                 if detail.contains("does not match the composed launch")
         ));

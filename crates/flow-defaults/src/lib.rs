@@ -93,7 +93,6 @@ impl ReadsAnchors for DefaultConfiguration {
 pub trait LaysOutDefaults {
     const STATE_DIRECTORY: &str = ".local/state/flow";
     const STORE_FILE: &str = "flow.sema";
-    const LAUNCH_BUNDLE_DIRECTORY: &str = "launch-bundles";
     const SOCKET_DIRECTORY: &str = "flow";
     const ORDINARY_SOCKET: &str = "flow.sock";
     const META_SOCKET: &str = "flow-meta.sock";
@@ -111,12 +110,6 @@ pub trait LaysOutDefaults {
 
     fn state_directory(&self) -> PathBuf {
         self.home().join(Self::STATE_DIRECTORY)
-    }
-
-    /// Where the Nexus writes each launch's own copy of the system-prompt
-    /// bundle.
-    fn launch_bundle_directory(&self) -> PathBuf {
-        self.state_directory().join(Self::LAUNCH_BUNDLE_DIRECTORY)
     }
 
     fn store_path(&self) -> PathBuf {

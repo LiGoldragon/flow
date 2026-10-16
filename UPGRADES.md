@@ -1,3 +1,80 @@
+# Flow 0.35.0
+
+Wire change: signal-flow 17.0.0, meta-signal-flow 20.0.0. Store change:
+launch attempts written before 0.35.0 are set aside as `BeforeModules`.
+
+- **A Start names its context by module identity, and nothing else.**
+  `LaunchProfile` carries `SystemModules` and `UserModules`; there is no
+  source path, skill name or system-prompt bundle file. A Start datom reads
+  `Start.{ { id [ spirit-core intent-flow ] [ operation-main-flow ] { Field
+  flow Quaternary } UltraLow Claude haiku medium None [] session None
+  «brief» } { origin session turn } }`. The `flow` CLI takes that one datom; its
+  `--system-modules` flag and its Curriculum `ResolveSkills` call are gone.
+- **Flow has Curriculum compose the context.** At Start (and at a fresh
+  wake and a resume) the Nexus sends `ComposeStartup.{ CallerMetaflow Target
+  SystemModules UserModules }` to the Curriculum Nexus at
+  `$XDG_RUNTIME_DIR/curriculum/curriculum.sock` (schema
+  `crates/flow-nexus/ethos/curriculum.ethos`, Curriculum candidate
+  925a55ca), and verifies the answer before any of it reaches a prompt: both
+  payload SHA-256s, every requested identity present at its placement, and
+  each text exactly the rendering of its modules, each module's slice at its
+  rendered SHA-256. A refusal answers `StartRejected.ContextRefused.<why>`.
+  Nothing composed is written to disk: the per-launch bundle copies and
+  their directory are gone, and so is the Prune operation.
+- **The system prompt travels as one argument.** Claude gets
+  `--system-prompt <text>`; Codex gets `-c instructions=<text>`. A system
+  prompt past 131071 bytes refuses the Start as `SystemTooLarge`.
+- **The first USER message is the modules, then the brief, once.** No
+  slash command, no Skill-tool instruction, no Codex typed skill item. A
+  Claude part is typed through Herdr's socket API (`agent.prompt`, one JSON
+  request line of at most 1 MiB), never as a process argument; a Codex part
+  is one text item of `turn/start` (at most 1048576 characters), sent in one
+  WebSocket frame whose length may take the 64-bit form.
+- **A message too large for one part goes in parts.** It is split where
+  modules begin; each part opens `Startup message, part k of n.` and every
+  part but the last tells the flow to wait for the last; the brief is in the
+  last part. The next part is sent once the flow answered the one before
+  (Claude: a Stop reported after it and Herdr showing the pane at rest;
+  Codex: the turn completed), recorded submitted before it is typed, never
+  typed twice. A module that cannot fit one part refuses as
+  `ModuleTooLarge`.
+- **The receipt is every part, then the first answer.** Each part is seen
+  in order as a user turn (Claude's pasted-content wrapper is taken off),
+  then the flow's first answer at the intended model and effort. The
+  durable intent holds every part's SHA-256 and how many were submitted.
+- **Started names the pane.** `Launched` carries the flow's
+  `HerdrRouteSelection` (session, agent, pane, terminal), read from the
+  flow's row when the reply is made; the outcome row keeps its shape.
+- **A fresh wake composes the last launch's identities.** A wake that does
+  not resume launches with the module identities and leave-outs the
+  metaflow's last launch named, its system prompt composed again; a
+  metaflow with no launch of record is `Unplaceable`. This replaces 0.34.6's
+  kept Start bundle: `flow_nexus_start_bundles` stays registered so a store
+  holding its rows opens, and is no longer read or written;
+  `Failed(StartBundleMissing)` is gone.
+  `Configure.Module` is gone from the meta socket; stored module rows are
+  kept unread.
+- **A Start can leave parts of its harness start out.** `LaunchProfile`
+  carries `Option<LeaveOuts>`; `Configure.LeaveOut.{ Address LeaveOuts }`
+  names a metaflow's default, which a Start naming its own replaces. Each
+  `LeaveOut` becomes the harness's own switch: Claude `--disallowedTools`
+  (Agent, Read/Edit/Write, Workflow, ScheduleWakeup, ReportFindings,
+  ListAgents, WebFetch/WebSearch, the deferred tools, Skill),
+  `--disable-slash-commands`, `--strict-mcp-config`, `--setting-sources
+  project`, an exported `ENABLE_CLAUDEAI_MCP_SERVERS=false` or
+  `CLAUDE_CODE_DISABLE_{EXPLORE_PLAN_AGENTS,WORKFLOWS,CRON,BUNDLED_SKILLS,CLAUDE_MDS,GIT_INSTRUCTIONS}=1`,
+  and empty attribution in the flag settings; Codex `-c` overrides
+  (`skills.include_instructions`, `project_doc_max_bytes`,
+  `include_collaboration_mode_instructions`, `include_environment_context`,
+  `include_permissions_instructions`, `developer_instructions`). Leaving out
+  `ToolSearch` or `BashTool`, `SkillTool` or `BundledSkills` with Workflow
+  kept, or a part of the other harness answers
+  `StartRejected.LeaveOutRefused.<why>`. A Claude receipt is refused when
+  the session uses a tool its leave-outs removed or shows a skill listing
+  with the Skill tool left out.
+- ethos-zero is pinned at 07714b0 (17.0.0); the starter's new types and its
+  input-free traits are generated from `crates/flow-nexus/ethos/starter.ethos`.
+
 # Flow 0.34.6
 
 No wire change. The store gains the `flow_nexus_start_bundles` table; a

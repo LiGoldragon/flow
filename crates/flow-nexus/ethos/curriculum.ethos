@@ -1,0 +1,60 @@
+; ID-only in-memory composition. No caller paths, source bodies or file projection.
+Library
+[]
+[ ModuleIdentity.String
+  RepositoryName.String
+  SourceRevision.String
+  SourceRoot.String
+  SourceRelativePath.String
+  ModuleType.String
+  ModuleSubject.String
+  DeclaredPlacement.String
+  SourceSha256.String
+  BodySha256.String
+  RenderedSha256.String
+  Target.[ Claude Codex Pi OpenCode ]
+  CallerMetaflow.{ String String String }
+  StartupPlacement.[ System User ]
+  SystemModules.Vector<ModuleIdentity>
+  UserModules.Vector<ModuleIdentity>
+  SystemText.String
+  UserText.String
+  SystemPayloadSha256.String
+  UserPayloadSha256.String
+  StartupSelection.{ CallerMetaflow Target SystemModules UserModules }
+  ContextProvenance.{ ModuleIdentity RepositoryName SourceRevision SourceRelativePath SourceSha256 BodySha256 RenderedSha256 StartupPlacement Integer }
+  StartupComposition.{ SystemText UserText SystemPayloadSha256 UserPayloadSha256 Vector<ContextProvenance> }
+  ResolvedModule.{ ModuleIdentity RepositoryName SourceRevision SourceRoot SourceRelativePath ModuleType ModuleSubject DeclaredPlacement SourceSha256 BodySha256 String Vector<String> }
+  RoleName.String
+  ModelId.String
+  DescriptionModule.ModuleIdentity
+  ContextModules.Vector<ModuleIdentity>
+  DescriptionText.String
+  ContextText.String
+  DescriptionPayloadSha256.String
+  ContextPayloadSha256.String
+  Permission.[ Restricted Unrestricted ]
+  Effort.[ Low Medium High Xhigh ]
+  Surface.[ ClaudeAgent CodexAgent PiAgent ]
+  RoleTools.[ Inherit Explicit.Vector<String> ]
+  RoleCallers.[ Any Only.Vector<CallerMetaflow> ]
+  RoleDefinition.{ RoleName Surface ModelId Effort Permission DescriptionModule ContextModules RoleTools RoleCallers }
+  Roles.{ Vector<RoleDefinition> }
+  RolesDocument.[ Roles.Roles ]
+  RoleSelection.{ RoleName Surface }
+  RoleComposition.{ RoleName Surface ModelId Effort Permission DescriptionText ContextText RoleTools RoleCallers Vector<ContextProvenance> DescriptionPayloadSha256 ContextPayloadSha256 }
+  CliRequest.[ ResolveSkills.Vector<ModuleIdentity>
+               ResolveSources.Vector<ModuleIdentity>
+               ComposeStartup.StartupSelection
+               ComposeRole.RoleSelection ]
+  Query.[ ResolveSkills.Vector<ModuleIdentity>
+          ResolveSources.Vector<ModuleIdentity>
+          ComposeStartup.StartupSelection
+          ComposeRole.RoleSelection ]
+  Outcome.[ ResolvedSkills.Vector<ModuleIdentity>
+            ResolvedSources.Vector<ResolvedModule>
+            StartupComposed.StartupComposition
+            RoleComposed.RoleComposition
+            Rejected.String ] ]
+[]
+[]

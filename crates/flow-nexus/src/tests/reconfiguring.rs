@@ -10,12 +10,10 @@ use crate::store::{
     StoreError,
 };
 use crate::{Dispatches, OpensRunningNexus, RunningNexus};
-use datom_codec::{Actualizing, Budget, Potential};
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureModel, ConfigureModule, ConfigureNexus,
-    ConfigureThreshold, ReconfigureRejection,
+    ConfigurationChange, ConfigurationSnapshot, ConfigureModel, ConfigureNexus, ConfigureThreshold,
+    ReconfigureRejection,
 };
-use protos::ReaderBudget;
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind,
     HerdrRoute, HerdrRouteSelection, Layer, Lock_Data, OriginClue, Process, Recipient, Response,
@@ -49,9 +47,8 @@ struct ConfiguredStore {
 }
 
 impl ConfiguredStore {
-    /// A store as Flow 0.28 leaves it: Nexus, Model, Threshold and Module
-    /// configured through Configure, a registered flow, Message bound and a
-    /// lock held.
+    /// A configured store: Nexus, Model and Threshold configured through
+    /// Configure, a registered flow, Message bound and a lock held.
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("temporary state");
         let defaults = DefaultConfiguration {
@@ -77,11 +74,10 @@ impl ConfiguredStore {
                 handover: 100_000,
                 refresh: 200_000,
             }),
-            ConfigurationChange::Module(Self::module()),
         ] {
             configuration
                 .configure_change(change)
-                .expect("0.28 configuration commits");
+                .expect("configuration commits");
         }
         drop(configuration);
         let store = FlowStore::open_configured(std::path::Path::new(&start.store_path))
@@ -142,20 +138,6 @@ impl ConfiguredStore {
         }
     }
 
-    fn module() -> ConfigureModule {
-        let mut budget = Budget {
-            remaining: 4096,
-            reader: ReaderBudget { remaining: 4096 },
-            depth: 0,
-            maximum_depth: 1024,
-        };
-        Potential::<ConfigureModule>::from(
-            "{ { Compensation compensationBookDistillation } { meta-signal-flow 0000000000000000000000000000000000000000000000000000000000000000 /git/github.com/LiGoldragon/meta-signal-flow } }",
-        )
-        .actualize(&mut budget)
-        .expect("module datom")
-    }
-
     fn message() -> Address {
         Address {
             aspect: Aspect::Field,
@@ -196,7 +178,6 @@ impl ConfiguredStore {
 struct OtherRows {
     models: Vec<ConfigureModel>,
     thresholds: Vec<ConfigureThreshold>,
-    modules: Vec<ConfigureModule>,
     flow: Option<FlowNode>,
     metaflows: Vec<signal_flow::Metaflow>,
     message_bound: bool,
@@ -205,16 +186,12 @@ struct OtherRows {
 
 fn other_rows(nexus: &RunningNexus) -> OtherRows {
     let ConfigurationSnapshot {
-        models,
-        thresholds,
-        modules,
-        ..
+        models, thresholds, ..
     } = snapshot(nexus);
     let peer = this_process();
     OtherRows {
         models,
         thresholds,
-        modules,
         flow: nexus.store.flow_node("da1e3f").expect("flow reads"),
         metaflows: nexus.store.list_metaflows().expect("metaflows read"),
         message_bound: nexus.store.message_peer(&peer).expect("binding reads"),
@@ -244,7 +221,6 @@ fn reconfigure_replaces_only_the_nexus_value_and_keeps_every_other_row() {
     let before = other_rows(&nexus);
     assert_eq!(before.models.len(), 1);
     assert_eq!(before.thresholds.len(), 1);
-    assert_eq!(before.modules.len(), 1);
     assert!(before.flow.is_some() && before.message_bound && before.message_lock_held);
     assert_eq!(before.metaflows.len(), 1);
 
@@ -340,4 +316,35 @@ fn a_store_reconfigured_while_stopped_opens_with_the_replaced_value() {
     assert_eq!(snapshot(&nexus).nexus, replaced);
     assert_eq!(other_rows(&nexus), rows);
     assert!(!stable_models(&nexus).contains(TERRA));
+}
+
+#[test]
+fn a_metaflow_default_leave_out_set_is_configured_read_and_snapshotted() {
+    use crate::store::ManagesMetaflowState as _;
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let address = Address {
+        aspect: Aspect::Field,
+        topic: "flow".into(),
+        layer: Layer::Quaternary,
+    };
+    assert!(nexus.store.default_leave_outs(&address).unwrap().is_empty());
+    let leave_out = meta_signal_flow::ConfigureLeaveOut {
+        address: address.clone(),
+        leave_outs: vec![
+            signal_flow::LeaveOut::SkillTool,
+            signal_flow::LeaveOut::WorkflowTool,
+        ],
+    };
+    assert_eq!(
+        nexus.dispatch_meta(meta_signal_flow::Query::Configure(
+            ConfigurationChange::LeaveOut(leave_out.clone())
+        )),
+        meta_signal_flow::Response::Configured
+    );
+    assert_eq!(
+        nexus.store.default_leave_outs(&address).unwrap(),
+        leave_out.leave_outs
+    );
+    assert_eq!(snapshot(&nexus).default_leave_outs, vec![leave_out]);
 }

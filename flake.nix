@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.34.6";
+            version = "0.35.0";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -167,10 +167,28 @@
             "tests::registration_carries_the_complete_herdr_binding";
           flow-native-resolution-serialization = context.exactTest "flow"
             "tests::native_resolution_serialization_matches_the_signal_contract";
-          flow-source-path-either-spelling = context.exactTest "flow-nexus"
-            "composition::tests::a_source_inside_the_root_is_read_whether_it_is_written_absolute_or_relative";
-          flow-source-outside-root-refused = context.exactTest "flow-nexus"
-            "composition::tests::a_source_outside_the_root_is_refused_in_either_spelling";
+          flow-start-names-only-module-identities = context.exactTest "flow-nexus"
+            "composition::tests::a_profile_naming_no_valid_identities_is_refused_before_composition";
+          flow-context-verification-refusals = context.exactTest "flow-nexus"
+            "context::tests::a_module_body_that_differs_from_its_rendered_hash_is_refused";
+          flow-message-split-where-modules-begin = context.exactTest "flow-nexus"
+            "composition::tests::a_message_too_large_for_one_part_is_split_where_modules_begin";
+          flow-one-message-through-herdr-socket = context.exactTest "flow-nexus"
+            "herdr::launch::tests::stages_pane_native_claim_registration_and_one_ambiguous_prompt_write";
+          flow-parts-received-in-order = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_two_part_claude_message_is_received_part_by_part_in_order";
+          flow-parts-advance-one-at-a-time = context.exactTest "flow-nexus"
+            "store::tests::parts_advance_one_at_a_time_and_the_receipt_waits_for_the_last";
+          flow-fresh-wake-composes-last-launch-context = context.exactTest "flow-nexus"
+            "tests::waking::a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work";
+          flow-leave-outs-refused-when-unsafe = context.exactTest "flow-nexus"
+            "lean::tests::indispensable_parts_skills_with_workflow_and_other_harness_parts_are_refused";
+          flow-leave-outs-reach-the-harness = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_claude_start_carries_its_leave_outs_as_flags_environment_and_settings";
+          flow-start-leave-outs-replace-the-default = context.exactTest "flow-nexus"
+            "composition::tests::a_start_naming_leave_outs_replaces_its_metaflow_default";
+          flow-codex-frame-sixty-four-bit-length = context.exactTest "flow-nexus"
+            "codex::tests::an_outbound_frame_past_sixty_five_kilobytes_takes_the_sixty_four_bit_length";
           flow-gone-pane-lists-exited = context.exactTest "flow-nexus"
             "tests::a_flow_whose_pane_left_herdr_is_listed_exited_and_keeps_its_row";
           flow-unreadable-herdr-changes-nothing = context.exactTest "flow-nexus"

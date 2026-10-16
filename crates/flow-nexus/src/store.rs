@@ -11,7 +11,7 @@ mod created_pane;
 pub mod delivery;
 pub mod events;
 pub(crate) mod metaflow;
-pub mod start_bundle;
+mod start_bundle;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -26,7 +26,7 @@ use std::{
 };
 
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureModel, ConfigureModule, ConfigureNexus,
+    ConfigurationChange, ConfigurationSnapshot, ConfigureLeaveOut, ConfigureModel, ConfigureNexus,
     ConfigureThreshold,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -38,12 +38,13 @@ use sema_engine::{
 };
 use signal_flow::{
     Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
-    FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-    LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, LaunchSource, Launched, Layer,
-    Lock, Metaflow, NativeLaunchBinding, NativeLaunchIntent, OriginClue, PowerLevel, Process,
-    PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
-    RegistrationAcknowledgement, RememberedFlow, ReplaceRejection, Replaced, Request, Response,
-    RestartRejection, Restarted, RouteReadiness, StartRejection, StopRejection,
+    FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute,
+    HerdrRouteSelection, Key, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
+    Launched, Layer, LeaveOut, Lock, Metaflow, NativeLaunchBinding, NativeLaunchIntent,
+    NativeTranscriptBoundary, OriginClue, PowerLevel, Process, PromptDeliveryIntent,
+    PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
+    RememberedFlow, ReplaceRejection, Replaced, Request, Response, RestartRejection, Restarted,
+    RouteReadiness, StartRejection, StopRejection,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -68,6 +69,8 @@ const META_MODEL_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_model_configuration");
 const META_THRESHOLD_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_threshold_configuration");
+const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_leave_out_configuration");
 const META_MODULE_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_module_configuration");
 // These are this Flow source's authored Memory version candidates. They are
@@ -320,9 +323,30 @@ impl EngineRecord for StoredMetaThresholdConfiguration {
     }
 }
 
+/// One metaflow's default leave-outs, keyed by its Address.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaLeaveOutConfiguration {
+    leave_out: ConfigureLeaveOut,
+}
+
+impl EngineRecord for StoredMetaLeaveOutConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.leave_out.address))
+    }
+}
+
+/// A topic module row of the meta configuration before meta-signal-flow
+/// 20.0.0 removed `Configure.Module`. The family stays registered so a store
+/// that holds such rows opens; they are never read or written.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct StoredMetaModuleConfiguration {
-    module: ConfigureModule,
+    module: RetiredModuleConfiguration,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct RetiredModuleConfiguration {
+    key: Key,
+    source: flow_ethos::Source,
 }
 
 impl EngineRecord for StoredMetaModuleConfiguration {
@@ -486,6 +510,104 @@ impl EngineRecord for StoredLaunchAttempt {
     }
 }
 
+/// The launch types as signal-flow 16.0.0 archived them, before 17.0.0
+/// named a launch's context by module identity. Every earlier launch-attempt
+/// shape carried them; they are only read to recognize a row set aside.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct LaunchSourceBeforeModules {
+    source_path: String,
+    source_sha256: String,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct NativeSkillSelectionBeforeModules {
+    skill_name: String,
+    native_skill_path: String,
+    native_skill_sha256: String,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct NativeLaunchIntentBeforeModules {
+    launch_request_id: String,
+    prompt_sha256: String,
+    harness_kind: HarnessKind,
+    model_name: String,
+    effort: String,
+    skill_name_vector: Vec<String>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct PromptDeliveryIntentBeforeModules {
+    launch_request_id: String,
+    prompt_sha256: String,
+    flow_id: String,
+    native_session_id: String,
+    harness_kind: HarnessKind,
+    model_name: String,
+    effort: String,
+    native_skill_selection_vector: Vec<NativeSkillSelectionBeforeModules>,
+    herdr_pane_binding: HerdrPaneBinding,
+    native_transcript_boundary: NativeTranscriptBoundary,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct NativeTargetReceiptBeforeModules {
+    launch_request_id: String,
+    prompt_sha256: String,
+    flow_id: String,
+    native_session_id: String,
+    native_turn_id: String,
+    receipt_sha256: String,
+    model_name: String,
+    effort: String,
+    native_skill_selection_vector: Vec<NativeSkillSelectionBeforeModules>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // mirrors the archived 16.0.0 layout
+enum PromptDeliveryResultBeforeModules {
+    Observed(NativeTargetReceiptBeforeModules),
+    Ambiguous(PromptDeliveryIntentBeforeModules),
+}
+
+/// A launch attempt as Flow archived it with signal-flow 16.0.0, before
+/// 17.0.0 named a launch's context by module identity.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchAttemptBeforeModules {
+    attempt: LaunchAttemptBeforeModules,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct LaunchAttemptBeforeModules {
+    launch_request_id: String,
+    launch_profile: LaunchProfileBeforeModules,
+    prompt_sha256: String,
+    origin_clue: OriginClue,
+    launch_attempt_phase: LaunchAttemptPhase,
+    native_launch_intent_option: Option<NativeLaunchIntentBeforeModules>,
+    native_launch_binding_option: Option<NativeLaunchBinding>,
+    registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
+    prompt_delivery_intent_option: Option<PromptDeliveryIntentBeforeModules>,
+    prompt_delivery_result_option: Option<PromptDeliveryResultBeforeModules>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct LaunchProfileBeforeModules {
+    launch_request_id: String,
+    launch_source_vector: Vec<LaunchSourceBeforeModules>,
+    skill_name_vector: Vec<String>,
+    address: Address,
+    power_level: PowerLevel,
+    harness_kind: HarnessKind,
+    model_name: String,
+    effort: String,
+    flow_id_option: Option<String>,
+    remembered_flow_vector: Vec<RememberedFlow>,
+    herdr_session_name: String,
+    system_prompt_bundle_file: String,
+    instruction_prompt: String,
+}
+
 /// A launch attempt as Flow archived it before signal-flow 3.0.0 (ab70332)
 /// added `SystemPromptBundleFile` to the launch profile: the same fields in
 /// the same order without it. Rows of this shape are only recognized and
@@ -502,17 +624,17 @@ struct LaunchAttemptBeforeBundle {
     prompt_sha256: String,
     origin_clue: OriginClue,
     launch_attempt_phase: LaunchAttemptPhase,
-    native_launch_intent_option: Option<NativeLaunchIntent>,
+    native_launch_intent_option: Option<NativeLaunchIntentBeforeModules>,
     native_launch_binding_option: Option<NativeLaunchBinding>,
     registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
-    prompt_delivery_intent_option: Option<PromptDeliveryIntent>,
-    prompt_delivery_result_option: Option<PromptDeliveryResult>,
+    prompt_delivery_intent_option: Option<PromptDeliveryIntentBeforeModules>,
+    prompt_delivery_result_option: Option<PromptDeliveryResultBeforeModules>,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct LaunchProfileBeforeBundle {
     launch_request_id: String,
-    launch_source_vector: Vec<LaunchSource>,
+    launch_source_vector: Vec<LaunchSourceBeforeModules>,
     skill_name_vector: Vec<String>,
     aspect: Aspect,
     power_level: PowerLevel,
@@ -541,17 +663,17 @@ struct LaunchAttemptBeforeAddress {
     prompt_sha256: String,
     origin_clue: OriginClue,
     launch_attempt_phase: LaunchAttemptPhase,
-    native_launch_intent_option: Option<NativeLaunchIntent>,
+    native_launch_intent_option: Option<NativeLaunchIntentBeforeModules>,
     native_launch_binding_option: Option<NativeLaunchBinding>,
     registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
-    prompt_delivery_intent_option: Option<PromptDeliveryIntent>,
-    prompt_delivery_result_option: Option<PromptDeliveryResult>,
+    prompt_delivery_intent_option: Option<PromptDeliveryIntentBeforeModules>,
+    prompt_delivery_result_option: Option<PromptDeliveryResultBeforeModules>,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct LaunchProfileBeforeAddress {
     launch_request_id: String,
-    launch_source_vector: Vec<LaunchSource>,
+    launch_source_vector: Vec<LaunchSourceBeforeModules>,
     skill_name_vector: Vec<String>,
     aspect: Aspect,
     power_level: PowerLevel,
@@ -584,6 +706,9 @@ pub enum ArchivedLaunchAttemptShape {
     Unknown(String),
     /// Written before signal-flow 16.0.0 named the launched seat's Address.
     BeforeAddress,
+    /// Written before signal-flow 17.0.0 named a launch's context by module
+    /// identity.
+    BeforeModules,
 }
 
 /// A launch-attempt row moved out of the attempts table when the store
@@ -617,6 +742,21 @@ trait NamesKeptLaunchRole {
 impl NamesKeptLaunchRole for QuarantinedLaunchAttempt {
     fn kept_role(&self, flow_id: &str) -> Option<Caller> {
         let (binding, aspect, power_level, model_name) = match self.shape {
+            ArchivedLaunchAttemptShape::BeforeModules => {
+                let kept =
+                    rkyv::from_bytes::<StoredLaunchAttemptBeforeModules, rkyv::rancor::Error>(
+                        &self.archive,
+                    )
+                    .ok()?
+                    .attempt;
+                let profile = kept.launch_profile;
+                (
+                    kept.native_launch_binding_option,
+                    profile.address.aspect,
+                    profile.power_level,
+                    profile.model_name,
+                )
+            }
             ArchivedLaunchAttemptShape::BeforeAddress => {
                 let kept =
                     rkyv::from_bytes::<StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
@@ -693,6 +833,7 @@ impl std::fmt::Display for LaunchAttemptSettlement {
                         "BeforeSystemPromptBundle"
                     }
                     ArchivedLaunchAttemptShape::BeforeAddress => "BeforeAddress",
+                    ArchivedLaunchAttemptShape::BeforeModules => "BeforeModules",
                     ArchivedLaunchAttemptShape::Unknown(_) => "Unknown",
                 }
             ),
@@ -718,10 +859,31 @@ impl std::fmt::Display for LaunchAttemptSettlement {
     derive(datom_codec::Datomizable, datom_codec::Composing)
 )]
 pub enum LaunchOutcome {
-    Started(Launched),
-    Replaced(Replaced),
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
     StartRejected(StartRejection),
     ReplaceRejected(ReplaceRejection),
+}
+
+pub use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
+
+impl From<&Launched> for LaunchedRecord {
+    fn from(launched: &Launched) -> Self {
+        Self {
+            flow_id: launched.flow_id.clone(),
+            session_id: launched.session_id.clone(),
+            origin_clue: launched.origin_clue.clone(),
+        }
+    }
+}
+
+impl From<&Replaced> for ReplacedRecord {
+    fn from(replaced: &Replaced) -> Self {
+        Self {
+            flow_id: replaced.flow_id.clone(),
+            launched_record: LaunchedRecord::from(&replaced.launched),
+        }
+    }
 }
 
 /// One marker-consistent read of the persisted launch request and its
@@ -733,20 +895,65 @@ pub(crate) struct LaunchInspectionRecords {
 }
 
 pub trait AnswersLaunchOutcome {
-    /// The reply the outcome is on the wire.
-    fn response(&self) -> Response;
+    /// The reply the outcome is on the wire, naming each launched flow's
+    /// Herdr route as its row holds it now.
+    fn response(&self, store: &FlowStore) -> Response;
+    /// The outcome as LaunchStatus reports it.
+    fn status_outcome(&self, store: &FlowStore) -> signal_flow::LaunchStatusOutcome;
     /// A refused reap leaves the predecessor Stopped and the successor held;
     /// it is the one outcome a repeated Replace takes up again.
     fn awaits_reaping(&self) -> bool;
 }
 
+/// A kept launch made a wire `Launched` again, with its flow's route.
+pub trait NamesLaunchedRoute {
+    fn launched(&self, store: &FlowStore) -> Launched;
+}
+
+impl NamesLaunchedRoute for LaunchedRecord {
+    fn launched(&self, store: &FlowStore) -> Launched {
+        Launched {
+            flow_id: self.flow_id.clone(),
+            session_id: self.session_id.clone(),
+            herdr_route_selection: store
+                .flow_node(&self.flow_id)
+                .ok()
+                .flatten()
+                .map(|node| node.herdr_route_selection)
+                .unwrap_or(HerdrRouteSelection::Unavailable),
+            origin_clue: self.origin_clue.clone(),
+        }
+    }
+}
+
 impl AnswersLaunchOutcome for LaunchOutcome {
-    fn response(&self) -> Response {
+    fn response(&self, store: &FlowStore) -> Response {
         match self {
-            Self::Started(started) => Response::Started(started.clone()),
-            Self::Replaced(replaced) => Response::Replaced(replaced.clone()),
+            Self::Started(started) => Response::Started(started.launched(store)),
+            Self::Replaced(replaced) => Response::Replaced(Replaced {
+                flow_id: replaced.flow_id.clone(),
+                launched: replaced.launched_record.launched(store),
+            }),
             Self::StartRejected(rejection) => Response::StartRejected(rejection.clone()),
             Self::ReplaceRejected(rejection) => Response::ReplaceRejected(rejection.clone()),
+        }
+    }
+
+    fn status_outcome(&self, store: &FlowStore) -> signal_flow::LaunchStatusOutcome {
+        match self {
+            Self::Started(started) => {
+                signal_flow::LaunchStatusOutcome::Started(started.launched(store))
+            }
+            Self::Replaced(replaced) => signal_flow::LaunchStatusOutcome::Replaced(Replaced {
+                flow_id: replaced.flow_id.clone(),
+                launched: replaced.launched_record.launched(store),
+            }),
+            Self::StartRejected(rejection) => {
+                signal_flow::LaunchStatusOutcome::StartRejected(rejection.clone())
+            }
+            Self::ReplaceRejected(rejection) => {
+                signal_flow::LaunchStatusOutcome::ReplaceRejected(rejection.clone())
+            }
         }
     }
 
@@ -808,8 +1015,8 @@ impl MemoryDefinition for StoredLaunchOutcomeV1 {
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 enum LaunchOutcomeV1 {
-    Started(Launched),
-    Replaced(Replaced),
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
     StartRejected(StartRejectionV1),
     ReplaceRejected(ReplaceRejectionV1),
 }
@@ -1004,7 +1211,9 @@ pub(crate) struct MetaConfigurationTables {
     nexus: TableReference<StoredMetaNexusConfiguration>,
     models: TableReference<StoredMetaModelConfiguration>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
-    modules: TableReference<StoredMetaModuleConfiguration>,
+    leave_outs: TableReference<StoredMetaLeaveOutConfiguration>,
+    /// Registered so a store holding retired module rows opens; never read.
+    _retired_modules: TableReference<StoredMetaModuleConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -1029,7 +1238,12 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 FamilyName::new("flow-nexus-meta-threshold-configuration"),
                 SchemaHash::for_label("flow-nexus-meta-threshold-configuration-v1"),
             ))?,
-            modules: engine.register_table(TableDescriptor::new(
+            leave_outs: engine.register_table(TableDescriptor::new(
+                META_LEAVE_OUT_CONFIGURATION_TABLE_NAME,
+                FamilyName::new("flow-nexus-meta-leave-out-configuration"),
+                SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
+            ))?,
+            _retired_modules: engine.register_table(TableDescriptor::new(
                 META_MODULE_CONFIGURATION_TABLE_NAME,
                 FamilyName::new("flow-nexus-meta-module-configuration"),
                 SchemaHash::for_label("flow-nexus-meta-module-configuration-v1"),
@@ -1060,7 +1274,9 @@ pub struct FlowStore {
     event_tables: events::EventTables,
     context_sizes: TableReference<context::FlowContextSize>,
     address_holds: TableReference<address_hold::AddressHold>,
-    start_bundles: TableReference<start_bundle::StartBundle>,
+    /// Registered so a store holding 0.34.6's Start bundles opens; never
+    /// read or written.
+    _retired_start_bundles: TableReference<start_bundle::StartBundle>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows that no longer read in the
     /// current shape; each is also logged.
@@ -1129,6 +1345,11 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             FamilyName::new("flow-nexus-meta-threshold-configuration"),
             SchemaHash::for_label("flow-nexus-meta-threshold-configuration-v1"),
         );
+        let meta_leave_outs_descriptor = TableDescriptor::new(
+            META_LEAVE_OUT_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-meta-leave-out-configuration"),
+            SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
+        );
         let meta_modules_descriptor = TableDescriptor::new(
             META_MODULE_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-meta-module-configuration"),
@@ -1146,6 +1367,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_nexus_descriptor)
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
+                .with_family(&meta_leave_outs_descriptor)
                 .with_family(&meta_modules_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
@@ -1156,7 +1378,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             nexus: engine.register_table(meta_nexus_descriptor)?,
             models: engine.register_table(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
-            modules: engine.register_table(meta_modules_descriptor)?,
+            leave_outs: engine.register_table(meta_leave_outs_descriptor)?,
+            _retired_modules: engine.register_table(meta_modules_descriptor)?,
         };
         if !recognized {
             engine.assert(Assertion::new(
@@ -1636,6 +1859,11 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-meta-threshold-configuration"),
             SchemaHash::for_label("flow-nexus-meta-threshold-configuration-v1"),
         );
+        let meta_leave_outs_descriptor = TableDescriptor::<StoredMetaLeaveOutConfiguration>::new(
+            META_LEAVE_OUT_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-meta-leave-out-configuration"),
+            SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
+        );
         let meta_modules_descriptor = TableDescriptor::<StoredMetaModuleConfiguration>::new(
             META_MODULE_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-meta-module-configuration"),
@@ -1675,6 +1903,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_nexus_descriptor)
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
+                .with_family(&meta_leave_outs_descriptor)
                 .with_family(&meta_modules_descriptor)
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
@@ -1703,7 +1932,7 @@ impl OpensFlowStore for FlowStore {
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let context_sizes = engine.register_table(context_sizes_descriptor)?;
         let address_holds = engine.register_table(address_holds_descriptor)?;
-        let start_bundles = engine.register_table(start_bundles_descriptor)?;
+        let _retired_start_bundles = engine.register_table(start_bundles_descriptor)?;
         let store = Self {
             engine,
             flows,
@@ -1726,7 +1955,7 @@ impl OpensFlowStore for FlowStore {
             event_tables,
             context_sizes,
             address_holds,
-            start_bundles,
+            _retired_start_bundles,
             launch_changes: LaunchChanges::default(),
             opening_settlements: Vec::new(),
         };
@@ -1840,7 +2069,7 @@ impl OpensFlowStore for FlowStore {
         let address_holds = engine.register_table(
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor(),
         )?;
-        let start_bundles = engine.register_table(
+        let _retired_start_bundles = engine.register_table(
             <start_bundle::StartBundle as start_bundle::DescribesStartBundleTable>::descriptor(),
         )?;
         let mut store = Self {
@@ -1865,7 +2094,7 @@ impl OpensFlowStore for FlowStore {
             event_tables,
             context_sizes,
             address_holds,
-            start_bundles,
+            _retired_start_bundles,
             launch_changes: LaunchChanges::default(),
             opening_settlements: Vec::new(),
         };
@@ -1942,6 +2171,9 @@ pub(crate) trait ManagesMetaflowState: Sized {
     /// The threshold configured for one layer, if any.
     fn configured_threshold(&self, layer: &Layer)
     -> Result<Option<ConfigureThreshold>, StoreError>;
+    /// The leave-outs a metaflow's Start takes when it names none; empty
+    /// when none are configured.
+    fn default_leave_outs(&self, address: &Address) -> Result<Vec<LeaveOut>, StoreError>;
     fn stored_metaflow(&self, address: &Address) -> Result<Option<StoredMetaflow>, StoreError>;
     fn stored_metaflow_process(
         &self,
@@ -1991,6 +2223,18 @@ impl ManagesMetaflowState for FlowStore {
         match rows.records() {
             [] => Ok(None),
             [stored] => Ok(Some(stored.threshold.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn default_leave_outs(&self, address: &Address) -> Result<Vec<LeaveOut>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.meta_configuration_tables.leave_outs,
+            RecordKey::new(FlowStore::address_record_key(address)),
+        ))?;
+        match rows.records() {
+            [] => Ok(Vec::new()),
+            [stored] => Ok(stored.leave_out.leave_outs.clone()),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -2518,7 +2762,13 @@ impl SettlesLaunchAttempts for FlowStore {
                 continue;
             };
             let shape =
-                if rkyv::from_bytes::<StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
+                if rkyv::from_bytes::<StoredLaunchAttemptBeforeModules, rkyv::rancor::Error>(
+                    &archive,
+                )
+                .is_ok()
+                {
+                    ArchivedLaunchAttemptShape::BeforeModules
+                } else if rkyv::from_bytes::<StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
                     &archive,
                 )
                 .is_ok()
@@ -2846,7 +3096,17 @@ impl RecordsNativeLaunchIntent for FlowStore {
             || stored.attempt.launch_profile.harness_kind != intent.harness_kind
             || stored.attempt.launch_profile.model_name != intent.model_name
             || stored.attempt.launch_profile.effort != intent.effort
-            || stored.attempt.launch_profile.skill_name_vector != intent.skill_name_vector
+            || intent.prompt_sha256_vector.is_empty()
+            || !intent
+                .prompt_sha256_vector
+                .iter()
+                .chain([&intent.system_prompt_sha256])
+                .all(|hash| {
+                    hash.len() == 64
+                        && hash
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
             || stored.attempt.native_launch_intent_option.is_some()
         {
             return Ok(false);
@@ -2945,22 +3205,11 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         let Some(native_intent) = stored.attempt.native_launch_intent_option.as_ref() else {
             return Ok(false);
         };
-        let valid_skills = intent
-            .native_skill_selection_vector
-            .iter()
-            .map(|selection| selection.skill_name.as_str())
-            .eq(native_intent.skill_name_vector.iter().map(String::as_str))
-            && intent
-                .native_skill_selection_vector
-                .iter()
-                .all(|selection| {
-                    Path::new(&selection.native_skill_path).is_absolute()
-                        && selection.native_skill_sha256.len() == 64
-                        && selection
-                            .native_skill_sha256
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                });
+        // The first part is the one about to be submitted; no Stop count
+        // can be negative.
+        let valid_parts = intent.prompt_sha256_vector == native_intent.prompt_sha256_vector
+            && intent.parts_submitted == 1
+            && intent.stops_reported >= 0;
         let valid_boundary = match &intent.native_transcript_boundary {
             signal_flow::NativeTranscriptBoundary::Existing(cursor) => {
                 cursor.native_session_id == intent.native_session_id
@@ -3005,7 +3254,7 @@ impl RecordsPromptDeliveryIntent for FlowStore {
             || intent.harness_kind != binding.harness_kind
             || intent.model_name != native_intent.model_name
             || intent.effort != native_intent.effort
-            || !valid_skills
+            || !valid_parts
             || intent.herdr_pane_binding != acknowledgement.herdr_pane_binding
             || !valid_boundary
             || stored.attempt.prompt_delivery_intent_option.is_some()
@@ -3062,8 +3311,9 @@ impl RecordsPromptDeliveryResult for FlowStore {
                         && previous.harness_kind == updated.harness_kind
                         && previous.model_name == updated.model_name
                         && previous.effort == updated.effort
-                        && previous.native_skill_selection_vector
-                            == updated.native_skill_selection_vector
+                        && previous.prompt_sha256_vector == updated.prompt_sha256_vector
+                        && previous.parts_submitted == updated.parts_submitted
+                        && previous.stops_reported == updated.stops_reported
                         && previous.herdr_pane_binding == updated.herdr_pane_binding
                         && matches!(
                         (&previous.native_transcript_boundary, &updated.native_transcript_boundary),
@@ -3086,14 +3336,39 @@ impl RecordsPromptDeliveryResult for FlowStore {
         } else {
             false
         };
-        if !first_result && !ambiguity_promotion && !boundary_advancement {
+        // The next part of a split first message is recorded before it is
+        // typed: one more part submitted, the Stop count it waited on, and
+        // nothing else changed.
+        let part_advancement = stored.attempt.launch_attempt_phase
+            == LaunchAttemptPhase::PromptAmbiguous
+            && match (
+                stored.attempt.prompt_delivery_result_option.as_ref(),
+                &result,
+            ) {
+                (
+                    Some(PromptDeliveryResult::Ambiguous(previous)),
+                    PromptDeliveryResult::Ambiguous(updated),
+                ) => {
+                    let mut expected = previous.clone();
+                    expected.parts_submitted += 1;
+                    expected.stops_reported = updated.stops_reported;
+                    &expected == updated
+                        && updated.stops_reported >= previous.stops_reported
+                        && usize::try_from(updated.parts_submitted)
+                            .is_ok_and(|parts| parts <= updated.prompt_sha256_vector.len())
+                }
+                _ => false,
+            };
+        if !first_result && !ambiguity_promotion && !boundary_advancement && !part_advancement {
             return Ok(false);
         }
         let phase = match &result {
             PromptDeliveryResult::Ambiguous(observed_intent) if observed_intent == intent => {
                 LaunchAttemptPhase::PromptAmbiguous
             }
-            PromptDeliveryResult::Ambiguous(observed_intent) if boundary_advancement => {
+            PromptDeliveryResult::Ambiguous(observed_intent)
+                if boundary_advancement || part_advancement =>
+            {
                 stored.attempt.prompt_delivery_intent_option = Some(observed_intent.clone());
                 LaunchAttemptPhase::PromptAmbiguous
             }
@@ -3110,8 +3385,9 @@ impl RecordsPromptDeliveryResult for FlowStore {
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                     && receipt.model_name == intent.model_name
                     && receipt.effort == intent.effort
-                    && receipt.native_skill_selection_vector
-                        == intent.native_skill_selection_vector =>
+                    && receipt.prompt_sha256_vector == intent.prompt_sha256_vector
+                    && usize::try_from(intent.parts_submitted)
+                        .is_ok_and(|parts| parts == intent.prompt_sha256_vector.len()) =>
             {
                 LaunchAttemptPhase::PromptObserved
             }
@@ -3461,7 +3737,7 @@ impl ReadsLaunchInspectionRecords for FlowStore {
                 }
             }
             Some(LaunchOutcome::Replaced(replaced)) => {
-                let successor = &replaced.launched;
+                let successor = &replaced.launched_record;
                 let matches_attempt = launch_attempt
                     .native_launch_binding_option
                     .as_ref()
@@ -3762,9 +4038,14 @@ impl WritesFlowStore for FlowStore {
         if written {
             self.engine.commit_atomic(commit)?;
         }
+        let herdr_route_selection = self
+            .flow_node(flow_id)?
+            .map(|node| node.herdr_route_selection)
+            .unwrap_or(HerdrRouteSelection::Unavailable);
         Ok(Response::Started(Launched {
             flow_id: flow_id.into(),
             session_id,
+            herdr_route_selection,
             origin_clue,
         }))
     }
@@ -3885,7 +4166,7 @@ impl EarlierLaunchAttemptRows {
             launch_request_id: Self::EARLIER_REQUEST.into(),
             launch_profile: LaunchProfileBeforeBundle {
                 launch_request_id: Self::EARLIER_REQUEST.into(),
-                launch_source_vector: vec![LaunchSource {
+                launch_source_vector: vec![LaunchSourceBeforeModules {
                     source_path: "skills/operation-main-flow.md".into(),
                     source_sha256: "ab".repeat(32),
                 }],
@@ -3910,7 +4191,7 @@ impl EarlierLaunchAttemptRows {
                 turn_id: "handover-successor".into(),
             },
             launch_attempt_phase: LaunchAttemptPhase::NativeBound,
-            native_launch_intent_option: Some(NativeLaunchIntent {
+            native_launch_intent_option: Some(NativeLaunchIntentBeforeModules {
                 launch_request_id: Self::EARLIER_REQUEST.into(),
                 prompt_sha256: "cd".repeat(32),
                 harness_kind: HarnessKind::Claude,
@@ -4151,6 +4432,10 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-meta-module-configuration",
                 "flow-nexus-meta-module-configuration-v1",
             ),
+            "flow_nexus_meta_leave_out_configuration" => (
+                "flow-nexus-meta-leave-out-configuration",
+                "flow-nexus-meta-leave-out-configuration-v1",
+            ),
             "flow_nexus_flow_events" => ("flow-nexus-flow-events", "flow-nexus-flow-events-v1"),
             "flow_nexus_flow_context_sizes" => (
                 context::FLOW_CONTEXT_SIZE_FAMILY,
@@ -4219,19 +4504,23 @@ pub(crate) trait ReadsFlowMemory {
         // before either opens, and its first full open adds the table, as
         // the first full open of a configuration-only store adds the running
         // tables.
+        // A store keeps its metaflows' default leave-outs from 0.35.0 on.
         const ADDED_LATER: &[&str] = &[
             "flow_nexus_flow_context_sizes",
             "flow_nexus_address_holds",
             "flow_nexus_start_bundles",
+            "flow_nexus_meta_leave_out_configuration",
         ];
-        let is_exact_set = |expected: &[&str]| {
-            actual.len() == expected.len() && expected.iter().all(|name| actual.contains(*name))
-        };
         let running = RUNNING.iter().all(|name| actual.contains(*name))
             && actual.iter().all(|name| {
                 RUNNING.contains(&name.as_str()) || ADDED_LATER.contains(&name.as_str())
             });
-        is_exact_set(CONFIGURATION_ONLY) || running
+        let configuration_only = CONFIGURATION_ONLY.iter().all(|name| actual.contains(*name))
+            && actual.iter().all(|name| {
+                CONFIGURATION_ONLY.contains(&name.as_str())
+                    || name == "flow_nexus_meta_leave_out_configuration"
+            });
+        configuration_only || running
     }
 
     fn recognize_flow_memory(path: &Path) -> Result<bool, StoreError> {
@@ -4404,10 +4693,10 @@ pub(crate) trait ReadsFlowMemory {
         };
         let models_rows = engine.match_records(QueryPlan::all(tables.models))?;
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
-        let modules_rows = engine.match_records(QueryPlan::all(tables.modules))?;
+        let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
         if models_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
-            || modules_rows.database_marker() != marker
+            || leave_out_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -4427,20 +4716,18 @@ pub(crate) trait ReadsFlowMemory {
             .map(|stored| stored.threshold.clone())
             .collect::<Vec<_>>();
         thresholds.sort_by_key(|threshold| FlowStore::layer_key(&threshold.layer));
-        let mut modules = modules_rows
+        let mut default_leave_outs = leave_out_rows
             .records()
             .iter()
-            .map(|stored| stored.module.clone())
+            .map(|stored| stored.leave_out.clone())
             .collect::<Vec<_>>();
-        modules.sort_by(|a, b| {
-            (FlowStore::subaspect_key(&a.key.subaspect), &a.key.topic)
-                .cmp(&(FlowStore::subaspect_key(&b.key.subaspect), &b.key.topic))
-        });
+        default_leave_outs
+            .sort_by_key(|leave_out| FlowStore::address_record_key(&leave_out.address));
         Ok(Some(ConfigurationSnapshot {
             nexus,
             models,
             thresholds,
-            modules,
+            default_leave_outs,
         }))
     }
 
@@ -4498,17 +4785,17 @@ pub(crate) trait ReadsFlowMemory {
                 tables.thresholds,
                 StoredMetaThresholdConfiguration { threshold },
             ),
-            ConfigurationChange::Module(module) => FlowStore::assert_identical_or_conflict(
+            ConfigurationChange::LeaveOut(leave_out) => FlowStore::assert_identical_or_conflict(
                 engine,
-                tables.modules,
-                StoredMetaModuleConfiguration { module },
+                tables.leave_outs,
+                StoredMetaLeaveOutConfiguration { leave_out },
             ),
         }
     }
 
     /// Replace the one committed Nexus row in one atomic commit. A store with
     /// no Nexus row, or a value whose Codex endpoints share a model, is
-    /// refused before any write; models, thresholds, modules and all runtime
+    /// refused before any write; models, thresholds and all runtime
     /// rows are never touched.
     fn replace_meta_nexus(
         engine: &Engine,
@@ -4580,7 +4867,13 @@ mod tests {
                     harness_kind: HarnessKind::Codex,
                     model_name: launch.launch_profile.model_name.clone(),
                     effort: launch.launch_profile.effort.clone(),
-                    skill_name_vector: Vec::new(),
+                    system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                    prompt_sha256_vector: launch
+                        .first_prompt_payload
+                        .prompt_part_vector
+                        .iter()
+                        .map(|part| part.prompt_sha256.clone())
+                        .collect(),
                 })
                 .expect("intent persists")
         );
@@ -4639,6 +4932,7 @@ mod tests {
         StartRejectionV1, StoredLaunchOutcomeV1,
     };
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
+    use super::{LaunchedRecord, ReplacedRecord};
     use super::{LaysOutDefaults, SeedsConfiguration};
     use crate::store::RegistersBindings;
     use crate::store::delivery::RecordsDeliveries;
@@ -4650,12 +4944,11 @@ mod tests {
     };
     use signal_flow::{
         Aspect, BindingRefusal, ComposedLaunch, FirstPromptPayload, HarnessKind, HerdrPaneBinding,
-        LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, Launched, NativeLaunchBinding,
-        NativeLaunchIntent, NativeSkillSelection, NativeTargetReceipt, NativeTranscriptAbsence,
-        NativeTranscriptBoundary, NativeTranscriptCursor, OriginClue, PowerLevel,
-        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
-        ReplaceRejection, Replaced, Response, Restarted, StartRejection, StartRequest,
-        StopRejection, TargetReceiptRequest,
+        LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile, NativeLaunchBinding,
+        NativeLaunchIntent, NativeTargetReceipt, NativeTranscriptAbsence, NativeTranscriptBoundary,
+        NativeTranscriptCursor, OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult,
+        Query, RegistrationAcknowledgement, ReplaceRejection, Response, Restarted, StartRejection,
+        StartRequest, StopRejection, TargetReceiptRequest,
     };
 
     struct StoreFixture {
@@ -4697,8 +4990,8 @@ mod tests {
         fn launch_profile(&self, launch_request_id: &str) -> LaunchProfile {
             LaunchProfile {
                 launch_request_id: launch_request_id.into(),
-                launch_source_vector: Vec::new(),
-                skill_name_vector: Vec::new(),
+                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+                user_modules: vec!["operation-main-flow".into()],
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
                     topic: "flow".into(),
@@ -4711,7 +5004,7 @@ mod tests {
                 flow_id_option: None,
                 remembered_flow_vector: Vec::new(),
                 herdr_session_name: "fixture-session".into(),
-                system_prompt_bundle_file: "/tmp/flow-system-prompt.md".into(),
+                leave_outs_option: None,
                 instruction_prompt: "fixture instruction".into(),
             }
         }
@@ -4719,15 +5012,23 @@ mod tests {
         fn composed_launch(&self, launch_request_id: &str, prompt_sha256: &str) -> ComposedLaunch {
             ComposedLaunch {
                 launch_profile: self.launch_profile(launch_request_id),
+                system_prompt: signal_flow::SystemPrompt {
+                    system_prompt_text: "fixture system prompt".into(),
+                    system_prompt_sha256: "9".repeat(64),
+                },
                 first_prompt_payload: FirstPromptPayload {
                     first_prompt_body: "fixture prompt".into(),
                     prompt_sha256: prompt_sha256.into(),
-                    first_prompt_text: "fixture prompt\nreceipt request".into(),
+                    prompt_part_vector: vec![signal_flow::PromptPart {
+                        prompt_part_text: "fixture prompt".into(),
+                        prompt_sha256: prompt_sha256.into(),
+                    }],
                 },
                 target_receipt_request: TargetReceiptRequest {
                     launch_request_id: launch_request_id.into(),
                     prompt_sha256: prompt_sha256.into(),
                 },
+                leave_outs: Vec::new(),
             }
         }
 
@@ -4772,7 +5073,13 @@ mod tests {
             harness_kind: HarnessKind::Codex,
             model_name: launch.launch_profile.model_name.clone(),
             effort: launch.launch_profile.effort.clone(),
-            skill_name_vector: launch.launch_profile.skill_name_vector.clone(),
+            system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+            prompt_sha256_vector: launch
+                .first_prompt_payload
+                .prompt_part_vector
+                .iter()
+                .map(|part| part.prompt_sha256.clone())
+                .collect(),
         };
         assert!(
             store
@@ -4820,8 +5127,6 @@ mod tests {
             "3333333333333333333333333333333333333333333333333333333333333333",
         );
         launch.launch_profile.harness_kind = HarnessKind::Claude;
-        launch.launch_profile.skill_name_vector =
-            vec!["operation-main-flow".into(), "spirit".into()];
         store
             .reserve_launch_attempt(&launch, fixture.origin())
             .expect("reservation persists");
@@ -4833,7 +5138,13 @@ mod tests {
                     harness_kind: HarnessKind::Claude,
                     model_name: launch.launch_profile.model_name.clone(),
                     effort: launch.launch_profile.effort.clone(),
-                    skill_name_vector: launch.launch_profile.skill_name_vector.clone(),
+                    system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                    prompt_sha256_vector: launch
+                        .first_prompt_payload
+                        .prompt_part_vector
+                        .iter()
+                        .map(|part| part.prompt_sha256.clone())
+                        .collect(),
                 })
                 .unwrap()
         );
@@ -4858,26 +5169,18 @@ mod tests {
         );
         let intent = PromptDeliveryIntent {
             launch_request_id: "request-boundary".into(),
-            prompt_sha256: launch.first_prompt_payload.prompt_sha256,
+            prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
             flow_id: "native-flow".into(),
             native_session_id: "native-session".into(),
             harness_kind: HarnessKind::Claude,
             model_name: launch.launch_profile.model_name.clone(),
             effort: launch.launch_profile.effort.clone(),
-            native_skill_selection_vector: vec![
-                NativeSkillSelection {
-                    skill_name: "spirit".into(),
-                    native_skill_path: "/configured/spirit/SKILL.md".into(),
-                    native_skill_sha256:
-                        "7777777777777777777777777777777777777777777777777777777777777777".into(),
-                },
-                NativeSkillSelection {
-                    skill_name: "operation-main-flow".into(),
-                    native_skill_path: "/configured/operation-main-flow/SKILL.md".into(),
-                    native_skill_sha256:
-                        "6666666666666666666666666666666666666666666666666666666666666666".into(),
-                },
+            prompt_sha256_vector: vec![
+                "7777777777777777777777777777777777777777777777777777777777777777".into(),
             ],
+            parts_submitted: 1,
+            stops_reported: 0,
+            leave_outs: Vec::new(),
             herdr_pane_binding: pane,
             native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
                 native_session_id: "different-session".into(),
@@ -4889,10 +5192,10 @@ mod tests {
         assert!(
             !store
                 .record_prompt_delivery_intent(intent.clone())
-                .expect("out-of-order native skill selection is refused")
+                .expect("part hashes other than the native intent's are refused")
         );
         let mut exact = intent;
-        exact.native_skill_selection_vector.swap(0, 1);
+        exact.prompt_sha256_vector = vec![launch.first_prompt_payload.prompt_sha256.clone()];
         assert!(
             !store
                 .record_prompt_delivery_intent(exact.clone())
@@ -4968,9 +5271,7 @@ mod tests {
                                 .into(),
                         model_name: cursor_intent.model_name.clone(),
                         effort: cursor_intent.effort.clone(),
-                        native_skill_selection_vector: cursor_intent
-                            .native_skill_selection_vector
-                            .clone(),
+                        prompt_sha256_vector: cursor_intent.prompt_sha256_vector.clone(),
                     }
                 ))
                 .expect("caller-shaped receipt is validated before promotion")
@@ -4989,10 +5290,152 @@ mod tests {
                                 .into(),
                         model_name: cursor_intent.model_name,
                         effort: cursor_intent.effort,
-                        native_skill_selection_vector: cursor_intent.native_skill_selection_vector,
+                        prompt_sha256_vector: cursor_intent.prompt_sha256_vector,
                     }
                 ))
                 .expect("authentic receipt promotes ambiguity")
+        );
+    }
+
+    /// A first message sent in parts: each next part is recorded submitted
+    /// before it is typed, one at a time, never past the last, and the
+    /// receipt is taken only once every part was submitted.
+    #[test]
+    fn parts_advance_one_at_a_time_and_the_receipt_waits_for_the_last() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let mut launch = fixture.composed_launch(
+            "request-parts",
+            "8888888888888888888888888888888888888888888888888888888888888888",
+        );
+        launch.first_prompt_payload.prompt_part_vector = vec![
+            signal_flow::PromptPart {
+                prompt_part_text: "part one".into(),
+                prompt_sha256: "a".repeat(64),
+            },
+            signal_flow::PromptPart {
+                prompt_part_text: "part two".into(),
+                prompt_sha256: "b".repeat(64),
+            },
+        ];
+        store
+            .reserve_launch_attempt(&launch, fixture.origin())
+            .expect("reservation persists");
+        assert!(
+            store
+                .record_native_launch_intent(NativeLaunchIntent {
+                    launch_request_id: "request-parts".into(),
+                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                    system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                    harness_kind: HarnessKind::Codex,
+                    model_name: launch.launch_profile.model_name.clone(),
+                    effort: launch.launch_profile.effort.clone(),
+                    prompt_sha256_vector: vec!["a".repeat(64), "b".repeat(64)],
+                })
+                .unwrap()
+        );
+        let pane = fixture.pane("request-parts");
+        assert!(
+            store
+                .record_native_launch_binding(NativeLaunchBinding {
+                    launch_request_id: "request-parts".into(),
+                    flow_id: "parts-flow".into(),
+                    native_session_id: "parts-session".into(),
+                    harness_kind: HarnessKind::Codex,
+                    herdr_pane_binding: pane.clone(),
+                })
+                .unwrap()
+        );
+        assert!(
+            store
+                .record_registration_acknowledgement(RegistrationAcknowledgement {
+                    launch_request_id: "request-parts".into(),
+                    flow_id: "parts-flow".into(),
+                    native_session_id: "parts-session".into(),
+                    herdr_pane_binding: pane.clone(),
+                })
+                .unwrap()
+        );
+        let first = PromptDeliveryIntent {
+            launch_request_id: "request-parts".into(),
+            prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+            flow_id: "parts-flow".into(),
+            native_session_id: "parts-session".into(),
+            harness_kind: HarnessKind::Codex,
+            model_name: launch.launch_profile.model_name.clone(),
+            effort: launch.launch_profile.effort.clone(),
+            prompt_sha256_vector: vec!["a".repeat(64), "b".repeat(64)],
+            parts_submitted: 1,
+            stops_reported: 2,
+            leave_outs: Vec::new(),
+            herdr_pane_binding: pane,
+            native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
+                native_session_id: "parts-session".into(),
+                harness_kind: HarnessKind::Codex,
+                transcript_root_device: "2049".into(),
+                transcript_root_inode: "99150".into(),
+            }),
+        };
+        assert!(store.record_prompt_delivery_intent(first.clone()).unwrap());
+        assert!(
+            store
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(first.clone()))
+                .unwrap()
+        );
+        let receipt = |intent: &PromptDeliveryIntent| NativeTargetReceipt {
+            launch_request_id: intent.launch_request_id.clone(),
+            prompt_sha256: intent.prompt_sha256.clone(),
+            flow_id: intent.flow_id.clone(),
+            native_session_id: intent.native_session_id.clone(),
+            native_turn_id: "parts-turn".into(),
+            receipt_sha256: "c".repeat(64),
+            model_name: intent.model_name.clone(),
+            effort: intent.effort.clone(),
+            prompt_sha256_vector: intent.prompt_sha256_vector.clone(),
+        };
+        assert!(
+            !store
+                .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt(&first)))
+                .unwrap(),
+            "no receipt before the last part is submitted"
+        );
+        let mut skipped = first.clone();
+        skipped.parts_submitted = 3;
+        assert!(
+            !store
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(skipped))
+                .unwrap(),
+            "no part past the last"
+        );
+        let mut fewer_stops = first.clone();
+        fewer_stops.parts_submitted = 2;
+        fewer_stops.stops_reported = 1;
+        assert!(
+            !store
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(fewer_stops))
+                .unwrap(),
+            "the Stop count never goes back"
+        );
+        let mut second = first.clone();
+        second.parts_submitted = 2;
+        second.stops_reported = 3;
+        assert!(
+            store
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(second.clone()))
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .launch_attempt("request-parts")
+                .unwrap()
+                .unwrap()
+                .prompt_delivery_intent_option,
+            Some(second.clone())
+        );
+        assert!(
+            store
+                .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt(&second)))
+                .unwrap()
         );
     }
 
@@ -6135,14 +6578,14 @@ mod tests {
             session_id: "origin-session".into(),
             turn_id: "origin-turn".into(),
         };
-        let started = Launched {
+        let started = LaunchedRecord {
             flow_id: "started-flow".into(),
             session_id: "started-session".into(),
             origin_clue: origin.clone(),
         };
-        let replaced = Replaced {
+        let replaced = ReplacedRecord {
             flow_id: "predecessor-flow".into(),
-            launched: Launched {
+            launched_record: LaunchedRecord {
                 flow_id: "successor-flow".into(),
                 session_id: "successor-session".into(),
                 origin_clue: origin,

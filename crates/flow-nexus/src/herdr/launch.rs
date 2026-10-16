@@ -96,6 +96,50 @@ pub trait ObservesNativeLaunchBinding {
     ) -> Result<NativeLaunchBinding, String>;
 }
 
+/// Why Herdr's `agent get` of a launch pane is not the bound native target.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum NativeTargetRefusal {
+    #[error("{0}")]
+    HerdrUnreadable(String),
+    #[error("receipt target no longer matches the registered Herdr pane")]
+    PaneMismatch,
+    #[error("receipt target has no official native session")]
+    NoNativeSession,
+    #[error("receipt target native identity is no longer exact")]
+    IdentityInexact,
+}
+
+impl From<NativeTargetRefusal> for String {
+    fn from(refusal: NativeTargetRefusal) -> Self {
+        refusal.to_string()
+    }
+}
+
+/// Why a launched Flow was not given its title. Each variant is a fixed
+/// diagnostic; adapter text stays in `HerdrUnreadable`'s display and is
+/// never logged.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TitleRefusal {
+    #[error("native binding does not belong to this launch")]
+    ForeignBinding,
+    #[error(transparent)]
+    Title(#[from] crate::title::TitleRefused),
+    #[error(transparent)]
+    Target(#[from] NativeTargetRefusal),
+    #[error("Claude target did not become interactively ready for its title")]
+    NotReady,
+    #[error("Herdr refused the native rename")]
+    RenameRefused,
+    #[error("the native transcript title is unreadable")]
+    TranscriptUnreadable,
+    #[error("Claude native title readback differs from the set title")]
+    ReadbackDiffers,
+    #[error("the Codex app-server refused the thread name")]
+    CodexNamingRefused,
+    #[error("Herdr pane label readback differs from the title")]
+    PaneLabelRefused,
+}
+
 /// After the Flow ID is claimed, sets the canonical native title and the
 /// Herdr pane label, and reads both back before any prompt is authorized.
 pub trait TitlesNativeFlow {
@@ -103,7 +147,7 @@ pub trait TitlesNativeFlow {
         &self,
         launch: &ComposedLaunch,
         binding: &NativeLaunchBinding,
-    ) -> Result<NativeTitle, String>;
+    ) -> Result<NativeTitle, TitleRefusal>;
 }
 
 /// Converts an exact registration acknowledgement into the value that the
@@ -330,7 +374,7 @@ pub(crate) trait ClaimsNativeIdentity {
         pane: &HerdrPaneBinding,
         native_session_id: &str,
         harness: &HarnessKind,
-    ) -> Result<serde_json::Value, String>;
+    ) -> Result<serde_json::Value, NativeTargetRefusal>;
 }
 
 impl ClaimsNativeIdentity for HerdrCli {
@@ -419,19 +463,23 @@ impl ClaimsNativeIdentity for HerdrCli {
         pane: &HerdrPaneBinding,
         native_session_id: &str,
         harness: &HarnessKind,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, NativeTargetRefusal> {
         // The pane id is the target: the flow may have renamed its agent
         // since launch, and the name is read, never matched.
-        let response = self.run_json(&[
-            "--session".into(),
-            pane.herdr_session_name.clone(),
-            "agent".into(),
-            "get".into(),
-            pane.herdr_pane_id.clone(),
-        ])?;
-        let agent = response
-            .pointer("/result/agent")
-            .ok_or_else(|| "Herdr agent get returned no receipt target".to_owned())?;
+        let response = self
+            .run_json(&[
+                "--session".into(),
+                pane.herdr_session_name.clone(),
+                "agent".into(),
+                "get".into(),
+                pane.herdr_pane_id.clone(),
+            ])
+            .map_err(NativeTargetRefusal::HerdrUnreadable)?;
+        let agent = response.pointer("/result/agent").ok_or_else(|| {
+            NativeTargetRefusal::HerdrUnreadable(
+                "Herdr agent get returned no receipt target".into(),
+            )
+        })?;
         if agent
             .get("workspace_id")
             .and_then(serde_json::Value::as_str)
@@ -441,11 +489,11 @@ impl ClaimsNativeIdentity for HerdrCli {
             || agent.get("terminal_id").and_then(serde_json::Value::as_str)
                 != Some(pane.herdr_terminal_id.as_str())
         {
-            return Err("receipt target no longer matches the registered Herdr pane".into());
+            return Err(NativeTargetRefusal::PaneMismatch);
         }
         let session = agent
             .get("agent_session")
-            .ok_or_else(|| "receipt target has no official native session".to_owned())?;
+            .ok_or(NativeTargetRefusal::NoNativeSession)?;
         let expected_harness = harness.expected_harness();
         if agent.get("agent").and_then(serde_json::Value::as_str) != Some(expected_harness)
             || session.get("source").and_then(serde_json::Value::as_str)
@@ -454,7 +502,7 @@ impl ClaimsNativeIdentity for HerdrCli {
             || session.get("kind").and_then(serde_json::Value::as_str) != Some("id")
             || session.get("value").and_then(serde_json::Value::as_str) != Some(native_session_id)
         {
-            return Err("receipt target native identity is no longer exact".into());
+            return Err(NativeTargetRefusal::IdentityInexact);
         }
         Ok(agent.clone())
     }
@@ -1115,6 +1163,12 @@ pub(crate) trait TitlesClaudeSession {
     const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(250);
     #[cfg(test)]
     const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(1);
+    /// How long Herdr's `agent wait` may take for a just-bound Claude to
+    /// come to rest before its title is set.
+    #[cfg(not(test))]
+    const TITLE_READINESS_WAIT_MILLISECONDS: &'static str = "30000";
+    #[cfg(test)]
+    const TITLE_READINESS_WAIT_MILLISECONDS: &'static str = "1000";
     /// The last title the native Claude transcript records for its session,
     /// or none while no transcript or no title record exists.
     fn claude_transcript_title(
@@ -1122,6 +1176,13 @@ pub(crate) trait TitlesClaudeSession {
         pane: &HerdrPaneBinding,
         native_session_id: &str,
     ) -> Result<Option<String>, String>;
+    /// Waits, through Herdr's `agent wait`, for a just-bound Claude to come
+    /// to rest, then for Herdr to report its official native session and
+    /// interactive readiness; returns the agent Herdr then reports.
+    fn await_claude_title_readiness(
+        &self,
+        binding: &NativeLaunchBinding,
+    ) -> Result<serde_json::Value, TitleRefusal>;
     /// Renames the Claude session with its own `/rename` command and reads
     /// the title back from the terminal title Claude sets and from the
     /// session's transcript title record once one exists.
@@ -1129,7 +1190,7 @@ pub(crate) trait TitlesClaudeSession {
         &self,
         binding: &NativeLaunchBinding,
         title: &NativeTitle,
-    ) -> Result<(), String>;
+    ) -> Result<(), TitleRefusal>;
     /// Labels the launch pane with the title and reads the label back.
     fn label_herdr_pane(&self, pane: &HerdrPaneBinding, title: &NativeTitle) -> Result<(), String>;
 }
@@ -1164,21 +1225,57 @@ impl TitlesClaudeSession for HerdrCli {
             .next())
     }
 
+    fn await_claude_title_readiness(
+        &self,
+        binding: &NativeLaunchBinding,
+    ) -> Result<serde_json::Value, TitleRefusal> {
+        let pane = &binding.herdr_pane_binding;
+        // Herdr may report a just-bound Claude before its session and its
+        // readiness: it is waited for, never checked once.
+        self.run_status(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "agent".into(),
+            "wait".into(),
+            pane.herdr_pane_id.clone(),
+            "--until".into(),
+            "idle".into(),
+            "--until".into(),
+            "done".into(),
+            "--timeout".into(),
+            Self::TITLE_READINESS_WAIT_MILLISECONDS.into(),
+        ])
+        .map_err(|_| TitleRefusal::NotReady)?;
+        let mut last = TitleRefusal::NotReady;
+        for _ in 0..Self::TITLE_READBACK_ATTEMPTS {
+            match self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)
+            {
+                Ok(agent)
+                    if agent
+                        .get("interactive_ready")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true) =>
+                {
+                    return Ok(agent);
+                }
+                Ok(_) => last = TitleRefusal::NotReady,
+                Err(NativeTargetRefusal::NoNativeSession) => {
+                    last = TitleRefusal::Target(NativeTargetRefusal::NoNativeSession);
+                }
+                Err(refusal) => return Err(refusal.into()),
+            }
+            std::thread::sleep(Self::TITLE_READBACK_INTERVAL);
+        }
+        Err(last)
+    }
+
     fn title_claude_session(
         &self,
         binding: &NativeLaunchBinding,
         title: &NativeTitle,
-    ) -> Result<(), String> {
+    ) -> Result<(), TitleRefusal> {
         let pane = &binding.herdr_pane_binding;
-        let agent =
-            self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)?;
-        if agent
-            .get("interactive_ready")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-        {
-            return Err("Claude target is not interactively ready for its title".into());
-        }
+        self.await_claude_title_readiness(binding)?;
         self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -1186,14 +1283,17 @@ impl TitlesClaudeSession for HerdrCli {
             "prompt".into(),
             pane.herdr_agent_name.clone(),
             format!("/rename {}", title.as_str()),
-        ])?;
+        ])
+        .map_err(|_| TitleRefusal::RenameRefused)?;
         for _ in 0..Self::TITLE_READBACK_ATTEMPTS {
             let agent =
                 self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)?;
             let terminal = agent
                 .get("terminal_title_stripped")
                 .and_then(serde_json::Value::as_str);
-            let recorded = self.claude_transcript_title(pane, &binding.native_session_id)?;
+            let recorded = self
+                .claude_transcript_title(pane, &binding.native_session_id)
+                .map_err(|_| TitleRefusal::TranscriptUnreadable)?;
             if terminal == Some(title.as_str())
                 && recorded
                     .as_deref()
@@ -1203,7 +1303,7 @@ impl TitlesClaudeSession for HerdrCli {
             }
             std::thread::sleep(Self::TITLE_READBACK_INTERVAL);
         }
-        Err("Claude native title readback differs from the set title".into())
+        Err(TitleRefusal::ReadbackDiffers)
     }
 
     fn label_herdr_pane(&self, pane: &HerdrPaneBinding, title: &NativeTitle) -> Result<(), String> {
@@ -1242,17 +1342,16 @@ impl TitlesNativeFlow for HerdrCli {
         &self,
         launch: &ComposedLaunch,
         binding: &NativeLaunchBinding,
-    ) -> Result<NativeTitle, String> {
-        launch.binding_matches_launch(&binding.herdr_pane_binding)?;
-        if binding.launch_request_id != launch.launch_profile.launch_request_id
+    ) -> Result<NativeTitle, TitleRefusal> {
+        if launch
+            .binding_matches_launch(&binding.herdr_pane_binding)
+            .is_err()
+            || binding.launch_request_id != launch.launch_profile.launch_request_id
             || binding.harness_kind != launch.launch_profile.harness_kind
         {
-            return Err("native binding does not belong to this launch".into());
+            return Err(TitleRefusal::ForeignBinding);
         }
-        let title = launch
-            .launch_profile
-            .native_title(&binding.flow_id)
-            .map_err(|refusal| refusal.to_string())?;
+        let title = launch.launch_profile.native_title(&binding.flow_id)?;
         match binding.harness_kind {
             HarnessKind::Claude => self.title_claude_session(binding, &title)?,
             HarnessKind::Codex => self
@@ -1261,9 +1360,10 @@ impl TitlesNativeFlow for HerdrCli {
                 .and_then(|adapter| {
                     adapter.name_bound_thread(&binding.native_session_id, title.as_str())
                 })
-                .map_err(|error| error.to_string())?,
+                .map_err(|_| TitleRefusal::CodexNamingRefused)?,
         }
-        self.label_herdr_pane(&binding.herdr_pane_binding, &title)?;
+        self.label_herdr_pane(&binding.herdr_pane_binding, &title)
+            .map_err(|_| TitleRefusal::PaneLabelRefused)?;
         Ok(title)
     }
 }
@@ -2185,6 +2285,7 @@ pub(crate) mod tests {
     use crate::herdr::launch::PreparesClaudeEnvironment;
     use crate::herdr::launch::PreparesClaudePane;
     use crate::herdr::launch::TitlesClaudeSession;
+    use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
     use crate::title::ShowsNativeTitle;
     use signal_flow::{
         Aspect, ComposedLaunch, Effort, FirstPromptPayload, HarnessKind, LaunchProfile, ModelName,
@@ -2267,6 +2368,7 @@ case "$*" in
   *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
   *"pane run"*) sh -c "$6" > '{marker_output}'; width=$(cat '{pane_width}' 2>/dev/null || printf 120); fold -w "$width" '{marker_output}' > '{visible_output}' ;;
   *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
+  *"agent wait"*) [ -f '{wait_refused}' ] && exit 11; rm -f '{missing_agent_session}'; printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
   *"agent start"*) printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
   *"agent get"*) reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); if [ -f '{missing_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness"; fi ;;
   *"agent prompt"*" /rename "*) title=$(printf '%s' "$*" | sed 's/.* \/rename //'); [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}\n' "$title" >> '{claude_transcript}'; printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
@@ -2279,6 +2381,7 @@ esac
             calls = calls.display(),
             reported_harness = reported_harness.display(),
             missing_agent_session = root.path().join("missing-agent-session").display(),
+            wait_refused = root.path().join("agent-wait-refused").display(),
             marker_output = root.path().join("marker-unwrapped").display(),
             visible_output = root.path().join("marker-visible").display(),
             pane_width = root.path().join("pane-width").display(),
@@ -3896,7 +3999,7 @@ printf '%s\n' 123456
         let title = adapter
             .title_native_flow(&launch, &binding)
             .expect("title set and read back");
-        let expected = "Psyche.{ Fable 123456 }";
+        let expected = "{ Psyche flow Secondary 123456 }";
         assert_eq!(title.as_str(), expected);
         // Readback: the terminal title Herdr reports, the session's
         // transcript title record, and the Herdr pane label all equal it.
@@ -3963,18 +4066,46 @@ printf '%s\n' 123456
         let binding = adapter
             .observe_native_binding(&launch, &pane, None)
             .unwrap();
-        assert!(
-            adapter
-                .title_native_flow(&launch, &binding)
-                .unwrap_err()
-                .contains("readback differs")
+        assert_eq!(
+            adapter.title_native_flow(&launch, &binding).unwrap_err(),
+            TitleRefusal::ReadbackDiffers
         );
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(!calls.contains("pane rename"));
     }
 
     #[test]
-    fn unmapped_model_is_refused_before_any_rename() {
+    fn a_model_alias_is_titled_from_the_address() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let mut launch = launch(HarnessKind::Claude);
+        launch.launch_profile.model_name = "haiku".into();
+        launch.launch_profile.address.layer = signal_flow::Layer::Quaternary;
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).unwrap();
+        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .unwrap();
+        let title = adapter
+            .title_native_flow(&launch, &binding)
+            .expect("an alias model is titled");
+        assert_eq!(title.as_str(), "{ Field flow Quaternary 123456 }");
+        assert_eq!(
+            fs::read_to_string(root.path().join("pane-label"))
+                .unwrap()
+                .trim_end(),
+            title.as_str()
+        );
+    }
+
+    #[test]
+    fn claude_readiness_is_waited_for_before_the_title() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
         let agent_name = launch.launch_agent_name();
@@ -3989,11 +4120,54 @@ printf '%s\n' 123456
         let binding = adapter
             .observe_native_binding(&launch, &pane, None)
             .unwrap();
-        assert!(
-            adapter
-                .title_native_flow(&launch, &binding)
-                .unwrap_err()
-                .contains("unmapped exact native model identifier: model-current")
+        // Just bound: Herdr does not show the official session yet; it does
+        // once the harness comes to rest.
+        fs::write(root.path().join("missing-agent-session"), "absent").unwrap();
+        let title = adapter
+            .title_native_flow(&launch, &binding)
+            .expect("title set once the target is ready");
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        let wait = calls
+            .lines()
+            .position(|line| {
+                line.ends_with("agent wait w7:p1 --until idle --until done --timeout 1000")
+            })
+            .expect("readiness wait");
+        let rename = calls
+            .lines()
+            .position(|line| line.contains(&format!("/rename {}", title.as_str())))
+            .expect("native rename");
+        assert!(wait < rename);
+    }
+
+    #[test]
+    fn a_target_that_never_comes_to_rest_is_refused_typed_before_any_rename() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).unwrap();
+        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .unwrap();
+        fs::write(root.path().join("agent-wait-refused"), "timeout").unwrap();
+        assert_eq!(
+            adapter.title_native_flow(&launch, &binding).unwrap_err(),
+            TitleRefusal::NotReady
+        );
+        // The wait answers, but Herdr shows another native session there.
+        fs::remove_file(root.path().join("agent-wait-refused")).unwrap();
+        let mut stale = binding.clone();
+        stale.native_session_id = "12345678-1234-4abc-8def-000000000000".into();
+        assert_eq!(
+            adapter.title_native_flow(&launch, &stale).unwrap_err(),
+            TitleRefusal::Target(NativeTargetRefusal::IdentityInexact)
         );
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(!calls.contains("/rename"));
@@ -4012,7 +4186,7 @@ printf '%s\n' 123456
             "1234567812344abc8def123456789abc",
             &agent_name,
         );
-        let expected = "Field.{ Astra 123456 }";
+        let expected = "{ Field flow Secondary 123456 }";
         let frame = |json: &str| {
             let mut bytes = vec![0x81, json.len() as u8];
             bytes.extend_from_slice(json.as_bytes());

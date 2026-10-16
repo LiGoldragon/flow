@@ -75,9 +75,11 @@ never retried, and a delivery a crash left under its lease settles Uncertain
 when the Nexus opens. `Deliver` is idempotent on its DeliveryId. A Pending row
 becomes Active when the flow is witnessed live: on a `Presented` Deliver, or
 when `List` finds its bound pane present in Herdr. Presented is not Read.
-`Stop` persists the Stopped
-lifecycle only after `herdr pane close` succeeds for the revalidated
-pane. `List` returns all durable rows, sorted by Flow ID, and reports each one's
+`Stop` closes the flow's recorded Herdr pane when a fresh snapshot still
+shows its binding there, whatever the seat's readiness and whether its FlowId
+claim was given back, so a Pending flow whose launch was refused is stopped
+too; it persists the Stopped lifecycle only after `herdr pane close`
+succeeds, and answers `RouteUnavailable` when Herdr does not show the pane. `List` returns all durable rows, sorted by Flow ID, and reports each one's
 true lifecycle. A row that is still live is reconciled against Herdr before it
 is answered: its bound pane present, the route is refreshed and the flow is
 reported Active; its bound pane gone, the flow is reported `Exited`, with no
@@ -213,14 +215,20 @@ recorded as plain text with no command loaded, is refused. Skill bodies are
 not pasted into the composed first prompt.
 
 After the Flow ID is claimed and registered, and before any prompt, Start
-sets the canonical native title, `<Aspect>.{ <Model> <FlowId> }` (for
-example `Psyche.{ Fable 38de5b }`), with the model's display name taken from
-the exact model identifier and an unmapped identifier refused. Claude is
-renamed with its own `/rename` and read back from the terminal title Herdr
-reports and the session's transcript title record; Codex is named with
-`thread/name/set` and read back with `thread/read`. The Herdr pane label is
-set to the same title and read back. A failed readback refuses the Start with
-`BindingRefused`. Before Claude starts, the pane's shell drops inherited
+sets the canonical native title, the seat's Datom
+`{ <Aspect> <Topic> <Layer> <FlowId> }` (for example
+`{ Field flow Quaternary 2712d3 }`), built from the profile's Address and the
+claimed Flow ID; the model never enters it. Claude is first waited for with
+Herdr's `agent wait --until idle --until done`, then until Herdr reports its
+official native session and interactive readiness, then renamed with its own
+`/rename` and read back from the terminal title Herdr reports and the
+session's transcript title record; Codex is named with `thread/name/set` and
+read back with `thread/read`. The Herdr pane label is set to the same title
+and read back. A refused title refuses the Start with `NativeLaunchRefused`,
+and the Nexus log names the typed reason
+(`flow-nexus: herdr stage=title category=<reason>`). A launch refused once its
+pane exists closes that pane and records the flow it registered Stopped
+before it gives back its claim. Before Claude starts, the pane's shell drops inherited
 `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_JOB_DIR`, `CLAUDE_CODE_SESSION_ID` and
 `CLAUDE_CODE_SESSION_KIND`, so a new Flow shares no job state, and so no title,
 with the process that opened its pane. Claude also starts with

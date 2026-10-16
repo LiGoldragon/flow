@@ -50,7 +50,7 @@ pub enum PanePresence {
     Unknown,
 }
 
-/// Closes one revalidated Herdr pane. Every write into a pane is the pane
+/// Closes one Herdr pane whose recorded binding a fresh snapshot shows. Every write into a pane is the pane
 /// writer's (see `pane` and `crate::delivery`).
 pub trait OperatesHerdrPane {
     fn close(&self, node: &FlowNode) -> bool;
@@ -203,7 +203,10 @@ impl OperatesHerdrPane for HerdrCli {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return false;
         };
-        if !self.route_is_available(node) {
+        // A pane is closed when Herdr still shows the recorded binding there,
+        // whatever its readiness and whether its FlowId claim was given back:
+        // closing needs the pane, not a route a prompt could take.
+        if self.pane_presence(node) != PanePresence::Present {
             return false;
         }
         Command::new(&self.executable)

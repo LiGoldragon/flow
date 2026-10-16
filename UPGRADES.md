@@ -1,3 +1,34 @@
+# Flow 0.33.0
+
+No wire change; no store change.
+
+- **A seat's title is its Address and Flow ID.** The native title, set
+  before the first prompt, is the Datom `{ <Aspect> <Topic> <Layer>
+  <FlowId> }`, e.g. `{ Field flow Quaternary 2712d3 }`. The model no longer
+  enters it, so a launch whose model is an alias such as `haiku` is titled;
+  the model display table is gone.
+- **Claude is waited for before its title.** The title step runs Herdr's
+  `agent wait <pane> --until idle --until done`, then reads the agent until
+  Herdr reports its official native session and interactive readiness,
+  before `/rename`.
+- **A refused title is logged by its reason.** The Title stage returns a
+  typed refusal; the Nexus log line is
+  `flow-nexus: herdr stage=title category=<reason>` (`not-ready`,
+  `native-session-missing`, `title-readback-differs`, `herdr-unreadable`, and
+  the rest), never adapter text. Herdr's "no official native session" is
+  classified `native-session-missing` at every stage.
+- **A launch refused after its pane exists leaves nothing running.** Start
+  closes the pane and records the flow it registered Stopped (which gives
+  back the Address its acknowledgement held), then releases the FlowId
+  claim. A created pane with no registered flow is closed when Herdr shows
+  its harness there.
+- **Stop closes a Pending flow's live pane.** Stop and every pane close now
+  require only that a fresh Herdr snapshot shows the flow's recorded binding
+  (pane, terminal, harness), not prompt readiness or a FlowId claim. A
+  Pending flow left by a refused launch, such as `2712d3`, is stopped with
+  `Stop.<flow>`; a pane Herdr does not show still answers
+  `StopRejected.RouteUnavailable`.
+
 # Flow 0.32.1
 
 No wire change; no store change.

@@ -158,16 +158,15 @@ impl Dispatches for RunningNexus {
                 if !node.flow_lifecycle.is_live() {
                     return Response::StopRejected(signal_flow::StopRejection::AlreadyStopped);
                 }
-                let node = self.herdr.refresh_route(node);
-                if !matches!(
-                    node.herdr_route_selection,
-                    HerdrRouteSelection::Available(_)
-                ) {
-                    return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
-                }
+                // The route is the flow's recorded Herdr pane: a Pending flow
+                // whose launch was refused, or a seat not ready for a prompt,
+                // is stopped when Herdr still shows its binding there.
                 let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
                     return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
                 };
+                if self.herdr.pane_presence(&node) != herdr::PanePresence::Present {
+                    return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
+                }
                 // No write is left half-typed into a pane as it closes.
                 let closed = {
                     let _lease = self.pane_leases.hold(route);
@@ -1674,6 +1673,105 @@ mod tests {
         );
         assert!(!bound_copy.exists(), "the stopped Flow's copy is removed");
         assert!(other_copy.exists(), "another launch's copy is kept");
+    }
+
+    /// The pane a staged launch registered, as Herdr shows a seat not yet
+    /// able to take a prompt.
+    fn unready_launch_agent() -> serde_json::Value {
+        serde_json::json!({
+            "agent":"codex","agent_status":"unknown","interactive_ready":false,
+            "name":"fixture-agent","pane_id":"w1:p1","terminal_id":"fixture-terminal",
+            "workspace_id":"fixture-workspace"
+        })
+    }
+
+    /// A launch refused after its flow was registered, whose FlowId claim
+    /// was given back, leaves a Pending flow in a live pane that is not
+    /// ready for a prompt. Stop resolves the route from the recorded pane,
+    /// closes it, and records the flow Stopped.
+    #[test]
+    fn stop_closes_the_live_pane_of_a_pending_flow_that_was_never_ready() {
+        let fixture = NexusFixture::new();
+        let operation_log = fixture.accept_pane_operations(
+            vec![unready_launch_agent()],
+            PromptFixture::Prompted("w1:p1"),
+        );
+        let launch = fixture.staged_launch("orphaned-request", None);
+        launch.reserve(&fixture.nexus);
+        launch.record_native_intent(&fixture.nexus);
+        launch.bind(&fixture.nexus);
+        launch.register_and_acknowledge(&fixture.nexus);
+        fs::remove_file(fixture.directory.path().join("flows/.908786.flow-id")).unwrap();
+        assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Pending);
+
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Stop("908786".into())),
+            Response::Stopped("908786".into())
+        );
+        assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Stopped);
+        let operations = fs::read_to_string(&operation_log).expect("Herdr operation log");
+        assert!(operations.contains("pane close w1:p1"), "{operations}");
+
+        // A pane Herdr no longer shows is not closed: the route is gone.
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(vec![], PromptFixture::Prompted("w1:p1"));
+        let launch = fixture.staged_launch("vanished-request", None);
+        launch.reserve(&fixture.nexus);
+        launch.record_native_intent(&fixture.nexus);
+        launch.bind(&fixture.nexus);
+        launch.register_and_acknowledge(&fixture.nexus);
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Stop("908786".into())),
+            Response::StopRejected(signal_flow::StopRejection::RouteUnavailable)
+        );
+    }
+
+    /// A launch refused after its flow was registered in its pane closes
+    /// that pane and records the flow Stopped, which gives back the Address
+    /// its acknowledgement held.
+    #[test]
+    fn a_refused_launch_closes_its_pane_and_stops_its_flow() {
+        use crate::launching::{AbandonsRefusedLaunch, LaunchesFlows};
+        use crate::store::address_hold::HoldsLaunchAddress;
+        use crate::store::metaflow::SleepsMetaflows;
+
+        let fixture = NexusFixture::new();
+        let operation_log = fixture.accept_pane_operations(
+            vec![unready_launch_agent()],
+            PromptFixture::Prompted("w1:p1"),
+        );
+        let launch = fixture.staged_launch("refused-title-request", None);
+        launch.reserve(&fixture.nexus);
+        launch.record_native_intent(&fixture.nexus);
+        launch.bind(&fixture.nexus);
+        launch.register_and_acknowledge(&fixture.nexus);
+        assert!(
+            fixture
+                .nexus
+                .store
+                .metaflow_awake_as("908786")
+                .unwrap()
+                .is_some()
+        );
+
+        fixture
+            .nexus
+            .abandon_refused_launch("refused-title-request", &HarnessKind::Codex, None);
+        let operations = fs::read_to_string(&operation_log).expect("Herdr operation log");
+        assert!(operations.contains("pane close w1:p1"), "{operations}");
+        assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Stopped);
+        assert_eq!(
+            fixture.nexus.store.metaflow_awake_as("908786").unwrap(),
+            None
+        );
+        assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
+        assert_eq!(
+            fixture.nexus.settle(
+                "refused-title-request",
+                Response::StartRejected(StartRejection::NativeLaunchRefused)
+            ),
+            Response::StartRejected(StartRejection::NativeLaunchRefused)
+        );
     }
 
     #[test]

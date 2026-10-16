@@ -5,6 +5,7 @@
 
 use crate::HoldsStopRequest;
 use crate::codex::SelectsCodexEndpoint;
+use crate::delivery::lease::LeasesPanes;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
     Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
@@ -13,6 +14,7 @@ use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ObservesNativeLaunchBinding;
 use crate::performing::Performs;
 use crate::store::AnswersLaunchOutcome;
+use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::metaflow::TakesLaunchAddress;
 use crate::store::{
@@ -187,11 +189,17 @@ impl LaunchesFlows for RunningNexus {
             }
             _ => return persistence(),
         };
+        let harness_kind = launch.launch_profile.harness_kind.clone();
         let response = self.launch_reserved(launch, origin, reserved.clone());
-        // A launch refused after Reserve gives back the flow it held and
-        // the FlowId it claimed; the refusal stands whatever Release does.
-        if let (Response::StartRejected(_), Some(flow_id)) = (&response, reserved) {
-            let _ = self.perform(Operation::Release(flow_id));
+        // A launch refused after its pane exists leaves nothing running: its
+        // pane is closed and the flow it registered recorded Stopped. Then
+        // it gives back the flow it held and the FlowId it claimed; the
+        // refusal stands whatever either does.
+        if let Response::StartRejected(_) = &response {
+            self.abandon_refused_launch(&launch_request_id, &harness_kind, reserved.as_deref());
+            if let Some(flow_id) = reserved {
+                let _ = self.perform(Operation::Release(flow_id));
+            }
         }
         response
     }
@@ -628,6 +636,97 @@ impl LaunchesFlows for RunningNexus {
             }
             Err(_) => Response::LaunchStatusRejected(LaunchStatusRejection::PersistenceRefused),
         }
+    }
+}
+
+/// What a launch refused after Reserve leaves in Herdr is taken down.
+pub(crate) trait AbandonsRefusedLaunch {
+    /// Closes the pane a refused launch created. A flow it registered is
+    /// recorded Stopped once its pane is closed or Herdr shows it gone; when
+    /// Herdr cannot be read the flow stays Pending, for Stop to finish. A
+    /// pane with no registered flow is closed through its created binding.
+    fn abandon_refused_launch(
+        &self,
+        launch_request_id: &str,
+        harness_kind: &HarnessKind,
+        reserved: Option<&str>,
+    );
+}
+
+impl AbandonsRefusedLaunch for RunningNexus {
+    fn abandon_refused_launch(
+        &self,
+        launch_request_id: &str,
+        harness_kind: &HarnessKind,
+        reserved: Option<&str>,
+    ) {
+        let bound = self
+            .store
+            .launch_attempt(launch_request_id)
+            .ok()
+            .flatten()
+            .and_then(|attempt| attempt.native_launch_binding_option)
+            .map(|binding| binding.flow_id);
+        let registered = bound
+            .as_deref()
+            .or(reserved)
+            .and_then(|flow_id| self.store.flow_node(flow_id).ok().flatten())
+            .filter(|node| node.flow_lifecycle.is_live());
+        if let Some(node) = registered {
+            let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+                return;
+            };
+            let gone = match self.herdr.pane_presence(&node) {
+                PanePresence::Absent => true,
+                PanePresence::Unknown => false,
+                PanePresence::Present => {
+                    let _lease = self.pane_leases.hold(route);
+                    self.perform(Operation::Close(node.clone())) == Outcome::Closed
+                }
+            };
+            if !gone {
+                eprintln!(
+                    "flow-nexus: refused launch {launch_request_id} left flow {} Pending: its pane was not closed",
+                    node.flow_id
+                );
+                return;
+            }
+            if self.perform(Operation::Record(Record_Data::Stopped(
+                node.flow_id.clone(),
+            ))) != Outcome::Recorded
+            {
+                eprintln!(
+                    "flow-nexus: refused launch {launch_request_id}: flow {} not recorded Stopped",
+                    node.flow_id
+                );
+            }
+            return;
+        }
+        let Ok(Some(pane)) = self.store.recoverable_launch_pane(launch_request_id) else {
+            return;
+        };
+        let node = FlowNode {
+            flow_id: reserved.unwrap_or_default().into(),
+            session_id: String::new(),
+            harness_kind: harness_kind.clone(),
+            endpoint_selection: EndpointSelection::Unavailable,
+            herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                herdr_session_name: pane.herdr_session_name.clone(),
+                herdr_agent_name: pane.herdr_agent_name.clone(),
+                herdr_pane_id: pane.herdr_pane_id.clone(),
+                herdr_terminal_id: pane.herdr_terminal_id.clone(),
+            }),
+            origin_clue: OriginClue {
+                flow_id: String::new(),
+                session_id: String::new(),
+                turn_id: String::new(),
+            },
+            flow_lifecycle: FlowLifecycle::Pending,
+        };
+        if self.herdr.pane_presence(&node) == PanePresence::Present {
+            let _ = self.perform(Operation::Close(node));
+        }
+        let _ = self.store.orphan_launch_pane(launch_request_id);
     }
 }
 

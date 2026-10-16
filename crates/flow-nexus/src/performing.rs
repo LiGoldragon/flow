@@ -14,8 +14,8 @@ use crate::generated::operation::{
 };
 use crate::herdr::OperatesHerdrPane;
 use crate::herdr::launch::{
-    CreatesHerdrLaunchPane, ObservesNativeLaunchBinding, StartsNativeHerdrHarness,
-    SubmitsFirstPromptOnce, TitlesNativeFlow,
+    CreatesHerdrLaunchPane, NativeTargetRefusal, ObservesNativeLaunchBinding,
+    StartsNativeHerdrHarness, SubmitsFirstPromptOnce, TitleRefusal, TitlesNativeFlow,
 };
 use crate::store::{
     ConfirmsStartedFlow, FlowRegistration, RecordsFlowLifecycle, RecordsLaunchOutcome,
@@ -23,6 +23,7 @@ use crate::store::{
     RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsReplacement,
     RegistersFlowIdentity, ReservesLaunchAttempt,
 };
+use crate::title::TitleRefused;
 use crate::waking::PerformsSleepAndWake;
 use signal_flow::{HarnessKind, LaunchAttemptReservation, Response, StartRejection};
 
@@ -60,6 +61,15 @@ pub(crate) enum HerdrFailureCategory {
     NativeIdentityConflict,
     FlowClaimUnavailable,
     HarnessMismatch,
+    HerdrUnreadable,
+    ForeignBinding,
+    InvalidFlowId,
+    NotReady,
+    RenameRefused,
+    TranscriptUnreadable,
+    TitleReadbackDiffers,
+    CodexNamingRefused,
+    PaneLabelRefused,
     AdapterRefused,
 }
 
@@ -76,6 +86,15 @@ impl ClassifiesHerdrFailureCategory for HerdrFailureCategory {
             Self::NativeIdentityConflict => "native-identity-conflict",
             Self::FlowClaimUnavailable => "flow-claim-unavailable",
             Self::HarnessMismatch => "harness-mismatch",
+            Self::HerdrUnreadable => "herdr-unreadable",
+            Self::ForeignBinding => "foreign-binding",
+            Self::InvalidFlowId => "invalid-flow-id",
+            Self::NotReady => "not-ready",
+            Self::RenameRefused => "rename-refused",
+            Self::TranscriptUnreadable => "transcript-unreadable",
+            Self::TitleReadbackDiffers => "title-readback-differs",
+            Self::CodexNamingRefused => "codex-naming-refused",
+            Self::PaneLabelRefused => "pane-label-refused",
             Self::AdapterRefused => "adapter-refused",
         }
     }
@@ -83,7 +102,10 @@ impl ClassifiesHerdrFailureCategory for HerdrFailureCategory {
     fn from_adapter_error(error: &str) -> Self {
         if error.contains("does not match the created native pane") {
             Self::PaneTargetMismatch
-        } else if error.contains("no native session") || error.contains("empty native identity") {
+        } else if error.contains("no native session")
+            || error.contains("no official native session")
+            || error.contains("empty native identity")
+        {
             Self::NativeSessionMissing
         } else if error.contains("conflicts with the Flow-selected")
             || error.contains("not the one Flow reserved")
@@ -100,6 +122,29 @@ impl ClassifiesHerdrFailureCategory for HerdrFailureCategory {
     }
 }
 
+impl From<&TitleRefusal> for HerdrFailureCategory {
+    fn from(refusal: &TitleRefusal) -> Self {
+        match refusal {
+            TitleRefusal::ForeignBinding => Self::ForeignBinding,
+            TitleRefusal::Title(TitleRefused::InvalidFlowId) => Self::InvalidFlowId,
+            TitleRefusal::Target(NativeTargetRefusal::HerdrUnreadable(_)) => Self::HerdrUnreadable,
+            TitleRefusal::Target(NativeTargetRefusal::PaneMismatch) => Self::PaneTargetMismatch,
+            TitleRefusal::Target(NativeTargetRefusal::NoNativeSession) => {
+                Self::NativeSessionMissing
+            }
+            TitleRefusal::Target(NativeTargetRefusal::IdentityInexact) => {
+                Self::NativeIdentityConflict
+            }
+            TitleRefusal::NotReady => Self::NotReady,
+            TitleRefusal::RenameRefused => Self::RenameRefused,
+            TitleRefusal::TranscriptUnreadable => Self::TranscriptUnreadable,
+            TitleRefusal::ReadbackDiffers => Self::TitleReadbackDiffers,
+            TitleRefusal::CodexNamingRefused => Self::CodexNamingRefused,
+            TitleRefusal::PaneLabelRefused => Self::PaneLabelRefused,
+        }
+    }
+}
+
 /// A bounded, typed internal diagnostic retained before the public operation
 /// outcome is intentionally reduced to `HerdrRefused`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,28 +155,36 @@ pub(crate) struct HerdrFailure {
 
 trait RefusesHerdrOperation {
     fn refused(stage: HerdrFailureStage, adapter_error: String) -> Outcome;
-
-    #[cfg(test)]
+    /// A typed Title refusal, logged by its own category.
+    fn refused_title(refusal: &TitleRefusal) -> Outcome;
+    fn logged(self) -> Outcome;
     fn log_line(self) -> String;
 }
 
 impl RefusesHerdrOperation for HerdrFailure {
     fn refused(stage: HerdrFailureStage, adapter_error: String) -> Outcome {
-        let failure = Self {
+        Self {
             stage,
             category: HerdrFailureCategory::from_adapter_error(&adapter_error),
-        };
+        }
+        .logged()
+    }
+
+    fn refused_title(refusal: &TitleRefusal) -> Outcome {
+        Self {
+            stage: HerdrFailureStage::Title,
+            category: refusal.into(),
+        }
+        .logged()
+    }
+
+    fn logged(self) -> Outcome {
         // This fixed-format line has no adapter text, stderr, paths, IDs, or
         // request content. Its bounded fields remain useful for diagnosis.
-        eprintln!(
-            "flow-nexus: herdr stage={} category={}",
-            failure.stage.label(),
-            failure.category.label()
-        );
+        eprintln!("{}", self.log_line());
         Outcome::Failed(Failed_Data::HerdrRefused)
     }
 
-    #[cfg(test)]
     fn log_line(self) -> String {
         format!(
             "flow-nexus: herdr stage={} category={}",
@@ -194,6 +247,54 @@ mod failure_tests {
                 "official Herdr integration reported no native session".into()
             ),
             Outcome::Failed(Failed_Data::HerdrRefused)
+        );
+    }
+
+    #[test]
+    fn a_title_refusal_is_logged_by_its_typed_category() {
+        use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
+        let missing = TitleRefusal::Target(NativeTargetRefusal::NoNativeSession);
+        let failure = HerdrFailure {
+            stage: HerdrFailureStage::Title,
+            category: (&missing).into(),
+        };
+        assert_eq!(
+            failure.log_line(),
+            "flow-nexus: herdr stage=title category=native-session-missing"
+        );
+        assert_eq!(
+            HerdrFailure::refused_title(&missing),
+            Outcome::Failed(Failed_Data::HerdrRefused)
+        );
+        for (refusal, label) in [
+            (TitleRefusal::NotReady, "not-ready"),
+            (TitleRefusal::ReadbackDiffers, "title-readback-differs"),
+            (
+                TitleRefusal::Title(crate::title::TitleRefused::InvalidFlowId),
+                "invalid-flow-id",
+            ),
+            (
+                TitleRefusal::Target(NativeTargetRefusal::HerdrUnreadable(
+                    "secret=/private/socket".into(),
+                )),
+                "herdr-unreadable",
+            ),
+        ] {
+            let line = HerdrFailure {
+                stage: HerdrFailureStage::Title,
+                category: (&refusal).into(),
+            }
+            .log_line();
+            assert!(line.ends_with(&format!("category={label}")), "{line}");
+            assert!(!line.contains("secret="));
+        }
+        // The adapter's own words for a missing session are classified, not
+        // filed as a catch-all refusal.
+        assert_eq!(
+            HerdrFailureCategory::from_adapter_error(
+                "receipt target has no official native session"
+            ),
+            HerdrFailureCategory::NativeSessionMissing
         );
     }
 
@@ -277,7 +378,7 @@ impl Performs for RunningNexus {
                 .title_native_flow(&composed_launch, &native_launch_binding)
             {
                 Ok(_) => Outcome::Titled,
-                Err(error) => HerdrFailure::refused(HerdrFailureStage::Title, error),
+                Err(refusal) => HerdrFailure::refused_title(&refusal),
             },
             Operation::Submit(Submit_Data {
                 composed_launch,

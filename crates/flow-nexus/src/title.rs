@@ -1,60 +1,32 @@
 //! The canonical native title of a started Flow.
 //!
-//! A title is a Datom struct, `<Aspect>.{ <Model> <FlowId> }`, built from
-//! the launch profile's explicit aspect, the display name of its exact model
-//! identifier, and the Flow ID claimed from the native session:
-//! `Psyche.{ Fable 38de5b }`. Power never enters the title. An unmapped
-//! model identifier is refused; no alias and no fallback is accepted.
+//! A title is the Datom struct of the seat's Address and the Flow ID claimed
+//! from its native session, `{ <Aspect> <Topic> <Layer> <FlowId> }`:
+//! `{ Field flow Quaternary 2712d3 }`. It is the seat's own datom, so the
+//! model a seat runs never enters it, and no model identifier can refuse it.
 
-use signal_flow::{Aspect, LaunchProfile};
+use datom_codec::Datomizable;
+use protos::{Compactable, Protosizable};
+use signal_flow::{Aspect, LaunchProfile, Layer, Topic};
 use thiserror::Error;
 
-/// Exact native model identifiers and their display names. This mirrors the
-/// workspace's authoritative model-display map
-/// (`config/model-display-names.json`, version 1); an identifier absent here
-/// has no title.
-pub trait NamesModel {
-    const MODEL_DISPLAY_NAMES: &'static [(&'static str, &'static str)] = &[
-        ("gpt-6-astra", "Astra"),
-        ("gpt-6-sol", "Sol"),
-        ("gpt-6-luna", "Luna"),
-        ("gpt-5.6-sol", "Sol"),
-        ("gpt-5.6-luna", "Luna"),
-        ("claude-fable-5-1", "Fable"),
-        ("claude-fable-5-1[1m]", "Fable"),
-        ("claude-opus-5-5", "Opus"),
-        ("claude-opus-5", "Opus 5"),
-        ("claude-opus-4-7", "OldOpus 4.7"),
-        ("claude-opus-4-7[1m]", "OldOpus 4.7 1m"),
-        ("claude-opus-4-6", "OldOpus 4.6"),
-        ("claude-opus-4-6[1m]", "OldOpus 4.6 1m"),
-        ("claude-sonnet-5", "Sonnet 5"),
-        ("claude-haiku-4-5-20251001", "Haiku 4.5"),
-    ];
-
-    /// The display name of this exact model identifier.
-    fn model_display_name(&self) -> Option<&'static str>;
-}
-
-impl NamesModel for str {
-    fn model_display_name(&self) -> Option<&'static str> {
-        Self::MODEL_DISPLAY_NAMES
-            .iter()
-            .find(|(identifier, _)| *identifier == self)
-            .map(|(_, name)| *name)
-    }
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum TitleRefused {
-    #[error("unmapped exact native model identifier: {0}")]
-    UnmappedModel(String),
     #[error("a title requires the exact six-character Flow ID")]
     InvalidFlowId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeTitle(String);
+
+/// The seat a title names, in the order its datom is written.
+#[derive(datom_codec::Datomizable)]
+struct TitledSeat {
+    aspect: Aspect,
+    topic: Topic,
+    layer: Layer,
+    flow_id: String,
+}
 
 /// The title a launch profile gives the Flow it starts.
 pub trait TitlesFlow {
@@ -70,16 +42,13 @@ impl TitlesFlow for LaunchProfile {
         {
             return Err(TitleRefused::InvalidFlowId);
         }
-        let model = self
-            .model_name
-            .model_display_name()
-            .ok_or_else(|| TitleRefused::UnmappedModel(self.model_name.clone()))?;
-        let aspect = match self.address.aspect {
-            Aspect::Psyche => "Psyche",
-            Aspect::Mind => "Mind",
-            Aspect::Field => "Field",
+        let seat = TitledSeat {
+            aspect: self.address.aspect.clone(),
+            topic: self.address.topic.clone(),
+            layer: self.address.layer.clone(),
+            flow_id: flow_id.into(),
         };
-        Ok(NativeTitle(format!("{aspect}.{{ {model} {flow_id} }}")))
+        Ok(NativeTitle(seat.datomize(Vec::new()).protosize().compact()))
     }
 }
 
@@ -97,9 +66,9 @@ impl ShowsNativeTitle for NativeTitle {
 #[cfg(test)]
 mod tests {
     use super::{ShowsNativeTitle, TitleRefused, TitlesFlow};
-    use signal_flow::{Aspect, HarnessKind, LaunchProfile, PowerLevel};
+    use signal_flow::{Aspect, HarnessKind, LaunchProfile, Layer, PowerLevel};
 
-    fn profile(aspect: Aspect, model: &str) -> LaunchProfile {
+    fn profile(aspect: Aspect, layer: Layer, model: &str) -> LaunchProfile {
         LaunchProfile {
             launch_request_id: "launch-title".into(),
             launch_source_vector: vec![],
@@ -107,7 +76,7 @@ mod tests {
             address: signal_flow::Address {
                 aspect,
                 topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary,
+                layer,
             },
             power_level: PowerLevel::High,
             harness_kind: HarnessKind::Claude,
@@ -122,39 +91,36 @@ mod tests {
     }
 
     #[test]
-    fn title_is_the_datom_of_aspect_model_and_flow() {
+    fn title_is_the_datom_of_the_address_and_flow() {
+        // A model alias names no title: the launch that failed on `haiku`.
         assert_eq!(
-            profile(Aspect::Psyche, "claude-fable-5-1")
+            profile(Aspect::Field, Layer::Quaternary, "haiku")
+                .native_title("2712d3")
+                .unwrap()
+                .as_str(),
+            "{ Field flow Quaternary 2712d3 }"
+        );
+        assert_eq!(
+            profile(Aspect::Psyche, Layer::Primary, "claude-fable-5-1")
                 .native_title("38de5b")
                 .unwrap()
                 .as_str(),
-            "Psyche.{ Fable 38de5b }"
+            "{ Psyche flow Primary 38de5b }"
         );
-        assert_eq!(
-            profile(Aspect::Mind, "gpt-6-sol")
-                .native_title("00f95a")
-                .unwrap()
-                .as_str(),
-            "Mind.{ Sol 00f95a }"
-        );
-        // Power never enters the title.
-        let mut low = profile(Aspect::Field, "gpt-6-luna");
+        // Power and model never enter the title.
+        let mut low = profile(Aspect::Mind, Layer::Secondary, "gpt-6-sol");
         low.power_level = PowerLevel::UltraLow;
         assert_eq!(
-            low.native_title("e71dab").unwrap().as_str(),
-            "Field.{ Luna e71dab }"
+            low.native_title("00f95a").unwrap().as_str(),
+            "{ Mind flow Secondary 00f95a }"
         );
     }
 
     #[test]
-    fn unmapped_models_and_malformed_flow_ids_are_refused() {
-        assert_eq!(
-            profile(Aspect::Psyche, "fable").native_title("38de5b"),
-            Err(TitleRefused::UnmappedModel("fable".into()))
-        );
+    fn malformed_flow_ids_are_refused() {
         for flow_id in ["38DE5B", "38de5", "38de5bb", "38de5g", ""] {
             assert_eq!(
-                profile(Aspect::Psyche, "claude-fable-5-1").native_title(flow_id),
+                profile(Aspect::Psyche, Layer::Primary, "haiku").native_title(flow_id),
                 Err(TitleRefused::InvalidFlowId)
             );
         }

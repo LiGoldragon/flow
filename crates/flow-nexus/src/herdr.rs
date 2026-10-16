@@ -422,6 +422,9 @@ pub trait ReadsHerdrPanes {
         herdr_session_name: &str,
         native_session_id: &str,
     ) -> Option<bool>;
+    /// Whether the pane Flow recorded for this flow runs the flow's own
+    /// native session now, under its FlowId claim: the binding verified.
+    fn runs_own_session(&self, node: &FlowNode) -> bool;
 }
 
 impl ReadsHerdrPanes for HerdrCli {
@@ -517,6 +520,28 @@ impl ReadsHerdrPanes for HerdrCli {
                 .and_then(serde_json::Value::as_str)
                 == Some(native_session_id)
         }))
+    }
+
+    fn runs_own_session(&self, node: &FlowNode) -> bool {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return false;
+        };
+        if node.session_id.is_empty() || !self.identity_is_claimed(node) {
+            return false;
+        }
+        self.snapshot(route)
+            .as_ref()
+            .and_then(|snapshot| snapshot.pointer("/result/snapshot/agents"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|agents| {
+                agents.iter().any(|agent| {
+                    agent.matches_binding(route, &node.harness_kind)
+                        && agent
+                            .pointer("/agent_session/value")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(node.session_id.as_str())
+                })
+            })
     }
 
     fn session_snapshot(&self, herdr_session_name: &str) -> Option<serde_json::Value> {

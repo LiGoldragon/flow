@@ -40,14 +40,16 @@ use crate::composition::{
     ResumesLaunch,
 };
 use crate::delivery::lease::LeasesPanes;
-use crate::delivery::{FindsDeliveryTarget, ReadsLeasedPane};
+use crate::delivery::{FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data, Sleep_Data, Title_Data,
 };
-use crate::herdr::launch::{ObservesNativeLaunchBinding, ResumesNativeHerdrHarness};
+use crate::herdr::launch::{
+    ObservesNativeLaunchBinding, ResumesNativeHerdrHarness, WaitsForPaneRest,
+};
 use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
-use crate::herdr::{LocatesNativeTranscripts, ReadsHerdrPanes, ReadsHerdrRoster};
+use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster};
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::store::address_hold::HoldsLaunchAddress;
@@ -58,9 +60,9 @@ use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle,
 };
 use signal_flow::{
-    Address, AgentState, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
-    HerdrRouteSelection, LaunchProfile, Layer, Metaflow, OriginClue, PowerLevel, Request, Response,
-    StartRequest,
+    Address, AgentState, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding,
+    HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow, OriginClue, PowerLevel,
+    Request, Response, StartRequest,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -356,6 +358,86 @@ pub enum KeptAtStop {
     SleepRefused(Box<Outcome>),
 }
 
+/// Why work was not typed into a live flow's pane. Each is logged by name;
+/// the operation answers `HerdrRefused` for every one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandOverRefusal {
+    /// The flow is not a live, routable flow Flow holds.
+    Target(TargetRefusal),
+    /// The pane is not writable: gone, not ready, Blocked, or its composer
+    /// holds text or cannot be read.
+    Pane(PaneRefusal),
+    /// Herdr refused the text before any of it reached the pane.
+    Refused,
+}
+
+/// Why a wake did not leave its seat Awake. Every refusal is logged by
+/// name; the operation answers the `Failed` it maps to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WakeRefusal {
+    /// The store could not be read or written.
+    StoreUnreadable,
+    /// The metaflow is not Asleep.
+    NotAsleep,
+    /// Nothing is queued for it.
+    NothingQueued,
+    /// A pane that is not the flow's own recorded pane runs its native
+    /// session.
+    SessionLive,
+    /// Herdr could not be read to see whether the session runs.
+    HerdrUnreadable,
+    /// Nothing names a Herdr session to wake the seat in.
+    Unplaceable,
+    /// The bundle copy the flow was launched with is gone.
+    BundleMissing,
+    /// No pane was opened for the resumed session.
+    PaneNotOpened(Failed_Data),
+    /// Herdr did not start the native session again in the new pane.
+    HarnessNotResumed,
+    /// The resumed harness's binding could not be read.
+    BindingUnread,
+    /// The resumed harness came up as another session or FlowId.
+    BindingDiffers,
+    /// The resumed flow's new route was not recorded.
+    ResumeNotRecorded,
+    /// The resumed pane did not come to rest before the work was typed.
+    NotResting,
+    /// The work was not typed into the resumed pane.
+    HandOver(HandOverRefusal),
+    /// A fresh launch did not start.
+    FreshNotStarted(Failed_Data),
+    /// The started flow was not recorded Awake.
+    AwakeNotRecorded,
+}
+
+/// What a wake refusal answers on the wire.
+pub trait AnswersWakeRefusal {
+    /// The operation's answer.
+    fn failure(&self) -> Failed_Data;
+}
+
+impl AnswersWakeRefusal for WakeRefusal {
+    fn failure(&self) -> Failed_Data {
+        match self {
+            Self::StoreUnreadable | Self::ResumeNotRecorded | Self::AwakeNotRecorded => {
+                Failed_Data::StoreRefused
+            }
+            Self::NotAsleep => Failed_Data::NotAsleep,
+            Self::NothingQueued => Failed_Data::NothingQueued,
+            Self::SessionLive | Self::BindingUnread | Self::BindingDiffers => {
+                Failed_Data::ConflictingBinding
+            }
+            Self::BundleMissing => Failed_Data::BundleRefused,
+            Self::PaneNotOpened(failure) | Self::FreshNotStarted(failure) => failure.clone(),
+            Self::HerdrUnreadable
+            | Self::Unplaceable
+            | Self::HarnessNotResumed
+            | Self::NotResting
+            | Self::HandOver(_) => Failed_Data::HerdrRefused,
+        }
+    }
+}
+
 /// The triggers: what a Stopped report, a queued request and a Nexus start
 /// set going.
 pub trait SleepsAndWakesSeats {
@@ -373,7 +455,9 @@ pub trait SleepsAndWakesSeats {
     /// Which way an Asleep metaflow is woken.
     fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan;
     /// At the Nexus's start: wakes every Asleep metaflow still holding work
-    /// that wakes it, as a wake the last Nexus did not finish left it.
+    /// that wakes it, as a wake the last Nexus did not finish left it, and
+    /// every Asleep metaflow whose last flow is still live, which a wake
+    /// that failed after resuming its session left so.
     fn recover_wakes(&self);
 }
 
@@ -389,12 +473,32 @@ pub trait PerformsSleepAndWake {
 
 /// The steps a wake takes.
 trait WakesInParts {
+    /// The body of `wake`, every early exit a typed refusal.
+    fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal>;
+    /// The last flow of an Asleep metaflow, when it is still live in the
+    /// pane Flow recorded for it, running its own native session under its
+    /// claim: a wake that resumed it and failed before recording it Awake.
+    fn live_last_flow(&self, metaflow: &Metaflow) -> Option<FlowNode>;
+    /// Records such a flow Awake, taking nothing from the queue; what is
+    /// queued is then typed in as work that arrived during a wake.
+    fn settle_live_resumed(&self, address: &Address, flow_id: &str) -> Result<FlowId, WakeRefusal>;
     fn resume(
         &self,
         node: FlowNode,
         profile: LaunchProfile,
         text: &str,
-    ) -> Result<FlowId, Failed_Data>;
+    ) -> Result<FlowId, WakeRefusal>;
+    /// The steps of a resume once its pane is open.
+    fn resume_in_pane(
+        &self,
+        node: &FlowNode,
+        launch: &signal_flow::ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        text: &str,
+    ) -> Result<(), WakeRefusal>;
+    /// Closes a pane a failed resume opened and records the flow Stopped,
+    /// so the next wake starts clean; the queue is untouched.
+    fn abandon_resumed(&self, node: &FlowNode, pane: &HerdrPaneBinding);
     fn start_fresh(
         &self,
         metaflow: &Metaflow,
@@ -402,17 +506,17 @@ trait WakesInParts {
         text: &str,
     ) -> Result<FlowId, Failed_Data>;
     /// Types text into a live flow's pane under its lease, as Flow's own
-    /// write: no Priority head, since it is not a Message.
-    fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), Failed_Data>;
+    /// write: no Priority head, since it is not a Message. A refusal is
+    /// logged by its reason.
+    fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), HandOverRefusal>;
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile>;
     /// Writes the context size the flow's native transcript shows now.
     fn record_context_at_stop(&self, flow_id: &str);
     /// The refresh threshold configured for this layer, in tokens.
     fn refresh_threshold(&self, layer: &Layer) -> Option<i64>;
     /// Refuses a wake while a pane already runs this flow's native session:
-    /// ConflictingBinding when one does, HerdrRefused when Herdr is
-    /// unreadable.
-    fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), Failed_Data>;
+    /// SessionLive when one does, HerdrUnreadable when Herdr is unreadable.
+    fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal>;
     fn now() -> i64;
     /// The body of `settle_stopped`: waits, boundedly and off the dispatch
     /// gate, for Herdr to show the seat resting, then drains or sleeps it.
@@ -432,9 +536,9 @@ impl SleepsAndWakesSeats for RunningNexus {
         let Some(lease) = self.waking.hold(&address) else {
             return;
         };
-        match self.perform(Operation::Wake(address.clone())) {
-            Outcome::Woken(_) => self.drain_woken(&address, lease),
-            outcome => eprintln!("flow-nexus: a queued request did not wake its seat: {outcome:?}"),
+        // A refused wake has logged its reason; its work stays queued.
+        if let Outcome::Woken(_) = self.perform(Operation::Wake(address.clone())) {
+            self.drain_woken(&address, lease);
         }
         self.settle_stops_at_confirmation();
     }
@@ -503,7 +607,13 @@ impl SleepsAndWakesSeats for RunningNexus {
                     .filter(|metaflow| {
                         metaflow.state == flow_ethos::State::Asleep
                             && Self::wakes_layer(&metaflow.address.layer)
-                            && metaflow.queue.iter().any(Self::wakes_for)
+                            && (metaflow.queue.iter().any(Self::wakes_for)
+                                || metaflow.past.last().is_some_and(|flow_id| {
+                                    matches!(
+                                        self.store.flow_node(flow_id),
+                                        Ok(Some(node)) if node.flow_lifecycle.is_live()
+                                    )
+                                }))
                     })
                     .map(|metaflow| metaflow.address)
                     .collect::<Vec<_>>(),
@@ -552,28 +662,74 @@ impl PerformsSleepAndWake for RunningNexus {
     }
 
     fn wake(&self, address: Address) -> Outcome {
-        let (metaflow, requests) = {
+        match self.waken(&address) {
+            Ok(flow_id) => Outcome::Woken(flow_id),
+            Err(refusal) => {
+                eprintln!(
+                    "flow-nexus: wake of {:?} {} {:?} refused: {refusal:?}",
+                    address.aspect, address.topic, address.layer
+                );
+                // Nothing was taken: the work is still queued, oldest first.
+                Outcome::Failed(refusal.failure())
+            }
+        }
+    }
+
+    fn drain(&self, address: Address) -> Outcome {
+        let (flow_id, oldest) = match self.store.metaflow(&address) {
+            Ok(Some(Metaflow {
+                state: flow_ethos::State::Awake(flow_id),
+                queue,
+                ..
+            })) => (flow_id, queue.into_iter().next()),
+            Ok(_) => return Outcome::Failed(Failed_Data::NotAwake),
+            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+        };
+        let Some(oldest) = oldest else {
+            return Outcome::Drained(Vec::new());
+        };
+        let typed = vec![oldest];
+        if self.hand_over(&flow_id, &typed.prompt_text()).is_err() {
+            return Outcome::Failed(Failed_Data::HerdrRefused);
+        }
+        // Typed (or possibly typed): it is never typed twice.
+        match self.store.remove_oldest_queued(&address, &typed[0]) {
+            Ok(true) => Outcome::Drained(typed),
+            _ => {
+                eprintln!("flow-nexus: work typed into flow {flow_id} is still queued");
+                Outcome::Failed(Failed_Data::StoreRefused)
+            }
+        }
+    }
+}
+
+impl WakesInParts for RunningNexus {
+    fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal> {
+        let metaflow = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.rest_ended_awake(&address);
-            match self.store.metaflow(&address) {
-                Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => {
-                    if metaflow.queue.is_empty() {
-                        return Outcome::Failed(Failed_Data::NothingQueued);
-                    }
-                    // Read, not taken: the requests leave the queue only
-                    // when the started flow is recorded Awake.
-                    let requests = metaflow.queue.clone();
-                    (metaflow, requests)
-                }
-                Ok(_) => return Outcome::Failed(Failed_Data::NotAsleep),
-                Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+            self.rest_ended_awake(address);
+            match self.store.metaflow(address) {
+                Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => metaflow,
+                Ok(_) => return Err(WakeRefusal::NotAsleep),
+                Err(_) => return Err(WakeRefusal::StoreUnreadable),
             }
         };
+        // The flow's own session, already live in the pane Flow recorded
+        // for it, is woken as it is: nothing is opened again.
+        if let Some(node) = self.live_last_flow(&metaflow) {
+            return self.settle_live_resumed(address, &node.flow_id);
+        }
+        if metaflow.queue.is_empty() {
+            return Err(WakeRefusal::NothingQueued);
+        }
+        // Read, not taken: the requests leave the queue only when the
+        // started flow is recorded Awake.
+        let requests = metaflow.queue.clone();
         let Ok(delivered) = i64::try_from(requests.len()) else {
-            return Outcome::Failed(Failed_Data::StoreRefused);
+            return Err(WakeRefusal::StoreUnreadable);
         };
         let text = requests.prompt_text();
         let plan = self.wake_plan(&metaflow);
@@ -595,109 +751,116 @@ impl PerformsSleepAndWake for RunningNexus {
             if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection {
                 sessions.push(route.herdr_session_name.clone());
             }
-            if let Err(failure) = self.refuse_live_session(&node, &sessions) {
-                return Outcome::Failed(failure);
-            }
+            self.refuse_live_session(&node, &sessions)?;
         }
-        let woken = match plan {
+        let flow_id = match plan {
             WakePlan::Resume { node, profile } => {
                 let _turn = self
                     .dispatch_gate
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                self.resume(*node, *profile, &text)
+                self.resume(*node, *profile, &text)?
             }
-            WakePlan::Fresh { herdr_session_name } => {
-                self.start_fresh(&metaflow, herdr_session_name, &text)
-            }
-            WakePlan::Unplaceable => Err(Failed_Data::HerdrRefused),
+            WakePlan::Fresh { herdr_session_name } => self
+                .start_fresh(&metaflow, herdr_session_name, &text)
+                .map_err(WakeRefusal::FreshNotStarted)?,
+            WakePlan::Unplaceable => return Err(WakeRefusal::Unplaceable),
         };
         let _turn = self
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match woken {
-            Ok(flow_id) => match self.perform(Operation::Record(Record_Data::Awoken(
-                Record_Data_Awoken_Data {
-                    address,
-                    flow_id: flow_id.clone(),
-                    delivered,
-                },
-            ))) {
-                Outcome::Recorded => Outcome::Woken(flow_id),
-                _ => {
-                    eprintln!("flow-nexus: flow {flow_id} woke but is not recorded Awake");
-                    Outcome::Failed(Failed_Data::StoreRefused)
-                }
+        match self.perform(Operation::Record(Record_Data::Awoken(
+            Record_Data_Awoken_Data {
+                address: address.clone(),
+                flow_id: flow_id.clone(),
+                delivered,
             },
-            // Nothing was taken: the work is still queued, oldest first.
-            Err(failure) => Outcome::Failed(failure),
-        }
-    }
-
-    fn drain(&self, address: Address) -> Outcome {
-        let (flow_id, oldest) = match self.store.metaflow(&address) {
-            Ok(Some(Metaflow {
-                state: flow_ethos::State::Awake(flow_id),
-                queue,
-                ..
-            })) => (flow_id, queue.into_iter().next()),
-            Ok(_) => return Outcome::Failed(Failed_Data::NotAwake),
-            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
-        };
-        let Some(oldest) = oldest else {
-            return Outcome::Drained(Vec::new());
-        };
-        let typed = vec![oldest];
-        if let Err(failure) = self.hand_over(&flow_id, &typed.prompt_text()) {
-            return Outcome::Failed(failure);
-        }
-        // Typed (or possibly typed): it is never typed twice.
-        match self.store.remove_oldest_queued(&address, &typed[0]) {
-            Ok(true) => Outcome::Drained(typed),
+        ))) {
+            Outcome::Recorded => Ok(flow_id),
             _ => {
-                eprintln!("flow-nexus: work typed into flow {flow_id} is still queued");
-                Outcome::Failed(Failed_Data::StoreRefused)
+                eprintln!("flow-nexus: flow {flow_id} woke but is not recorded Awake");
+                Err(WakeRefusal::AwakeNotRecorded)
             }
         }
     }
-}
 
-impl WakesInParts for RunningNexus {
+    fn live_last_flow(&self, metaflow: &Metaflow) -> Option<FlowNode> {
+        let node = self.store.flow_node(metaflow.past.last()?).ok().flatten()?;
+        (node.flow_lifecycle.is_live() && self.herdr.runs_own_session(&node)).then_some(node)
+    }
+
+    fn settle_live_resumed(&self, address: &Address, flow_id: &str) -> Result<FlowId, WakeRefusal> {
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match self.perform(Operation::Record(Record_Data::Awoken(
+            Record_Data_Awoken_Data {
+                address: address.clone(),
+                flow_id: flow_id.to_owned(),
+                delivered: 0,
+            },
+        ))) {
+            Outcome::Recorded => {
+                eprintln!(
+                    "flow-nexus: flow {flow_id} already live in its own pane is recorded Awake"
+                );
+                Ok(flow_id.to_owned())
+            }
+            _ => Err(WakeRefusal::AwakeNotRecorded),
+        }
+    }
+
     fn resume(
         &self,
         node: FlowNode,
         profile: LaunchProfile,
         text: &str,
-    ) -> Result<FlowId, Failed_Data> {
+    ) -> Result<FlowId, WakeRefusal> {
         // The bundle copy the flow was launched with is kept while it sleeps.
         if !self.composer.launch_bundles().file_for(&profile).is_file() {
-            return Err(Failed_Data::BundleRefused);
+            return Err(WakeRefusal::BundleMissing);
         }
         let launch = profile.resumption(text);
         let pane = match self.perform(Operation::Open(launch.clone())) {
             Outcome::Opened(pane) => pane,
-            Outcome::Failed(failure) => return Err(failure),
-            _ => return Err(Failed_Data::HerdrRefused),
+            Outcome::Failed(failure) => return Err(WakeRefusal::PaneNotOpened(failure)),
+            _ => return Err(WakeRefusal::PaneNotOpened(Failed_Data::HerdrRefused)),
         };
-        if let Err(error) =
-            self.herdr
-                .resume_native_harness(&launch, &pane, &node.flow_id, &node.session_id)
+        match self.resume_in_pane(&node, &launch, &pane, text) {
+            Ok(()) => Ok(node.flow_id),
+            Err(refusal) => {
+                self.abandon_resumed(&node, &pane);
+                Err(refusal)
+            }
+        }
+    }
+
+    fn resume_in_pane(
+        &self,
+        node: &FlowNode,
+        launch: &signal_flow::ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        text: &str,
+    ) -> Result<(), WakeRefusal> {
+        if self
+            .herdr
+            .resume_native_harness(launch, pane, &node.flow_id, &node.session_id)
+            .is_err()
         {
             // Adapter text may carry private paths; only the fact is logged.
-            let _ = error;
-            eprintln!("flow-nexus: flow {} not resumed by Herdr", node.flow_id);
-            return Err(Failed_Data::HerdrRefused);
+            return Err(WakeRefusal::HarnessNotResumed);
         }
         // The resumed harness must come up as the same session, and its
         // claim must still name this FlowId: the flow keeps its identity or
         // the resume fails, never silently taking another.
         let binding = self
             .herdr
-            .observe_native_binding(&launch, &pane, Some(&node.flow_id))
-            .map_err(|_| Failed_Data::ConflictingBinding)?;
+            .observe_native_binding(launch, pane, Some(&node.flow_id))
+            .map_err(|_| WakeRefusal::BindingUnread)?;
         if binding.native_session_id != node.session_id || binding.flow_id != node.flow_id {
-            return Err(Failed_Data::ConflictingBinding);
+            return Err(WakeRefusal::BindingDiffers);
         }
         let route = HerdrRoute {
             herdr_session_name: pane.herdr_session_name.clone(),
@@ -707,13 +870,13 @@ impl WakesInParts for RunningNexus {
         };
         if !self
             .store
-            .record_resumed(&node.flow_id, route)
+            .record_resumed(&node.flow_id, route.clone())
             .unwrap_or(false)
         {
-            return Err(Failed_Data::StoreRefused);
+            return Err(WakeRefusal::ResumeNotRecorded);
         }
         if self.perform(Operation::Title(Title_Data {
-            composed_launch: launch,
+            composed_launch: launch.clone(),
             native_launch_binding: binding,
         })) != Outcome::Titled
         {
@@ -722,8 +885,52 @@ impl WakesInParts for RunningNexus {
                 node.flow_id
             );
         }
-        self.hand_over(&node.flow_id, text)?;
-        Ok(node.flow_id)
+        // A `/rename` the title typed is taken on Herdr's Enter, 300 ms
+        // after its text: the pane must be at rest and its composer clear
+        // before the work is typed, as for a fresh seat's first prompt.
+        self.herdr
+            .await_pane_rest(pane)
+            .map_err(|_| WakeRefusal::NotResting)?;
+        let _ = self.herdr.composer_cleared(&route, &node.harness_kind);
+        self.hand_over(&node.flow_id, text)
+            .map_err(WakeRefusal::HandOver)
+    }
+
+    fn abandon_resumed(&self, node: &FlowNode, pane: &HerdrPaneBinding) {
+        let route = HerdrRoute {
+            herdr_session_name: pane.herdr_session_name.clone(),
+            herdr_agent_name: pane.herdr_agent_name.clone(),
+            herdr_pane_id: pane.herdr_pane_id.clone(),
+            herdr_terminal_id: pane.herdr_terminal_id.clone(),
+        };
+        let opened = FlowNode {
+            herdr_route_selection: HerdrRouteSelection::Available(route.clone()),
+            ..node.clone()
+        };
+        let closed = match self.herdr.pane_presence(&opened) {
+            PanePresence::Absent => true,
+            PanePresence::Unknown => false,
+            PanePresence::Present | PanePresence::Bare => {
+                let _lease = self.pane_leases.hold(&route);
+                self.perform(Operation::Close(opened)) == Outcome::Closed
+            }
+        };
+        if !closed {
+            eprintln!(
+                "flow-nexus: a failed resume of flow {} left its pane open",
+                node.flow_id
+            );
+            return;
+        }
+        if self.perform(Operation::Record(Record_Data::Stopped(
+            node.flow_id.clone(),
+        ))) != Outcome::Recorded
+        {
+            eprintln!(
+                "flow-nexus: a failed resume of flow {} is not recorded Stopped",
+                node.flow_id
+            );
+        }
     }
 
     fn start_fresh(
@@ -808,28 +1015,36 @@ impl WakesInParts for RunningNexus {
         }
     }
 
-    fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), Failed_Data> {
-        let target = self
-            .delivery_target(flow_id)
-            .map_err(|_| Failed_Data::HerdrRefused)?;
-        let _lease = self.pane_leases.hold(&target.route);
-        let agent_state = self
-            .writable_state(&target)
-            .map_err(|_| Failed_Data::HerdrRefused)?;
-        let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
-        match self.herdr.place(&target.route, text, observe) {
-            Placement::Placed { observed: true } if self.herdr.route_is_available(&target.node) => {
-                let _ = self.store.record_active(flow_id);
-                Ok(())
+    fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), HandOverRefusal> {
+        let handed = (|| {
+            let target = self
+                .delivery_target(flow_id)
+                .map_err(HandOverRefusal::Target)?;
+            let _lease = self.pane_leases.hold(&target.route);
+            let agent_state = self
+                .writable_state(&target)
+                .map_err(HandOverRefusal::Pane)?;
+            let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
+            match self.herdr.place(&target.route, text, observe) {
+                Placement::Placed { observed: true }
+                    if self.herdr.route_is_available(&target.node) =>
+                {
+                    let _ = self.store.record_active(flow_id);
+                    Ok(())
+                }
+                Placement::Placed { .. } => Ok(()),
+                // It may have reached the pane: it is never typed twice.
+                Placement::Uncertain => {
+                    eprintln!("flow-nexus: work typed into flow {flow_id}, reaction unknown");
+                    Ok(())
+                }
+                Placement::Refused => Err(HandOverRefusal::Refused),
             }
-            Placement::Placed { .. } => Ok(()),
-            // It may have reached the pane: it is never typed twice.
-            Placement::Uncertain => {
-                eprintln!("flow-nexus: work typed into flow {flow_id}, reaction unknown");
-                Ok(())
-            }
-            Placement::Refused => Err(Failed_Data::HerdrRefused),
+        })();
+        if let Err(refusal) = &handed {
+            eprintln!("flow-nexus: work not typed into flow {flow_id}: {refusal:?}");
         }
+        handed
     }
 
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile> {
@@ -877,7 +1092,7 @@ impl WakesInParts for RunningNexus {
             .map(|threshold| threshold.refresh)
     }
 
-    fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), Failed_Data> {
+    fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal> {
         let mut checked = HashSet::new();
         for herdr_session_name in sessions {
             if !checked.insert(herdr_session_name) {
@@ -893,9 +1108,9 @@ impl WakesInParts for RunningNexus {
                         "flow-nexus: flow {} is already running; not woken again",
                         node.flow_id
                     );
-                    return Err(Failed_Data::ConflictingBinding);
+                    return Err(WakeRefusal::SessionLive);
                 }
-                None => return Err(Failed_Data::HerdrRefused),
+                None => return Err(WakeRefusal::HerdrUnreadable),
             }
         }
         Ok(())

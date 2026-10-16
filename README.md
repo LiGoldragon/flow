@@ -221,8 +221,10 @@ sets the canonical native title, the seat's Datom
 claimed Flow ID; the model never enters it. Claude is first waited for with
 Herdr's `agent wait --until idle --until done`, then until Herdr reports its
 official native session and interactive readiness, then renamed with its own
-`/rename` and read back from the terminal title Herdr reports and the
-session's transcript title record; Codex is named with `thread/name/set` and
+`/rename` and read back from the terminal title Herdr reports and a
+transcript title record written after the command (one more than before it
+was typed). A session whose latest title record already is the title, as a
+resumed one keeps from its first life, is not renamed. Codex is named with `thread/name/set` and
 read back with `thread/read`. The Herdr pane label is set to the same title
 and read back. A refused title refuses the Start with `NativeLaunchRefused`,
 and the Nexus log names the typed reason

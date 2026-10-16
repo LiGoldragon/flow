@@ -1163,13 +1163,14 @@ pub(crate) trait TitlesClaudeSession {
     const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(250);
     #[cfg(test)]
     const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(1);
-    /// The last title the native Claude transcript records for its session,
-    /// or none while no transcript or no title record exists.
-    fn claude_transcript_title(
+    /// Every title the native Claude transcript records for its session, in
+    /// the order written; empty while no transcript or no title record
+    /// exists.
+    fn claude_transcript_titles(
         &self,
         pane: &HerdrPaneBinding,
         native_session_id: &str,
-    ) -> Result<Option<String>, String>;
+    ) -> Result<Vec<String>, String>;
     /// Waits, through Herdr's `agent wait`, for a just-bound Claude to come
     /// to rest, then for Herdr to report its official native session and
     /// interactive readiness; returns the agent Herdr then reports.
@@ -1178,8 +1179,9 @@ pub(crate) trait TitlesClaudeSession {
         binding: &NativeLaunchBinding,
     ) -> Result<serde_json::Value, TitleRefusal>;
     /// Renames the Claude session with its own `/rename` command and reads
-    /// the title back from the terminal title Claude sets and from the
-    /// session's transcript title record once one exists.
+    /// the title back from the terminal title Claude sets and from a
+    /// transcript title record written after the command. A session whose
+    /// latest title record is already the title is left as it is.
     fn title_claude_session(
         &self,
         binding: &NativeLaunchBinding,
@@ -1190,21 +1192,20 @@ pub(crate) trait TitlesClaudeSession {
 }
 
 impl TitlesClaudeSession for HerdrCli {
-    fn claude_transcript_title(
+    fn claude_transcript_titles(
         &self,
         pane: &HerdrPaneBinding,
         native_session_id: &str,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Vec<String>, String> {
         let (root, _, found) =
             self.transcript_candidates(pane, native_session_id, &HarnessKind::Claude, None)?;
         if found.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let transcript = fs::read(root.one_resolved_transcript(found)?)
             .map_err(|error| format!("native transcript is unreadable: {error}"))?;
         Ok(transcript
             .split(|byte| *byte == b'\n')
-            .rev()
             .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
             .filter(|row| {
                 row.get("type").and_then(serde_json::Value::as_str) == Some("custom-title")
@@ -1216,7 +1217,7 @@ impl TitlesClaudeSession for HerdrCli {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned)
             })
-            .next())
+            .collect())
     }
 
     fn await_claude_title_readiness(
@@ -1258,6 +1259,14 @@ impl TitlesClaudeSession for HerdrCli {
     ) -> Result<(), TitleRefusal> {
         let pane = &binding.herdr_pane_binding;
         self.await_claude_title_readiness(binding)?;
+        // A resumed session keeps the title its first life recorded: when
+        // its latest title record is already this title, nothing is typed.
+        let before = self
+            .claude_transcript_titles(pane, &binding.native_session_id)
+            .map_err(|_| TitleRefusal::TranscriptUnreadable)?;
+        if before.last().map(String::as_str) == Some(title.as_str()) {
+            return Ok(());
+        }
         self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -1273,13 +1282,15 @@ impl TitlesClaudeSession for HerdrCli {
             let terminal = agent
                 .get("terminal_title_stripped")
                 .and_then(serde_json::Value::as_str);
+            // Only a title record written after this `/rename` counts: one
+            // more than before it was typed, naming this title. Claude takes
+            // the command only on Herdr's Enter, 300 ms after the text.
             let recorded = self
-                .claude_transcript_title(pane, &binding.native_session_id)
+                .claude_transcript_titles(pane, &binding.native_session_id)
                 .map_err(|_| TitleRefusal::TranscriptUnreadable)?;
             if terminal == Some(title.as_str())
-                && recorded
-                    .as_deref()
-                    .is_none_or(|name| name == title.as_str())
+                && recorded.len() > before.len()
+                && recorded.last().map(String::as_str) == Some(title.as_str())
             {
                 return Ok(());
             }
@@ -2394,8 +2405,8 @@ case "$*" in
   *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
   *"agent wait"*) [ -f '{wait_refused}' ] && exit 11; rm -f '{missing_agent_session}'; printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
   *"agent start"*) printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
-  *"agent get"*) reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); if [ -f '{missing_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness"; fi ;;
-  *"agent prompt"*" /rename "*) title=$(printf '%s' "$*" | sed 's/.* \/rename //'); [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}\n' "$title" >> '{claude_transcript}'; printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
+  *"agent get"*) if [ -f '{pending_record}' ]; then left=$(cat '{record_delay}'); if [ "$left" -le 0 ]; then cat '{pending_record}' >> '{claude_transcript}'; rm -f '{pending_record}'; else printf '%s' $((left - 1)) > '{record_delay}'; fi; fi; reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); if [ -f '{missing_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness"; fi ;;
+  *"agent prompt"*" /rename "*) title=$(printf '%s' "$*" | sed 's/.* \/rename //'); [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"pane rename w7:p1 "*) printf '%s' "$*" | sed 's/.*pane rename w7:p1 //' > '{label_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
   *"pane get w7:p1"*) label=$(cat '{label_file}' 2>/dev/null); printf '{{"result":{{"pane":{{"pane_id":"w7:p1","terminal_id":"term-native","label":"%s"}}}}}}\n' "$label" ;;
@@ -2411,6 +2422,8 @@ esac
             pane_width = root.path().join("pane-width").display(),
             title_file = root.path().join("native-title").display(),
             title_override = root.path().join("native-title-override").display(),
+            record_delay = root.path().join("title-record-delay").display(),
+            pending_record = root.path().join("title-record-pending").display(),
             label_file = root.path().join("pane-label").display(),
             claude_transcript = root
                 .path()
@@ -4033,10 +4046,9 @@ printf '%s\n' 123456
         );
         assert_eq!(
             adapter
-                .claude_transcript_title(&pane, native_session)
-                .unwrap()
-                .as_deref(),
-            Some(expected)
+                .claude_transcript_titles(&pane, native_session)
+                .unwrap(),
+            vec![expected.to_owned()]
         );
         assert_eq!(
             fs::read_to_string(root.path().join("pane-label"))
@@ -4096,6 +4108,113 @@ printf '%s\n' 123456
         );
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(!calls.contains("pane rename"));
+    }
+
+    /// A resumed session whose latest title record is already its title is
+    /// not renamed again: nothing is typed, and its new pane is labelled.
+    #[test]
+    fn a_session_already_carrying_its_title_is_not_renamed() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let expected = "{ Field flow Secondary 123456 }";
+        fs::write(
+            root.path()
+                .join("native-transcripts/claude")
+                .join(format!("{native_session}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"custom-title","customTitle":"an older name","sessionId":native_session}),
+                serde_json::json!({"type":"custom-title","customTitle":expected,"sessionId":native_session}),
+            ),
+        )
+        .unwrap();
+        let pane = adapter.create_launch_pane(&launch).unwrap();
+        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .unwrap();
+        let title = adapter
+            .title_native_flow(&launch, &binding)
+            .expect("the kept title stands");
+        assert_eq!(title.as_str(), expected);
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(!calls.contains("/rename"), "{calls}");
+        assert_eq!(
+            fs::read_to_string(root.path().join("pane-label"))
+                .unwrap()
+                .trim_end(),
+            expected
+        );
+    }
+
+    /// A typed `/rename` is read back only from a title record written after
+    /// it: the terminal title alone, or a record from before, is not enough.
+    #[test]
+    fn a_typed_rename_waits_for_its_own_title_record() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let transcript = root
+            .path()
+            .join("native-transcripts/claude")
+            .join(format!("{native_session}.jsonl"));
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"custom-title","customTitle":"an older name","sessionId":native_session})
+            ),
+        )
+        .unwrap();
+        // Claude writes the record only some reads after the command.
+        fs::write(root.path().join("title-record-delay"), "5").unwrap();
+        let pane = adapter.create_launch_pane(&launch).unwrap();
+        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .unwrap();
+        let title = adapter
+            .title_native_flow(&launch, &binding)
+            .expect("read back once its own record is written");
+        assert!(!root.path().join("title-record-pending").exists());
+        assert_eq!(
+            adapter
+                .claude_transcript_titles(&pane, native_session)
+                .unwrap(),
+            vec!["an older name".to_owned(), title.as_str().to_owned()]
+        );
+
+        // A record that never comes refuses, though the terminal shows it.
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        fs::write(root.path().join("title-record-delay"), "100000").unwrap();
+        let pane = adapter.create_launch_pane(&launch).unwrap();
+        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .unwrap();
+        assert_eq!(
+            adapter.title_native_flow(&launch, &binding).unwrap_err(),
+            TitleRefusal::ReadbackDiffers
+        );
+        assert!(!root.path().join("pane-label").exists());
     }
 
     #[test]

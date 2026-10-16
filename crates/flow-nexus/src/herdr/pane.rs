@@ -109,6 +109,17 @@ pub trait WritesPane {
         submission
     }
 
+    /// Waits, boundedly, for the composer to hold no text of its own: a
+    /// command typed just before, such as a title's `/rename`, leaves it
+    /// once Herdr's CR, sent 300 ms after the text, has reached the harness.
+    /// A composer already blank is not waited for.
+    fn composer_cleared(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Submission {
+        if self.composer_is_blank(route, harness_kind) == Some(true) {
+            return Submission::Seen;
+        }
+        self.submission(route, harness_kind)
+    }
+
     /// Presses the composer's submit key once.
     fn submit(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool {
         self.press(route, &Composer::of(harness_kind).submit_keys())

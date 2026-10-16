@@ -1,3 +1,40 @@
+# Flow 0.34.4
+
+No wire change; no store change.
+
+- **A resumed session keeping its title is not renamed.** When the
+  session's latest `custom-title` transcript record already is the canonical
+  title, the title step types no `/rename`; the new pane is still labelled.
+- **A rename is read back from its own record.** A typed `/rename` passes
+  only when the terminal title shows it and the transcript holds one more
+  title record than before the command was typed, the last naming the
+  title. A record from the session's first life no longer passes it before
+  Claude has taken Herdr's Enter.
+- **The work waits for the resumed pane.** Before a wake types its queue,
+  Herdr's `agent wait <pane> --until idle --until done` runs, then the
+  composer is read until it holds no text (bounded, as a submission read).
+- **Refusals say why.** A wake that does not leave its seat Awake logs
+  `flow-nexus: wake of <aspect> <topic> <layer> refused: <reason>` with one
+  of `StoreUnreadable`, `NotAsleep`, `NothingQueued`, `SessionLive`,
+  `HerdrUnreadable`, `Unplaceable`, `BundleMissing`, `PaneNotOpened`,
+  `HarnessNotResumed`, `BindingUnread`, `BindingDiffers`,
+  `ResumeNotRecorded`, `NotResting`, `HandOver(<reason>)`,
+  `FreshNotStarted` or `AwakeNotRecorded`. Work not typed into a pane logs
+  `flow-nexus: work not typed into flow <id>: <reason>`, the reason
+  `Target(..)`, `Pane(..)` (`ComposerOccupied` among them) or `Refused`.
+  The wire answers are unchanged.
+- **A seat left live by a failed wake is woken as it is.** When the last
+  flow of an Asleep metaflow is Pending or Active and the pane Flow
+  recorded for it runs its own native session under its claim, a wake
+  records it Awake taking nothing from the queue, and the queue is then
+  typed in oldest first; it is no longer refused `ConflictingBinding`. The
+  Nexus does this at its start too, for every such metaflow, so a store a
+  0.34.3 wake left so needs no hand edit.
+- **A wake failing after its pane opened leaves nothing running.** The
+  pane is closed and the flow recorded Stopped; the work stays queued and
+  the metaflow Asleep for a clean next wake. A pane that cannot be closed
+  is logged and its flow left as it is.
+
 # Flow 0.34.3
 
 No wire change; no store change.

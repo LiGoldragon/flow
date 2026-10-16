@@ -627,6 +627,17 @@ fn resumable_ended_by(
             )
         )
     );
+    // With the LIVE file, the snapshot shows the resumed pane running the
+    // flow's own session; BUSY holds how many composer reads still show a
+    // command not yet taken.
+    let sessioned = agent.replace(
+        r#""revision":1}"#,
+        &format!(
+            r#""revision":1,"agent_session":{{"source":"herdr:claude","agent":"claude","kind":"id","value":"{session}"}}}}"#
+        ),
+    );
+    let live = fixture.directory.path().join("resumed-pane-live");
+    let busy = fixture.directory.path().join("composer-busy-reads");
     let calls = fixture.directory.path().join("herdr-calls.log");
     let typed = fixture.directory.path().join("pane-typed.txt");
     let marker = fixture.directory.path().join("marker-output");
@@ -639,9 +650,10 @@ case "$*" in
   *"pane wait-output"*) line=$(grep -F FLOW_CLAUDE_ENV_READY_ 'MARKER'); printf '{"result":{"pane_id":"w9:p1","matched_line":"%s"}}\n' "$line" ;;
   *"agent start"*) printf '%s\n' '{"result":{"agent":{"name":"x"}}}' ;;
   *"agent get"*) printf '%s\n' 'RECORD' ;;
-  *"api snapshot"*) printf '%s\n' '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":[AGENT],"protocol":20,"version":"0.8.2"},"type":"session_snapshot"}}' ;;
+  *"api snapshot"*) if [ -f 'LIVE' ]; then printf '%s\n' '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":[SESSIONED],"protocol":20,"version":"0.8.2"},"type":"session_snapshot"}}'; else printf '%s\n' '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":[AGENT],"protocol":20,"version":"0.8.2"},"type":"session_snapshot"}}'; fi ;;
   *"agent wait"*) printf '%s\n' '{"result":{"status":"idle"}}' ;;
-  *"agent read"*) printf '%s\n' '❯ ' ;;
+  *"agent read"*) left=$(cat 'BUSY' 2>/dev/null || printf 0); if [ "$left" -gt 0 ]; then printf '%s' $((left - 1)) > 'BUSY'; printf '%s\n' '❯ /rename kept' ; else printf '%s\n' '❯ ' ; fi ;;
+  *"pane close"*) printf '%s\n' '{"result":{}}' ;;
   *"agent prompt /rename "*|*"agent prompt "*" /rename "*) printf '%s\n' '{"result":{"accepted":true}}' ;;
   *"agent prompt"*) printf '%s\n--\n' "$6" >> 'TYPED'; printf '%s\n' '{"id":"cli:agent:prompt","result":{"type":"agent_prompted","agent":AGENT}}' ;;
   *) exit 64 ;;
@@ -652,6 +664,9 @@ esac
     .replace("MARKER", &marker.display().to_string())
     .replace("TYPED", &typed.display().to_string())
     .replace("RECORD", &agent_record)
+    .replace("SESSIONED", &sessioned)
+    .replace("LIVE", &live.display().to_string())
+    .replace("BUSY", &busy.display().to_string())
     .replace("AGENT", &agent);
     FixtureExecutable {
         path: fixture.snapshot_program.clone(),
@@ -837,6 +852,191 @@ fn a_wake_is_refused_while_a_pane_already_runs_the_session() {
     let asleep = stored(&fixture, Layer::Secondary);
     assert_eq!(asleep.state, State::Asleep);
     assert_eq!(asleep.queue, queue);
+}
+
+fn typed_prompts(fixture: &NexusFixture) -> Vec<String> {
+    fs::read_to_string(fixture.directory.path().join("pane-typed.txt"))
+        .unwrap_or_default()
+        .split("\n--\n")
+        .filter(|prompt| !prompt.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn herdr_calls(fixture: &NexusFixture) -> String {
+    fs::read_to_string(fixture.directory.path().join("herdr-calls.log")).unwrap_or_default()
+}
+
+/// A resumed session whose transcript already carries its title from its
+/// first life is not renamed again, and its queue is typed.
+#[test]
+fn a_resume_whose_session_keeps_its_title_types_no_rename_and_delivers() {
+    let fixture = NexusFixture::new();
+    let seat = resumable(&fixture);
+    let project = fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{}.jsonl", seat.session)),
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"custom-title","customTitle":"{ Mind flow Secondary abc123 }","sessionId":seat.session})
+        ),
+    )
+    .unwrap();
+    let at = address(Layer::Secondary);
+    let queue = vec![Request::Order("A".into())];
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        queue.clone(),
+    ));
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at)),
+        Outcome::Woken("abc123".into())
+    );
+    assert!(!herdr_calls(&fixture).contains("/rename"));
+    assert_eq!(typed_prompts(&fixture), vec![queue.prompt_text()]);
+    let woken = stored(&fixture, Layer::Secondary);
+    assert_eq!(woken.state, State::Awake("abc123".into()));
+    assert!(woken.queue.is_empty());
+}
+
+/// A composer still holding a command when the work is due is waited for
+/// until it clears; then the work is typed.
+#[test]
+fn a_resumed_composer_not_yet_clear_is_waited_for_before_the_work() {
+    let fixture = NexusFixture::new();
+    resumable(&fixture);
+    fs::write(fixture.directory.path().join("composer-busy-reads"), "3").unwrap();
+    let at = address(Layer::Secondary);
+    let queue = vec![Request::Order("A".into())];
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        queue.clone(),
+    ));
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at)),
+        Outcome::Woken("abc123".into())
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.directory.path().join("composer-busy-reads")).unwrap(),
+        "0",
+        "every busy read was taken before the work was typed"
+    );
+    let calls = herdr_calls(&fixture);
+    let wait = calls
+        .lines()
+        .position(|line| line.contains("agent wait w9:p1"))
+        .expect("the pane is waited for");
+    let prompt = calls
+        .lines()
+        .position(|line| line.contains("agent prompt w9:p1"))
+        .expect("the work is typed");
+    assert!(wait < prompt);
+    assert_eq!(typed_prompts(&fixture), vec![queue.prompt_text()]);
+}
+
+/// A wake that fails once its pane is open closes that pane and records the
+/// flow Stopped; its work stays queued and the metaflow Asleep, so the next
+/// wake starts clean.
+#[test]
+fn a_wake_failing_after_its_pane_opened_closes_it_and_keeps_the_queue() {
+    let fixture = NexusFixture::new();
+    resumable(&fixture);
+    // The composer never clears: nothing may be typed into it.
+    fs::write(
+        fixture.directory.path().join("composer-busy-reads"),
+        "100000",
+    )
+    .unwrap();
+    let at = address(Layer::Secondary);
+    let queue = vec![Request::Order("A".into())];
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        queue.clone(),
+    ));
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at)),
+        Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
+    );
+    assert!(herdr_calls(&fixture).contains("pane close w9:p1"));
+    assert!(typed_prompts(&fixture).is_empty());
+    let node = fixture.nexus.store.flow_node("abc123").unwrap().unwrap();
+    assert_eq!(node.flow_lifecycle, FlowLifecycle::Stopped);
+    let asleep = stored(&fixture, Layer::Secondary);
+    assert_eq!(asleep.state, State::Asleep);
+    assert_eq!(asleep.past, vec!["abc123".to_owned()]);
+    assert_eq!(asleep.queue, queue);
+}
+
+/// The state a wake that failed after resuming left: the flow Pending in
+/// its new pane, running its own session, the metaflow Asleep with the
+/// work still queued.
+fn stuck_resumed(fixture: &NexusFixture) -> Vec<Request> {
+    resumable(fixture);
+    let route = HerdrRoute {
+        herdr_session_name: "fixture-session".into(),
+        herdr_agent_name: "resumed-agent".into(),
+        herdr_pane_id: "w9:p1".into(),
+        herdr_terminal_id: "term-resumed".into(),
+    };
+    assert!(fixture.nexus.store.record_resumed("abc123", route).unwrap());
+    fs::write(fixture.directory.path().join("resumed-pane-live"), "live").unwrap();
+    let queue = vec![Request::Order("A".into()), Request::Order("B".into())];
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        queue.clone(),
+    ));
+    queue
+}
+
+fn settled_and_delivered(fixture: &NexusFixture, queue: &[Request]) {
+    let woken = stored(fixture, Layer::Secondary);
+    assert_eq!(woken.state, State::Awake("abc123".into()));
+    assert!(woken.past.is_empty());
+    assert!(woken.queue.is_empty());
+    let calls = herdr_calls(fixture);
+    assert!(
+        !calls.contains("workspace create"),
+        "nothing opened: {calls}"
+    );
+    assert!(!calls.contains("agent start"), "nothing resumed: {calls}");
+    assert_eq!(
+        typed_prompts(fixture),
+        queue
+            .iter()
+            .map(|request| [request.clone()].prompt_text())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The flow's own session live in the pane Flow recorded for it is woken
+/// as it is by the next queued request, never refused as a conflict.
+#[test]
+fn a_seat_left_live_by_a_failed_wake_settles_on_the_next_wake() {
+    let fixture = NexusFixture::new();
+    let queue = stuck_resumed(&fixture);
+    fixture.nexus.wake_due(address(Layer::Secondary));
+    settled_and_delivered(&fixture, &queue);
+}
+
+/// The same seat settles at the Nexus's start.
+#[test]
+fn a_seat_left_live_by_a_failed_wake_settles_at_the_nexus_start() {
+    let fixture = NexusFixture::new();
+    let queue = stuck_resumed(&fixture);
+    fixture.nexus.recover_wakes();
+    settled_and_delivered(&fixture, &queue);
 }
 
 trait ReadsLiveness {

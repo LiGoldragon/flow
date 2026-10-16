@@ -672,12 +672,18 @@ pub struct Stopping {
     requested: AtomicBool,
 }
 
-impl Stopping {
-    pub fn requested(&self) -> bool {
+/// What a stop request can say: whether it was made, and making it.
+pub trait HoldsStopRequest {
+    fn requested(&self) -> bool;
+    fn request(&self);
+}
+
+impl HoldsStopRequest for Stopping {
+    fn requested(&self) -> bool {
         self.requested.load(Ordering::SeqCst)
     }
 
-    pub fn request(&self) {
+    fn request(&self) {
         self.requested.store(true, Ordering::SeqCst);
     }
 }
@@ -707,8 +713,13 @@ impl StopsNexus for RunningNexus {
 /// that accepts belongs to a live process and is refused.
 pub struct ClaimedSocket;
 
-impl ClaimedSocket {
-    pub fn bind(socket: &Path) -> Result<UnixListener, String> {
+/// Binds a socket path this process claims.
+pub trait ClaimsSocket {
+    fn bind(socket: &Path) -> Result<UnixListener, String>;
+}
+
+impl ClaimsSocket for ClaimedSocket {
+    fn bind(socket: &Path) -> Result<UnixListener, String> {
         use std::os::unix::fs::FileTypeExt;
         if let Some(directory) = socket
             .parent()
@@ -774,15 +785,19 @@ pub struct TerminationSignals {
     set: libc::sigset_t,
 }
 
-impl TerminationSignals {
-    const POLL: libc::timespec = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 200_000_000,
-    };
-
+/// Blocks the termination signals, then watches for them.
+pub trait WatchesTerminationSignals: Sized {
     /// Blocks SIGTERM and SIGINT in the calling thread; call before any
     /// other thread starts.
-    pub fn block() -> Self {
+    fn block() -> Self;
+
+    /// Waits for SIGTERM or SIGINT until `finished` holds; true when a
+    /// signal came.
+    fn watch(&self, finished: &dyn Fn() -> bool) -> bool;
+}
+
+impl WatchesTerminationSignals for TerminationSignals {
+    fn block() -> Self {
         // SAFETY: the set is initialized by sigemptyset before use, and
         // pthread_sigmask only reads it.
         unsafe {
@@ -795,14 +810,15 @@ impl TerminationSignals {
         }
     }
 
-    /// Waits for SIGTERM or SIGINT until `finished` holds; true when a
-    /// signal came.
-    pub fn watch(&self, finished: &dyn Fn() -> bool) -> bool {
+    fn watch(&self, finished: &dyn Fn() -> bool) -> bool {
+        const POLL: libc::timespec = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 200_000_000,
+        };
         while !finished() {
             // SAFETY: the set and timeout are valid for the call; no
             // siginfo is requested.
-            let signal =
-                unsafe { libc::sigtimedwait(&self.set, std::ptr::null_mut(), &Self::POLL) };
+            let signal = unsafe { libc::sigtimedwait(&self.set, std::ptr::null_mut(), &POLL) };
             if signal == libc::SIGTERM || signal == libc::SIGINT {
                 return true;
             }

@@ -3,6 +3,7 @@
 //! a launch request — its attempt, its outcome, and whether it replaces a
 //! predecessor.
 
+use crate::HoldsStopRequest;
 use crate::codex::SelectsCodexEndpoint;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,

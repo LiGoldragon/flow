@@ -1,8 +1,9 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
 use flow_nexus::store::ConfiguresOnlyStore;
 use flow_nexus::{
-    CarriesSignalFrames, ClaimedSocket, OpensRunningNexus, RunningNexus, ServesMeta,
-    ServesOrdinary, StopsNexus, TerminationSignals,
+    CarriesSignalFrames, ClaimedSocket, ClaimsSocket, HoldsStopRequest, OpensRunningNexus,
+    RunningNexus, ServesMeta, ServesOrdinary, StopsNexus, TerminationSignals,
+    WatchesTerminationSignals,
     caller::{IdentifiesPeer, LocatesCallerPane},
     launching::PromotesAmbiguousLaunches,
     store::{ConfigurationOnlyStore, DefaultConfiguration, ReadsAnchors, StoreError},

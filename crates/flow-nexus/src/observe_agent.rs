@@ -6,11 +6,11 @@
 //! flow's pane, and `pane.closed` / `pane.exited`. Nothing is re-read on a
 //! timer; a flow whose agent does not change sends nothing.
 
-use crate::RunningNexus;
 use crate::herdr::HerdrCli;
 use crate::herdr::pane::ReadsAgentStatus;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
+use crate::{HoldsStopRequest, RunningNexus};
 use signal_flow::{
     AgentObservation, AgentState, FlowNode, HerdrRoute, HerdrRouteSelection, Response,
 };

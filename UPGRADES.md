@@ -1,3 +1,9 @@
+# Flow 0.28.1
+
+No wire or store change. Terra is not offered: the stable Codex line is
+`gpt-5.6-sol` and `gpt-5.6-luna`, and `gpt-5.6-terra` has no title mapping.
+Terra is not used until Terra 6.
+
 # Flow 0.28.0
 
 No wire change (signal-flow d1358d3 and meta-signal-flow 6d07b7b unchanged).

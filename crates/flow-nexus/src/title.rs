@@ -19,7 +19,6 @@ pub trait NamesModel {
         ("gpt-6-sol", "Sol"),
         ("gpt-6-luna", "Luna"),
         ("gpt-5.6-sol", "Sol"),
-        ("gpt-5.6-terra", "Terra"),
         ("gpt-5.6-luna", "Luna"),
         ("claude-fable-5-1", "Fable"),
         ("claude-fable-5-1[1m]", "Fable"),

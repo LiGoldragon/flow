@@ -100,7 +100,7 @@ pub trait LaysOutDefaults {
     const SOURCE_ROOT: &str = "primary";
     const STABLE_CODEX_CLIENT: &str = "codex-stable-flow-client";
     const STABLE_CODEX_HOME: &str = ".codex";
-    const STABLE_CODEX_MODELS: [&str; 3] = ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"];
+    const STABLE_CODEX_MODELS: [&str; 2] = ["gpt-5.6-sol", "gpt-5.6-luna"];
     const NEXT_CODEX_CLIENT: &str = "codex-next-flow-client";
     const NEXT_CODEX_HOME: &str = ".codex-next";
     const NEXT_CODEX_MODELS: [&str; 3] = ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"];

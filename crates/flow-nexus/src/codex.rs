@@ -1188,7 +1188,7 @@ mod tests {
                 home: PathBuf::from("/home/test/.codex"),
                 socket: "/home/test/.codex/app-server-control/app-server-control.sock".into(),
                 transcript_root: PathBuf::from("/home/test/.codex/sessions"),
-                model_names: BTreeSet::from(["gpt-5.6-terra".into()]),
+                model_names: BTreeSet::from(["gpt-5.6-sol".into()]),
             },
             next: CodexEndpoint {
                 client_path: PathBuf::from("/profile/bin/codex-next"),
@@ -1214,7 +1214,7 @@ mod tests {
             PathBuf::from("/profile/bin/codex-next")
         );
         assert_eq!(
-            endpoints.endpoint_for("gpt-5.6-terra").unwrap().client_path,
+            endpoints.endpoint_for("gpt-5.6-sol").unwrap().client_path,
             PathBuf::from("/profile/bin/codex")
         );
         assert!(endpoints.endpoint_for("gpt-6-invented").is_err());

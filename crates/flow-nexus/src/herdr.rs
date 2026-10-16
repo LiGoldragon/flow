@@ -141,7 +141,7 @@ impl Default for HerdrCli {
                         .to_string_lossy()
                         .into_owned(),
                     transcript_root: codex_home.join("sessions"),
-                    model_names: BTreeSet::from(["gpt-5.6-terra".into()]),
+                    model_names: BTreeSet::from(["gpt-5.6-sol".into()]),
                 },
                 next: CodexEndpoint {
                     client_path: PathBuf::from("/fixture/codex-next"),

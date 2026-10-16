@@ -41,6 +41,9 @@ pub trait ReadsHerdrRoster {
 pub enum PanePresence {
     /// The snapshot shows the recorded binding: the pane is there to close.
     Present,
+    /// The snapshot shows the recorded pane and terminal with no agent on
+    /// it: a pane whose harness never appeared. It is there to close.
+    Bare,
     /// The Flow has no recorded pane, or a readable snapshot shows neither
     /// the binding nor its pane: nothing is left to close.
     Absent,
@@ -206,7 +209,10 @@ impl OperatesHerdrPane for HerdrCli {
         // A pane is closed when Herdr still shows the recorded binding there,
         // whatever its readiness and whether its FlowId claim was given back:
         // closing needs the pane, not a route a prompt could take.
-        if self.pane_presence(node) != PanePresence::Present {
+        if !matches!(
+            self.pane_presence(node),
+            PanePresence::Present | PanePresence::Bare
+        ) {
             return false;
         }
         Command::new(&self.executable)
@@ -445,6 +451,20 @@ impl ReadsHerdrPanes for HerdrCli {
                 == Some(route.herdr_pane_id.as_str())
         }) {
             return PanePresence::Unknown;
+        }
+        let shown = snapshot
+            .pointer("/result/snapshot/panes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|panes| {
+                panes.iter().any(|pane| {
+                    pane.get("pane_id").and_then(serde_json::Value::as_str)
+                        == Some(route.herdr_pane_id.as_str())
+                        && pane.get("terminal_id").and_then(serde_json::Value::as_str)
+                            == Some(route.herdr_terminal_id.as_str())
+                })
+            });
+        if shown {
+            return PanePresence::Bare;
         }
         PanePresence::Absent
     }

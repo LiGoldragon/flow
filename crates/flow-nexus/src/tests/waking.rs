@@ -613,7 +613,9 @@ case "$*" in
   *"agent start"*) printf '%s\n' '{"result":{"agent":{"name":"x"}}}' ;;
   *"agent get"*) printf '%s\n' 'RECORD' ;;
   *"api snapshot"*) printf '%s\n' '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":[AGENT],"protocol":20,"version":"0.8.2"},"type":"session_snapshot"}}' ;;
+  *"agent wait"*) printf '%s\n' '{"result":{"status":"idle"}}' ;;
   *"agent read"*) printf '%s\n' '❯ ' ;;
+  *"agent prompt /rename "*|*"agent prompt "*" /rename "*) printf '%s\n' '{"result":{"accepted":true}}' ;;
   *"agent prompt"*) printf '%s\n--\n' "$6" >> 'TYPED'; printf '%s\n' '{"id":"cli:agent:prompt","result":{"type":"agent_prompted","agent":AGENT}}' ;;
   *) exit 64 ;;
 esac

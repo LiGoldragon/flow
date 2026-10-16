@@ -1,3 +1,20 @@
+# Flow 0.34.0
+
+No wire change; no store change.
+
+- **A bind waits for the harness.** Before reading the agent, Bind runs
+  Herdr's `agent wait <pane> --until idle --until done --timeout 30000`; it
+  no longer checks `interactive_ready` once. A timeout is refused as
+  `not-ready` (`flow-nexus: herdr stage=bind category=not-ready`).
+- **The first prompt waits for the rename.** After the title (`/rename`
+  accepted and read back) and before the first prompt is typed, Flow runs the
+  same Herdr wait. A timeout types nothing and is refused as `not-ready`.
+  The title step shares this wait.
+- **A pane whose harness never appeared is closed.** When Herdr's snapshot
+  shows the launch pane and terminal with no agent on it, a refused launch
+  closes it (and a Replace's reap closes it) instead of only marking it
+  orphaned.
+
 # Flow 0.33.0
 
 No wire change; no store change.

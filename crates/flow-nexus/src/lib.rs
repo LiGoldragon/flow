@@ -875,7 +875,7 @@ impl ReconcilesListedFlows for RunningNexus {
                 node
             }
             herdr::PanePresence::Unknown => node,
-            herdr::PanePresence::Absent => FlowNode {
+            herdr::PanePresence::Absent | herdr::PanePresence::Bare => FlowNode {
                 endpoint_selection: EndpointSelection::Unavailable,
                 herdr_route_selection: HerdrRouteSelection::Unavailable,
                 flow_lifecycle: FlowLifecycle::Exited,
@@ -1771,6 +1771,55 @@ mod tests {
                 Response::StartRejected(StartRejection::NativeLaunchRefused)
             ),
             Response::StartRejected(StartRejection::NativeLaunchRefused)
+        );
+    }
+
+    /// A pane whose harness never appeared shows in Herdr's snapshot as a
+    /// pane with no agent; the refused launch closes it.
+    #[test]
+    fn a_refused_launch_closes_a_pane_whose_harness_never_appeared() {
+        use crate::launching::AbandonsRefusedLaunch;
+        use crate::store::RecordsCreatedLaunchPane;
+        let fixture = NexusFixture::new();
+        let launch = fixture.staged_launch("bare-pane-request", None);
+        launch.reserve(&fixture.nexus);
+        launch.record_native_intent(&fixture.nexus);
+        assert!(
+            fixture
+                .nexus
+                .store
+                .record_created_launch_pane(launch.pane.clone())
+                .unwrap()
+        );
+        fixture
+            .nexus
+            .store
+            .request_harness_start("bare-pane-request")
+            .unwrap();
+        let snapshot = serde_json::json!({
+            "id":"cli:api:snapshot",
+            "result":{"snapshot":{
+                "agents":[],
+                "panes":[{"pane_id":launch.pane.herdr_pane_id,"terminal_id":launch.pane.herdr_terminal_id}],
+                "protocol":20,"version":"0.8.2"},
+            "type":"session_snapshot"}
+        });
+        let log = fixture.directory.path().join("bare-pane.log");
+        FixtureExecutable {
+            path: fixture.snapshot_program.clone(),
+        }
+        .install(&format!(
+            "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"pane close\") printf '%s\\n' \"$*\" >> '{}' ;;\n  *) exit 64 ;;\nesac\n",
+            snapshot,
+            log.display(),
+        ));
+        fixture
+            .nexus
+            .abandon_refused_launch("bare-pane-request", &HarnessKind::Codex, None);
+        let operations = fs::read_to_string(&log).expect("Herdr operation log");
+        assert!(
+            operations.contains(&format!("pane close {}", launch.pane.herdr_pane_id)),
+            "{operations}"
         );
     }
 

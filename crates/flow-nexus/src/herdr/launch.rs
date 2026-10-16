@@ -1163,12 +1163,6 @@ pub(crate) trait TitlesClaudeSession {
     const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(250);
     #[cfg(test)]
     const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(1);
-    /// How long Herdr's `agent wait` may take for a just-bound Claude to
-    /// come to rest before its title is set.
-    #[cfg(not(test))]
-    const TITLE_READINESS_WAIT_MILLISECONDS: &'static str = "30000";
-    #[cfg(test)]
-    const TITLE_READINESS_WAIT_MILLISECONDS: &'static str = "1000";
     /// The last title the native Claude transcript records for its session,
     /// or none while no transcript or no title record exists.
     fn claude_transcript_title(
@@ -1232,20 +1226,8 @@ impl TitlesClaudeSession for HerdrCli {
         let pane = &binding.herdr_pane_binding;
         // Herdr may report a just-bound Claude before its session and its
         // readiness: it is waited for, never checked once.
-        self.run_status(&[
-            "--session".into(),
-            pane.herdr_session_name.clone(),
-            "agent".into(),
-            "wait".into(),
-            pane.herdr_pane_id.clone(),
-            "--until".into(),
-            "idle".into(),
-            "--until".into(),
-            "done".into(),
-            "--timeout".into(),
-            Self::TITLE_READINESS_WAIT_MILLISECONDS.into(),
-        ])
-        .map_err(|_| TitleRefusal::NotReady)?;
+        self.await_pane_rest(pane)
+            .map_err(|_| TitleRefusal::NotReady)?;
         let mut last = TitleRefusal::NotReady;
         for _ in 0..Self::TITLE_READBACK_ATTEMPTS {
             match self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)
@@ -1563,6 +1545,41 @@ impl SpawnsNativeHarness for HerdrCli {
     }
 }
 
+/// Herdr's own wait for a launched agent's pane to come to rest. The launch
+/// path never polls for readiness itself: a bind, and a first prompt after
+/// the title, each wait here, bounded, and a timeout is a typed not-ready
+/// refusal.
+pub(crate) trait WaitsForPaneRest {
+    /// How long Herdr's `agent wait` may take before a bind or a first prompt.
+    #[cfg(not(test))]
+    const REST_WAIT_MILLISECONDS: &'static str = "30000";
+    #[cfg(test)]
+    const REST_WAIT_MILLISECONDS: &'static str = "1000";
+    /// The refusal text a bind or a prompt that never found the pane at rest
+    /// carries; the failure classifier reads it as not-ready.
+    const NOT_READY: &'static str = "Herdr agent did not come to rest: not ready";
+    fn await_pane_rest(&self, pane: &HerdrPaneBinding) -> Result<(), String>;
+}
+
+impl WaitsForPaneRest for HerdrCli {
+    fn await_pane_rest(&self, pane: &HerdrPaneBinding) -> Result<(), String> {
+        self.run_status(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "agent".into(),
+            "wait".into(),
+            pane.herdr_pane_id.clone(),
+            "--until".into(),
+            "idle".into(),
+            "--until".into(),
+            "done".into(),
+            "--timeout".into(),
+            Self::REST_WAIT_MILLISECONDS.into(),
+        ])
+        .map_err(|_| Self::NOT_READY.to_owned())
+    }
+}
+
 impl ObservesNativeLaunchBinding for HerdrCli {
     fn observe_native_binding(
         &self,
@@ -1572,6 +1589,9 @@ impl ObservesNativeLaunchBinding for HerdrCli {
     ) -> Result<NativeLaunchBinding, String> {
         launch.binding_matches_launch(pane)?;
         let expected_harness = launch.launch_profile.harness_kind.expected_harness();
+        // Herdr may report a just-started harness before it is ready: it is
+        // waited for, never checked once.
+        self.await_pane_rest(pane)?;
         let response = self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -1790,6 +1810,10 @@ impl SubmitsFirstPromptOnce for HerdrCli {
         if durable_intent.harness_kind != HarnessKind::Claude {
             return Err("Codex first turns require the bound native typed-skill controller".into());
         }
+        // The title's `/rename` has been accepted and read back; the composer
+        // must be at rest before the first prompt is typed. Nothing is typed
+        // when it is not.
+        self.await_pane_rest(&durable_intent.herdr_pane_binding)?;
         self.run_json(&[
             "--session".into(),
             durable_intent.herdr_pane_binding.herdr_session_name.clone(),
@@ -4172,6 +4196,142 @@ printf '%s\n' 123456
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(!calls.contains("/rename"));
         assert!(!calls.contains("pane rename"));
+    }
+
+    const REST_WAIT: &str = "agent wait w7:p1 --until idle --until done --timeout 1000";
+
+    #[test]
+    fn a_bind_waits_through_herdr_before_it_reads_the_agent() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).unwrap();
+        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        adapter
+            .observe_native_binding(&launch, &pane, None)
+            .expect("bound once Herdr reports rest");
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        let wait = calls
+            .lines()
+            .position(|line| line.ends_with(REST_WAIT))
+            .expect("bind wait");
+        let get = calls
+            .lines()
+            .position(|line| line.contains("agent get"))
+            .expect("agent get");
+        assert!(wait < get);
+    }
+
+    #[test]
+    fn a_bind_whose_pane_never_comes_to_rest_is_refused_not_ready_without_reading_it() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).unwrap();
+        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        fs::write(root.path().join("agent-wait-refused"), "timeout").unwrap();
+        let error = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .unwrap_err();
+        assert!(error.contains("not ready"), "{error}");
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(!calls.contains("agent get"));
+    }
+
+    fn promptable(
+        root: &tempfile::TempDir,
+        adapter: &HerdrCli,
+        launch: &ComposedLaunch,
+        native_session: &str,
+    ) -> PromptDeliveryIntent {
+        let _ = root;
+        let pane = adapter.create_launch_pane(launch).unwrap();
+        adapter.start_native_harness(launch, &pane, None).unwrap();
+        let binding = adapter.observe_native_binding(launch, &pane, None).unwrap();
+        adapter.title_native_flow(launch, &binding).unwrap();
+        let acknowledgement = RegistrationAcknowledgement {
+            launch_request_id: binding.launch_request_id.clone(),
+            flow_id: binding.flow_id.clone(),
+            native_session_id: native_session.into(),
+            herdr_pane_binding: binding.herdr_pane_binding.clone(),
+        };
+        adapter
+            .accept_registration(launch, &binding, &acknowledgement, vec![])
+            .expect("registered intent")
+    }
+
+    #[test]
+    fn the_first_prompt_waits_through_herdr_after_the_rename() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let intent = promptable(&root, &adapter, &launch, native_session);
+        adapter
+            .submit_first_prompt_once(&launch, &intent)
+            .expect("typed once at rest");
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        let lines = calls.lines().collect::<Vec<_>>();
+        let rename = lines
+            .iter()
+            .position(|line| line.contains("/rename"))
+            .expect("rename");
+        let wait = lines
+            .iter()
+            .rposition(|line| line.ends_with(REST_WAIT))
+            .expect("prompt wait");
+        let prompt = lines
+            .iter()
+            .rposition(|line| line.contains("agent prompt"))
+            .expect("first prompt");
+        assert!(rename < wait && wait < prompt, "{calls}");
+    }
+
+    #[test]
+    fn a_first_prompt_whose_composer_never_rests_is_refused_typed_and_nothing_is_typed() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let intent = promptable(&root, &adapter, &launch, native_session);
+        let before = fs::read_to_string(root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("agent prompt"))
+            .count();
+        fs::write(root.path().join("agent-wait-refused"), "timeout").unwrap();
+        let error = adapter
+            .submit_first_prompt_once(&launch, &intent)
+            .unwrap_err();
+        assert!(error.contains("not ready"), "{error}");
+        let after = fs::read_to_string(root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("agent prompt"))
+            .count();
+        assert_eq!(before, after);
     }
 
     #[test]

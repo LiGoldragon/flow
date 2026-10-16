@@ -100,7 +100,9 @@ impl ClassifiesHerdrFailureCategory for HerdrFailureCategory {
     }
 
     fn from_adapter_error(error: &str) -> Self {
-        if error.contains("does not match the created native pane") {
+        if error.contains("not ready") {
+            Self::NotReady
+        } else if error.contains("does not match the created native pane") {
             Self::PaneTargetMismatch
         } else if error.contains("no native session")
             || error.contains("no official native session")

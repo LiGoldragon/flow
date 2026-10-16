@@ -598,7 +598,7 @@ impl LaunchesFlows for RunningNexus {
                     StopRejection::RouteUnavailable,
                 ));
             }
-            PanePresence::Present => {
+            PanePresence::Present | PanePresence::Bare => {
                 if self.perform(Operation::Close(node)) != Outcome::Closed {
                     return refuse(ReplaceRejection::ReapRefused(StopRejection::CloseRefused));
                 }
@@ -679,7 +679,7 @@ impl AbandonsRefusedLaunch for RunningNexus {
             let gone = match self.herdr.pane_presence(&node) {
                 PanePresence::Absent => true,
                 PanePresence::Unknown => false,
-                PanePresence::Present => {
+                PanePresence::Present | PanePresence::Bare => {
                     let _lease = self.pane_leases.hold(route);
                     self.perform(Operation::Close(node.clone())) == Outcome::Closed
                 }
@@ -723,7 +723,10 @@ impl AbandonsRefusedLaunch for RunningNexus {
             },
             flow_lifecycle: FlowLifecycle::Pending,
         };
-        if self.herdr.pane_presence(&node) == PanePresence::Present {
+        if matches!(
+            self.herdr.pane_presence(&node),
+            PanePresence::Present | PanePresence::Bare
+        ) {
             let _ = self.perform(Operation::Close(node));
         }
         let _ = self.store.orphan_launch_pane(launch_request_id);

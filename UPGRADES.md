@@ -1,3 +1,31 @@
+# Flow 0.29.0
+
+Wire change: meta-signal-flow 19.0.0 (cd8d5ec) adds `Reconfigure`; the meta
+contract digest changes, so `flow-nexus`, `flow-meta` and every meta client
+move together and an 18.0.0 peer is refused at the greeting. No store
+change: no table, family or record shape is added, and a 0.28 store opens
+as it is.
+
+- **Reconfigure.** `Reconfigure.ConfigureNexus` replaces the stored Nexus
+  value as a whole in one commit. Models, thresholds, modules, flows,
+  metaflows, Message's binding and locks are kept. It answers
+  `Reconfigured`, or `ReconfigureRejected.Unconfigured` (no Nexus value yet;
+  first setup stays `Configure.Nexus`) or
+  `ReconfigureRejected.CodexModelsOverlap` (one model names both Codex
+  endpoints), and then nothing changed. `Configure.Nexus` still answers
+  `ConfigureRejected.Conflict` for a differing value. `flow-nexus
+  --configure-only` accepts one `Configure` or one `Reconfigure`.
+- **When it applies.** The running Nexus reads `MessageNexusBinary`,
+  `MetaAspects`, `Lease`, `HarnessProfiles` and `MessageNexusPath` from the
+  store at each use, so those apply at once. `SourceRoot`, `StableCodex` and
+  `NextCodex`, the Codex model lists included, are read when the Nexus
+  opens: restart the Nexus to serve them.
+
+To deploy: install 0.29.0, restart the Nexus, read the stored value with
+`flow-meta Configuration`, send the whole edited value with
+`flow-meta 'Reconfigure.{ ... }'`, then restart the Nexus again so it opens
+with the replaced Codex endpoints.
+
 # Flow 0.28.1
 
 No wire or store change. Terra is not offered: the stable Codex line is

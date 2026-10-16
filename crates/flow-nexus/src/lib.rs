@@ -229,6 +229,26 @@ impl Dispatches for RunningNexus {
                     ),
                 }
             }
+            // Replaces the stored Nexus value; this Nexus keeps the Codex
+            // endpoints it opened with until its next start.
+            meta_signal_flow::Query::Reconfigure(nexus) => {
+                match self.store.replace_nexus_configuration(nexus) {
+                    Ok(()) => meta_signal_flow::Response::Reconfigured,
+                    Err(store::StoreError::NotConfigured) => {
+                        meta_signal_flow::Response::ReconfigureRejected(
+                            meta_signal_flow::ReconfigureRejection::Unconfigured,
+                        )
+                    }
+                    Err(store::StoreError::CodexModelsOverlap) => {
+                        meta_signal_flow::Response::ReconfigureRejected(
+                            meta_signal_flow::ReconfigureRejection::CodexModelsOverlap,
+                        )
+                    }
+                    Err(error) => meta_signal_flow::Response::Refused(
+                        meta_signal_flow::Refusal::Store(error.to_string()),
+                    ),
+                }
+            }
             meta_signal_flow::Query::ConsumeReset(request) => self
                 .codex_endpoints
                 .next
@@ -856,6 +876,7 @@ mod tests {
     use crate::store::ConfiguresOnlyStore;
     mod delivery;
     mod launching_nexus;
+    mod reconfiguring;
     mod reservation;
     mod submission;
     mod waking;

@@ -927,6 +927,8 @@ pub enum StoreError {
     InvalidStorePath,
     #[error("meta configuration is not configured")]
     NotConfigured,
+    #[error("a Codex model names both the stable and the next endpoint")]
+    CodexModelsOverlap,
     #[error("store {path} is not a recognized Flow Memory v2 store: {reason}")]
     UnrecognizedMemory { path: String, reason: String },
 }
@@ -1021,6 +1023,7 @@ pub trait ConfiguresOnlyStore: Sized {
     fn open(path: &Path) -> Result<Self, StoreError>;
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
     fn configure_change(&self, change: ConfigurationChange) -> Result<(), StoreError>;
+    fn replace_nexus_configuration(&self, nexus: ConfigureNexus) -> Result<(), StoreError>;
     fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError>;
     fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError>;
 }
@@ -1117,6 +1120,10 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
 
     fn configure_change(&self, change: ConfigurationChange) -> Result<(), StoreError> {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
+    }
+
+    fn replace_nexus_configuration(&self, nexus: ConfigureNexus) -> Result<(), StoreError> {
+        FlowStore::replace_meta_nexus(&self.engine, &self.meta_configuration_tables, nexus)
     }
 
     /// Reads either a wholly unconfigured store (using its declared defaults
@@ -1845,6 +1852,8 @@ impl OpensFlowStore for FlowStore {
 pub(crate) trait ManagesMetaflowState: Sized {
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
     fn configure_change(&self, change: ConfigurationChange) -> Result<(), StoreError>;
+    /// Replace the committed Nexus value as a whole; every other row stays.
+    fn replace_nexus_configuration(&self, nexus: ConfigureNexus) -> Result<(), StoreError>;
     /// The threshold configured for one layer, if any.
     fn configured_threshold(&self, layer: &Layer)
     -> Result<Option<ConfigureThreshold>, StoreError>;
@@ -1882,6 +1891,10 @@ impl ManagesMetaflowState for FlowStore {
 
     fn configure_change(&self, change: ConfigurationChange) -> Result<(), StoreError> {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
+    }
+
+    fn replace_nexus_configuration(&self, nexus: ConfigureNexus) -> Result<(), StoreError> {
+        FlowStore::replace_meta_nexus(&self.engine, &self.meta_configuration_tables, nexus)
     }
 
     fn configured_threshold(
@@ -5903,6 +5916,35 @@ pub(crate) trait ReadsFlowMemory {
                 tables.modules,
                 StoredMetaModuleConfiguration { module },
             ),
+        }
+    }
+
+    /// Replace the one committed Nexus row in one atomic commit. A store with
+    /// no Nexus row, or a value whose Codex endpoints share a model, is
+    /// refused before any write; models, thresholds, modules and all runtime
+    /// rows are never touched.
+    fn replace_meta_nexus(
+        engine: &Engine,
+        tables: &MetaConfigurationTables,
+        nexus: ConfigureNexus,
+    ) -> Result<(), StoreError> {
+        if nexus
+            .stable_codex
+            .model_name_vector
+            .iter()
+            .any(|model| nexus.next_codex.model_name_vector.contains(model))
+        {
+            return Err(StoreError::CodexModelsOverlap);
+        }
+        let stored = StoredMetaNexusConfiguration { nexus };
+        let rows = engine.match_records(QueryPlan::key(tables.nexus, stored.record_key()))?;
+        match rows.records() {
+            [] => Err(StoreError::NotConfigured),
+            [_] => {
+                engine.commit_atomic(engine.begin_atomic_commit().mutate(tables.nexus, stored))?;
+                Ok(())
+            }
+            _ => Err(StoreError::StateInvariant),
         }
     }
 

@@ -246,6 +246,25 @@ mod tests {
     }
 
     #[test]
+    fn reconfigure_is_one_inline_datom_carrying_a_whole_nexus() {
+        let client = FlowMetaClient {
+            socket: "unused".into(),
+        };
+        let datom = "Reconfigure.{ /home/li/primary { /opt/codex-stable /home/li/.codex /home/li/.codex/control.sock [ gpt-5.6-sol gpt-5.6-luna ] } { /opt/codex-next /home/li/.codex-next /home/li/.codex-next/control.sock [ gpt-6-sol gpt-6-luna gpt-6-astra ] } [ { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] /run/message.sock /opt/message-nexus 60 }";
+        let query = client
+            .parse_command([datom.to_owned()].into_iter())
+            .expect("Reconfigure datom parses");
+        let Query::Reconfigure(nexus) = &query else {
+            panic!("Reconfigure datom must stay a Reconfigure query")
+        };
+        assert_eq!(
+            nexus.stable_codex.model_name_vector,
+            vec!["gpt-5.6-sol".to_owned(), "gpt-5.6-luna".to_owned()]
+        );
+        assert_eq!(query.datomize(vec![]).protosize().compact(), datom);
+    }
+
+    #[test]
     fn deliver_is_one_inline_datom_carrying_a_typed_message() {
         let client = FlowMetaClient {
             socket: "unused".into(),

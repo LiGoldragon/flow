@@ -21,7 +21,8 @@ use std::{
 };
 
 use meta_signal_flow::{
-    ConfigureRejection, MetaRefusal, Query as MetaQuery, Response as MetaResponse,
+    ConfigureRejection, MetaRefusal, Query as MetaQuery, ReconfigureRejection,
+    Response as MetaResponse,
 };
 
 /// `--version` is the only command that runs without a typed Start datom.
@@ -584,19 +585,39 @@ trait RunsConfigurationStartup {
             peer.write_meta_response(&MetaResponse::MetaRefused(refusal))?;
             return Err("meta configuration peer was not provably authorized".into());
         }
-        let MetaQuery::Configure(change) = query else {
-            return Err("configuration-only listener accepts one Configure request".into());
-        };
-        let response = match store.configure_change(change) {
-            Ok(()) => MetaResponse::Configured,
-            Err(StoreError::ConfigurationConflict) => {
-                MetaResponse::ConfigureRejected(ConfigureRejection::Conflict)
+        let response = match query {
+            MetaQuery::Configure(change) => match store.configure_change(change) {
+                Ok(()) => MetaResponse::Configured,
+                Err(StoreError::ConfigurationConflict) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::Conflict)
+                }
+                Err(error) => {
+                    MetaResponse::Refused(meta_signal_flow::Refusal::Store(error.to_string()))
+                }
+            },
+            MetaQuery::Reconfigure(nexus) => match store.replace_nexus_configuration(nexus) {
+                Ok(()) => MetaResponse::Reconfigured,
+                Err(StoreError::NotConfigured) => {
+                    MetaResponse::ReconfigureRejected(ReconfigureRejection::Unconfigured)
+                }
+                Err(StoreError::CodexModelsOverlap) => {
+                    MetaResponse::ReconfigureRejected(ReconfigureRejection::CodexModelsOverlap)
+                }
+                Err(error) => {
+                    MetaResponse::Refused(meta_signal_flow::Refusal::Store(error.to_string()))
+                }
+            },
+            _ => {
+                return Err(
+                    "configuration-only listener accepts one Configure or Reconfigure request"
+                        .into(),
+                );
             }
-            Err(error) => {
-                MetaResponse::Refused(meta_signal_flow::Refusal::Store(error.to_string()))
-            }
         };
-        let configured = matches!(&response, MetaResponse::Configured);
+        let configured = matches!(
+            &response,
+            MetaResponse::Configured | MetaResponse::Reconfigured
+        );
         peer.write_meta_response(&response)?;
         if configured {
             Ok(())

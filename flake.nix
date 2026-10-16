@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.0";
+            version = "0.35.1";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -139,6 +139,26 @@
               cargoExtraArgs = "--workspace";
             }
           );
+          # The flow-nexus library test executable, built so a test kept
+          # out of every check (one that needs a store no repository holds,
+          # named at run time) can be run by name where a build runs.
+          store-proof = context.craneLib.mkCargoDerivation (
+            context.commonArgs
+            // {
+              inherit (context) cargoArtifacts;
+              pnameSuffix = "-store-proof";
+              nativeBuildInputs = [ context.pkgs.jq ];
+              buildPhaseCargoCommand = ''
+                cargoWithProfile test --locked -p flow-nexus --lib --no-run \
+                  --message-format json-render-diagnostics > cargo-test.json
+              '';
+              installPhaseCommand = ''
+                executable=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test and .target.name == "flow_nexus") | .executable' cargo-test.json)
+                mkdir -p "$out/bin"
+                cp "$executable" "$out/bin/flow-nexus-store-proof"
+              '';
+            }
+          );
         }
       );
 
@@ -175,6 +195,22 @@
             "store::tests::a_v5_flow_row_upgrades_to_its_derived_origin";
           flow-v2-outcomes-upgrade-to-derived-origin = context.exactTest "flow-nexus"
             "store::tests::v2_launch_outcomes_upgrade_to_their_derived_origin";
+          flow-0-34-launch-attempt-carried = context.exactTest "flow-nexus"
+            "store::tests::a_0_34_launch_attempt_row_is_carried_with_what_it_named_kept";
+          flow-codex-thread-opened-lean-before-attach = context.exactTest "flow-nexus"
+            "codex::tests::a_codex_thread_is_opened_lean_and_given_its_first_turn_before_attach";
+          flow-codex-loaded-instructions-get-no-turn = context.exactTest "flow-nexus"
+            "codex::tests::a_codex_thread_that_loaded_left_out_instructions_gets_no_turn";
+          flow-codex-exclusions-reapplied-after-attach = context.exactTest "flow-nexus"
+            "codex::tests::after_attach_the_exclusions_are_applied_again_and_read_back";
+          flow-codex-attached-readback-refused = context.exactTest "flow-nexus"
+            "codex::tests::an_attached_thread_whose_readback_differs_is_refused";
+          flow-codex-first-turn-before-attach-observed = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_codex_first_turn_given_before_the_tui_attached_is_observed";
+          flow-codex-left-out-block-refused = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_codex_request_carrying_a_left_out_block_is_refused";
+          flow-codex-tui-attaches-to-opened-thread = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_codex_tui_attaches_to_the_opened_thread_and_binds_only_to_it";
           flow-retired-tables-dropped-on-open = context.exactTest "flow-nexus"
             "store::tests::a_store_from_0_34_6_drops_its_retired_tables_when_it_opens";
           flow-start-origin-derived-from-caller = context.exactTest "flow-nexus"

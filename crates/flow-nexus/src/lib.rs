@@ -4565,6 +4565,15 @@ mod tests {
                 )
             );
         }
+        // The 0.34 row is carried and answers.
+        assert!(matches!(
+            fixture.nexus.dispatch(Query::LaunchStatus(
+                crate::store::EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST.into()
+            )),
+            Response::LaunchInspected(inspection)
+                if inspection.launch_attempt.launch_request_id
+                    == crate::store::EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST
+        ));
         // The flow the earlier launch bound keeps the role it named.
         assert_eq!(
             crate::store::ReadsFlowRoles::role(&fixture.nexus.store, "launched-earlier")

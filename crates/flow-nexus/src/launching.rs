@@ -254,11 +254,18 @@ impl LaunchesFlows for RunningNexus {
             composed_launch: launch.clone(),
             herdr_pane_binding: pane,
             flow_id_option: reserved,
+            native_session_id_option: None,
         };
-        if self.perform(Operation::Spawn(pane_launch.clone())) != Outcome::Spawned {
-            return Response::StartRejected(StartRejection::NativeLaunchRefused);
-        }
-        let binding = match self.perform(Operation::Bind(pane_launch)) {
+        // A Codex Spawn names the thread it opened, its first turn already
+        // in it, before the TUI attached; Bind requires that thread.
+        let opened = match self.perform(Operation::Spawn(pane_launch.clone())) {
+            Outcome::Spawned(opened) => opened,
+            _ => return Response::StartRejected(StartRejection::NativeLaunchRefused),
+        };
+        let binding = match self.perform(Operation::Bind(PaneLaunch {
+            native_session_id_option: opened,
+            ..pane_launch
+        })) {
             Outcome::Bound(binding) => binding,
             _ => return Response::StartRejected(StartRejection::NativeLaunchRefused),
         };

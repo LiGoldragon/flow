@@ -38,12 +38,12 @@ use sema_engine::{
 use signal_flow::{
     Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute,
-    HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation, Launched,
-    Layer, LeaveOut, Lock, Metaflow, NativeLaunchBinding, NativeLaunchIntent,
-    NativeTranscriptBoundary, Origin, PowerLevel, Process, PromptDeliveryIntent,
-    PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
-    RememberedFlow, ReplaceRejection, Replaced, Request, Response, RestartRejection, Restarted,
-    RouteReadiness, StartRejection,
+    HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
+    LaunchProfile, Launched, Layer, LeaveOut, Lock, Metaflow, NativeLaunchBinding,
+    NativeLaunchIntent, NativeTranscriptBoundary, Origin, PowerLevel, Process,
+    PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
+    RegistrationAcknowledgement, RememberedFlow, ReplaceRejection, Replaced, Request, Response,
+    RestartRejection, Restarted, RouteReadiness, StartRejection,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -572,9 +572,12 @@ impl EngineRecord for FlowStoreConfiguration {
     }
 }
 
+/// A launch attempt, and what it knows of the context its seat started
+/// with: named by module identity, or kept from a launch before 0.35.0.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchAttempt {
+pub(crate) struct StoredLaunchAttempt {
     attempt: LaunchAttempt,
+    context: LaunchContext,
 }
 
 impl EngineRecord for StoredLaunchAttempt {
@@ -583,9 +586,20 @@ impl EngineRecord for StoredLaunchAttempt {
     }
 }
 
+impl MemoryDefinition for StoredLaunchAttempt {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-attempt-v2")
+    }
+}
+
 /// The launch types as signal-flow 16.0.0 archived them, before 17.0.0
-/// named a launch's context by module identity. Every earlier launch-attempt
-/// shape carried them; they are only read to recognize a row set aside.
+/// named a launch's context by module identity. A Flow 0.34 launch-attempt
+/// row is read in them by the v1-to-v2 family upgrade; every earlier shape
+/// carried them too, and is only read to recognize a row set aside.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct LaunchSourceBeforeModules {
     source_path: String,
@@ -643,11 +657,184 @@ enum PromptDeliveryResultBeforeModules {
     Ambiguous(PromptDeliveryIntentBeforeModules),
 }
 
-/// A launch attempt as Flow archived it with signal-flow 16.0.0, before
-/// 17.0.0 named a launch's context by module identity.
+/// A launch attempt as Flow 0.34 archived it with signal-flow 16.0.0,
+/// before 17.0.0 named a launch's context by module identity. It is read
+/// only by the v1-to-v2 family upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredLaunchAttemptBeforeModules {
+struct StoredLaunchAttemptV1 {
     attempt: LaunchAttemptBeforeModules,
+}
+
+impl EngineRecord for StoredLaunchAttemptV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.attempt.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchAttemptV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-attempt-v1")
+    }
+}
+
+impl From<NativeSkillSelectionBeforeModules> for NativeSkill {
+    fn from(selection: NativeSkillSelectionBeforeModules) -> Self {
+        Self {
+            skill_name: selection.skill_name,
+            skill_path: selection.native_skill_path,
+            skill_sha256: selection.native_skill_sha256,
+        }
+    }
+}
+
+/// A 0.34 launch's one first message was its one part: the part's hash is
+/// the prompt's. It recorded no system-prompt hash and no Stop count, and
+/// left nothing out.
+impl From<PromptDeliveryIntentBeforeModules> for PromptDeliveryIntent {
+    fn from(intent: PromptDeliveryIntentBeforeModules) -> Self {
+        Self {
+            prompt_sha256_vector: vec![intent.prompt_sha256.clone()],
+            launch_request_id: intent.launch_request_id,
+            prompt_sha256: intent.prompt_sha256,
+            flow_id: intent.flow_id,
+            native_session_id: intent.native_session_id,
+            harness_kind: intent.harness_kind,
+            model_name: intent.model_name,
+            effort: intent.effort,
+            parts_submitted: 1,
+            stops_reported: 0,
+            leave_outs: Vec::new(),
+            herdr_pane_binding: intent.herdr_pane_binding,
+            native_transcript_boundary: intent.native_transcript_boundary,
+        }
+    }
+}
+
+impl From<PromptDeliveryResultBeforeModules> for PromptDeliveryResult {
+    fn from(result: PromptDeliveryResultBeforeModules) -> Self {
+        match result {
+            PromptDeliveryResultBeforeModules::Observed(receipt) => {
+                Self::Observed(signal_flow::NativeTargetReceipt {
+                    prompt_sha256_vector: vec![receipt.prompt_sha256.clone()],
+                    launch_request_id: receipt.launch_request_id,
+                    prompt_sha256: receipt.prompt_sha256,
+                    flow_id: receipt.flow_id,
+                    native_session_id: receipt.native_session_id,
+                    native_turn_id: receipt.native_turn_id,
+                    receipt_sha256: receipt.receipt_sha256,
+                    model_name: receipt.model_name,
+                    effort: receipt.effort,
+                })
+            }
+            PromptDeliveryResultBeforeModules::Ambiguous(intent) => Self::Ambiguous(intent.into()),
+        }
+    }
+}
+
+/// Every value a 0.34 launch-attempt row held is carried: what the current
+/// shape names, into it; what it no longer names (the skill sources, the
+/// skills, the power, the harness, the bundle file, the native skill
+/// selections and the origin clue whole), into `LaunchContext::BeforeModules`.
+impl UpgradeFrom<StoredLaunchAttemptV1> for StoredLaunchAttempt {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredLaunchAttemptV1) -> Decision<Self, Self::Refusal> {
+        let previous = previous.attempt;
+        let profile = previous.launch_profile;
+        let skills_of = |selections: &Vec<NativeSkillSelectionBeforeModules>| {
+            selections
+                .iter()
+                .cloned()
+                .map(NativeSkill::from)
+                .collect::<Vec<_>>()
+        };
+        let intent_skills = previous
+            .prompt_delivery_intent_option
+            .as_ref()
+            .map(|intent| skills_of(&intent.native_skill_selection_vector));
+        let result_skills = previous
+            .prompt_delivery_result_option
+            .as_ref()
+            .map(|result| match result {
+                PromptDeliveryResultBeforeModules::Observed(receipt) => {
+                    skills_of(&receipt.native_skill_selection_vector)
+                }
+                PromptDeliveryResultBeforeModules::Ambiguous(intent) => {
+                    skills_of(&intent.native_skill_selection_vector)
+                }
+            });
+        let launch_intent_skills = previous
+            .native_launch_intent_option
+            .as_ref()
+            .map(|intent| intent.skill_name_vector.clone());
+        let context = LaunchContext::BeforeModules(ContextBeforeModules {
+            launch_sources: profile
+                .launch_source_vector
+                .into_iter()
+                .map(|source| LaunchSource {
+                    source_path: source.source_path,
+                    source_sha256: source.source_sha256,
+                })
+                .collect(),
+            skills: profile.skill_name_vector,
+            power_level: profile.power_level,
+            harness_kind: profile.harness_kind,
+            bundle_file: profile.system_prompt_bundle_file,
+            origin_clue: OriginClue {
+                flow_id: previous.origin_clue.flow_id.clone(),
+                session_id: previous.origin_clue.session_id.clone(),
+                turn_id: previous.origin_clue.turn_id.clone(),
+            },
+            launch_intent_skills,
+            intent_skills,
+            result_skills,
+        });
+        Decision::Ready(Self {
+            attempt: LaunchAttempt {
+                launch_request_id: previous.launch_request_id,
+                launch_profile: LaunchProfile {
+                    launch_request_id: profile.launch_request_id,
+                    system_modules: Vec::new(),
+                    user_modules: Vec::new(),
+                    address: profile.address,
+                    model_name: profile.model_name,
+                    effort: profile.effort,
+                    flow_id_option: profile.flow_id_option,
+                    remembered_flow_vector: profile.remembered_flow_vector,
+                    herdr_session_name: profile.herdr_session_name,
+                    leave_outs_option: Some(Vec::new()),
+                    instruction_prompt: profile.instruction_prompt,
+                },
+                origin: previous.origin_clue.into(),
+                launch_attempt_phase: previous.launch_attempt_phase,
+                native_launch_intent_option: previous.native_launch_intent_option.map(|intent| {
+                    NativeLaunchIntent {
+                        prompt_sha256_vector: vec![intent.prompt_sha256.clone()],
+                        launch_request_id: intent.launch_request_id,
+                        prompt_sha256: intent.prompt_sha256,
+                        system_prompt_sha256: String::new(),
+                        harness_kind: intent.harness_kind,
+                        model_name: intent.model_name,
+                        effort: intent.effort,
+                    }
+                }),
+                native_launch_binding_option: previous.native_launch_binding_option,
+                registration_acknowledgement_option: previous.registration_acknowledgement_option,
+                prompt_delivery_intent_option: previous
+                    .prompt_delivery_intent_option
+                    .map(PromptDeliveryIntent::from),
+                prompt_delivery_result_option: previous
+                    .prompt_delivery_result_option
+                    .map(PromptDeliveryResult::from),
+                prompt_sha256: previous.prompt_sha256,
+            },
+            context,
+        })
+    }
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -779,9 +966,6 @@ pub enum ArchivedLaunchAttemptShape {
     Unknown(String),
     /// Written before signal-flow 16.0.0 named the launched seat's Address.
     BeforeAddress,
-    /// Written before signal-flow 17.0.0 named a launch's context by module
-    /// identity.
-    BeforeModules,
 }
 
 /// A launch-attempt row moved out of the attempts table when the store
@@ -815,21 +999,6 @@ trait NamesKeptLaunchRole {
 impl NamesKeptLaunchRole for QuarantinedLaunchAttempt {
     fn kept_role(&self, flow_id: &str) -> Option<Caller> {
         let (binding, aspect, power_level, model_name) = match self.shape {
-            ArchivedLaunchAttemptShape::BeforeModules => {
-                let kept =
-                    rkyv::from_bytes::<StoredLaunchAttemptBeforeModules, rkyv::rancor::Error>(
-                        &self.archive,
-                    )
-                    .ok()?
-                    .attempt;
-                let profile = kept.launch_profile;
-                (
-                    kept.native_launch_binding_option,
-                    profile.address.aspect,
-                    profile.power_level,
-                    profile.model_name,
-                )
-            }
             ArchivedLaunchAttemptShape::BeforeAddress => {
                 let kept =
                     rkyv::from_bytes::<StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
@@ -906,7 +1075,6 @@ impl std::fmt::Display for LaunchAttemptSettlement {
                         "BeforeSystemPromptBundle"
                     }
                     ArchivedLaunchAttemptShape::BeforeAddress => "BeforeAddress",
-                    ArchivedLaunchAttemptShape::BeforeModules => "BeforeModules",
                     ArchivedLaunchAttemptShape::Unknown(_) => "Unknown",
                 }
             ),
@@ -938,6 +1106,9 @@ pub enum LaunchOutcome {
     ReplaceRejected(ReplaceRejection),
 }
 
+use crate::generated::starter::{
+    ContextBeforeModules, LaunchContext, LaunchSource, NativeSkill, OriginClue,
+};
 pub use crate::generated::starter::{LaunchedRecord, ReplacedRecord};
 use crate::generated::starter::{LaunchedRecording, NamesLaunchedRoute};
 
@@ -1234,6 +1405,8 @@ pub enum StoreError {
     LaunchOutcomeUpgrade(String),
     #[error("flow family upgrade failed: {0}")]
     FlowUpgrade(String),
+    #[error("launch attempt family upgrade failed: {0}")]
+    LaunchAttemptUpgrade(String),
     #[error("retired tables could not be dropped: {0}")]
     RetiredTableDrop(String),
     #[error("flow nexus state record is absent or duplicated")]
@@ -1258,9 +1431,11 @@ pub enum StoreError {
     UnrecognizedMemory { path: String, reason: String },
 }
 
-/// The families whose rows change shape in 0.35.0, upgraded from their
-/// 0.34 predecessor when the store opens: a flow's origin and a launched
-/// outcome's origin are derived, no longer the clue the caller named.
+/// The families whose rows change shape in 0.35, upgraded from their 0.34
+/// predecessor when the store opens: a flow's origin and a launched
+/// outcome's origin are derived, no longer the clue the caller named; a
+/// launch attempt names its context by module identity, or keeps what a
+/// 0.34 launch named instead.
 trait UpgradesFlowFamilies {
     fn upgraded_flows(
         &mut self,
@@ -1270,6 +1445,19 @@ trait UpgradesFlowFamilies {
         &mut self,
         descriptor: TableDescriptor<StoredLaunchOutcome>,
     ) -> Result<TableReference<StoredLaunchOutcome>, StoreError>;
+    /// A 0.34 attempts table first moves aside whole each row older than
+    /// 0.34's shape, then every row left is carried into the current shape.
+    fn upgraded_launch_attempts(
+        &mut self,
+        descriptor: TableDescriptor<StoredLaunchAttempt>,
+        quarantine: TableReference<QuarantinedLaunchAttempt>,
+    ) -> Result<
+        (
+            TableReference<StoredLaunchAttempt>,
+            Vec<LaunchAttemptSettlement>,
+        ),
+        StoreError,
+    >;
 }
 
 impl UpgradesFlowFamilies for Engine {
@@ -1297,6 +1485,51 @@ impl UpgradesFlowFamilies for Engine {
                 Err(StoreError::LaunchOutcomeUpgrade(format!("{failure:?}")))
             }
         }
+    }
+
+    fn upgraded_launch_attempts(
+        &mut self,
+        descriptor: TableDescriptor<StoredLaunchAttempt>,
+        quarantine: TableReference<QuarantinedLaunchAttempt>,
+    ) -> Result<
+        (
+            TableReference<StoredLaunchAttempt>,
+            Vec<LaunchAttemptSettlement>,
+        ),
+        StoreError,
+    > {
+        let predecessor = TableDescriptor::<StoredLaunchAttemptV1>::new(
+            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-attempt"),
+            StoredLaunchAttemptV1::schema_hash(),
+        )
+        .family_identity();
+        let settlements = if self
+            .catalog()
+            .family_identity(&FLOW_LAUNCH_ATTEMPT_TABLE_NAME)
+            == Some(&predecessor)
+        {
+            // Opening never fails on a row older than 0.34's shape: each is
+            // moved aside whole, and every such move is logged.
+            self.settle_launch_attempts(quarantine)
+                .unwrap_or_else(|error| {
+                    vec![LaunchAttemptSettlement::Unsettled {
+                        store_error: error.to_string(),
+                    }]
+                })
+        } else {
+            Vec::new()
+        };
+        let table =
+            match self.upgrade_table::<StoredLaunchAttemptV1, StoredLaunchAttempt>(descriptor) {
+                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                UpgradeOutcome::AlreadyCurrent(table) => table,
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::LaunchAttemptUpgrade(format!("{failure:?}")));
+                }
+            };
+        Ok((table, settlements))
     }
 }
 
@@ -1354,17 +1587,14 @@ pub struct FlowStore {
     replacements: TableReference<Replacement>,
     roles: TableReference<StoredRole>,
     meta_configuration_tables: MetaConfigurationTables,
-    unread_launch_attempts: TableReference<UnreadLaunchAttempt>,
     quarantined_launch_attempts: TableReference<QuarantinedLaunchAttempt>,
     delivery_tables: DeliveryTables,
     event_tables: events::EventTables,
     context_sizes: TableReference<context::FlowContextSize>,
     address_holds: TableReference<address_hold::AddressHold>,
-    /// Registered so a store holding 0.34.6's Start bundles opens; never
-    /// read or written.
     pub launch_changes: LaunchChanges,
-    /// What opening did with launch-attempt rows that no longer read in the
-    /// current shape; each is also logged.
+    /// What opening did with launch-attempt rows older than 0.34's shape;
+    /// each is also logged.
     pub opening_settlements: Vec<LaunchAttemptSettlement>,
 }
 
@@ -1763,6 +1993,13 @@ pub trait RecordsReplacement {
 
 pub trait ReadsLaunchAttempt {
     fn launch_attempt(&self, launch_request_id: &str) -> Result<Option<LaunchAttempt>, StoreError>;
+    /// The profile of a launch that named its seat's context by module
+    /// identity, which a later seat can be composed from again; None for a
+    /// launch kept from before 0.35.0, whose context no module names.
+    fn composable_launch_profile(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<LaunchProfile>, StoreError>;
     /// The launch requests whose native launch bound this Flow ID.
     fn launch_requests_bound_to(&self, flow_id: &str) -> Result<Vec<String>, StoreError>;
     /// Every attempt whose first prompt is ambiguous and that is unsettled.
@@ -1819,7 +2056,9 @@ trait WritesFlowStore {
     -> Result<bool, StoreError>;
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError>;
     fn restart(&self, authorization: RestartAuthorization) -> Result<Response, StoreError>;
-    fn mutate_launch_attempt(&self, attempt: LaunchAttempt) -> Result<(), StoreError>;
+    /// Writes the attempt's next state, keeping what its row knows of the
+    /// context its seat started with.
+    fn mutate_launch_attempt(&self, stored: StoredLaunchAttempt) -> Result<(), StoreError>;
 }
 
 impl OpensFlowStore for FlowStore {
@@ -1878,8 +2117,9 @@ impl OpensFlowStore for FlowStore {
         let launch_attempts_descriptor = TableDescriptor::<StoredLaunchAttempt>::new(
             FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-attempt"),
-            SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
-        );
+            StoredLaunchAttempt::schema_hash(),
+        )
+        .with_predecessor::<StoredLaunchAttemptV1>();
         let launch_panes_descriptor = TableDescriptor::<StoredLaunchPane>::new(
             FLOW_LAUNCH_PANE_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-pane"),
@@ -1900,11 +2140,6 @@ impl OpensFlowStore for FlowStore {
             FLOW_ROLE_TABLE_NAME,
             FamilyName::new("flow-nexus-role"),
             SchemaHash::for_label("flow-nexus-role-v1"),
-        );
-        let unread_launch_attempts_descriptor = TableDescriptor::<UnreadLaunchAttempt>::new(
-            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-            FamilyName::new("flow-nexus-launch-attempt"),
-            SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
         );
         let quarantined_launch_attempts_descriptor =
             TableDescriptor::<QuarantinedLaunchAttempt>::new(
@@ -1971,7 +2206,6 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&launch_outcomes_descriptor)
                 .with_family(&replacements_descriptor)
                 .with_family(&roles_descriptor)
-                .with_family(&unread_launch_attempts_descriptor)
                 .with_family(&quarantined_launch_attempts_descriptor)
                 .with_family(&delivery_descriptor)
                 .with_family(&pane_lease_descriptor)
@@ -1992,14 +2226,14 @@ impl OpensFlowStore for FlowStore {
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let herdr_routes = engine.register_table(herdr_routes_descriptor)?;
-        let launch_attempts = engine.register_table(launch_attempts_descriptor)?;
+        let quarantined_launch_attempts =
+            engine.register_table(quarantined_launch_attempts_descriptor)?;
+        let (launch_attempts, opening_settlements) = engine
+            .upgraded_launch_attempts(launch_attempts_descriptor, quarantined_launch_attempts)?;
         let launch_panes = engine.register_table(launch_panes_descriptor)?;
         let launch_outcomes = engine.upgraded_launch_outcomes(launch_outcomes_descriptor)?;
         let replacements = engine.register_table(replacements_descriptor)?;
         let roles = engine.register_table(roles_descriptor)?;
-        let unread_launch_attempts = engine.register_table(unread_launch_attempts_descriptor)?;
-        let quarantined_launch_attempts =
-            engine.register_table(quarantined_launch_attempts_descriptor)?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
         let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
         let event_tables =
@@ -2022,15 +2256,17 @@ impl OpensFlowStore for FlowStore {
             replacements,
             roles,
             meta_configuration_tables,
-            unread_launch_attempts,
             quarantined_launch_attempts,
             delivery_tables,
             event_tables,
             context_sizes,
             address_holds,
             launch_changes: LaunchChanges::default(),
-            opening_settlements: Vec::new(),
+            opening_settlements,
         };
+        for settlement in &store.opening_settlements {
+            eprintln!("flow-nexus: {settlement}");
+        }
 
         // Recognition already checked the authored Memory identity record;
         // these reads require the complete committed configuration before any
@@ -2095,11 +2331,6 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-pane"),
             SchemaHash::for_label("flow-nexus-launch-pane-v1"),
         ))?;
-        let launch_attempts = engine.register_table(TableDescriptor::new(
-            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-            FamilyName::new("flow-nexus-launch-attempt"),
-            SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
-        ))?;
         let launch_outcomes = engine.upgraded_launch_outcomes(
             TableDescriptor::new(
                 FLOW_LAUNCH_OUTCOME_TABLE_NAME,
@@ -2118,17 +2349,20 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-role"),
             SchemaHash::for_label("flow-nexus-role-v1"),
         ))?;
-        // The same table, named for moving aside a row no shape reads.
-        let unread_launch_attempts = engine.register_table(TableDescriptor::new(
-            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-            FamilyName::new("flow-nexus-launch-attempt"),
-            SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
-        ))?;
         let quarantined_launch_attempts = engine.register_table(TableDescriptor::new(
             FLOW_QUARANTINED_LAUNCH_ATTEMPT_TABLE_NAME,
             FamilyName::new("flow-nexus-quarantined-launch-attempt"),
             SchemaHash::for_label("flow-nexus-quarantined-launch-attempt-v1"),
         ))?;
+        let (launch_attempts, opening_settlements) = engine.upgraded_launch_attempts(
+            TableDescriptor::new(
+                FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+                FamilyName::new("flow-nexus-launch-attempt"),
+                StoredLaunchAttempt::schema_hash(),
+            )
+            .with_predecessor::<StoredLaunchAttemptV1>(),
+            quarantined_launch_attempts,
+        )?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
         let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
         let event_tables =
@@ -2139,7 +2373,7 @@ impl OpensFlowStore for FlowStore {
         let address_holds = engine.register_table(
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor(),
         )?;
-        let mut store = Self {
+        let store = Self {
             engine,
             flows,
             state,
@@ -2155,14 +2389,13 @@ impl OpensFlowStore for FlowStore {
             replacements,
             roles,
             meta_configuration_tables,
-            unread_launch_attempts,
             quarantined_launch_attempts,
             delivery_tables,
             event_tables,
             context_sizes,
             address_holds,
             launch_changes: LaunchChanges::default(),
-            opening_settlements: Vec::new(),
+            opening_settlements,
         };
         if store
             .engine
@@ -2205,13 +2438,6 @@ impl OpensFlowStore for FlowStore {
                 defaults.runtime_configuration(),
             ))?;
         }
-        // Opening never fails on a launch-attempt row: each is read or moved
-        // aside, and every such move is logged.
-        store.opening_settlements = store.settle_launch_attempts().unwrap_or_else(|error| {
-            vec![LaunchAttemptSettlement::Unsettled {
-                store_error: error.to_string(),
-            }]
-        });
         for settlement in &store.opening_settlements {
             eprintln!("flow-nexus: {settlement}");
         }
@@ -2802,11 +3028,14 @@ impl RegistersBindings for FlowStore {
 }
 
 trait SettlesLaunchAttempts {
-    /// Reads every launch-attempt row by itself. A row that reads in the
-    /// current shape stays. Any other row is moved aside whole into the
-    /// quarantine table, in one commit with its retraction, naming the
-    /// earlier shape it reads in, or Unknown.
-    fn settle_launch_attempts(&self) -> Result<Vec<LaunchAttemptSettlement>, StoreError>;
+    /// Reads every row of a 0.34 attempts table by itself. A row that reads
+    /// in 0.34's shape stays, for the family upgrade to carry. Any other row
+    /// is moved aside whole into the quarantine table, in one commit with
+    /// its retraction, naming the earlier shape it reads in, or Unknown.
+    fn settle_launch_attempts(
+        &mut self,
+        quarantine: TableReference<QuarantinedLaunchAttempt>,
+    ) -> Result<Vec<LaunchAttemptSettlement>, StoreError>;
     /// Every launch-attempt row as its stored key and archive bytes, read
     /// through the engine's read-only storage reader. Reading the archive
     /// undecoded is an exception taken only here: it is how a row that no
@@ -2814,27 +3043,26 @@ trait SettlesLaunchAttempts {
     fn launch_attempt_archives(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError>;
     fn quarantined_launch_attempts_of(
         &self,
+        quarantine: TableReference<QuarantinedLaunchAttempt>,
         launch_request_id: &str,
     ) -> Result<Vec<QuarantinedLaunchAttempt>, StoreError>;
 }
 
-impl SettlesLaunchAttempts for FlowStore {
-    fn settle_launch_attempts(&self) -> Result<Vec<LaunchAttemptSettlement>, StoreError> {
+impl SettlesLaunchAttempts for Engine {
+    fn settle_launch_attempts(
+        &mut self,
+        quarantine: TableReference<QuarantinedLaunchAttempt>,
+    ) -> Result<Vec<LaunchAttemptSettlement>, StoreError> {
         let mut settlements = Vec::new();
+        let mut unread = None;
         for (launch_request_id, archive) in self.launch_attempt_archives()? {
             let Err(decode_error) =
-                rkyv::from_bytes::<StoredLaunchAttempt, rkyv::rancor::Error>(&archive)
+                rkyv::from_bytes::<StoredLaunchAttemptV1, rkyv::rancor::Error>(&archive)
             else {
                 continue;
             };
             let shape =
-                if rkyv::from_bytes::<StoredLaunchAttemptBeforeModules, rkyv::rancor::Error>(
-                    &archive,
-                )
-                .is_ok()
-                {
-                    ArchivedLaunchAttemptShape::BeforeModules
-                } else if rkyv::from_bytes::<StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
+                if rkyv::from_bytes::<StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
                     &archive,
                 )
                 .is_ok()
@@ -2849,19 +3077,30 @@ impl SettlesLaunchAttempts for FlowStore {
                 } else {
                     ArchivedLaunchAttemptShape::Unknown(decode_error.to_string())
                 };
+            // The same table, named for moving aside a row 0.34's shape
+            // does not read.
+            let unread_table = match unread {
+                Some(table) => table,
+                None => {
+                    let table =
+                        self.register_table(TableDescriptor::<UnreadLaunchAttempt>::new(
+                            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+                            FamilyName::new("flow-nexus-launch-attempt"),
+                            StoredLaunchAttemptV1::schema_hash(),
+                        ))?;
+                    unread = Some(table);
+                    table
+                }
+            };
             let quarantine_number = self
-                .quarantined_launch_attempts_of(&launch_request_id)?
+                .quarantined_launch_attempts_of(quarantine, &launch_request_id)?
                 .len() as u64
                 + 1;
-            self.engine.commit_atomic(
-                self.engine
-                    .begin_atomic_commit()
-                    .retract(
-                        self.unread_launch_attempts,
-                        RecordKey::new(launch_request_id.clone()),
-                    )
+            self.commit_atomic(
+                self.begin_atomic_commit()
+                    .retract(unread_table, RecordKey::new(launch_request_id.clone()))
                     .assert(
-                        self.quarantined_launch_attempts,
+                        quarantine,
                         QuarantinedLaunchAttempt {
                             launch_request_id: launch_request_id.clone(),
                             quarantine_number,
@@ -2883,9 +3122,6 @@ impl SettlesLaunchAttempts for FlowStore {
                 },
             });
         }
-        if !settlements.is_empty() {
-            self.launch_changes.announce();
-        }
         Ok(settlements)
     }
 
@@ -2893,7 +3129,6 @@ impl SettlesLaunchAttempts for FlowStore {
         let definition =
             redb::TableDefinition::<String, &[u8]>::new(FLOW_LAUNCH_ATTEMPT_TABLE_NAME.as_str());
         Ok(self
-            .engine
             .storage_reader()
             .read(|transaction| {
                 let table = match transaction.open_table(definition) {
@@ -2913,11 +3148,11 @@ impl SettlesLaunchAttempts for FlowStore {
 
     fn quarantined_launch_attempts_of(
         &self,
+        quarantine: TableReference<QuarantinedLaunchAttempt>,
         launch_request_id: &str,
     ) -> Result<Vec<QuarantinedLaunchAttempt>, StoreError> {
         Ok(self
-            .engine
-            .match_records(QueryPlan::all(self.quarantined_launch_attempts))?
+            .match_records(QueryPlan::all(quarantine))?
             .records()
             .iter()
             .filter(|quarantined| quarantined.launch_request_id == launch_request_id)
@@ -3147,6 +3382,7 @@ impl ReservesLaunchAttempt for FlowStore {
             self.launch_attempts,
             StoredLaunchAttempt {
                 attempt: attempt.clone(),
+                context: LaunchContext::Modules,
             },
         ))?;
         self.launch_changes.announce();
@@ -3180,7 +3416,7 @@ impl RecordsNativeLaunchIntent for FlowStore {
         }
         stored.attempt.launch_attempt_phase = LaunchAttemptPhase::NativeLaunchIntentRecorded;
         stored.attempt.native_launch_intent_option = Some(intent);
-        self.mutate_launch_attempt(stored.attempt)?;
+        self.mutate_launch_attempt(stored)?;
         Ok(true)
     }
 }
@@ -3206,7 +3442,7 @@ impl RecordsNativeLaunchBinding for FlowStore {
         }
         stored.attempt.launch_attempt_phase = LaunchAttemptPhase::NativeBound;
         stored.attempt.native_launch_binding_option = Some(binding);
-        self.mutate_launch_attempt(stored.attempt)?;
+        self.mutate_launch_attempt(stored)?;
         Ok(true)
     }
 }
@@ -3330,7 +3566,7 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         }
         stored.attempt.launch_attempt_phase = LaunchAttemptPhase::PromptIntentRecorded;
         stored.attempt.prompt_delivery_intent_option = Some(intent);
-        self.mutate_launch_attempt(stored.attempt)?;
+        self.mutate_launch_attempt(stored)?;
         Ok(true)
     }
 }
@@ -3464,7 +3700,7 @@ impl RecordsPromptDeliveryResult for FlowStore {
         };
         stored.attempt.launch_attempt_phase = phase;
         stored.attempt.prompt_delivery_result_option = Some(result);
-        self.mutate_launch_attempt(stored.attempt)?;
+        self.mutate_launch_attempt(stored)?;
         Ok(true)
     }
 }
@@ -3585,6 +3821,18 @@ impl ReadsLaunchAttempt for FlowStore {
         Ok(self
             .stored_launch_attempt(launch_request_id)?
             .map(|stored| stored.attempt))
+    }
+
+    fn composable_launch_profile(
+        &self,
+        launch_request_id: &str,
+    ) -> Result<Option<LaunchProfile>, StoreError> {
+        Ok(self
+            .stored_launch_attempt(launch_request_id)?
+            .and_then(|stored| match stored.context {
+                LaunchContext::Modules => Some(stored.attempt.launch_profile),
+                LaunchContext::BeforeModules(_) => None,
+            }))
     }
 
     fn launch_requests_bound_to(&self, flow_id: &str) -> Result<Vec<String>, StoreError> {
@@ -3985,11 +4233,11 @@ impl RecordsFlowLifecycle for FlowStore {
 }
 
 impl WritesFlowStore for FlowStore {
-    fn mutate_launch_attempt(&self, attempt: LaunchAttempt) -> Result<(), StoreError> {
+    fn mutate_launch_attempt(&self, stored: StoredLaunchAttempt) -> Result<(), StoreError> {
         self.engine.mutate_keyed(KeyedMutation::new(
             self.launch_attempts,
-            RecordKey::new(attempt.launch_request_id.clone()),
-            StoredLaunchAttempt { attempt },
+            RecordKey::new(stored.attempt.launch_request_id.clone()),
+            stored,
         ))?;
         self.launch_changes.announce();
         Ok(())
@@ -4186,6 +4434,7 @@ impl EarlierLaunchAttemptRows {
     pub const EARLIER_REQUEST: &str = "flow06-earlier";
     pub const BEFORE_ADDRESS_REQUEST: &str = "flow15-before-address";
     pub const UNREADABLE_REQUEST: &str = "unreadable-request";
+    pub const ZERO_THIRTY_FOUR_REQUEST: &str = "flow34-before-modules";
 
     /// A launch as signal-flow 15.0.0 archived it: its profile named the
     /// Aspect alone. It bound no flow.
@@ -4279,60 +4528,119 @@ impl EarlierLaunchAttemptRows {
         }
     }
 
-    /// Writes the rows into the store at `path` and closes it.
+    /// A launch as Flow 0.34 archived it: its context named by skill
+    /// sources and a bundle file, its first message observed.
+    fn zero_thirty_four_attempt(&self) -> LaunchAttemptBeforeModules {
+        let request = Self::ZERO_THIRTY_FOUR_REQUEST;
+        let selection = NativeSkillSelectionBeforeModules {
+            skill_name: "operation-main-flow".into(),
+            native_skill_path: "/kept/skills/operation-main-flow/SKILL.md".into(),
+            native_skill_sha256: "ef".repeat(32),
+        };
+        let pane = signal_flow::HerdrPaneBinding {
+            launch_request_id: request.into(),
+            herdr_session_name: "messaging-build".into(),
+            herdr_agent_name: "mind-sol-34".into(),
+            herdr_workspace_id: "w34".into(),
+            herdr_pane_id: "w34:p1".into(),
+            herdr_terminal_id: "term-34".into(),
+        };
+        let boundary = NativeTranscriptBoundary::Absent(signal_flow::NativeTranscriptAbsence {
+            native_session_id: "session-34".into(),
+            harness_kind: HarnessKind::Codex,
+            transcript_root_device: "64768".into(),
+            transcript_root_inode: "1234".into(),
+        });
+        let intent = PromptDeliveryIntentBeforeModules {
+            launch_request_id: request.into(),
+            prompt_sha256: "ab".repeat(32),
+            flow_id: "flow34".into(),
+            native_session_id: "session-34".into(),
+            harness_kind: HarnessKind::Codex,
+            model_name: "gpt-sol".into(),
+            effort: "medium".into(),
+            native_skill_selection_vector: vec![selection.clone()],
+            herdr_pane_binding: pane.clone(),
+            native_transcript_boundary: boundary,
+        };
+        LaunchAttemptBeforeModules {
+            launch_request_id: request.into(),
+            launch_profile: LaunchProfileBeforeModules {
+                launch_request_id: request.into(),
+                launch_source_vector: vec![LaunchSourceBeforeModules {
+                    source_path: "/kept/skills/operation-main-flow.md".into(),
+                    source_sha256: "cd".repeat(32),
+                }],
+                skill_name_vector: vec!["operation-main-flow".into()],
+                address: Address {
+                    aspect: Aspect::Mind,
+                    topic: "flow".into(),
+                    layer: Layer::Secondary,
+                },
+                power_level: PowerLevel::Medium,
+                harness_kind: HarnessKind::Codex,
+                model_name: "gpt-sol".into(),
+                effort: "medium".into(),
+                flow_id_option: Some("predecessor-34".into()),
+                remembered_flow_vector: vec![RememberedFlow {
+                    flow_id: "e51411".into(),
+                    remembering_depth: 2,
+                }],
+                herdr_session_name: "messaging-build".into(),
+                system_prompt_bundle_file: "/kept/bundles/flow34.md".into(),
+                instruction_prompt: "0.34 instruction".into(),
+            },
+            prompt_sha256: "ab".repeat(32),
+            origin_clue: OriginClueBeforeOrigin {
+                flow_id: "e51411".into(),
+                session_id: "e51411-session".into(),
+                turn_id: "turn-34".into(),
+            },
+            launch_attempt_phase: LaunchAttemptPhase::PromptObserved,
+            native_launch_intent_option: Some(NativeLaunchIntentBeforeModules {
+                launch_request_id: request.into(),
+                prompt_sha256: "ab".repeat(32),
+                harness_kind: HarnessKind::Codex,
+                model_name: "gpt-sol".into(),
+                effort: "medium".into(),
+                skill_name_vector: vec!["operation-main-flow".into()],
+            }),
+            native_launch_binding_option: Some(NativeLaunchBinding {
+                launch_request_id: request.into(),
+                flow_id: "flow34".into(),
+                native_session_id: "session-34".into(),
+                harness_kind: HarnessKind::Codex,
+                herdr_pane_binding: pane.clone(),
+            }),
+            registration_acknowledgement_option: Some(RegistrationAcknowledgement {
+                launch_request_id: request.into(),
+                flow_id: "flow34".into(),
+                native_session_id: "session-34".into(),
+                herdr_pane_binding: pane,
+            }),
+            prompt_delivery_intent_option: Some(intent),
+            prompt_delivery_result_option: Some(PromptDeliveryResultBeforeModules::Observed(
+                NativeTargetReceiptBeforeModules {
+                    launch_request_id: request.into(),
+                    prompt_sha256: "ab".repeat(32),
+                    flow_id: "flow34".into(),
+                    native_session_id: "session-34".into(),
+                    native_turn_id: "turn-1".into(),
+                    receipt_sha256: "12".repeat(32),
+                    model_name: "gpt-sol".into(),
+                    effort: "medium".into(),
+                    native_skill_selection_vector: vec![selection],
+                },
+            )),
+        }
+    }
+
+    /// Writes the rows into the store at `path` and closes it: the store
+    /// is made current, then its attempts table is set back to 0.34's
+    /// family identity, as an 0.34 store holds it, and the earlier rows
+    /// are written under it.
     pub fn seed(&self, path: &Path) {
-        let mut store = FlowStore::open(path).expect("store to seed opens");
-        let earlier = store
-            .engine
-            .register_table::<StoredLaunchAttemptBeforeBundle>(TableDescriptor::new(
-                FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-                FamilyName::new("flow-nexus-launch-attempt"),
-                SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
-            ))
-            .expect("earlier shape names the table");
-        let before_address = store
-            .engine
-            .register_table::<StoredLaunchAttemptBeforeAddress>(TableDescriptor::new(
-                FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-                FamilyName::new("flow-nexus-launch-attempt"),
-                SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
-            ))
-            .expect("15.0.0 shape names the table");
-        store
-            .engine
-            .assert(Assertion::new(
-                before_address,
-                StoredLaunchAttemptBeforeAddress {
-                    attempt: self.before_address_attempt(),
-                },
-            ))
-            .expect("15.0.0 row written");
-        let unreadable = store
-            .engine
-            .register_table::<NotALaunchAttempt>(TableDescriptor::new(
-                FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
-                FamilyName::new("flow-nexus-launch-attempt"),
-                SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
-            ))
-            .expect("unreadable shape names the table");
-        store
-            .engine
-            .assert(Assertion::new(
-                earlier,
-                StoredLaunchAttemptBeforeBundle {
-                    attempt: self.earlier_attempt(),
-                },
-            ))
-            .expect("earlier row written");
-        store
-            .engine
-            .assert(Assertion::new(
-                unreadable,
-                NotALaunchAttempt {
-                    launch_request_id: Self::UNREADABLE_REQUEST.into(),
-                },
-            ))
-            .expect("unreadable row written");
+        let store = FlowStore::open(path).expect("store to seed opens");
         let node = signal_flow::FlowNode {
             flow_id: self.bound_flow_id.clone(),
             session_id: format!("{}-session", self.bound_flow_id),
@@ -4351,6 +4659,104 @@ impl EarlierLaunchAttemptRows {
             store.register_flow(node).expect("earlier flow registered"),
             FlowRegistration::Registered(_)
         ));
+        drop(store);
+        StoredLaunchAttemptV1::restore_family(path);
+
+        let mut engine = Engine::open(EngineOpen::new(path, SchemaVersion::new(1)))
+            .expect("store opens under the engine");
+        // Every shape names the table under 0.34's identity.
+        let descriptor = || {
+            (
+                FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+                FamilyName::new("flow-nexus-launch-attempt"),
+                StoredLaunchAttemptV1::schema_hash(),
+            )
+        };
+        let (name, family, schema) = descriptor();
+        let zero_thirty_four = engine
+            .register_table::<StoredLaunchAttemptV1>(TableDescriptor::new(name, family, schema))
+            .expect("0.34 shape names the table");
+        engine
+            .assert(Assertion::new(
+                zero_thirty_four,
+                StoredLaunchAttemptV1 {
+                    attempt: self.zero_thirty_four_attempt(),
+                },
+            ))
+            .expect("0.34 row written");
+        let (name, family, schema) = descriptor();
+        let earlier = engine
+            .register_table::<StoredLaunchAttemptBeforeBundle>(TableDescriptor::new(
+                name, family, schema,
+            ))
+            .expect("earlier shape names the table");
+        engine
+            .assert(Assertion::new(
+                earlier,
+                StoredLaunchAttemptBeforeBundle {
+                    attempt: self.earlier_attempt(),
+                },
+            ))
+            .expect("earlier row written");
+        let (name, family, schema) = descriptor();
+        let before_address = engine
+            .register_table::<StoredLaunchAttemptBeforeAddress>(TableDescriptor::new(
+                name, family, schema,
+            ))
+            .expect("15.0.0 shape names the table");
+        engine
+            .assert(Assertion::new(
+                before_address,
+                StoredLaunchAttemptBeforeAddress {
+                    attempt: self.before_address_attempt(),
+                },
+            ))
+            .expect("15.0.0 row written");
+        let (name, family, schema) = descriptor();
+        let unreadable = engine
+            .register_table::<NotALaunchAttempt>(TableDescriptor::new(name, family, schema))
+            .expect("unreadable shape names the table");
+        engine
+            .assert(Assertion::new(
+                unreadable,
+                NotALaunchAttempt {
+                    launch_request_id: Self::UNREADABLE_REQUEST.into(),
+                },
+            ))
+            .expect("unreadable row written");
+    }
+}
+
+/// Sets a store's attempts table back to the family identity Flow 0.34
+/// registered it under. The table must hold no row.
+#[cfg(test)]
+trait RestoresZeroThirtyFourFamily {
+    fn restore_family(path: &Path);
+}
+
+#[cfg(test)]
+impl RestoresZeroThirtyFourFamily for StoredLaunchAttemptV1 {
+    fn restore_family(path: &Path) {
+        let registration = TableRegistration::new(
+            TableDescriptor::<StoredLaunchAttemptV1>::new(
+                FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+                FamilyName::new("flow-nexus-launch-attempt"),
+                StoredLaunchAttemptV1::schema_hash(),
+            )
+            .family_identity(),
+        );
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&registration)
+            .expect("registration archives")
+            .to_vec();
+        let database = redb::Database::open(path).expect("store opens directly");
+        let write = database.begin_write().expect("catalog transaction starts");
+        {
+            let mut catalog = write.open_table(SEMA_CATALOG_TABLE).expect("catalog opens");
+            catalog
+                .insert(FLOW_LAUNCH_ATTEMPT_TABLE_NAME.as_str(), bytes.as_slice())
+                .expect("0.34 identity written");
+        }
+        write.commit().expect("catalog commits");
     }
 }
 
@@ -4440,7 +4846,10 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_herdr_routes" => ("flow-nexus-herdr-route", "flow-nexus-herdr-route-v1"),
             "flow_nexus_launch_panes" => ("flow-nexus-launch-pane", "flow-nexus-launch-pane-v1"),
             "flow_nexus_launch_attempts" => {
-                ("flow-nexus-launch-attempt", "flow-nexus-launch-attempt-v1")
+                return Some((
+                    "flow-nexus-launch-attempt",
+                    StoredLaunchAttempt::schema_hash(),
+                ));
             }
             "flow_nexus_runtime_configuration" => (
                 "flow-nexus-runtime-configuration",
@@ -4517,6 +4926,10 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_launch_outcomes" => Some((
                 "flow-nexus-launch-outcome",
                 StoredLaunchOutcomeV2::schema_hash(),
+            )),
+            "flow_nexus_launch_attempts" => Some((
+                "flow-nexus-launch-attempt",
+                StoredLaunchAttemptV1::schema_hash(),
             )),
             _ => None,
         };
@@ -6534,12 +6947,6 @@ mod tests {
         };
         let fixture = StoreFixture::new();
         let path = fixture.directory.path().join("flow.sema");
-        let store = fixture.store();
-        let current = fixture.composed_launch("current-request", &"ef".repeat(32));
-        store
-            .reserve_launch_attempt(&current, fixture.origin())
-            .expect("current row reserved");
-        drop(store);
         let rows = EarlierLaunchAttemptRows {
             bound_flow_id: "launched-earlier".into(),
         };
@@ -6592,12 +6999,12 @@ mod tests {
         ] {
             assert_eq!(store.launch_attempt(request).unwrap(), None);
         }
-        assert_eq!(
+        // The 0.34 row is carried, not set aside.
+        assert!(
             store
-                .launch_attempt("current-request")
+                .launch_attempt(EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST)
                 .unwrap()
-                .map(|attempt| attempt.launch_profile),
-            Some(current.launch_profile)
+                .is_some()
         );
         // Every whole-table read answers again.
         assert!(store.ambiguous_launch_attempts().is_ok());
@@ -6652,6 +7059,510 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    /// How many rows each Flow table holds: read raw off a store file, or
+    /// read whole, every row decoded, through an open store.
+    trait CountsRowsByTable {
+        fn rows_by_table(&self) -> std::collections::BTreeMap<String, u64>;
+    }
+
+    /// Every table the catalog registers, each row counted undecoded.
+    impl CountsRowsByTable for std::path::Path {
+        fn rows_by_table(&self) -> std::collections::BTreeMap<String, u64> {
+            use redb::{ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _};
+            let database = redb::ReadOnlyDatabase::open(self).expect("store reads directly");
+            let read = database.begin_read().expect("read starts");
+            let catalog = read
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            let names = catalog
+                .iter()
+                .expect("catalog iterates")
+                .map(|entry| entry.expect("catalog entry").0.value().to_owned())
+                .collect::<Vec<_>>();
+            names
+                .into_iter()
+                .map(|name| {
+                    let rows =
+                        match read.open_table(redb::TableDefinition::<String, &[u8]>::new(&name)) {
+                            Ok(table) => table.len().expect("table length"),
+                            Err(redb::TableError::TableDoesNotExist(_)) => 0,
+                            Err(error) => panic!("table {name} opens: {error}"),
+                        };
+                    (name, rows)
+                })
+                .collect()
+        }
+    }
+
+    /// Every table the store holds, each row read and decoded in its
+    /// current shape.
+    impl CountsRowsByTable for FlowStore {
+        fn rows_by_table(&self) -> std::collections::BTreeMap<String, u64> {
+            let engine = &self.engine;
+            let meta = &self.meta_configuration_tables;
+            let delivery = &self.delivery_tables;
+            let read = |name: &str, rows: usize| (name.to_owned(), rows as u64);
+            [
+                read(
+                    "flow_nexus_flows",
+                    engine
+                        .match_records(QueryPlan::all(self.flows))
+                        .expect("flows read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_state",
+                    engine
+                        .match_records(QueryPlan::all(self.state))
+                        .expect("state reads")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_metaflows",
+                    engine
+                        .match_records(QueryPlan::all(self.metaflows))
+                        .expect("metaflows read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_metaflow_processes",
+                    engine
+                        .match_records(QueryPlan::all(self.metaflow_processes))
+                        .expect("metaflow processes read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_metaflow_locks",
+                    engine
+                        .match_records(QueryPlan::all(self.metaflow_locks))
+                        .expect("metaflow locks read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_configuration",
+                    engine
+                        .match_records(QueryPlan::all(self.configuration))
+                        .expect("configuration reads")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_runtime_configuration",
+                    engine
+                        .match_records(QueryPlan::all(self.runtime_configuration))
+                        .expect("runtime configuration reads")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_herdr_routes",
+                    engine
+                        .match_records(QueryPlan::all(self.herdr_routes))
+                        .expect("herdr routes read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_launch_attempts",
+                    engine
+                        .match_records(QueryPlan::all(self.launch_attempts))
+                        .expect("launch attempts read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_launch_panes",
+                    engine
+                        .match_records(QueryPlan::all(self.launch_panes))
+                        .expect("launch panes read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_launch_outcomes",
+                    engine
+                        .match_records(QueryPlan::all(self.launch_outcomes))
+                        .expect("launch outcomes read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_replacements",
+                    engine
+                        .match_records(QueryPlan::all(self.replacements))
+                        .expect("replacements read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_roles",
+                    engine
+                        .match_records(QueryPlan::all(self.roles))
+                        .expect("roles read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_quarantined_launch_attempts",
+                    engine
+                        .match_records(QueryPlan::all(self.quarantined_launch_attempts))
+                        .expect("quarantined launch attempts read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_deliveries",
+                    engine
+                        .match_records(QueryPlan::all(delivery.deliveries))
+                        .expect("deliveries read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_pane_leases",
+                    engine
+                        .match_records(QueryPlan::all(delivery.pane_leases))
+                        .expect("pane leases read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_delivery_configuration",
+                    engine
+                        .match_records(QueryPlan::all(delivery.configuration))
+                        .expect("delivery configuration reads")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_meta_nexus_configuration",
+                    engine
+                        .match_records(QueryPlan::all(meta.nexus))
+                        .expect("meta nexus configuration reads")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_meta_model_configuration",
+                    engine
+                        .match_records(QueryPlan::all(meta.models))
+                        .expect("meta model configuration reads")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_meta_threshold_configuration",
+                    engine
+                        .match_records(QueryPlan::all(meta.thresholds))
+                        .expect("meta threshold configuration reads")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_meta_leave_out_configuration",
+                    engine
+                        .match_records(QueryPlan::all(meta.leave_outs))
+                        .expect("meta leave-out configuration reads")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_flow_events",
+                    engine
+                        .match_records(QueryPlan::all(self.event_tables.events))
+                        .expect("flow events read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_flow_context_sizes",
+                    engine
+                        .match_records(QueryPlan::all(self.context_sizes))
+                        .expect("context sizes read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_address_holds",
+                    engine
+                        .match_records(QueryPlan::all(self.address_holds))
+                        .expect("address holds read")
+                        .records()
+                        .len(),
+                ),
+            ]
+            .into_iter()
+            .collect()
+        }
+    }
+
+    /// A store Flow 0.34.4 wrote, opened as production opens it: every
+    /// row of every table reads in the current shape, and each table holds
+    /// as many rows as it did. `FLOW_0_34_STORE` names that store; it is
+    /// copied and only the copy is opened. No such store is kept in the
+    /// repository, so the test runs only when asked for by name with
+    /// `--ignored` and the variable set.
+    #[test]
+    #[ignore = "needs FLOW_0_34_STORE naming a store Flow 0.34.4 wrote"]
+    fn a_0_34_4_store_opens_and_every_row_of_every_table_reads() {
+        use super::{LaunchAttemptSettlement, ManagesMetaflowState, ReadsFlowRows};
+        let source = std::env::var_os("FLOW_0_34_STORE")
+            .map(std::path::PathBuf::from)
+            .expect("FLOW_0_34_STORE names the 0.34.4 store to copy");
+        let directory = tempfile::tempdir().expect("copy directory");
+        let path = directory.path().join("flow.sema");
+        std::fs::copy(&source, &path).expect("0.34.4 store copied");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("copy metadata")
+            .permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&path, permissions).expect("copy writable");
+
+        let before = path.rows_by_table();
+        eprintln!("rows before: {before:?}");
+        let store = FlowStore::open_configured(&path).expect("the 0.34.4 store opens");
+        let set_aside = store
+            .opening_settlements
+            .iter()
+            .filter(|settlement| !matches!(settlement, LaunchAttemptSettlement::Unsettled { .. }))
+            .count() as u64;
+        assert!(
+            !store
+                .opening_settlements
+                .iter()
+                .any(|settlement| matches!(settlement, LaunchAttemptSettlement::Unsettled { .. })),
+            "{:?}",
+            store.opening_settlements
+        );
+        let after = store.rows_by_table();
+        eprintln!("rows after: {after:?}");
+        eprintln!("launch-attempt rows set aside: {set_aside}");
+        for (table, rows) in &before {
+            if super::RETIRED_TABLES
+                .iter()
+                .any(|(retired, _, _)| retired == table)
+            {
+                eprintln!("retired table {table} held {rows} rows");
+                assert!(!after.contains_key(table), "{table} is retired");
+                continue;
+            }
+            let expected = match table.as_str() {
+                "flow_nexus_launch_attempts" => rows - set_aside,
+                "flow_nexus_quarantined_launch_attempts" => rows + set_aside,
+                _ => *rows,
+            };
+            assert_eq!(after.get(table), Some(&expected), "rows of {table}");
+        }
+        for (table, rows) in &after {
+            if !before.contains_key(table) {
+                assert_eq!(*rows, 0, "{table} is added empty");
+            }
+        }
+
+        // Every whole-table read answers, and every attempt and outcome.
+        assert!(store.ambiguous_launch_attempts().is_ok());
+        assert_eq!(
+            store.flow_nodes().expect("flow nodes read").len() as u64,
+            after["flow_nexus_flows"]
+        );
+        assert_eq!(
+            store.list_metaflows().expect("metaflows list").len() as u64,
+            after["flow_nexus_metaflows"]
+        );
+        assert!(
+            store
+                .configuration_snapshot()
+                .expect("snapshot reads")
+                .is_some()
+        );
+        let attempts = store
+            .engine
+            .match_records(QueryPlan::all(store.launch_attempts))
+            .expect("attempts read")
+            .records()
+            .to_vec();
+        for stored in &attempts {
+            let request = &stored.attempt.launch_request_id;
+            assert!(
+                store
+                    .launch_attempt(request)
+                    .expect("attempt reads")
+                    .is_some()
+            );
+            store.launch_outcome(request).expect("outcome reads");
+        }
+        drop(store);
+
+        // The upgrade is done once: a reopen carries nothing again.
+        let reopened = FlowStore::open_configured(&path).expect("the upgraded store reopens");
+        assert_eq!(reopened.opening_settlements, Vec::new());
+        assert_eq!(reopened.rows_by_table(), after);
+    }
+
+    /// A 0.34 launch-attempt row is carried into the current shape when the
+    /// store opens: what the current shape names, into it, and what it no
+    /// longer names, kept beside it; no later seat is composed from it.
+    #[test]
+    fn a_0_34_launch_attempt_row_is_carried_with_what_it_named_kept() {
+        use super::{
+            Address, ContextBeforeModules, EarlierLaunchAttemptRows, LaunchAttempt, LaunchContext,
+            LaunchSource, Layer, NativeSkill, OriginClue,
+        };
+        let fixture = StoreFixture::new();
+        let path = fixture.directory.path().join("flow.sema");
+        let rows = EarlierLaunchAttemptRows {
+            bound_flow_id: "launched-earlier".into(),
+        };
+        rows.seed(&path);
+        let request = EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST;
+
+        let store = fixture.store();
+        let pane = signal_flow::HerdrPaneBinding {
+            launch_request_id: request.into(),
+            herdr_session_name: "messaging-build".into(),
+            herdr_agent_name: "mind-sol-34".into(),
+            herdr_workspace_id: "w34".into(),
+            herdr_pane_id: "w34:p1".into(),
+            herdr_terminal_id: "term-34".into(),
+        };
+        let intent = signal_flow::PromptDeliveryIntent {
+            launch_request_id: request.into(),
+            prompt_sha256: "ab".repeat(32),
+            flow_id: "flow34".into(),
+            native_session_id: "session-34".into(),
+            harness_kind: HarnessKind::Codex,
+            model_name: "gpt-sol".into(),
+            effort: "medium".into(),
+            prompt_sha256_vector: vec!["ab".repeat(32)],
+            parts_submitted: 1,
+            stops_reported: 0,
+            leave_outs: Vec::new(),
+            herdr_pane_binding: pane.clone(),
+            native_transcript_boundary: signal_flow::NativeTranscriptBoundary::Absent(
+                signal_flow::NativeTranscriptAbsence {
+                    native_session_id: "session-34".into(),
+                    harness_kind: HarnessKind::Codex,
+                    transcript_root_device: "64768".into(),
+                    transcript_root_inode: "1234".into(),
+                },
+            ),
+        };
+        let expected = LaunchAttempt {
+            launch_request_id: request.into(),
+            launch_profile: signal_flow::LaunchProfile {
+                launch_request_id: request.into(),
+                system_modules: Vec::new(),
+                user_modules: Vec::new(),
+                address: Address {
+                    aspect: Aspect::Mind,
+                    topic: "flow".into(),
+                    layer: Layer::Secondary,
+                },
+                model_name: "gpt-sol".into(),
+                effort: "medium".into(),
+                flow_id_option: Some("predecessor-34".into()),
+                remembered_flow_vector: vec![signal_flow::RememberedFlow {
+                    flow_id: "e51411".into(),
+                    remembering_depth: 2,
+                }],
+                herdr_session_name: "messaging-build".into(),
+                leave_outs_option: Some(Vec::new()),
+                instruction_prompt: "0.34 instruction".into(),
+            },
+            prompt_sha256: "ab".repeat(32),
+            origin: Origin::Flow(signal_flow::FlowOrigin {
+                flow_id: "e51411".into(),
+                session_id: "e51411-session".into(),
+            }),
+            launch_attempt_phase: LaunchAttemptPhase::PromptObserved,
+            native_launch_intent_option: Some(signal_flow::NativeLaunchIntent {
+                launch_request_id: request.into(),
+                prompt_sha256: "ab".repeat(32),
+                system_prompt_sha256: String::new(),
+                harness_kind: HarnessKind::Codex,
+                model_name: "gpt-sol".into(),
+                effort: "medium".into(),
+                prompt_sha256_vector: vec!["ab".repeat(32)],
+            }),
+            native_launch_binding_option: Some(signal_flow::NativeLaunchBinding {
+                launch_request_id: request.into(),
+                flow_id: "flow34".into(),
+                native_session_id: "session-34".into(),
+                harness_kind: HarnessKind::Codex,
+                herdr_pane_binding: pane.clone(),
+            }),
+            registration_acknowledgement_option: Some(signal_flow::RegistrationAcknowledgement {
+                launch_request_id: request.into(),
+                flow_id: "flow34".into(),
+                native_session_id: "session-34".into(),
+                herdr_pane_binding: pane,
+            }),
+            prompt_delivery_intent_option: Some(intent),
+            prompt_delivery_result_option: Some(signal_flow::PromptDeliveryResult::Observed(
+                signal_flow::NativeTargetReceipt {
+                    launch_request_id: request.into(),
+                    prompt_sha256: "ab".repeat(32),
+                    flow_id: "flow34".into(),
+                    native_session_id: "session-34".into(),
+                    native_turn_id: "turn-1".into(),
+                    receipt_sha256: "12".repeat(32),
+                    model_name: "gpt-sol".into(),
+                    effort: "medium".into(),
+                    prompt_sha256_vector: vec!["ab".repeat(32)],
+                },
+            )),
+        };
+        let skill = NativeSkill {
+            skill_name: "operation-main-flow".into(),
+            skill_path: "/kept/skills/operation-main-flow/SKILL.md".into(),
+            skill_sha256: "ef".repeat(32),
+        };
+        let stored = store
+            .stored_launch_attempt(request)
+            .unwrap()
+            .expect("0.34 row carried");
+        assert_eq!(stored.attempt, expected);
+        assert_eq!(
+            stored.context,
+            LaunchContext::BeforeModules(ContextBeforeModules {
+                launch_sources: vec![LaunchSource {
+                    source_path: "/kept/skills/operation-main-flow.md".into(),
+                    source_sha256: "cd".repeat(32),
+                }],
+                skills: vec!["operation-main-flow".into()],
+                power_level: PowerLevel::Medium,
+                harness_kind: HarnessKind::Codex,
+                bundle_file: "/kept/bundles/flow34.md".into(),
+                origin_clue: OriginClue {
+                    flow_id: "e51411".into(),
+                    session_id: "e51411-session".into(),
+                    turn_id: "turn-34".into(),
+                },
+                launch_intent_skills: Some(vec!["operation-main-flow".into()]),
+                intent_skills: Some(vec![skill.clone()]),
+                result_skills: Some(vec![skill]),
+            })
+        );
+        // No module names its context: no later seat is composed from it.
+        assert_eq!(store.composable_launch_profile(request).unwrap(), None);
+        assert_eq!(
+            store.launch_attempt(request).unwrap(),
+            Some(expected.clone())
+        );
+        drop(store);
+
+        // The family is current now: a reopen carries nothing again.
+        let store = fixture.store();
+        assert_eq!(store.opening_settlements, Vec::new());
+        assert_eq!(store.launch_attempt(request).unwrap(), Some(expected));
     }
 
     #[test]

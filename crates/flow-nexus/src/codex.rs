@@ -168,16 +168,32 @@ pub trait ConsumesResetCredit {
 }
 
 /// Submits the part of the first USER message the durable intent last
-/// counted as submitted, as one native turn of one text item. The first part
-/// goes only to a thread with no turn yet; a later part follows the turn the
-/// transcript showed completed. Durable one-shot gating belongs to the
-/// caller; this never creates, resumes, or replaces the Herdr-owned thread.
+/// counted as submitted, as one native turn of one text item, after
+/// applying the launch's base instructions and exclusions to the attached
+/// thread again and reading them back. The first part is already the
+/// thread's first turn, given when the thread was opened, so for it nothing
+/// more is sent; a later part follows the turn the transcript showed
+/// completed. Durable one-shot gating belongs to the caller; this never
+/// creates or replaces the Herdr-attached thread.
 pub trait SubmitsBoundCodexPart {
     fn submit_bound_codex_part(
         &self,
         launch: &ComposedLaunch,
         durable_intent: &PromptDeliveryIntent,
     ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable>;
+}
+
+/// Opens a launch's Codex thread through the app-server before any TUI
+/// attaches to it: the thread starts with the composed system prompt as its
+/// base instructions and the launch's exclusions in its config, what the
+/// app-server answers is read back against them, and the first part of the
+/// first USER message (the whole message when it fits one Codex turn) is
+/// submitted as the thread's first turn. The answer is the thread's id.
+pub trait OpensCodexThread {
+    fn open_thread_with_first_turn(
+        &self,
+        launch: &ComposedLaunch,
+    ) -> Result<String, CodexAdapterUnavailable>;
 }
 
 /// Names the exact Herdr-bound thread through the app-server and reads the
@@ -578,18 +594,38 @@ impl BuildsCodexTurn for CodexAdapter {
 
 trait OpensBoundCodexSession {
     fn initialize_bound_session(&self) -> Result<ProxySession, CodexAdapterUnavailable>;
-    fn require_empty_bound_thread(
-        &self,
-        session: &mut ProxySession,
-        request_id: u64,
-        native_session_id: &str,
-    ) -> Result<(), CodexAdapterUnavailable>;
     /// The `turn/start` of the part the intent last counted as submitted:
     /// its text as the one input item.
     fn bound_turn_params(
         launch: &ComposedLaunch,
         intent: &PromptDeliveryIntent,
     ) -> Option<serde_json::Value>;
+    /// The thread config a launch's Codex exclusions and effort make, each
+    /// leave-out as the setting its TUI switch names.
+    fn exclusion_config(launch: &ComposedLaunch) -> serde_json::Map<String, serde_json::Value>;
+    /// Reads back what `thread/start` or `thread/resume` answered for the
+    /// thread: its id, model and reasoning effort are the launch's, and no
+    /// instruction source (AGENTS.md) is loaded when the launch left
+    /// project instructions out. The answer schema (codex app-server v2,
+    /// ThreadStartResponse and ThreadResumeResponse) names no field for the
+    /// skill listing or the other exclusions; their witness is the receipt,
+    /// which refuses a request that carried one.
+    fn read_back_thread(
+        launch: &ComposedLaunch,
+        thread_id: &str,
+        method: &str,
+        response: &serde_json::Value,
+    ) -> Result<(), CodexAdapterUnavailable>;
+    /// Applies the launch's base instructions, exclusions and flow
+    /// environment again once Herdr's TUI has attached to the thread, since
+    /// a TUI resume replaces the thread's settings, and reads them back.
+    fn configure_bound_thread(
+        &self,
+        session: &mut ProxySession,
+        request_id: u64,
+        launch: &ComposedLaunch,
+        intent: &PromptDeliveryIntent,
+    ) -> Result<(), CodexAdapterUnavailable>;
 }
 
 impl OpensBoundCodexSession for CodexAdapter {
@@ -615,44 +651,6 @@ impl OpensBoundCodexSession for CodexAdapter {
         Ok(session)
     }
 
-    fn require_empty_bound_thread(
-        &self,
-        session: &mut ProxySession,
-        request_id: u64,
-        native_session_id: &str,
-    ) -> Result<(), CodexAdapterUnavailable> {
-        let read = session.request(
-            request_id,
-            "thread/read",
-            serde_json::json!({
-                "threadId": native_session_id,
-                "includeTurns": true
-            }),
-            self.timeout,
-        )?;
-        let thread = read.get("thread").unwrap_or(&read);
-        if thread.get("id").and_then(serde_json::Value::as_str) != Some(native_session_id) {
-            return Err(CodexAdapterUnavailable::Protocol(
-                "thread/read did not return the exact Herdr-bound thread".into(),
-            ));
-        }
-        let turns = thread
-            .get("turns")
-            .or_else(|| thread.pointer("/history/turns"))
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                CodexAdapterUnavailable::Protocol(
-                    "thread/read did not provide an authenticated turn list".into(),
-                )
-            })?;
-        if !turns.is_empty() {
-            return Err(CodexAdapterUnavailable::Protocol(
-                "Herdr-bound Codex thread already has a turn".into(),
-            ));
-        }
-        Ok(())
-    }
-
     fn bound_turn_params(
         launch: &ComposedLaunch,
         intent: &PromptDeliveryIntent,
@@ -670,6 +668,184 @@ impl OpensBoundCodexSession for CodexAdapter {
             }],
             "turnTrigger": "flow-nexus"
         }))
+    }
+
+    fn exclusion_config(launch: &ComposedLaunch) -> serde_json::Map<String, serde_json::Value> {
+        let mut config = serde_json::Map::new();
+        for leave_out in &launch.leave_outs {
+            let (key, value) = match leave_out {
+                signal_flow::LeaveOut::CodexAgentsMd => {
+                    ("project_doc_max_bytes", serde_json::json!(0))
+                }
+                signal_flow::LeaveOut::CodexSkillListing => {
+                    ("skills.include_instructions", serde_json::json!(false))
+                }
+                signal_flow::LeaveOut::CodexCollaborationMode => (
+                    "include_collaboration_mode_instructions",
+                    serde_json::json!(false),
+                ),
+                signal_flow::LeaveOut::CodexEnvironmentContext => {
+                    ("include_environment_context", serde_json::json!(false))
+                }
+                signal_flow::LeaveOut::CodexPermissions => {
+                    ("include_permissions_instructions", serde_json::json!(false))
+                }
+                signal_flow::LeaveOut::CodexDeveloperInstructions => {
+                    ("developer_instructions", serde_json::json!(""))
+                }
+                _ => continue,
+            };
+            config.insert(key.into(), value);
+        }
+        config.insert(
+            "model_reasoning_effort".into(),
+            serde_json::json!(launch.launch_profile.effort),
+        );
+        config
+    }
+
+    fn read_back_thread(
+        launch: &ComposedLaunch,
+        thread_id: &str,
+        method: &str,
+        response: &serde_json::Value,
+    ) -> Result<(), CodexAdapterUnavailable> {
+        if response
+            .pointer("/thread/id")
+            .and_then(serde_json::Value::as_str)
+            != Some(thread_id)
+        {
+            return Err(CodexAdapterUnavailable::Protocol(format!(
+                "{method} did not return the launch's thread"
+            )));
+        }
+        if response.get("model").and_then(serde_json::Value::as_str)
+            != Some(launch.launch_profile.model_name.as_str())
+            || response
+                .get("reasoningEffort")
+                .and_then(serde_json::Value::as_str)
+                != Some(launch.launch_profile.effort.as_str())
+        {
+            return Err(CodexAdapterUnavailable::Protocol(format!(
+                "{method} readback differs from the launch's model or effort"
+            )));
+        }
+        if launch
+            .leave_outs
+            .contains(&signal_flow::LeaveOut::CodexAgentsMd)
+        {
+            let sources = response
+                .get("instructionSources")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    CodexAdapterUnavailable::Protocol(format!(
+                        "{method} answered no instruction sources"
+                    ))
+                })?;
+            if !sources.is_empty() {
+                return Err(CodexAdapterUnavailable::Protocol(format!(
+                    "{method} loaded project instructions the launch left out"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn configure_bound_thread(
+        &self,
+        session: &mut ProxySession,
+        request_id: u64,
+        launch: &ComposedLaunch,
+        intent: &PromptDeliveryIntent,
+    ) -> Result<(), CodexAdapterUnavailable> {
+        let mut config = Self::exclusion_config(launch);
+        config.insert(
+            "shell_environment_policy".into(),
+            serde_json::json!({ "inherit": "core", "set": {
+                "FLOW_ID": intent.flow_id,
+                "FLOW_DIRECTORY": self.flow_directory(&intent.flow_id)
+            }}),
+        );
+        let response = session.request(
+            request_id,
+            "thread/resume",
+            serde_json::json!({
+                "threadId": intent.native_session_id,
+                "model": intent.model_name,
+                "baseInstructions": launch.system_prompt.system_prompt_text,
+                "config": config
+            }),
+            self.timeout,
+        )?;
+        Self::read_back_thread(
+            launch,
+            &intent.native_session_id,
+            "thread/resume",
+            &response,
+        )
+    }
+}
+
+impl OpensCodexThread for CodexAdapter {
+    fn open_thread_with_first_turn(
+        &self,
+        launch: &ComposedLaunch,
+    ) -> Result<String, CodexAdapterUnavailable> {
+        let first = launch.first_prompt_payload.prompt_part_vector.first();
+        let Some(first) = first.filter(|_| {
+            launch.has_canonical_first_prompt()
+                && launch.harness_kind == HarnessKind::Codex
+                && self.model == launch.launch_profile.model_name
+        }) else {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "the composed launch is no Codex launch this endpoint serves".into(),
+            ));
+        };
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            let started = session.request(
+                2,
+                "thread/start",
+                serde_json::json!({
+                    "model": launch.launch_profile.model_name,
+                    "cwd": self.workspace_root,
+                    "approvalPolicy": "never",
+                    "sandbox": "danger-full-access",
+                    "baseInstructions": launch.system_prompt.system_prompt_text,
+                    "ephemeral": false,
+                    "config": Self::exclusion_config(launch)
+                }),
+                self.timeout,
+            )?;
+            let thread = started
+                .pointer("/thread/id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|thread| !thread.is_empty())
+                .ok_or_else(|| {
+                    CodexAdapterUnavailable::Protocol("thread/start returned no thread id".into())
+                })?
+                .to_owned();
+            Self::read_back_thread(launch, &thread, "thread/start", &started)?;
+            session.request(
+                3,
+                "turn/start",
+                serde_json::json!({
+                    "threadId": thread,
+                    "effort": launch.launch_profile.effort,
+                    "model": launch.launch_profile.model_name,
+                    "input": [{
+                        "type": "text",
+                        "text": first.prompt_part_text,
+                        "text_elements": []
+                    }],
+                    "turnTrigger": "flow-nexus"
+                }),
+                self.timeout,
+            )?;
+            Ok(thread)
+        })();
+        session.stop_proxy();
+        result
     }
 }
 
@@ -707,13 +883,15 @@ impl SubmitsBoundCodexPart for CodexAdapter {
         };
         let mut session = self.initialize_bound_session()?;
         let result = (|| {
-            // The first part opens the thread's first turn. A later part
-            // follows the turn the transcript showed completed; the thread
-            // is not read again, since its turns now carry whole parts.
-            if intent.parts_submitted == 1 {
-                self.require_empty_bound_thread(&mut session, 2, &intent.native_session_id)?;
+            // The attached TUI replaced the thread's settings: they are
+            // applied again and read back before anything more is sent.
+            self.configure_bound_thread(&mut session, 2, launch, intent)?;
+            // The first part is the thread's first turn, given before the
+            // TUI attached. A later part follows the turn the transcript
+            // showed completed.
+            if intent.parts_submitted > 1 {
+                session.request(3, "turn/start", params, self.timeout)?;
             }
-            session.request(3, "turn/start", params, self.timeout)?;
             Ok(PromptDeliveryResult::Ambiguous(intent.clone()))
         })();
         session.stop_proxy();
@@ -978,7 +1156,14 @@ mod tests {
 
     impl BuildsFakeProxy for FakeProxy {
         fn websocket_frame(&self, json: &str) -> String {
-            let mut bytes = vec![0x81, json.len() as u8];
+            let mut bytes = vec![0x81];
+            match u8::try_from(json.len()) {
+                Ok(short) if short < 126 => bytes.push(short),
+                _ => {
+                    bytes.push(126);
+                    bytes.extend_from_slice(&(json.len() as u16).to_be_bytes());
+                }
+            }
             bytes.extend_from_slice(json.as_bytes());
             bytes.iter().map(|byte| format!("\\{:03o}", byte)).collect()
         }
@@ -988,6 +1173,82 @@ mod tests {
                 "#!/bin/sh\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nprintf '%b' '{}'\nsleep 2\n",
                 frames.join("")
             )
+        }
+    }
+
+    /// A fake app-server that also keeps every frame the client sent, so a
+    /// test reads back the requests a launch made, in order.
+    struct RecordingFakeProxy;
+
+    trait InstallsRecordingFakeProxy {
+        fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathBuf, PathBuf);
+    }
+
+    impl InstallsRecordingFakeProxy for RecordingFakeProxy {
+        fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathBuf, PathBuf) {
+            let directory = tempfile::tempdir().unwrap();
+            let executable = directory.path().join("codex");
+            let record = directory.path().join("requests");
+            let script = FakeProxy.executable(frames).replacen(
+                "\nprintf '%b' 'HTTP/1.1",
+                &format!(
+                    "\nexec 3<&0\ncat <&3 > '{}' &\nprintf '%b' 'HTTP/1.1",
+                    record.display()
+                ),
+                1,
+            );
+            FixtureExecutable {
+                path: executable.clone(),
+            }
+            .install(&script);
+            (directory, executable, record)
+        }
+    }
+
+    /// The JSON messages a recorded client stream holds: each masked client
+    /// frame unmasked (RFC 6455 5.3), waiting until `count` have arrived.
+    trait ReadsRecordedRequests {
+        fn requests(&self, count: usize) -> Vec<serde_json::Value>;
+    }
+
+    impl ReadsRecordedRequests for std::path::Path {
+        fn requests(&self, count: usize) -> Vec<serde_json::Value> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let bytes = std::fs::read(self).unwrap_or_default();
+                let mut messages = Vec::new();
+                let mut at = 0;
+                while at + 2 <= bytes.len() {
+                    let (length, header) = match bytes[at + 1] & 0x7f {
+                        126 if at + 4 <= bytes.len() => (
+                            u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]) as usize,
+                            4,
+                        ),
+                        127 if at + 10 <= bytes.len() => (
+                            u64::from_be_bytes(bytes[at + 2..at + 10].try_into().unwrap()) as usize,
+                            10,
+                        ),
+                        short if short < 126 => (short as usize, 2),
+                        _ => break,
+                    };
+                    let start = at + header + 4;
+                    if start + length > bytes.len() {
+                        break;
+                    }
+                    let mask = &bytes[at + header..start];
+                    let payload = bytes[start..start + length]
+                        .iter()
+                        .enumerate()
+                        .map(|(index, byte)| byte ^ mask[index % 4])
+                        .collect::<Vec<_>>();
+                    messages.push(serde_json::from_slice(&payload).expect("a JSON request"));
+                    at = start + length;
+                }
+                if messages.len() >= count || Instant::now() > deadline {
+                    return messages;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 
@@ -1350,5 +1611,199 @@ mod tests {
                 .unwrap(),
             meta_signal_flow::ResetOutcome::NothingToReset
         );
+    }
+
+    /// A Codex launch the fake app-server serves: the fixture's composed
+    /// context, leaving the AGENTS.md body and the skill listing out.
+    fn lean_codex_launch() -> ComposedLaunch {
+        use crate::composition::ComposesLaunch;
+        use crate::composition::tests::{fixture_composer, fixture_profile};
+        fixture_composer()
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: fixture_profile(),
+                },
+                vec![
+                    signal_flow::LeaveOut::CodexAgentsMd,
+                    signal_flow::LeaveOut::CodexSkillListing,
+                ],
+            )
+            .unwrap()
+    }
+
+    fn lean_adapter_at(executable: PathBuf, launch: &ComposedLaunch) -> CodexAdapter {
+        CodexAdapter {
+            model: launch.launch_profile.model_name.clone(),
+            ..adapter_at(executable)
+        }
+    }
+
+    /// The thread is opened lean through the app-server, its readback
+    /// checked, and the first turn given before any TUI attaches: the
+    /// requests are initialize, thread/start with the system prompt and the
+    /// exclusions, then turn/start with the whole first part.
+    #[test]
+    fn a_codex_thread_is_opened_lean_and_given_its_first_turn_before_attach() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let launch = lean_codex_launch();
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(
+                r#"{"id":2,"result":{"thread":{"id":"thread-lean"},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":[]}}"#,
+            ),
+            fake.websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#),
+        ];
+        let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
+        assert_eq!(
+            lean_adapter_at(executable, &launch)
+                .open_thread_with_first_turn(&launch)
+                .unwrap(),
+            "thread-lean"
+        );
+        let requests = record.requests(4);
+        let methods = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            ["initialize", "initialized", "thread/start", "turn/start"]
+        );
+        let start = &requests[2]["params"];
+        assert_eq!(
+            start["baseInstructions"],
+            launch.system_prompt.system_prompt_text
+        );
+        assert_eq!(start["config"]["project_doc_max_bytes"], 0);
+        assert_eq!(start["config"]["skills.include_instructions"], false);
+        assert_eq!(start["config"]["model_reasoning_effort"], "medium");
+        assert_eq!(start["model"], "gpt-6-astra");
+        let turn = &requests[3]["params"];
+        assert_eq!(turn["threadId"], "thread-lean");
+        assert_eq!(
+            turn["input"][0]["text"],
+            launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text
+        );
+        assert_eq!(turn["input"].as_array().unwrap().len(), 1);
+    }
+
+    /// A thread whose readback shows project instructions loaded, though
+    /// the launch left them out, is refused and given no turn.
+    #[test]
+    fn a_codex_thread_that_loaded_left_out_instructions_gets_no_turn() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let launch = lean_codex_launch();
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(
+                r#"{"id":2,"result":{"thread":{"id":"thread-lean"},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":["/primary/AGENTS.md"]}}"#,
+            ),
+            fake.websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#),
+        ];
+        let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
+        assert!(matches!(
+            lean_adapter_at(executable, &launch).open_thread_with_first_turn(&launch),
+            Err(CodexAdapterUnavailable::Protocol(detail))
+                if detail.contains("loaded project instructions the launch left out")
+        ));
+        let requests = record.requests(3);
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request["method"] == "turn/start")
+        );
+    }
+
+    fn attached_intent(launch: &ComposedLaunch, parts_submitted: i64) -> PromptDeliveryIntent {
+        let (_, mut intent) = malformed_bound_launch();
+        intent.launch_request_id = launch.launch_profile.launch_request_id.clone();
+        intent.prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
+        intent.prompt_sha256_vector = launch
+            .first_prompt_payload
+            .prompt_part_vector
+            .iter()
+            .map(|part| part.prompt_sha256.clone())
+            .collect();
+        intent.model_name = launch.launch_profile.model_name.clone();
+        intent.effort = launch.launch_profile.effort.clone();
+        intent.native_session_id = "thread-lean".into();
+        intent.leave_outs = launch.leave_outs.clone();
+        intent.parts_submitted = parts_submitted;
+        intent
+    }
+
+    /// Once the TUI has attached, the base instructions, exclusions and
+    /// flow environment are applied to the thread again and read back; the
+    /// first part is already the thread's first turn, so nothing else goes.
+    #[test]
+    fn after_attach_the_exclusions_are_applied_again_and_read_back() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let launch = lean_codex_launch();
+        let intent = attached_intent(&launch, 1);
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(
+                r#"{"id":2,"result":{"thread":{"id":"thread-lean"},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":[]}}"#,
+            ),
+        ];
+        let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
+        assert_eq!(
+            lean_adapter_at(executable, &launch)
+                .submit_bound_codex_part(&launch, &intent)
+                .unwrap(),
+            PromptDeliveryResult::Ambiguous(intent.clone())
+        );
+        let requests = record.requests(3);
+        let methods = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(methods, ["initialize", "initialized", "thread/resume"]);
+        let resume = &requests[2]["params"];
+        assert_eq!(resume["threadId"], "thread-lean");
+        assert_eq!(
+            resume["baseInstructions"],
+            launch.system_prompt.system_prompt_text
+        );
+        assert_eq!(resume["config"]["project_doc_max_bytes"], 0);
+        assert_eq!(resume["config"]["skills.include_instructions"], false);
+        assert_eq!(
+            resume["config"]["shell_environment_policy"]["set"]["FLOW_ID"],
+            intent.flow_id
+        );
+    }
+
+    /// A readback after attach that differs from the launch refuses the
+    /// part: the attached thread runs another model, or loaded AGENTS.md.
+    #[test]
+    fn an_attached_thread_whose_readback_differs_is_refused() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let launch = lean_codex_launch();
+        let intent = attached_intent(&launch, 1);
+        let fake = FakeProxy;
+        for (answer, refusal) in [
+            (
+                r#"{"id":2,"result":{"thread":{"id":"thread-lean"},"model":"gpt-6-sol","reasoningEffort":"medium","instructionSources":[]}}"#,
+                "model or effort",
+            ),
+            (
+                r#"{"id":2,"result":{"thread":{"id":"thread-lean"},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":["/primary/AGENTS.md"]}}"#,
+                "loaded project instructions",
+            ),
+        ] {
+            let frames = [
+                fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+                fake.websocket_frame(answer),
+            ];
+            let (_directory, executable, _record) = RecordingFakeProxy.install(&frames);
+            assert!(matches!(
+                lean_adapter_at(executable, &launch).submit_bound_codex_part(&launch, &intent),
+                Err(CodexAdapterUnavailable::Protocol(detail)) if detail.contains(refusal)
+            ));
+        }
     }
 }

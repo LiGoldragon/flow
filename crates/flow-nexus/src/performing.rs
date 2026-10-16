@@ -5,7 +5,7 @@
 //! paths decide what to do next; this is the only place they act.
 
 use crate::RunningNexus;
-use crate::codex::{SelectsCodexEndpoint, SubmitsBoundCodexPart};
+use crate::codex::{OpensCodexThread, SelectsCodexEndpoint, SubmitsBoundCodexPart};
 use crate::composition::{ComposesLaunch, CompositionError, HarnessedProfile};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
@@ -290,26 +290,67 @@ impl Performs for RunningNexus {
                 composed_launch,
                 herdr_pane_binding,
                 flow_id_option,
-            }) => match self.herdr.start_native_harness(
-                &composed_launch,
-                &herdr_pane_binding,
-                flow_id_option.as_deref(),
-            ) {
-                Ok(()) => Outcome::Spawned,
-                Err(error) => HerdrFailure::refused(HerdrFailureStage::Spawn, error),
-            },
+                ..
+            }) => {
+                // Codex: the thread is opened lean and given its first turn
+                // through the app-server before the TUI attaches to it.
+                let opened = match composed_launch.harness_kind {
+                    HarnessKind::Codex => match self
+                        .codex_endpoints
+                        .adapter_for(&composed_launch.launch_profile.model_name)
+                        .and_then(|adapter| adapter.open_thread_with_first_turn(&composed_launch))
+                    {
+                        Ok(thread) => Some(thread),
+                        Err(error) => {
+                            eprintln!(
+                                "flow-nexus: launch {} Codex thread not opened: {error}",
+                                composed_launch.launch_profile.launch_request_id
+                            );
+                            return Outcome::Failed(Failed_Data::CodexRefused);
+                        }
+                    },
+                    HarnessKind::Claude => None,
+                };
+                let started = match &opened {
+                    Some(thread) => self.herdr.attach_codex_harness(
+                        &composed_launch,
+                        &herdr_pane_binding,
+                        thread,
+                    ),
+                    None => self.herdr.start_native_harness(
+                        &composed_launch,
+                        &herdr_pane_binding,
+                        flow_id_option.as_deref(),
+                    ),
+                };
+                match started {
+                    Ok(()) => Outcome::Spawned(opened),
+                    Err(error) => HerdrFailure::refused(HerdrFailureStage::Spawn, error),
+                }
+            }
             Operation::Bind(PaneLaunch {
                 composed_launch,
                 herdr_pane_binding,
                 flow_id_option,
-            }) => match self.herdr.observe_native_binding(
-                &composed_launch,
-                &herdr_pane_binding,
-                flow_id_option.as_deref(),
-            ) {
-                Ok(binding) => Outcome::Bound(binding),
-                Err(error) => HerdrFailure::refused(HerdrFailureStage::Bind, error),
-            },
+                native_session_id_option,
+            }) => {
+                let observed = match native_session_id_option {
+                    Some(thread) => self.herdr.observe_attached_codex_binding(
+                        &composed_launch,
+                        &herdr_pane_binding,
+                        &thread,
+                    ),
+                    None => self.herdr.observe_native_binding(
+                        &composed_launch,
+                        &herdr_pane_binding,
+                        flow_id_option.as_deref(),
+                    ),
+                };
+                match observed {
+                    Ok(binding) => Outcome::Bound(binding),
+                    Err(error) => HerdrFailure::refused(HerdrFailureStage::Bind, error),
+                }
+            }
             Operation::Title(Title_Data {
                 composed_launch,
                 native_launch_binding,

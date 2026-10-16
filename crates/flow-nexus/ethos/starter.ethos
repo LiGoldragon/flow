@@ -16,7 +16,7 @@
 ; a generated type's fields are public.
 
 Library
-[ signal_flow:[ Address HarnessKind LaunchProfile PromptDeliveryIntent NativeTargetReceipt FlowId SessionId Origin SystemModules UserModules HerdrSessionName LeaveOuts LeaveOutRefusal ComposedLaunch ContextRefusal SystemPrompt HerdrPaneBinding PromptDeliveryResult Response Launched ]
+[ signal_flow:[ Address HarnessKind PowerLevel LaunchProfile PromptDeliveryIntent NativeTargetReceipt FlowId SessionId Origin SystemModules UserModules HerdrSessionName LeaveOuts LeaveOutRefusal ComposedLaunch ContextRefusal SystemPrompt HerdrPaneBinding PromptDeliveryResult Response Launched ]
   flow_nexus:[ StartupSelection StartupComposition ContextProvenance CurriculumQuery CurriculumOutcome CompositionError VerifiedContext OperationOutcome CallerProcess ]
   serde_json:JsonValue.Value ]
 [ ; What a launch asks of the context composer.
@@ -29,6 +29,23 @@ Library
   ; from the flow's own row when the reply is made.
   LaunchedRecord.{ FlowId SessionId Origin }
   ReplacedRecord.{ FlowId LaunchedRecord }
+  ; What a launch attempt's row knows of the context its seat started with.
+  ; Modules: its profile names that context by module identity.
+  ; BeforeModules: Flow kept the launch before 0.35.0, when a launch named
+  ; its context by skill sources and a system-prompt bundle file. Its profile
+  ; names no module and leaves nothing out, its native intent names no
+  ; system-prompt hash, its one first message is its one part, and the Stop
+  ; count at that part was not kept; what it named instead is kept here
+  ; whole, with the origin clue its caller named and the skill names its
+  ; native launch intent recorded.
+  LaunchSource.{ SourcePath.String SourceSha256.String }
+  LaunchSources.Vector<LaunchSource>
+  NativeSkill.{ SkillName.String SkillPath.String SkillSha256.String }
+  NativeSkills.Vector<NativeSkill>
+  OriginClue.{ FlowId SessionId TurnId.String }
+  ContextBeforeModules.{ LaunchSources Skills.Vector<String> PowerLevel HarnessKind BundleFile.String OriginClue LaunchIntentSkills.Option<Vector<String>> IntentSkills.Option<NativeSkills> ResultSkills.Option<NativeSkills> }
+  LaunchContext.[ Modules
+                  BeforeModules.ContextBeforeModules ]
   ; What the native transcript shows of a first USER message: Received is
   ; every part in order then the first answer; Waiting is not yet; and
   ; PartAnswered is every submitted part seen, the last answered, and parts

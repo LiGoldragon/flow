@@ -6,6 +6,7 @@ pub struct PaneLaunch {
     pub composed_launch: signal_flow::ComposedLaunch,
     pub herdr_pane_binding: signal_flow::HerdrPaneBinding,
     pub flow_id_option: std::option::Option<signal_flow::FlowId>,
+    pub native_session_id_option: std::option::Option<signal_flow::NativeSessionId>,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -160,7 +161,7 @@ pub enum Outcome {
     Registered(signal_flow::FlowNode),
     Started(signal_flow::Launched),
     Opened(signal_flow::HerdrPaneBinding),
-    Spawned,
+    Spawned(std::option::Option<signal_flow::NativeSessionId>),
     Bound(signal_flow::NativeLaunchBinding),
     Titled,
     Submitted(signal_flow::PromptDeliveryResult),

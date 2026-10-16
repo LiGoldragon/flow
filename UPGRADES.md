@@ -1,3 +1,43 @@
+# Flow 0.35.1
+
+No wire change. Store change: the launch-attempt family upgrades from v1 to
+v2 on the first open, so a store Flow 0.34 wrote opens with every row.
+
+- **A 0.34 launch attempt is carried, not set aside.** Each row reads in
+  0.34's shape and is written in the current one: what the current shape
+  names goes into it (its profile names no module and leaves nothing out,
+  its native intent names no system-prompt hash, its one first message is
+  its one part, and its Stop count reads 0, which 0.34 did not keep); what
+  it named instead is kept beside it as `LaunchContext.BeforeModules`: the
+  skill sources, the skill names, the power, the harness, the bundle file,
+  the origin clue whole, the native launch intent's skill names, and the
+  native skill selections of its delivery intent and receipt. No later seat
+  is composed from such a row: a metaflow whose last flow was launched by
+  one is not woken from it (its wake is Unplaceable) until a Start names
+  its modules. A row older than 0.34's shape is still moved
+  whole into the quarantine table. The Flow 0.34.4 production store was
+  opened in a disposable copy with this code: every row of every table read,
+  and every table held as many rows after as before.
+- **A Codex thread is opened lean and given its first turn before its TUI
+  attaches.** The Nexus opens the thread through the app-server
+  (`thread/start` with the composed system prompt as `baseInstructions` and
+  the launch's exclusions in `config`), checks the answer (thread, model,
+  reasoning effort, and no `instructionSources` when `CodexAgentsMd` is left
+  out), submits the first part as the thread's first turn, and only then
+  starts the TUI in the pane as `codex --remote … resume <thread>`. Bind
+  requires the session Herdr reports to be that thread.
+- **After the TUI attaches, the exclusions are applied again and read
+  back.** Before a part is counted delivered, `thread/resume` sends the base
+  instructions, the exclusions, the effort and the flow's `FLOW_ID` and
+  `FLOW_DIRECTORY` again, and the same readback refuses a differing answer.
+- **A Codex receipt refuses a request that carried a left-out block.** The
+  receipt reads a Codex thread from its start; an AGENTS.md body, a skill
+  listing, permissions, collaboration-mode or environment-context block in a
+  request, while its leave-out is in force, refuses the launch.
+- `packages.store-proof` is the flow-nexus library test executable, so the
+  ignored `a_0_34_4_store_opens_and_every_row_of_every_table_reads` runs by
+  name with `FLOW_0_34_STORE` naming a store copy.
+
 # Flow 0.35.0
 
 Wire change: signal-flow 17.0.0, meta-signal-flow 20.0.0. Store change:

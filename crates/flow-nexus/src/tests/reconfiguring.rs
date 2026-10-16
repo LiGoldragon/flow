@@ -348,3 +348,39 @@ fn a_metaflow_default_leave_out_set_is_configured_read_and_snapshotted() {
     );
     assert_eq!(snapshot(&nexus).default_leave_outs, vec![leave_out]);
 }
+
+#[test]
+fn configured_subagent_roles_are_snapshotted_and_given_to_the_next_open() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    assert!(
+        snapshot(&nexus)
+            .subagent_roles
+            .subagent_role_names
+            .is_empty()
+    );
+    assert!(nexus.herdr.subagent_roles.names.is_empty());
+    let roles = meta_signal_flow::ConfigureSubagentRoles {
+        subagent_role_names: vec!["comment-relay".into()],
+    };
+    assert_eq!(
+        nexus.dispatch_meta(meta_signal_flow::Query::Configure(
+            ConfigurationChange::SubagentRoles(roles.clone())
+        )),
+        meta_signal_flow::Response::Configured
+    );
+    assert_eq!(snapshot(&nexus).subagent_roles, roles);
+    assert_eq!(
+        nexus.dispatch_meta(meta_signal_flow::Query::Configure(
+            ConfigurationChange::SubagentRoles(meta_signal_flow::ConfigureSubagentRoles {
+                subagent_role_names: vec!["other-role".into()],
+            })
+        )),
+        meta_signal_flow::Response::ConfigureRejected(
+            meta_signal_flow::ConfigureRejection::Conflict
+        )
+    );
+    drop(nexus);
+    let reopened = fixture.open();
+    assert_eq!(reopened.herdr.subagent_roles.names, ["comment-relay"]);
+}

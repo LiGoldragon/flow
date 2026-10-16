@@ -104,10 +104,6 @@ pub trait LaysOutDefaults {
     const NEXT_CODEX_HOME: &str = ".codex-next";
     const NEXT_CODEX_MODELS: [&str; 3] = ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"];
     const CODEX_CONTROL_SOCKET: &str = "app-server-control/app-server-control.sock";
-    /// The subagent roles a Claude flow is offered, by Curriculum role
-    /// name; each is composed by Curriculum and offered only to the flows
-    /// its caller policy permits.
-    const SUBAGENT_ROLES: [&str; 1] = ["comment-relay"];
 
     fn home(&self) -> &Path;
     fn runtime_directory(&self) -> &Path;
@@ -150,13 +146,6 @@ pub trait LaysOutDefaults {
             Self::NEXT_CODEX_HOME,
             &Self::NEXT_CODEX_MODELS,
         )
-    }
-
-    fn subagent_role_names(&self) -> Vec<String> {
-        Self::SUBAGENT_ROLES
-            .iter()
-            .map(|role| (*role).to_owned())
-            .collect()
     }
 
     fn codex_endpoint(&self, client: &str, home: &str, models: &[&str]) -> DefaultCodexEndpoint {

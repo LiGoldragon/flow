@@ -26,7 +26,7 @@ use std::{
 
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureLeaveOut, ConfigureModel, ConfigureNexus,
-    ConfigureThreshold,
+    ConfigureSubagentRoles, ConfigureThreshold,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -70,6 +70,8 @@ const META_THRESHOLD_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_threshold_configuration");
 const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_leave_out_configuration");
+const META_SUBAGENT_ROLE_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_subagent_role_configuration");
 /// The tables a store before 0.35.0 kept and 0.35.0 drops when it opens:
 /// the meta configuration's topic modules, which meta-signal-flow 20.0.0
 /// no longer configures, and the system-prompt bundle 0.34.6 kept for each
@@ -346,6 +348,18 @@ struct StoredMetaLeaveOutConfiguration {
 impl EngineRecord for StoredMetaLeaveOutConfiguration {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(FlowStore::address_record_key(&self.leave_out.address))
+    }
+}
+
+/// The subagent role names Flow offers and guards: one row.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaSubagentRoleConfiguration {
+    subagent_roles: ConfigureSubagentRoles,
+}
+
+impl EngineRecord for StoredMetaSubagentRoleConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("subagent-roles")
     }
 }
 
@@ -1305,6 +1319,7 @@ pub(crate) struct MetaConfigurationTables {
     models: TableReference<StoredMetaModelConfiguration>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
     leave_outs: TableReference<StoredMetaLeaveOutConfiguration>,
+    subagent_roles: TableReference<StoredMetaSubagentRoleConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -1333,6 +1348,11 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 META_LEAVE_OUT_CONFIGURATION_TABLE_NAME,
                 FamilyName::new("flow-nexus-meta-leave-out-configuration"),
                 SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
+            ))?,
+            subagent_roles: engine.register_table(TableDescriptor::new(
+                META_SUBAGENT_ROLE_CONFIGURATION_TABLE_NAME,
+                FamilyName::new("flow-nexus-meta-subagent-role-configuration"),
+                SchemaHash::for_label("flow-nexus-meta-subagent-role-configuration-v1"),
             ))?,
         })
     }
@@ -1436,6 +1456,11 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             FamilyName::new("flow-nexus-meta-leave-out-configuration"),
             SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
         );
+        let meta_subagent_roles_descriptor = TableDescriptor::new(
+            META_SUBAGENT_ROLE_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-meta-subagent-role-configuration"),
+            SchemaHash::for_label("flow-nexus-meta-subagent-role-configuration-v1"),
+        );
         if recognized {
             FlowStore::drop_retired_tables(path)?;
         }
@@ -1451,7 +1476,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_nexus_descriptor)
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
-                .with_family(&meta_leave_outs_descriptor),
+                .with_family(&meta_leave_outs_descriptor)
+                .with_family(&meta_subagent_roles_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
@@ -1462,6 +1488,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             models: engine.register_table(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
             leave_outs: engine.register_table(meta_leave_outs_descriptor)?,
+            subagent_roles: engine.register_table(meta_subagent_roles_descriptor)?,
         };
         if !recognized {
             engine.assert(Assertion::new(
@@ -1947,6 +1974,12 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-meta-leave-out-configuration"),
             SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
         );
+        let meta_subagent_roles_descriptor =
+            TableDescriptor::<StoredMetaSubagentRoleConfiguration>::new(
+                META_SUBAGENT_ROLE_CONFIGURATION_TABLE_NAME,
+                FamilyName::new("flow-nexus-meta-subagent-role-configuration"),
+                SchemaHash::for_label("flow-nexus-meta-subagent-role-configuration-v1"),
+            );
         let events_descriptor = TableDescriptor::<events::FlowEvents>::new(
             events::FLOW_EVENT_TABLE_NAME,
             FamilyName::new("flow-nexus-flow-events"),
@@ -1980,6 +2013,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
                 .with_family(&meta_leave_outs_descriptor)
+                .with_family(&meta_subagent_roles_descriptor)
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
                 .with_family(&address_holds_descriptor),
@@ -4488,6 +4522,10 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-meta-leave-out-configuration",
                 "flow-nexus-meta-leave-out-configuration-v1",
             ),
+            "flow_nexus_meta_subagent_role_configuration" => (
+                "flow-nexus-meta-subagent-role-configuration",
+                "flow-nexus-meta-subagent-role-configuration-v1",
+            ),
             "flow_nexus_flow_events" => ("flow-nexus-flow-events", "flow-nexus-flow-events-v1"),
             "flow_nexus_flow_context_sizes" => (
                 context::FLOW_CONTEXT_SIZE_FAMILY,
@@ -4606,11 +4644,13 @@ pub(crate) trait ReadsFlowMemory {
         // before either opens, and its first full open adds the table, as
         // the first full open of a configuration-only store adds the running
         // tables.
-        // A store keeps its metaflows' default leave-outs from 0.35.0 on.
+        // A store keeps its metaflows' default leave-outs from 0.35.0 on,
+        // and its subagent role names from the comment-relay seam on.
         const ADDED_LATER: &[&str] = &[
             "flow_nexus_flow_context_sizes",
             "flow_nexus_address_holds",
             "flow_nexus_meta_leave_out_configuration",
+            "flow_nexus_meta_subagent_role_configuration",
         ];
         // A store before 0.35.0 may still hold a table 0.35.0 drops.
         let retired = |name: &String| RETIRED_TABLES.iter().any(|(table, _, _)| table == name);
@@ -4624,6 +4664,7 @@ pub(crate) trait ReadsFlowMemory {
             && actual.iter().all(|name| {
                 CONFIGURATION_ONLY.contains(&name.as_str())
                     || name == "flow_nexus_meta_leave_out_configuration"
+                    || name == "flow_nexus_meta_subagent_role_configuration"
                     || retired(name)
             });
         configuration_only || running
@@ -4800,9 +4841,11 @@ pub(crate) trait ReadsFlowMemory {
         let models_rows = engine.match_records(QueryPlan::all(tables.models))?;
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
         let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
+        let subagent_role_rows = engine.match_records(QueryPlan::all(tables.subagent_roles))?;
         if models_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
             || leave_out_rows.database_marker() != marker
+            || subagent_role_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -4829,11 +4872,19 @@ pub(crate) trait ReadsFlowMemory {
             .collect::<Vec<_>>();
         default_leave_outs
             .sort_by_key(|leave_out| FlowStore::address_record_key(&leave_out.address));
+        let subagent_roles = match subagent_role_rows.records() {
+            [] => ConfigureSubagentRoles {
+                subagent_role_names: Vec::new(),
+            },
+            [stored] => stored.subagent_roles.clone(),
+            _ => return Err(StoreError::StateInvariant),
+        };
         Ok(Some(ConfigurationSnapshot {
             nexus,
             models,
             thresholds,
             default_leave_outs,
+            subagent_roles,
         }))
     }
 
@@ -4896,6 +4947,13 @@ pub(crate) trait ReadsFlowMemory {
                 tables.leave_outs,
                 StoredMetaLeaveOutConfiguration { leave_out },
             ),
+            ConfigurationChange::SubagentRoles(subagent_roles) => {
+                FlowStore::assert_identical_or_conflict(
+                    engine,
+                    tables.subagent_roles,
+                    StoredMetaSubagentRoleConfiguration { subagent_roles },
+                )
+            }
         }
     }
 

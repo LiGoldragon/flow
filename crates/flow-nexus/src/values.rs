@@ -11,7 +11,7 @@ use crate::generated::curriculum::{RoleComposition, RoleSelection};
 use crate::generated::operation::Outcome;
 use crate::generated::role::{
     Addressed, AgentCall, AgentCaller, AgentCalling, ResolvesAgentCaller, RoleComposing,
-    RoleSelecting,
+    RoleNaming, RoleSelecting,
 };
 use crate::generated::starter::{
     CallerProcessing, ContextRequest, ContextRequesting, CurriculumQuerying, DeliveryIntended,
@@ -332,5 +332,23 @@ impl ResolvesAgentCaller for AgentCaller {
 impl<T: ResolvesAgentCaller + ?Sized> ResolvesAgentCaller for &T {
     fn agent_caller(&self) -> AgentCaller {
         (**self).agent_caller()
+    }
+}
+
+impl RoleNaming for [String] {
+    fn role_names(&self) -> Vec<String> {
+        self.to_vec()
+    }
+}
+
+impl RoleNaming for Vec<String> {
+    fn role_names(&self) -> Vec<String> {
+        self.clone()
+    }
+}
+
+impl<T: RoleNaming + ?Sized> RoleNaming for &T {
+    fn role_names(&self) -> Vec<String> {
+        (**self).role_names()
     }
 }

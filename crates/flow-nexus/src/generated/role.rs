@@ -77,8 +77,12 @@ pub trait ResolvesAgentCaller {
     fn agent_caller(&self) -> AgentCaller;
 }
 #[rustfmt::skip]
+pub trait RoleNaming {
+    fn role_names(&self) -> SubagentRoleNames;
+}
+#[rustfmt::skip]
 pub trait OpensSubagentRoles {
-    fn from_environment() -> Self
+    fn named<N: RoleNaming>(input: N) -> Self
     where
         Self: Sized;
 }

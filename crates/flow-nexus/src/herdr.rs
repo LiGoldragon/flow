@@ -164,9 +164,11 @@ impl Default for HerdrCli {
                 .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
                 .unwrap_or_else(|| PathBuf::from("flow-hook")),
             ordinary_socket: defaults.ordinary_socket_path(),
+            // None until the Nexus names its configured roles
+            // (`with_subagent_roles`).
             subagent_roles: {
                 use crate::role::OpensSubagentRoles;
-                crate::role::SubagentRoles::from_environment()
+                crate::role::SubagentRoles::named(Vec::<String>::new())
             },
         }
     }
@@ -309,7 +311,7 @@ pub trait ConfiguresHerdrCli {
     fn with_source_root(self, source_root: &std::path::Path) -> Self;
     #[cfg(test)]
     fn at(executable: PathBuf, flows_root: PathBuf) -> Self;
-    #[cfg(test)]
+    /// The subagent roles the store's configuration names.
     fn with_subagent_roles(self, subagent_roles: crate::role::SubagentRoles) -> Self;
 }
 
@@ -380,7 +382,6 @@ impl ConfiguresHerdrCli for HerdrCli {
         }
     }
 
-    #[cfg(test)]
     fn with_subagent_roles(mut self, subagent_roles: crate::role::SubagentRoles) -> Self {
         self.subagent_roles = subagent_roles;
         self

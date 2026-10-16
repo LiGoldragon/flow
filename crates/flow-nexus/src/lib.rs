@@ -63,6 +63,7 @@ use observe_agent::ObservesAgent;
 use peer::{AdmitsMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
+use role::OpensSubagentRoles;
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
     Origin, Process, Query, Response, RestartRejection,
@@ -513,7 +514,12 @@ impl OpensRunningNexus for RunningNexus {
             herdr: herdr::HerdrCli::default()
                 .with_source_root(&source_root)
                 .with_codex_endpoints(codex_endpoints)
-                .with_ordinary_socket(&ordinary_socket),
+                .with_ordinary_socket(&ordinary_socket)
+                // The subagent roles are read when the Nexus opens, as the
+                // Codex endpoints are.
+                .with_subagent_roles(role::SubagentRoles::named(
+                    &snapshot.subagent_roles.subagent_role_names,
+                )),
             // A launch's context is composed by the Curriculum Nexus.
             composer: LaunchComposer::with_context(context::ContextComposer::Curriculum(
                 CurriculumComposer::from_environment(),

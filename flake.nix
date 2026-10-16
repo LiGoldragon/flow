@@ -199,6 +199,8 @@
             "role::tests::an_agent_call_is_permitted_only_for_the_named_main_thread_caller";
           flow-agents-argument-at-spawn = context.exactTest "flow-nexus"
             "herdr::launch::tests::a_permitted_claude_flow_starts_with_its_verified_roles_as_one_agents_argument";
+          flow-subagent-roles-configured = context.exactTest "flow-nexus"
+            "tests::reconfiguring::configured_subagent_roles_are_snapshotted_and_given_to_the_next_open";
           flow-hook-agent-deny-decision = context.exactTest "flow"
             "tests::a_denial_is_the_native_pre_tool_use_deny_decision";
           flow-message-split-where-modules-begin = context.exactTest "flow-nexus"

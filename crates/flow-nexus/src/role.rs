@@ -1,8 +1,9 @@
 //! A flow's subagent roles: composed by Curriculum, verified, offered to
 //! the Claude flows their caller policy permits, and guarded at dispatch.
 //!
-//! Flow selects each role by name (`LaysOutDefaults::SUBAGENT_ROLES`) and
-//! asks Curriculum for it with `ComposeRole` on the `ClaudeAgent` surface.
+//! Flow selects each role by name, as its configuration names them (meta
+//! `Configure.SubagentRoles`, read when the Nexus opens), and asks
+//! Curriculum for it with `ComposeRole` on the `ClaudeAgent` surface.
 //! The only way its text reaches a harness is through [`VerifiedRole`],
 //! whose one constructor is [`VerifiesRole::verified_role`]: the answer
 //! must name the role and surface asked for, both payload SHA-256s are
@@ -37,11 +38,10 @@ use crate::generated::curriculum::{
 pub use crate::generated::role::{
     Addressed, AgentCall, AgentCaller, AgentCalling, AgentDecision, AgentDenial,
     AuthorizesAgentCall, ComposesRole, ComposesSubagentRoles, OpensSubagentRoles,
-    ReadsVerifiedRole, ResolvesAgentCaller, RoleComposing, RoleRefusal, RoleSelecting,
+    ReadsVerifiedRole, ResolvesAgentCaller, RoleComposing, RoleNaming, RoleRefusal, RoleSelecting,
     SubagentRoleNames, VerifiesRole,
 };
 use crate::generated::starter::OpensCurriculumComposer;
-use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
 use sha2::{Digest, Sha256};
 use signal_flow::{Address, Aspect, Layer};
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,10 +66,10 @@ pub struct SubagentRoles {
 }
 
 impl OpensSubagentRoles for SubagentRoles {
-    fn from_environment() -> Self {
+    fn named<N: RoleNaming>(input: N) -> Self {
         Self {
             composer: RoleComposer::Curriculum(CurriculumComposer::from_environment()),
-            names: DefaultConfiguration::from_environment().subagent_role_names(),
+            names: input.role_names(),
         }
     }
 }

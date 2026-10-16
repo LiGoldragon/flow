@@ -31,7 +31,9 @@ appending the event to that flow's events in its Memory, and answers
 never adopts. The owner reads a flow's events with meta `ReadEvents`.
 
 A Claude flow's subagent roles come from Curriculum. Flow selects each role by
-name (`LaysOutDefaults::SUBAGENT_ROLES`), asks Curriculum `ComposeRole` for it
+name as its configuration names them (meta `Configure.SubagentRoles`, read
+when the Nexus opens, as the Codex endpoints are), asks Curriculum
+`ComposeRole` for it
 on the `ClaudeAgent` surface at every spawn (a start, a fresh wake and a
 resume), and verifies the answer (`role::VerifiedRole`): the role and surface
 asked for, both payload SHA-256s, a manifest of unique modules in order whose
@@ -41,8 +43,9 @@ the flow's Address exactly, case preserved, are given to the harness in one
 inline `--agents` JSON argument, each as `description`, `prompt`, `model`,
 `effort`, `permissionMode` and, for an explicit list, `tools`; a policy field
 with no native counterpart, or an unavailable Curriculum, refuses the spawn.
-The offer is not the guard: `flow-hook` also runs on every PreToolUse of the
-Agent tool and denies a call naming a selected role unless it comes from the
+The offer is not the guard: when roles are configured, `flow-hook` also runs on
+every PreToolUse of the Agent tool, given the configured role names as its
+arguments, and denies a call naming a selected role unless it comes from the
 flow's main thread, sets neither `model` nor `effort`, and the calling flow,
 resolved by the Nexus from the kernel-named calling process
 (`ResolveCaller.None`, then the one metaflow awake as that flow), is one the

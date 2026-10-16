@@ -284,9 +284,10 @@ pub(crate) trait PreparesClaudePane {
     /// launch already runs in suppresses the offer without touching any
     /// settings file. They also carry the harness hook: `flow-hook` on
     /// SessionStart, every PostToolUse and Stop, so each harness event
-    /// reaches Flow as a Report, and on every PreToolUse of the Agent tool,
-    /// where it decides whether a call naming a subagent role Flow selects
-    /// may dispatch.
+    /// reaches Flow as a Report, and, when Flow's configuration names
+    /// subagent roles, on every PreToolUse of the Agent tool, with those
+    /// role names as its arguments, where it decides whether a call naming
+    /// one of them may dispatch.
     /// A launch that leaves out the attribution reminder sets the
     /// attribution lines empty here.
     fn claude_flag_settings(&self, lean: &LeanStart) -> String;
@@ -314,22 +315,25 @@ impl PreparesClaudePane for HerdrCli {
                 "command": self.harness_hook.to_string_lossy(),
             }]
         }]);
-        let agent_tool = serde_json::json!([{
-            "matcher": "Agent",
-            "hooks": [{
-                "type": "command",
-                "command": self.harness_hook.to_string_lossy(),
-            }]
-        }]);
         let mut settings = serde_json::json!({
             "permissions": { "defaultMode": "bypassPermissions" },
             "hooks": {
                 "SessionStart": hook,
-                "PreToolUse": agent_tool,
                 "PostToolUse": every_tool,
                 "Stop": hook,
             }
         });
+        if !self.subagent_roles.names.is_empty() {
+            let guard = std::iter::once(self.harness_hook.to_string_lossy().into_owned())
+                .chain(self.subagent_roles.names.iter().cloned())
+                .map(|word| word.shell_quoted())
+                .collect::<Vec<_>>()
+                .join(" ");
+            settings["hooks"]["PreToolUse"] = serde_json::json!([{
+                "matcher": "Agent",
+                "hooks": [{ "type": "command", "command": guard }]
+            }]);
+        }
         if lean.attribution_off() {
             settings["attribution"] = serde_json::json!({ "commit": "", "pr": "" });
         }
@@ -2661,6 +2665,10 @@ printf '%s\n' 123456
             r#""model":"sonnet","permissionMode":"bypassPermissions","prompt":"#
         )));
         assert!(call.contains(r#""tools":["Read"]}}"#));
+        assert!(call.contains(concat!(
+            r#""PreToolUse":[{"hooks":[{"command":"'/fixture/bin/flow-hook' 'comment-relay'","#,
+            r#""type":"command"}],"matcher":"Agent"}]"#
+        )));
 
         let elsewhere = RoleCallers::Only(vec![CallerMetaflow {
             first_string: "Psyche".into(),
@@ -2714,7 +2722,6 @@ printf '%s\n' 123456
             concat!(
                 r#"{"hooks":{"#,
                 r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
-                r#""PreToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"Agent"}],"#,
                 r#""SessionStart":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
                 r#""Stop":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
                 r#""permissions":{"defaultMode":"bypassPermissions"}}"#

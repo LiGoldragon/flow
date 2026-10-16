@@ -26,7 +26,8 @@ Library
                 ManifestMismatch
                 ProvenanceMismatch
                 UnmappableField ]
-  ; The roles a Claude flow is offered, by role name.
+  ; The roles Flow offers and guards, by role name, as its configuration
+  ; (meta Configure.SubagentRoles) names them.
   SubagentRoleNames.Vector<String>
   ; What one PreToolUse Agent call asks, as the hook reads it.
   AgentCall.{ SubagentType.String
@@ -52,8 +53,10 @@ Library
   Addressed.[ addressed.[ Address ] ]
   AgentCalling.[ agent_call.[ AgentCall ] ]
   ResolvesAgentCaller.[ agent_caller.[ AgentCaller ] ]
-  ; Curriculum at its socket and the role names Flow's defaults select.
-  OpensSubagentRoles.[ from_environment:[ Self ] ]
+  RoleNaming.[ role_names.[ SubagentRoleNames ] ]
+  ; Curriculum at its socket, and the role names Flow's configuration
+  ; selects.
+  OpensSubagentRoles.[ named:{ [ RoleNaming ] [ Self ] } ]
   ComposesRole.[ compose_role.{ [ RoleSelecting ] [ Result<RoleComposition RoleRefusal> ] } ]
   VerifiesRole.[ verified_role:{ [ RoleSelecting RoleComposing ] [ Result<Self RoleRefusal> ] } ]
   ReadsVerifiedRole.[ role_name.[ String ]

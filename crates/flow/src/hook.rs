@@ -13,8 +13,10 @@
 //! flow f1c841). With no FLOW_ID, or on any other event, it reports
 //! nothing.
 //!
-//! Claude Code also runs it on every PreToolUse of the Agent tool, where it
-//! guards the subagent roles Flow selects (`flow_nexus::role`). A call
+//! When Flow's configuration names subagent roles, Claude Code also runs it
+//! on every PreToolUse of the Agent tool, with those role names as its
+//! arguments (written by the Nexus into the flow's launch settings), where
+//! it guards them (`flow_nexus::role`). A call
 //! naming one is denied unless it is made by the flow's main thread (no
 //! `agent_id` in the event), sets neither `model` nor `effort`, and the
 //! calling flow is one the role's caller policy names. The calling flow is
@@ -53,6 +55,8 @@ use std::{
 struct HarnessHook {
     input: serde_json::Value,
     flow_id: Option<String>,
+    /// The subagent roles the Agent guard governs: the hook's arguments.
+    role_names: Vec<String>,
 }
 
 /// What the hook does with one event.
@@ -117,6 +121,7 @@ impl ReadsHookInput for HarnessHook {
             flow_id: env::var("FLOW_ID")
                 .ok()
                 .filter(|flow_id| !flow_id.is_empty()),
+            role_names: env::args().skip(1).collect(),
         }
     }
 }
@@ -266,7 +271,7 @@ impl ReportsThroughCli for HarnessHook {
         let datom = match self.call() {
             HookCall::Report(datom) => datom,
             HookCall::Decide(call) => {
-                let decision = SubagentRoles::from_environment().decide(
+                let decision = SubagentRoles::named(&self.role_names).decide(
                     &call,
                     FlowCliCaller {
                         client: self.client(),
@@ -332,6 +337,7 @@ mod tests {
         HarnessHook {
             input,
             flow_id: flow_id.map(str::to_owned),
+            role_names: vec!["comment-relay".into()],
         }
     }
 

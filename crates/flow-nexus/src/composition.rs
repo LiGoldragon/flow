@@ -653,10 +653,8 @@ impl ComposesLaunch for LaunchComposer {
             .collect::<Result<Vec<_>, _>>()?;
         self.write_launch_bundle(profile, profile.harness_kind == HarnessKind::Codex)?;
         let mut body = self.render_body(profile, &sources);
-        if profile.harness_kind == HarnessKind::Claude {
-            if !body.fits_claude_paste() {
-                body = self.render_claude_direct(profile, &sources);
-            }
+        if profile.harness_kind == HarnessKind::Claude && !body.fits_claude_paste() {
+            body = self.render_claude_direct(profile, &sources);
         }
         let prompt_sha256 = self.sha256(body.as_bytes());
         let target_receipt_request = TargetReceiptRequest {

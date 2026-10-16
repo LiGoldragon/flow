@@ -171,318 +171,6 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{AnswersVersion, ConfigureRejection, ParsesStart};
-    use super::{ConfigurationStartup, RunsConfigurationStartup};
-    use datom_codec::{Actualizing, Budget, Datomizable, Potential};
-    use flow_nexus::store::ConfiguresOnlyStore;
-    use flow_nexus::{
-        CarriesSignalFrames,
-        store::{ConfigurationOnlyStore, DefaultConfiguration},
-    };
-    use meta_signal_flow::{
-        ConfigurationChange, ConfigureNexus, Query as MetaQuery, Response as MetaResponse,
-    };
-    use protos::{Compactable, Protosizable, ReaderBudget};
-    use std::{
-        os::unix::{
-            fs::FileTypeExt,
-            net::{UnixListener, UnixStream},
-        },
-        path::{Path, PathBuf},
-    };
-
-    #[test]
-    fn version_answers_the_cargo_package_version() {
-        assert_eq!(
-            (&["--version".to_owned()] as &[String]).version_answer(),
-            Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
-        );
-        assert_eq!((&[] as &[String]).version_answer(), None);
-        assert_eq!(
-            (&["--version".to_owned(), "x".to_owned()] as &[String]).version_answer(),
-            None
-        );
-    }
-
-    #[test]
-    fn start_is_one_typed_datom_and_has_no_positional_socket_override() {
-        let expected = flow_ethos::Start {
-            ordinary_socket_path: "/run/user/test/flow.sock".into(),
-            meta_socket_path: "/run/user/test/flow-meta.sock".into(),
-            store_path: "/home/test/.local/state/flow-next/flow.sema".into(),
-        };
-        let datom = expected.datomize(vec![]).protosize().compact();
-        assert_eq!(
-            [datom.clone()].parse_start().expect("Start datom parses"),
-            expected
-        );
-        assert!([datom, "ignored.sock".into()].parse_start().is_err());
-        assert!(Vec::<String>::new().parse_start().is_err());
-        assert!(["Start.{".into()].parse_start().is_err());
-    }
-
-    #[test]
-    fn literal_start_argument_is_an_unheaded_struct() {
-        let expected = flow_ethos::Start {
-            ordinary_socket_path: "/run/flow.sock".into(),
-            meta_socket_path: "/run/flow-meta.sock".into(),
-            store_path: "/state/flow.sema".into(),
-        };
-        for literal in [
-            "{ /run/flow.sock /run/flow-meta.sock /state/flow.sema }",
-            "{ «/run/flow.sock» «/run/flow-meta.sock» «/state/flow.sema» }",
-        ] {
-            assert_eq!([literal.to_owned()].parse_start().unwrap(), expected);
-        }
-        assert!(
-            ["Start.{ /run/flow.sock /run/flow-meta.sock /state/flow.sema }".into()]
-                .parse_start()
-                .is_err()
-        );
-        let spaced = ["{ «/run/o s» «/run/m s» «/state/f s» }".to_owned()]
-            .parse_start()
-            .expect("delimited path strings preserve spaces");
-        assert_eq!(spaced.ordinary_socket_path, "/run/o s");
-        assert_eq!(spaced.meta_socket_path, "/run/m s");
-        assert_eq!(spaced.store_path, "/state/f s");
-    }
-
-    #[test]
-    fn usage_example_can_be_passed_as_one_start_argument() {
-        let usage = Vec::<String>::new().parse_start().unwrap_err();
-        let example = usage
-            .split_once('\'')
-            .and_then(|(_, example)| example.strip_suffix('\''))
-            .expect("usage contains one shell-quoted argument");
-        let parsed = [example.to_owned()]
-            .parse_start()
-            .expect("the advertised argument has the supported Start shape");
-        assert_eq!(parsed.ordinary_socket_path, "ordinary-socket");
-        assert_eq!(parsed.meta_socket_path, "meta-socket");
-        assert_eq!(parsed.store_path, "store-path");
-    }
-
-    #[test]
-    fn unrecognized_store_refusal_is_one_typed_datom_with_its_path_and_reason() {
-        let refusal = ConfigurationStartup::start_store_refusal_datom(
-            "/home/test/old flow.sema",
-            "Sema schema version is Some(1), expected 2",
-        )
-        .expect("Start refusal is an authored Flow datom");
-        let mut budget = Budget {
-            remaining: 65_536,
-            reader: ReaderBudget { remaining: 65_536 },
-            depth: 0,
-            maximum_depth: 1_024,
-        };
-        let parsed = Potential::<flow_ethos::StartRefusal>::from(refusal.clone())
-            .actualize(&mut budget)
-            .expect("refusal datom parses as the authored type");
-        assert!(refusal.starts_with("Store.{ "));
-        assert!(!refusal.starts_with("StartRefusal."));
-        assert!(!refusal.starts_with("Refused.Store."));
-        assert_eq!(
-            parsed.datomize(vec![]).protosize().compact(),
-            refusal,
-            "the path with spaces and the exact observed reason survive canonical output"
-        );
-    }
-
-    #[test]
-    fn configuration_peer_gate_refuses_unknown_and_pane_peers() {
-        assert!(matches!(
-            ConfigurationStartup::configuration_peer_refusal(false, false, false),
-            Some(meta_signal_flow::MetaRefusal::PeerUnknown)
-        ));
-        assert!(matches!(
-            ConfigurationStartup::configuration_peer_refusal(true, false, true),
-            Some(meta_signal_flow::MetaRefusal::PeerUnknown)
-        ));
-        assert!(ConfigurationStartup::configuration_peer_refusal(true, false, false).is_none());
-        assert!(ConfigurationStartup::configuration_peer_refusal(true, true, true).is_none());
-    }
-
-    #[test]
-    fn configuration_lock_is_acquired_before_stale_socket_removal() {
-        let directory = tempfile::tempdir().expect("temporary home");
-        let defaults = DefaultConfiguration {
-            home: directory.path().join("home"),
-            runtime_directory: directory.path().join("runtime"),
-        };
-        let start = flow_ethos::Start {
-            ordinary_socket_path: directory
-                .path()
-                .join("custom/flow.sock")
-                .to_string_lossy()
-                .into_owned(),
-            meta_socket_path: directory
-                .path()
-                .join("custom/meta.sock")
-                .to_string_lossy()
-                .into_owned(),
-            store_path: directory
-                .path()
-                .join("custom/flow.sema")
-                .to_string_lossy()
-                .into_owned(),
-        };
-        let store = ConfigurationOnlyStore::open(Path::new(&start.store_path)).expect("store lock");
-        let socket = PathBuf::from(&start.meta_socket_path);
-        std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("socket directory");
-        let stale = UnixListener::bind(&socket).expect("create socket inode");
-        drop(stale);
-        assert!(UnixStream::connect(&socket).is_err(), "socket is stale");
-
-        assert!(ConfigurationStartup::open_configuration_listener(&start).is_err());
-        assert!(
-            std::fs::symlink_metadata(&socket)
-                .expect("socket inode remains")
-                .file_type()
-                .is_socket()
-        );
-        drop(store);
-    }
-
-    fn nexus_change(binary: &str, message_socket: &str) -> ConfigurationChange {
-        let codex = || meta_signal_flow::CodexEndpoint {
-            client_path: "/nix/store/codex/bin/codex".into(),
-            home: "/tmp/codex".into(),
-            control_socket_path: "/tmp/codex/app-server.sock".into(),
-            model_name_vector: vec!["gpt-test".into()],
-        };
-        ConfigurationChange::Nexus(ConfigureNexus {
-            source_root: "/tmp/source".into(),
-            stable_codex: codex(),
-            next_codex: codex(),
-            harness_profiles: vec![],
-            meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
-            message_nexus_path: message_socket.into(),
-            message_nexus_binary: binary.into(),
-            lease: 60,
-        })
-    }
-
-    #[test]
-    fn configuration_listener_commits_one_typed_change_and_exits() {
-        let directory = tempfile::tempdir().expect("temporary home");
-        let executable = std::env::current_exe()
-            .expect("test executable")
-            .canonicalize()
-            .expect("canonical test executable");
-        let start = flow_ethos::Start {
-            ordinary_socket_path: directory
-                .path()
-                .join("flow.sock")
-                .to_string_lossy()
-                .into_owned(),
-            meta_socket_path: directory
-                .path()
-                .join("runtime/flow-meta.sock")
-                .to_string_lossy()
-                .into_owned(),
-            store_path: directory
-                .path()
-                .join("store/configured.flow.sema")
-                .to_string_lossy()
-                .into_owned(),
-        };
-        let (store, message_binary, listener) =
-            ConfigurationStartup::open_configuration_listener(&start)
-                .expect("configuration listener opens");
-        assert!(
-            message_binary.is_empty(),
-            "fresh stores have no Message identity"
-        );
-        let socket = PathBuf::from(&start.meta_socket_path);
-        let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
-        assert!(
-            UnixStream::connect(&ordinary_socket).is_err(),
-            "configuration-only startup does not expose the ordinary adapter"
-        );
-        let change = nexus_change(&executable.to_string_lossy(), "/tmp/message.sock");
-        let expected_nexus = match &change {
-            ConfigurationChange::Nexus(nexus) => nexus.clone(),
-            _ => unreachable!(),
-        };
-        let server = std::thread::spawn(move || {
-            ConfigurationStartup::serve_one_configuration(
-                listener,
-                &store,
-                &message_binary,
-                &std::sync::atomic::AtomicBool::new(false),
-            )
-        });
-
-        let mut peer = UnixStream::connect(&socket).expect("connect to config-only listener");
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&MetaQuery::Configure(change))
-            .expect("encode one Configure request");
-        peer.write_frame(&bytes)
-            .expect("send one Configure request");
-        let reply = peer.read_frame().expect("read Configure response");
-        let response = rkyv::from_bytes::<MetaResponse, rkyv::rancor::Error>(&reply)
-            .expect("decode Configure response");
-        assert!(matches!(response, MetaResponse::Configured));
-        assert!(server.join().expect("server thread joins").is_ok());
-        assert_eq!(
-            super::ConfigurationOnlyStore::open(Path::new(&start.store_path))
-                .expect("reopen committed configuration")
-                .configuration_snapshot()
-                .expect("snapshot reads")
-                .expect("configuration is present")
-                .nexus,
-            expected_nexus
-        );
-        assert!(
-            UnixStream::connect(&socket).is_err(),
-            "one-request listener has exited"
-        );
-
-        let (store, configured_message_binary, listener) =
-            ConfigurationStartup::open_configuration_listener(&start)
-                .expect("the same typed Start reopens the configuration listener");
-        assert_eq!(
-            configured_message_binary,
-            executable.to_string_lossy().into_owned()
-        );
-        let server = std::thread::spawn(move || {
-            ConfigurationStartup::serve_one_configuration(
-                listener,
-                &store,
-                &configured_message_binary,
-                &std::sync::atomic::AtomicBool::new(false),
-            )
-        });
-        let mut peer = UnixStream::connect(&socket).expect("reconnect to same typed Start");
-        let mut changed_nexus = expected_nexus.clone();
-        changed_nexus.message_nexus_binary = "/nix/store/other-message/bin/message".into();
-        let changed = ConfigurationChange::Nexus(changed_nexus);
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&MetaQuery::Configure(changed))
-            .expect("encode changed Nexus configuration");
-        peer.write_frame(&bytes)
-            .expect("send changed Nexus configuration");
-        let reply = peer.read_frame().expect("read conflict response");
-        let response = rkyv::from_bytes::<MetaResponse, rkyv::rancor::Error>(&reply)
-            .expect("decode conflict response");
-        assert!(matches!(
-            response,
-            MetaResponse::ConfigureRejected(ConfigureRejection::Conflict)
-        ));
-        assert!(server.join().expect("second server joins").is_err());
-        assert_eq!(
-            super::ConfigurationOnlyStore::open(Path::new(&start.store_path))
-                .expect("reopen unchanged configuration")
-                .configuration_snapshot()
-                .expect("snapshot rereads")
-                .expect("configuration remains present")
-                .nexus,
-            expected_nexus,
-            "a changed Message binary conflicts without replacing the whole Nexus"
-        );
-    }
-}
-
 struct ConfigurationStartup;
 
 trait RunsConfigurationStartup {
@@ -674,3 +362,308 @@ trait RunsConfigurationStartup {
 }
 
 impl RunsConfigurationStartup for ConfigurationStartup {}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnswersVersion, ConfigureRejection, ParsesStart};
+    use super::{ConfigurationStartup, RunsConfigurationStartup};
+    use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+    use flow_nexus::store::ConfiguresOnlyStore;
+    use flow_nexus::{CarriesSignalFrames, store::ConfigurationOnlyStore};
+    use meta_signal_flow::{
+        ConfigurationChange, ConfigureNexus, Query as MetaQuery, Response as MetaResponse,
+    };
+    use protos::{Compactable, Protosizable, ReaderBudget};
+    use std::{
+        os::unix::{
+            fs::FileTypeExt,
+            net::{UnixListener, UnixStream},
+        },
+        path::{Path, PathBuf},
+    };
+
+    #[test]
+    fn version_answers_the_cargo_package_version() {
+        assert_eq!(
+            (&["--version".to_owned()] as &[String]).version_answer(),
+            Some(format!("flow-nexus {}", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!((&[] as &[String]).version_answer(), None);
+        assert_eq!(
+            (&["--version".to_owned(), "x".to_owned()] as &[String]).version_answer(),
+            None
+        );
+    }
+
+    #[test]
+    fn start_is_one_typed_datom_and_has_no_positional_socket_override() {
+        let expected = flow_ethos::Start {
+            ordinary_socket_path: "/run/user/test/flow.sock".into(),
+            meta_socket_path: "/run/user/test/flow-meta.sock".into(),
+            store_path: "/home/test/.local/state/flow-next/flow.sema".into(),
+        };
+        let datom = expected.datomize(vec![]).protosize().compact();
+        assert_eq!(
+            [datom.clone()].parse_start().expect("Start datom parses"),
+            expected
+        );
+        assert!([datom, "ignored.sock".into()].parse_start().is_err());
+        assert!(Vec::<String>::new().parse_start().is_err());
+        assert!(["Start.{".into()].parse_start().is_err());
+    }
+
+    #[test]
+    fn literal_start_argument_is_an_unheaded_struct() {
+        let expected = flow_ethos::Start {
+            ordinary_socket_path: "/run/flow.sock".into(),
+            meta_socket_path: "/run/flow-meta.sock".into(),
+            store_path: "/state/flow.sema".into(),
+        };
+        for literal in [
+            "{ /run/flow.sock /run/flow-meta.sock /state/flow.sema }",
+            "{ «/run/flow.sock» «/run/flow-meta.sock» «/state/flow.sema» }",
+        ] {
+            assert_eq!([literal.to_owned()].parse_start().unwrap(), expected);
+        }
+        assert!(
+            ["Start.{ /run/flow.sock /run/flow-meta.sock /state/flow.sema }".into()]
+                .parse_start()
+                .is_err()
+        );
+        let spaced = ["{ «/run/o s» «/run/m s» «/state/f s» }".to_owned()]
+            .parse_start()
+            .expect("delimited path strings preserve spaces");
+        assert_eq!(spaced.ordinary_socket_path, "/run/o s");
+        assert_eq!(spaced.meta_socket_path, "/run/m s");
+        assert_eq!(spaced.store_path, "/state/f s");
+    }
+
+    #[test]
+    fn usage_example_can_be_passed_as_one_start_argument() {
+        let usage = Vec::<String>::new().parse_start().unwrap_err();
+        let example = usage
+            .split_once('\'')
+            .and_then(|(_, example)| example.strip_suffix('\''))
+            .expect("usage contains one shell-quoted argument");
+        let parsed = [example.to_owned()]
+            .parse_start()
+            .expect("the advertised argument has the supported Start shape");
+        assert_eq!(parsed.ordinary_socket_path, "ordinary-socket");
+        assert_eq!(parsed.meta_socket_path, "meta-socket");
+        assert_eq!(parsed.store_path, "store-path");
+    }
+
+    #[test]
+    fn unrecognized_store_refusal_is_one_typed_datom_with_its_path_and_reason() {
+        let refusal = ConfigurationStartup::start_store_refusal_datom(
+            "/home/test/old flow.sema",
+            "Sema schema version is Some(1), expected 2",
+        )
+        .expect("Start refusal is an authored Flow datom");
+        let mut budget = Budget {
+            remaining: 65_536,
+            reader: ReaderBudget { remaining: 65_536 },
+            depth: 0,
+            maximum_depth: 1_024,
+        };
+        let parsed = Potential::<flow_ethos::StartRefusal>::from(refusal.clone())
+            .actualize(&mut budget)
+            .expect("refusal datom parses as the authored type");
+        assert!(refusal.starts_with("Store.{ "));
+        assert!(!refusal.starts_with("StartRefusal."));
+        assert!(!refusal.starts_with("Refused.Store."));
+        assert_eq!(
+            parsed.datomize(vec![]).protosize().compact(),
+            refusal,
+            "the path with spaces and the exact observed reason survive canonical output"
+        );
+    }
+
+    #[test]
+    fn configuration_peer_gate_refuses_unknown_and_pane_peers() {
+        assert!(matches!(
+            ConfigurationStartup::configuration_peer_refusal(false, false, false),
+            Some(meta_signal_flow::MetaRefusal::PeerUnknown)
+        ));
+        assert!(matches!(
+            ConfigurationStartup::configuration_peer_refusal(true, false, true),
+            Some(meta_signal_flow::MetaRefusal::PeerUnknown)
+        ));
+        assert!(ConfigurationStartup::configuration_peer_refusal(true, false, false).is_none());
+        assert!(ConfigurationStartup::configuration_peer_refusal(true, true, true).is_none());
+    }
+
+    #[test]
+    fn configuration_lock_is_acquired_before_stale_socket_removal() {
+        let directory = tempfile::tempdir().expect("temporary home");
+        let start = flow_ethos::Start {
+            ordinary_socket_path: directory
+                .path()
+                .join("custom/flow.sock")
+                .to_string_lossy()
+                .into_owned(),
+            meta_socket_path: directory
+                .path()
+                .join("custom/meta.sock")
+                .to_string_lossy()
+                .into_owned(),
+            store_path: directory
+                .path()
+                .join("custom/flow.sema")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let store = ConfigurationOnlyStore::open(Path::new(&start.store_path)).expect("store lock");
+        let socket = PathBuf::from(&start.meta_socket_path);
+        std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("socket directory");
+        let stale = UnixListener::bind(&socket).expect("create socket inode");
+        drop(stale);
+        assert!(UnixStream::connect(&socket).is_err(), "socket is stale");
+
+        assert!(ConfigurationStartup::open_configuration_listener(&start).is_err());
+        assert!(
+            std::fs::symlink_metadata(&socket)
+                .expect("socket inode remains")
+                .file_type()
+                .is_socket()
+        );
+        drop(store);
+    }
+
+    fn nexus_change(binary: &str, message_socket: &str) -> ConfigurationChange {
+        let codex = || meta_signal_flow::CodexEndpoint {
+            client_path: "/nix/store/codex/bin/codex".into(),
+            home: "/tmp/codex".into(),
+            control_socket_path: "/tmp/codex/app-server.sock".into(),
+            model_name_vector: vec!["gpt-test".into()],
+        };
+        ConfigurationChange::Nexus(ConfigureNexus {
+            source_root: "/tmp/source".into(),
+            stable_codex: codex(),
+            next_codex: codex(),
+            harness_profiles: vec![],
+            meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
+            message_nexus_path: message_socket.into(),
+            message_nexus_binary: binary.into(),
+            lease: 60,
+        })
+    }
+
+    #[test]
+    fn configuration_listener_commits_one_typed_change_and_exits() {
+        let directory = tempfile::tempdir().expect("temporary home");
+        let executable = std::env::current_exe()
+            .expect("test executable")
+            .canonicalize()
+            .expect("canonical test executable");
+        let start = flow_ethos::Start {
+            ordinary_socket_path: directory
+                .path()
+                .join("flow.sock")
+                .to_string_lossy()
+                .into_owned(),
+            meta_socket_path: directory
+                .path()
+                .join("runtime/flow-meta.sock")
+                .to_string_lossy()
+                .into_owned(),
+            store_path: directory
+                .path()
+                .join("store/configured.flow.sema")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let (store, message_binary, listener) =
+            ConfigurationStartup::open_configuration_listener(&start)
+                .expect("configuration listener opens");
+        assert!(
+            message_binary.is_empty(),
+            "fresh stores have no Message identity"
+        );
+        let socket = PathBuf::from(&start.meta_socket_path);
+        let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
+        assert!(
+            UnixStream::connect(&ordinary_socket).is_err(),
+            "configuration-only startup does not expose the ordinary adapter"
+        );
+        let change = nexus_change(&executable.to_string_lossy(), "/tmp/message.sock");
+        let expected_nexus = match &change {
+            ConfigurationChange::Nexus(nexus) => nexus.clone(),
+            _ => unreachable!(),
+        };
+        let server = std::thread::spawn(move || {
+            ConfigurationStartup::serve_one_configuration(
+                listener,
+                &store,
+                &message_binary,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+        });
+
+        let mut peer = UnixStream::connect(&socket).expect("connect to config-only listener");
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&MetaQuery::Configure(change))
+            .expect("encode one Configure request");
+        peer.write_frame(&bytes)
+            .expect("send one Configure request");
+        let reply = peer.read_frame().expect("read Configure response");
+        let response = rkyv::from_bytes::<MetaResponse, rkyv::rancor::Error>(&reply)
+            .expect("decode Configure response");
+        assert!(matches!(response, MetaResponse::Configured));
+        assert!(server.join().expect("server thread joins").is_ok());
+        assert_eq!(
+            super::ConfigurationOnlyStore::open(Path::new(&start.store_path))
+                .expect("reopen committed configuration")
+                .configuration_snapshot()
+                .expect("snapshot reads")
+                .expect("configuration is present")
+                .nexus,
+            expected_nexus
+        );
+        assert!(
+            UnixStream::connect(&socket).is_err(),
+            "one-request listener has exited"
+        );
+
+        let (store, configured_message_binary, listener) =
+            ConfigurationStartup::open_configuration_listener(&start)
+                .expect("the same typed Start reopens the configuration listener");
+        assert_eq!(
+            configured_message_binary,
+            executable.to_string_lossy().into_owned()
+        );
+        let server = std::thread::spawn(move || {
+            ConfigurationStartup::serve_one_configuration(
+                listener,
+                &store,
+                &configured_message_binary,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+        });
+        let mut peer = UnixStream::connect(&socket).expect("reconnect to same typed Start");
+        let mut changed_nexus = expected_nexus.clone();
+        changed_nexus.message_nexus_binary = "/nix/store/other-message/bin/message".into();
+        let changed = ConfigurationChange::Nexus(changed_nexus);
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&MetaQuery::Configure(changed))
+            .expect("encode changed Nexus configuration");
+        peer.write_frame(&bytes)
+            .expect("send changed Nexus configuration");
+        let reply = peer.read_frame().expect("read conflict response");
+        let response = rkyv::from_bytes::<MetaResponse, rkyv::rancor::Error>(&reply)
+            .expect("decode conflict response");
+        assert!(matches!(
+            response,
+            MetaResponse::ConfigureRejected(ConfigureRejection::Conflict)
+        ));
+        assert!(server.join().expect("second server joins").is_err());
+        assert_eq!(
+            super::ConfigurationOnlyStore::open(Path::new(&start.store_path))
+                .expect("reopen unchanged configuration")
+                .configuration_snapshot()
+                .expect("snapshot rereads")
+                .expect("configuration remains present")
+                .nexus,
+            expected_nexus,
+            "a changed Message binary conflicts without replacing the whole Nexus"
+        );
+    }
+}

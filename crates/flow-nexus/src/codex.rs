@@ -1108,7 +1108,6 @@ impl ConsumesResetCredit for CodexAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::composition::KeepsLaunchBundles;
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use std::{fs, sync::Mutex};
 

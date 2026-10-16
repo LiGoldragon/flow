@@ -114,10 +114,10 @@ impl MutatesMetaflows for FlowStore {
                 return Ok(Response::Refused(Refusal::Ended(address)));
             }
             if let Some(previous) = self.bound_process(&address)? {
-                if previous == *peer {
-                    if let MetaflowState::Awake(id) = &stored.metaflow.state {
-                        return Ok(Response::Bound(id.clone()));
-                    }
+                if previous == *peer
+                    && let MetaflowState::Awake(id) = &stored.metaflow.state
+                {
+                    return Ok(Response::Bound(id.clone()));
                 }
                 if FlowStore::process_is_live(&previous) {
                     return Ok(Response::Refused(Refusal::Taken(address)));
@@ -202,10 +202,10 @@ impl MutatesMetaflows for FlowStore {
         if recipient.metaflow.state == MetaflowState::Ended {
             return Ok(Response::Refused(Refusal::Ended(address)));
         }
-        if let Some(held) = self.stored_metaflow_lock(&address)? {
-            if held.lock.until > now {
-                return Ok(Response::Refused(Refusal::Held(held.lock)));
-            }
+        if let Some(held) = self.stored_metaflow_lock(&address)?
+            && held.lock.until > now
+        {
+            return Ok(Response::Refused(Refusal::Held(held.lock)));
         }
         let Some(configuration) = self.configuration_snapshot()? else {
             return Ok(Response::Refused(Refusal::NotConfigured));

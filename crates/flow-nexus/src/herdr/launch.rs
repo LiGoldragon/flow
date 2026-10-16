@@ -1709,7 +1709,7 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         Ok(NativeLaunchBinding {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
             flow_id,
-            native_session_id: native_session_id.into(),
+            native_session_id,
             harness_kind: launch.launch_profile.harness_kind.clone(),
             herdr_pane_binding: pane.clone(),
         })

@@ -223,98 +223,6 @@ impl<E> AnswersRecord for Result<(), E> {
         }
     }
 }
-
-#[cfg(test)]
-mod failure_tests {
-    use super::{
-        ClassifiesHerdrFailureCategory, HerdrFailure, HerdrFailureCategory, HerdrFailureStage,
-        RefusesHerdrOperation,
-    };
-    use crate::generated::operation::{Failed_Data, Outcome};
-
-    #[test]
-    fn binding_failure_keeps_a_useful_allowlisted_category_before_wire_erasure() {
-        let category = HerdrFailureCategory::from_adapter_error(
-            "official Herdr integration reported no native session",
-        );
-        let failure = HerdrFailure {
-            stage: HerdrFailureStage::Bind,
-            category,
-        };
-        assert_eq!(failure.stage, HerdrFailureStage::Bind);
-        assert_eq!(failure.category, HerdrFailureCategory::NativeSessionMissing);
-        assert_eq!(
-            HerdrFailure::refused(
-                failure.stage,
-                "official Herdr integration reported no native session".into()
-            ),
-            Outcome::Failed(Failed_Data::HerdrRefused)
-        );
-    }
-
-    #[test]
-    fn a_title_refusal_is_logged_by_its_typed_category() {
-        use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
-        let missing = TitleRefusal::Target(NativeTargetRefusal::NoNativeSession);
-        let failure = HerdrFailure {
-            stage: HerdrFailureStage::Title,
-            category: (&missing).into(),
-        };
-        assert_eq!(
-            failure.log_line(),
-            "flow-nexus: herdr stage=title category=native-session-missing"
-        );
-        assert_eq!(
-            HerdrFailure::refused_title(&missing),
-            Outcome::Failed(Failed_Data::HerdrRefused)
-        );
-        for (refusal, label) in [
-            (TitleRefusal::NotReady, "not-ready"),
-            (TitleRefusal::ReadbackDiffers, "title-readback-differs"),
-            (
-                TitleRefusal::Title(crate::title::TitleRefused::InvalidFlowId),
-                "invalid-flow-id",
-            ),
-            (
-                TitleRefusal::Target(NativeTargetRefusal::HerdrUnreadable(
-                    "secret=/private/socket".into(),
-                )),
-                "herdr-unreadable",
-            ),
-        ] {
-            let line = HerdrFailure {
-                stage: HerdrFailureStage::Title,
-                category: (&refusal).into(),
-            }
-            .log_line();
-            assert!(line.ends_with(&format!("category={label}")), "{line}");
-            assert!(!line.contains("secret="));
-        }
-        // The adapter's own words for a missing session are classified, not
-        // filed as a catch-all refusal.
-        assert_eq!(
-            HerdrFailureCategory::from_adapter_error(
-                "receipt target has no official native session"
-            ),
-            HerdrFailureCategory::NativeSessionMissing
-        );
-    }
-
-    #[test]
-    fn malicious_or_long_adapter_text_is_not_retained_or_rendered() {
-        let attacker_text = format!("secret=/private/socket {}", "x".repeat(20_000));
-        let failure = HerdrFailure {
-            stage: HerdrFailureStage::Spawn,
-            category: HerdrFailureCategory::from_adapter_error(&attacker_text),
-        };
-        let line = failure.log_line();
-        assert_eq!(failure.category, HerdrFailureCategory::AdapterRefused);
-        assert!(!line.contains("secret="));
-        assert!(!line.contains("/private/socket"));
-        assert!(line.len() <= 96, "bounded fixed diagnostic");
-    }
-}
-
 impl Performs for RunningNexus {
     fn perform(&self, operation: Operation) -> Outcome {
         match operation {
@@ -574,5 +482,96 @@ impl PerformsInParts for RunningNexus {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::{
+        ClassifiesHerdrFailureCategory, HerdrFailure, HerdrFailureCategory, HerdrFailureStage,
+        RefusesHerdrOperation,
+    };
+    use crate::generated::operation::{Failed_Data, Outcome};
+
+    #[test]
+    fn binding_failure_keeps_a_useful_allowlisted_category_before_wire_erasure() {
+        let category = HerdrFailureCategory::from_adapter_error(
+            "official Herdr integration reported no native session",
+        );
+        let failure = HerdrFailure {
+            stage: HerdrFailureStage::Bind,
+            category,
+        };
+        assert_eq!(failure.stage, HerdrFailureStage::Bind);
+        assert_eq!(failure.category, HerdrFailureCategory::NativeSessionMissing);
+        assert_eq!(
+            HerdrFailure::refused(
+                failure.stage,
+                "official Herdr integration reported no native session".into()
+            ),
+            Outcome::Failed(Failed_Data::HerdrRefused)
+        );
+    }
+
+    #[test]
+    fn a_title_refusal_is_logged_by_its_typed_category() {
+        use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
+        let missing = TitleRefusal::Target(NativeTargetRefusal::NoNativeSession);
+        let failure = HerdrFailure {
+            stage: HerdrFailureStage::Title,
+            category: (&missing).into(),
+        };
+        assert_eq!(
+            failure.log_line(),
+            "flow-nexus: herdr stage=title category=native-session-missing"
+        );
+        assert_eq!(
+            HerdrFailure::refused_title(&missing),
+            Outcome::Failed(Failed_Data::HerdrRefused)
+        );
+        for (refusal, label) in [
+            (TitleRefusal::NotReady, "not-ready"),
+            (TitleRefusal::ReadbackDiffers, "title-readback-differs"),
+            (
+                TitleRefusal::Title(crate::title::TitleRefused::InvalidFlowId),
+                "invalid-flow-id",
+            ),
+            (
+                TitleRefusal::Target(NativeTargetRefusal::HerdrUnreadable(
+                    "secret=/private/socket".into(),
+                )),
+                "herdr-unreadable",
+            ),
+        ] {
+            let line = HerdrFailure {
+                stage: HerdrFailureStage::Title,
+                category: (&refusal).into(),
+            }
+            .log_line();
+            assert!(line.ends_with(&format!("category={label}")), "{line}");
+            assert!(!line.contains("secret="));
+        }
+        // The adapter's own words for a missing session are classified, not
+        // filed as a catch-all refusal.
+        assert_eq!(
+            HerdrFailureCategory::from_adapter_error(
+                "receipt target has no official native session"
+            ),
+            HerdrFailureCategory::NativeSessionMissing
+        );
+    }
+
+    #[test]
+    fn malicious_or_long_adapter_text_is_not_retained_or_rendered() {
+        let attacker_text = format!("secret=/private/socket {}", "x".repeat(20_000));
+        let failure = HerdrFailure {
+            stage: HerdrFailureStage::Spawn,
+            category: HerdrFailureCategory::from_adapter_error(&attacker_text),
+        };
+        let line = failure.log_line();
+        assert_eq!(failure.category, HerdrFailureCategory::AdapterRefused);
+        assert!(!line.contains("secret="));
+        assert!(!line.contains("/private/socket"));
+        assert!(line.len() <= 96, "bounded fixed diagnostic");
     }
 }

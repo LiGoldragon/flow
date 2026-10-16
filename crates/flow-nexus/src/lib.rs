@@ -20,7 +20,7 @@ pub mod codex;
 pub mod composition;
 pub mod delivery;
 mod metaflow;
-mod pending_start_recovery;
+pub mod recovery;
 use metaflow::DispatchesMetaflowPeer;
 #[cfg(test)]
 mod fixture_executable;
@@ -43,7 +43,6 @@ use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchBundles, LaunchComposer, OpensLaunchComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
-use flow_ethos::Start;
 use generated::operation::{Operation, Outcome, Record_Data};
 use launching::{LaunchesFlows, ObservesLaunch, PrunesLaunchBundles};
 use observe_agent::ObservesAgent;
@@ -70,9 +69,8 @@ use std::{
     time::Duration,
 };
 use store::{
-    AppliesFlowQuery, AuthorizesFlowRestart, ConfiguresFlowStore, FlowStore, NamesLiveFlow,
-    OpensFlowStore, ReadsFlowRows, RecordsLaunchOutcome, RegistersExistingFlow,
-    RegistersFlowIdentity,
+    AppliesFlowQuery, AuthorizesFlowRestart, FlowStore, NamesLiveFlow, OpensFlowStore,
+    ReadsFlowRows, RecordsLaunchOutcome, RegistersExistingFlow, RegistersFlowIdentity,
 };
 use waking::SettlesStopsAtConfirmation;
 use waking::SleepsAndWakesSeats;
@@ -1088,11 +1086,11 @@ mod tests {
         composition::{ComposesLaunch, LaunchBundles, LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
         store::{
-            ConfigurationOnlyStore, ConfiguresFlowStore, DefaultConfiguration, FlowStore,
-            LaunchOutcome, OpensFlowStore, RecordsFlowLifecycle, RecordsLaunchOutcome,
-            RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
-            RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersFlowIdentity,
-            ReservesLaunchAttempt, SeedsConfiguration,
+            ConfigurationOnlyStore, DefaultConfiguration, FlowStore, LaunchOutcome, OpensFlowStore,
+            RecordsFlowLifecycle, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
+            RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+            RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
+            SeedsConfiguration,
         },
     };
     use sha2::{Digest, Sha256};
@@ -3684,7 +3682,6 @@ mod tests {
     /// settled by that end, and the Address takes a fresh launch.
     #[test]
     fn an_unconfirmed_launch_stopped_leaves_its_address_to_a_fresh_start() {
-        use crate::store::ManagesMetaflowState as _;
         use crate::store::ReadsLaunchAttempt as _;
         use crate::store::address_hold::HoldsLaunchAddress as _;
         use crate::store::metaflow::SleepsMetaflows as _;
@@ -3743,11 +3740,9 @@ mod tests {
     /// before it reads the Address, with no hand edit.
     #[test]
     fn a_stale_hold_behind_an_ended_flow_is_given_back_at_start() {
-        use crate::store::ManagesMetaflowState as _;
         use crate::store::address_hold::HoldsLaunchAddress as _;
         use crate::store::address_hold::LeavesStaleHold as _;
         use crate::store::metaflow::SleepsMetaflows as _;
-        use crate::store::metaflow::TakesLaunchAddress as _;
         let fixture = NexusFixture::new();
         fixture.herdr_for_replacement(0);
         let mut seat = fixture.staged_launch("seat-request", None);
@@ -3794,7 +3789,6 @@ mod tests {
     /// while no metaflow exists yet, still refuses another Start there.
     #[test]
     fn a_launch_in_flight_before_binding_refuses_another_start_at_its_address() {
-        use crate::store::ManagesMetaflowState as _;
         use crate::store::metaflow::SleepsMetaflows as _;
         let fixture = NexusFixture::new();
         let calls = fixture.herdr_for_replacement(0);
@@ -3822,7 +3816,6 @@ mod tests {
     /// and its Address given back, rather than left ambiguous.
     #[test]
     fn a_receipt_that_contradicts_the_launch_rejects_it() {
-        use crate::store::ManagesMetaflowState as _;
         use crate::store::address_hold::HoldsLaunchAddress as _;
         use crate::store::metaflow::SleepsMetaflows as _;
         let fixture = NexusFixture::new();

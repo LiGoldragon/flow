@@ -86,13 +86,29 @@
               || (type == "regular" && pkgs.lib.hasSuffix ".rs" path)
               || (type == "regular" && pkgs.lib.hasSuffix ".sh" path);
           };
+          # One named test, run exactly once: a name that matches no test
+          # (or more than one) fails the check rather than passing empty.
           exactTest =
             package: testName:
-            craneLib.cargoTest (
+            craneLib.mkCargoDerivation (
               commonArgs
               // {
                 inherit cargoArtifacts;
-                cargoTestExtraArgs = "-p ${package} ${testName} -- --exact";
+                pnameSuffix = "-test";
+                doCheck = true;
+                buildPhaseCargoCommand = "";
+                checkPhaseCargoCommand = ''
+                  cargoWithProfile test --locked -p ${package} ${testName} -- --exact 2>&1 | tee exact-test.log
+                  status=''${PIPESTATUS[0]}
+                  if [ "$status" -ne 0 ]; then
+                    exit "$status"
+                  fi
+                  ran=$(grep -cFx "test ${testName} ... ok" exact-test.log || true)
+                  if [ "$ran" -ne 1 ]; then
+                    echo "exact test ${package} ${testName} ran $ran times; it must run once" >&2
+                    exit 1
+                  fi
+                '';
               }
             );
         in
@@ -214,15 +230,15 @@
           flow-hook-reports-each-event = context.exactTest "flow"
             "tests::each_harness_event_becomes_one_report_of_the_claimed_flow";
           flow-reserve-holds-the-flow-id = context.exactTest "flow-nexus"
-            "tests::reservation::a_claude_launch_holds_its_flow_id_from_reserve_before_any_harness";
+            "tests::reservation::a_claude_launch_whose_flow_id_cannot_be_claimed_is_refused_before_any_pane";
           flow-reserved-flow-id-reaches-the-harness = context.exactTest "flow-nexus"
             "herdr::launch::tests::a_reserved_claude_launch_starts_as_its_session_with_its_flow_id";
           flow-reserved-flow-id-in-the-environment = context.exactTest "flow-nexus"
             "herdr::launch::tests::claude_environment_preparation_exports_the_reserved_flow_id";
           flow-launch-exports-its-nexus-socket = context.exactTest "flow-nexus"
             "herdr::launch::tests::claude_environment_preparation_exports_the_launching_nexus_socket";
-          flow-launch-socket-from-the-store = context.exactTest "flow-nexus"
-            "tests::launching_nexus::a_launch_carries_the_ordinary_socket_the_store_configures";
+          flow-launch-socket-from-the-start = context.exactTest "flow-nexus"
+            "tests::launching_nexus::a_launch_receives_the_socket_from_each_typed_start";
           flow-hook-reports-to-its-launching-nexus = context.exactTest "flow"
             "the_hook_reports_to_the_socket_its_launching_nexus_exported";
           flow-retire-keeps-history = context.exactTest "flow-nexus"
@@ -260,7 +276,7 @@
           flow-meta-client-default-socket = context.exactTest "flow-meta"
             "the_meta_client_reaches_the_default_meta_socket_under_the_runtime_directory";
           flow-configuration-only-over-meta = context.exactTest "flow-nexus"
-            "a_flow_variable_in_the_environment_does_not_reach_the_configuration";
+            "configure_only_commits_before_normal_start_uses_the_declared_store";
           flow-first-turn-sends-before-any-answer = context.exactTest "flow-nexus"
             "tests::waking::a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer";
           flow-unconfirmed-launch-gives-back-its-address = context.exactTest "flow-nexus"

@@ -408,7 +408,7 @@ mod tests {
         };
         let Query::Start(request) = client
             .parse_command([
-                "Start.{ { request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ operation-main-flow compensation-behavior ] Field High Codex gpt-6-astra medium Some.836818 [ { 1b8ac0 1 } ] messaging-build /tmp/flow-system-prompt.md «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into(),
+                "Start.{ { request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ operation-main-flow compensation-behavior ] { Field flow Primary } High Codex gpt-6-astra medium Some.836818 [ { 1b8ac0 1 } ] messaging-build /tmp/flow-system-prompt.md «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into(),
             ]
             .into_iter())
             .expect("typed Start parses")
@@ -431,7 +431,7 @@ mod tests {
         let start = launch_invocation(
             &client,
             "[ vision-design spirit-core intent-psyche-interaction ]",
-            "Start.{ { request-7 [] [ operation-main-flow compensation-behavior ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }",
+            "Start.{ { request-7 [] [ operation-main-flow compensation-behavior ] { Field flow Primary } High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }",
         );
         let start = FlowClient::resolve_launch_skills(start, |roots| {
             assert_eq!(roots, ["operation-main-flow", "compensation-behavior"]);
@@ -462,7 +462,7 @@ mod tests {
         let replace = launch_invocation(
             &client,
             "[ spirit-core ]",
-            "Replace.{ { request-8 [] [ compensation-behavior ] Field High Claude opus-5-5 high Some.fac697 [] messaging-build /workspace/bundles/flow.md «Carry on from fac697.» } { fac697 session-1 turn-2 } }",
+            "Replace.{ { request-8 [] [ compensation-behavior ] { Field flow Primary } High Claude opus-5-5 high Some.fac697 [] messaging-build /workspace/bundles/flow.md «Carry on from fac697.» } { fac697 session-1 turn-2 } }",
         );
         let replace = FlowClient::resolve_launch_skills(replace, |roots| {
             assert_eq!(roots, ["compensation-behavior"]);
@@ -521,7 +521,7 @@ mod tests {
         let invocation = launch_invocation(
             &client,
             "[]",
-            "Start.{ { request-7 [] [ operation-main-flow ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
+            "Start.{ { request-7 [] [ operation-main-flow ] { Field flow Primary } High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
         );
         let mut submitted = false;
         let result =
@@ -542,7 +542,7 @@ mod tests {
         let invocation = launch_invocation(
             &client,
             "[ spirit-core ]",
-            "Start.{ { request-7 [] [ operation-main-flow compensation-behavior ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
+            "Start.{ { request-7 [] [ operation-main-flow compensation-behavior ] { Field flow Primary } High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
         );
         let result = FlowClient::resolve_launch_skills(invocation, |_| {
             Ok(vec![
@@ -584,7 +584,7 @@ mod tests {
             Query::Observe(signal_flow::ObserveSelection::Launch("request-8".into()))
         );
         let Query::Replace(request) = client
-            .parse_command(["Replace.{ { request-8 [] [ spirit ] Field High Claude opus-5-5 high Some.fac697 [] messaging-build /workspace/bundles/flow.md «Carry on from fac697.» } { fac697 session-1 turn-2 } }".into()].into_iter())
+            .parse_command(["Replace.{ { request-8 [] [ spirit ] { Field flow Primary } High Claude opus-5-5 high Some.fac697 [] messaging-build /workspace/bundles/flow.md «Carry on from fac697.» } { fac697 session-1 turn-2 } }".into()].into_iter())
             .expect("typed Replace parses")
         else {
             panic!("Replace fixture must remain a Replace query")
@@ -624,7 +624,7 @@ mod tests {
         let start = launch_invocation(
             &client,
             "[ vision-design spirit-core intent-psyche-interaction ]",
-            "Start.{ { request-7 [] [ operation-main-flow ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
+            "Start.{ { request-7 [] [ operation-main-flow ] { Field flow Primary } High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
         );
         assert_eq!(
             start.selected_system_modules.as_deref().unwrap(),
@@ -634,13 +634,13 @@ mod tests {
         let empty = launch_invocation(
             &client,
             "[]",
-            "Replace.{ { request-8 [] [ operation-main-flow ] Field High Claude opus-5-5 high Some.fac697 [] messaging-build /tmp/flow-system-prompt.md «Continue.» } { fac697 session-1 turn-2 } }",
+            "Replace.{ { request-8 [] [ operation-main-flow ] { Field flow Primary } High Claude opus-5-5 high Some.fac697 [] messaging-build /tmp/flow-system-prompt.md «Continue.» } { fac697 session-1 turn-2 } }",
         );
         assert!(empty.selected_system_modules.as_deref().unwrap().is_empty());
 
         assert!(client
             .parse_invocation(
-                ["Start.{ { request-7 [] [ operation-main-flow ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }".into()]
+                ["Start.{ { request-7 [] [ operation-main-flow ] { Field flow Primary } High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }".into()]
                     .into_iter()
             )
             .unwrap_err()
@@ -679,7 +679,7 @@ mod tests {
         let client = FlowClient {
             socket: "unused".into(),
         };
-        let query = "Start.{ { request-7 [] [ operation-main-flow ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }";
+        let query = "Start.{ { request-7 [] [ operation-main-flow ] { Field flow Primary } High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }";
         for modules in [
             "[ Spirit-core ]",
             "[ ../vision-design ]",
@@ -705,7 +705,7 @@ mod tests {
         let invocation = launch_invocation(
             &client,
             "[ spirit-core vision-design ]",
-            "Start.{ { request-7 [] [ operation-main-flow compensation-behavior ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
+            "Start.{ { request-7 [] [ operation-main-flow compensation-behavior ] { Field flow Primary } High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
         );
         let query = FlowClient::resolve_launch_skills(invocation, |_| {
             Ok(vec![
@@ -741,7 +741,7 @@ mod tests {
             let invocation = launch_invocation(
                 &client,
                 "[]",
-                "Start.{ { request-7 [] [ operation-main-flow ] Field High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
+                "Start.{ { request-7 [] [ operation-main-flow ] { Field flow Primary } High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }",
             );
             let result = FlowClient::resolve_launch_skills(invocation, |_| {
                 Ok(vec!["operation-main-flow".into(), legacy.into()])

@@ -17,7 +17,9 @@
 ; Record.Context writes the tokens a flow's native session carried into
 ; its last turn, read from its transcript when its hook reports Stopped.
 ; Register binds a flow's row and role. Confirm makes a Pending launch
-; Active and answers Started. Open makes the launch pane; Spawn starts
+; Active and records the Address its launch profile names Awake as it, in
+; one write, and answers Started; an Address Awake as a live flow fails
+; AddressAwake, an Ended one AddressEnded, and the launch stays Pending. Open makes the launch pane; Spawn starts
 ; the native harness in it; Bind claims the flow's identity from the
 ; harness's integration report; Title names the claimed flow; Submit types
 ; the first prompt once, which carries the brief; Close closes a flow's
@@ -103,5 +105,7 @@ Operation
            ClaimRefused
            NotAsleep
            NotAwake
-           NothingQueued ] ]
+           NothingQueued
+           AddressAwake
+           AddressEnded ] ]
 [ PaneLaunch.{ ComposedLaunch HerdrPaneBinding Option<FlowId> } ]

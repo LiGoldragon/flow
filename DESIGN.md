@@ -45,6 +45,19 @@ flow, not to the default socket under the pane's runtime directory. A Codex
 launch reserves nothing: its session is
 named by its app server, and Bind claims from it as before.
 
+A launch names the Address of its seat in its profile. When the launch is
+confirmed, Confirm makes the flow Active and records that metaflow Awake as
+the flow in one write, by Bind's rules: a metaflow Awake as a live flow, or
+bound to a live process, is refused, an Ended one is refused, and an absent
+or Asleep one, or one Awake as a flow no longer live, is taken, a displaced
+flow joining Past; a replacement takes over its predecessor's. Start refuses
+before launching an Address it could not take or another unsettled launch
+names. A resumed wake takes its Address through the same rule with
+`Record.Awoken`. `Identify` names a process in a launched flow's pane, found
+from the Herdr marks as ResolveCaller finds it, as the Address that flow is
+Awake at, so a launched seat sends through Message; a process bound by Bind,
+or descended from one, keeps naming that binding first.
+
 ```mermaid
 sequenceDiagram
   participant C as flow CLI

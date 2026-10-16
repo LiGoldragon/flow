@@ -428,7 +428,7 @@ fn a_fresh_wake_composes_the_topic_modules_and_the_queued_work() {
         prompt: text.clone(),
     };
     let profile = fixture.nexus.composer.fresh_profile(&seat).unwrap();
-    assert_eq!(profile.aspect, Aspect::Mind);
+    assert_eq!(profile.address, address(Layer::Secondary));
     assert_eq!(profile.instruction_prompt, text);
     assert_eq!(profile.launch_source_vector.len(), 1);
     assert_eq!(
@@ -497,7 +497,11 @@ fn resumable(fixture: &NexusFixture) -> Resumable {
         launch_request_id: "resumed-request".into(),
         launch_source_vector: vec![],
         skill_name_vector: vec![],
-        aspect: Aspect::Mind,
+        address: signal_flow::Address {
+            aspect: Aspect::Mind,
+            topic: "flow".into(),
+            layer: signal_flow::Layer::Secondary,
+        },
         power_level: PowerLevel::Medium,
         harness_kind: HarnessKind::Claude,
         model_name: "claude-fixture".into(),
@@ -813,4 +817,264 @@ impl ReadsLiveness for FlowLifecycle {
     fn is_live_for_tests(&self) -> bool {
         matches!(self, FlowLifecycle::Pending | FlowLifecycle::Active)
     }
+}
+
+/// A launch takes its Address by Bind's rules: an Address Awake as a live
+/// flow is refused unless that flow is the predecessor the launch replaces;
+/// one Awake as a flow no longer live, or Asleep, is taken, a displaced
+/// flow joining Past; an Ended one is refused. A resumed flow leaves Past.
+#[test]
+fn a_launch_takes_its_address_by_binds_rules() {
+    use crate::store::metaflow::{AddressTaking, TakesLaunchAddress};
+    use signal_flow::StartRejection;
+    let fixture = NexusFixture::new();
+    let store = &fixture.nexus.store;
+    let at = address(Layer::Tertiary);
+    let taken = |predecessor: Option<&str>, flow_id: &str| match store
+        .address_taking(&at, flow_id, predecessor, 0)
+        .unwrap()
+    {
+        AddressTaking::Takes(_) => Ok(()),
+        AddressTaking::Refused(rejection) => Err(rejection),
+    };
+
+    // No metaflow yet: taken, and recorded only by the write.
+    assert_eq!(taken(None, "aaaaaa"), Ok(()));
+    assert!(store.awaken_metaflow(&at, "aaaaaa", 0).unwrap());
+    assert_eq!(
+        stored(&fixture, Layer::Tertiary).state,
+        State::Awake("aaaaaa".into())
+    );
+
+    // Awake as a flow with no live row: taken over, the old flow Past.
+    assert!(store.awaken_metaflow(&at, "bbbbbb", 0).unwrap());
+    let over = stored(&fixture, Layer::Tertiary);
+    assert_eq!(over.state, State::Awake("bbbbbb".into()));
+    assert_eq!(over.past, vec!["aaaaaa".to_owned()]);
+
+    // Awake as a live flow: refused, but not to its successor.
+    store
+        .register_flow(fixture.node())
+        .expect("live flow registered");
+    store.seed_metaflow(metaflow(
+        Layer::Tertiary,
+        State::Awake("908786".into()),
+        vec![],
+        vec![],
+    ));
+    assert_eq!(taken(None, "cccccc"), Err(StartRejection::AddressAwake));
+    assert!(!store.awaken_metaflow(&at, "cccccc", 0).unwrap());
+    assert_eq!(taken(Some("908786"), "cccccc"), Ok(()));
+    assert_eq!(
+        taken(None, "908786"),
+        Ok(()),
+        "a flow keeps its own Address"
+    );
+
+    // Asleep: taken; the resumed flow leaves Past.
+    store.seed_metaflow(metaflow(
+        Layer::Tertiary,
+        State::Asleep,
+        vec!["dddddd"],
+        vec![Request::Order("A".into())],
+    ));
+    assert!(store.awaken_metaflow(&at, "dddddd", 1).unwrap());
+    let resumed = stored(&fixture, Layer::Tertiary);
+    assert_eq!(resumed.state, State::Awake("dddddd".into()));
+    assert!(resumed.past.is_empty());
+    assert!(resumed.queue.is_empty());
+
+    // Ended: refused.
+    store.seed_metaflow(metaflow(Layer::Tertiary, State::Ended, vec![], vec![]));
+    assert_eq!(taken(None, "eeeeee"), Err(StartRejection::AddressEnded));
+}
+
+/// A seat Flow launched sends through Message: Message names the sending
+/// process, which runs in the launched seat's pane, and Flow identifies it
+/// as the Address its launch took. Its Order to an Asleep seat is queued
+/// and wakes that seat, which is handed the Order.
+#[test]
+fn a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_seat() {
+    use crate::metaflow::DispatchesMetaflowPeer;
+    use crate::store::metaflow::{MutatesMetaflows, TakesLaunchAddress};
+    use crate::store::{FlowStore, ReadsFlowMemory};
+    use signal_flow::{Bind_Data, Deliver_Data, Lock_Data, Recipient, Response};
+
+    let fixture = NexusFixture::new();
+    resumable(&fixture);
+    // Message runs as its own process, an ancestor of no seat.
+    let message_child = super::MarkedProcess::spawn("sleep", &["30"], "w0:p0");
+    let message_executable = fs::canonicalize(format!("/proc/{}/exe", message_child.0.id()))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    use crate::store::SeedsConfiguration;
+    let settings = crate::store::DefaultConfiguration {
+        home: fixture.directory.path().join("home"),
+        runtime_directory: fixture.directory.path().join("runtime"),
+    }
+    .configuration();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+            meta_signal_flow::ConfigureNexus {
+                source_root: settings.source_root,
+                stable_codex: settings.stable_codex,
+                next_codex: settings.next_codex,
+                harness_profiles: settings.harness_profile_vector,
+                meta_aspects: settings.meta_aspects,
+                message_nexus_path: settings.message_nexus_path,
+                message_nexus_binary: message_executable,
+                lease: 30,
+            },
+        ))
+        .expect("Nexus configured");
+    let message = FlowStore::process_identity_for_pid(message_child.0.id()).unwrap();
+    let message_address = Address {
+        aspect: Aspect::Field,
+        topic: "message".into(),
+        layer: Layer::Primary,
+    };
+    assert!(matches!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::Bind(Bind_Data {
+                    address: message_address,
+                    process: message.clone(),
+                }),
+                Some(&message),
+            )
+            .response,
+        Response::Bound(_)
+    ));
+    assert!(fixture.nexus.store.message_peer(&message).unwrap());
+
+    // The sending seat: a flow Flow launched into pane w5:p1, its launch
+    // having taken the Address Field flow Quaternary.
+    let sender_address = Address {
+        aspect: Aspect::Field,
+        topic: "flow".into(),
+        layer: Layer::Quaternary,
+    };
+    let sender_route = HerdrRoute {
+        herdr_session_name: "messaging-build".into(),
+        herdr_agent_name: "sender-agent".into(),
+        herdr_pane_id: "w5:p1".into(),
+        herdr_terminal_id: "term-sender".into(),
+    };
+    fixture
+        .nexus
+        .store
+        .register_flow_in_role(
+            FlowNode {
+                flow_id: "5e4de7".into(),
+                session_id: "5e4de700-0000-4000-8000-000000000001".into(),
+                harness_kind: HarnessKind::Claude,
+                endpoint_selection: EndpointSelection::Unavailable,
+                herdr_route_selection: HerdrRouteSelection::Available(sender_route),
+                origin_clue: OriginClue {
+                    flow_id: "da2038".into(),
+                    session_id: "field-session".into(),
+                    turn_id: "field-turn".into(),
+                },
+                flow_lifecycle: FlowLifecycle::Active,
+            },
+            signal_flow::Caller {
+                flow_id: "5e4de7".into(),
+                aspect: Aspect::Field,
+                power_level: PowerLevel::UltraLow,
+                model_name: "haiku".into(),
+            },
+        )
+        .expect("sender registered");
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .address_taking(&sender_address, "5e4de7", None, 0)
+            .unwrap(),
+        crate::store::metaflow::AddressTaking::Takes(_)
+    ));
+    assert!(
+        fixture
+            .nexus
+            .store
+            .awaken_metaflow(&sender_address, "5e4de7", 0)
+            .unwrap()
+    );
+    // Herdr shows the sender's pane beside the seat a wake resumes.
+    let script = fs::read_to_string(&fixture.snapshot_program).unwrap();
+    let sender_agent = r#"{"agent":"claude","agent_status":"working","name":"sender-agent","pane_id":"w5:p1","terminal_id":"term-sender","workspace_id":"w5"}"#;
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replace(r#""agents":["#, &format!(r#""agents":[{sender_agent},"#)));
+
+    // The process that sends runs in the sender's pane, as Herdr marks it.
+    let sender = super::MarkedProcess::spawn("sleep", &["30"], "w5:p1");
+    let sender_process = FlowStore::process_identity_for_pid(sender.0.id()).unwrap();
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::Identify(sender_process.clone()),
+                Some(&message)
+            )
+            .response,
+        Response::Identified(sender_address.clone())
+    );
+    // A process in no launched seat's pane names no one.
+    let stranger = super::MarkedProcess::spawn("sleep", &["30"], "w8:p8");
+    let stranger_process = FlowStore::process_identity_for_pid(stranger.0.id()).unwrap();
+    assert!(matches!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::Identify(stranger_process),
+                Some(&message)
+            )
+            .response,
+        Response::Refused(signal_flow::Refusal::Unidentified(_))
+    ));
+
+    // The Asleep seat the Order is for.
+    let at = address(Layer::Secondary);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![],
+    ));
+    let Response::Locked(lock) = fixture
+        .nexus
+        .dispatch_metaflow_peer(
+            signal_flow::Query::Lock(Lock_Data {
+                sender: sender_address.clone(),
+                recipient: Recipient::Address(at.clone()),
+            }),
+            Some(&message),
+        )
+        .response
+    else {
+        panic!("the identified sender locks the recipient")
+    };
+    let order = Request::Order("Run the tier tests.".into());
+    let answer = fixture.nexus.dispatch_metaflow_peer(
+        signal_flow::Query::Deliver(Deliver_Data {
+            lock,
+            request: order.clone(),
+        }),
+        Some(&message),
+    );
+    assert_eq!(answer.response, Response::Queued);
+    assert_eq!(answer.wake, Some(at.clone()), "the Order wakes the seat");
+
+    fixture.nexus.wake_due(at.clone());
+    let woken = stored(&fixture, Layer::Secondary);
+    assert_eq!(woken.state, State::Awake("abc123".into()));
+    assert!(woken.queue.is_empty());
+    let typed = fs::read_to_string(fixture.directory.path().join("pane-typed.txt")).unwrap();
+    assert!(typed.starts_with(&[order].prompt_text()));
 }

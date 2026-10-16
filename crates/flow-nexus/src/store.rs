@@ -13,6 +13,7 @@ pub(crate) mod metaflow;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
+use metaflow::{TakesLaunchAddress, WritesTakenAddress};
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
@@ -485,8 +486,8 @@ impl EngineRecord for StoredLaunchAttempt {
 
 /// A launch attempt as Flow archived it before signal-flow 3.0.0 (ab70332)
 /// added `SystemPromptBundleFile` to the launch profile: the same fields in
-/// the same order without it. Rows of this shape are read only to carry them
-/// forward; nothing is written in it.
+/// the same order without it. Rows of this shape are only recognized and
+/// kept aside; nothing is written in it.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct StoredLaunchAttemptBeforeBundle {
     attempt: LaunchAttemptBeforeBundle,
@@ -522,29 +523,71 @@ struct LaunchProfileBeforeBundle {
     instruction_prompt: String,
 }
 
+/// A launch attempt as Flow archived it before signal-flow 16.0.0 put the
+/// launched seat's `Address` where the launch profile named its `Aspect`.
+/// Its profile names no topic or layer, so it cannot become a current row;
+/// it is only recognized and kept aside.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchAttemptBeforeAddress {
+    attempt: LaunchAttemptBeforeAddress,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct LaunchAttemptBeforeAddress {
+    launch_request_id: String,
+    launch_profile: LaunchProfileBeforeAddress,
+    prompt_sha256: String,
+    origin_clue: OriginClue,
+    launch_attempt_phase: LaunchAttemptPhase,
+    native_launch_intent_option: Option<NativeLaunchIntent>,
+    native_launch_binding_option: Option<NativeLaunchBinding>,
+    registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
+    prompt_delivery_intent_option: Option<PromptDeliveryIntent>,
+    prompt_delivery_result_option: Option<PromptDeliveryResult>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct LaunchProfileBeforeAddress {
+    launch_request_id: String,
+    launch_source_vector: Vec<LaunchSource>,
+    skill_name_vector: Vec<String>,
+    aspect: Aspect,
+    power_level: PowerLevel,
+    harness_kind: HarnessKind,
+    model_name: String,
+    effort: String,
+    flow_id_option: Option<String>,
+    remembered_flow_vector: Vec<RememberedFlow>,
+    herdr_session_name: String,
+    system_prompt_bundle_file: String,
+    instruction_prompt: String,
+}
+
 /// A launch-attempt row named to the engine only so it can be retracted when
-/// no known shape reads it. Its archive is empty, so it checks against any
-/// bytes; it is never asserted and never read for content. An exception to
-/// typed rows, taken only for moving such a row aside.
+/// it no longer reads in the current shape. Its archive is empty, so it
+/// checks against any bytes; it is never asserted and never read for
+/// content. An exception to typed rows, taken only for moving such a row
+/// aside.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct UnreadLaunchAttempt;
 
 /// The shape a launch-attempt row that no longer reads in the current shape
-/// was found to have.
+/// was found to have. New shapes are appended, so a kept row's shape keeps
+/// reading.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ArchivedLaunchAttemptShape {
-    /// Written before signal-flow 3.0.0 added `SystemPromptBundleFile`. It is
-    /// carried forward with an empty `SystemPromptBundleFile`, the one field
-    /// its archive never held.
+    /// Written before signal-flow 3.0.0 added `SystemPromptBundleFile`.
     BeforeSystemPromptBundle,
     /// No known shape reads it; the text is the current shape's decode error.
     Unknown(String),
+    /// Written before signal-flow 16.0.0 named the launched seat's Address.
+    BeforeAddress,
 }
 
 /// A launch-attempt row moved out of the attempts table when the store
 /// opened, kept whole: its stored key, its original archive bytes, and the
-/// shape it was found to have. A row of a known shape is also carried forward
-/// into the attempts table; an Unknown one stays only here.
+/// shape it was found to have. No earlier shape names the launched seat's
+/// Address, so none is carried into the attempts table.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct QuarantinedLaunchAttempt {
     pub launch_request_id: String,
@@ -563,12 +606,65 @@ impl EngineRecord for QuarantinedLaunchAttempt {
     }
 }
 
+/// The role a kept launch-attempt row of a known shape names for the flow
+/// its native launch bound: what a store written before roles adopts.
+trait NamesKeptLaunchRole {
+    fn kept_role(&self, flow_id: &str) -> Option<Caller>;
+}
+
+impl NamesKeptLaunchRole for QuarantinedLaunchAttempt {
+    fn kept_role(&self, flow_id: &str) -> Option<Caller> {
+        let (binding, aspect, power_level, model_name) = match self.shape {
+            ArchivedLaunchAttemptShape::BeforeAddress => {
+                let kept =
+                    rkyv::from_bytes::<StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
+                        &self.archive,
+                    )
+                    .ok()?
+                    .attempt;
+                let profile = kept.launch_profile;
+                (
+                    kept.native_launch_binding_option,
+                    profile.aspect,
+                    profile.power_level,
+                    profile.model_name,
+                )
+            }
+            ArchivedLaunchAttemptShape::BeforeSystemPromptBundle => {
+                let kept =
+                    rkyv::from_bytes::<StoredLaunchAttemptBeforeBundle, rkyv::rancor::Error>(
+                        &self.archive,
+                    )
+                    .ok()?
+                    .attempt;
+                let profile = kept.launch_profile;
+                (
+                    kept.native_launch_binding_option,
+                    profile.aspect,
+                    profile.power_level,
+                    profile.model_name,
+                )
+            }
+            ArchivedLaunchAttemptShape::Unknown(_) => return None,
+        };
+        binding
+            .filter(|binding| binding.flow_id == flow_id)
+            .map(|_| Caller {
+                flow_id: flow_id.into(),
+                aspect,
+                power_level,
+                model_name,
+            })
+    }
+}
+
 /// What opening the store did with a launch-attempt row that no longer read
 /// in the current shape. Its Display is the line the Nexus logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchAttemptSettlement {
-    /// Carried forward from a known earlier shape into the current one.
-    Migrated {
+    /// Of a known earlier shape: moved aside whole into the quarantine
+    /// table, where its shape is named.
+    SetAside {
         launch_request_id: String,
         from: ArchivedLaunchAttemptShape,
     },
@@ -584,16 +680,17 @@ pub enum LaunchAttemptSettlement {
 impl std::fmt::Display for LaunchAttemptSettlement {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Migrated {
+            Self::SetAside {
                 launch_request_id,
                 from,
             } => write!(
                 formatter,
-                "LaunchAttemptMigrated.{{ {launch_request_id} {} }}",
+                "LaunchAttemptSetAside.{{ {launch_request_id} {} }}",
                 match from {
                     ArchivedLaunchAttemptShape::BeforeSystemPromptBundle => {
                         "BeforeSystemPromptBundle"
                     }
+                    ArchivedLaunchAttemptShape::BeforeAddress => "BeforeAddress",
                     ArchivedLaunchAttemptShape::Unknown(_) => "Unknown",
                 }
             ),
@@ -607,38 +704,6 @@ impl std::fmt::Display for LaunchAttemptSettlement {
             Self::Unsettled { store_error } => {
                 write!(formatter, "LaunchAttemptsUnsettled.«{store_error}»")
             }
-        }
-    }
-}
-
-impl From<LaunchAttemptBeforeBundle> for LaunchAttempt {
-    fn from(attempt: LaunchAttemptBeforeBundle) -> Self {
-        let profile = attempt.launch_profile;
-        Self {
-            launch_request_id: attempt.launch_request_id,
-            launch_profile: signal_flow::LaunchProfile {
-                launch_request_id: profile.launch_request_id,
-                launch_source_vector: profile.launch_source_vector,
-                skill_name_vector: profile.skill_name_vector,
-                aspect: profile.aspect,
-                power_level: profile.power_level,
-                harness_kind: profile.harness_kind,
-                model_name: profile.model_name,
-                effort: profile.effort,
-                flow_id_option: profile.flow_id_option,
-                remembered_flow_vector: profile.remembered_flow_vector,
-                herdr_session_name: profile.herdr_session_name,
-                system_prompt_bundle_file: String::new(),
-                instruction_prompt: profile.instruction_prompt,
-            },
-            prompt_sha256: attempt.prompt_sha256,
-            origin_clue: attempt.origin_clue,
-            launch_attempt_phase: attempt.launch_attempt_phase,
-            native_launch_intent_option: attempt.native_launch_intent_option,
-            native_launch_binding_option: attempt.native_launch_binding_option,
-            registration_acknowledgement_option: attempt.registration_acknowledgement_option,
-            prompt_delivery_intent_option: attempt.prompt_delivery_intent_option,
-            prompt_delivery_result_option: attempt.prompt_delivery_result_option,
         }
     }
 }
@@ -1825,8 +1890,8 @@ impl OpensFlowStore for FlowStore {
                 defaults.runtime_configuration(),
             ))?;
         }
-        // Opening never fails on a launch-attempt row: each is read, carried
-        // forward, or moved aside, and every such move is logged.
+        // Opening never fails on a launch-attempt row: each is read or moved
+        // aside, and every such move is logged.
         store.opening_settlements = store.settle_launch_attempts().unwrap_or_else(|error| {
             vec![LaunchAttemptSettlement::Unsettled {
                 store_error: error.to_string(),
@@ -2424,10 +2489,8 @@ impl RegistersBindings for FlowStore {
 trait SettlesLaunchAttempts {
     /// Reads every launch-attempt row by itself. A row that reads in the
     /// current shape stays. Any other row is moved aside whole into the
-    /// quarantine table, in one commit with its retraction; a row of a known
-    /// earlier shape is then carried forward into the current shape. A carry
-    /// interrupted before it landed is completed at the next open, since the
-    /// quarantined row still names its shape and no attempt holds its key.
+    /// quarantine table, in one commit with its retraction, naming the
+    /// earlier shape it reads in, or Unknown.
     fn settle_launch_attempts(&self) -> Result<Vec<LaunchAttemptSettlement>, StoreError>;
     /// Every launch-attempt row as its stored key and archive bytes, read
     /// through the engine's read-only storage reader. Reading the archive
@@ -2449,12 +2512,22 @@ impl SettlesLaunchAttempts for FlowStore {
             else {
                 continue;
             };
-            let shape = match rkyv::from_bytes::<StoredLaunchAttemptBeforeBundle, rkyv::rancor::Error>(
-                &archive,
-            ) {
-                Ok(_) => ArchivedLaunchAttemptShape::BeforeSystemPromptBundle,
-                Err(_) => ArchivedLaunchAttemptShape::Unknown(decode_error.to_string()),
-            };
+            let shape =
+                if rkyv::from_bytes::<StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
+                    &archive,
+                )
+                .is_ok()
+                {
+                    ArchivedLaunchAttemptShape::BeforeAddress
+                } else if rkyv::from_bytes::<StoredLaunchAttemptBeforeBundle, rkyv::rancor::Error>(
+                    &archive,
+                )
+                .is_ok()
+                {
+                    ArchivedLaunchAttemptShape::BeforeSystemPromptBundle
+                } else {
+                    ArchivedLaunchAttemptShape::Unknown(decode_error.to_string())
+                };
             let quarantine_number = self
                 .quarantined_launch_attempts_of(&launch_request_id)?
                 .len() as u64
@@ -2476,40 +2549,17 @@ impl SettlesLaunchAttempts for FlowStore {
                         },
                     ),
             )?;
-            if let ArchivedLaunchAttemptShape::Unknown(decode_error) = shape {
-                settlements.push(LaunchAttemptSettlement::Quarantined {
+            settlements.push(match shape {
+                ArchivedLaunchAttemptShape::Unknown(decode_error) => {
+                    LaunchAttemptSettlement::Quarantined {
+                        launch_request_id,
+                        decode_error,
+                    }
+                }
+                from => LaunchAttemptSettlement::SetAside {
                     launch_request_id,
-                    decode_error,
-                });
-            }
-        }
-        for quarantined in self
-            .engine
-            .match_records(QueryPlan::all(self.quarantined_launch_attempts))?
-            .records()
-        {
-            if quarantined.shape != ArchivedLaunchAttemptShape::BeforeSystemPromptBundle
-                || self
-                    .stored_launch_attempt(&quarantined.launch_request_id)?
-                    .is_some()
-            {
-                continue;
-            }
-            let Ok(earlier) = rkyv::from_bytes::<
-                StoredLaunchAttemptBeforeBundle,
-                rkyv::rancor::Error,
-            >(&quarantined.archive) else {
-                continue;
-            };
-            self.engine.assert(Assertion::new(
-                self.launch_attempts,
-                StoredLaunchAttempt {
-                    attempt: earlier.attempt.into(),
+                    from,
                 },
-            ))?;
-            settlements.push(LaunchAttemptSettlement::Migrated {
-                launch_request_id: quarantined.launch_request_id.clone(),
-                from: quarantined.shape.clone(),
             });
         }
         if !settlements.is_empty() {
@@ -2572,7 +2622,7 @@ impl AdoptsLegacyRoles for FlowStore {
             .match_records(QueryPlan::all(self.flows))?
             .records()
             .to_vec();
-        // Settlement has already carried or moved aside every row that did
+        // Settlement has already moved aside every row that did
         // not read; should the attempts still not read, adoption says so and
         // reads the flow types alone rather than refusing to open the store.
         let attempts = match self
@@ -2585,6 +2635,13 @@ impl AdoptsLegacyRoles for FlowStore {
                 Vec::new()
             }
         };
+        // A launch archived in an earlier shape is kept aside whole; the
+        // role it names is read from there.
+        let kept_attempts = self
+            .engine
+            .match_records(QueryPlan::all(self.quarantined_launch_attempts))?
+            .records()
+            .to_vec();
         for flow in flows {
             if self.role(&flow.flow_id)?.is_some() {
                 continue;
@@ -2597,12 +2654,17 @@ impl AdoptsLegacyRoles for FlowStore {
                     .filter(|binding| binding.flow_id == flow.flow_id)
                     .map(|_| Caller {
                         flow_id: flow.flow_id.clone(),
-                        aspect: attempt.launch_profile.aspect.clone(),
+                        aspect: attempt.launch_profile.address.aspect.clone(),
                         power_level: attempt.launch_profile.power_level.clone(),
                         model_name: attempt.launch_profile.model_name.clone(),
                     })
             });
-            let Some(role) = launched.or_else(|| flow.legacy_role()) else {
+            let kept = || {
+                kept_attempts
+                    .iter()
+                    .find_map(|kept| kept.kept_role(&flow.flow_id))
+            };
+            let Some(role) = launched.or_else(kept).or_else(|| flow.legacy_role()) else {
                 continue;
             };
             self.engine
@@ -3620,14 +3682,39 @@ impl WritesFlowStore for FlowStore {
         }
         let origin_clue = flow.origin.clone();
         let session_id = flow.thread_id.clone().expect("checked thread identity");
+        // The launch that bound this flow names the Address it takes, in
+        // the same write that makes it Active.
+        let mut taken = None;
+        if let Some(launch_request_id) = self.launch_requests_bound_to(flow_id)?.pop()
+            && let Some(attempt) = self.launch_attempt(&launch_request_id)?
+        {
+            let profile = attempt.launch_profile;
+            match self.address_taking(
+                &profile.address,
+                flow_id,
+                profile.flow_id_option.as_deref(),
+                0,
+            )? {
+                metaflow::AddressTaking::Takes(taking) => taken = Some(taking),
+                metaflow::AddressTaking::Refused(rejection) => {
+                    return Ok(Response::StartRejected(rejection));
+                }
+            }
+        }
+        let mut commit = self.engine.begin_atomic_commit();
+        let mut written = false;
         if flow.lifecycle == FlowLifecycle::Pending {
             flow.lifecycle = FlowLifecycle::Active;
             flow.generation = 1;
-            self.engine.mutate_keyed(KeyedMutation::new(
-                self.flows,
-                RecordKey::new(flow_id),
-                flow,
-            ))?;
+            commit = commit.mutate(self.flows, flow);
+            written = true;
+        }
+        if let Some(taking) = taken {
+            commit = taking.written(self, commit);
+            written = true;
+        }
+        if written {
+            self.engine.commit_atomic(commit)?;
         }
         Ok(Response::Started(Launched {
             flow_id: flow_id.into(),
@@ -3666,7 +3753,8 @@ impl WritesFlowStore for FlowStore {
 /// Rows as earlier Flow versions left them, for fixtures: one launch attempt
 /// archived before `SystemPromptBundleFile`, whose native launch bound
 /// `bound_flow_id` (registered here without a role, as Start registered it
-/// then), and one row no known shape reads.
+/// then), one archived before the profile named an Address, and one row no
+/// known shape reads.
 #[cfg(test)]
 pub(crate) struct EarlierLaunchAttemptRows {
     pub bound_flow_id: String,
@@ -3693,9 +3781,50 @@ impl EngineRecord for StoredLaunchAttemptBeforeBundle {
 }
 
 #[cfg(test)]
+impl EngineRecord for StoredLaunchAttemptBeforeAddress {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.attempt.launch_request_id.clone())
+    }
+}
+
+#[cfg(test)]
 impl EarlierLaunchAttemptRows {
     pub const EARLIER_REQUEST: &str = "flow06-earlier";
+    pub const BEFORE_ADDRESS_REQUEST: &str = "flow15-before-address";
     pub const UNREADABLE_REQUEST: &str = "unreadable-request";
+
+    /// A launch as signal-flow 15.0.0 archived it: its profile named the
+    /// Aspect alone. It bound no flow.
+    fn before_address_attempt(&self) -> LaunchAttemptBeforeAddress {
+        let earlier = self.earlier_attempt();
+        let profile = earlier.launch_profile;
+        LaunchAttemptBeforeAddress {
+            launch_request_id: Self::BEFORE_ADDRESS_REQUEST.into(),
+            launch_profile: LaunchProfileBeforeAddress {
+                launch_request_id: Self::BEFORE_ADDRESS_REQUEST.into(),
+                launch_source_vector: profile.launch_source_vector,
+                skill_name_vector: profile.skill_name_vector,
+                aspect: Aspect::Field,
+                power_level: profile.power_level,
+                harness_kind: profile.harness_kind,
+                model_name: profile.model_name,
+                effort: profile.effort,
+                flow_id_option: None,
+                remembered_flow_vector: profile.remembered_flow_vector,
+                herdr_session_name: profile.herdr_session_name,
+                system_prompt_bundle_file: "/kept/bundle.md".into(),
+                instruction_prompt: profile.instruction_prompt,
+            },
+            prompt_sha256: earlier.prompt_sha256,
+            origin_clue: earlier.origin_clue,
+            launch_attempt_phase: LaunchAttemptPhase::Reserved,
+            native_launch_intent_option: None,
+            native_launch_binding_option: None,
+            registration_acknowledgement_option: None,
+            prompt_delivery_intent_option: None,
+            prompt_delivery_result_option: None,
+        }
+    }
 
     fn earlier_attempt(&self) -> LaunchAttemptBeforeBundle {
         let pane = signal_flow::HerdrPaneBinding {
@@ -3767,6 +3896,23 @@ impl EarlierLaunchAttemptRows {
                 SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
             ))
             .expect("earlier shape names the table");
+        let before_address = store
+            .engine
+            .register_table::<StoredLaunchAttemptBeforeAddress>(TableDescriptor::new(
+                FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+                FamilyName::new("flow-nexus-launch-attempt"),
+                SchemaHash::for_label("flow-nexus-launch-attempt-v1"),
+            ))
+            .expect("15.0.0 shape names the table");
+        store
+            .engine
+            .assert(Assertion::new(
+                before_address,
+                StoredLaunchAttemptBeforeAddress {
+                    attempt: self.before_address_attempt(),
+                },
+            ))
+            .expect("15.0.0 row written");
         let unreadable = store
             .engine
             .register_table::<NotALaunchAttempt>(TableDescriptor::new(
@@ -3955,7 +4101,11 @@ mod tests {
                 launch_request_id: launch_request_id.into(),
                 launch_source_vector: Vec::new(),
                 skill_name_vector: Vec::new(),
-                aspect: Aspect::Field,
+                address: signal_flow::Address {
+                    aspect: Aspect::Field,
+                    topic: "flow".into(),
+                    layer: signal_flow::Layer::Secondary,
+                },
                 power_level: PowerLevel::High,
                 harness_kind: HarnessKind::Codex,
                 model_name: "fixture-model".into(),
@@ -5111,7 +5261,7 @@ mod tests {
     }
 
     #[test]
-    fn earlier_launch_attempt_rows_are_migrated_or_quarantined_once_and_logged() {
+    fn earlier_launch_attempt_rows_are_set_aside_whole_once_and_logged() {
         use super::{
             ArchivedLaunchAttemptShape, EarlierLaunchAttemptRows, LaunchAttemptSettlement,
             QueryPlan, ReadsFlowRows,
@@ -5132,39 +5282,50 @@ mod tests {
         let store = fixture.store();
         let quarantined = match store.opening_settlements.as_slice() {
             [
+                LaunchAttemptSettlement::SetAside {
+                    launch_request_id: earlier,
+                    from: ArchivedLaunchAttemptShape::BeforeSystemPromptBundle,
+                },
+                LaunchAttemptSettlement::SetAside {
+                    launch_request_id: before_address,
+                    from: ArchivedLaunchAttemptShape::BeforeAddress,
+                },
                 LaunchAttemptSettlement::Quarantined {
                     launch_request_id: unreadable,
                     decode_error,
                 },
-                LaunchAttemptSettlement::Migrated {
-                    launch_request_id: migrated,
-                    from: ArchivedLaunchAttemptShape::BeforeSystemPromptBundle,
-                },
             ] => {
+                assert_eq!(earlier, EarlierLaunchAttemptRows::EARLIER_REQUEST);
+                assert_eq!(
+                    before_address,
+                    EarlierLaunchAttemptRows::BEFORE_ADDRESS_REQUEST
+                );
                 assert_eq!(unreadable, EarlierLaunchAttemptRows::UNREADABLE_REQUEST);
-                assert_eq!(migrated, EarlierLaunchAttemptRows::EARLIER_REQUEST);
                 decode_error.clone()
             }
             other => panic!("unexpected settlements: {other:?}"),
         };
         assert_eq!(
-            store.opening_settlements[1].to_string(),
-            "LaunchAttemptMigrated.{ flow06-earlier BeforeSystemPromptBundle }"
+            store.opening_settlements[0].to_string(),
+            "LaunchAttemptSetAside.{ flow06-earlier BeforeSystemPromptBundle }"
         );
         assert_eq!(
-            store.opening_settlements[0].to_string(),
+            store.opening_settlements[1].to_string(),
+            "LaunchAttemptSetAside.{ flow15-before-address BeforeAddress }"
+        );
+        assert_eq!(
+            store.opening_settlements[2].to_string(),
             format!("LaunchAttemptQuarantined.{{ unreadable-request «{quarantined}» }}")
         );
-        // The migrated row reads in the current shape, whole but for the
-        // one field its archive never held.
-        let expected: signal_flow::LaunchAttempt = rows.earlier_attempt().into();
-        assert_eq!(expected.launch_profile.system_prompt_bundle_file, "");
-        assert_eq!(
-            store
-                .launch_attempt(EarlierLaunchAttemptRows::EARLIER_REQUEST)
-                .unwrap(),
-            Some(expected)
-        );
+        // No earlier shape names the launched seat's Address: none is
+        // carried into the attempts table.
+        for request in [
+            EarlierLaunchAttemptRows::EARLIER_REQUEST,
+            EarlierLaunchAttemptRows::BEFORE_ADDRESS_REQUEST,
+            EarlierLaunchAttemptRows::UNREADABLE_REQUEST,
+        ] {
+            assert_eq!(store.launch_attempt(request).unwrap(), None);
+        }
         assert_eq!(
             store
                 .launch_attempt("current-request")
@@ -5172,27 +5333,17 @@ mod tests {
                 .map(|attempt| attempt.launch_profile),
             Some(current.launch_profile)
         );
-        assert_eq!(
-            store
-                .launch_attempt(EarlierLaunchAttemptRows::UNREADABLE_REQUEST)
-                .unwrap(),
-            None
-        );
         // Every whole-table read answers again.
         assert!(store.ambiguous_launch_attempts().is_ok());
         assert_eq!(store.flow_nodes().unwrap().len(), 1);
-        assert_eq!(
-            store.launch_requests_bound_to("launched-earlier").unwrap(),
-            vec![EarlierLaunchAttemptRows::EARLIER_REQUEST.to_string()]
-        );
-        // Both rows are kept whole, each with the shape it was found to have.
+        // Every row is kept whole, each with the shape it was found to have.
         let kept = store
             .engine
             .match_records(QueryPlan::all(store.quarantined_launch_attempts))
             .unwrap()
             .records()
             .to_vec();
-        assert_eq!(kept.len(), 2);
+        assert_eq!(kept.len(), 3);
         assert!(kept.iter().any(|row| {
             row.launch_request_id == EarlierLaunchAttemptRows::EARLIER_REQUEST
                 && row.shape == ArchivedLaunchAttemptShape::BeforeSystemPromptBundle
@@ -5201,10 +5352,18 @@ mod tests {
                 )
                 .is_ok_and(|earlier| earlier.attempt == rows.earlier_attempt())
         }));
+        assert!(kept.iter().any(|row| {
+            row.launch_request_id == EarlierLaunchAttemptRows::BEFORE_ADDRESS_REQUEST
+                && row.shape == ArchivedLaunchAttemptShape::BeforeAddress
+                && rkyv::from_bytes::<super::StoredLaunchAttemptBeforeAddress, rkyv::rancor::Error>(
+                    &row.archive,
+                )
+                .is_ok_and(|kept| kept.attempt == rows.before_address_attempt())
+        }));
         assert!(kept.iter().any(|row| row.launch_request_id
             == EarlierLaunchAttemptRows::UNREADABLE_REQUEST
             && row.shape == ArchivedLaunchAttemptShape::Unknown(quarantined.clone())));
-        // The flow the earlier launch bound takes its role from that launch.
+        // The flow the earlier launch bound takes its role from the kept row.
         assert_eq!(
             store.role("launched-earlier").unwrap(),
             Some(signal_flow::Caller {
@@ -5225,55 +5384,7 @@ mod tests {
                 .unwrap()
                 .records()
                 .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn a_carry_interrupted_after_quarantine_completes_at_the_next_open() {
-        use super::{
-            ArchivedLaunchAttemptShape, EarlierLaunchAttemptRows, LaunchAttemptSettlement,
-            QuarantinedLaunchAttempt, StoredLaunchAttemptBeforeBundle,
-        };
-        let fixture = StoreFixture::new();
-        let rows = EarlierLaunchAttemptRows {
-            bound_flow_id: "launched-earlier".into(),
-        };
-        let store = fixture.store();
-        // As a crash would leave it: moved aside, not yet carried forward.
-        store
-            .engine
-            .assert(sema_engine::Assertion::new(
-                store.quarantined_launch_attempts,
-                QuarantinedLaunchAttempt {
-                    launch_request_id: EarlierLaunchAttemptRows::EARLIER_REQUEST.into(),
-                    quarantine_number: 1,
-                    archive: rkyv::to_bytes::<rkyv::rancor::Error>(
-                        &StoredLaunchAttemptBeforeBundle {
-                            attempt: rows.earlier_attempt(),
-                        },
-                    )
-                    .unwrap()
-                    .to_vec(),
-                    shape: ArchivedLaunchAttemptShape::BeforeSystemPromptBundle,
-                },
-            ))
-            .unwrap();
-        drop(store);
-
-        let store = fixture.store();
-        assert_eq!(
-            store.opening_settlements,
-            vec![LaunchAttemptSettlement::Migrated {
-                launch_request_id: EarlierLaunchAttemptRows::EARLIER_REQUEST.into(),
-                from: ArchivedLaunchAttemptShape::BeforeSystemPromptBundle,
-            }]
-        );
-        assert_eq!(
-            store
-                .launch_attempt(EarlierLaunchAttemptRows::EARLIER_REQUEST)
-                .unwrap(),
-            Some(rows.earlier_attempt().into())
+            3
         );
     }
 

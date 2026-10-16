@@ -1,6 +1,7 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane};
-use crate::store::ManagesMetaflowState;
+use crate::store::metaflow::SleepsMetaflows;
+use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
 use crate::waking::WakePolicy;
 use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
 use signal_flow::{Address, Process, Query, Refusal, Response};
@@ -18,6 +19,48 @@ impl From<Response> for MetaflowAnswer {
         Self {
             response,
             wake: None,
+        }
+    }
+}
+
+/// Names the metaflow a process Message names runs in.
+pub(crate) trait IdentifiesPeerProcess {
+    /// A process bound by Bind, or descended from one, names that binding's
+    /// Address. Otherwise a process running in the pane of a flow Flow
+    /// launched names the Address its launch took: the pane is found from
+    /// the Herdr marks the process or its nearest marked ancestor carries,
+    /// the pane must hold exactly that one flow in the registry with the
+    /// live Herdr snapshot still showing its binding, and the metaflow must
+    /// be Awake as it. The process must still run with the start the
+    /// kernel gave Message, before and after its marks are read.
+    fn identify_peer_process(&self, process: Process) -> Result<Response, StoreError>;
+}
+
+impl IdentifiesPeerProcess for RunningNexus {
+    fn identify_peer_process(&self, process: Process) -> Result<Response, StoreError> {
+        match self.store.identify_process(process.clone())? {
+            Response::Refused(Refusal::Unidentified(_)) => {}
+            identified => return Ok(identified),
+        }
+        let unidentified = || Ok(Response::Refused(Refusal::Unidentified(process.clone())));
+        if !FlowStore::process_is_live(&process) {
+            return unidentified();
+        }
+        let Some(pane) = u32::try_from(process.pid)
+            .ok()
+            .and_then(|process_id| CallerProcess { process_id }.caller_pane())
+        else {
+            return unidentified();
+        };
+        if !FlowStore::process_is_live(&process) {
+            return unidentified();
+        }
+        let Ok(caller) = self.bound_caller(&pane) else {
+            return unidentified();
+        };
+        match self.store.metaflow_awake_as(&caller.flow_id)? {
+            Some(metaflow) => Ok(Response::Identified(metaflow.address)),
+            None => unidentified(),
         }
     }
 }
@@ -72,7 +115,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Err(error) => return Response::Refused(Refusal::Store(error.to_string())).into(),
             }
             match query {
-                Query::Identify(process) => self.store.identify_process(process),
+                Query::Identify(process) => self.identify_peer_process(process),
                 Query::Lock(request) => self.store.lock_metaflow(request, now),
                 Query::Deliver(request) => {
                     let address = request.lock.address.clone();

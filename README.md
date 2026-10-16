@@ -95,8 +95,13 @@ as gone. `Retire` refuses `AlreadyGone` for a flow that has already ended.
 `Start` carries a typed `LaunchProfile` plus an `OriginClue`. The origin is a
 caller claim; its text does not authenticate the caller. A profile names its
 ordered source descriptors and exact SHA-256 values, ordered native skill
-names, aspect, power, harness, model, effort, predecessor, remembered flows,
-Herdr target session, and first instruction. Profile producers should use the
+names, the launched seat's Address (aspect, topic, layer), power, harness,
+model, effort, predecessor, remembered flows, Herdr target session, and first
+instruction. A confirmed launch records that Address's metaflow Awake as the
+launched flow, so the seat sleeps at a resting Stop and a queued request wakes
+it; a Start whose Address a live seat holds, or another unsettled launch
+names, answers `StartRejected.AddressAwake`, and one at an ended Address
+`StartRejected.AddressEnded`. Profile producers should use the
 generated `signal-flow` Datom types rather than assembling positional text.
 The old `flow start ...`, `flow restart ...`, and `flow resolve ...` argument
 forms are rejected.

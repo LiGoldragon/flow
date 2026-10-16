@@ -262,7 +262,7 @@ trait NamesRole {
 
 impl NamesRole for LaunchProfile {
     fn aspect_name(&self) -> &'static str {
-        match self.aspect {
+        match self.address.aspect {
             Aspect::Psyche => "Psyche",
             Aspect::Mind => "Mind",
             Aspect::Field => "Field",
@@ -875,7 +875,7 @@ impl ComposesFreshSeat for LaunchComposer {
             launch_request_id: seat.launch_request_id.clone(),
             launch_source_vector,
             skill_name_vector: Vec::new(),
-            aspect: seat.address.aspect.clone(),
+            address: seat.address.clone(),
             power_level: seat.power_level.clone(),
             harness_kind: seat.harness_kind.clone(),
             model_name: seat.model_name.clone(),
@@ -919,7 +919,11 @@ mod tests {
                 launch_request_id: "launch-42".into(),
                 launch_source_vector: sources,
                 skill_name_vector: vec!["operation-main-flow".into(), "knowledge-flow".into()],
-                aspect: Aspect::Field,
+                address: signal_flow::Address {
+                    aspect: Aspect::Field,
+                    topic: "flow".into(),
+                    layer: signal_flow::Layer::Secondary,
+                },
                 power_level: PowerLevel::High,
                 harness_kind: HarnessKind::Codex,
                 model_name: "gpt-6-astra".into(),

@@ -74,7 +74,7 @@ impl TitlesFlow for LaunchProfile {
             .model_name
             .model_display_name()
             .ok_or_else(|| TitleRefused::UnmappedModel(self.model_name.clone()))?;
-        let aspect = match self.aspect {
+        let aspect = match self.address.aspect {
             Aspect::Psyche => "Psyche",
             Aspect::Mind => "Mind",
             Aspect::Field => "Field",
@@ -104,7 +104,11 @@ mod tests {
             launch_request_id: "launch-title".into(),
             launch_source_vector: vec![],
             skill_name_vector: vec![],
-            aspect: aspect,
+            address: signal_flow::Address {
+                aspect,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            },
             power_level: PowerLevel::High,
             harness_kind: HarnessKind::Claude,
             model_name: model.into(),

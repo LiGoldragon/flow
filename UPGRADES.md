@@ -1,3 +1,50 @@
+# Flow 0.31.0
+
+The ordinary wire changes: signal-flow 16.0.0 (229933d9) and
+meta-signal-flow 19.0.1 (b6f86546). The Flow CLI and Nexus are rebuilt and
+restarted together; an older peer is refused at the greeting.
+
+- **A launch names its seat's Address.** `LaunchProfile` carries the
+  `Address` (`{ Aspect Topic Layer }`) where it carried the `Aspect`:
+  `Start.{ { id [] [ skills ] { Field flow Quaternary } UltraLow Claude
+  haiku medium None [] session bundle «prompt» } { origin session turn } }`.
+- **The launch enters the registry.** When a launch is confirmed (its
+  receipt observed in the native transcript), the Nexus records that
+  Address's metaflow Awake as the launched FlowId in the same write that
+  makes the flow Active. A metaflow Awake as a live flow, or bound to a
+  live process, is refused; an Ended one is refused; an absent or Asleep
+  one, or one Awake as a flow no longer live, is taken, a displaced flow
+  joining Past. A replacement takes over its predecessor's metaflow. The
+  seat can now sleep at its Stop and be woken by a queued request.
+- **A held Address refuses the Start.** A Start whose Address is Awake as a
+  live flow, or named by another launch not yet settled, answers
+  `StartRejected.AddressAwake`; one whose Address was ended answers
+  `StartRejected.AddressEnded`. Nothing is launched.
+- **Wakes take the Address the same way.** A fresh wake's launch takes it
+  at its confirmation; a resume takes it with `Record.Awoken`, in the write
+  that removes the handed-over requests from the queue.
+- **A launched seat is identified.** `Identify` names a process bound by
+  `Bind`, or descended from one, as before; otherwise a process in the pane
+  of a launched flow (found from the Herdr marks it or its nearest marked
+  ancestor carries, with the registry and the live Herdr snapshot agreeing
+  on the pane's one flow) names the Address that flow is Awake at. Such a
+  seat sends through Message:
+  `message 'Send.{ Address.{ Mind flow Secondary } Order.«…» }'`.
+- **Old launch attempts are set aside.** A launch-attempt row archived
+  before 16.0.0 names no topic or layer, so it cannot read as a current
+  row. At open it is moved whole into the quarantine table under its shape
+  (`BeforeAddress`, or `BeforeSystemPromptBundle` for older rows), logged
+  `LaunchAttemptSetAside.{ id Shape }`, and no longer answers LaunchStatus.
+  A flow such a launch bound keeps its role: a store written before roles
+  adopts it from the kept row. Rows earlier releases carried forward from
+  `BeforeSystemPromptBundle` are now set aside as `BeforeAddress`. Every
+  store opens; nothing else in it changes.
+
+To deploy: install 0.31.0, restart the Nexus, and rebuild every client of
+signal-flow (Message, its CLI and signal-message) against 16.0.0. Seats
+launched before this release hold no metaflow until they Bind or are
+launched again.
+
 # Flow 0.30.1
 
 No wire or store change.

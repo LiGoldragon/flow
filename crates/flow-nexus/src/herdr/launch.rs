@@ -2204,7 +2204,11 @@ pub(crate) mod tests {
                 launch_request_id: "launch-42".into(),
                 launch_source_vector: vec![],
                 skill_name_vector: vec![],
-                aspect: Aspect::Field,
+                address: signal_flow::Address {
+                    aspect: Aspect::Field,
+                    topic: "flow".into(),
+                    layer: signal_flow::Layer::Secondary,
+                },
                 power_level: PowerLevel::Medium,
                 harness_kind,
                 model_name: ModelName::from("model-current"),
@@ -3875,7 +3879,7 @@ printf '%s\n' 123456
     fn claude_title_is_set_after_the_claim_and_read_back() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let mut launch = launch(HarnessKind::Claude);
-        launch.launch_profile.aspect = Aspect::Psyche;
+        launch.launch_profile.address.aspect = Aspect::Psyche;
         launch.launch_profile.model_name = "claude-fable-5-1".into();
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
@@ -3941,7 +3945,7 @@ printf '%s\n' 123456
     fn claude_title_readback_that_differs_refuses_before_the_label() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let mut launch = launch(HarnessKind::Claude);
-        launch.launch_profile.aspect = Aspect::Psyche;
+        launch.launch_profile.address.aspect = Aspect::Psyche;
         launch.launch_profile.model_name = "claude-fable-5-1".into();
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(

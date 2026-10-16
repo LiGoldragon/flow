@@ -147,6 +147,8 @@ pub enum Failed_Data {
     NotAsleep,
     NotAwake,
     NothingQueued,
+    AddressAwake,
+    AddressEnded,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

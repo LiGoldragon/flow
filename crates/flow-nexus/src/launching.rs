@@ -14,6 +14,7 @@ use crate::herdr::launch::ObservesNativeLaunchBinding;
 use crate::performing::Performs;
 use crate::store::AnswersLaunchOutcome;
 use crate::store::ReadsLaunchInspectionRecords;
+use crate::store::metaflow::TakesLaunchAddress;
 use crate::store::{
     AnnouncesLaunchChanges, ReadsCreatedLaunchPane, RecordsCreatedLaunchPane,
     RecordsNativeLaunchBinding,
@@ -137,6 +138,12 @@ impl LaunchesFlows for RunningNexus {
             return self.promote_ambiguous(attempt);
         }
         let persistence = || Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+        // A seat whose Address it could not take is never launched.
+        match self.store.launch_address_refusal(&request.launch_profile) {
+            Ok(None) => {}
+            Ok(Some(rejection)) => return Response::StartRejected(rejection),
+            Err(_) => return persistence(),
+        }
         let launch = match self.perform(Operation::Compose(request.launch_profile)) {
             Outcome::Composed(launch) => launch,
             _ => return Response::StartRejected(StartRejection::CompositionRefused),
@@ -258,7 +265,7 @@ impl LaunchesFlows for RunningNexus {
         }
         let caller = signal_flow::Caller {
             flow_id: binding.flow_id.clone(),
-            aspect: launch.launch_profile.aspect.clone(),
+            aspect: launch.launch_profile.address.aspect.clone(),
             power_level: launch.launch_profile.power_level.clone(),
             model_name: launch.launch_profile.model_name.clone(),
         };
@@ -709,6 +716,12 @@ impl ResumesReplacement for RunningNexus {
             Outcome::Started(started) => Response::Started(started),
             Outcome::Failed(Failed_Data::Unstarted) => {
                 Response::StartRejected(StartRejection::NativeLaunchRefused)
+            }
+            Outcome::Failed(Failed_Data::AddressAwake) => {
+                Response::StartRejected(StartRejection::AddressAwake)
+            }
+            Outcome::Failed(Failed_Data::AddressEnded) => {
+                Response::StartRejected(StartRejection::AddressEnded)
             }
             _ => Response::StartRejected(StartRejection::LaunchPersistenceRefused),
         }

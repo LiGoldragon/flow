@@ -24,7 +24,7 @@ use crate::store::{
     RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 use crate::waking::PerformsSleepAndWake;
-use signal_flow::{HarnessKind, LaunchAttemptReservation, Response};
+use signal_flow::{HarnessKind, LaunchAttemptReservation, Response, StartRejection};
 
 /// The internal stage at which the Herdr adapter refused an operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +232,12 @@ impl Performs for RunningNexus {
             }
             Operation::Confirm(flow_id) => match self.store.confirm_started(&flow_id) {
                 Ok(Response::Started(started)) => Outcome::Started(started),
+                Ok(Response::StartRejected(StartRejection::AddressAwake)) => {
+                    Outcome::Failed(Failed_Data::AddressAwake)
+                }
+                Ok(Response::StartRejected(StartRejection::AddressEnded)) => {
+                    Outcome::Failed(Failed_Data::AddressEnded)
+                }
                 Ok(_) => Outcome::Failed(Failed_Data::Unstarted),
                 Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
             },

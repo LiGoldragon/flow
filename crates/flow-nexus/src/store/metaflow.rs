@@ -1,7 +1,10 @@
 //! Ordinary metaflow mutations. The connection supplies the witnessed peer;
 //! the serial dispatcher holds exclusion across authorization and mutation.
 use super::*;
-use signal_flow::{Bind_Data, Deliver_Data, FlowId, Lock_Data, Recipient, Refusal, Unknown_Data};
+use signal_flow::{
+    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Recipient, Refusal, StartRejection,
+    Unknown_Data,
+};
 
 /// What a Deliver did to its recipient's queue: the wire answer, and
 /// whether the recipient was Asleep when the request was queued, which is
@@ -33,10 +36,12 @@ pub(crate) trait SleepsMetaflows {
     /// Awake as `flow_id` becomes Asleep, and `flow_id` joins Past. The
     /// flow's own row, with its native session, is untouched.
     fn sleep_metaflow(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError>;
-    /// Asleep becomes Awake as the started flow, and the `delivered` oldest
-    /// queued requests, which the started flow was handed, leave the queue
-    /// in the same write. A resumed flow that ends Past is taken out of it,
-    /// since it is current again. Refused when fewer are queued.
+    /// The metaflow becomes Awake as the started flow, under the rules a
+    /// launch takes its Address by (see [`TakesLaunchAddress`]); a fresh
+    /// wake's launch already took it at its confirmation. The `delivered`
+    /// oldest queued requests, which the started flow was handed, leave the
+    /// queue in the same write. Refused when the Address is not the
+    /// flow's to take or fewer are queued.
     fn awaken_metaflow(
         &self,
         address: &Address,
@@ -132,7 +137,9 @@ impl MutatesMetaflows for FlowStore {
             past: vec![],
             queue: vec![],
         });
-        if let MetaflowState::Awake(previous) = metaflow.state {
+        if let MetaflowState::Awake(previous) = metaflow.state
+            && previous != flow_id
+        {
             metaflow.past.push(previous);
         }
         metaflow.state = MetaflowState::Awake(flow_id.clone());
@@ -294,19 +301,12 @@ impl SleepsMetaflows for FlowStore {
         flow_id: &str,
         delivered: usize,
     ) -> Result<bool, StoreError> {
-        let Some(mut stored) = self.stored_metaflow(address)? else {
+        let AddressTaking::Takes(taken) = self.address_taking(address, flow_id, None, delivered)?
+        else {
             return Ok(false);
         };
-        if stored.metaflow.state != MetaflowState::Asleep || stored.metaflow.queue.len() < delivered
-        {
-            return Ok(false);
-        }
-        if stored.metaflow.past.last().map(String::as_str) == Some(flow_id) {
-            stored.metaflow.past.pop();
-        }
-        stored.metaflow.state = MetaflowState::Awake(flow_id.to_owned());
-        stored.metaflow.queue.drain(..delivered);
-        self.write_metaflow(stored)?;
+        let commit = taken.written(self, self.engine.begin_atomic_commit());
+        self.engine.commit_atomic(commit)?;
         Ok(true)
     }
 
@@ -341,6 +341,182 @@ impl SleepsMetaflows for FlowStore {
         Ok(self
             .stored_metaflow_lock(address)?
             .is_some_and(|held| held.lock.until > now))
+    }
+}
+
+/// What a launch may do to the metaflow of the Address it names.
+pub(crate) enum AddressTaking {
+    Takes(TakenAddress),
+    Refused(StartRejection),
+}
+
+/// The writes that take an Address for a launched flow.
+pub(crate) struct TakenAddress {
+    metaflow: StoredMetaflow,
+    new: bool,
+    /// A binding of a process no longer live, left by an earlier Bind.
+    stale_binding: bool,
+}
+
+/// How a flow Flow launched takes the metaflow of its Address. The rules
+/// are Bind's: a metaflow Awake as a live flow, or bound to a live process,
+/// is refused (AddressAwake), an Ended one is refused (AddressEnded), and
+/// an absent, Asleep, or Awake-as-not-live one is taken, a displaced flow
+/// joining Past. A launch takes over the predecessor its profile names,
+/// live or not, and a flow already Awake there keeps it. A taken flow is
+/// never also Past: a resumed one leaves it.
+pub(crate) trait TakesLaunchAddress {
+    /// What taking `address` as `flow_id` does, with the `delivered`
+    /// oldest queued requests leaving the queue.
+    fn address_taking(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        predecessor: Option<&str>,
+        delivered: usize,
+    ) -> Result<AddressTaking, StoreError>;
+    /// Why a Start of this profile would be refused before anything
+    /// launches: its Address could not be taken, or another launch not yet
+    /// settled names it.
+    fn launch_address_refusal(
+        &self,
+        profile: &LaunchProfile,
+    ) -> Result<Option<StartRejection>, StoreError>;
+    /// Whether a flow is live: its row is Pending or Active.
+    fn flow_is_live(&self, flow_id: &str) -> Result<bool, StoreError>;
+}
+
+impl TakesLaunchAddress for FlowStore {
+    fn address_taking(
+        &self,
+        address: &Address,
+        flow_id: &str,
+        predecessor: Option<&str>,
+        delivered: usize,
+    ) -> Result<AddressTaking, StoreError> {
+        let existing = self.stored_metaflow(address)?;
+        let binding = self.bound_process(address)?;
+        let live_binding = binding.as_ref().is_some_and(FlowStore::process_is_live);
+        let mut metaflow = match existing.as_ref() {
+            Some(stored) => stored.metaflow.clone(),
+            None => Metaflow {
+                address: address.clone(),
+                state: MetaflowState::Asleep,
+                past: vec![],
+                queue: vec![],
+            },
+        };
+        match &metaflow.state {
+            MetaflowState::Ended => {
+                return Ok(AddressTaking::Refused(StartRejection::AddressEnded));
+            }
+            MetaflowState::Awake(current) if current == flow_id => {}
+            MetaflowState::Awake(current) => {
+                if Some(current.as_str()) != predecessor
+                    && (live_binding || self.flow_is_live(current)?)
+                {
+                    return Ok(AddressTaking::Refused(StartRejection::AddressAwake));
+                }
+                metaflow.past.push(current.clone());
+            }
+            MetaflowState::Asleep if live_binding => {
+                return Ok(AddressTaking::Refused(StartRejection::AddressAwake));
+            }
+            MetaflowState::Asleep => {}
+        }
+        if metaflow.queue.len() < delivered {
+            return Ok(AddressTaking::Refused(
+                StartRejection::LaunchPersistenceRefused,
+            ));
+        }
+        metaflow.past.retain(|past| past != flow_id);
+        metaflow.state = MetaflowState::Awake(flow_id.to_owned());
+        metaflow.queue.drain(..delivered);
+        Ok(AddressTaking::Takes(TakenAddress {
+            metaflow: StoredMetaflow { metaflow },
+            new: existing.is_none(),
+            stale_binding: binding.is_some() && !live_binding,
+        }))
+    }
+
+    fn launch_address_refusal(
+        &self,
+        profile: &LaunchProfile,
+    ) -> Result<Option<StartRejection>, StoreError> {
+        let predecessor = profile.flow_id_option.as_deref();
+        let refused = match self.stored_metaflow(&profile.address)? {
+            Some(stored) => match &stored.metaflow.state {
+                MetaflowState::Ended => Some(StartRejection::AddressEnded),
+                MetaflowState::Awake(current) => (Some(current.as_str()) != predecessor
+                    && (self.flow_is_live(current)?
+                        || self
+                            .bound_process(&profile.address)?
+                            .as_ref()
+                            .is_some_and(FlowStore::process_is_live)))
+                .then_some(StartRejection::AddressAwake),
+                MetaflowState::Asleep => self
+                    .bound_process(&profile.address)?
+                    .as_ref()
+                    .is_some_and(FlowStore::process_is_live)
+                    .then_some(StartRejection::AddressAwake),
+            },
+            None => None,
+        };
+        if refused.is_some() {
+            return Ok(refused);
+        }
+        for attempt in self
+            .engine
+            .match_records(QueryPlan::all(self.launch_attempts))?
+            .records()
+        {
+            let attempt = &attempt.attempt;
+            if attempt.launch_request_id != profile.launch_request_id
+                && attempt.launch_profile.address == profile.address
+                && self.launch_outcome(&attempt.launch_request_id)?.is_none()
+            {
+                return Ok(Some(StartRejection::AddressAwake));
+            }
+        }
+        Ok(None)
+    }
+
+    fn flow_is_live(&self, flow_id: &str) -> Result<bool, StoreError> {
+        Ok(self.flow(flow_id)?.is_some_and(|flow| {
+            matches!(
+                flow.lifecycle,
+                FlowLifecycle::Pending | FlowLifecycle::Active
+            )
+        }))
+    }
+}
+
+/// Adds the writes that take an Address to an atomic commit.
+pub(crate) trait WritesTakenAddress {
+    fn written(
+        self,
+        store: &FlowStore,
+        commit: sema_engine::AtomicCommit,
+    ) -> sema_engine::AtomicCommit;
+}
+
+impl WritesTakenAddress for TakenAddress {
+    fn written(
+        self,
+        store: &FlowStore,
+        commit: sema_engine::AtomicCommit,
+    ) -> sema_engine::AtomicCommit {
+        let key = FlowStore::address_record_key(&self.metaflow.metaflow.address);
+        let commit = if self.new {
+            commit.assert(store.metaflows, self.metaflow)
+        } else {
+            commit.mutate(store.metaflows, self.metaflow)
+        };
+        if self.stale_binding {
+            commit.retract(store.metaflow_processes, RecordKey::new(key))
+        } else {
+            commit
+        }
     }
 }
 

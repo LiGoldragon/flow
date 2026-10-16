@@ -2209,7 +2209,11 @@ mod tests {
                 source_sha256: format!("{:x}", Sha256::digest(b"exact source bytes\n")),
             }],
             skill_name_vector: Vec::new(),
-            aspect: Aspect::Field,
+            address: signal_flow::Address {
+                aspect: Aspect::Field,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            },
             power_level: PowerLevel::High,
             harness_kind: HarnessKind::Codex,
             model_name: "fixture-model".into(),
@@ -2270,7 +2274,11 @@ mod tests {
                 source_sha256: format!("{:x}", Sha256::digest(b"delayed exact bytes\n")),
             }],
             skill_name_vector: Vec::new(),
-            aspect: Aspect::Field,
+            address: signal_flow::Address {
+                aspect: Aspect::Field,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            },
             power_level: PowerLevel::High,
             harness_kind: HarnessKind::Codex,
             model_name: "fixture-model".into(),
@@ -2883,7 +2891,12 @@ mod tests {
                     source_sha256: format!("{:x}", Sha256::digest(b"staged exact bytes\n")),
                 }],
                 skill_name_vector: Vec::new(),
-                aspect: Aspect::Field,
+                // Each staged launch is the seat of its own Address.
+                address: signal_flow::Address {
+                    aspect: Aspect::Field,
+                    topic: launch_request_id.into(),
+                    layer: signal_flow::Layer::Secondary,
+                },
                 power_level: PowerLevel::High,
                 harness_kind: HarnessKind::Codex,
                 model_name: "fixture-model".into(),
@@ -3452,6 +3465,82 @@ mod tests {
         );
     }
 
+    /// A launch names the Address of its seat: the confirmed launch records
+    /// that metaflow Awake as the launched flow in the write that makes it
+    /// Active, and a Start at an Address a live seat holds, or one ended, is
+    /// refused before anything launches.
+    #[test]
+    fn a_confirmed_launch_takes_its_address_and_a_held_address_refuses_the_next_start() {
+        use crate::store::ManagesMetaflowState as _;
+        use crate::store::metaflow::SleepsMetaflows as _;
+        let fixture = NexusFixture::new();
+        let calls = fixture.herdr_for_replacement(0);
+        let mut seat = fixture.staged_launch("seat-request", None);
+        let address = seat.profile.address.clone();
+        seat.stage_to_ambiguity(&fixture.nexus);
+        assert_eq!(
+            fixture.nexus.store.metaflow(&address).unwrap(),
+            None,
+            "nothing is recorded before the launch is confirmed"
+        );
+        let mut second = fixture.staged_launch("second-request", None);
+        second.profile.address = address.clone();
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Start(second.request())),
+            Response::StartRejected(StartRejection::AddressAwake),
+            "another unsettled launch names the Address"
+        );
+
+        seat.write_receipt();
+        let Response::Started(started) = fixture.nexus.dispatch(Query::Start(seat.request()))
+        else {
+            panic!("the observed launch starts")
+        };
+        let metaflow = fixture
+            .nexus
+            .store
+            .metaflow(&address)
+            .unwrap()
+            .expect("the launch recorded its metaflow");
+        assert_eq!(
+            metaflow.state,
+            flow_ethos::State::Awake(started.flow_id.clone())
+        );
+        assert!(metaflow.past.is_empty());
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .metaflow_awake_as(&started.flow_id)
+                .unwrap(),
+            Some(metaflow)
+        );
+
+        let launched = fs::read_to_string(&calls).unwrap_or_default();
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Start(second.request())),
+            Response::StartRejected(StartRejection::AddressAwake),
+            "the Address is Awake as a live flow"
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .end_metaflow(address.clone(), 0)
+                .unwrap(),
+            Response::Ended
+        );
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Start(second.request())),
+            Response::StartRejected(StartRejection::AddressEnded)
+        );
+        assert_eq!(
+            fs::read_to_string(&calls).unwrap_or_default(),
+            launched,
+            "a refused Start touches no pane"
+        );
+    }
+
     #[test]
     fn launch_status_answers_pending_and_every_outcome_once() {
         let fixture = NexusFixture::new();
@@ -4010,7 +4099,7 @@ mod tests {
             bound_flow_id: "launched-earlier".into(),
         };
         let fixture = NexusFixture::with_store(|path| rows.seed(path));
-        assert_eq!(fixture.nexus.store.opening_settlements.len(), 2);
+        assert_eq!(fixture.nexus.store.opening_settlements.len(), 3);
         use crate::store::ReadsFlowRows as _;
         assert_eq!(
             fixture
@@ -4022,21 +4111,25 @@ mod tests {
                 .flow_id,
             "launched-earlier"
         );
-        assert!(matches!(
-            fixture.nexus.dispatch(Query::LaunchStatus(
-                crate::store::EarlierLaunchAttemptRows::EARLIER_REQUEST.into()
-            )),
-            Response::LaunchInspected(inspection)
-                if inspection.launch_attempt.launch_profile.aspect == Aspect::Psyche
-                    && inspection.launch_status_outcome_option.is_none()
-        ));
-        assert!(matches!(
-            fixture.nexus.dispatch(Query::LaunchStatus(
-                crate::store::EarlierLaunchAttemptRows::UNREADABLE_REQUEST.into()
-            )),
-            Response::LaunchStatusRejected(
-                signal_flow::LaunchStatusRejection::UnknownLaunchRequest
-            )
-        ));
+        // Every earlier row is kept aside: none answers as an attempt.
+        for request in [
+            crate::store::EarlierLaunchAttemptRows::EARLIER_REQUEST,
+            crate::store::EarlierLaunchAttemptRows::BEFORE_ADDRESS_REQUEST,
+            crate::store::EarlierLaunchAttemptRows::UNREADABLE_REQUEST,
+        ] {
+            assert_eq!(
+                fixture.nexus.dispatch(Query::LaunchStatus(request.into())),
+                Response::LaunchStatusRejected(
+                    signal_flow::LaunchStatusRejection::UnknownLaunchRequest
+                )
+            );
+        }
+        // The flow the earlier launch bound keeps the role it named.
+        assert_eq!(
+            crate::store::ReadsFlowRoles::role(&fixture.nexus.store, "launched-earlier")
+                .unwrap()
+                .map(|role| role.aspect),
+            Some(Aspect::Psyche)
+        );
     }
 }

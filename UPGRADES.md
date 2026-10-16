@@ -28,8 +28,8 @@ the first open.
   wake and a resume) the Nexus sends `ComposeStartup.{ CallerMetaflow Target
   SystemModules UserModules }` to the Curriculum Nexus at
   `$XDG_RUNTIME_DIR/curriculum/curriculum.sock` (schema
-  `crates/flow-nexus/ethos/curriculum.ethos`, Curriculum candidate
-  925a55ca), and verifies the answer before any of it reaches a prompt: both
+  `crates/flow-nexus/ethos/curriculum.ethos`, Curriculum main
+  691852aa), and verifies the answer before any of it reaches a prompt: both
   payload SHA-256s, every requested identity present at its placement, and
   each text exactly the rendering of its modules, each module's slice at its
   rendered SHA-256. A refusal answers `StartRejected.ContextRefused.<why>`.
@@ -78,7 +78,9 @@ the first open.
   (`skills.include_instructions`, `project_doc_max_bytes`,
   `include_collaboration_mode_instructions`, `include_environment_context`,
   `include_permissions_instructions`, `developer_instructions`). Leaving out
-  `ToolSearch` or `BashTool`, `SkillTool` or `BundledSkills` with Workflow
+  `ToolSearch`, `BashTool` or `UserSettings` (whose settings carry Herdr's
+  SessionStart hook, which Flow's binding relies on), `SkillTool` or
+  `BundledSkills` with Workflow
   kept, or a part of the other harness answers
   `StartRejected.LeaveOutRefused.<why>`. A Claude receipt is refused when
   the session uses a tool its leave-outs removed or shows a skill listing

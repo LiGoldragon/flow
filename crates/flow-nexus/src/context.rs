@@ -12,8 +12,9 @@
 //! path, file or inline context text is accepted anywhere on this route.
 //!
 //! The production composer is the Curriculum Nexus, asked over its socket
-//! with `ComposeStartup` from the frozen schema in `ethos/curriculum.ethos`
-//! (candidate 925a55ca, schema SHA-256 7450ce7a…382ad). Its answer names no
+//! with `ComposeStartup` from its schema, copied byte for byte into
+//! `ethos/curriculum.ethos` from Curriculum main 691852aa (schema SHA-256
+//! 7450ce7a…382ad). Its answer names no
 //! metaflow, so the metaflow check is Flow's own: the request carries the
 //! launch's Address, and the composed launch keeps it with the identities
 //! asked for it.

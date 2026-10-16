@@ -6,8 +6,10 @@
 //! (the lean-start catalogue of 2026-10-16): a tool left out is named in
 //! `--disallowedTools`, a block or feature is turned off by its flag,
 //! environment variable or setting. A leave-out the flow cannot go without
-//! (ToolSearch, Bash), a skill leave-out with Workflow kept, and a leave-out
-//! of the other harness are refused before anything launches.
+//! (ToolSearch, Bash, and the user settings, which carry Herdr's SessionStart
+//! hook that Flow's binding relies on), a skill leave-out with Workflow kept,
+//! and a leave-out of the other harness are refused before anything
+//! launches.
 
 use crate::generated::starter::{LeanStart, RendersLeanStart};
 use signal_flow::{HarnessKind, LeaveOut, LeaveOutRefusal};
@@ -54,7 +56,10 @@ impl BelongsToHarness for LeaveOut {
 impl RendersLeanStart for LeanStart {
     fn refusal(&self) -> Option<LeaveOutRefusal> {
         for leave_out in &self.leave_outs {
-            if matches!(leave_out, LeaveOut::ToolSearch | LeaveOut::BashTool) {
+            if matches!(
+                leave_out,
+                LeaveOut::ToolSearch | LeaveOut::BashTool | LeaveOut::UserSettings
+            ) {
                 return Some(LeaveOutRefusal::Indispensable(leave_out.clone()));
             }
             if leave_out.harness() != self.harness_kind {
@@ -159,6 +164,21 @@ mod tests {
             harness_kind,
             leave_outs: leave_outs.to_vec(),
         }
+    }
+
+    /// Leaving out the user settings drops Herdr's SessionStart hook, on
+    /// which Flow binds the flow, so it is refused as ToolSearch and Bash
+    /// are; the Agent tool may go, since a leaf role may need no subflows.
+    #[test]
+    fn user_settings_are_indispensable_and_the_agent_tool_is_not() {
+        assert_eq!(
+            lean(HarnessKind::Claude, &[LeaveOut::UserSettings]).refusal(),
+            Some(LeaveOutRefusal::Indispensable(LeaveOut::UserSettings))
+        );
+        assert_eq!(
+            lean(HarnessKind::Claude, &[LeaveOut::AgentTool]).refusal(),
+            None
+        );
     }
 
     #[test]

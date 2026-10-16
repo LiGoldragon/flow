@@ -205,6 +205,8 @@
             "tests::waking::a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work";
           flow-leave-outs-refused-when-unsafe = context.exactTest "flow-nexus"
             "lean::tests::indispensable_parts_skills_with_workflow_and_other_harness_parts_are_refused";
+          flow-user-settings-leave-out-refused = context.exactTest "flow-nexus"
+            "lean::tests::user_settings_are_indispensable_and_the_agent_tool_is_not";
           flow-leave-outs-reach-the-harness = context.exactTest "flow-nexus"
             "herdr::launch::tests::a_claude_start_carries_its_leave_outs_as_flags_environment_and_settings";
           flow-start-leave-outs-replace-the-default = context.exactTest "flow-nexus"

@@ -193,6 +193,14 @@
             "composition::tests::a_profile_naming_no_valid_identities_is_refused_before_composition";
           flow-context-verification-refusals = context.exactTest "flow-nexus"
             "context::tests::a_module_body_that_differs_from_its_rendered_hash_is_refused";
+          flow-role-verification-refusals = context.exactTest "flow-nexus"
+            "role::tests::a_composition_that_differs_from_what_it_claims_is_refused";
+          flow-agent-call-authorization = context.exactTest "flow-nexus"
+            "role::tests::an_agent_call_is_permitted_only_for_the_named_main_thread_caller";
+          flow-agents-argument-at-spawn = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_permitted_claude_flow_starts_with_its_verified_roles_as_one_agents_argument";
+          flow-hook-agent-deny-decision = context.exactTest "flow"
+            "tests::a_denial_is_the_native_pre_tool_use_deny_decision";
           flow-message-split-where-modules-begin = context.exactTest "flow-nexus"
             "composition::tests::a_message_too_large_for_one_part_is_split_where_modules_begin";
           flow-one-message-through-herdr-socket = context.exactTest "flow-nexus"

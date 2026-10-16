@@ -36,3 +36,14 @@ No test needs them.
 **Proper fix:** undecided. A wrapper that sets `XDG_RUNTIME_DIR` to its
 slot's runtime anchor reaches the same path with no Flow variable, but a
 moved socket would then have no way to be named.
+
+## Subagent role names come from Flow's defaults
+
+The subagent roles a Claude flow is offered, and that `flow-hook` guards, are
+named by `LaysOutDefaults::SUBAGENT_ROLES` in `flow-defaults`, not by the
+store's configuration: meta-signal-flow's `Configuration` has no field for
+them, so no `Configure` can change them, and the hook, which runs outside the
+Nexus, reads the same constant.
+
+**Proper fix:** meta-signal-flow's `Configuration` gains the subagent role
+names, the Nexus serves them, and the hook reads them through the Nexus.

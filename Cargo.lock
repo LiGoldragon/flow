@@ -219,6 +219,8 @@ version = "0.35.0"
 dependencies = [
  "datom-codec",
  "flow-defaults",
+ "flow-ethos",
+ "flow-nexus",
  "protos",
  "rkyv",
  "serde_json",

@@ -1,0 +1,66 @@
+; A flow's subagent roles: the roles Flow selects by name for a Claude
+; flow, each composed by Curriculum with ComposeRole and verified before
+; any of its text reaches the harness's native agent definition, and the
+; PreToolUse decision that guards an Agent call naming one of them.
+;
+; A role is offered to a flow only when its caller policy permits the
+; flow's Address exactly, case preserved. The offer is defense in depth;
+; the guard is the decision: a governed role is dispatched only when the
+; calling flow, resolved from the kernel-named calling process and never
+; from the call, is permitted, the call is not made from inside a
+; subagent, and it overrides neither the role's model nor its effort.
+;
+; VerifiedRole is the guard on the text: its fields are private and its one
+; constructor is VerifiesRole.verified_role, so no text but Curriculum's
+; verified answer reaches a native agent definition.
+
+Library
+[ signal_flow:[ Address ]
+  flow_nexus:[ RoleSelection RoleComposition VerifiedRole ]
+  serde_json:JsonValue.Value ]
+[ ; Why a role was not composed, verified, or rendered for its surface.
+  RoleRefusal.[ ComposerUnavailable
+                ComposerRejected
+                RoleMismatch
+                PayloadMismatch
+                ManifestMismatch
+                ProvenanceMismatch
+                UnmappableField ]
+  ; The roles a Claude flow is offered, by role name.
+  SubagentRoleNames.Vector<String>
+  ; What one PreToolUse Agent call asks, as the hook reads it.
+  AgentCall.{ SubagentType.String
+              Nested.Boolean
+              RequestsModel.Boolean
+              RequestsEffort.Boolean }
+  ; The calling flow, as the Nexus resolved the calling process.
+  AgentCaller.[ Resolved.Address
+                Unresolved ]
+  AgentDenial.[ NestedCaller
+                ModelOverridden
+                EffortOverridden
+                CallerUnresolved
+                PolicyUnavailable
+                CallerNotPermitted ]
+  ; Ungoverned: the call names no role Flow selects, and Flow decides
+  ; nothing.
+  AgentDecision.[ Ungoverned
+                  Permitted
+                  Denied.AgentDenial ] ]
+[ RoleSelecting.[ role_selection.[ RoleSelection ] ]
+  RoleComposing.[ role_composition.[ RoleComposition ] ]
+  Addressed.[ addressed.[ Address ] ]
+  AgentCalling.[ agent_call.[ AgentCall ] ]
+  ResolvesAgentCaller.[ agent_caller.[ AgentCaller ] ]
+  ; Curriculum at its socket and the role names Flow's defaults select.
+  OpensSubagentRoles.[ from_environment:[ Self ] ]
+  ComposesRole.[ compose_role.{ [ RoleSelecting ] [ Result<RoleComposition RoleRefusal> ] } ]
+  VerifiesRole.[ verified_role:{ [ RoleSelecting RoleComposing ] [ Result<Self RoleRefusal> ] } ]
+  ReadsVerifiedRole.[ role_name.[ String ]
+                      permits.{ [ Addressed ] [ Boolean ] }
+                      native_definition.[ Result<JsonValue RoleRefusal> ] ]
+  ComposesSubagentRoles.[ governs.{ [ AgentCalling ] [ Boolean ] }
+                          permitted_roles.{ [ Addressed ] [ Result<Vector<VerifiedRole> RoleRefusal> ] }
+                          agents_argument.{ [ Addressed ] [ Result<Option<String> RoleRefusal> ] } ]
+  AuthorizesAgentCall.[ decide.{ [ AgentCalling ResolvesAgentCaller ] [ AgentDecision ] } ] ]
+[]

@@ -96,9 +96,9 @@ pub struct HerdrCli {
     /// The Claude daemon's records, read for a daemon-owned session's
     /// readiness.
     pub(crate) claude_daemon: crate::claude::ClaudeDaemon,
-    /// The `flow-hook` Claude Code runs on SessionStart, PostToolUse and
-    /// Stop in every Claude flow Flow launches: the one installed beside
-    /// this Nexus's own executable.
+    /// The `flow-hook` Claude Code runs on SessionStart, PostToolUse, Stop
+    /// and every PreToolUse of the Agent tool in every Claude flow Flow
+    /// launches: the one installed beside this Nexus's own executable.
     pub(crate) harness_hook: PathBuf,
     /// This Nexus's own ordinary socket, the one it serves: every Claude
     /// pane it launches gets it as `FLOW_SOCKET`, so the `flow` CLI that
@@ -106,6 +106,9 @@ pub struct HerdrCli {
     /// whatever Nexus the default path under the pane's runtime directory
     /// names.
     pub(crate) ordinary_socket: PathBuf,
+    /// The subagent roles a Claude flow is offered at spawn, composed by
+    /// Curriculum and kept for the flows their caller policy permits.
+    pub(crate) subagent_roles: crate::role::SubagentRoles,
 }
 
 impl Default for HerdrCli {
@@ -161,6 +164,10 @@ impl Default for HerdrCli {
                 .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
                 .unwrap_or_else(|| PathBuf::from("flow-hook")),
             ordinary_socket: defaults.ordinary_socket_path(),
+            subagent_roles: {
+                use crate::role::OpensSubagentRoles;
+                crate::role::SubagentRoles::from_environment()
+            },
         }
     }
 }
@@ -302,6 +309,8 @@ pub trait ConfiguresHerdrCli {
     fn with_source_root(self, source_root: &std::path::Path) -> Self;
     #[cfg(test)]
     fn at(executable: PathBuf, flows_root: PathBuf) -> Self;
+    #[cfg(test)]
+    fn with_subagent_roles(self, subagent_roles: crate::role::SubagentRoles) -> Self;
 }
 
 impl ConfiguresHerdrCli for HerdrCli {
@@ -322,6 +331,7 @@ impl ConfiguresHerdrCli for HerdrCli {
 
     #[cfg(test)]
     fn at(executable: PathBuf, flows_root: PathBuf) -> Self {
+        use crate::context::OpensCurriculumComposer;
         let fixture_root = flows_root
             .parent()
             .expect("fixture flows root has a parent")
@@ -359,7 +369,21 @@ impl ConfiguresHerdrCli for HerdrCli {
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
+            // A fixture flow is offered no subagent role unless a test
+            // names some (`with_subagent_roles`).
+            subagent_roles: crate::role::SubagentRoles {
+                composer: crate::role::RoleComposer::Curriculum(
+                    crate::context::CurriculumComposer::at("/fixture/run/curriculum.sock"),
+                ),
+                names: Vec::new(),
+            },
         }
+    }
+
+    #[cfg(test)]
+    fn with_subagent_roles(mut self, subagent_roles: crate::role::SubagentRoles) -> Self {
+        self.subagent_roles = subagent_roles;
+        self
     }
 }
 

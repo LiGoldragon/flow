@@ -18,6 +18,7 @@ use crate::generated::starter::{
     ReadsTypedUserText, RendersLeanStart, StartupReading, Textual,
 };
 use crate::herdr::reservation::ChoosesNativeSession;
+use crate::role::ComposesSubagentRoles;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use sha2::{Digest, Sha256};
 use signal_flow::{
@@ -283,7 +284,9 @@ pub(crate) trait PreparesClaudePane {
     /// launch already runs in suppresses the offer without touching any
     /// settings file. They also carry the harness hook: `flow-hook` on
     /// SessionStart, every PostToolUse and Stop, so each harness event
-    /// reaches Flow as a Report.
+    /// reaches Flow as a Report, and on every PreToolUse of the Agent tool,
+    /// where it decides whether a call naming a subagent role Flow selects
+    /// may dispatch.
     /// A launch that leaves out the attribution reminder sets the
     /// attribution lines empty here.
     fn claude_flag_settings(&self, lean: &LeanStart) -> String;
@@ -311,10 +314,18 @@ impl PreparesClaudePane for HerdrCli {
                 "command": self.harness_hook.to_string_lossy(),
             }]
         }]);
+        let agent_tool = serde_json::json!([{
+            "matcher": "Agent",
+            "hooks": [{
+                "type": "command",
+                "command": self.harness_hook.to_string_lossy(),
+            }]
+        }]);
         let mut settings = serde_json::json!({
             "permissions": { "defaultMode": "bypassPermissions" },
             "hooks": {
                 "SessionStart": hook,
+                "PreToolUse": agent_tool,
                 "PostToolUse": every_tool,
                 "Stop": hook,
             }
@@ -1459,6 +1470,23 @@ impl SpawnsNativeHarness for HerdrCli {
             arguments.push(
                 HarnessKind::Claude.system_argument(&launch.system_prompt.system_prompt_text),
             );
+            // The subagent roles this flow's Address is permitted, composed
+            // and verified now, as one inline JSON argument; nothing is
+            // written to disk, and a role that cannot be given whole
+            // refuses the spawn.
+            let agents = self
+                .subagent_roles
+                .agents_argument(&launch.launch_profile.address)
+                .map_err(|refusal| {
+                    format!("the flow's subagent roles were refused: {refusal:?}")
+                })?;
+            if let Some(agents) = agents {
+                if !HarnessKind::Claude.fits_one_argument(&agents) {
+                    return Err("the flow's subagent roles exceed one argument".into());
+                }
+                arguments.push("--agents".into());
+                arguments.push(agents);
+            }
             match session {
                 ClaudeSession::Unchosen => {}
                 ClaudeSession::Chosen(session) => {
@@ -2569,6 +2597,95 @@ printf '%s\n' 123456
         );
     }
 
+    fn relay_roles(
+        callers: crate::generated::curriculum::RoleCallers,
+    ) -> crate::role::SubagentRoles {
+        use crate::generated::curriculum::{Effort, Permission, RoleTools};
+        crate::role::SubagentRoles {
+            composer: crate::role::RoleComposer::Fixture(crate::role::FixtureRoles {
+                roles: [(
+                    "comment-relay".to_owned(),
+                    crate::role::FixtureRole {
+                        model_id: "sonnet".into(),
+                        effort: Effort::Medium,
+                        permission: Permission::Unrestricted,
+                        modules: vec![
+                            ("role-comment-relay-description".into(), "Relays.".into()),
+                            ("role-comment-relay".into(), "Relay body.".into()),
+                        ],
+                        role_tools: RoleTools::Explicit(vec!["Read".into()]),
+                        role_callers: callers,
+                    },
+                )]
+                .into(),
+            }),
+            names: vec!["comment-relay".into()],
+        }
+    }
+
+    #[test]
+    fn a_permitted_claude_flow_starts_with_its_verified_roles_as_one_agents_argument() {
+        use crate::generated::curriculum::{CallerMetaflow, RoleCallers};
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let start_call = |roles: crate::role::SubagentRoles| {
+            let (root, adapter) = fixture_herdr(
+                "claude",
+                "12345678-1234-4abc-8def-123456789abc",
+                "1234567812344abc8def123456789abc",
+                &agent_name,
+            );
+            let adapter = adapter.with_subagent_roles(roles);
+            let pane = adapter.create_launch_pane(&launch).expect("created pane");
+            let started = adapter.start_native_harness(&launch, &pane, None);
+            let calls = fs::read_to_string(root.path().join("calls")).unwrap_or_default();
+            (
+                started,
+                calls
+                    .lines()
+                    .find(|line| line.contains("agent start"))
+                    .map(str::to_owned),
+            )
+        };
+        let permitted = RoleCallers::Only(vec![CallerMetaflow {
+            first_string: "Field".into(),
+            second_string: "flow".into(),
+            third_string: "Secondary".into(),
+        }]);
+        let (started, call) = start_call(relay_roles(permitted));
+        started.expect("started with its roles");
+        let call = call.expect("agent start");
+        assert_eq!(call.matches(" --agents ").count(), 1);
+        assert!(call.contains(concat!(
+            r#" --agents {"comment-relay":{"description":"Relays.","effort":"medium","#,
+            r#""model":"sonnet","permissionMode":"bypassPermissions","prompt":"#
+        )));
+        assert!(call.contains(r#""tools":["Read"]}}"#));
+
+        let elsewhere = RoleCallers::Only(vec![CallerMetaflow {
+            first_string: "Psyche".into(),
+            second_string: "core".into(),
+            third_string: "Tertiary".into(),
+        }]);
+        let (started, call) = start_call(relay_roles(elsewhere));
+        started.expect("started without roles");
+        assert!(!call.expect("agent start").contains("--agents"));
+
+        let mut unavailable = relay_roles(RoleCallers::Any);
+        unavailable.composer = crate::role::RoleComposer::Curriculum(
+            <crate::context::CurriculumComposer as crate::context::OpensCurriculumComposer>::at(
+                "/nonexistent/curriculum.sock",
+            ),
+        );
+        let (started, call) = start_call(unavailable);
+        assert!(
+            started
+                .unwrap_err()
+                .contains("subagent roles were refused: ComposerUnavailable")
+        );
+        assert_eq!(call, None);
+    }
+
     #[test]
     fn stages_pane_native_claim_registration_and_one_ambiguous_prompt_write() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
@@ -2597,6 +2714,7 @@ printf '%s\n' 123456
             concat!(
                 r#"{"hooks":{"#,
                 r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
+                r#""PreToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"Agent"}],"#,
                 r#""SessionStart":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
                 r#""Stop":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
                 r#""permissions":{"defaultMode":"bypassPermissions"}}"#

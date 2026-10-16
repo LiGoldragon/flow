@@ -11,6 +11,7 @@ mod created_pane;
 pub mod delivery;
 pub mod events;
 pub(crate) mod metaflow;
+pub mod start_bundle;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -1059,6 +1060,7 @@ pub struct FlowStore {
     event_tables: events::EventTables,
     context_sizes: TableReference<context::FlowContextSize>,
     address_holds: TableReference<address_hold::AddressHold>,
+    start_bundles: TableReference<start_bundle::StartBundle>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows that no longer read in the
     /// current shape; each is also logged.
@@ -1648,6 +1650,8 @@ impl OpensFlowStore for FlowStore {
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
         let address_holds_descriptor =
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor();
+        let start_bundles_descriptor =
+            <start_bundle::StartBundle as start_bundle::DescribesStartBundleTable>::descriptor();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -1674,7 +1678,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_modules_descriptor)
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
-                .with_family(&address_holds_descriptor),
+                .with_family(&address_holds_descriptor)
+                .with_family(&start_bundles_descriptor),
         )?;
         let flows = engine.register_table(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -1698,6 +1703,7 @@ impl OpensFlowStore for FlowStore {
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let context_sizes = engine.register_table(context_sizes_descriptor)?;
         let address_holds = engine.register_table(address_holds_descriptor)?;
+        let start_bundles = engine.register_table(start_bundles_descriptor)?;
         let store = Self {
             engine,
             flows,
@@ -1720,6 +1726,7 @@ impl OpensFlowStore for FlowStore {
             event_tables,
             context_sizes,
             address_holds,
+            start_bundles,
             launch_changes: LaunchChanges::default(),
             opening_settlements: Vec::new(),
         };
@@ -1833,6 +1840,9 @@ impl OpensFlowStore for FlowStore {
         let address_holds = engine.register_table(
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor(),
         )?;
+        let start_bundles = engine.register_table(
+            <start_bundle::StartBundle as start_bundle::DescribesStartBundleTable>::descriptor(),
+        )?;
         let mut store = Self {
             engine,
             flows,
@@ -1855,6 +1865,7 @@ impl OpensFlowStore for FlowStore {
             event_tables,
             context_sizes,
             address_holds,
+            start_bundles,
             launch_changes: LaunchChanges::default(),
             opening_settlements: Vec::new(),
         };
@@ -4145,6 +4156,10 @@ pub(crate) trait ReadsFlowMemory {
                 context::FLOW_CONTEXT_SIZE_FAMILY,
                 context::FLOW_CONTEXT_SIZE_SCHEMA,
             ),
+            "flow_nexus_start_bundles" => (
+                start_bundle::START_BUNDLE_FAMILY,
+                start_bundle::START_BUNDLE_SCHEMA,
+            ),
             "flow_nexus_address_holds" => (
                 address_hold::ADDRESS_HOLD_FAMILY,
                 address_hold::ADDRESS_HOLD_SCHEMA,
@@ -4204,7 +4219,11 @@ pub(crate) trait ReadsFlowMemory {
         // before either opens, and its first full open adds the table, as
         // the first full open of a configuration-only store adds the running
         // tables.
-        const ADDED_LATER: &[&str] = &["flow_nexus_flow_context_sizes", "flow_nexus_address_holds"];
+        const ADDED_LATER: &[&str] = &[
+            "flow_nexus_flow_context_sizes",
+            "flow_nexus_address_holds",
+            "flow_nexus_start_bundles",
+        ];
         let is_exact_set = |expected: &[&str]| {
             actual.len() == expected.len() && expected.iter().all(|name| actual.contains(*name))
         };

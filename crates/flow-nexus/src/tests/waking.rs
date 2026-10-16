@@ -443,11 +443,18 @@ fn a_fresh_wake_composes_the_topic_modules_and_the_queued_work() {
             hash: "unchecked".into(),
             path: "vision-flow.md".into(),
         }],
+        system_bundle: b"the launcher's spirit and intent\n".to_vec(),
         prompt: text.clone(),
     };
     let profile = fixture.nexus.composer.fresh_profile(&seat).unwrap();
     assert_eq!(profile.address, address(Layer::Secondary));
-    assert_eq!(profile.instruction_prompt, text);
+    assert!(
+        profile
+            .instruction_prompt
+            .starts_with("You are the { Mind flow Secondary } metaflow;"),
+        "the metaflow line opens the first prompt"
+    );
+    assert!(profile.instruction_prompt.ends_with(&text));
     assert_eq!(profile.launch_source_vector.len(), 1);
     assert_eq!(
         profile.launch_source_vector[0].source_path,
@@ -457,8 +464,11 @@ fn a_fresh_wake_composes_the_topic_modules_and_the_queued_work() {
         profile.launch_source_vector[0].source_sha256,
         format!("{:x}", Sha256::digest(b"module bytes\n"))
     );
-    let bundle = fs::read_to_string(&profile.system_prompt_bundle_file).unwrap();
-    assert!(bundle.contains("Mind flow Secondary seat"));
+    assert_eq!(
+        fs::read(&profile.system_prompt_bundle_file).unwrap(),
+        b"the launcher's spirit and intent\n",
+        "the system prompt is the Start bundle, byte for byte"
+    );
     let composed = fixture.nexus.composer.compose(&profile).unwrap();
     let prompt = composed.first_prompt_payload.first_prompt_text;
     assert!(
@@ -1847,5 +1857,100 @@ fn a_nexus_start_puts_every_metaflow_left_awake_as_an_ended_flow_to_sleep() {
     assert_eq!(
         stored(&fixture, Layer::Tertiary).state,
         State::Awake("flow-0000000000000001".into())
+    );
+}
+
+/// A Start at an Address keeps the caller's bundle bytes, and the next fresh
+/// wake of that Address takes them as its system prompt.
+#[test]
+fn a_start_keeps_its_bundle_for_the_address_and_a_fresh_wake_reuses_it() {
+    use crate::Dispatches;
+    use crate::store::start_bundle::RecordsStartBundle;
+    let fixture = NexusFixture::new();
+    let bundle = fixture.directory.path().join("caller-bundle.md");
+    fs::write(&bundle, b"spirit\nintent\n").unwrap();
+    let profile = LaunchProfile {
+        launch_request_id: "start-bundle-request".into(),
+        launch_source_vector: vec![],
+        skill_name_vector: vec![],
+        address: address(Layer::Tertiary),
+        power_level: PowerLevel::Medium,
+        harness_kind: HarnessKind::Claude,
+        model_name: "claude-fixture".into(),
+        effort: "medium".into(),
+        flow_id_option: Some("1b8ac0".into()),
+        remembered_flow_vector: vec![],
+        herdr_session_name: "fixture-session".into(),
+        system_prompt_bundle_file: bundle.to_string_lossy().into_owned(),
+        instruction_prompt: "fixture instruction".into(),
+    };
+    let _ = fixture
+        .nexus
+        .dispatch(signal_flow::Query::Start(signal_flow::StartRequest {
+            launch_profile: profile,
+            origin_clue: OriginClue {
+                flow_id: "caller".into(),
+                session_id: "caller-session".into(),
+                turn_id: "caller-turn".into(),
+            },
+        }));
+    let kept = fixture
+        .nexus
+        .store
+        .start_bundle(&address(Layer::Tertiary))
+        .unwrap()
+        .expect("the Start kept the caller's bundle");
+    assert_eq!(
+        kept, b"spirit\nintent\n",
+        "the caller's bytes, without the Predecessor line"
+    );
+    let seat = FreshSeat {
+        address: address(Layer::Tertiary),
+        launch_request_id: "wake-0-2".into(),
+        model_name: "claude-fixture".into(),
+        harness_kind: HarnessKind::Claude,
+        power_level: PowerLevel::Medium,
+        effort: "medium".into(),
+        herdr_session_name: "fixture-session".into(),
+        modules: vec![],
+        system_bundle: kept.clone(),
+        prompt: "work".into(),
+    };
+    let woken = fixture.nexus.composer.fresh_profile(&seat).unwrap();
+    assert_eq!(fs::read(&woken.system_prompt_bundle_file).unwrap(), kept);
+    assert_eq!(woken.flow_id_option, None);
+}
+
+/// An Address no Start kept a bundle for is not woken fresh.
+#[test]
+fn a_fresh_wake_of_an_address_without_a_start_bundle_is_refused() {
+    let fixture = NexusFixture::new();
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("abc123".into()),
+        vec![],
+        vec![],
+    ));
+    resumable_ended_by(&fixture, |store| {
+        store.record_active("abc123").unwrap() && store.record_retired("abc123").unwrap()
+    });
+    let mut retired = stored(&fixture, Layer::Secondary);
+    retired.queue.push(Request::Order("Carry on.".into()));
+    fixture.nexus.store.seed_metaflow(retired);
+    let at = address(Layer::Secondary);
+    assert_eq!(
+        crate::store::start_bundle::RecordsStartBundle::start_bundle(&fixture.nexus.store, &at)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Failed(crate::generated::operation::Failed_Data::StartBundleMissing),
+        "no one-line fallback: the wake is refused"
+    );
+    assert_eq!(
+        stored(&fixture, Layer::Secondary).state,
+        State::Asleep,
+        "the seat stays asleep with its work queued"
     );
 }

@@ -18,6 +18,7 @@ use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::metaflow::TakesLaunchAddress;
+use crate::store::start_bundle::RecordsStartBundle;
 use crate::store::{
     AnnouncesLaunchChanges, ReadsCreatedLaunchPane, RecordsCreatedLaunchPane,
     RecordsNativeLaunchBinding,
@@ -178,6 +179,20 @@ impl LaunchesFlows for RunningNexus {
                 .is_err()
         {
             return Response::StartRejected(StartRejection::NativeLaunchRefused);
+        }
+        // The caller's bundle bytes are kept for the Address: a fresh wake
+        // of this seat uses them as its system prompt.
+        match std::fs::read(&launch.launch_profile.system_prompt_bundle_file) {
+            Ok(bytes) => {
+                if self
+                    .store
+                    .record_start_bundle(&launch.launch_profile.address, &bytes)
+                    .is_err()
+                {
+                    return persistence();
+                }
+            }
+            Err(_) => return Response::StartRejected(StartRejection::CompositionRefused),
         }
         // A Claude launch's FlowId is claimed here, before its harness
         // exists; the harness is spawned with it.

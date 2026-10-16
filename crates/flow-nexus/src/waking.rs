@@ -56,6 +56,7 @@ use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::RecordsContextSize;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SleepsMetaflows;
+use crate::store::start_bundle::RecordsStartBundle;
 use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle,
 };
@@ -940,6 +941,11 @@ impl WakesInParts for RunningNexus {
         text: &str,
     ) -> Result<FlowId, Failed_Data> {
         let address = &metaflow.address;
+        let system_bundle = match self.store.start_bundle(address) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Err(Failed_Data::StartBundleMissing),
+            Err(_) => return Err(Failed_Data::StoreRefused),
+        };
         let snapshot = match self.store.configuration_snapshot() {
             Ok(Some(snapshot)) => snapshot,
             _ => return Err(Failed_Data::StoreRefused),
@@ -977,6 +983,7 @@ impl WakesInParts for RunningNexus {
                 .filter(|module| module.key.topic == address.topic)
                 .map(|module| module.source.clone())
                 .collect(),
+            system_bundle,
             prompt: text.to_owned(),
         };
         let profile = self

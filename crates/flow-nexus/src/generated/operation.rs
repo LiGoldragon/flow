@@ -149,6 +149,7 @@ pub enum Failed_Data {
     NothingQueued,
     AddressAwake,
     AddressEnded,
+    StartBundleMissing,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

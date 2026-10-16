@@ -107,5 +107,6 @@ Operation
            NotAwake
            NothingQueued
            AddressAwake
-           AddressEnded ] ]
+           AddressEnded
+           StartBundleMissing ] ]
 [ PaneLaunch.{ ComposedLaunch HerdrPaneBinding Option<FlowId> } ]

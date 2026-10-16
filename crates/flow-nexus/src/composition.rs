@@ -747,11 +747,15 @@ pub struct FreshSeat {
     pub effort: String,
     pub herdr_session_name: String,
     pub modules: Vec<Source>,
+    /// The system-prompt bundle the seat's Address was last started with.
+    pub system_bundle: Vec<u8>,
     pub prompt: String,
 }
 
 /// Composes the LaunchProfile of a seat woken fresh. Its system-prompt
-/// bundle is written beside the launch copies and names the seat; each
+/// bundle is the Start bundle of its Address, written byte for byte beside
+/// the launch copies; the first prompt opens with the line that names the
+/// seat and says why it was started. Each
 /// configured module is a launch source, named by its path under the source
 /// root, as `Repository/Path` when it names a repository. The module's
 /// Blake3 hash is not checked here: the source is pinned by the SHA-256 of
@@ -817,14 +821,7 @@ impl ComposesFreshSeat for LaunchComposer {
         let unwritable =
             |error: std::io::Error| CompositionError::LaunchBundleUnwritable(error.to_string());
         fs::create_dir_all(&self.launch_bundles.directory).map_err(unwritable)?;
-        fs::write(
-            &bundle,
-            format!(
-                "You are the {} seat. Flow started you because work arrived for you while no seat of yours was running. The work is in your first prompt, oldest first.\n",
-                seat.address.seat_name()
-            ),
-        )
-        .map_err(unwritable)?;
+        fs::write(&bundle, &seat.system_bundle).map_err(unwritable)?;
         Ok(LaunchProfile {
             launch_request_id: seat.launch_request_id.clone(),
             launch_source_vector,
@@ -838,7 +835,11 @@ impl ComposesFreshSeat for LaunchComposer {
             remembered_flow_vector: Vec::new(),
             herdr_session_name: seat.herdr_session_name.clone(),
             system_prompt_bundle_file: bundle.to_string_lossy().into_owned(),
-            instruction_prompt: seat.prompt.clone(),
+            instruction_prompt: format!(
+                "You are the {{ {} }} metaflow; this flow started because work arrived while no flow of yours was running. The work follows, oldest first.\n\n{}",
+                seat.address.seat_name(),
+                seat.prompt
+            ),
         })
     }
 }

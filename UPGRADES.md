@@ -1,3 +1,19 @@
+# Flow 0.34.6
+
+No wire change. The store gains the `flow_nexus_start_bundles` table; a
+store written before it opens with the table added and holds no bundles.
+
+- **A fresh wake keeps the metaflow's system prompt.** At Start, Flow records
+  the caller's system-prompt bundle bytes for the launch's Address. A fresh
+  wake writes exactly those bytes, without any Predecessor or Remembered
+  line, as the woken flow's system prompt, so the spirit and intent modules
+  the launcher put there survive every wake. The line naming the metaflow and
+  why this flow started opens the first prompt instead.
+- **A wake without a Start bundle is refused.** An Address no Start kept a
+  bundle for is not woken fresh: the wake logs `FreshNotStarted` and answers
+  `Failed(StartBundleMissing)`, the work stays queued and the metaflow
+  Asleep. There is no one-line fallback.
+
 # Flow 0.34.5
 
 No wire change; no store change.

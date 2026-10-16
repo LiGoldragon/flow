@@ -11,7 +11,7 @@
 use super::HerdrCli;
 use super::launch::ClaimsNativeIdentity;
 use sha2::{Digest, Sha256};
-use signal_flow::{ComposedLaunch, HarnessKind, LaunchProfile};
+use signal_flow::{ComposedLaunch, HarnessKind};
 
 pub trait ChoosesNativeSession {
     /// The Claude session id this Nexus chooses for a launch: UUIDv5-shaped
@@ -22,19 +22,19 @@ pub trait ChoosesNativeSession {
     /// sandbox beside the production Nexus) serve different sockets, so
     /// the same request id never names one session twice. `None` for a
     /// Codex launch.
-    fn reserved_native_session_id(&self, profile: &LaunchProfile) -> Option<String>;
+    fn reserved_native_session_id(&self, launch: &ComposedLaunch) -> Option<String>;
 }
 
 impl ChoosesNativeSession for HerdrCli {
-    fn reserved_native_session_id(&self, profile: &LaunchProfile) -> Option<String> {
-        if profile.harness_kind != HarnessKind::Claude {
+    fn reserved_native_session_id(&self, launch: &ComposedLaunch) -> Option<String> {
+        if launch.harness_kind != HarnessKind::Claude {
             return None;
         }
         let digest = Sha256::digest(
             format!(
                 "flow-claude-session-v2\0{}\0{}",
                 self.ordinary_socket.to_string_lossy(),
-                profile.launch_request_id
+                launch.launch_profile.launch_request_id
             )
             .as_bytes(),
         );
@@ -65,7 +65,7 @@ pub trait ReservesFlowIdentity {
 
 impl ReservesFlowIdentity for HerdrCli {
     fn reserve_flow_identity(&self, launch: &ComposedLaunch) -> Result<Option<String>, String> {
-        let Some(session) = self.reserved_native_session_id(&launch.launch_profile) else {
+        let Some(session) = self.reserved_native_session_id(launch) else {
             return Ok(None);
         };
         self.claim_flow_identity(&HarnessKind::Claude, &session)
@@ -127,14 +127,14 @@ impl ReleasesFlowIdentity for HerdrCli {
 mod tests {
     use super::{ChoosesNativeSession, ReleasesFlowIdentity};
     use crate::herdr::{ConfiguresHerdrCli, HerdrCli};
-    use signal_flow::{HarnessKind, LaunchProfile};
+    use signal_flow::{ComposedLaunch, HarnessKind};
     use std::fs;
     use std::path::Path;
 
-    fn profile(harness_kind: HarnessKind) -> LaunchProfile {
-        let mut profile = crate::herdr::launch::tests::launch(harness_kind).launch_profile;
-        profile.launch_request_id = "request-1".into();
-        profile
+    fn profile(harness_kind: HarnessKind) -> ComposedLaunch {
+        let mut launch = crate::herdr::launch::tests::launch(harness_kind);
+        launch.launch_profile.launch_request_id = "request-1".into();
+        launch
     }
 
     /// One request to one Nexus names one session every time; the same

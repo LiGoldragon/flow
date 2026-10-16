@@ -79,7 +79,7 @@ impl ShowsNativeTitle for NativeTitle {
 #[cfg(test)]
 mod tests {
     use super::{ShowsNativeTitle, TitleRefused, TitlesFlow};
-    use signal_flow::{Aspect, HarnessKind, LaunchProfile, Layer, PowerLevel};
+    use signal_flow::{Aspect, LaunchProfile, Layer};
 
     fn profile(aspect: Aspect, layer: Layer, model: &str) -> LaunchProfile {
         LaunchProfile {
@@ -91,8 +91,6 @@ mod tests {
                 topic: "flow".into(),
                 layer,
             },
-            power_level: PowerLevel::High,
-            harness_kind: HarnessKind::Claude,
             model_name: model.into(),
             effort: "high".into(),
             flow_id_option: None,
@@ -121,8 +119,7 @@ mod tests {
             "{ Psyche flow Primary 38de5b }"
         );
         // Power and model never enter the title.
-        let mut low = profile(Aspect::Mind, Layer::Secondary, "gpt-6-sol");
-        low.power_level = PowerLevel::UltraLow;
+        let low = profile(Aspect::Mind, Layer::Secondary, "gpt-6-sol");
         assert_eq!(
             low.native_title("00f95a").unwrap().as_str(),
             "{ Mind flow Secondary 00f95a }"

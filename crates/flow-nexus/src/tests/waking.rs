@@ -27,9 +27,9 @@ use crate::waking::{
 };
 use flow_ethos::State;
 use signal_flow::{
-    Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
-    HerdrRouteSelection, LaunchProfile, Layer, Metaflow, NativeLaunchBinding, NativeLaunchIntent,
-    OriginClue, PowerLevel, Request,
+    Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
+    HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow, NativeLaunchBinding,
+    NativeLaunchIntent, Origin, PowerLevel, Request,
 };
 use std::fs;
 
@@ -82,7 +82,6 @@ fn claude_seat(fixture: &NexusFixture, tokens: i64) {
     node.session_id = CLAUDE_SESSION.into();
     node.harness_kind = HarnessKind::Claude;
     node.endpoint_selection = EndpointSelection::Unavailable;
-    node.origin_clue.flow_id = CLAUDE_SEAT.into();
     fixture
         .nexus
         .store
@@ -435,8 +434,6 @@ fn a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work() {
         address: address(Layer::Secondary),
         launch_request_id: "wake-0-1".into(),
         model_name: "claude-fixture".into(),
-        harness_kind: HarnessKind::Claude,
-        power_level: PowerLevel::Medium,
         effort: "medium".into(),
         herdr_session_name: "fixture-session".into(),
         system_modules: vec!["spirit-core".into(), "intent-flow".into()],
@@ -448,7 +445,17 @@ fn a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work() {
     assert_eq!(profile.address, address(Layer::Secondary));
     assert_eq!(profile.instruction_prompt, text);
     assert_eq!(profile.user_modules, seat.user_modules);
-    let composed = fixture.nexus.composer.compose(&profile).unwrap();
+    let composed = fixture
+        .nexus
+        .composer
+        .compose(
+            crate::composition::HarnessedProfile {
+                harness_kind: HarnessKind::Claude,
+                launch_profile: profile.clone(),
+            },
+            Vec::<signal_flow::LeaveOut>::new(),
+        )
+        .unwrap();
     // The same full module text a Start of these identities carries, then
     // the queued work as the brief.
     let body = composed.first_prompt_payload.first_prompt_body;
@@ -516,8 +523,6 @@ fn resumable_ended_by(
             topic: "flow".into(),
             layer: signal_flow::Layer::Secondary,
         },
-        power_level: PowerLevel::Medium,
-        harness_kind: HarnessKind::Claude,
         model_name: "claude-fixture".into(),
         effort: "medium".into(),
         flow_id_option: None,
@@ -526,18 +531,27 @@ fn resumable_ended_by(
         leave_outs_option: None,
         instruction_prompt: "fixture instruction".into(),
     };
+    // The launch that bound abc123.
+    let composed = fixture
+        .nexus
+        .composer
+        .compose(
+            crate::composition::HarnessedProfile {
+                harness_kind: HarnessKind::Claude,
+                launch_profile: profile.clone(),
+            },
+            Vec::<signal_flow::LeaveOut>::new(),
+        )
+        .expect("composes");
     let session = fixture
         .nexus
         .herdr
-        .reserved_native_session_id(&profile)
+        .reserved_native_session_id(&composed)
         .expect("a Claude launch has a Flow-chosen session");
-    // The launch that bound abc123.
-    let composed = fixture.nexus.composer.compose(&profile).expect("composes");
-    let origin = OriginClue {
+    let origin = Origin::Flow(FlowOrigin {
         flow_id: "caller".into(),
         session_id: "caller-session".into(),
-        turn_id: "caller-turn".into(),
-    };
+    });
     fixture
         .nexus
         .store
@@ -598,7 +612,7 @@ fn resumable_ended_by(
                 herdr_pane_id: "w1:p3".into(),
                 herdr_terminal_id: "term-old".into(),
             }),
-            origin_clue: origin,
+            origin,
             flow_lifecycle: FlowLifecycle::Active,
         })
         .expect("registered");
@@ -753,7 +767,13 @@ fn a_queued_order_resumes_the_sleeping_session_with_its_flow_id_and_the_whole_qu
             herdr_agent_name: fixture
                 .nexus
                 .composer
-                .compose(&seat.profile)
+                .compose(
+                    crate::composition::HarnessedProfile {
+                        harness_kind: HarnessKind::Claude,
+                        launch_profile: seat.profile.clone()
+                    },
+                    Vec::<signal_flow::LeaveOut>::new(),
+                )
                 .unwrap()
                 .launch_agent_name(),
             herdr_pane_id: "w9:p1".into(),
@@ -1221,11 +1241,10 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
                 harness_kind: HarnessKind::Claude,
                 endpoint_selection: EndpointSelection::Unavailable,
                 herdr_route_selection: HerdrRouteSelection::Available(sender_route),
-                origin_clue: OriginClue {
+                origin: Origin::Flow(FlowOrigin {
                     flow_id: "da2038".into(),
                     session_id: "field-session".into(),
-                    turn_id: "field-turn".into(),
-                },
+                }),
                 flow_lifecycle: FlowLifecycle::Active,
             },
             signal_flow::Caller {

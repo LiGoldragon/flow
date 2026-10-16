@@ -185,8 +185,8 @@ mod tests {
     use super::{EventRecording, RecordsHarnessEvents};
     use crate::store::{FlowStore, OpensFlowStore, RegistersFlowIdentity};
     use signal_flow::{
-        EndpointSelection, Event, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
-        HerdrRouteSelection, OriginClue,
+        EndpointSelection, Event, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
+        HerdrRouteSelection, Origin,
     };
 
     fn node() -> FlowNode {
@@ -201,11 +201,10 @@ mod tests {
                 herdr_pane_id: "w1:p1".into(),
                 herdr_terminal_id: "term-1".into(),
             }),
-            origin_clue: OriginClue {
+            origin: Origin::Flow(FlowOrigin {
                 flow_id: "5a4d0b".into(),
                 session_id: "c0ffee00-0000-4000-8000-000000000001".into(),
-                turn_id: "unavailable".into(),
-            },
+            }),
             flow_lifecycle: FlowLifecycle::Active,
         }
     }

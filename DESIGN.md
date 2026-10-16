@@ -83,10 +83,11 @@ sequenceDiagram
 ```
 
 The launch brief and the Codex thread environment give the child its allocated
-`FLOW_ID` and `FLOW_DIRECTORY`, then record parent Flow, source session, and
-source turn as the child’s context clue. Origin does not grant authority. A
-restart is authorized only when the supplied Flow ID and harness session equal
-the target's registered identity. The store returns that child’s saved daemon
+`FLOW_ID` and `FLOW_DIRECTORY`, then record the origin the Nexus derived from
+the calling process: the flow bound in its pane and that flow's session, or
+Unbound. Origin does not grant authority to launch. A restart is authorized
+only when the calling process's derived origin is the target's registered
+identity, its Flow ID and harness session. The store returns that child’s saved daemon
 thread ID; the adapter resumes it; generation changes only after the resume
 turn succeeds.
 
@@ -96,7 +97,7 @@ launching a second thread. A thread-start failure leaves a non-resumable
 pending reservation. Both conditions recover from `FLOW_NEXUS_STORE`.
 
 `ResolveRecipient` projects a durable Flow record into a `FlowNode`: Flow ID,
-daemon session ID, harness kind, route readiness, endpoint, origin clue, and
+daemon session ID, harness kind, route readiness, endpoint, origin, and
 lifecycle. Message Nexus consumes that typed reply instead of maintaining a
 second identity registry.
 

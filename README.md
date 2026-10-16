@@ -94,12 +94,15 @@ None of the three is a deletion — each keeps the row, its origin and its
 history — and `Deliver`, `ResolveRecipient`, `Stop` and `Replace` treat all three
 as gone. `Retire` refuses `AlreadyGone` for a flow that has already ended.
 
-`Start` carries a typed `LaunchProfile` plus an `OriginClue`. The origin is a
-caller claim; its text does not authenticate the caller. A profile names its
-ordered source descriptors and exact SHA-256 values, ordered native skill
-names, the launched seat's Address (aspect, topic, layer), power, harness,
-model, effort, predecessor, remembered flows, Herdr target session, and first
-instruction. Once the seat's native binding is witnessed and its flow
+`Start` carries a typed `LaunchProfile` alone. A profile names the module
+identities of its system prompt and of its first USER message, the launched
+flow's Address (aspect, topic, layer), model, effort, predecessor, remembered
+flows, Herdr target session, leave-outs, and first instruction. The Nexus
+derives the rest: the origin from the calling process, as Identify reads a
+caller (the one flow bound in its Herdr pane, with that flow's native
+session, or `Unbound` for any other caller, which is recorded and not
+refused); the power from the Address layer; the harness from the model,
+Codex when a configured Codex endpoint serves it and Claude otherwise. Once the seat's native binding is witnessed and its flow
 registered, before its first prompt, the launch records that Address's
 metaflow Awake as the launched flow, so the seat's first tool call is
 identified and sends through Message; confirmation keeps it, so the seat

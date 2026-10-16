@@ -12,7 +12,7 @@ pub struct PaneLaunch {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Reserve_Data {
     pub composed_launch: signal_flow::ComposedLaunch,
-    pub origin_clue: signal_flow::OriginClue,
+    pub origin: signal_flow::Origin,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

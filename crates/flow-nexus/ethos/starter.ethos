@@ -6,25 +6,28 @@
 ; the one before; the receipt is every part seen in order, then the flow's
 ; first answer.
 ;
+; A capability takes traits, never concrete values: each value a starter
+; capability reads (a text, a profile, a request, a transcript row) reaches
+; it through the trait that yields it, which the concrete type implements.
+;
 ; VerifiedContext is the guard: its fields are private and its one
 ; constructor is VerifiesContext.verified, so no text but the composer's
 ; verified answer reaches a prompt. It stays a Rust type of its own because
 ; a generated type's fields are public.
-;
-; The starter's traits whose methods take an input are hand-written: an
-; ethos-zero capability takes only traits as inputs, and the values these
-; methods take (a request, a profile, a text) are concrete types.
 
 Library
-[ signal_flow:[ Address HarnessKind LaunchProfile PromptDeliveryIntent NativeTargetReceipt FlowId SessionId OriginClue SystemModules UserModules HerdrSessionName LeaveOuts LeaveOutRefusal ]
-  flow_nexus:[ StartupSelection ] ]
+[ signal_flow:[ Address HarnessKind LaunchProfile PromptDeliveryIntent NativeTargetReceipt FlowId SessionId Origin SystemModules UserModules HerdrSessionName LeaveOuts LeaveOutRefusal ComposedLaunch ContextRefusal SystemPrompt HerdrPaneBinding PromptDeliveryResult Response Launched ]
+  flow_nexus:[ StartupSelection StartupComposition ContextProvenance CurriculumQuery CurriculumOutcome CompositionError VerifiedContext OperationOutcome CallerProcess ]
+  serde_json:JsonValue.Value ]
 [ ; What a launch asks of the context composer.
   ContextRequest.{ Address HarnessKind SystemModules UserModules }
+  ; A launch profile with the harness the Nexus derived for its model.
+  HarnessedProfile.{ LaunchProfile HarnessKind }
   ; What a fresh wake takes from the metaflow's last launch.
   FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> }
   ; A Started launch as its outcome row keeps it; the flow's route is read
   ; from the flow's own row when the reply is made.
-  LaunchedRecord.{ FlowId SessionId OriginClue }
+  LaunchedRecord.{ FlowId SessionId Origin }
   ReplacedRecord.{ FlowId LaunchedRecord }
   ; What the native transcript shows of a first USER message: Received is
   ; every part in order then the first answer; Waiting is not yet; and
@@ -41,17 +44,67 @@ Library
   StartupReading.{ SeenParts LastPartAnswered Option<NativeTurn> Option<PartTurn> }
   ; A harness start and the parts it leaves out.
   LeanStart.{ HarnessKind LeaveOuts } ]
-[ SelectsStartup.[ startup_selection.[ StartupSelection ] ]
+[ ; The values capabilities read, each through the trait that yields it.
+  Textual.[ text.[ String ] ]
+  Profiled.[ profile.[ LaunchProfile ]
+             harness_kind.[ HarnessKind ] ]
+  LeaveOutListing.[ leave_outs.[ LeaveOuts ] ]
+  ContextRequesting.[ context_request.[ ContextRequest ] ]
+  StartupComposing.[ composition.[ StartupComposition ] ]
+  CurriculumQuerying.[ query.[ CurriculumQuery ] ]
+  ProvenanceListing.[ provenance.[ Vector<ContextProvenance> ] ]
+  SegmentListing.[ segments.[ Vector<String> ] ]
+  PartNumbering.[ part_number.[ Integer ]
+                  part_count.[ Integer ] ]
+  SystemPrompted.[ system_prompt.[ SystemPrompt ] ]
+  PaneBound.[ pane.[ HerdrPaneBinding ] ]
+  JsonRow.[ row.[ JsonValue ] ]
+  DeliveryIntended.[ intent.[ PromptDeliveryIntent ] ]
+  Progressing.[ progress.[ StartupProgress ] ]
+  OutcomeCarrying.[ outcome.[ OperationOutcome ] ]
+  LaunchedRecording.[ launched_record.[ LaunchedRecord ] ]
+  CallerProcessing.[ caller_process.[ Option<CallerProcess> ] ]
+  ; The starter's capabilities.
+  ComposesFlowContext.[ compose_flow_context.{ [ ContextRequesting ] [ Result<StartupComposition ContextRefusal> ] } ]
+  OpensCurriculumComposer.[ at:{ [ Textual ] [ Self ] }
+                            from_environment:[ Self ] ]
+  SelectsStartup.[ startup_selection.[ StartupSelection ] ]
+  ExchangesCurriculumFrames.[ exchange.{ [ CurriculumQuerying ] [ Result<CurriculumOutcome String> ] } ]
+  VerifiesContext.[ verified:{ [ ContextRequesting StartupComposing ] [ Result<Self ContextRefusal> ] } ]
   ReadsVerifiedContext.[ address.[ Address ]
                          system_text.[ String ]
                          user_segments.[ Vector<String> ] ]
+  CutsRenderedText.[ rendered_segments.{ [ ProvenanceListing ] [ Option<Vector<String>> ] } ]
+  FitsOneMessage.[ fits_one_message.{ [ Textual ] [ Boolean ] }
+                   system_argument.{ [ Textual ] [ String ] }
+                   fits_one_argument.{ [ Textual ] [ Boolean ] } ]
+  SplitsStartupMessage.[ part_header:{ [ PartNumbering ] [ String ] }
+                         startup_parts.{ [ SegmentListing Textual ] [ Result<Vector<String> ContextRefusal> ] } ]
+  JoinsContextAndBrief.[ joined_with.{ [ Textual ] [ Vector<String> ] } ]
   RendersBrief.[ brief.[ String ] ]
+  ResolvesLeaveOuts.[ effective_leave_outs.{ [ LeaveOutListing ] [ Result<LeaveOuts CompositionError> ] } ]
+  ComposesVerifiedContext.[ verified_context.{ [ Profiled ] [ Result<VerifiedContext CompositionError> ] }
+                            launch_system_prompt.{ [ Profiled ReadsVerifiedContext ] [ Result<SystemPrompt ContextRefusal> ] } ]
+  AssemblesComposedLaunch.[ assembled:{ [ Profiled SystemPrompted Textual SegmentListing LeaveOutListing ] [ ComposedLaunch ] } ]
+  ComposesLaunch.[ compose.{ [ Profiled LeaveOutListing ] [ Result<ComposedLaunch CompositionError> ] }
+                   resumption.{ [ Profiled LeaveOutListing Textual ] [ Result<ComposedLaunch CompositionError> ] } ]
   ProfilesFreshSeat.[ fresh_profile.[ LaunchProfile ] ]
+  PromptsThroughHerdrSocket.[ herdr_session_socket.{ [ Textual ] [ Result<String String> ] }
+                              prompt_through_socket.{ [ PaneBound Textual ] [ Result<JsonValue String> ] } ]
+  ReadsStartupRecord.[ read_record!{ [ JsonRow DeliveryIntended ] [ Result<Option<String> String> ] }
+                       read_part!{ [ Textual DeliveryIntended ] [ Result<Integer String> ] } ]
   ReadsTypedUserText.[ claude_typed_text.[ Option<String> ] ]
   RendersLeanStart.[ refusal.[ Option<LeaveOutRefusal> ]
                      arguments.[ Vector<String> ]
                      environment.[ Vector<String> ]
                      disallowed_tools.[ Vector<String> ]
                      attribution_off.[ Boolean ]
-                     skill_listing_off.[ Boolean ] ] ]
+                     skill_listing_off.[ Boolean ] ]
+  SettlesStartupProgress.[ settle_progress.{ [ Profiled DeliveryIntended Progressing ] [ Response ] }
+                           advance_startup.{ [ Profiled DeliveryIntended ] [ Response ] }
+                           stops_reported.{ [ Textual ] [ Integer ] }
+                           composition_refused:{ [ OutcomeCarrying ] [ Response ] } ]
+  NamesLaunchedRoute.[ launched.{ [ LaunchedRecording ] [ Launched ] } ]
+  DerivesOrigin.[ origin_of.{ [ CallerProcessing ] [ Origin ] } ]
+  DerivesHarness.[ harness_for.{ [ Textual ] [ HarnessKind ] } ] ]
 []

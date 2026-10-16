@@ -178,31 +178,28 @@ mod tests {
         };
         let Query::Start(request) = client
             .parse_command([
-                "Start.{ { request-7 [ spirit-core intent-flow ] [ operation-main-flow compensation-behavior ] { Field flow Primary } High Codex gpt-6-astra medium Some.836818 [ { 1b8ac0 1 } ] messaging-build Some.[ SkillTool WorkflowTool ] «Carry this bounded launch request.» } { fac697 session-1 turn-2 } }".into(),
+                "Start.{ request-7 [ spirit-core intent-flow ] [ operation-main-flow compensation-behavior ] { Field flow Primary } gpt-6-astra medium Some.836818 [ { 1b8ac0 1 } ] messaging-build Some.[ SkillTool WorkflowTool ] «Carry this bounded launch request.» }".into(),
             ]
             .into_iter())
             .expect("typed Start parses")
         else {
             panic!("Start fixture must remain a Start query")
         };
-        assert_eq!(request.launch_profile.launch_request_id, "request-7");
+        assert_eq!(request.launch_request_id, "request-7");
+        assert_eq!(request.system_modules, ["spirit-core", "intent-flow"]);
         assert_eq!(
-            request.launch_profile.system_modules,
-            ["spirit-core", "intent-flow"]
-        );
-        assert_eq!(
-            request.launch_profile.user_modules,
+            request.user_modules,
             ["operation-main-flow", "compensation-behavior"]
         );
         assert_eq!(
-            request.launch_profile.leave_outs_option,
+            request.leave_outs_option,
             Some(vec![
                 signal_flow::LeaveOut::SkillTool,
                 signal_flow::LeaveOut::WorkflowTool
             ])
         );
         assert_eq!(
-            request.launch_profile.instruction_prompt,
+            request.instruction_prompt,
             "Carry this bounded launch request."
         );
     }
@@ -215,7 +212,7 @@ mod tests {
         assert!(
             client
                 .parse_command([
-                    "Start.{ { request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ operation-main-flow ] { Field flow Primary } High Codex gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» } { fac697 session-1 turn-2 } }".into(),
+                    "Start.{ request-7 [ { Vision/flowNexus.md 54c08e7190360a308e560935c120c69b81c4aacb4975751a4841912b599f4f5a } ] [ operation-main-flow ] { Field flow Primary } gpt-6-astra medium None [] messaging-build /tmp/flow-system-prompt.md «Launch.» }".into(),
                 ]
                 .into_iter())
                 .is_err()
@@ -252,12 +249,12 @@ mod tests {
             Query::Observe(signal_flow::ObserveSelection::Launch("request-8".into()))
         );
         let Query::Replace(request) = client
-            .parse_command(["Replace.{ { request-8 [ spirit-core ] [] { Field flow Primary } High Claude opus-5-5 high Some.fac697 [] messaging-build None «Carry on from fac697.» } { fac697 session-1 turn-2 } }".into()].into_iter())
+            .parse_command(["Replace.{ request-8 [ spirit-core ] [] { Field flow Primary } opus-5-5 high Some.fac697 [] messaging-build None «Carry on from fac697.» }".into()].into_iter())
             .expect("typed Replace parses")
         else {
             panic!("Replace fixture must remain a Replace query")
         };
-        assert_eq!(request.launch_profile.flow_id_option, Some("fac697".into()));
+        assert_eq!(request.flow_id_option, Some("fac697".into()));
     }
 
     #[test]
@@ -302,16 +299,12 @@ mod tests {
                     herdr_terminal_id: "term-current".into(),
                 },
             ),
-            origin_clue: signal_flow::OriginClue {
-                flow_id: "da1e3f".into(),
-                session_id: "da1e3f9d-full".into(),
-                turn_id: "unavailable".into(),
-            },
+            origin: signal_flow::Origin::Unbound,
             flow_lifecycle: signal_flow::FlowLifecycle::Active,
         });
         assert_eq!(
             client.textualize_reply(&reply),
-            "RecipientResolved.{ da1e3f da1e3f9d-full Claude Unavailable Available.{ messaging-build recipient w1:p2 term-current } { da1e3f da1e3f9d-full unavailable } Active }"
+            "RecipientResolved.{ da1e3f da1e3f9d-full Claude Unavailable Available.{ messaging-build recipient w1:p2 term-current } Unbound Active }"
         );
     }
 }

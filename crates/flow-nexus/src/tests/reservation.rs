@@ -8,7 +8,7 @@ use super::NexusFixture;
 use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use meta_signal_flow::{Query as MetaQuery, Response as MetaResponse};
-use signal_flow::{Event, HarnessKind, Query, Report_Data, Response, StartRejection};
+use signal_flow::{Event, Query, Report_Data, Response, StartRejection};
 use std::fs;
 
 impl NexusFixture {
@@ -75,7 +75,7 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
     // before any harness exists.
     let _ = fs::remove_file(&fixture.snapshot_program);
     let mut launch = fixture.staged_launch("reserved-request", None);
-    launch.profile.harness_kind = HarnessKind::Claude;
+    launch.profile.model_name = "claude-fixture".into();
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),
         Response::StartRejected(StartRejection::NativeLaunchRefused)
@@ -125,7 +125,7 @@ fn a_claude_launch_whose_flow_id_cannot_be_claimed_is_refused_before_any_pane() 
     let fixture = NexusFixture::new();
     // No flow-id helper: the claim at Reserve fails.
     let mut launch = fixture.staged_launch("unclaimed-request", None);
-    launch.profile.harness_kind = HarnessKind::Claude;
+    launch.profile.model_name = "claude-fixture".into();
     let log = fixture.herdr_logging_every_call();
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),

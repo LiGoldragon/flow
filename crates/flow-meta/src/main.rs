@@ -115,8 +115,8 @@ impl ParsesMetaCommand for FlowMetaClient {
                     })
                 };
                 Ok(Query::RegisterFlow(signal_flow::FlowNode {
-                    flow_id: flow_id.clone(),
-                    session_id: session_id.clone(),
+                    flow_id,
+                    session_id,
                     harness_kind,
                     endpoint_selection,
                     herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
@@ -127,11 +127,8 @@ impl ParsesMetaCommand for FlowMetaClient {
                             herdr_terminal_id,
                         },
                     ),
-                    origin_clue: signal_flow::OriginClue {
-                        flow_id,
-                        session_id,
-                        turn_id: "unavailable".into(),
-                    },
+                    // A flow registered by hand was started by no flow.
+                    origin: signal_flow::Origin::Unbound,
                     flow_lifecycle: signal_flow::FlowLifecycle::Active,
                 }))
             }

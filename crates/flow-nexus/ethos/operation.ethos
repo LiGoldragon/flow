@@ -49,10 +49,10 @@
 ; the Nexus crate until the Memory root is compiled.
 
 Operation
-[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch OriginClue LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request ContextRefusal LeaveOutRefusal ]
+[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request ContextRefusal LeaveOutRefusal ]
   flow_nexus:[ LaunchOutcome Replacement ] ]
 [ Compose.LaunchProfile
-  Reserve.{ ComposedLaunch OriginClue }
+  Reserve.{ ComposedLaunch Origin }
   Record.[ Intent.NativeLaunchIntent
            Binding.NativeLaunchBinding
            Acknowledgement.RegistrationAcknowledgement

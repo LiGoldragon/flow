@@ -10,11 +10,15 @@
 //! each opening with a header naming it part k of n; the brief is in the
 //! last part.
 
-use crate::context::{ComposesFlowContext, VerifiedContext, VerifiesContext};
-use crate::generated::starter::{
-    ContextRequest, LeanStart, ProfilesFreshSeat, ReadsVerifiedContext, RendersBrief,
-    RendersLeanStart,
+use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
+pub use crate::generated::starter::{
+    AssemblesComposedLaunch, ComposesLaunch, ComposesVerifiedContext, ContextRequest,
+    FitsOneMessage, HarnessedProfile, JoinsContextAndBrief, LeanStart, LeaveOutListing,
+    PartNumbering, Profiled, ProfilesFreshSeat, ReadsVerifiedContext, RendersBrief,
+    RendersLeanStart, ResolvesLeaveOuts, SegmentListing, SplitsStartupMessage, SystemPrompted,
+    Textual,
 };
+use crate::waking::WakePolicy;
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
@@ -23,7 +27,7 @@ use signal_flow::{
     LaunchProfile, LeaveOut, LeaveOutRefusal, PowerLevel, PromptPart, Request, SystemPrompt,
     TargetReceiptRequest,
 };
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CompositionError {
@@ -42,17 +46,17 @@ impl From<ContextRefusal> for CompositionError {
 }
 
 /// Composes launches through one context composer.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LaunchComposer {
-    context: Arc<dyn ComposesFlowContext>,
+    context: ContextComposer,
 }
 
 pub trait OpensLaunchComposer {
-    fn with_context(context: Arc<dyn ComposesFlowContext>) -> Self;
+    fn with_context(context: ContextComposer) -> Self;
 }
 
 impl OpensLaunchComposer for LaunchComposer {
-    fn with_context(context: Arc<dyn ComposesFlowContext>) -> Self {
+    fn with_context(context: ContextComposer) -> Self {
         Self { context }
     }
 }
@@ -84,6 +88,11 @@ impl RendersLaunchSection for LaunchProfile {
     }
 }
 
+pub(crate) const HERDR_REQUEST_LINE_LIMIT: usize = 1024 * 1024;
+const HERDR_ENVELOPE_ALLOWANCE: usize = 1024;
+const CODEX_TEXT_CHARACTER_LIMIT: usize = 1 << 20;
+const ARGUMENT_BYTE_LIMIT: usize = 131_071;
+
 /// What one message and one argument may hold for a harness.
 ///
 /// A Claude part is typed by Herdr's `agent.prompt`, whose JSON request line
@@ -94,48 +103,61 @@ impl RendersLaunchSection for LaunchProfile {
 /// characters. The system prompt travels as one process argument
 /// (`--system-prompt` for Claude, `instructions=` for Codex), which Linux
 /// bounds at 131072 bytes with its terminating NUL.
-pub trait FitsOneMessage {
-    const HERDR_REQUEST_LINE_LIMIT: usize = 1024 * 1024;
-    const HERDR_ENVELOPE_ALLOWANCE: usize = 1024;
-    const CODEX_TEXT_CHARACTER_LIMIT: usize = 1 << 20;
-    const ARGUMENT_BYTE_LIMIT: usize = 131_071;
-    fn fits_one_message(&self, text: &str) -> bool;
-    /// The process argument that carries the system prompt.
-    fn system_argument(&self, text: &str) -> String;
-    fn fits_one_argument(&self, text: &str) -> bool;
-}
-
 impl FitsOneMessage for HarnessKind {
-    fn fits_one_message(&self, text: &str) -> bool {
+    fn fits_one_message<N: Textual>(&self, input: N) -> bool {
+        let text = input.text();
         match self {
-            HarnessKind::Claude => serde_json::to_string(text).is_ok_and(|encoded| {
-                encoded.len() + Self::HERDR_ENVELOPE_ALLOWANCE <= Self::HERDR_REQUEST_LINE_LIMIT
+            HarnessKind::Claude => serde_json::to_string(&text).is_ok_and(|encoded| {
+                encoded.len() + HERDR_ENVELOPE_ALLOWANCE <= HERDR_REQUEST_LINE_LIMIT
             }),
-            HarnessKind::Codex => text.chars().count() <= Self::CODEX_TEXT_CHARACTER_LIMIT,
+            HarnessKind::Codex => text.chars().count() <= CODEX_TEXT_CHARACTER_LIMIT,
         }
     }
 
-    fn system_argument(&self, text: &str) -> String {
+    fn system_argument<N: Textual>(&self, input: N) -> String {
+        let text = input.text();
         match self {
-            HarnessKind::Claude => text.to_owned(),
+            HarnessKind::Claude => text,
             // A JSON string is a TOML basic string; Codex reads `-c` values
             // as TOML.
             HarnessKind::Codex => format!(
                 "instructions={}",
-                serde_json::to_string(text).unwrap_or_default()
+                serde_json::to_string(&text).unwrap_or_default()
             ),
         }
     }
 
-    fn fits_one_argument(&self, text: &str) -> bool {
-        !text.contains('\0') && self.system_argument(text).len() <= Self::ARGUMENT_BYTE_LIMIT
+    fn fits_one_argument<N: Textual>(&self, input: N) -> bool {
+        let text = input.text();
+        !text.contains('\0') && self.system_argument(&text).len() <= ARGUMENT_BYTE_LIMIT
     }
 }
 
-/// The parts of a first USER message.
-pub trait SplitsStartupMessage {
-    /// The header of part `number` (from 1) of `count`.
-    fn part_header(number: usize, count: usize) -> String {
+/// The body of a first USER message: the segments with the brief appended
+/// to the last, after a blank line; the brief alone when there is no USER
+/// context.
+impl JoinsContextAndBrief for [String] {
+    fn joined_with<N: Textual>(&self, input: N) -> Vec<String> {
+        let brief = input.text();
+        let mut pieces = self.to_vec();
+        match pieces.last_mut() {
+            Some(last) => {
+                last.push_str(if last.ends_with('\n') { "\n" } else { "\n\n" });
+                last.push_str(&brief);
+            }
+            None => pieces.push(brief),
+        }
+        pieces
+    }
+}
+
+/// The parts of a first USER message: the message whole when it fits; else
+/// split where modules begin, the brief in the last part, each part headed
+/// with its number. A module that cannot fit one part with its header
+/// refuses.
+impl SplitsStartupMessage for HarnessKind {
+    fn part_header<N: PartNumbering>(input: N) -> String {
+        let (number, count) = (input.part_number(), input.part_count());
         if number == count {
             format!("Startup message, part {number} of {count}, the last.\n\n")
         } else {
@@ -144,59 +166,28 @@ pub trait SplitsStartupMessage {
             )
         }
     }
-    /// The message whole when it fits; else split where modules begin, the
-    /// brief in the last part. A module that cannot fit one part with its
-    /// header refuses.
-    fn startup_parts(
+
+    fn startup_parts<N: SegmentListing, O: Textual>(
         &self,
-        segments: &[String],
-        brief: &str,
-    ) -> Result<Vec<String>, ContextRefusal>;
-}
-
-/// The body of a first USER message: the context, then the brief.
-pub trait JoinsContextAndBrief {
-    fn joined_with(&self, brief: &str) -> Vec<String>;
-}
-
-impl JoinsContextAndBrief for [String] {
-    /// The segments with the brief appended to the last, after a blank line;
-    /// the brief alone when there is no USER context.
-    fn joined_with(&self, brief: &str) -> Vec<String> {
-        let mut pieces = self.to_vec();
-        match pieces.last_mut() {
-            Some(last) => {
-                last.push_str(if last.ends_with('\n') { "\n" } else { "\n\n" });
-                last.push_str(brief);
-            }
-            None => pieces.push(brief.to_owned()),
-        }
-        pieces
-    }
-}
-
-impl SplitsStartupMessage for HarnessKind {
-    fn startup_parts(
-        &self,
-        segments: &[String],
-        brief: &str,
+        input_0: N,
+        input_1: O,
     ) -> Result<Vec<String>, ContextRefusal> {
-        let pieces = segments.joined_with(brief);
+        let pieces = input_0.segments().joined_with(input_1.text());
         let whole = pieces.concat();
         if self.fits_one_message(&whole) {
             return Ok(vec![whole]);
         }
         // Packed under the longest header a part can have, so the real one
         // never makes a part overflow.
-        let widest = Self::part_header(1, 999_999);
+        let widest = Self::part_header((1, 999_999));
         let mut chunks: Vec<String> = Vec::new();
         let mut current = String::new();
         for piece in pieces {
-            if !current.is_empty() && !self.fits_one_message(&format!("{widest}{current}{piece}")) {
+            if !current.is_empty() && !self.fits_one_message(format!("{widest}{current}{piece}")) {
                 chunks.push(std::mem::take(&mut current));
             }
             current.push_str(&piece);
-            if !self.fits_one_message(&format!("{widest}{current}")) {
+            if !self.fits_one_message(format!("{widest}{current}")) {
                 return Err(ContextRefusal::ModuleTooLarge);
             }
         }
@@ -205,65 +196,8 @@ impl SplitsStartupMessage for HarnessKind {
         Ok(chunks
             .into_iter()
             .enumerate()
-            .map(|(index, chunk)| format!("{}{chunk}", Self::part_header(index + 1, count)))
+            .map(|(index, chunk)| format!("{}{chunk}", Self::part_header((index + 1, count))))
             .collect())
-    }
-}
-
-/// Composes one launch from a profile.
-///
-/// `prompt_sha256` is SHA-256 over the exact UTF-8 bytes of
-/// `first_prompt_body`, the whole first USER message; each part carries the
-/// SHA-256 of its own exact text. Hashes stay in the store and never enter
-/// a prompt.
-///
-/// The launch's effective leave-outs are its profile's when it names them,
-/// else `default`, its metaflow's configured default; a set its harness
-/// refuses refuses the launch.
-pub trait ComposesLaunch {
-    /// A launch whose metaflow names no default leave-outs.
-    fn compose(&self, profile: &LaunchProfile) -> Result<ComposedLaunch, CompositionError> {
-        self.compose_leaving_out(profile, Vec::new())
-    }
-    fn compose_leaving_out(
-        &self,
-        profile: &LaunchProfile,
-        default: Vec<LeaveOut>,
-    ) -> Result<ComposedLaunch, CompositionError>;
-    /// A resumed flow's launch: its original profile with its system prompt
-    /// composed again, carrying `text` as its one part. A resumed flow is
-    /// not observed as a launch; the hash only names the text.
-    fn resumption(
-        &self,
-        profile: &LaunchProfile,
-        default: Vec<LeaveOut>,
-        text: &str,
-    ) -> Result<ComposedLaunch, CompositionError>;
-}
-
-/// The leave-outs a launch takes: its own, else the default, checked against
-/// its harness.
-trait ResolvesLeaveOuts {
-    fn effective_leave_outs(
-        &self,
-        default: Vec<LeaveOut>,
-    ) -> Result<Vec<LeaveOut>, CompositionError>;
-}
-
-impl ResolvesLeaveOuts for LaunchProfile {
-    fn effective_leave_outs(
-        &self,
-        default: Vec<LeaveOut>,
-    ) -> Result<Vec<LeaveOut>, CompositionError> {
-        let leave_outs = self.leave_outs_option.clone().unwrap_or(default);
-        let lean = LeanStart {
-            harness_kind: self.harness_kind.clone(),
-            leave_outs: leave_outs.clone(),
-        };
-        match lean.refusal() {
-            Some(refusal) => Err(CompositionError::LeaveOut(refusal)),
-            None => Ok(leave_outs),
-        }
     }
 }
 
@@ -296,7 +230,7 @@ impl ValidatesComposedPrompt for ComposedLaunch {
         }
         let mut body = String::new();
         for (index, part) in parts.iter().enumerate() {
-            let header = HarnessKind::part_header(index + 1, parts.len());
+            let header = HarnessKind::part_header((index + 1, parts.len()));
             let Some(chunk) = part.prompt_part_text.strip_prefix(&header) else {
                 return false;
             };
@@ -321,7 +255,6 @@ impl ValidatesComposedPrompt for ComposedLaunch {
 /// enters the prompt.
 pub trait NamesRemoteControl {
     fn remote_control_name(&self) -> String;
-    fn remote_control_record(&self) -> String;
 }
 
 /// The launch request ID's short form, used where a per-Flow name is needed
@@ -363,7 +296,7 @@ impl NamesRole for LaunchProfile {
     }
 
     fn power_name(&self) -> &'static str {
-        match self.power_level {
+        match <crate::RunningNexus as WakePolicy>::power_of(&self.address.layer) {
             PowerLevel::High => "High",
             PowerLevel::Medium => "Medium",
             PowerLevel::Low => "Low",
@@ -375,13 +308,6 @@ impl NamesRole for LaunchProfile {
 impl NamesRemoteControl for LaunchProfile {
     fn remote_control_name(&self) -> String {
         format!("flow-{}", self.launch_request_short_form())
-    }
-
-    fn remote_control_record(&self) -> String {
-        match self.harness_kind {
-            HarnessKind::Claude => format!("--remote-control {}", self.remote_control_name()),
-            HarnessKind::Codex => "app-server endpoint".into(),
-        }
     }
 }
 
@@ -444,43 +370,59 @@ impl ValidatesLaunchProfile for LaunchProfile {
     }
 }
 
-impl RendersBrief for LaunchProfile {
+/// The brief that follows the context: the instruction itself for Claude,
+/// under a launch record for Codex.
+impl RendersBrief for HarnessedProfile {
     fn brief(&self) -> String {
-        let profile = self;
-        if profile.harness_kind == HarnessKind::Claude {
+        let profile = &self.launch_profile;
+        if self.harness_kind == HarnessKind::Claude {
             return profile.instruction_prompt.clone();
         }
         format!(
-            "# Flow launch\n\nRole: {} {}\nHarness: Codex\nModel: {}\nEffort: {}\nHerdr session: {}\nRemote control: {}\n\n{}",
+            "# Flow launch\n\nRole: {} {}\nHarness: Codex\nModel: {}\nEffort: {}\nHerdr session: {}\nRemote control: app-server endpoint\n\n{}",
             profile.aspect_name(),
             profile.power_name(),
             profile.model_name,
             profile.effort,
             profile.herdr_session_name,
-            profile.remote_control_record(),
             profile.instruction_prompt,
         )
     }
 }
 
-trait ComposesVerifiedContext {
-    /// The profile's context, composed and verified, and the system prompt
-    /// it gives the launch.
-    fn verified_context(
+/// The leave-outs a launch takes: its own, else the default its metaflow
+/// configures, checked against its harness.
+impl ResolvesLeaveOuts for HarnessedProfile {
+    fn effective_leave_outs<N: LeaveOutListing>(
         &self,
-        profile: &LaunchProfile,
-    ) -> Result<(VerifiedContext, SystemPrompt), CompositionError>;
+        input: N,
+    ) -> Result<Vec<LeaveOut>, CompositionError> {
+        let leave_outs = self
+            .launch_profile
+            .leave_outs_option
+            .clone()
+            .unwrap_or_else(|| input.leave_outs());
+        let lean = LeanStart {
+            harness_kind: self.harness_kind.clone(),
+            leave_outs: leave_outs.clone(),
+        };
+        match lean.refusal() {
+            Some(refusal) => Err(CompositionError::LeaveOut(refusal)),
+            None => Ok(leave_outs),
+        }
+    }
 }
 
+/// The profile's context, composed and verified, and the system prompt it
+/// gives the launch: the verified system text, then the launch's own
+/// section after a blank line.
 impl ComposesVerifiedContext for LaunchComposer {
-    fn verified_context(
-        &self,
-        profile: &LaunchProfile,
-    ) -> Result<(VerifiedContext, SystemPrompt), CompositionError> {
+    fn verified_context<N: Profiled>(&self, input: N) -> Result<VerifiedContext, CompositionError> {
+        let profile = input.profile();
         profile.validate()?;
         let request = ContextRequest {
             address: profile.address.clone(),
-            harness_kind: profile.harness_kind.clone(),
+            harness_kind: input.harness_kind(),
             system_modules: profile.system_modules.clone(),
             user_modules: profile.user_modules.clone(),
         };
@@ -489,8 +431,16 @@ impl ComposesVerifiedContext for LaunchComposer {
         if verified.address() != profile.address {
             return Err(ContextRefusal::MetaflowMismatch.into());
         }
-        let mut system_prompt_text = verified.system_text();
-        let section = profile.launch_section();
+        Ok(verified)
+    }
+
+    fn launch_system_prompt<N: Profiled, O: ReadsVerifiedContext>(
+        &self,
+        input_0: N,
+        input_1: O,
+    ) -> Result<SystemPrompt, ContextRefusal> {
+        let mut system_prompt_text = input_1.system_text();
+        let section = input_0.profile().launch_section();
         if !section.is_empty() {
             if !system_prompt_text.is_empty() && !system_prompt_text.ends_with('\n') {
                 system_prompt_text.push('\n');
@@ -498,47 +448,55 @@ impl ComposesVerifiedContext for LaunchComposer {
             system_prompt_text.push('\n');
             system_prompt_text.push_str(&section);
         }
-        if !profile.harness_kind.fits_one_argument(&system_prompt_text) {
-            return Err(ContextRefusal::SystemTooLarge.into());
+        if !input_0
+            .harness_kind()
+            .fits_one_argument(&system_prompt_text)
+        {
+            return Err(ContextRefusal::SystemTooLarge);
         }
         let system_prompt_sha256 = format!("{:x}", Sha256::digest(system_prompt_text.as_bytes()));
-        Ok((
-            verified,
-            SystemPrompt {
-                system_prompt_text,
-                system_prompt_sha256,
-            },
-        ))
+        Ok(SystemPrompt {
+            system_prompt_text,
+            system_prompt_sha256,
+        })
     }
 }
 
-trait AssemblesComposedLaunch {
-    fn assembled(
-        profile: &LaunchProfile,
-        system_prompt: SystemPrompt,
-        body: String,
-        parts: Vec<String>,
-        leave_outs: Vec<LeaveOut>,
-    ) -> ComposedLaunch;
-}
-
+/// A composed launch from its parts: `prompt_sha256` is SHA-256 over the
+/// exact UTF-8 bytes of the whole first USER message, and each part carries
+/// the SHA-256 of its own exact text. Hashes stay in the store and never
+/// enter a prompt.
 impl AssemblesComposedLaunch for LaunchComposer {
-    fn assembled(
-        profile: &LaunchProfile,
-        system_prompt: SystemPrompt,
-        body: String,
-        parts: Vec<String>,
-        leave_outs: Vec<LeaveOut>,
+    fn assembled<
+        N: Profiled,
+        O: SystemPrompted,
+        P: Textual,
+        Q: SegmentListing,
+        R: LeaveOutListing,
+    >(
+        input_0: N,
+        input_1: O,
+        input_2: P,
+        input_3: Q,
+        input_4: R,
     ) -> ComposedLaunch {
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
+        let profile = input_0.profile();
+        let body = input_2.text();
         let prompt_sha256 = digest(&body);
         ComposedLaunch {
-            launch_profile: profile.clone(),
-            system_prompt,
+            target_receipt_request: TargetReceiptRequest {
+                launch_request_id: profile.launch_request_id.clone(),
+                prompt_sha256: prompt_sha256.clone(),
+            },
+            launch_profile: profile,
+            harness_kind: input_0.harness_kind(),
+            system_prompt: input_1.system_prompt(),
             first_prompt_payload: FirstPromptPayload {
                 first_prompt_body: body,
-                prompt_sha256: prompt_sha256.clone(),
-                prompt_part_vector: parts
+                prompt_sha256,
+                prompt_part_vector: input_3
+                    .segments()
                     .into_iter()
                     .map(|text| PromptPart {
                         prompt_sha256: digest(&text),
@@ -546,50 +504,63 @@ impl AssemblesComposedLaunch for LaunchComposer {
                     })
                     .collect(),
             },
-            target_receipt_request: TargetReceiptRequest {
-                launch_request_id: profile.launch_request_id.clone(),
-                prompt_sha256,
-            },
-            leave_outs,
+            leave_outs: input_4.leave_outs(),
         }
     }
 }
 
+/// Composes one launch from a profile and the harness the Nexus derived
+/// for it. The launch's leave-outs are its profile's when it names them,
+/// else the metaflow's default; a set its harness refuses refuses the
+/// launch. A resumption is the original profile with its system prompt
+/// composed again, carrying the text as its one part; a resumed flow is not
+/// observed as a launch, and the hash only names the text.
 impl ComposesLaunch for LaunchComposer {
-    fn compose_leaving_out(
+    fn compose<N: Profiled, O: LeaveOutListing>(
         &self,
-        profile: &LaunchProfile,
-        default: Vec<LeaveOut>,
+        input_0: N,
+        input_1: O,
     ) -> Result<ComposedLaunch, CompositionError> {
-        let leave_outs = profile.effective_leave_outs(default)?;
-        let (verified, system_prompt) = self.verified_context(profile)?;
-        let brief = profile.brief();
+        let harnessed = HarnessedProfile {
+            launch_profile: input_0.profile(),
+            harness_kind: input_0.harness_kind(),
+        };
+        let leave_outs = harnessed.effective_leave_outs(input_1)?;
+        let verified = self.verified_context(&harnessed)?;
+        let system_prompt = self.launch_system_prompt(&harnessed, &verified)?;
+        let brief = harnessed.brief();
         let segments = verified.user_segments();
         let body = segments.joined_with(&brief).concat();
-        let parts = profile.harness_kind.startup_parts(&segments, &brief)?;
+        let parts = harnessed.harness_kind.startup_parts(&segments, &brief)?;
         Ok(Self::assembled(
-            profile,
-            system_prompt,
-            body,
-            parts,
-            leave_outs,
+            &harnessed,
+            &system_prompt,
+            &body,
+            &parts,
+            &leave_outs,
         ))
     }
 
-    fn resumption(
+    fn resumption<N: Profiled, O: LeaveOutListing, P: Textual>(
         &self,
-        profile: &LaunchProfile,
-        default: Vec<LeaveOut>,
-        text: &str,
+        input_0: N,
+        input_1: O,
+        input_2: P,
     ) -> Result<ComposedLaunch, CompositionError> {
-        let leave_outs = profile.effective_leave_outs(default)?;
-        let (_, system_prompt) = self.verified_context(profile)?;
+        let harnessed = HarnessedProfile {
+            launch_profile: input_0.profile(),
+            harness_kind: input_0.harness_kind(),
+        };
+        let leave_outs = harnessed.effective_leave_outs(input_1)?;
+        let verified = self.verified_context(&harnessed)?;
+        let system_prompt = self.launch_system_prompt(&harnessed, &verified)?;
+        let text = input_2.text();
         Ok(Self::assembled(
-            profile,
-            system_prompt,
-            text.to_owned(),
-            vec![text.to_owned()],
-            leave_outs,
+            &harnessed,
+            &system_prompt,
+            &text,
+            &[text.clone()][..],
+            &leave_outs,
         ))
     }
 }
@@ -629,16 +600,13 @@ impl RendersQueuedWork for [Request] {
 
 /// Everything a fresh wake knows of the flow it starts, all of it read from
 /// the meta configuration and the metaflow's last flow: its Address, the
-/// layer's Model and the harness that serves it, the module identities the
-/// last launch named, the Herdr session its last flow ran in, and the
-/// queued work.
+/// layer's Model, the module identities and leave-outs the last launch
+/// named, the Herdr session its last flow ran in, and the queued work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FreshSeat {
     pub address: Address,
     pub launch_request_id: String,
     pub model_name: String,
-    pub harness_kind: HarnessKind,
-    pub power_level: PowerLevel,
     pub effort: String,
     pub herdr_session_name: String,
     pub system_modules: Vec<String>,
@@ -657,8 +625,6 @@ impl ProfilesFreshSeat for FreshSeat {
             system_modules: self.system_modules.clone(),
             user_modules: self.user_modules.clone(),
             address: self.address.clone(),
-            power_level: self.power_level.clone(),
-            harness_kind: self.harness_kind.clone(),
             model_name: self.model_name.clone(),
             effort: self.effort.clone(),
             flow_id_option: None,
@@ -678,10 +644,9 @@ pub(crate) mod tests {
     };
     use crate::context::FixtureComposer;
     use signal_flow::{
-        Address, Aspect, ContextRefusal, HarnessKind, LaunchProfile, Layer, PowerLevel,
+        Address, Aspect, ContextRefusal, HarnessKind, LaunchProfile, Layer, LeaveOut,
         RememberedFlow,
     };
-    use std::sync::Arc;
 
     /// A launch profile and a composer holding its modules, for tests.
     pub(crate) fn fixture_profile() -> LaunchProfile {
@@ -694,8 +659,6 @@ pub(crate) mod tests {
                 topic: "flow".into(),
                 layer: Layer::Secondary,
             },
-            power_level: PowerLevel::High,
-            harness_kind: HarnessKind::Codex,
             model_name: "gpt-6-astra".into(),
             effort: "medium".into(),
             flow_id_option: Some("1b8ac0".into()),
@@ -710,14 +673,16 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn fixture_composer() -> LaunchComposer {
-        LaunchComposer::with_context(Arc::new(FixtureComposer::from(
-            &[
-                ("spirit-core", "Spirit body."),
-                ("intent-flow", "Intent body."),
-                ("operation-main-flow", "Main flow body."),
-                ("knowledge-flow", "Knowledge body."),
-            ][..],
-        )))
+        LaunchComposer::with_context(crate::context::ContextComposer::Fixture(
+            FixtureComposer::from(
+                &[
+                    ("spirit-core", "Spirit body."),
+                    ("intent-flow", "Intent body."),
+                    ("operation-main-flow", "Main flow body."),
+                    ("knowledge-flow", "Knowledge body."),
+                ][..],
+            ),
+        ))
     }
 
     /// A composer holding one large knowledge module per size.
@@ -742,16 +707,26 @@ pub(crate) mod tests {
             .map(|(name, body)| (*name, body.as_str()))
             .collect::<Vec<_>>();
         (
-            LaunchComposer::with_context(Arc::new(FixtureComposer::from(&held[..]))),
+            LaunchComposer::with_context(crate::context::ContextComposer::Fixture(
+                FixtureComposer::from(&held[..]),
+            )),
             names,
         )
     }
 
     #[test]
     fn a_claude_message_is_the_user_context_then_the_brief_in_one_part() {
-        let mut profile = fixture_profile();
-        profile.harness_kind = HarnessKind::Claude;
-        let composed = fixture_composer().compose(&profile).unwrap();
+        let profile = fixture_profile();
+        let harness = HarnessKind::Claude;
+        let composed = fixture_composer()
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: harness.clone(),
+                    launch_profile: profile.clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
         assert!(body.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: operation-main-flow, knowledge-flow\n"));
         assert!(body.contains("\n<!-- module: knowledge-flow -->\nKnowledge body.\n<!-- end-module: knowledge-flow -->\n"));
@@ -769,7 +744,15 @@ pub(crate) mod tests {
 
     #[test]
     fn the_system_prompt_is_the_system_context_then_the_launch_section() {
-        let composed = fixture_composer().compose(&fixture_profile()).unwrap();
+        let composed = fixture_composer()
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: fixture_profile().clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap();
         let system = &composed.system_prompt.system_prompt_text;
         assert!(system.contains("<!-- module: spirit-core -->\nSpirit body.\n"));
         assert!(system.ends_with(
@@ -782,12 +765,20 @@ pub(crate) mod tests {
 
     #[test]
     fn a_codex_message_puts_its_launch_record_after_the_context() {
-        let composed = fixture_composer().compose(&fixture_profile()).unwrap();
+        let composed = fixture_composer()
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: fixture_profile().clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
         assert!(body.starts_with("These are your skills"));
         assert!(body.ends_with(concat!(
             "<!-- end-module: knowledge-flow -->\n\n# Flow launch\n\n",
-            "Role: Field High\nHarness: Codex\nModel: gpt-6-astra\nEffort: medium\n",
+            "Role: Field Medium\nHarness: Codex\nModel: gpt-6-astra\nEffort: medium\n",
             "Herdr session: messaging-build\nRemote control: app-server endpoint\n\n",
             "Carry the bounded task."
         )));
@@ -802,8 +793,15 @@ pub(crate) mod tests {
         let mut profile = fixture_profile();
         profile.user_modules = names.clone();
         for harness in [HarnessKind::Claude, HarnessKind::Codex] {
-            profile.harness_kind = harness.clone();
-            let composed = composer.compose(&profile).unwrap();
+            let composed = composer
+                .compose(
+                    crate::composition::HarnessedProfile {
+                        harness_kind: harness.clone(),
+                        launch_profile: profile.clone(),
+                    },
+                    Vec::<signal_flow::LeaveOut>::new(),
+                )
+                .unwrap();
             let parts = &composed.first_prompt_payload.prompt_part_vector;
             assert_eq!(parts.len(), 2, "{harness:?}");
             assert!(parts[0].prompt_part_text.starts_with(
@@ -836,7 +834,13 @@ pub(crate) mod tests {
         let mut profile = fixture_profile();
         profile.user_modules = names;
         assert_eq!(
-            composer.compose(&profile),
+            composer.compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: profile.clone()
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            ),
             Err(CompositionError::Context(ContextRefusal::ModuleTooLarge))
         );
     }
@@ -848,7 +852,13 @@ pub(crate) mod tests {
         profile.system_modules = vec!["spirit-core".into(), names[1].clone()];
         profile.user_modules = vec![names[0].clone()];
         assert_eq!(
-            composer.compose(&profile),
+            composer.compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: profile.clone()
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            ),
             Err(CompositionError::Context(ContextRefusal::SystemTooLarge))
         );
     }
@@ -873,7 +883,13 @@ pub(crate) mod tests {
             let mut profile = fixture_profile();
             change(&mut profile);
             assert_eq!(
-                composer.compose(&profile),
+                composer.compose(
+                    crate::composition::HarnessedProfile {
+                        harness_kind: HarnessKind::Codex,
+                        launch_profile: profile.clone()
+                    },
+                    Vec::<signal_flow::LeaveOut>::new(),
+                ),
                 Err(CompositionError::InvalidProfileField(field))
             );
         }
@@ -884,7 +900,13 @@ pub(crate) mod tests {
         let mut profile = fixture_profile();
         profile.user_modules.push("unknown-module".into());
         assert_eq!(
-            fixture_composer().compose(&profile),
+            fixture_composer().compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: profile.clone()
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            ),
             Err(CompositionError::Context(ContextRefusal::ComposerRejected))
         );
     }
@@ -895,7 +917,15 @@ pub(crate) mod tests {
         let (composer, names) = large(&[size, size, size]);
         let mut profile = fixture_profile();
         profile.user_modules = names;
-        let mut composed = composer.compose(&profile).unwrap();
+        let mut composed = composer
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: profile.clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap();
         assert!(composed.has_canonical_first_prompt());
         composed.first_prompt_payload.prompt_part_vector[1]
             .prompt_part_text
@@ -905,12 +935,27 @@ pub(crate) mod tests {
 
     #[test]
     fn a_resumption_composes_the_system_prompt_again_and_carries_the_text() {
-        let mut profile = fixture_profile();
-        profile.harness_kind = HarnessKind::Claude;
+        let profile = fixture_profile();
+        let harness = HarnessKind::Claude;
         let composer = fixture_composer();
-        let launched = composer.compose(&profile).unwrap();
+        let launched = composer
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: harness.clone(),
+                    launch_profile: profile.clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap();
         let resumed = composer
-            .resumption(&profile, Vec::new(), "Work queued.")
+            .resumption(
+                crate::composition::HarnessedProfile {
+                    harness_kind: harness.clone(),
+                    launch_profile: profile.clone(),
+                },
+                Vec::<LeaveOut>::new(),
+                "Work queued.",
+            )
             .unwrap();
         assert_eq!(resumed.system_prompt, launched.system_prompt);
         assert_eq!(
@@ -923,26 +968,43 @@ pub(crate) mod tests {
 
     #[test]
     fn a_start_naming_leave_outs_replaces_its_metaflow_default() {
-        use signal_flow::LeaveOut;
         let composer = fixture_composer();
         let mut profile = fixture_profile();
-        profile.harness_kind = HarnessKind::Claude;
+        let harness = HarnessKind::Claude;
         let default = vec![LeaveOut::SkillTool, LeaveOut::WorkflowTool];
         // None takes the default.
         let composed = composer
-            .compose_leaving_out(&profile, default.clone())
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: harness.clone(),
+                    launch_profile: profile.clone(),
+                },
+                default.clone(),
+            )
             .unwrap();
         assert_eq!(composed.leave_outs, default);
         // A Start's own vector replaces it, even an empty one.
         profile.leave_outs_option = Some(vec![LeaveOut::GitInstructions]);
         let composed = composer
-            .compose_leaving_out(&profile, default.clone())
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: harness.clone(),
+                    launch_profile: profile.clone(),
+                },
+                default.clone(),
+            )
             .unwrap();
         assert_eq!(composed.leave_outs, [LeaveOut::GitInstructions]);
         profile.leave_outs_option = Some(Vec::new());
         assert!(
             composer
-                .compose_leaving_out(&profile, default.clone())
+                .compose(
+                    crate::composition::HarnessedProfile {
+                        harness_kind: harness.clone(),
+                        launch_profile: profile.clone()
+                    },
+                    default.clone()
+                )
                 .unwrap()
                 .leave_outs
                 .is_empty()
@@ -950,7 +1012,13 @@ pub(crate) mod tests {
         // A set its harness refuses refuses the launch.
         profile.leave_outs_option = Some(vec![LeaveOut::ToolSearch]);
         assert_eq!(
-            composer.compose_leaving_out(&profile, default),
+            composer.compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: harness.clone(),
+                    launch_profile: profile.clone()
+                },
+                default
+            ),
             Err(CompositionError::LeaveOut(
                 signal_flow::LeaveOutRefusal::Indispensable(LeaveOut::ToolSearch)
             ))
@@ -960,11 +1028,11 @@ pub(crate) mod tests {
     #[test]
     fn the_part_header_names_its_place_and_never_a_seat() {
         assert_eq!(
-            HarnessKind::part_header(3, 3),
+            HarnessKind::part_header((3, 3)),
             "Startup message, part 3 of 3, the last.\n\n"
         );
-        assert!(HarnessKind::part_header(1, 3).contains("part 3 of 3"));
-        assert!(!HarnessKind::part_header(1, 3).contains("seat"));
+        assert!(HarnessKind::part_header((1, 3)).contains("part 3 of 3"));
+        assert!(!HarnessKind::part_header((1, 3)).contains("seat"));
     }
 
     #[test]

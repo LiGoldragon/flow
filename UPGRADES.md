@@ -1,15 +1,29 @@
 # Flow 0.35.0
 
 Wire change: signal-flow 17.0.0, meta-signal-flow 20.0.0. Store change:
-launch attempts written before 0.35.0 are set aside as `BeforeModules`.
+launch attempts written before 0.35.0 are set aside as `BeforeModules`; the
+flows family upgrades from v5 to v6 and the launch outcomes from v2 to v3,
+each carrying its origin as derived; the `flow_nexus_meta_module_configuration`
+and `flow_nexus_start_bundles` tables are dropped, rows and registrations, on
+the first open.
 
 - **A Start names its context by module identity, and nothing else.**
   `LaunchProfile` carries `SystemModules` and `UserModules`; there is no
   source path, skill name or system-prompt bundle file. A Start datom reads
-  `Start.{ { id [ spirit-core intent-flow ] [ operation-main-flow ] { Field
-  flow Quaternary } UltraLow Claude haiku medium None [] session None
-  «brief» } { origin session turn } }`. The `flow` CLI takes that one datom; its
-  `--system-modules` flag and its Curriculum `ResolveSkills` call are gone.
+  `Start.{ id [ spirit-core intent-flow ] [ operation-main-flow ] { Field
+  flow Quaternary } haiku medium None [] session None «brief» }`. The `flow`
+  CLI takes that one datom; its `--system-modules` flag and its Curriculum
+  `ResolveSkills` call are gone.
+- **A Start names no origin, power or harness; the Nexus derives them.**
+  `Start.LaunchProfile`, `Replace.LaunchProfile`, `Restart.FlowId`. The
+  origin is read from the calling process as Identify reads a caller: the
+  one flow bound in its Herdr pane, with that flow's native session, is
+  `Origin.Flow.{ FlowId SessionId }`; any other caller is `Origin.Unbound`,
+  recorded and not refused. `FlowNode`, `Launched` and `LaunchAttempt`
+  carry `Origin`. A flow's power is its Address layer's (Primary High,
+  Secondary Medium, Tertiary Low, Quaternary UltraLow). Its harness is
+  Codex when a configured Codex endpoint serves its model, else Claude;
+  `ComposedLaunch` carries that `HarnessKind`.
 - **Flow has Curriculum compose the context.** At Start (and at a fresh
   wake and a resume) the Nexus sends `ComposeStartup.{ CallerMetaflow Target
   SystemModules UserModules }` to the Curriculum Nexus at
@@ -48,12 +62,9 @@ launch attempts written before 0.35.0 are set aside as `BeforeModules`.
 - **A fresh wake composes the last launch's identities.** A wake that does
   not resume launches with the module identities and leave-outs the
   metaflow's last launch named, its system prompt composed again; a
-  metaflow with no launch of record is `Unplaceable`. This replaces 0.34.6's
-  kept Start bundle: `flow_nexus_start_bundles` stays registered so a store
-  holding its rows opens, and is no longer read or written;
-  `Failed(StartBundleMissing)` is gone.
-  `Configure.Module` is gone from the meta socket; stored module rows are
-  kept unread.
+  metaflow with no launch of record is `Unplaceable`. 0.34.6's kept Start
+  bundle and `Failed(StartBundleMissing)` are gone. `Configure.Module` is
+  gone from the meta socket.
 - **A Start can leave parts of its harness start out.** `LaunchProfile`
   carries `Option<LeaveOuts>`; `Configure.LeaveOut.{ Address LeaveOuts }`
   names a metaflow's default, which a Start naming its own replaces. Each
@@ -72,8 +83,11 @@ launch attempts written before 0.35.0 are set aside as `BeforeModules`.
   `StartRejected.LeaveOutRefused.<why>`. A Claude receipt is refused when
   the session uses a tool its leave-outs removed or shows a skill listing
   with the Skill tool left out.
-- ethos-zero is pinned at 07714b0 (17.0.0); the starter's new types and its
-  input-free traits are generated from `crates/flow-nexus/ethos/starter.ethos`.
+- ethos-zero is pinned at 07714b0 (17.0.0); the starter's types and traits
+  are generated from `crates/flow-nexus/ethos/starter.ethos`. Every value a
+  starter capability reads reaches it through an Ethos trait the concrete
+  type implements (`crates/flow-nexus/src/values.rs`); `VerifiedContext`
+  alone stays a Rust type, so that its fields stay private.
 
 # Flow 0.34.6
 

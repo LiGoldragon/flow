@@ -47,11 +47,7 @@ fn retired() -> signal_flow::FlowNode {
         harness_kind: signal_flow::HarnessKind::Claude,
         endpoint_selection: signal_flow::EndpointSelection::Unavailable,
         herdr_route_selection: signal_flow::HerdrRouteSelection::Unavailable,
-        origin_clue: signal_flow::OriginClue {
-            flow_id: "fac697".into(),
-            session_id: "session-1".into(),
-            turn_id: "unavailable".into(),
-        },
+        origin: signal_flow::Origin::Unbound,
         flow_lifecycle: signal_flow::FlowLifecycle::Retired,
     }
 }

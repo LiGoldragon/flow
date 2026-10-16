@@ -15,8 +15,9 @@ use meta_signal_flow::{
     ReconfigureRejection,
 };
 use signal_flow::{
-    Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, Layer, Lock_Data, OriginClue, Process, Recipient, Response,
+    Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
+    HarnessKind, HerdrRoute, HerdrRouteSelection, Layer, Lock_Data, Origin, Process, Recipient,
+    Response,
 };
 use std::collections::BTreeSet;
 
@@ -158,11 +159,10 @@ impl ConfiguredStore {
                 herdr_pane_id: "w1:p2".into(),
                 herdr_terminal_id: "term-current".into(),
             }),
-            origin_clue: OriginClue {
+            origin: Origin::Flow(FlowOrigin {
                 flow_id: "da1e3f".into(),
                 session_id: "claude-session".into(),
-                turn_id: "unavailable".into(),
-            },
+            }),
             flow_lifecycle: FlowLifecycle::Active,
         }
     }

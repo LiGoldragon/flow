@@ -155,8 +155,14 @@
               cargoClippyExtraArgs = "--workspace --all-targets --all-features -- -D warnings";
             }
           );
-          flow-v5-row-preservation = context.exactTest "flow-nexus"
-            "store::tests::an_existing_v5_row_reopens_unchanged_and_defaults_to_unavailable_route";
+          flow-v5-flow-row-upgrades-to-derived-origin = context.exactTest "flow-nexus"
+            "store::tests::a_v5_flow_row_upgrades_to_its_derived_origin";
+          flow-v2-outcomes-upgrade-to-derived-origin = context.exactTest "flow-nexus"
+            "store::tests::v2_launch_outcomes_upgrade_to_their_derived_origin";
+          flow-retired-tables-dropped-on-open = context.exactTest "flow-nexus"
+            "store::tests::a_store_from_0_34_6_drops_its_retired_tables_when_it_opens";
+          flow-start-origin-derived-from-caller = context.exactTest "flow-nexus"
+            "tests::a_start_origin_is_the_bound_flow_in_the_callers_pane_or_unbound";
           flow-herdr-route-durability = context.exactTest "flow-nexus"
             "tests::running_nexus_parses_actual_working_interactive_snapshot";
           flow-stale-route-unavailable = context.exactTest "flow-nexus"

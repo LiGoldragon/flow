@@ -207,7 +207,6 @@ impl NexusFixture {
         let mut node = self.node();
         node.harness_kind = harness.harness_kind();
         node.session_id = harness.session_id().into();
-        node.origin_clue.session_id = harness.session_id().into();
         node.flow_lifecycle = FlowLifecycle::Active;
         assert!(matches!(
             self.nexus.dispatch_meta(MetaQuery::RegisterFlow(node)),

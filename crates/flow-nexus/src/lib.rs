@@ -11,7 +11,14 @@ use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::AnswersLaunchOutcome;
-pub use generated::curriculum::StartupSelection;
+pub use caller::CallerProcess;
+pub use composition::CompositionError;
+pub use context::VerifiedContext;
+pub use generated::curriculum::{
+    ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery, StartupComposition,
+    StartupSelection,
+};
+pub use generated::operation::Outcome as OperationOutcome;
 pub use store::{LaunchOutcome, Replacement};
 pub mod binding;
 pub mod caller;
@@ -38,6 +45,7 @@ pub mod performing;
 pub mod reporting;
 pub mod store;
 pub mod title;
+pub mod values;
 pub mod waking;
 
 use binding::{ChecksFlowBinding, ChecksFlowContainer, ChecksProcessIdentity, RefusesBinding};
@@ -47,6 +55,7 @@ use composition::{LaunchComposer, OpensLaunchComposer};
 use context::{CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
 use generated::operation::{Operation, Outcome, Record_Data};
+use generated::starter::DerivesOrigin;
 use launching::{LaunchesFlows, ObservesLaunch};
 use observe_agent::ObservesAgent;
 use peer::{AdmitsMetaPeer, ResolvesPeer};
@@ -54,7 +63,7 @@ use performing::Performs;
 use reporting::RecordsReports;
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
-    Process, Query, Response, RestartRejection,
+    Origin, Process, Query, Response, RestartRejection,
 };
 use std::{
     collections::HashSet,
@@ -97,22 +106,27 @@ pub struct RunningNexus {
 }
 
 pub trait Dispatches {
-    fn dispatch(&self, query: Query) -> Response;
+    /// A query no calling process stands behind: its origin is Unbound.
+    fn dispatch(&self, query: Query) -> Response {
+        self.dispatch_from(query, Origin::Unbound)
+    }
+    /// A query from `origin`, the calling process as the Nexus derived it.
+    fn dispatch_from(&self, query: Query, origin: Origin) -> Response;
     fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response;
 }
 
 impl Dispatches for RunningNexus {
-    fn dispatch(&self, query: Query) -> Response {
+    fn dispatch_from(&self, query: Query, origin: Origin) -> Response {
         match query {
-            Query::Start(request) => {
-                let launch_request_id = request.launch_profile.launch_request_id.clone();
-                if let Some(settled) = self.settled(&request) {
+            Query::Start(profile) => {
+                let launch_request_id = profile.launch_request_id.clone();
+                if let Some(settled) = self.settled(&profile, &origin) {
                     return settled;
                 }
-                let response = self.start(request);
+                let response = self.start(profile, origin);
                 self.settle(&launch_request_id, response)
             }
-            Query::Replace(request) => self.replace(request),
+            Query::Replace(profile) => self.replace(profile, origin),
             Query::LaunchStatus(launch_request_id) => self.launch_status(&launch_request_id),
             // Over a connection Observe streams; a direct dispatch answers the
             // subscription's opening frame.
@@ -120,14 +134,17 @@ impl Dispatches for RunningNexus {
                 self.launch_status(&launch_request_id)
             }
             Query::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id),
-            Query::Restart(request) => {
-                let authorization = self
-                    .store
-                    .authorize_restart(&request.flow_id, &request.origin_clue.flow_id);
+            Query::Restart(flow_id) => {
+                // The restart is authorized by the flow that asks: its
+                // origin is the calling process's bound flow and session.
+                let Origin::Flow(caller) = origin else {
+                    return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
+                };
+                let authorization = self.store.authorize_restart(&flow_id, &caller.flow_id);
                 let Ok(Some(token)) = authorization else {
                     return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
                 };
-                if request.origin_clue.session_id != token.thread_id {
+                if caller.session_id != token.thread_id {
                     return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
                 }
                 // v2 restart does not carry the original model/endpoint. Moving
@@ -383,11 +400,9 @@ impl Dispatches for RunningNexus {
                             herdr_pane_id: binding.herdr_pane_id,
                             herdr_terminal_id: binding.herdr_terminal_id,
                         }),
-                        origin_clue: signal_flow::OriginClue {
-                            flow_id: container.meta_flow_owner_id.clone(),
-                            session_id: container.herdr_session_name.clone(),
-                            turn_id: "meta-bind-existing".into(),
-                        },
+                        // A flow bound after the fact has no launch that asked
+                        // for it.
+                        origin: Origin::Unbound,
                         flow_lifecycle: FlowLifecycle::Pending,
                     };
                     let role = signal_flow::Caller {
@@ -472,7 +487,8 @@ impl OpensRunningNexus for RunningNexus {
         let store_path = Path::new(&start.store_path);
         // The configured opener checks the typed store path read-only first,
         // reads the committed snapshot, and only then registers runtime tables.
-        // It never seeds defaults, upgrades a predecessor, or settles work.
+        // It never seeds defaults or settles work; it drops the retired
+        // tables and upgrades the flows and outcomes from their 0.34 shape.
         let store = FlowStore::open_configured(store_path)?;
         let snapshot = store
             .configuration_snapshot()?
@@ -497,7 +513,7 @@ impl OpensRunningNexus for RunningNexus {
                 .with_codex_endpoints(codex_endpoints)
                 .with_ordinary_socket(&ordinary_socket),
             // A launch's context is composed by the Curriculum Nexus.
-            composer: LaunchComposer::with_context(std::sync::Arc::new(
+            composer: LaunchComposer::with_context(context::ContextComposer::Curriculum(
                 CurriculumComposer::from_environment(),
             )),
             dispatch_gate: Mutex::new(()),
@@ -592,7 +608,13 @@ impl ServesConnection for Connection {
                 }
                 return Ok(());
             }
-            query => nexus.dispatch_serially(query),
+            // A launch's origin is the calling process, as Identify reads
+            // it: its pane's bound flow and that flow's native session.
+            query @ (Query::Start(_) | Query::Replace(_) | Query::Restart(_)) => {
+                let origin = nexus.origin_of(self.peer.peer_process());
+                nexus.dispatch_serially(query, origin)
+            }
+            query => nexus.dispatch_serially(query, Origin::Unbound),
         };
         self.peer.write_response(&response)?;
         drop(self);
@@ -939,15 +961,15 @@ impl AwaitsLaunchSettlement for RunningNexus {
 trait DispatchesSerially {
     /// Store transitions are read-modify-write; one dispatch runs at a time
     /// across both sockets while frames are read concurrently.
-    fn dispatch_serially(&self, query: Query) -> Response;
+    fn dispatch_serially(&self, query: Query, origin: Origin) -> Response;
     fn dispatch_meta_serially(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response;
 }
 
 impl DispatchesSerially for RunningNexus {
-    fn dispatch_serially(&self, query: Query) -> Response {
+    fn dispatch_serially(&self, query: Query, origin: Origin) -> Response {
         let launch_request_id = match &query {
-            Query::Start(request) | Query::Replace(request) => {
-                Some(request.launch_profile.launch_request_id.clone())
+            Query::Start(profile) | Query::Replace(profile) => {
+                Some(profile.launch_request_id.clone())
             }
             _ => None,
         };
@@ -956,7 +978,7 @@ impl DispatchesSerially for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.dispatch(query)
+            self.dispatch_from(query, origin)
         };
         // The gate is released before the wait: the launch is settled by the
         // Nexus's own promoter, which needs the gate to do it.
@@ -1089,11 +1111,11 @@ mod tests {
         },
     };
     use signal_flow::{
-        Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding,
-        HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile, LaunchStatusOutcome,
-        NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence, NativeTranscriptBoundary,
-        OriginClue, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query,
-        RegistrationAcknowledgement, Response, StartRejection, StartRequest,
+        Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
+        HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile,
+        LaunchStatusOutcome, NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence,
+        NativeTranscriptBoundary, Origin, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult,
+        Query, RegistrationAcknowledgement, Response, StartRejection,
     };
     use std::{
         collections::BTreeSet,
@@ -1292,14 +1314,16 @@ mod tests {
                 codex_endpoints: codex_endpoints.clone(),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
                     .with_codex_endpoints(codex_endpoints),
-                composer: LaunchComposer::with_context(std::sync::Arc::new(FixtureComposer::from(
-                    &[
-                        ("spirit-core", "Spirit body."),
-                        ("intent-flow", "Intent body."),
-                        ("operation-main-flow", "Main flow body."),
-                        ("knowledge-flow", "Knowledge body."),
-                    ][..],
-                ))),
+                composer: LaunchComposer::with_context(crate::context::ContextComposer::Fixture(
+                    FixtureComposer::from(
+                        &[
+                            ("spirit-core", "Spirit body."),
+                            ("intent-flow", "Intent body."),
+                            ("operation-main-flow", "Main flow body."),
+                            ("knowledge-flow", "Knowledge body."),
+                        ][..],
+                    ),
+                )),
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),
@@ -1363,11 +1387,10 @@ mod tests {
                     herdr_pane_id: "w1:p3".into(),
                     herdr_terminal_id: "term_65bb7f87270cb3".into(),
                 }),
-                origin_clue: OriginClue {
+                origin: Origin::Flow(FlowOrigin {
                     flow_id: "908786".into(),
                     session_id: "01a0b22c-e24f-7452-9940-64490878680f".into(),
-                    turn_id: "unavailable".into(),
-                },
+                }),
                 flow_lifecycle: FlowLifecycle::Active,
             }
         }
@@ -2029,7 +2052,7 @@ mod tests {
         };
         assert_eq!(node.flow_lifecycle, FlowLifecycle::Pending);
         assert_eq!(node.endpoint_selection, EndpointSelection::Unavailable);
-        assert_eq!(node.origin_clue.flow_id, "field-owner");
+        assert_eq!(node.origin, Origin::Unbound);
         assert!(matches!(
             fixture
                 .nexus
@@ -2318,8 +2341,6 @@ mod tests {
                 topic: "flow".into(),
                 layer: signal_flow::Layer::Secondary,
             },
-            power_level: PowerLevel::High,
-            harness_kind: HarnessKind::Codex,
             model_name: "fixture-model".into(),
             effort: "medium".into(),
             flow_id_option: None,
@@ -2328,15 +2349,20 @@ mod tests {
             leave_outs_option: None,
             instruction_prompt: "fixture instruction".into(),
         };
-        let origin = OriginClue {
+        let origin = Origin::Flow(FlowOrigin {
             flow_id: "caller".into(),
             session_id: "caller-session".into(),
-            turn_id: "caller-turn".into(),
-        };
+        });
         let composed = fixture
             .nexus
             .composer
-            .compose(&profile)
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: profile.clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
             .expect("new request composes once");
         fixture
             .nexus
@@ -2345,19 +2371,17 @@ mod tests {
             .expect("reservation persists");
 
         assert!(matches!(
-            fixture.nexus.dispatch(Query::Start(StartRequest {
-                launch_profile: profile.clone(),
-                origin_clue: origin.clone(),
-            })),
+            fixture
+                .nexus
+                .dispatch_from(Query::Start(profile.clone()), origin.clone()),
             Response::LaunchPending(_)
         ));
         let mut changed = profile;
         changed.effort = "high".into();
         assert_eq!(
-            fixture.nexus.dispatch(Query::Start(StartRequest {
-                launch_profile: changed,
-                origin_clue: origin,
-            })),
+            fixture
+                .nexus
+                .dispatch_from(Query::Start(changed), origin.clone()),
             Response::StartRejected(StartRejection::LaunchRequestConflict)
         );
         assert!(!fixture.snapshot_program.exists());
@@ -2375,8 +2399,6 @@ mod tests {
                 topic: "flow".into(),
                 layer: signal_flow::Layer::Secondary,
             },
-            power_level: PowerLevel::High,
-            harness_kind: HarnessKind::Codex,
             model_name: "fixture-model".into(),
             effort: "medium".into(),
             flow_id_option: None,
@@ -2385,12 +2407,21 @@ mod tests {
             leave_outs_option: None,
             instruction_prompt: "fixture instruction".into(),
         };
-        let origin = OriginClue {
+        let origin = Origin::Flow(FlowOrigin {
             flow_id: "caller".into(),
             session_id: "caller-session".into(),
-            turn_id: "caller-turn".into(),
-        };
-        let composed = fixture.nexus.composer.compose(&profile).unwrap();
+        });
+        let composed = fixture
+            .nexus
+            .composer
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: profile.clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap();
         fixture
             .nexus
             .store
@@ -2449,7 +2480,7 @@ mod tests {
                     herdr_pane_id: pane.herdr_pane_id.clone(),
                     herdr_terminal_id: pane.herdr_terminal_id.clone(),
                 }),
-                origin_clue: origin.clone(),
+                origin: origin.clone(),
                 flow_lifecycle: FlowLifecycle::Pending,
             })
             .unwrap();
@@ -2556,10 +2587,7 @@ mod tests {
         output.sync_all().unwrap();
 
         assert!(matches!(
-            fixture.nexus.dispatch(Query::Start(StartRequest {
-                launch_profile: profile,
-                origin_clue: origin,
-            })),
+            fixture.nexus.dispatch_from(Query::Start(profile), origin.clone()),
             Response::Started(started)
                 if started.flow_id == "908786" && started.session_id == native_session_id
         ));
@@ -2607,10 +2635,7 @@ mod tests {
             HerdrRouteSelection::Unavailable
         );
         assert_eq!(rows[0].endpoint_selection, EndpointSelection::Unavailable);
-        assert_eq!(
-            rows[0].origin_clue, node.origin_clue,
-            "its provenance is kept"
-        );
+        assert_eq!(rows[0].origin, node.origin, "its provenance is kept");
 
         // List wrote nothing: the stored row still says what Flow recorded.
         assert_eq!(
@@ -2811,7 +2836,7 @@ mod tests {
         assert_eq!(retired.flow_lifecycle, FlowLifecycle::Retired);
         assert_eq!(retired.flow_id, "908786");
         assert_eq!(retired.session_id, node.session_id, "its history is kept");
-        assert_eq!(retired.origin_clue, node.origin_clue);
+        assert_eq!(retired.origin, node.origin);
 
         // Retiring it again changes nothing and says so.
         assert_eq!(
@@ -2974,7 +2999,7 @@ mod tests {
     /// drives it, so a fixture can stop at any phase.
     struct StagedLaunch {
         profile: LaunchProfile,
-        origin: OriginClue,
+        origin: Origin,
         composed: signal_flow::ComposedLaunch,
         pane: HerdrPaneBinding,
         binding: NativeLaunchBinding,
@@ -3000,8 +3025,6 @@ mod tests {
                     topic: launch_request_id.into(),
                     layer: signal_flow::Layer::Secondary,
                 },
-                power_level: PowerLevel::High,
-                harness_kind: HarnessKind::Codex,
                 model_name: "fixture-model".into(),
                 effort: "medium".into(),
                 flow_id_option: predecessor.map(str::to_owned),
@@ -3013,7 +3036,13 @@ mod tests {
             let composed = self
                 .nexus
                 .composer
-                .compose(&profile)
+                .compose(
+                    crate::composition::HarnessedProfile {
+                        harness_kind: HarnessKind::Codex,
+                        launch_profile: profile.clone(),
+                    },
+                    Vec::<signal_flow::LeaveOut>::new(),
+                )
                 .expect("launch composes");
             let pane = HerdrPaneBinding {
                 launch_request_id: launch_request_id.into(),
@@ -3034,11 +3063,7 @@ mod tests {
                     herdr_pane_binding: pane.clone(),
                 },
                 profile,
-                origin: OriginClue {
-                    flow_id: "caller".into(),
-                    session_id: "caller-session".into(),
-                    turn_id: "caller-turn".into(),
-                },
+                origin: Origin::Unbound,
                 composed,
                 pane,
                 intent: None,
@@ -3172,11 +3197,10 @@ mod tests {
     }
 
     impl StagedLaunch {
-        fn request(&self) -> StartRequest {
-            StartRequest {
-                launch_profile: self.profile.clone(),
-                origin_clue: self.origin.clone(),
-            }
+        /// The profile a Start or Replace carries; an ordinary dispatch
+        /// with no calling flow derives the Unbound origin.
+        fn request(&self) -> LaunchProfile {
+            self.profile.clone()
         }
 
         fn reserve(&self, nexus: &RunningNexus) {
@@ -3240,13 +3264,15 @@ mod tests {
                             herdr_pane_id: self.pane.herdr_pane_id.clone(),
                             herdr_terminal_id: self.pane.herdr_terminal_id.clone(),
                         }),
-                        origin_clue: self.origin.clone(),
+                        origin: self.origin.clone(),
                         flow_lifecycle: FlowLifecycle::Pending,
                     },
                     signal_flow::Caller {
                         flow_id: self.binding.flow_id.clone(),
                         aspect: self.profile.address.aspect.clone(),
-                        power_level: self.profile.power_level.clone(),
+                        power_level: <RunningNexus as crate::waking::WakePolicy>::power_of(
+                            &self.profile.address.layer,
+                        ),
                         model_name: self.profile.model_name.clone(),
                     },
                 )
@@ -3913,7 +3939,7 @@ mod tests {
         fixture.claims_flow_ids();
         fs::remove_file(&fixture.snapshot_program).expect("Herdr withdrawn");
         let mut rejected = fixture.staged_launch("rejected-request", None);
-        rejected.profile.harness_kind = HarnessKind::Claude;
+        rejected.profile.model_name = "claude-fixture".into();
         let rejection = fixture.nexus.dispatch(Query::Start(rejected.request()));
         assert_eq!(
             rejection,
@@ -3939,7 +3965,7 @@ mod tests {
         // predecessor keeps receiving.
         fixture.register_predecessor("fac697");
         let mut refused = fixture.staged_launch("refused-request", Some("fac697"));
-        refused.profile.harness_kind = HarnessKind::Claude;
+        refused.profile.model_name = "claude-fixture".into();
         let rejection = fixture.nexus.dispatch(Query::Replace(refused.request()));
         assert_eq!(
             rejection,
@@ -3986,8 +4012,11 @@ mod tests {
         // No promoter runs yet, so Start is the only thing that can look at
         // the transcript: the log growing is Start having looked and found
         // no receipt, which is exactly where it used to answer ambiguity.
-        let answering =
-            std::thread::spawn(move || fixture.nexus.dispatch_serially(Query::Start(request)));
+        let answering = std::thread::spawn(move || {
+            fixture
+                .nexus
+                .dispatch_serially(Query::Start(request), Origin::Unbound)
+        });
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while looks() == before_start {
             assert!(
@@ -4359,6 +4388,47 @@ mod tests {
                 .nexus
                 .resolve_caller(marked_process.caller_pane(&fixture.nexus.herdr), None),
             Response::CallerResolved(mind_live())
+        );
+    }
+
+    /// A Start's origin is derived from its calling process as Identify
+    /// resolves a caller: the one flow bound in the peer's pane, with its
+    /// native session. A process in no bound pane, or a peer not read, is
+    /// Unbound: recorded as such, never refused.
+    #[test]
+    fn a_start_origin_is_the_bound_flow_in_the_callers_pane_or_unbound() {
+        use crate::generated::starter::DerivesOrigin;
+        use crate::store::ReadsFlowRows;
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        let bound = MarkedProcess::spawn("sleep", &["30"], "pane-1");
+        let unbound = MarkedProcess::spawn("sleep", &["30"], "pane-9");
+        let session_id = fixture
+            .nexus
+            .store
+            .flow_node("mind-live")
+            .unwrap()
+            .expect("the bound flow's row")
+            .session_id;
+        assert_eq!(
+            fixture.nexus.origin_of(Some(CallerProcess {
+                process_id: bound.0.id(),
+            })),
+            Origin::Flow(FlowOrigin {
+                flow_id: "mind-live".into(),
+                session_id,
+            })
+        );
+        assert_eq!(
+            fixture.nexus.origin_of(Some(CallerProcess {
+                process_id: unbound.0.id(),
+            })),
+            Origin::Unbound
+        );
+        assert_eq!(
+            fixture.nexus.origin_of(None::<CallerProcess>),
+            Origin::Unbound
         );
     }
 

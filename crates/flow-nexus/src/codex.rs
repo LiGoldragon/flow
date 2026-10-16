@@ -7,7 +7,7 @@ use crate::store::{CodexEndpointConfiguration, RuntimeConfiguration};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
 use signal_flow::{
-    ComposedLaunch, HarnessKind, OriginClue, PromptDeliveryIntent, PromptDeliveryResult,
+    ComposedLaunch, HarnessKind, Origin, PromptDeliveryIntent, PromptDeliveryResult,
 };
 use std::{
     collections::BTreeSet,
@@ -91,6 +91,17 @@ impl SelectsCodexEndpoint for CodexEndpoints {
     }
 }
 
+/// The harness a model runs on: Codex when a configured Codex endpoint
+/// serves it, else Claude.
+impl crate::generated::starter::DerivesHarness for CodexEndpoints {
+    fn harness_for<N: crate::generated::starter::Textual>(&self, input: N) -> HarnessKind {
+        match self.adapter_for(&input.text()) {
+            Ok(_) => HarnessKind::Codex,
+            Err(_) => HarnessKind::Claude,
+        }
+    }
+}
+
 impl From<&CodexEndpointConfiguration> for CodexEndpoint {
     fn from(configuration: &CodexEndpointConfiguration) -> Self {
         let home = PathBuf::from(&configuration.home);
@@ -136,7 +147,7 @@ pub trait StartsCodex {
         &self,
         flow_id: &str,
         goal: &str,
-        origin: &OriginClue,
+        origin: &Origin,
     ) -> Result<String, CodexAdapterUnavailable>;
 }
 
@@ -145,7 +156,7 @@ pub trait ResumesCodex {
         &self,
         thread_id: &str,
         goal: &str,
-        origin: &OriginClue,
+        origin: &Origin,
     ) -> Result<(), CodexAdapterUnavailable>;
 }
 
@@ -219,7 +230,7 @@ trait BuildsCodexTurn {
         thread_id: &str,
         flow_id: &str,
         goal: &str,
-        origin: &OriginClue,
+        origin: &Origin,
     ) -> serde_json::Value;
 }
 
@@ -550,11 +561,14 @@ impl BuildsCodexTurn for CodexAdapter {
         thread_id: &str,
         flow_id: &str,
         goal: &str,
-        origin: &OriginClue,
+        origin: &Origin,
     ) -> serde_json::Value {
         serde_json::json!({
             "threadId": thread_id,
-            "input": [{ "type": "text", "text": format!("{goal}\n\nFlow identity:\nFLOW_ID={flow_id}\nFLOW_DIRECTORY={}\n\nOrigin clue:\nflow: {}\nsession: {}\nturn: {}", self.flow_directory(flow_id).display(), origin.flow_id, origin.session_id, origin.turn_id) }],
+            "input": [{ "type": "text", "text": format!("{goal}\n\nFlow identity:\nFLOW_ID={flow_id}\nFLOW_DIRECTORY={}\n\nOrigin:\n{}", self.flow_directory(flow_id).display(), match origin {
+                Origin::Flow(caller) => format!("flow: {}\nsession: {}", caller.flow_id, caller.session_id),
+                Origin::Unbound => "unbound".to_owned(),
+            }) }],
             "model": self.model,
             "effort": "medium",
             "turnTrigger": "flow-nexus"
@@ -673,7 +687,7 @@ impl SubmitsBoundCodexPart for CodexAdapter {
             .collect::<Vec<_>>();
         let params = Self::bound_turn_params(launch, intent);
         if !launch.has_canonical_first_prompt()
-            || launch.launch_profile.harness_kind != HarnessKind::Codex
+            || launch.harness_kind != HarnessKind::Codex
             || intent.harness_kind != HarnessKind::Codex
             || intent.launch_request_id != launch.launch_profile.launch_request_id
             || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
@@ -747,7 +761,7 @@ impl StartsCodex for CodexAdapter {
         &self,
         flow_id: &str,
         goal: &str,
-        origin: &OriginClue,
+        origin: &Origin,
     ) -> Result<String, CodexAdapterUnavailable> {
         let mut session = self.open_proxy()?;
         let result = (|| {
@@ -801,7 +815,7 @@ pub trait StartsObservedCodex {
         &self,
         flow_id: &str,
         goal: &str,
-        origin: &OriginClue,
+        origin: &Origin,
         observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
     ) -> Result<String, CodexAdapterUnavailable>;
 }
@@ -811,7 +825,7 @@ impl StartsObservedCodex for CodexAdapter {
         &self,
         flow_id: &str,
         goal: &str,
-        origin: &OriginClue,
+        origin: &Origin,
         observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
     ) -> Result<String, CodexAdapterUnavailable> {
         let mut session = self.open_proxy()?;
@@ -868,7 +882,7 @@ impl ResumesCodex for CodexAdapter {
         &self,
         thread_id: &str,
         goal: &str,
-        origin: &OriginClue,
+        origin: &Origin,
     ) -> Result<(), CodexAdapterUnavailable> {
         let mut session = self.open_proxy()?;
         let result = (|| {
@@ -883,7 +897,15 @@ impl ResumesCodex for CodexAdapter {
             session.request(
                 3,
                 "turn/start",
-                self.turn_params(thread_id, origin.flow_id.as_str(), goal, origin),
+                self.turn_params(
+                    thread_id,
+                    match origin {
+                        Origin::Flow(caller) => caller.flow_id.as_str(),
+                        Origin::Unbound => "",
+                    },
+                    goal,
+                    origin,
+                ),
                 self.timeout,
             )?;
             Ok(())
@@ -985,12 +1007,11 @@ mod tests {
         }
     }
 
-    fn origin() -> OriginClue {
-        OriginClue {
+    fn origin() -> Origin {
+        Origin::Flow(signal_flow::FlowOrigin {
             flow_id: "parent-flow".into(),
             session_id: "session-1".into(),
-            turn_id: "turn-1".into(),
-        }
+        })
     }
 
     fn adapter() -> CodexAdapter {
@@ -1081,6 +1102,7 @@ mod tests {
         };
         let prompt_sha256 = "230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5";
         let launch = ComposedLaunch {
+            harness_kind: HarnessKind::Codex,
             launch_profile: signal_flow::LaunchProfile {
                 launch_request_id: "launch-malformed".into(),
                 system_modules: vec!["spirit-core".into(), "intent-flow".into()],
@@ -1090,8 +1112,6 @@ mod tests {
                     topic: "flow".into(),
                     layer: signal_flow::Layer::Secondary,
                 },
-                power_level: signal_flow::PowerLevel::Medium,
-                harness_kind: HarnessKind::Codex,
                 model_name: "gpt-5.6".into(),
                 effort: "medium".into(),
                 flow_id_option: None,
@@ -1157,16 +1177,23 @@ mod tests {
             .unwrap()
             .join("flows/flow-0000000000000001");
         assert!(brief.contains(&format!("FLOW_DIRECTORY={}", expected.display())));
-        assert!(brief.contains("flow: parent-flow\nsession: session-1\nturn: turn-1"));
+        assert!(brief.contains("Origin:\nflow: parent-flow\nsession: session-1"));
     }
 
     #[test]
     fn a_codex_part_is_one_text_item_and_nothing_else() {
         use crate::composition::ComposesLaunch;
         use crate::composition::tests::{fixture_composer, fixture_profile};
-        let mut profile = fixture_profile();
-        profile.harness_kind = HarnessKind::Codex;
-        let launch = fixture_composer().compose(&profile).unwrap();
+        let profile = fixture_profile();
+        let launch = fixture_composer()
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: profile.clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap();
         let (_, mut intent) = malformed_bound_launch();
         intent.prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
         intent.prompt_sha256_vector = vec![

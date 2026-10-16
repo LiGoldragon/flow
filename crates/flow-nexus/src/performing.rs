@@ -6,12 +6,13 @@
 
 use crate::RunningNexus;
 use crate::codex::{SelectsCodexEndpoint, SubmitsBoundCodexPart};
-use crate::composition::{ComposesLaunch, CompositionError};
+use crate::composition::{ComposesLaunch, CompositionError, HarnessedProfile};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
     Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
     Record_Data_Settled_Data, Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
+use crate::generated::starter::DerivesHarness;
 use crate::herdr::OperatesHerdrPane;
 use crate::herdr::launch::{
     CreatesHerdrLaunchPane, NativeTargetRefusal, ObservesNativeLaunchBinding,
@@ -227,8 +228,11 @@ impl<E> AnswersRecord for Result<(), E> {
 impl Performs for RunningNexus {
     fn perform(&self, operation: Operation) -> Outcome {
         match operation {
-            Operation::Compose(profile) => match self.composer.compose_leaving_out(
-                &profile,
+            Operation::Compose(profile) => match self.composer.compose(
+                HarnessedProfile {
+                    harness_kind: self.codex_endpoints.harness_for(&profile.model_name),
+                    launch_profile: profile.clone(),
+                },
                 self.store
                     .default_leave_outs(&profile.address)
                     .unwrap_or_default(),
@@ -320,7 +324,7 @@ impl Performs for RunningNexus {
                 composed_launch,
                 prompt_delivery_intent,
             }) => {
-                let submission = match composed_launch.launch_profile.harness_kind {
+                let submission = match composed_launch.harness_kind {
                     HarnessKind::Codex => self
                         .codex_endpoints
                         .adapter_for(&composed_launch.launch_profile.model_name)
@@ -372,12 +376,9 @@ impl PerformsInParts for RunningNexus {
         use crate::store::events::RecordsHarnessEvents;
         let Reserve_Data {
             composed_launch,
-            origin_clue,
+            origin,
         } = reserve;
-        let reservation = match self
-            .store
-            .reserve_launch_attempt(&composed_launch, origin_clue)
-        {
+        let reservation = match self.store.reserve_launch_attempt(&composed_launch, origin) {
             Ok(reservation) => reservation,
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
         };

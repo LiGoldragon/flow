@@ -35,14 +35,16 @@
 use crate::AwaitsLaunchSettlement;
 use crate::RunningNexus;
 use crate::claude::MeasuresClaudeContext;
-use crate::codex::SelectsCodexEndpoint;
-use crate::composition::{ComposesLaunch, CompositionError, FreshSeat, RendersQueuedWork};
+use crate::composition::{
+    ComposesLaunch, CompositionError, FreshSeat, HarnessedProfile, RendersQueuedWork,
+};
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data, Sleep_Data, Title_Data,
 };
+use crate::generated::starter::DerivesHarness;
 use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::launch::{
     ObservesNativeLaunchBinding, ResumesNativeHerdrHarness, WaitsForPaneRest,
@@ -60,8 +62,8 @@ use crate::store::{
 };
 use signal_flow::{
     Address, AgentState, ContextRefusal, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind,
-    HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow, OriginClue,
-    PowerLevel, Request, Response, StartRequest,
+    HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow, Origin,
+    PowerLevel, Request, Response,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -576,7 +578,7 @@ impl SleepsAndWakesSeats for RunningNexus {
         let profile = last.and_then(|flow_id| self.last_launch_profile(flow_id));
         if let (Some(node), Some(profile)) = (&node, &profile)
             && Self::can_resume(node)
-            && profile.harness_kind == HarnessKind::Claude
+            && node.harness_kind == HarnessKind::Claude
             && Self::resumes(
                 self.store.context_size(&node.flow_id).ok().flatten(),
                 self.refresh_threshold(&metaflow.address.layer),
@@ -828,7 +830,11 @@ impl WakesInParts for RunningNexus {
             .store
             .default_leave_outs(&profile.address)
             .unwrap_or_default();
-        let launch = match self.composer.resumption(&profile, default, text) {
+        let harnessed = HarnessedProfile {
+            harness_kind: self.codex_endpoints.harness_for(&profile.model_name),
+            launch_profile: profile,
+        };
+        let launch = match self.composer.resumption(&harnessed, default, text) {
             Ok(launch) => launch,
             Err(CompositionError::Context(refusal)) => {
                 return Err(WakeRefusal::ContextRefused(refusal));
@@ -965,10 +971,6 @@ impl WakesInParts for RunningNexus {
         else {
             return Err(Failed_Data::CompositionRefused);
         };
-        let harness_kind = match self.codex_endpoints.adapter_for(&model.native) {
-            Ok(_) => HarnessKind::Codex,
-            Err(_) => HarnessKind::Claude,
-        };
         let launch_request_id = format!(
             "wake-{}-{}",
             metaflow.past.len(),
@@ -981,8 +983,6 @@ impl WakesInParts for RunningNexus {
             address: address.clone(),
             launch_request_id: launch_request_id.clone(),
             model_name: model.native.clone(),
-            harness_kind,
-            power_level: Self::power_of(&address.layer),
             effort: Self::WAKE_EFFORT.into(),
             herdr_session_name: fresh.herdr_session_name,
             system_modules: fresh.system_modules,
@@ -991,24 +991,14 @@ impl WakesInParts for RunningNexus {
             prompt: text.to_owned(),
         };
         let profile = seat.fresh_profile();
-        let request = StartRequest {
-            launch_profile: profile,
-            origin_clue: OriginClue {
-                flow_id: metaflow
-                    .past
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| "flow-nexus".into()),
-                session_id: "flow-nexus-wake".into(),
-                turn_id: launch_request_id.clone(),
-            },
-        };
         let response = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let response = self.start(request);
+            // The Nexus starts this flow itself: no calling flow is its
+            // origin.
+            let response = self.start(profile, Origin::Unbound);
             self.settle(&launch_request_id, response)
         };
         // The gate is released before the wait: the launch is settled by the

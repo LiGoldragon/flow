@@ -10,9 +10,13 @@
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
+use crate::composition::HERDR_REQUEST_LINE_LIMIT;
 use crate::composition::{FitsOneMessage, NamesRemoteControl, ValidatesComposedPrompt};
 pub use crate::generated::starter::StartupProgress;
-use crate::generated::starter::{LeanStart, ReadsTypedUserText, RendersLeanStart, StartupReading};
+use crate::generated::starter::{
+    DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
+    ReadsTypedUserText, RendersLeanStart, StartupReading, Textual,
+};
 use crate::herdr::reservation::ChoosesNativeSession;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use sha2::{Digest, Sha256};
@@ -189,25 +193,29 @@ pub trait ObservesNativeTargetReceipt {
 /// Herdr's socket API, spoken directly: one JSON request line out, one JSON
 /// reply line back, on the socket `herdr session list` names for the pane's
 /// session. Herdr 0.8.2 reads a request line up to 1 MiB.
-pub(crate) trait PromptsThroughHerdrSocket {
-    const PROMPT_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
-    fn herdr_session_socket(&self, herdr_session_name: &str) -> Result<PathBuf, String>;
-    /// Herdr's `agent.prompt` for the pane's agent: the text, then Enter.
-    fn prompt_through_socket(&self, pane: &HerdrPaneBinding, text: &str) -> Result<(), String>;
-}
+/// Herdr's `agent.prompt` for the pane's agent types the text, then Enter;
+/// its reply is the JSON value Herdr answered with a result.
+const PROMPT_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl PromptsThroughHerdrSocket for HerdrCli {
-    fn herdr_session_socket(&self, herdr_session_name: &str) -> Result<PathBuf, String> {
+    fn herdr_session_socket<N: Textual>(&self, input: N) -> Result<String, String> {
         use crate::caller::KnowsHerdrServers;
+        let herdr_session_name = input.text();
         self.herdr_sessions()
             .ok_or_else(|| "Herdr sessions could not be listed".to_owned())?
             .into_iter()
             .find(|session| session.name == herdr_session_name)
-            .map(|session| session.socket)
+            .map(|session| session.socket.display().to_string())
             .ok_or_else(|| "Herdr lists no socket for the pane's session".to_owned())
     }
 
-    fn prompt_through_socket(&self, pane: &HerdrPaneBinding, text: &str) -> Result<(), String> {
+    fn prompt_through_socket<N: PaneBound, O: Textual>(
+        &self,
+        input_0: N,
+        input_1: O,
+    ) -> Result<serde_json::Value, String> {
+        let pane = input_0.pane();
+        let text = input_1.text();
         let request = serde_json::json!({
             "id": format!("flow:prompt:{}", pane.launch_request_id),
             "method": "agent.prompt",
@@ -216,15 +224,15 @@ impl PromptsThroughHerdrSocket for HerdrCli {
         let mut line = serde_json::to_string(&request)
             .map_err(|error| format!("Herdr prompt request not encoded: {error}"))?;
         line.push('\n');
-        if line.len() > HarnessKind::HERDR_REQUEST_LINE_LIMIT {
+        if line.len() > HERDR_REQUEST_LINE_LIMIT {
             return Err("Herdr prompt request exceeds its line limit".into());
         }
         let socket = self.herdr_session_socket(&pane.herdr_session_name)?;
         let mut stream = UnixStream::connect(&socket)
             .map_err(|error| format!("Herdr socket unreachable: {error}"))?;
         stream
-            .set_read_timeout(Some(Self::PROMPT_REPLY_TIMEOUT))
-            .and_then(|_| stream.set_write_timeout(Some(Self::PROMPT_REPLY_TIMEOUT)))
+            .set_read_timeout(Some(PROMPT_REPLY_TIMEOUT))
+            .and_then(|_| stream.set_write_timeout(Some(PROMPT_REPLY_TIMEOUT)))
             .map_err(|error| error.to_string())?;
         stream
             .write_all(line.as_bytes())
@@ -242,7 +250,7 @@ impl PromptsThroughHerdrSocket for HerdrCli {
         if reply.get("result").is_none() {
             return Err("Herdr prompt reply carries no result".into());
         }
-        Ok(())
+        Ok(reply)
     }
 }
 
@@ -849,16 +857,12 @@ impl ChecksComposedLaunch for ComposedLaunch {
                 .as_bytes()
             )
         );
-        format!(
-            "{}-{}",
-            launch.launch_profile.harness_kind.expected_harness(),
-            &hash[..24]
-        )
+        format!("{}-{}", launch.harness_kind.expected_harness(), &hash[..24])
     }
 
     fn lean_start(&self) -> LeanStart {
         LeanStart {
-            harness_kind: self.launch_profile.harness_kind.clone(),
+            harness_kind: self.harness_kind.clone(),
             leave_outs: self.leave_outs.clone(),
         }
     }
@@ -890,7 +894,7 @@ impl ChecksComposedLaunch for ComposedLaunch {
         launch.binding_matches_launch(&intent.herdr_pane_binding)?;
         if intent.launch_request_id != launch.launch_profile.launch_request_id
             || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
-            || intent.harness_kind != launch.launch_profile.harness_kind
+            || intent.harness_kind != launch.harness_kind
             || intent.model_name != launch.launch_profile.model_name
             || intent.effort != launch.launch_profile.effort
             || intent.prompt_sha256_vector != launch.part_hashes()
@@ -1285,7 +1289,7 @@ impl TitlesNativeFlow for HerdrCli {
             .binding_matches_launch(&binding.herdr_pane_binding)
             .is_err()
             || binding.launch_request_id != launch.launch_profile.launch_request_id
-            || binding.harness_kind != launch.launch_profile.harness_kind
+            || binding.harness_kind != launch.harness_kind
         {
             return Err(TitleRefusal::ForeignBinding);
         }
@@ -1360,11 +1364,10 @@ impl StartsNativeHerdrHarness for HerdrCli {
     ) -> Result<(), String> {
         // A reserved FlowId was claimed for the session Flow chose; the
         // harness runs as that session.
-        let session =
-            match reserved.and_then(|_| self.reserved_native_session_id(&launch.launch_profile)) {
-                Some(session) => ClaudeSession::Chosen(session),
-                None => ClaudeSession::Unchosen,
-            };
+        let session = match reserved.and_then(|_| self.reserved_native_session_id(launch)) {
+            Some(session) => ClaudeSession::Chosen(session),
+            None => ClaudeSession::Unchosen,
+        };
         self.spawn_native_harness(launch, pane, reserved, session)
     }
 }
@@ -1377,7 +1380,7 @@ impl ResumesNativeHerdrHarness for HerdrCli {
         flow_id: &str,
         native_session_id: &str,
     ) -> Result<(), String> {
-        if launch.launch_profile.harness_kind != HarnessKind::Claude {
+        if launch.harness_kind != HarnessKind::Claude {
             return Err("only a Claude harness is resumed in a pane".into());
         }
         if native_session_id.is_empty() {
@@ -1401,10 +1404,10 @@ impl SpawnsNativeHarness for HerdrCli {
         session: ClaudeSession,
     ) -> Result<(), String> {
         launch.binding_matches_launch(pane)?;
-        if launch.launch_profile.harness_kind == HarnessKind::Claude {
+        if launch.harness_kind == HarnessKind::Claude {
             self.prepare_claude_pane_environment(launch, pane, reserved)?;
         }
-        let harness = launch.launch_profile.harness_kind.expected_harness();
+        let harness = launch.harness_kind.expected_harness();
         let mut arguments = vec![
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -1418,7 +1421,7 @@ impl SpawnsNativeHarness for HerdrCli {
             "--timeout".into(),
             "30000".into(),
         ];
-        let codex_endpoint = if launch.launch_profile.harness_kind == HarnessKind::Codex {
+        let codex_endpoint = if launch.harness_kind == HarnessKind::Codex {
             let endpoint = self
                 .codex_endpoints
                 .endpoint_for(&launch.launch_profile.model_name)
@@ -1443,7 +1446,7 @@ impl SpawnsNativeHarness for HerdrCli {
             arguments.push("--remote".into());
             arguments.push(format!("unix://{}", endpoint.socket));
         }
-        if launch.launch_profile.harness_kind == HarnessKind::Claude {
+        if launch.harness_kind == HarnessKind::Claude {
             arguments.push("--settings".into());
             arguments.push(self.claude_flag_settings(&launch.lean_start()));
             // Every Claude Flow is remotely controllable; the name never
@@ -1470,7 +1473,7 @@ impl SpawnsNativeHarness for HerdrCli {
         }
         arguments.push("--model".into());
         arguments.push(launch.launch_profile.model_name.clone());
-        match launch.launch_profile.harness_kind {
+        match launch.harness_kind {
             HarnessKind::Claude => {
                 arguments.push("--effort".into());
                 arguments.push(launch.launch_profile.effort.clone());
@@ -1493,7 +1496,6 @@ impl SpawnsNativeHarness for HerdrCli {
         // The launch's leave-outs, as its harness's own switches.
         arguments.extend(launch.lean_start().arguments());
         if !launch
-            .launch_profile
             .harness_kind
             .fits_one_argument(&launch.system_prompt.system_prompt_text)
         {
@@ -1547,7 +1549,7 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         reserved: Option<&str>,
     ) -> Result<NativeLaunchBinding, String> {
         launch.binding_matches_launch(pane)?;
-        let expected_harness = launch.launch_profile.harness_kind.expected_harness();
+        let expected_harness = launch.harness_kind.expected_harness();
         // Herdr may report a just-started harness before it is ready: it is
         // waited for, never checked once.
         self.await_pane_rest(pane)?;
@@ -1585,8 +1587,8 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         // after exact pane/harness/readiness verification. If Herdr does expose
         // a session, it must agree exactly; it is never silently substituted.
         let selected_claude_session =
-            if launch.launch_profile.harness_kind == HarnessKind::Claude && reserved.is_some() {
-                self.reserved_native_session_id(&launch.launch_profile)
+            if launch.harness_kind == HarnessKind::Claude && reserved.is_some() {
+                self.reserved_native_session_id(launch)
                     .filter(|session| !session.is_empty())
             } else {
                 None
@@ -1637,28 +1639,23 @@ impl ObservesNativeLaunchBinding for HerdrCli {
             .collect::<String>()
             .to_ascii_lowercase();
         if reserved.is_some()
-            && self
-                .reserved_native_session_id(&launch.launch_profile)
-                .as_deref()
+            && self.reserved_native_session_id(launch).as_deref()
                 != Some(native_session_id.as_str())
         {
             return Err("native session is not the one Flow reserved for this launch".into());
         }
-        let flow_id =
-            self.claim_flow_identity(&launch.launch_profile.harness_kind, &native_session_id)?;
+        let flow_id = self.claim_flow_identity(&launch.harness_kind, &native_session_id)?;
         if reserved.is_some_and(|reserved| reserved != flow_id) {
             return Err("flow claim does not name the FlowId Flow reserved".into());
         }
-        if self.claimed_native_identity(&flow_id, &launch.launch_profile.harness_kind)?
-            != normalized_identity
-        {
+        if self.claimed_native_identity(&flow_id, &launch.harness_kind)? != normalized_identity {
             return Err("flow claim does not contain the observed native identity".into());
         }
         Ok(NativeLaunchBinding {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
             flow_id,
             native_session_id,
-            harness_kind: launch.launch_profile.harness_kind.clone(),
+            harness_kind: launch.harness_kind.clone(),
             herdr_pane_binding: pane.clone(),
         })
     }
@@ -1672,7 +1669,7 @@ impl AcceptsLaunchRegistration for HerdrCli {
         acknowledgement: &RegistrationAcknowledgement,
     ) -> Result<PromptDeliveryIntent, String> {
         launch.binding_matches_launch(&binding.herdr_pane_binding)?;
-        if binding.harness_kind != launch.launch_profile.harness_kind
+        if binding.harness_kind != launch.harness_kind
             || acknowledgement.launch_request_id != binding.launch_request_id
             || acknowledgement.flow_id != binding.flow_id
             || acknowledgement.native_session_id != binding.native_session_id
@@ -1726,20 +1723,6 @@ impl SubmitsStartupPart for HerdrCli {
     }
 }
 
-/// One transcript record read against the intent.
-trait ReadsStartupRecord {
-    /// The receipt turn when this record is the flow's first answer after
-    /// every part; a contradiction refuses.
-    fn read_record(
-        &mut self,
-        row: &serde_json::Value,
-        intent: &PromptDeliveryIntent,
-    ) -> Result<Option<String>, String>;
-    /// The part this user text is, when it is the next one expected; a
-    /// user text that is not refuses while parts are still expected.
-    fn read_part(&mut self, text: &str, intent: &PromptDeliveryIntent) -> Result<(), String>;
-}
-
 /// The text a Claude user row carries as typed input: a string, or a
 /// content vector of text items only. A harness notice (isMeta), a tool
 /// result or any other item is not typed input.
@@ -1768,8 +1751,19 @@ impl ReadsTypedUserText for serde_json::Value {
     }
 }
 
+/// One transcript record read against the intent: the receipt turn when
+/// the record is the flow's first answer after every part, and a
+/// contradiction refuses. A user text is the next part expected, and the
+/// count of parts seen grows by it; one that is not refuses while parts
+/// are still expected.
 impl ReadsStartupRecord for StartupReading {
-    fn read_part(&mut self, text: &str, intent: &PromptDeliveryIntent) -> Result<(), String> {
+    fn read_part<N: Textual, O: DeliveryIntended>(
+        &mut self,
+        input_0: N,
+        input_1: O,
+    ) -> Result<i64, String> {
+        let text = input_0.text();
+        let intent = input_1.intent();
         let expected = usize::try_from(self.seen_parts)
             .ok()
             .and_then(|seen| intent.prompt_sha256_vector.get(seen))
@@ -1777,16 +1771,18 @@ impl ReadsStartupRecord for StartupReading {
         if expected.is_some_and(|hash| &text.text_sha256() == hash) {
             self.seen_parts += 1;
             self.last_part_answered = false;
-            return Ok(());
+            return Ok(self.seen_parts);
         }
         Err("a native user turn differs from the startup parts".into())
     }
 
-    fn read_record(
+    fn read_record<N: JsonRow, O: DeliveryIntended>(
         &mut self,
-        row: &serde_json::Value,
-        intent: &PromptDeliveryIntent,
+        input_0: N,
+        input_1: O,
     ) -> Result<Option<String>, String> {
+        let row = &input_0.row();
+        let intent = &input_1.intent();
         let every_part =
             usize::try_from(self.seen_parts).ok() == Some(intent.prompt_sha256_vector.len());
         let kind = row.get("type").and_then(serde_json::Value::as_str);
@@ -2034,9 +2030,9 @@ pub(crate) mod tests {
     use crate::title::ShowsNativeTitle;
     use signal_flow::{
         Aspect, ComposedLaunch, Effort, FirstPromptPayload, HarnessKind, LaunchProfile, ModelName,
-        NativeLaunchBinding, NativeTargetReceipt, NativeTranscriptBoundary, PowerLevel,
-        PromptDeliveryIntent, PromptDeliveryResult, PromptPart, RegistrationAcknowledgement,
-        SystemPrompt, TargetReceiptRequest,
+        NativeLaunchBinding, NativeTargetReceipt, NativeTranscriptBoundary, PromptDeliveryIntent,
+        PromptDeliveryResult, PromptPart, RegistrationAcknowledgement, SystemPrompt,
+        TargetReceiptRequest,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Write};
@@ -2056,6 +2052,7 @@ pub(crate) mod tests {
 
     pub(crate) fn launch(harness_kind: HarnessKind) -> ComposedLaunch {
         ComposedLaunch {
+            harness_kind,
             launch_profile: LaunchProfile {
                 launch_request_id: "launch-42".into(),
                 system_modules: vec!["spirit-core".into(), "intent-flow".into()],
@@ -2065,8 +2062,6 @@ pub(crate) mod tests {
                     topic: "flow".into(),
                     layer: signal_flow::Layer::Secondary,
                 },
-                power_level: PowerLevel::Medium,
-                harness_kind,
                 model_name: ModelName::from("model-current"),
                 effort: Effort::from("high"),
                 flow_id_option: None,
@@ -2107,7 +2102,7 @@ pub(crate) mod tests {
             .iter()
             .enumerate()
             .map(|(index, chunk)| {
-                let text = format!("{}{chunk}", HarnessKind::part_header(index + 1, 2));
+                let text = format!("{}{chunk}", HarnessKind::part_header((index + 1, 2)));
                 PromptPart {
                     prompt_sha256: digest(&text),
                     prompt_part_text: text,
@@ -2234,7 +2229,7 @@ printf '%s\n' 123456
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
             flow_id: "123456".into(),
             native_session_id: native_session.into(),
-            harness_kind: launch.launch_profile.harness_kind.clone(),
+            harness_kind: launch.harness_kind.clone(),
             herdr_pane_binding: pane.clone(),
         };
         let acknowledgement = RegistrationAcknowledgement {
@@ -2451,7 +2446,7 @@ printf '%s\n' 123456
         let launch = launch(HarnessKind::Claude);
         let session = HerdrCli::default()
             .with_ordinary_socket(Path::new("/fixture/run/flow-next/flow/flow.sock"))
-            .reserved_native_session_id(&launch.launch_profile)
+            .reserved_native_session_id(&launch)
             .expect("a Claude launch chooses its session");
         let agent_name = launch.launch_agent_name();
         let (root, adapter) =
@@ -2503,7 +2498,7 @@ printf '%s\n' 123456
         let launch = launch(HarnessKind::Claude);
         let session = HerdrCli::default()
             .with_ordinary_socket(Path::new("/fixture/run/flow-next/flow/flow.sock"))
-            .reserved_native_session_id(&launch.launch_profile)
+            .reserved_native_session_id(&launch)
             .expect("a reserved Claude launch chooses its session");
         let agent_name = launch.launch_agent_name();
         let (root, adapter) =

@@ -239,8 +239,8 @@ impl NormalizesState for str {
 mod tests {
     use super::{ClaudeDaemon, MeasuresClaudeContext, ProjectsClaudeReadiness};
     use signal_flow::{
-        Available_Data, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, OriginClue,
-        RouteReadiness,
+        Available_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
+        Origin, RouteReadiness,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -272,11 +272,10 @@ mod tests {
                 route_readiness: RouteReadiness::Ready,
             }),
             herdr_route_selection: signal_flow::HerdrRouteSelection::Unavailable,
-            origin_clue: OriginClue {
+            origin: Origin::Flow(FlowOrigin {
                 flow_id: "da1e3f".into(),
                 session_id: "da1e3f9d-full".into(),
-                turn_id: "unavailable".into(),
-            },
+            }),
             flow_lifecycle: FlowLifecycle::Active,
         };
         assert!(matches!(

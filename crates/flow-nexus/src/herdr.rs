@@ -728,8 +728,8 @@ mod tests {
     use crate::herdr::ReadsHerdrSnapshot;
     use crate::herdr::pane::ReadsAgentStatus;
     use signal_flow::{
-        EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection,
-        OriginClue,
+        EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
+        HerdrRouteSelection, Origin,
     };
     use std::path::PathBuf;
 
@@ -869,11 +869,10 @@ mod tests {
             harness_kind: HarnessKind::Claude,
             endpoint_selection: EndpointSelection::Unavailable,
             herdr_route_selection: HerdrRouteSelection::Available(route()),
-            origin_clue: OriginClue {
+            origin: Origin::Flow(FlowOrigin {
                 flow_id: "1ac573".into(),
                 session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
-                turn_id: "unavailable".into(),
-            },
+            }),
             flow_lifecycle: FlowLifecycle::Active,
         };
         std::fs::write(
@@ -902,11 +901,10 @@ mod tests {
                 route_readiness: signal_flow::RouteReadiness::Ready,
             }),
             herdr_route_selection: HerdrRouteSelection::Available(route()),
-            origin_clue: OriginClue {
+            origin: Origin::Flow(FlowOrigin {
                 flow_id: "1ac573".into(),
                 session_id: "f52d95a1-857f-49ab-8c6f-3aa0a9db826b".into(),
-                turn_id: "unavailable".into(),
-            },
+            }),
             flow_lifecycle: FlowLifecycle::Active,
         };
         let stale = herdr.refresh_route(node.clone());

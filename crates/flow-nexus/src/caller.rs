@@ -22,9 +22,10 @@
 //! Message, which reads its own peer from the kernel.
 
 use crate::RunningNexus;
+use crate::generated::starter::{CallerProcessing, DerivesOrigin};
 use crate::herdr::PanePresence;
 use crate::herdr::ReadsHerdrPanes;
-use crate::store::{ReadsFlowRoles, StoreError};
+use crate::store::{ReadsFlowRoles, ReadsFlowRows, StoreError};
 use signal_flow::{Caller, CallerResolutionRejection, FlowId, FlowNode, Response};
 use std::collections::BTreeSet;
 use std::{fs, os::unix::net::UnixStream, path::PathBuf};
@@ -270,6 +271,26 @@ impl ResolvesCaller for RunningNexus {
             }
             (Ok(caller), _) => Response::CallerResolved(caller),
         }
+    }
+}
+
+/// The origin of what a calling process asks: its pane's one bound flow
+/// with that flow's native session, as Identify resolves a caller, or
+/// Unbound when it is no bound flow (a deploy script, a shell).
+impl DerivesOrigin for RunningNexus {
+    fn origin_of<N: CallerProcessing>(&self, input: N) -> signal_flow::Origin {
+        input
+            .caller_process()
+            .and_then(|process| process.caller_pane(&self.herdr))
+            .and_then(|pane| self.bound_caller(&pane).ok())
+            .and_then(|caller| self.store.flow_node(&caller.flow_id).ok().flatten())
+            .map(|node| {
+                signal_flow::Origin::Flow(signal_flow::FlowOrigin {
+                    flow_id: node.flow_id,
+                    session_id: node.session_id,
+                })
+            })
+            .unwrap_or(signal_flow::Origin::Unbound)
     }
 }
 

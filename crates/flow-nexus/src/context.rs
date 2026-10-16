@@ -22,7 +22,11 @@ use crate::generated::curriculum::{
     CallerMetaflow, ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery,
     StartupComposition, StartupPlacement, StartupSelection, Target,
 };
-use crate::generated::starter::{ContextRequest, ReadsVerifiedContext, SelectsStartup};
+pub use crate::generated::starter::{
+    ComposesFlowContext, ContextRequest, ContextRequesting, CurriculumQuerying, CutsRenderedText,
+    ExchangesCurriculumFrames, OpensCurriculumComposer, ProvenanceListing, ReadsVerifiedContext,
+    SelectsStartup, StartupComposing, Textual, VerifiesContext,
+};
 use sha2::{Digest, Sha256};
 use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Layer};
 use std::{
@@ -32,14 +36,6 @@ use std::{
     time::Duration,
 };
 
-/// Composes a flow's system and USER context from module identities.
-pub trait ComposesFlowContext: Send + Sync {
-    fn compose_flow_context(
-        &self,
-        request: &ContextRequest,
-    ) -> Result<StartupComposition, ContextRefusal>;
-}
-
 /// The Curriculum Nexus, asked over its Unix socket: one big-endian u32
 /// length-prefixed rkyv `Query` frame out, one `Outcome` frame back.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,31 +43,52 @@ pub struct CurriculumComposer {
     socket: PathBuf,
 }
 
-pub trait OpensCurriculumComposer: Sized {
-    /// How long one composition may take on the socket.
-    const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
-    /// The largest answer frame read: generous for two texts.
-    const ANSWER_FRAME_LIMIT: usize = 64 * 1024 * 1024;
-    fn at(socket: impl Into<PathBuf>) -> Self;
-    /// `$XDG_RUNTIME_DIR/curriculum/curriculum.sock`, as Curriculum serves it.
-    fn from_environment() -> Self;
-}
+/// How long one composition may take on the Curriculum socket.
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The largest Curriculum answer frame read: generous for two texts.
+const ANSWER_FRAME_LIMIT: usize = 64 * 1024 * 1024;
+/// The opening line of a rendered context text.
+pub const CONTEXT_OPENING: &str = "These are your skills, given here; do not reload them.";
 
+/// A Curriculum composer at the socket a text names; from the environment,
+/// at `$XDG_RUNTIME_DIR/curriculum/curriculum.sock`, as Curriculum serves it.
 impl OpensCurriculumComposer for CurriculumComposer {
-    fn at(socket: impl Into<PathBuf>) -> Self {
+    fn at<N: Textual>(input: N) -> Self {
         Self {
-            socket: socket.into(),
+            socket: PathBuf::from(input.text()),
         }
     }
 
     fn from_environment() -> Self {
-        Self::at(
-            std::env::var_os("XDG_RUNTIME_DIR")
+        Self {
+            socket: std::env::var_os("XDG_RUNTIME_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/run"))
                 .join("curriculum")
                 .join("curriculum.sock"),
-        )
+        }
+    }
+}
+
+/// The context composer a Nexus runs with: the Curriculum Nexus, or, under
+/// test, the in-memory fixture.
+#[derive(Debug, Clone)]
+pub enum ContextComposer {
+    Curriculum(CurriculumComposer),
+    #[cfg(test)]
+    Fixture(FixtureComposer),
+}
+
+impl ComposesFlowContext for ContextComposer {
+    fn compose_flow_context<N: ContextRequesting>(
+        &self,
+        input: N,
+    ) -> Result<StartupComposition, ContextRefusal> {
+        match self {
+            Self::Curriculum(composer) => composer.compose_flow_context(input),
+            #[cfg(test)]
+            Self::Fixture(composer) => composer.compose_flow_context(input),
+        }
     }
 }
 
@@ -104,20 +121,18 @@ impl SelectsStartup for ContextRequest {
     }
 }
 
-trait ExchangesCurriculumFrames {
-    fn exchange(&self, query: &CurriculumQuery) -> Result<CurriculumOutcome, String>;
-}
-
+/// One big-endian u32 length-prefixed rkyv `Query` frame out, one
+/// `Outcome` frame back.
 impl ExchangesCurriculumFrames for CurriculumComposer {
-    fn exchange(&self, query: &CurriculumQuery) -> Result<CurriculumOutcome, String> {
-        let request = rkyv::to_bytes::<rkyv::rancor::Error>(query)
+    fn exchange<N: CurriculumQuerying>(&self, input: N) -> Result<CurriculumOutcome, String> {
+        let request = rkyv::to_bytes::<rkyv::rancor::Error>(&input.query())
             .map_err(|error| format!("query not archived: {error}"))?;
         let length = u32::try_from(request.len()).map_err(|_| "query frame too large")?;
         let mut stream = UnixStream::connect(&self.socket)
             .map_err(|error| format!("Curriculum socket unreachable: {error}"))?;
         stream
-            .set_read_timeout(Some(Self::EXCHANGE_TIMEOUT))
-            .and_then(|_| stream.set_write_timeout(Some(Self::EXCHANGE_TIMEOUT)))
+            .set_read_timeout(Some(EXCHANGE_TIMEOUT))
+            .and_then(|_| stream.set_write_timeout(Some(EXCHANGE_TIMEOUT)))
             .map_err(|error| error.to_string())?;
         stream
             .write_all(&length.to_be_bytes())
@@ -129,7 +144,7 @@ impl ExchangesCurriculumFrames for CurriculumComposer {
             .read_exact(&mut prefix)
             .map_err(|error| format!("answer not read: {error}"))?;
         let length = u32::from_be_bytes(prefix) as usize;
-        if length > Self::ANSWER_FRAME_LIMIT {
+        if length > ANSWER_FRAME_LIMIT {
             return Err("answer frame exceeds its limit".into());
         }
         let mut frame = vec![0_u8; length];
@@ -142,12 +157,12 @@ impl ExchangesCurriculumFrames for CurriculumComposer {
 }
 
 impl ComposesFlowContext for CurriculumComposer {
-    fn compose_flow_context(
+    fn compose_flow_context<N: ContextRequesting>(
         &self,
-        request: &ContextRequest,
+        input: N,
     ) -> Result<StartupComposition, ContextRefusal> {
-        match self.exchange(&CurriculumQuery::ComposeStartup(
-            request.startup_selection(),
+        match self.exchange(CurriculumQuery::ComposeStartup(
+            input.context_request().startup_selection(),
         )) {
             Ok(CurriculumOutcome::StartupComposed(composition)) => Ok(composition),
             Ok(CurriculumOutcome::Rejected(reason)) => {
@@ -176,29 +191,17 @@ pub struct VerifiedContext {
     user_segments: Vec<String>,
 }
 
-pub trait VerifiesContext: Sized {
-    /// The opening line of a rendered context text.
-    const OPENING: &'static str = "These are your skills, given here; do not reload them.";
-    fn verified(
-        request: &ContextRequest,
-        composition: StartupComposition,
-    ) -> Result<Self, ContextRefusal>;
-}
-
 /// Cuts a rendered text back into its modules, checking each module's slice
 /// against its rendered SHA-256 and the whole against the rendering.
-trait CutsRenderedText {
-    fn rendered_segments(&self, rows: &[&ContextProvenance]) -> Option<Vec<String>>;
-}
-
 impl CutsRenderedText for str {
-    fn rendered_segments(&self, rows: &[&ContextProvenance]) -> Option<Vec<String>> {
+    fn rendered_segments<N: ProvenanceListing>(&self, input: N) -> Option<Vec<String>> {
+        let rows = input.provenance();
         if rows.is_empty() {
             return self.is_empty().then(Vec::new);
         }
         let opening = format!(
             "{}\n\nModule IDs: {}\n",
-            VerifiedContext::OPENING,
+            CONTEXT_OPENING,
             rows.iter()
                 .map(|row| row.module_identity.as_str())
                 .collect::<Vec<_>>()
@@ -235,10 +238,12 @@ impl CutsRenderedText for str {
 }
 
 impl VerifiesContext for VerifiedContext {
-    fn verified(
-        request: &ContextRequest,
-        composition: StartupComposition,
+    fn verified<N: ContextRequesting, O: StartupComposing>(
+        input_0: N,
+        input_1: O,
     ) -> Result<Self, ContextRefusal> {
+        let request = input_0.context_request();
+        let composition = input_1.composition();
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         if digest(&composition.system_text) != composition.system_payload_sha256
             || digest(&composition.user_text) != composition.user_payload_sha256
@@ -246,14 +251,15 @@ impl VerifiesContext for VerifiedContext {
             return Err(ContextRefusal::PayloadMismatch);
         }
         let rows = &composition.context_provenance_vector;
-        let placed = |placement: StartupPlacement| -> Vec<&ContextProvenance> {
+        let placed = |placement: StartupPlacement| -> Vec<ContextProvenance> {
             rows.iter()
                 .filter(|row| row.startup_placement == placement)
+                .cloned()
                 .collect()
         };
         let system_rows = placed(StartupPlacement::System);
         let user_rows = placed(StartupPlacement::User);
-        let present = |identities: &[String], placed: &[&ContextProvenance]| {
+        let present = |identities: &[String], placed: &[ContextProvenance]| {
             identities
                 .iter()
                 .all(|identity| placed.iter().any(|row| &row.module_identity == identity))
@@ -263,7 +269,7 @@ impl VerifiesContext for VerifiedContext {
         {
             return Err(ContextRefusal::ModuleMissing);
         }
-        let ordered = |placed: &[&ContextProvenance]| {
+        let ordered = |placed: &[ContextProvenance]| {
             placed
                 .iter()
                 .enumerate()
@@ -333,10 +339,11 @@ impl From<&[(&str, &str)]> for FixtureComposer {
 
 #[cfg(test)]
 impl ComposesFlowContext for FixtureComposer {
-    fn compose_flow_context(
+    fn compose_flow_context<N: ContextRequesting>(
         &self,
-        request: &ContextRequest,
+        input: N,
     ) -> Result<StartupComposition, ContextRefusal> {
+        let request = input.context_request();
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let mut rows = Vec::new();
         for (identities, placement) in [
@@ -368,7 +375,7 @@ impl ComposesFlowContext for FixtureComposer {
             }
             let mut text = format!(
                 "{}\n\nModule IDs: {}\n",
-                VerifiedContext::OPENING,
+                CONTEXT_OPENING,
                 identities.join(", ")
             );
             for identity in identities {
@@ -394,8 +401,8 @@ impl ComposesFlowContext for FixtureComposer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposesFlowContext, ContextRequest, FixtureComposer, ReadsVerifiedContext, SelectsStartup,
-        VerifiedContext, VerifiesContext,
+        CONTEXT_OPENING, ComposesFlowContext, ContextRequest, FixtureComposer,
+        ReadsVerifiedContext, SelectsStartup, VerifiedContext, VerifiesContext,
     };
     use crate::generated::curriculum::Target;
     use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Layer};
@@ -435,7 +442,7 @@ mod tests {
         let verified = VerifiedContext::verified(&request, composition).unwrap();
         assert_eq!(verified.user_segments().len(), 2);
         assert_eq!(verified.user_segments().concat(), user_text);
-        assert!(verified.user_segments()[0].starts_with(VerifiedContext::OPENING));
+        assert!(verified.user_segments()[0].starts_with(CONTEXT_OPENING));
         assert!(verified.user_segments()[1].starts_with("\n<!-- module: knowledge-flow -->\n"));
         assert!(verified.system_text().contains("Spirit body."));
         assert_eq!(verified.address(), request.address);

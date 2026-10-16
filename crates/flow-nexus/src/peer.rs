@@ -13,13 +13,13 @@
 
 use crate::RunningNexus;
 use crate::binding::ChecksProcessIdentity;
-use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ResolvesCaller};
+use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ReadsProcess, ResolvesCaller};
 use crate::store::ManagesMetaflowState;
 use crate::store::ReadsFlowRoles;
 use crate::store::delivery::RecordsDeliveries;
 use meta_signal_flow::{MetaRefusal, ProcessIdentity, Response};
 use signal_flow::CallerResolutionRejection;
-use std::{fs, path::PathBuf};
+use std::fs;
 
 /// Names the flow a process runs in.
 pub trait ResolvesPeer {
@@ -36,7 +36,7 @@ impl ResolvesPeer for RunningNexus {
         let Ok(process_id) = u32::try_from(identity.process_id) else {
             return Response::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
         };
-        let pane = CallerProcess { process_id }.caller_pane();
+        let pane = CallerProcess { process_id }.caller_pane(&self.herdr);
         match self.resolve_caller(pane, None) {
             signal_flow::Response::CallerResolved(caller) => Response::PeerResolved(caller),
             signal_flow::Response::CallerResolutionRejected(rejection) => {
@@ -73,7 +73,7 @@ impl AdmitsMetaPeer for RunningNexus {
         {
             return None;
         }
-        let pane = peer.caller_pane();
+        let pane = peer.caller_pane(&self.herdr);
         let caller = match self.resolve_caller(pane.clone(), None) {
             signal_flow::Response::CallerResolved(caller) => caller,
             // In a pane that holds a flow whose role Flow does not know: a
@@ -104,16 +104,5 @@ impl FindsFlowInPane for RunningNexus {
             .map(|flows| !flows.is_empty())
             // A store that cannot say is not taken to mean no flow.
             .unwrap_or(true)
-    }
-}
-
-/// The executable a process runs.
-trait ReadsExecutable {
-    fn executable(&self) -> Option<PathBuf>;
-}
-
-impl ReadsExecutable for CallerProcess {
-    fn executable(&self) -> Option<PathBuf> {
-        fs::canonicalize(format!("/proc/{}/exe", self.process_id)).ok()
     }
 }

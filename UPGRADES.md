@@ -1,3 +1,27 @@
+# Flow 0.34.3
+
+No wire change; no store change.
+
+- **A default-session pane is found.** Herdr's default session exports
+  `HERDR_PANE_ID` and no `HERDR_SESSION`, so a seat Flow launched there was
+  answered `Unidentified` by Identify, and ResolveCaller, ResolvePeer and
+  Bind did not find its flow. For a process whose nearest mark is the pane
+  ID alone, the Nexus walks its ancestry on to the Herdr server: the
+  ancestor whose `/proc/<pid>/exe` is the Herdr binary (the `herdr` on the
+  Nexus's `PATH`, canonical). The session is the one whose socket in `herdr
+  session list --json` that server listens on, read from the server's open
+  descriptors and `/proc/<pid>/net/unix`. A server on the sockets of more
+  than one session, a different pane ID on the way up, or no such server
+  names no pane. Every later check is unchanged.
+- **A Herdr server running a replaced binary names no pane.** When the
+  `herdr` on `PATH` has moved to a new store path since the default-session
+  server started, the server's executable no longer matches and its panes
+  are not found until that server restarts.
+- **Session sockets are read from JSON.** The agent observer locates a
+  session's socket through `herdr session list --json`.
+- **Configuration-only startup is unchanged.** It still treats a peer as in
+  a pane only when it or an ancestor carries both marks.
+
 # Flow 0.34.2
 
 No wire change; no store change.

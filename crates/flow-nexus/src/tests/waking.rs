@@ -631,6 +631,7 @@ fn resumable_ended_by(
     let typed = fixture.directory.path().join("pane-typed.txt");
     let marker = fixture.directory.path().join("marker-output");
     let script = r#"#!/bin/sh
+SESSIONS
 printf '%s\n' "$*" >> 'CALLS'
 case "$*" in
   *"workspace create"*) printf '%s\n' '{"result":{"workspace":{"workspace_id":"w9"},"root_pane":{"pane_id":"w9:p1","terminal_id":"term-resumed"}}}' ;;
@@ -646,6 +647,7 @@ case "$*" in
   *) exit 64 ;;
 esac
 "#
+    .replace("SESSIONS", &fixture.session_listing())
     .replace("CALLS", &calls.display().to_string())
     .replace("MARKER", &marker.display().to_string())
     .replace("TYPED", &typed.display().to_string())
@@ -1063,7 +1065,8 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     }
     .install(&script.replace(r#""agents":["#, &format!(r#""agents":[{sender_agent},"#)));
 
-    // The process that sends runs in the sender's pane, as Herdr marks it.
+    // The process that sends runs in the sender's pane, its pane ID alone
+    // marked, as in Herdr's default session.
     let sender = super::MarkedProcess::spawn("sleep", &["30"], "w5:p1");
     let sender_process = FlowStore::process_identity_for_pid(sender.0.id()).unwrap();
     assert_eq!(

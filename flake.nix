@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.34.2";
+            version = "0.34.3";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -227,6 +227,10 @@
             "tests::submission::a_draft_claudes_interrupt_put_back_is_never_taken_out";
           flow-caller-pane-from-marks-or-ancestry = context.exactTest "flow-nexus"
             "tests::a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors";
+          flow-caller-pane-ambiguous-session-refused = context.exactTest "flow-nexus"
+            "tests::a_pane_id_whose_herdr_server_serves_two_sessions_names_no_pane";
+          flow-launched-seat-identifies-and-wakes = context.exactTest "flow-nexus"
+            "tests::waking::a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_seat";
           flow-client-default-socket = context.exactTest "flow"
             "the_client_reaches_the_default_ordinary_socket_under_the_runtime_directory";
           flow-meta-client-default-socket = context.exactTest "flow-meta"

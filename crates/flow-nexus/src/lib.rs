@@ -579,7 +579,7 @@ impl ServesConnection for Connection {
             Query::ResolveCaller(claim) => nexus.resolve_caller(
                 self.peer
                     .peer_process()
-                    .and_then(|process| process.caller_pane()),
+                    .and_then(|process| process.caller_pane(&nexus.herdr)),
                 claim,
             ),
             query @ (Query::Bind(_)
@@ -1168,6 +1168,10 @@ mod tests {
         directory: tempfile::TempDir,
         nexus: RunningNexus,
         snapshot_program: PathBuf,
+        /// The fixture Herdr server's socket for the session
+        /// `messaging-build`: the test process listens on it, standing as
+        /// that server, and every marked fixture process descends from it.
+        _herdr_server: UnixListener,
     }
 
     fn inspected(response: Response, launch_request_id: &str) -> signal_flow::LaunchInspection {
@@ -1360,11 +1364,46 @@ mod tests {
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
                 stopping: crate::Stopping::default(),
             };
-            Self {
+            let herdr_config = directory.path().join("herdr-config");
+            let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");
+            fs::create_dir_all(session_socket.parent().expect("session directory"))
+                .expect("fixture Herdr session directory");
+            let herdr_server =
+                UnixListener::bind(&session_socket).expect("fixture Herdr server socket");
+            let fixture = Self {
                 directory,
                 nexus,
                 snapshot_program,
-            }
+                _herdr_server: herdr_server,
+            };
+            // The default session is listed, stopped, as Herdr lists it.
+            fixture.list_herdr_sessions(&[
+                ("default", herdr_config.join("herdr.sock")),
+                ("messaging-build", session_socket),
+            ]);
+            fixture
+        }
+
+        /// What the fixture Herdr's `session list --json` answers.
+        fn list_herdr_sessions(&self, sessions: &[(&str, PathBuf)]) {
+            let sessions: Vec<serde_json::Value> = sessions
+                .iter()
+                .map(|(name, socket)| serde_json::json!({"name": name, "socket_path": socket}))
+                .collect();
+            fs::write(
+                self.directory.path().join("herdr-sessions.json"),
+                serde_json::json!({"sessions": sessions}).to_string(),
+            )
+            .expect("fixture Herdr session list");
+        }
+
+        /// The fixture Herdr's first line after its shebang: it answers
+        /// `session list --json` from the listing the fixture keeps.
+        fn session_listing(&self) -> String {
+            format!(
+                "[ \"$1 $2 $3\" = \"session list --json\" ] && {{ cat '{}'; exit 0; }}",
+                self.directory.path().join("herdr-sessions.json").display()
+            )
         }
 
         fn node(&self) -> FlowNode {
@@ -1426,7 +1465,8 @@ mod tests {
                 }
             });
             let body = format!(
-                "#!/bin/sh\n[ \"$1\" = \"--session\" ] && [ \"$3\" = \"api\" ] && [ \"$4\" = \"snapshot\" ] || exit 64\nprintf '%s\\n' '{}'\n",
+                "#!/bin/sh\n{}\n[ \"$1\" = \"--session\" ] && [ \"$3\" = \"api\" ] && [ \"$4\" = \"snapshot\" ] || exit 64\nprintf '%s\\n' '{}'\n",
+                self.session_listing(),
                 snapshot
             );
             FixtureExecutable {
@@ -1448,7 +1488,8 @@ mod tests {
             let log = self.directory.path().join("herdr-operations.log");
             let typed = self.directory.path().join("pane-typed.txt");
             let body = format!(
-                "#!/bin/sh\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; {} ;;\n  \"pane close\"|\"pane send-keys\"|\"agent wait\") printf '%s\\n' \"$*\" >> '{}' ;;\n  \"agent read\") printf '%s\\n' '❯ ' '› ' ;;\n  *) exit 64 ;;\nesac\n",
+                "#!/bin/sh\n{}\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; {} ;;\n  \"pane close\"|\"pane send-keys\"|\"agent wait\") printf '%s\\n' \"$*\" >> '{}' ;;\n  \"agent read\") printf '%s\\n' '❯ ' '› ' ;;\n  *) exit 64 ;;\nesac\n",
+                self.session_listing(),
                 snapshot,
                 log.display(),
                 prompt.shell(&typed, &agents),
@@ -4290,15 +4331,15 @@ mod tests {
         /// A pane's marks appear within microseconds; this is only a bound.
         const SETTLING_LIMIT: Duration = Duration::from_secs(5);
 
-        fn settled_pane(&self) -> CallerPane;
+        fn settled_pane_id(&self) -> String;
     }
 
     impl SettlesItsMarks for CallerProcess {
-        fn settled_pane(&self) -> CallerPane {
+        fn settled_pane_id(&self) -> String {
             let deadline = std::time::Instant::now() + Self::SETTLING_LIMIT;
             loop {
-                if let Some(pane) = self.marked_pane() {
-                    return pane;
+                if let Some(pane_id) = self.marked_pane_id() {
+                    return pane_id;
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
@@ -4309,7 +4350,10 @@ mod tests {
         }
     }
 
-    /// A process that sleeps under the given Herdr marks, killed on drop.
+    /// A process that sleeps in a pane of Herdr's default-session shape,
+    /// killed on drop: it carries `HERDR_PANE_ID` alone, and its Herdr
+    /// server ancestor is the test process, listening on the fixture
+    /// session's socket.
     struct MarkedProcess(std::process::Child);
 
     impl MarkedProcess {
@@ -4324,14 +4368,14 @@ mod tests {
         fn spawn(program: &str, arguments: &[&str], pane: &str) -> Self {
             let child = std::process::Command::new(program)
                 .args(arguments)
-                .env("HERDR_SESSION", "messaging-build")
+                .env_remove("HERDR_SESSION")
                 .env("HERDR_PANE_ID", pane)
                 .spawn()
                 .expect("marked fixture process");
             CallerProcess {
                 process_id: child.id(),
             }
-            .settled_pane();
+            .settled_pane_id();
             Self(child)
         }
     }
@@ -4363,8 +4407,13 @@ mod tests {
 
     #[test]
     fn a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors() {
-        // The first sleeper carries the marks itself; the second shell
-        // stays the parent of a sleeper whose environment drops the marks.
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        // The first sleeper carries the pane mark itself; the second shell
+        // stays the parent of a sleeper whose environment drops it. Neither
+        // carries a session: the session is the one whose socket their
+        // Herdr server ancestor listens on.
         let marked = MarkedProcess::spawn("sleep", &["30"], "pane-1");
         let scrubbed = MarkedProcess::spawn(
             "sh",
@@ -4374,7 +4423,11 @@ mod tests {
         let marked_process = CallerProcess {
             process_id: marked.0.id(),
         };
-        assert_eq!(marked_process.caller_pane(), pane("pane-1"));
+        assert_eq!(marked_process.marked_pane(), None);
+        assert_eq!(
+            marked_process.caller_pane(&fixture.nexus.herdr),
+            pane("pane-1")
+        );
 
         let shell = scrubbed.0.id();
         let children = format!("/proc/{shell}/task/{shell}/children");
@@ -4394,17 +4447,54 @@ mod tests {
         let sleeper = CallerProcess {
             process_id: sleeper,
         };
-        assert_eq!(sleeper.marked_pane(), None);
-        assert_eq!(sleeper.caller_pane(), pane("pane-2"));
+        assert_eq!(sleeper.marked_pane_id(), None);
+        assert_eq!(sleeper.caller_pane(&fixture.nexus.herdr), pane("pane-2"));
 
-        let fixture = NexusFixture::new();
-        bind_existing_caller(&fixture, "mind-live", "pane-1");
-        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
         assert_eq!(
             fixture
                 .nexus
-                .resolve_caller(marked_process.caller_pane(), None),
+                .resolve_caller(marked_process.caller_pane(&fixture.nexus.herdr), None),
             Response::CallerResolved(mind_live())
+        );
+    }
+
+    /// A Herdr server that listens on the sockets of two listed sessions
+    /// does not say which one its pane is in: the pane is not found, and no
+    /// flow is named.
+    #[test]
+    fn a_pane_id_whose_herdr_server_serves_two_sessions_names_no_pane() {
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        let marked = MarkedProcess::spawn("sleep", &["30"], "pane-1");
+        let marked_process = CallerProcess {
+            process_id: marked.0.id(),
+        };
+        assert_eq!(
+            marked_process.caller_pane(&fixture.nexus.herdr),
+            pane("pane-1")
+        );
+
+        let herdr_config = fixture.directory.path().join("herdr-config");
+        let other_socket = herdr_config.join("sessions/other/herdr.sock");
+        fs::create_dir_all(other_socket.parent().unwrap()).unwrap();
+        let _other_server = UnixListener::bind(&other_socket).unwrap();
+        fixture.list_herdr_sessions(&[
+            ("default", herdr_config.join("herdr.sock")),
+            (
+                "messaging-build",
+                herdr_config.join("sessions/messaging-build/herdr.sock"),
+            ),
+            ("other", other_socket),
+        ]);
+        assert_eq!(marked_process.caller_pane(&fixture.nexus.herdr), None);
+        assert_eq!(
+            fixture
+                .nexus
+                .resolve_caller(marked_process.caller_pane(&fixture.nexus.herdr), None),
+            Response::CallerResolutionRejected(
+                signal_flow::CallerResolutionRejection::CallerUnknown
+            )
         );
     }
 

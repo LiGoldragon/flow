@@ -29,6 +29,8 @@ pub(crate) trait IdentifiesPeerProcess {
     /// Address. Otherwise a process running in the pane of a flow Flow
     /// launched names the Address its launch took: the pane is found from
     /// the Herdr marks the process or its nearest marked ancestor carries,
+    /// its session, when only the pane ID is marked, from the socket its
+    /// Herdr server ancestor listens on,
     /// the pane must hold exactly that one flow in the registry with the
     /// live Herdr snapshot still showing its binding, and the metaflow must
     /// be Awake as it. The process must still run with the start the
@@ -48,7 +50,7 @@ impl IdentifiesPeerProcess for RunningNexus {
         }
         let Some(pane) = u32::try_from(process.pid)
             .ok()
-            .and_then(|process_id| CallerProcess { process_id }.caller_pane())
+            .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
         else {
             return unidentified();
         };
@@ -98,7 +100,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
             // Awake as that flow, so the flow's own Stop can put it to sleep.
             let launched = u32::try_from(peer.pid)
                 .ok()
-                .and_then(|process_id| CallerProcess { process_id }.caller_pane())
+                .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
                 .and_then(|pane| self.bound_caller(&pane).ok())
                 .map(|caller| caller.flow_id);
             self.store.bind_metaflow(binding, peer, launched)

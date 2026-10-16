@@ -524,7 +524,11 @@ trait RunsConfigurationStartup {
         // Configuration-only startup has not built the ordinary pane readers, so
         // it can admit the owner or configured Message but cannot prove a pane
         // peer's configured MetaAspects membership.
-        ConfigurationStartup::configuration_peer_refusal(true, false, peer.caller_pane().is_some())
+        ConfigurationStartup::configuration_peer_refusal(
+            true,
+            false,
+            peer.marked_caller_pane().is_some(),
+        )
     }
 
     fn configuration_listener(socket: &Path) -> Result<UnixListener, String> {

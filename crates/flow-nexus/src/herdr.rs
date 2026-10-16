@@ -88,6 +88,9 @@ impl LocatesNativeTranscripts for HerdrCli {
 /// The production Herdr roster reader.
 pub struct HerdrCli {
     pub(crate) executable: PathBuf,
+    /// The binary Herdr servers run, when it is not the executable this
+    /// Nexus runs Herdr by, as resolved through `PATH` at each reading.
+    server_binary: Option<PathBuf>,
     flow_id_executable: PathBuf,
     flows_root: PathBuf,
     codex_endpoints: CodexEndpoints,
@@ -133,6 +136,7 @@ impl Default for HerdrCli {
         claude_skill_roots.push(workspace_root.join(".claude/skills"));
         Self {
             executable: PathBuf::from("herdr"),
+            server_binary: None,
             flow_id_executable: PathBuf::from("flow-id"),
             flows_root: flows_root.clone(),
             codex_endpoints: CodexEndpoints {
@@ -360,6 +364,10 @@ impl ConfiguresHerdrCli for HerdrCli {
             .join("native-transcripts");
         Self {
             executable,
+            // The test process stands as the fixture Herdr server.
+            server_binary: std::env::current_exe()
+                .ok()
+                .and_then(|binary| fs::canonicalize(binary).ok()),
             flow_id_executable: fixture_root.join("flow-id"),
             flows_root: flows_root.clone(),
             codex_endpoints: CodexEndpoints {
@@ -521,6 +529,44 @@ impl ReadsHerdrPanes for HerdrCli {
             .success()
             .then(|| serde_json::from_slice(&output.stdout).ok())
             .flatten()
+    }
+}
+
+impl crate::caller::KnowsHerdrServers for HerdrCli {
+    /// `herdr session list --json` names each session with its socket.
+    fn herdr_sessions(&self) -> Option<Vec<crate::caller::HerdrSession>> {
+        let output = Command::new(&self.executable)
+            .args(["session", "list", "--json"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let listing: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        listing
+            .get("sessions")?
+            .as_array()?
+            .iter()
+            .map(|session| {
+                Some(crate::caller::HerdrSession {
+                    name: session.get("name")?.as_str()?.to_owned(),
+                    socket: PathBuf::from(session.get("socket_path")?.as_str()?),
+                })
+            })
+            .collect()
+    }
+
+    fn herdr_binary(&self) -> Option<PathBuf> {
+        if let Some(binary) = &self.server_binary {
+            return Some(binary.clone());
+        }
+        if self.executable.components().count() > 1 {
+            return fs::canonicalize(&self.executable).ok();
+        }
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|directory| directory.join(&self.executable))
+            .find(|candidate| candidate.is_file())
+            .and_then(|found| fs::canonicalize(found).ok())
     }
 }
 

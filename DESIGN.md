@@ -104,9 +104,15 @@ second identity registry.
 process of the ordinary connection from the kernel (`SO_PEERCRED`); nothing in
 the request names the caller. Herdr's snapshot carries no process IDs, so the
 pane is read where Herdr marks it: every process Herdr starts in a pane
-inherits `HERDR_SESSION` and `HERDR_PANE_ID`, and the Nexus reads them from
-the peer's `/proc/<pid>/environ`, or from its nearest ancestor's when the
-peer's environment was scrubbed. The registry must hold exactly one routable
+inherits `HERDR_PANE_ID`, and in a named session also `HERDR_SESSION`, and
+the Nexus reads them from the peer's `/proc/<pid>/environ`, or from its
+nearest ancestor's when the peer's environment was scrubbed. Herdr's default
+session exports no `HERDR_SESSION`; for a pane ID alone the Nexus walks on to
+the Herdr server, the ancestor whose `/proc/<pid>/exe` is the Herdr binary,
+and takes the one session whose socket in `herdr session list --json` that
+server listens on, as the kernel lists its listening Unix sockets. A server
+on the sockets of more than one session, a pane ID that changes on the way
+up, or no Herdr server names no pane. The registry must hold exactly one routable
 flow on that session and pane, and the live snapshot must still show its
 binding (pane, terminal, harness); otherwise the reply is `CallerUnknown`.
 The answer is the flow's role, `Caller.{ FlowId FlowAspect PowerLevel

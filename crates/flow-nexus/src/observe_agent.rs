@@ -18,7 +18,6 @@ use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
-    process::Command,
 };
 
 /// Answers and streams a flow's agent state.
@@ -130,22 +129,12 @@ pub trait LocatesHerdrSession {
 }
 
 impl LocatesHerdrSession for HerdrCli {
-    /// `herdr session list` prints one row per session: name, status,
-    /// directory, socket.
     fn session_socket(&self, session_name: &str) -> Option<PathBuf> {
-        let output = Command::new(&self.executable)
-            .args(["session", "list"])
-            .output()
-            .ok()?;
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .skip(1)
-            .find_map(|row| {
-                let columns: Vec<&str> = row.split_whitespace().collect();
-                (columns.first() == Some(&session_name))
-                    .then(|| columns.last().map(PathBuf::from))
-                    .flatten()
-            })
+        use crate::caller::KnowsHerdrServers;
+        self.herdr_sessions()?
+            .into_iter()
+            .find(|session| session.name == session_name)
+            .map(|session| session.socket)
     }
 }
 

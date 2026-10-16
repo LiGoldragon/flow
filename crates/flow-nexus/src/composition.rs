@@ -145,50 +145,18 @@ impl RendersLaunchSection for LaunchProfile {
 ///
 /// `prompt_sha256` is SHA-256 over the exact UTF-8 bytes in
 /// `first_prompt_body`; it stays in the store and the observer and never
-/// enters the prompt. `first_prompt_text` is that body followed by the fixed
-/// receipt footer, which carries a short marker and no hash or request ID. The
-/// adapter sends `first_prompt_text` exactly.
+/// enters the prompt. `first_prompt_text` is that body exactly, and the
+/// adapter sends it exactly. The body is the brief: the seat's first answer
+/// performs it, and the launch is witnessed in
+/// the native transcript as the authenticated turn and its skill loads.
 pub trait ComposesLaunch {
     fn compose(&self, profile: &LaunchProfile) -> Result<ComposedLaunch, CompositionError>;
 }
 
-/// Verifies the exact body digest and the fixed receipt footer before a
-/// composed prompt crosses either native harness boundary.
+/// Verifies the exact body digest, and that the sent text is that body,
+/// before a composed prompt crosses either native harness boundary.
 pub trait ValidatesComposedPrompt {
     fn has_canonical_first_prompt(&self) -> bool;
-}
-
-/// The receipt a launched Flow is asked for. Its single line is bound to the
-/// Flow by native session, transcript cursor and the authenticated first
-/// turn, so the marker itself carries no identity and no hash.
-///
-/// Asking for the marker and nothing else is what makes it verifiable, and
-/// it is also what ends the seat's turn. The brief the same prompt carries
-/// is therefore not begun by this footer; Flow begins it, sending
-/// [`crate::performing::Performs::BRIEF_CONTINUATION`] over the
-/// seat's bound route the moment the receipt is witnessed. The footer stays
-/// exactly as it is.
-pub trait AsksForLaunchReceipt {
-    const LAUNCH_RECEIPT: &'static str = "FLOW_LAUNCH_RECEIPT_V2";
-
-    /// The fixed footer that follows every composed body of the harness.
-    /// Claude's footer continues its one line; Codex's is its own paragraph.
-    fn receipt_footer(&self) -> String;
-}
-
-impl AsksForLaunchReceipt for HarnessKind {
-    fn receipt_footer(&self) -> String {
-        match self {
-            HarnessKind::Claude => format!(
-                " When every skill has loaded, reply once with exactly {} and nothing else.",
-                Self::LAUNCH_RECEIPT
-            ),
-            HarnessKind::Codex => format!(
-                "\n\nWhen every skill has loaded, reply once with exactly this line and nothing else:\n{}",
-                Self::LAUNCH_RECEIPT
-            ),
-        }
-    }
 }
 
 /// Claude Code's observed transition to a pasted-content transcript shape.
@@ -415,13 +383,7 @@ impl ValidatesComposedPrompt for ComposedLaunch {
         {
             return false;
         }
-        let text = &self.first_prompt_payload.first_prompt_text;
-        *text
-            == format!(
-                "{}{}",
-                self.first_prompt_payload.first_prompt_body,
-                self.launch_profile.harness_kind.receipt_footer()
-            )
+        self.first_prompt_payload.first_prompt_text == self.first_prompt_payload.first_prompt_body
     }
 }
 
@@ -733,8 +695,7 @@ impl ComposesLaunch for LaunchComposer {
         );
         let mut body = self.render_body(profile, &bundle, &sources);
         if profile.harness_kind == HarnessKind::Claude {
-            let candidate = format!("{}{}", body, profile.harness_kind.receipt_footer());
-            if !candidate.fits_claude_paste() {
+            if !body.fits_claude_paste() {
                 let LaunchBundleText::File(bundle_file) = &bundle else {
                     unreachable!("Claude launches always receive a bundle file")
                 };
@@ -746,7 +707,7 @@ impl ComposesLaunch for LaunchComposer {
             launch_request_id: profile.launch_request_id.clone(),
             prompt_sha256: prompt_sha256.clone(),
         };
-        let first_prompt_text = format!("{}{}", body, profile.harness_kind.receipt_footer());
+        let first_prompt_text = body.clone();
         Ok(ComposedLaunch {
             launch_profile: profile.clone(),
             first_prompt_payload: FirstPromptPayload {
@@ -794,8 +755,8 @@ impl RendersQueuedWork for [Request] {
 
 /// A resumed flow's launch: its original profile, which names its pane
 /// agent, its session and its bundle copy, carrying the queued work as the
-/// text Flow types once the harness is back. No receipt is asked of a
-/// resumed seat; the hash only names the text.
+/// text Flow types once the harness is back. A resumed seat is not observed
+/// as a launch; the hash only names the text.
 pub trait ResumesLaunch {
     fn resumption(&self, text: &str) -> ComposedLaunch;
 }
@@ -931,9 +892,8 @@ impl ComposesFreshSeat for LaunchComposer {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsksForLaunchReceipt, ComposesLaunch, CompositionError, FitsClaudePaste, LaunchBundles,
-        LaunchComposer, NamesRemoteControl, OpensLaunchComposer, ShortensLaunchRequest,
-        ValidatesComposedPrompt,
+        ComposesLaunch, CompositionError, FitsClaudePaste, LaunchBundles, LaunchComposer,
+        NamesRemoteControl, OpensLaunchComposer, ShortensLaunchRequest, ValidatesComposedPrompt,
     };
     use crate::composition::KeepsLaunchBundles;
     use sha2::Digest as _;
@@ -1046,12 +1006,8 @@ mod tests {
         assert!(!body.contains("Remembered"), "{body}");
         assert!(!body.contains("1b8ac0"), "{body}");
         assert!(!body.contains("836818"), "{body}");
-        assert_eq!(
-            composed.first_prompt_payload.first_prompt_text,
-            format!(
-                "{expected}\n\nWhen every skill has loaded, reply once with exactly this line and nothing else:\nFLOW_LAUNCH_RECEIPT_V2"
-            )
-        );
+        // The first prompt is the body exactly: the brief.
+        assert_eq!(composed.first_prompt_payload.first_prompt_text, expected);
         assert_eq!(
             composed.target_receipt_request.prompt_sha256,
             composed.first_prompt_payload.prompt_sha256
@@ -1101,12 +1057,7 @@ mod tests {
                 root.bundles().file_for(&profile).display()
             ),
         );
-        assert_eq!(
-            composed.first_prompt_payload.first_prompt_text,
-            format!(
-                "{body} When every skill has loaded, reply once with exactly FLOW_LAUNCH_RECEIPT_V2 and nothing else."
-            )
-        );
+        assert_eq!(composed.first_prompt_payload.first_prompt_text, body);
         assert_eq!(body.matches("/knowledge-flow").count(), 1);
         assert_eq!(body.matches("/operation-main-flow").count(), 1);
         assert!(!body.contains("$spirit"));
@@ -1326,8 +1277,7 @@ mod tests {
         );
         composed.first_prompt_payload.prompt_sha256 = hash.clone();
         composed.target_receipt_request.prompt_sha256 = hash;
-        composed.first_prompt_payload.first_prompt_text =
-            format!("{body}{}", HarnessKind::Claude.receipt_footer());
+        composed.first_prompt_payload.first_prompt_text = body;
         assert!(composed.has_canonical_first_prompt());
     }
 

@@ -869,7 +869,6 @@ impl CarriesSignalFrames for UnixStream {
 #[cfg(test)]
 mod tests {
     use crate::DispatchesSerially;
-    use crate::composition::AsksForLaunchReceipt;
     use crate::composition::KeepsLaunchBundles;
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
@@ -2214,10 +2213,8 @@ mod tests {
                 "value":native_session_id
             }
         }}});
-        // The seat is really there: its pane answers `agent get`, the
-        // session snapshot shows it idle, and it takes a typed prompt. That
-        // is what lets Flow continue the seat into its brief once the
-        // receipt in the transcript is witnessed.
+        // The seat is really there: its pane answers `agent get` and the
+        // session snapshot shows it idle.
         let snapshot = serde_json::json!({
             "id":"cli:api:snapshot",
             "result":{"snapshot":{"agents":[serde_json::json!({
@@ -2243,13 +2240,11 @@ mod tests {
         }
         .install(&body);
 
-        let marker = HarnessKind::LAUNCH_RECEIPT;
         let transcript = transcript_root.join(format!("rollout-{native_session_id}.jsonl"));
         let mut output = fs::File::create(transcript).unwrap();
         for row in [
             serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-delayed"}}),
             serde_json::json!({"type":"event_msg","payload":{"thread_id":native_session_id,"turn_id":"turn-delayed","item":{"type":"UserMessage","content":[{"type":"text","text":composed.first_prompt_payload.first_prompt_text}]}}}),
-            serde_json::json!({"type":"event_msg","payload":{"thread_id":native_session_id,"turn_id":"turn-delayed","item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}}),
         ] {
             writeln!(output, "{row}").unwrap();
         }
@@ -2265,9 +2260,8 @@ mod tests {
         ));
         let calls = fs::read_to_string(herdr_calls).unwrap();
         // The receipt was promoted from what was already written: no second
-        // external write, and the first prompt is never re-typed. The one
-        // prompt in the log is the continuation into the brief.
-        only_the_brief_continuation_was_typed(&calls);
+        // external write, and the first prompt is never re-typed.
+        nothing_was_typed_after_the_first_prompt(&calls);
     }
 
     /// A seat Flow never stopped can still be gone: its pane leaves Herdr and
@@ -2995,14 +2989,12 @@ mod tests {
             self.record_ambiguity(nexus);
         }
 
-        /// The harness writes the first turn and the launch receipt.
+        /// The harness writes the authenticated first turn: the receipt.
         fn write_receipt(&self) {
-            let marker = HarnessKind::LAUNCH_RECEIPT;
             let mut rows = String::new();
             for row in [
                 serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-staged"}}),
                 serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":self.composed.first_prompt_payload.first_prompt_text}]}}}),
-                serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}}),
             ] {
                 rows.push_str(&format!("{row}\n"));
             }
@@ -3102,7 +3094,7 @@ mod tests {
             1,
             "{calls}"
         );
-        only_the_brief_continuation_was_typed(&calls);
+        nothing_was_typed_after_the_first_prompt(&calls);
     }
 
     #[test]
@@ -3483,22 +3475,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         assert_eq!(started.flow_id, "908786");
-        // Started is recorded before the continuation finishes being typed,
-        // so the log is waited on rather than read once: the promoter settles
-        // the launch and Flow then continues the seat into its brief.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let calls = loop {
-            let calls = fs::read_to_string(&calls).unwrap_or_default();
-            if calls.contains("agent prompt") {
-                break calls;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the brief continuation was never typed: {calls}"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        only_the_brief_continuation_was_typed(&calls);
+        let calls = fs::read_to_string(&calls).unwrap_or_default();
+        nothing_was_typed_after_the_first_prompt(&calls);
         assert!(!calls.contains("pane create"), "{calls}");
     }
 
@@ -3588,23 +3566,15 @@ mod tests {
         );
         assert!(late.read_response().is_err());
         let calls = fs::read_to_string(calls).unwrap_or_default();
-        only_the_brief_continuation_was_typed(&calls);
+        nothing_was_typed_after_the_first_prompt(&calls);
         assert!(!calls.contains("pane create"), "{calls}");
     }
 
-    /// Asserts the Herdr call log shows exactly one typed prompt, the
-    /// continuation Flow sends the moment the launch receipt is witnessed,
-    /// on the successor's own pane. Nothing else is ever typed at a launch:
-    /// the first prompt is never sent twice.
-    fn only_the_brief_continuation_was_typed(calls: &str) {
-        assert_eq!(calls.matches("agent prompt").count(), 1, "{calls}");
-        assert!(
-            calls.contains(&format!(
-                "--session fixture-session agent prompt w1:p1 {}",
-                <RunningNexus as crate::performing::Performs>::BRIEF_CONTINUATION
-            )),
-            "{calls}"
-        );
+    /// Asserts the Herdr call log shows no typed prompt. The Codex first
+    /// prompt travels over its app-server and carries the brief; once the
+    /// launch is witnessed nothing more is typed into the seat's pane.
+    fn nothing_was_typed_after_the_first_prompt(calls: &str) {
+        assert_eq!(calls.matches("agent prompt").count(), 0, "{calls}");
     }
 
     fn bind_existing_caller(fixture: &NexusFixture, flow_id: &str, pane: &str) {

@@ -1,3 +1,29 @@
+# Flow 0.30.0
+
+No wire or store change (signal-flow d1358d3 and meta-signal-flow cd8d5ec
+unchanged). The Nexus Operation root loses `Continue.FlowId` and its
+`Continued` outcome; that root is the Nexus's own and crosses no wire.
+
+- **The first prompt is the brief.** A launched seat's first prompt carries
+  the brief and ends with it, and the seat's first answer performs it. The
+  composed `first_prompt_text` is `first_prompt_body` exactly, and
+  `prompt_sha256` is the digest of the text the harness receives.
+- **The receipt is the native transcript.** The watched transcript of the
+  bound session shows the launch took: the first turn authenticated by its
+  digest, every selected skill loaded in order, and, for Claude, the seat's
+  first answer after them, at the intended model and effort. Codex records
+  its turn's model and effort before the input, so its confirmed skill loads
+  are the receipt. `NativeTargetReceipt.native_turn_id` is the Codex turn or
+  the Claude assistant row's uuid; `receipt_sha256` is the SHA-256 of the
+  transcript record that completed the receipt, newline included.
+- **Started is the end of a launch.** Settling a launch Started, or a
+  Replace Replaced, types nothing into the seat's pane.
+
+To deploy: let every launch in `PromptAmbiguous` settle, install 0.30.0 and
+restart the Nexus. A launch composed by 0.29.0 and still ambiguous at the
+restart is not promoted: its typed text no longer hashes to its stored
+body digest.
+
 # Flow 0.29.0
 
 Wire change: meta-signal-flow 19.0.0 (cd8d5ec) adds `Reconfigure`; the meta

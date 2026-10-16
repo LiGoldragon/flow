@@ -8,9 +8,7 @@
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
-use crate::composition::{
-    AsksForLaunchReceipt, NamesRemoteControl, StacksClaudeCommands, ValidatesComposedPrompt,
-};
+use crate::composition::{NamesRemoteControl, StacksClaudeCommands, ValidatesComposedPrompt};
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::reservation::ChoosesNativeSession;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
@@ -132,7 +130,8 @@ pub trait ResolvesClaudeNativeSkills {
 
 /// Performs one prompt submission attempt per invocation. The caller must
 /// durably gate invocation; a successful Herdr write remains ambiguous until
-/// the native transcript independently contains the requested receipt.
+/// the native transcript independently shows the authenticated first turn
+/// and every selected skill loaded.
 pub trait SubmitsFirstPromptOnce {
     fn submit_first_prompt_once(
         &self,
@@ -141,8 +140,10 @@ pub trait SubmitsFirstPromptOnce {
     ) -> Result<PromptDeliveryResult, String>;
 }
 
-/// Promotes an ambiguous delivery only from an exact assistant record in the
-/// native transcript for the bound session and turn. If a transcript was
+/// Promotes an ambiguous delivery only from the native transcript of the
+/// bound session: the first turn authenticated by its digest, every selected
+/// skill loaded in order, and, for Claude, the seat's first answer after
+/// them at the intended model and effort. If a transcript was
 /// absent at submission and later appears without a receipt, the returned
 /// ambiguous intent contains its adopted cursor and must replace the stored
 /// absence boundary before another observation.
@@ -922,8 +923,8 @@ impl HashesPrefix for File {
 
 pub(crate) trait ReadsLaunchText {
     fn decimal_identity(&self, label: &str) -> Result<u64, String>;
-    /// Whether `text` is the composed first prompt of the intent: its body
-    /// hash under the harness footer. Claude may store the exact text inside
+    /// Whether `text` is the composed first prompt of the intent: its exact
+    /// digest is the intent's prompt hash. Claude may store the exact text inside
     /// its native pasted-content wrapper, which is normalized separately.
     fn prompt_text_matches_intent(&self, intent: &PromptDeliveryIntent) -> bool;
     /// Returns the exact text inside Claude Code's native paste wrapper.
@@ -954,10 +955,7 @@ impl ReadsLaunchText for str {
 
     fn prompt_text_matches_intent(&self, intent: &PromptDeliveryIntent) -> bool {
         let text = self;
-        text.strip_suffix(&intent.harness_kind.receipt_footer())
-            .is_some_and(|body| {
-                format!("{:x}", Sha256::digest(body.as_bytes())) == intent.prompt_sha256
-            })
+        format!("{:x}", Sha256::digest(text.as_bytes())) == intent.prompt_sha256
     }
 
     fn claude_pasted_content(&self) -> Option<&str> {
@@ -999,7 +997,8 @@ impl ReadsLaunchText for str {
 }
 
 pub(crate) trait ReadsTranscriptRow {
-    fn assistant_receipt(&self, native_session_id: &str, expected: &str) -> Option<String>;
+    /// The uuid of a Claude assistant row of this native session.
+    fn assistant_turn(&self, native_session_id: &str) -> Option<String>;
     /// Whether a Claude assistant row ran at the intended effort. Claude Code
     /// 2.1.280 records `effort` (and `perTurnEffort`) only for a model that
     /// takes one; for Claude Haiku 4.5 it records no `effort` and
@@ -1009,46 +1008,17 @@ pub(crate) trait ReadsTranscriptRow {
 }
 
 impl ReadsTranscriptRow for serde_json::Value {
-    fn assistant_receipt(&self, native_session_id: &str, expected: &str) -> Option<String> {
+    fn assistant_turn(&self, native_session_id: &str) -> Option<String> {
         let row = self;
-        if row.get("type").and_then(serde_json::Value::as_str) == Some("event_msg")
-            && row
-                .pointer("/payload/thread_id")
-                .and_then(serde_json::Value::as_str)
-                == Some(native_session_id)
-            && row
-                .pointer("/payload/item/type")
-                .and_then(serde_json::Value::as_str)
-                == Some("AgentMessage")
-        {
-            let turn = row
-                .pointer("/payload/turn_id")
-                .and_then(serde_json::Value::as_str)?;
-            let contents = row
-                .pointer("/payload/item/content")
-                .and_then(serde_json::Value::as_array)?;
-            return (contents.len() == 1
-                && contents[0].get("text").and_then(serde_json::Value::as_str) == Some(expected))
-            .then(|| turn.to_owned());
-        }
-
-        if row.get("type").and_then(serde_json::Value::as_str) == Some("assistant")
+        (row.get("type").and_then(serde_json::Value::as_str) == Some("assistant")
             && row
                 .get("sessionId")
                 .or_else(|| row.get("session_id"))
                 .and_then(serde_json::Value::as_str)
-                == Some(native_session_id)
-        {
-            let turn = row.get("uuid").and_then(serde_json::Value::as_str)?;
-            let contents = row
-                .pointer("/message/content")
-                .and_then(serde_json::Value::as_array)?;
-            return (contents.len() == 1
-                && contents[0].get("text").and_then(serde_json::Value::as_str) == Some(expected))
-            .then(|| turn.to_owned());
-        }
-
-        None
+                == Some(native_session_id))
+        .then(|| row.get("uuid").and_then(serde_json::Value::as_str))
+        .flatten()
+        .map(str::to_owned)
     }
 
     fn claude_effort_matches(&self, effort: &str) -> bool {
@@ -1738,11 +1708,10 @@ impl ObservesNativeTargetReceipt for HerdrCli {
         &self,
         durable_intent: &PromptDeliveryIntent,
     ) -> Result<PromptDeliveryResult, String> {
-        let expected = HarnessKind::LAUNCH_RECEIPT;
         let Some((input, adopted_after_absence)) = self.receipt_input(durable_intent)? else {
             return Ok(PromptDeliveryResult::Ambiguous(durable_intent.clone()));
         };
-        let mut observed_turn = None;
+        let mut observed = None;
         let mut native_turn = None;
         let mut input_verified = false;
         let mut skill_index = 0_usize;
@@ -1771,9 +1740,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                 continue;
             };
             // Once the first turn and every selected skill are confirmed,
-            // what the flow does next is its own work: the instruction may
-            // load further skills, and harness notices or later messages may
-            // land before the receipt. Only the receipt is looked for.
+            // what the flow does next is its own work: the brief may load
+            // further skills, and harness notices may land before its first
+            // answer. Only that answer is looked for.
             let claude_first_turn_confirmed = input_verified
                 && !claude_command_expansion_pending
                 && pending_claude_tool.is_none()
@@ -2128,20 +2097,26 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                     }
                 }
             }
-            if let Some(turn) = row.assistant_receipt(&durable_intent.native_session_id, expected) {
-                if observed_turn.is_some() {
-                    return Err("native transcript contains duplicate target receipts".into());
-                }
-                if skill_index != durable_intent.native_skill_selection_vector.len()
-                    || matches!(durable_intent.harness_kind, HarnessKind::Codex)
-                        && (!input_verified || native_turn.as_deref() != Some(turn.as_str()))
-                    || matches!(durable_intent.harness_kind, HarnessKind::Claude)
-                        && (!input_verified
-                            || claude_command_expansion_pending
-                            || claude_commands_loaded > 0 && claude_commands_loaded != claude_stack)
+            // The launch took once the authenticated first turn and every
+            // selected skill are confirmed. Codex records the turn's model
+            // and effort before its input, so that confirmation is the
+            // receipt. Claude records model and effort on its assistant
+            // rows, so its receipt is the first assistant row of the
+            // session after confirmation: the seat beginning its brief.
+            let receipt_turn = match durable_intent.harness_kind {
+                HarnessKind::Codex
+                    if input_verified
+                        && skill_index == durable_intent.native_skill_selection_vector.len() =>
                 {
-                    return Err("target receipt preceded native skill confirmation".into());
+                    native_turn.clone()
                 }
+                HarnessKind::Codex => None,
+                HarnessKind::Claude if claude_first_turn_confirmed => {
+                    row.assistant_turn(&durable_intent.native_session_id)
+                }
+                HarnessKind::Claude => None,
+            };
+            if let Some(turn) = receipt_turn {
                 if matches!(durable_intent.harness_kind, HarnessKind::Claude)
                     && (row
                         .pointer("/message/model")
@@ -2151,10 +2126,11 @@ impl ObservesNativeTargetReceipt for HerdrCli {
                 {
                     return Err("native Claude model or effort differs from intent".into());
                 }
-                observed_turn = Some(turn);
+                observed = Some((turn, format!("{:x}", Sha256::digest(&record))));
+                break;
             }
         }
-        let Some(native_turn_id) = observed_turn else {
+        let Some((native_turn_id, receipt_sha256)) = observed else {
             if adopted_after_absence {
                 let binding = NativeLaunchBinding {
                     launch_request_id: durable_intent.launch_request_id.clone(),
@@ -2178,7 +2154,6 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             }
             return Ok(PromptDeliveryResult::Ambiguous(durable_intent.clone()));
         };
-        let receipt_sha256 = format!("{:x}", Sha256::digest(expected.as_bytes()));
         Ok(PromptDeliveryResult::Observed(NativeTargetReceipt {
             launch_request_id: durable_intent.launch_request_id.clone(),
             prompt_sha256: durable_intent.prompt_sha256.clone(),
@@ -2202,8 +2177,7 @@ pub(crate) mod tests {
     };
     use crate::composition::KeepsLaunchBundles;
     use crate::composition::{
-        AsksForLaunchReceipt, ComposesLaunch, LaunchBundles, LaunchComposer, NamesRemoteControl,
-        OpensLaunchComposer,
+        ComposesLaunch, LaunchBundles, LaunchComposer, NamesRemoteControl, OpensLaunchComposer,
     };
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use crate::herdr::ConfiguresHerdrCli;
@@ -2225,7 +2199,6 @@ pub(crate) mod tests {
     const PROMPT_HASH: &str = "0cb26cfe0a554e4780aa5af20cafbe3ae3259f823438576026a4ffff58371a67";
 
     pub(crate) fn launch(harness_kind: HarnessKind) -> ComposedLaunch {
-        let footer = harness_kind.receipt_footer();
         ComposedLaunch {
             launch_profile: LaunchProfile {
                 launch_request_id: "launch-42".into(),
@@ -2245,7 +2218,7 @@ pub(crate) mod tests {
             first_prompt_payload: FirstPromptPayload {
                 first_prompt_body: "composed body".into(),
                 prompt_sha256: PROMPT_HASH.into(),
-                first_prompt_text: format!("composed body{footer}"),
+                first_prompt_text: "composed body".into(),
             },
             target_receipt_request: TargetReceiptRequest {
                 launch_request_id: "launch-42".into(),
@@ -2914,7 +2887,7 @@ printf '%s\n' 123456
     }
 
     #[test]
-    fn old_exact_receipt_before_cursor_is_rejected_and_new_receipt_is_observed() {
+    fn a_first_turn_before_the_cursor_is_ignored_and_the_new_one_is_observed() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Codex);
         let agent_name = launch.launch_agent_name();
@@ -2925,15 +2898,17 @@ printf '%s\n' 123456
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
-        let marker = HarnessKind::LAUNCH_RECEIPT;
         let transcript = root
             .path()
             .join("native-transcripts/codex")
             .join(format!("rollout-{native_session}.jsonl"));
-        let stale_receipt = serde_json::json!({"type":"event_msg","payload":{
+        let stale_context = serde_json::json!({"type":"turn_context","payload":{
+            "turn_id":"turn-stale","model":"model-current","effort":"high"}});
+        let stale_input = serde_json::json!({"type":"event_msg","payload":{
             "thread_id":native_session,"turn_id":"turn-stale",
-            "item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}});
-        fs::write(&transcript, format!("{}\n", stale_receipt)).expect("stale transcript");
+            "item":{"type":"UserMessage","content":[{"type":"text","text":launch.first_prompt_payload.first_prompt_text}]}}});
+        fs::write(&transcript, format!("{stale_context}\n{stale_input}\n"))
+            .expect("stale transcript");
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         assert!(matches!(
             &intent.native_transcript_boundary,
@@ -2942,12 +2917,9 @@ printf '%s\n' 123456
         assert_eq!(
             adapter
                 .observe_native_target_receipt(&intent)
-                .expect("stale receipt is ignored"),
+                .expect("a first turn before the cursor is ignored"),
             PromptDeliveryResult::Ambiguous(intent.clone())
         );
-        let receipt = serde_json::json!({"type":"event_msg","payload":{
-            "thread_id":native_session,"turn_id":"turn-new",
-            "item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}});
         let context = serde_json::json!({"type":"turn_context","payload":{
             "turn_id":"turn-new","model":"model-current","effort":"high"}});
         let input = serde_json::json!({"type":"event_msg","payload":{
@@ -2960,7 +2932,6 @@ printf '%s\n' 123456
             .expect("append transcript");
         writeln!(append, "{context}").expect("append turn context");
         writeln!(append, "{input}").expect("append native input");
-        writeln!(append, "{receipt}").expect("append fresh receipt");
         let result = adapter
             .observe_native_target_receipt(&intent)
             .expect("observed transcript receipt");
@@ -2977,7 +2948,7 @@ printf '%s\n' 123456
     }
 
     #[test]
-    fn codex_receipt_rejects_wrong_first_text_with_matching_skills_and_marker() {
+    fn codex_receipt_rejects_a_wrong_first_text() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Codex);
         let agent_name = launch.launch_agent_name();
@@ -2994,16 +2965,12 @@ printf '%s\n' 123456
             .join(format!("rollout-{native_session}.jsonl"));
         fs::write(&transcript, "{\"type\":\"session_meta\"}\n").expect("initial transcript");
         let intent = registered_intent(&adapter, &launch, pane, native_session);
-        let marker = HarnessKind::LAUNCH_RECEIPT;
         let rows = [
             serde_json::json!({"type":"turn_context","payload":{
                 "turn_id":"turn-wrong","model":"model-current","effort":"high"}}),
             serde_json::json!({"type":"event_msg","payload":{
                 "thread_id":native_session,"turn_id":"turn-wrong",
-                "item":{"type":"UserMessage","content":[{"type":"text","text":"wrong body with no authenticated footer"}]}}}),
-            serde_json::json!({"type":"event_msg","payload":{
-                "thread_id":native_session,"turn_id":"turn-wrong",
-                "item":{"type":"AgentMessage","content":[{"type":"Text","text":marker}]}}}),
+                "item":{"type":"UserMessage","content":[{"type":"text","text":"a body the intent never hashed"}]}}}),
         ];
         use std::io::Write;
         let mut append = fs::OpenOptions::new()
@@ -3022,7 +2989,7 @@ printf '%s\n' 123456
     }
 
     #[test]
-    fn absent_or_duplicate_native_receipt_is_never_retried_or_invented() {
+    fn an_absent_receipt_is_never_invented_and_the_first_answer_is_observed() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
         let agent_name = launch.launch_agent_name();
@@ -3039,9 +3006,8 @@ printf '%s\n' 123456
             NativeTranscriptBoundary::Absent(_)
         ));
         let untrusted_transcript = root.path().join("caller-selected.jsonl");
-        let marker = HarnessKind::LAUNCH_RECEIPT;
         let untrusted_row = serde_json::json!({"type":"assistant","sessionId":native_session,
-            "uuid":"untrusted-turn","message":{"content":[{"type":"text","text":marker}]}});
+            "uuid":"untrusted-turn","message":{"content":[{"type":"text","text":"work"}]}});
         fs::write(&untrusted_transcript, format!("{}\n", untrusted_row))
             .expect("untrusted transcript");
         assert_eq!(
@@ -3069,26 +3035,33 @@ printf '%s\n' 123456
         ));
         let row = serde_json::json!({"type":"assistant","sessionId":native_session,
             "uuid":"turn-claude","effort":"high","message":{"model":"model-current",
-            "content":[{"type":"text","text":marker}]}});
+            "content":[{"type":"text","text":"Beginning the brief."}]}});
         use std::io::Write;
         let mut append = fs::OpenOptions::new()
             .append(true)
             .open(&transcript)
-            .expect("append duplicate receipts");
-        writeln!(append, "{row}").expect("first receipt");
-        writeln!(append, "{row}").expect("second receipt");
-        assert!(
-            adapter
-                .observe_native_target_receipt(&adopted_intent)
-                .unwrap_err()
-                .contains("duplicate")
+            .expect("append the first answer");
+        writeln!(append, "{row}").expect("first answer");
+        let PromptDeliveryResult::Observed(observed) = adapter
+            .observe_native_target_receipt(&adopted_intent)
+            .expect("the first answer is the receipt")
+        else {
+            panic!("the first answer after the authenticated turn is the receipt");
+        };
+        assert_eq!(observed.native_turn_id, "turn-claude");
+        assert_eq!(
+            observed.receipt_sha256,
+            format!(
+                "{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(format!("{row}\n").as_bytes())
+            )
         );
     }
 
     /// e167d8 sandbox: Claude Haiku 4.5 takes no effort, and Claude Code
     /// 2.1.280 records its turns with no `effort` and `perTurnEffort: null`.
-    /// The seat answered exactly the marker and Start stayed Ambiguous; a
-    /// recorded effort that differs is still refused.
+    /// The seat's first answer must still be read; a recorded effort that
+    /// differs is refused.
     #[test]
     fn claude_receipt_of_a_model_without_effort_is_observed() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
@@ -3112,7 +3085,7 @@ printf '%s\n' 123456
             let mut row = serde_json::json!({"type":"assistant","sessionId":native_session,
                 "session_id":native_session,"uuid":"turn-claude","perTurnEffort":null,
                 "message":{"model":"model-current",
-                "content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}});
+                "content":[{"type":"text","text":"Beginning the brief."}]}});
             if !effort.is_null() {
                 row["effort"] = effort.clone();
                 row["perTurnEffort"] = effort;
@@ -3235,8 +3208,7 @@ printf '%s\n' 123456
         let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
         launch.first_prompt_payload.first_prompt_body = body.into();
         launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
-        launch.first_prompt_payload.first_prompt_text =
-            format!("{body}{}", HarnessKind::Claude.receipt_footer());
+        launch.first_prompt_payload.first_prompt_text = body.to_string();
         assert!(!launch.first_prompt_payload.first_prompt_text.contains('\n'));
         assert!(
             launch
@@ -3289,13 +3261,9 @@ printf '%s\n' 123456
         // record per loaded command, each carrying the text after the whole
         // stack, the first also carrying the original input; each followed
         // by its expansion.
-        let argument = format!(
-            "{}{}",
-            body.strip_prefix("/operation-main-flow /knowledge-psyche /compensation-behavior /knowledge-vocabulary /compensation-messenger-clj ")
-                .unwrap(),
-            HarnessKind::Claude.receipt_footer()
-        );
-        let original = format!("{body}{}", HarnessKind::Claude.receipt_footer());
+        let argument = body.strip_prefix("/operation-main-flow /knowledge-psyche /compensation-behavior /knowledge-vocabulary /compensation-messenger-clj ")
+                .unwrap().to_owned();
+        let original = body.to_string();
         let command = |name: &str| {
             let mut row = serde_json::json!({"type":"user","sessionId":native_session,"message":{"role":"user",
                 "content":format!("<command-message>{name}</command-message>\n<command-name>/{name}</command-name>\n<command-args>{argument}</command-args>")}});
@@ -3322,7 +3290,7 @@ printf '%s\n' 123456
         };
         let receipt = serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-claude",
             "effort":"high","message":{"model":"model-current",
-            "content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}});
+            "content":[{"type":"text","text":"Beginning the brief."}]}});
         let mut rows = Vec::new();
         for name in &names[..5] {
             rows.push(command(name));
@@ -3502,7 +3470,7 @@ printf '%s\n' 123456
             "message":{"role":"user","content":original}})];
         rows.extend(tool("operation-main-flow", "tool-2"));
         rows.extend(tool("knowledge-flow", "tool-1"));
-        rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-direct","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}}));
+        rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-direct","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":"Beginning the brief."}]}}));
         let skill_invocations = rows
             .iter()
             .filter_map(|row| row.pointer("/message/content/0"))
@@ -3548,13 +3516,10 @@ printf '%s\n' 123456
         assert_eq!(calls.matches("agent prompt").count(), 1, "{calls}");
 
         // The accepted direct row above and this same-length, one-byte newline
-        // alteration form the refusal oracle. The footer remains intact while
-        // the body digest changes.
-        let footer = HarnessKind::Claude.receipt_footer();
+        // alteration form the refusal oracle: the body digest changes.
         let changed_body = body.replacen('\n', "\r", 1);
-        let changed = format!("{changed_body}{footer}");
+        let changed = changed_body.clone();
         assert_eq!(changed_body.len(), body.len());
-        assert!(changed.ends_with(&footer));
         assert_ne!(
             launch.first_prompt_payload.prompt_sha256,
             format!(
@@ -3603,16 +3568,14 @@ printf '%s\n' 123456
         );
 
         // The second Skill call succeeded, but Claude did not record the
-        // companion expansion before it emitted the receipt.
+        // companion expansion: an answer then does not confirm the launch.
         let mut missing_expansion = rows[..6].to_vec();
         missing_expansion.push(rows.last().unwrap().clone());
         write(&missing_expansion);
-        assert!(
-            adapter
-                .observe_native_target_receipt(&intent)
-                .unwrap_err()
-                .contains("target receipt preceded native skill confirmation")
-        );
+        assert!(matches!(
+            adapter.observe_native_target_receipt(&intent),
+            Ok(PromptDeliveryResult::Ambiguous(_))
+        ));
 
         let mut altered = rows.clone();
         altered[0]["message"]["content"] =
@@ -3681,7 +3644,7 @@ printf '%s\n' 123456
             "message":{"role":"user","content":format!("<pasted_content id=\"ab12\">\n{original}\n</pasted_content>")}})];
         rows.extend(tool("operation-main-flow", "tool-2"));
         rows.extend(tool("knowledge-flow", "tool-1"));
-        rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-wrapped","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]}}));
+        rows.push(serde_json::json!({"type":"assistant","sessionId":native_session,"uuid":"turn-wrapped","effort":"high","message":{"model":"model-current","content":[{"type":"text","text":"Beginning the brief."}]}}));
         let transcript = root
             .path()
             .join("native-transcripts/claude")
@@ -3704,11 +3667,11 @@ printf '%s\n' 123456
     /// The shape of 88475f's transcript (Claude Code 2.1.280, Flow 0.10.5):
     /// two stacked commands, then an instruction that loads thirteen more
     /// skills through the Skill tool — two of them in one assistant turn —
-    /// plus Read and Bash work, a harness notice and a plain assistant line,
-    /// all before the receipt. 0.10.5 refused the first extra Skill call as
-    /// out of order and the launch stayed ambiguous.
+    /// plus Read and Bash work, a harness notice and a plain assistant line.
+    /// The receipt is the seat's first answer once the selected skills have
+    /// loaded; what the brief loads and does after it is the seat's own work.
     #[test]
-    fn claude_receipt_after_further_skill_loads_and_work_is_observed() {
+    fn claude_receipt_is_the_first_answer_once_the_selected_skills_load() {
         use sha2::{Digest, Sha256};
         use std::io::Write;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
@@ -3719,8 +3682,7 @@ printf '%s\n' 123456
         let body_hash = format!("{:x}", Sha256::digest(body.as_bytes()));
         launch.first_prompt_payload.first_prompt_body = body.into();
         launch.first_prompt_payload.prompt_sha256 = body_hash.clone();
-        launch.first_prompt_payload.first_prompt_text =
-            format!("{body}{}", HarnessKind::Claude.receipt_footer());
+        launch.first_prompt_payload.first_prompt_text = body.to_string();
         launch.target_receipt_request.prompt_sha256 = body_hash;
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
@@ -3753,13 +3715,11 @@ printf '%s\n' 123456
                 skills.join(name).canonicalize().unwrap().display()
             )
         };
-        let argument = format!(
-            "{}{}",
-            body.strip_prefix("/operation-main-flow /operation-file-editing ")
-                .unwrap(),
-            HarnessKind::Claude.receipt_footer()
-        );
-        let original = format!("{body}{}", HarnessKind::Claude.receipt_footer());
+        let argument = body
+            .strip_prefix("/operation-main-flow /operation-file-editing ")
+            .unwrap()
+            .to_owned();
+        let original = body.to_string();
         let user = |extra: serde_json::Value, content: serde_json::Value| {
             let mut row = serde_json::json!({"type":"user","sessionId":native_session,
                 "origin":{"kind":"human"},"message":{"role":"user","content":content}});
@@ -3885,7 +3845,7 @@ printf '%s\n' 123456
         ));
         let mut receipt = assistant(
             "claude",
-            serde_json::json!([{"type":"text","text":HarnessKind::LAUNCH_RECEIPT}]),
+            serde_json::json!([{"type":"text","text":"Beginning the brief."}]),
         );
         receipt["attributionSkill"] = serde_json::json!("compensation-prose");
         rows.push(receipt);
@@ -3908,7 +3868,7 @@ printf '%s\n' 123456
         else {
             panic!("receipt remained ambiguous");
         };
-        assert_eq!(observed.native_turn_id, "turn-claude");
+        assert_eq!(observed.native_turn_id, "turn-read");
     }
 
     #[test]

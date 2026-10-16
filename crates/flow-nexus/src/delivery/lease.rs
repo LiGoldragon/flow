@@ -1,6 +1,6 @@
 //! The pane lease: Flow's exclusive hold on one pane for a whole key
-//! sequence (interrupt, text, submit), a Command, the brief continuation,
-//! or a close. Two writes to one pane never interleave; writes to different
+//! sequence (interrupt, text, submit), a Command, queued work handed to a
+//! woken seat, or a close. Two writes to one pane never interleave; writes to different
 //! panes do not wait for each other. The lease lives inside the Nexus and is
 //! never handed out on the wire, so no client can hold a pane.
 

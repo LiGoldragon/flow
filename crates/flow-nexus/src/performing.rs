@@ -143,19 +143,6 @@ impl RefusesHerdrOperation for HerdrFailure {
 
 /// The Nexus acting: one Operation in, one Outcome out.
 pub trait Performs {
-    /// What a seat is told the moment its launch receipt is confirmed.
-    ///
-    /// The first prompt ends by asking for the receipt marker and nothing else,
-    /// which is what makes the receipt verifiable: the seat's first turn is
-    /// exactly one known line. That same ending ends the turn, so the brief the
-    /// first prompt carries would sit there unstarted, waiting for someone to
-    /// say go. Nobody says go. Flow does: the receipt is witnessed, the launch
-    /// is Started, and Flow types this one line into the bound pane through its
-    /// own writer (`Operation::Continue`). No caller and no human follows a
-    /// launch.
-    const BRIEF_CONTINUATION: &'static str =
-        "Launch receipt confirmed. Begin the brief in your first prompt now.";
-
     fn perform(&self, operation: Operation) -> Outcome;
 }
 
@@ -313,7 +300,6 @@ impl Performs for RunningNexus {
                     Err(failure) => Outcome::Failed(failure),
                 }
             }
-            Operation::Continue(flow_id) => self.continue_into_brief(&flow_id),
             Operation::Release(flow_id) => self.release(&flow_id),
             Operation::Close(node) => match self.herdr.close(&node) {
                 true => Outcome::Closed,
@@ -351,11 +337,6 @@ trait PerformsInParts {
     /// flow held in Memory, then the FlowId claim. Both are needed for
     /// Released; a failure of either is reported to the Nexus log.
     fn release(&self, flow_id: &str) -> Outcome;
-    /// Best effort by design: the flow is Started whatever this does. A
-    /// continuation that does not reach the seat is reported to the Nexus
-    /// log, never turned into a launch rejection — the seat exists, is
-    /// registered and is routable, and one Deliver can reach it.
-    fn continue_into_brief(&self, flow_id: &str) -> Outcome;
 }
 
 impl PerformsInParts for RunningNexus {
@@ -482,56 +463,6 @@ impl PerformsInParts for RunningNexus {
                     Ok(EventRecording::UnknownFlow) => Outcome::Failed(Failed_Data::UnknownFlow),
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
                 }
-            }
-        }
-    }
-
-    /// Typed by Flow's own writer, under the pane lease, like any other
-    /// write. Exception, noted here: this one line is Flow's own, not a
-    /// Message, so it carries no Priority head.
-    fn continue_into_brief(&self, flow_id: &str) -> Outcome {
-        use crate::delivery::lease::LeasesPanes;
-        use crate::delivery::{FindsDeliveryTarget, ReadsLeasedPane};
-        use crate::herdr::ReadsHerdrRoster;
-        use crate::herdr::pane::{Placement, WritesPane};
-        let target = match self.delivery_target(flow_id) {
-            Ok(target) => target,
-            Err(refusal) => {
-                eprintln!(
-                    "flow-nexus: flow {flow_id} cannot be continued into its brief: {refusal:?}"
-                );
-                return Outcome::Failed(Failed_Data::HerdrRefused);
-            }
-        };
-        let _lease = self.pane_leases.hold(&target.route);
-        let agent_state = match self.writable_state(&target) {
-            Ok(agent_state) => agent_state,
-            Err(refusal) => {
-                eprintln!("flow-nexus: flow {flow_id} brief continuation refused: {refusal:?}");
-                return Outcome::Failed(Failed_Data::HerdrRefused);
-            }
-        };
-        let observe = matches!(
-            agent_state,
-            signal_flow::AgentState::Idle | signal_flow::AgentState::Done
-        );
-        match self
-            .herdr
-            .place(&target.route, Self::BRIEF_CONTINUATION, observe)
-        {
-            // The seat was seen reacting on its exact pane: it is Active.
-            Placement::Placed { observed: true } if self.herdr.route_is_available(&target.node) => {
-                let _ = self.perform(Operation::Record(Record_Data::Active(flow_id.into())));
-                Outcome::Continued
-            }
-            Placement::Placed { .. } => Outcome::Continued,
-            Placement::Uncertain => {
-                eprintln!("flow-nexus: flow {flow_id} brief continuation typed, reaction unknown");
-                Outcome::Continued
-            }
-            Placement::Refused => {
-                eprintln!("flow-nexus: flow {flow_id} brief continuation refused by Herdr");
-                Outcome::Failed(Failed_Data::HerdrRefused)
             }
         }
     }

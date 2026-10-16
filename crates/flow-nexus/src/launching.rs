@@ -442,7 +442,6 @@ impl LaunchesFlows for RunningNexus {
                         launch_request_id,
                         LaunchOutcome::Started(started.clone()),
                     ));
-                    let _ = self.perform(Operation::Continue(started.flow_id.clone()));
                     Response::Started(started)
                 }
             },
@@ -600,7 +599,6 @@ impl LaunchesFlows for RunningNexus {
                 StopRejection::PersistenceRefused,
             ));
         }
-        let _ = self.perform(Operation::Continue(replaced.launched.flow_id.clone()));
         Response::Replaced(replaced)
     }
 

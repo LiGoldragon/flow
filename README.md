@@ -184,7 +184,8 @@ expands no command. The line opens with up to five space-separated
 at the head of a block and loads at most five stacked ones. One instruction
 sentence follows: read the launch's system-prompt bundle at its path, load any
 further skills through the Skill tool in order, then the goal and any source
-paths, then the receipt request. At Start the Nexus writes each Claude launch
+paths. The first prompt is the brief, and the seat's first answer performs
+it. At Start the Nexus writes each Claude launch
 its own copy of the caller's bundle, under `~/.local/state/flow/launch-bundles/`,
 named by the launch request's short form: the caller's bytes unchanged, then,
 after a blank line, the same launch section Codex receives. That copy is the
@@ -198,7 +199,7 @@ break or pass 800 characters is refused (`CompositionRefused`), never
 truncated. The observer requires one command record and one harness expansion
 per stacked command, each carrying the same argument, then native Skill tool
 calls, successful results, and expansion evidence for the rest, before
-accepting the target receipt; a first turn wrapped as pasted content, or
+accepting the launch; a first turn wrapped as pasted content, or
 recorded as plain text with no command loaded, is refused. Skill bodies are
 not pasted into the composed first prompt.
 
@@ -222,13 +223,12 @@ The prompt is lean: no launch request ID, no hash, and no inlined source text.
 Sources are named by absolute path after their bytes are checked against the
 profile hash. A profile may write a source path absolute or relative: an
 absolute path is taken as written, a relative one under the configured source root,
-and either is read exactly when what it resolves to lies inside that root. The requested receipt is the fixed line
-`FLOW_LAUNCH_RECEIPT_V2`; the observer binds it to the launch by native
-session, transcript cursor, and the authenticated first turn, whose body
-digest stays in the store. Asking for that line and nothing else ends the
-seat's turn, so Flow begins the brief itself: once the launch is Started it
-types one fixed continuation line into the seat's bound pane, and no caller
-and no human has to follow a launch. A Claude launch is remotely controllable under a
+and either is read exactly when what it resolves to lies inside that root. The launch is witnessed in the native transcript of the bound session,
+watched for file changes: the first turn authenticated by its body digest,
+which stays in the store, every selected skill loaded in order, and, for
+Claude, the seat's first answer after them at the intended model and effort
+(Codex records its turn's model and effort before the input). That is the
+receipt, and no caller and no human has to follow a launch. A Claude launch is remotely controllable under a
 name unique to the Flow, `flow-` and the launch request ID's short form (the
 first sixteen hex digits of its SHA-256; the bundle copy is named by the same
 short form, so two launch requests never share either). The Flow ID is claimed from the native

@@ -20,6 +20,7 @@ pub use generated::curriculum::{
 };
 pub use generated::operation::Outcome as OperationOutcome;
 pub use store::{LaunchOutcome, Replacement};
+pub mod awaiting;
 pub mod binding;
 pub mod caller;
 pub mod claude;
@@ -106,6 +107,8 @@ pub struct RunningNexus {
     pub waking: waking::WakingMetaflows,
     /// Flows confirmed after their Stop, awaiting settlement; see `waking`.
     pub stopped_at_confirmation: waking::StoppedAtConfirmation,
+    /// Refused wakes waiting on a Herdr pane event; see `awaiting`.
+    pub awaited_panes: awaiting::AwaitedPanes,
     /// Set once the Nexus is told to stop; see [`StopsNexus`].
     pub stopping: Stopping,
 }
@@ -521,6 +524,7 @@ impl OpensRunningNexus for RunningNexus {
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
+            awaited_panes: awaiting::AwaitedPanes::default(),
             stopping: Stopping::default(),
         })
     }
@@ -722,8 +726,9 @@ impl HoldsStopRequest for Stopping {
 
 /// Stops a running Nexus so that every thread borrowing it returns and the
 /// store closes cleanly: the accept loops stop taking connections and join
-/// the ones in flight, the launch promoter and launch observers return, and
-/// agent observers end at their next read timeout.
+/// the ones in flight, the launch promoter and launch observers return,
+/// agent observers end at their next read timeout, and every pane-await
+/// subscription is shut down.
 pub trait StopsNexus {
     fn stop(&self, sockets: &[&Path]);
 }
@@ -732,6 +737,11 @@ impl StopsNexus for RunningNexus {
     fn stop(&self, sockets: &[&Path]) {
         self.stopping.request();
         self.store.launch_changes.announce();
+        // Every pane-await subscription blocks in its read: it is shut down.
+        {
+            use awaiting::HoldsAwaitedPanes;
+            self.awaited_panes.close_all();
+        }
         // Each accept loop is blocked in accept; a connection wakes it. A
         // listener not yet bound sees the request once it binds.
         for socket in sockets {
@@ -1597,6 +1607,7 @@ mod tests {
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
+                awaited_panes: crate::awaiting::AwaitedPanes::default(),
                 stopping: crate::Stopping::default(),
             };
             let herdr_config = directory.path().join("herdr-config");

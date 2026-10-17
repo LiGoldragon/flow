@@ -110,6 +110,8 @@ impl ObservesAgent for RunningNexus {
             let agent_state = match event {
                 PaneEvent::Status(status) => Some(status.as_str()).agent_state(),
                 PaneEvent::Gone => AgentState::Gone,
+                // Not subscribed here; a detection carries no state.
+                PaneEvent::Detected => continue,
             };
             if agent_state == last {
                 continue;
@@ -140,39 +142,81 @@ impl LocatesHerdrSession for HerdrCli {
 
 /// What Herdr said of the observed pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PaneEvent {
+pub enum PaneEvent {
     Status(String),
+    /// Herdr detected an agent in the pane (`pane.agent_detected`).
+    Detected,
     Gone,
 }
 
 /// One open Herdr event subscription for one pane.
-struct HerdrEvents {
+pub struct HerdrEvents {
     pane_id: String,
     reader: BufReader<UnixStream>,
     /// What has arrived of the line not yet ended.
     pending: Vec<u8>,
 }
 
-trait SubscribesHerdrEvents: Sized {
-    fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String>;
+pub trait SubscribesHerdrEvents: Sized {
+    /// Observe.Agent's subscription: the pane's agent status and its going.
+    fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String> {
+        Self::subscribe_to(
+            socket,
+            pane_id,
+            "flow-nexus:observe-agent",
+            serde_json::json!([
+                {"type": "pane.agent_status_changed", "pane_id": pane_id},
+                {"type": "pane.closed"},
+                {"type": "pane.exited"}
+            ]),
+        )
+    }
+    /// A refused wake's subscription: the pane's agent detected or its
+    /// status changed, and its going. Herdr takes no pane for a detection,
+    /// a close or an exit; events of other panes are read past.
+    fn subscribe_awaited(socket: &std::path::Path, pane_id: &str) -> Result<Self, String> {
+        Self::subscribe_to(
+            socket,
+            pane_id,
+            "flow-nexus:await-pane",
+            serde_json::json!([
+                {"type": "pane.agent_detected"},
+                {"type": "pane.agent_status_changed", "pane_id": pane_id},
+                {"type": "pane.closed"},
+                {"type": "pane.exited"}
+            ]),
+        )
+    }
+    fn subscribe_to(
+        socket: &std::path::Path,
+        pane_id: &str,
+        id: &str,
+        subscriptions: serde_json::Value,
+    ) -> Result<Self, String>;
     /// How often a waiting subscription looks whether the Nexus is stopping.
     const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(500);
     /// The next event about this pane; None when Herdr closes the stream,
     /// an error once `stopping` holds.
     fn next_event(&mut self, stopping: &dyn Fn() -> bool) -> Result<Option<PaneEvent>, String>;
+    /// The next event about this pane, read with no timeout; None when
+    /// Herdr closes the stream or the subscription is shut down.
+    fn next_pane_event(&mut self) -> Result<Option<PaneEvent>, String>;
+    /// A handle on the subscription's stream, which shuts it down.
+    fn handle(&self) -> Result<UnixStream, String>;
 }
 
 impl SubscribesHerdrEvents for HerdrEvents {
-    fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String> {
+    fn subscribe_to(
+        socket: &std::path::Path,
+        pane_id: &str,
+        id: &str,
+        subscriptions: serde_json::Value,
+    ) -> Result<Self, String> {
         let mut stream = UnixStream::connect(socket).map_err(|error| error.to_string())?;
         let request = serde_json::json!({
-            "id": "flow-nexus:observe-agent",
+            "id": id,
             "method": "events.subscribe",
-            "params": {"subscriptions": [
-                {"type": "pane.agent_status_changed", "pane_id": pane_id},
-                {"type": "pane.closed"},
-                {"type": "pane.exited"}
-            ]}
+            "params": {"subscriptions": subscriptions}
         });
         stream
             .write_all(format!("{request}\n").as_bytes())
@@ -232,10 +276,39 @@ impl SubscribesHerdrEvents for HerdrEvents {
             }
         }
     }
+
+    fn next_pane_event(&mut self) -> Result<Option<PaneEvent>, String> {
+        self.reader
+            .get_ref()
+            .set_read_timeout(None)
+            .map_err(|error| error.to_string())?;
+        loop {
+            let mut line = Vec::new();
+            match self.reader.read_until(b'\n', &mut line) {
+                Ok(0) => return Ok(None),
+                Ok(_) if line.last() != Some(&b'\n') => return Ok(None),
+                Ok(_) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            let Ok(event) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if let Some(event) = event.pane_event(&self.pane_id) {
+                return Ok(Some(event));
+            }
+        }
+    }
+
+    fn handle(&self) -> Result<UnixStream, String> {
+        self.reader
+            .get_ref()
+            .try_clone()
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// A Herdr stream event, read as what it says of one pane.
-trait ReadsPaneEvent {
+pub trait ReadsPaneEvent {
     /// Herdr 0.8.2 names events `pane_closed` on the stream and
     /// `pane.closed` in its schema; both spellings are read.
     fn pane_event(&self, pane_id: &str) -> Option<PaneEvent>;
@@ -251,6 +324,9 @@ impl ReadsPaneEvent for serde_json::Value {
         let kind = event.get("event").and_then(serde_json::Value::as_str)?;
         if kind.ends_with("closed") || kind.ends_with("exited") {
             return Some(PaneEvent::Gone);
+        }
+        if kind.ends_with("agent_detected") {
+            return Some(PaneEvent::Detected);
         }
         data.get("agent_status")
             .and_then(serde_json::Value::as_str)
@@ -273,5 +349,9 @@ mod tests {
             working.pane_event("w1:p1"),
             Some(PaneEvent::Status("working".into()))
         );
+        // Herdr's schema for a detection, as its event stream spells it.
+        let detected = serde_json::json!({"data":{"pane_id":"w9:p1","workspace_id":"w9","agent":"claude"},"event":"pane_agent_detected"});
+        assert_eq!(detected.pane_event("w9:p1"), Some(PaneEvent::Detected));
+        assert_eq!(detected.pane_event("w9:p2"), None);
     }
 }

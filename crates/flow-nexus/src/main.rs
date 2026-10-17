@@ -4,6 +4,7 @@ use flow_nexus::{
     CarriesSignalFrames, ClaimedSocket, ClaimsSocket, HoldsStopRequest, OpensRunningNexus,
     RunningNexus, ServesMeta, ServesOrdinary, StopsNexus, TerminationSignals,
     WatchesTerminationSignals,
+    awaiting::ServesPaneAwaits,
     caller::{IdentifiesPeer, LocatesCallerPane},
     launching::PromotesAmbiguousLaunches,
     send_tool::ServesSendTool,
@@ -158,6 +159,9 @@ fn main() -> ExitCode {
         scope.spawn(move || send_tool_nexus.serve_send_tool(scope));
         // A wake the last Nexus did not finish left its work queued: wake it.
         scope.spawn(|| nexus.recover_wakes());
+        // A wake refused until a Herdr pane event waits on that pane.
+        let awaits_nexus = &nexus;
+        scope.spawn(move || awaits_nexus.serve_pane_awaits(scope));
         scope.spawn(|| {
             if signals.watch(&|| nexus.stopping.requested()) {
                 nexus.stop(&sockets);

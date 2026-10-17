@@ -1032,15 +1032,15 @@ fn the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread() {
 
     assert_eq!(
         held(vec![quiet.clone()], &node, "messaging-build"),
-        Some(true)
+        Ok(true)
     );
     assert_eq!(
         held(vec![reporting(&node.session_id)], &node, "messaging-build"),
-        Some(true)
+        Ok(true)
     );
     assert_eq!(
         held(vec![elsewhere_reporting], &node, "messaging-build"),
-        Some(true)
+        Ok(true)
     );
     assert_eq!(
         held(
@@ -1048,20 +1048,17 @@ fn the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread() {
             &node,
             "messaging-build"
         ),
-        Some(false)
+        Ok(false)
     );
-    assert_eq!(held(vec![elsewhere], &node, "messaging-build"), Some(false));
-    assert_eq!(
-        held(vec![quiet.clone()], &node, "other-session"),
-        Some(false)
-    );
+    assert_eq!(held(vec![elsewhere], &node, "messaging-build"), Ok(false));
+    assert_eq!(held(vec![quiet.clone()], &node, "other-session"), Ok(false));
     let mut claude = node.clone();
     claude.harness_kind = HarnessKind::Claude;
     let mut claude_agent = quiet;
     claude_agent["agent"] = serde_json::Value::String("claude".into());
     assert_eq!(
         held(vec![claude_agent], &claude, "messaging-build"),
-        Some(false)
+        Ok(false)
     );
 }
 
@@ -1150,7 +1147,7 @@ fn the_live_seat_check_names_why_a_recorded_pane_is_not_the_flows_own() {
     .install("#!/bin/sh\nexit 64\n");
     assert_eq!(
         fixture.nexus.herdr.own_session(&claude),
-        OwnSession::HerdrUnreadable
+        OwnSession::HerdrUnreadable(crate::generated::wake::HerdrUnread::ServerUnreachable)
     );
 }
 
@@ -2853,4 +2850,346 @@ fn a_refreshed_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
     );
     assert!(!calls.contains("--resume"), "{calls}");
     assert!(!calls.contains(&seat.session), "{calls}");
+}
+
+/// The pane a wake that failed after resuming left the flow in.
+fn resumed_pane() -> crate::generated::wake::AgentPaneEvent {
+    crate::generated::wake::AgentPaneEvent {
+        herdr_session_name: "fixture-session".into(),
+        pane_id: "w9:p1".into(),
+    }
+}
+
+/// The route Flow recorded for that pane.
+fn resumed_route() -> HerdrRoute {
+    HerdrRoute {
+        herdr_session_name: "fixture-session".into(),
+        herdr_agent_name: "resumed-agent".into(),
+        herdr_pane_id: "w9:p1".into(),
+        herdr_terminal_id: "term-resumed".into(),
+    }
+}
+
+/// The state a wake that failed after resuming left, its pane showing the
+/// harness with no native session reported yet.
+fn stuck_unsettled(fixture: &NexusFixture) -> Vec<Request> {
+    let queue = stuck_resumed(fixture);
+    fs::remove_file(fixture.directory.path().join("resumed-pane-live")).unwrap();
+    queue
+}
+
+fn session_reported(fixture: &NexusFixture) {
+    fs::write(fixture.directory.path().join("resumed-pane-live"), "live").unwrap();
+}
+
+fn awaited(fixture: &NexusFixture) -> Vec<(Address, HerdrRoute)> {
+    use crate::awaiting::HoldsAwaitedPanes;
+    fixture.nexus.awaited_panes.awaited()
+}
+
+fn still_asleep_with(fixture: &NexusFixture, queue: &[Request]) {
+    let asleep = stored(fixture, Layer::Secondary);
+    assert_eq!(asleep.state, State::Asleep);
+    assert_eq!(asleep.queue, queue.to_vec().unsent());
+    let calls = herdr_calls(fixture);
+    assert!(
+        !calls.contains("workspace create"),
+        "nothing opened: {calls}"
+    );
+    assert!(!calls.contains("agent start"), "nothing launched: {calls}");
+    assert!(typed_prompts(fixture).is_empty());
+}
+
+/// A flow a wake resumed and did not record Awake may be running: while its
+/// pane shows the harness with no session reported, a request queued again
+/// launches nothing beside it, and the wake waits on that pane.
+#[test]
+fn a_resumed_seat_not_yet_reporting_its_session_is_never_launched_again() {
+    let fixture = NexusFixture::new();
+    let queue = stuck_unsettled(&fixture);
+    let at = address(Layer::Secondary);
+    fixture.nexus.wake_due(at.clone());
+    fixture.nexus.wake_due(at.clone());
+    still_asleep_with(&fixture, &queue);
+    assert_eq!(awaited(&fixture), vec![(at, resumed_route())]);
+}
+
+/// The event the wake waits on wakes the seat once; an event while the pane
+/// still shows no session waits again, and a duplicate after the wake finds
+/// nothing waiting.
+#[test]
+fn the_awaited_pane_event_wakes_the_seat_exactly_once() {
+    use crate::generated::wake::WakesOnPaneEvent;
+    let fixture = NexusFixture::new();
+    let queue = stuck_unsettled(&fixture);
+    let at = address(Layer::Secondary);
+    fixture.nexus.wake_due(at.clone());
+
+    assert_eq!(
+        fixture.nexus.wake_on_pane_event(resumed_pane()),
+        vec![at.clone()]
+    );
+    still_asleep_with(&fixture, &queue);
+    assert_eq!(awaited(&fixture), vec![(at.clone(), resumed_route())]);
+
+    session_reported(&fixture);
+    assert_eq!(
+        fixture.nexus.wake_on_pane_event(resumed_pane()),
+        vec![at.clone()]
+    );
+    assert!(
+        fixture.nexus.wake_on_pane_event(resumed_pane()).is_empty(),
+        "a duplicate event finds nothing waiting"
+    );
+    assert!(fixture.nexus.wake_on_pane_event(resumed_pane()).is_empty());
+    settled_and_delivered(&fixture, &queue);
+    assert!(awaited(&fixture).is_empty());
+}
+
+/// An event for another pane, or the same pane id in another Herdr session,
+/// wakes nothing.
+#[test]
+fn an_event_for_another_pane_wakes_nothing() {
+    use crate::generated::wake::{AgentPaneEvent, WakesOnPaneEvent};
+    let fixture = NexusFixture::new();
+    let queue = stuck_unsettled(&fixture);
+    let at = address(Layer::Secondary);
+    fixture.nexus.wake_due(at.clone());
+    // A wrongful wake would now succeed.
+    session_reported(&fixture);
+    for other in [
+        AgentPaneEvent {
+            herdr_session_name: "fixture-session".into(),
+            pane_id: "w9:p2".into(),
+        },
+        AgentPaneEvent {
+            herdr_session_name: "other-session".into(),
+            pane_id: "w9:p1".into(),
+        },
+    ] {
+        assert!(fixture.nexus.wake_on_pane_event(other).is_empty());
+    }
+    still_asleep_with(&fixture, &queue);
+    assert_eq!(awaited(&fixture), vec![(at, resumed_route())]);
+}
+
+/// A refusal no wait recovers waits on no pane, and stays refused whatever
+/// Herdr announces.
+#[test]
+fn a_terminal_refusal_waits_on_no_pane_and_stays_refused_on_events() {
+    use crate::generated::wake::{ClassifiesWakeRefusal, WakeRecovery, WakesOnPaneEvent};
+    let fixture = NexusFixture::new();
+    let at = address(Layer::Secondary);
+    let queue = vec![Request::Order("A".into())];
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec![],
+        queue.clone(),
+    ));
+    assert_eq!(
+        crate::waking::WakeRefusal::Unplaceable.recovery(),
+        WakeRecovery::Terminal
+    );
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
+    );
+    assert!(awaited(&fixture).is_empty());
+    for _ in 0..2 {
+        assert!(fixture.nexus.wake_on_pane_event(resumed_pane()).is_empty());
+    }
+    let asleep = stored(&fixture, Layer::Secondary);
+    assert_eq!(asleep.state, State::Asleep);
+    assert_eq!(asleep.queue, queue.unsent());
+}
+
+/// A wake refused because Herdr's server did not answer waits on no event:
+/// its work stays queued, Herdr's pane events do not try it, and it wakes
+/// at the next request queued for the metaflow or the Nexus's next start.
+fn herdr_unreachable_then_back(retry: impl Fn(&NexusFixture, Address)) {
+    use crate::generated::wake::WakesOnPaneEvent;
+    let fixture = NexusFixture::new();
+    resumable(&fixture);
+    let at = address(Layer::Secondary);
+    let queue = vec![Request::Order("A".into())];
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        queue.clone(),
+    ));
+    let herdr = FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    };
+    let reachable = fs::read_to_string(&fixture.snapshot_program).unwrap();
+    herdr.install("#!/bin/sh\nexit 64\n");
+
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
+    );
+    assert!(
+        awaited(&fixture).is_empty(),
+        "no event announces the server"
+    );
+    assert!(fixture.nexus.wake_on_pane_event(resumed_pane()).is_empty());
+    let asleep = stored(&fixture, Layer::Secondary);
+    assert_eq!(asleep.state, State::Asleep);
+    assert_eq!(asleep.queue, queue.clone().unsent());
+
+    herdr.install(&reachable);
+    retry(&fixture, at);
+    let woken = stored(&fixture, Layer::Secondary);
+    assert_eq!(woken.state, State::Awake("abc123".into()));
+    assert!(woken.queue.is_empty());
+    assert_eq!(
+        typed_prompts(&fixture),
+        vec![queue.clone().unsent().prompt_text()]
+    );
+}
+
+#[test]
+fn a_wake_refused_while_herdr_is_unreachable_wakes_at_the_next_request() {
+    herdr_unreachable_then_back(|fixture, at| fixture.nexus.wake_due(at));
+}
+
+#[test]
+fn a_wake_refused_while_herdr_is_unreachable_wakes_at_the_nexus_start() {
+    herdr_unreachable_then_back(|fixture, _| fixture.nexus.recover_wakes());
+}
+
+/// The wait on a pane is not kept across a restart: the Nexus's start
+/// derives it again from Flow's records, and the event then wakes the seat.
+#[test]
+fn a_nexus_start_awaits_an_unsettled_seats_pane_again() {
+    use crate::generated::wake::WakesOnPaneEvent;
+    let fixture = NexusFixture::new();
+    let queue = stuck_unsettled(&fixture);
+    let at = address(Layer::Secondary);
+    assert!(awaited(&fixture).is_empty());
+    fixture.nexus.recover_wakes();
+    still_asleep_with(&fixture, &queue);
+    assert_eq!(awaited(&fixture), vec![(at.clone(), resumed_route())]);
+    session_reported(&fixture);
+    assert_eq!(fixture.nexus.wake_on_pane_event(resumed_pane()), vec![at]);
+    settled_and_delivered(&fixture, &queue);
+}
+
+/// Each refusal names the recovery the cause it kept allows.
+#[test]
+fn each_wake_refusal_names_the_recovery_its_cause_allows() {
+    use crate::generated::operation::Failed_Data;
+    use crate::generated::wake::{ClassifiesWakeRefusal, FreshRefusal, HerdrUnread, WakeRecovery};
+    use crate::waking::{HandOverRefusal, WakeRefusal};
+    use signal_flow::{
+        ContextRefusal, NativeLaunchFailure, NativeLaunchRefusal, NativeLaunchStage,
+        SpawnRefusalCause, StartRejection,
+    };
+    let native = |native_launch_stage, native_launch_failure| NativeLaunchRefusal {
+        native_launch_stage,
+        native_launch_failure,
+    };
+    let cases = vec![
+        (WakeRefusal::NotAsleep, WakeRecovery::Terminal),
+        (WakeRefusal::NothingQueued, WakeRecovery::Terminal),
+        (WakeRefusal::Unplaceable, WakeRecovery::Terminal),
+        (WakeRefusal::NotComposed, WakeRecovery::Terminal),
+        (WakeRefusal::BindingDiffers, WakeRecovery::Terminal),
+        (
+            WakeRefusal::ContextRefused(ContextRefusal::ModuleMissing),
+            WakeRecovery::Terminal,
+        ),
+        (
+            WakeRefusal::HarnessNotResumed(Some(SpawnRefusalCause::CommandTooLong)),
+            WakeRecovery::Terminal,
+        ),
+        (
+            WakeRefusal::FreshNotStarted(FreshRefusal::NoLayerModel),
+            WakeRecovery::Terminal,
+        ),
+        (
+            WakeRefusal::AgentUnsettled(resumed_route()),
+            WakeRecovery::AwaitingPane(resumed_route()),
+        ),
+        (
+            WakeRefusal::HerdrUnreadable(HerdrUnread::ServerUnreachable),
+            WakeRecovery::AwaitingServer,
+        ),
+        (
+            WakeRefusal::ContextRefused(ContextRefusal::ComposerUnavailable),
+            WakeRecovery::AwaitingServer,
+        ),
+        (
+            WakeRefusal::PaneNotOpened(Failed_Data::LaunchRefused(native(
+                NativeLaunchStage::Open,
+                NativeLaunchFailure::HerdrUnreadable,
+            ))),
+            WakeRecovery::AwaitingServer,
+        ),
+        (
+            WakeRefusal::FreshNotStarted(FreshRefusal::Rejected(
+                StartRejection::NativeLaunchRefused(native(
+                    NativeLaunchStage::Spawn,
+                    NativeLaunchFailure::HerdrUnreadable,
+                )),
+            )),
+            WakeRecovery::AwaitingServer,
+        ),
+        (WakeRefusal::SessionLive, WakeRecovery::Reconcile),
+        (WakeRefusal::ResumeNotRecorded, WakeRecovery::Reconcile),
+        (WakeRefusal::AwakeNotRecorded, WakeRecovery::Reconcile),
+        (
+            WakeRefusal::ResumeLeftOpen(Box::new(WakeRefusal::NotResting)),
+            WakeRecovery::Reconcile,
+        ),
+        (
+            WakeRefusal::FreshNotStarted(FreshRefusal::Unsettled),
+            WakeRecovery::Reconcile,
+        ),
+        (
+            WakeRefusal::FreshNotStarted(FreshRefusal::Rejected(StartRejection::AddressAwake)),
+            WakeRecovery::Reconcile,
+        ),
+        (WakeRefusal::StoreUnreadable, WakeRecovery::Unresolved),
+        (
+            WakeRefusal::HerdrUnreadable(HerdrUnread::PaneUnreadable),
+            WakeRecovery::Unresolved,
+        ),
+        (
+            WakeRefusal::PaneNotOpened(Failed_Data::HerdrRefused),
+            WakeRecovery::Unresolved,
+        ),
+        (
+            WakeRefusal::HarnessNotResumed(None),
+            WakeRecovery::Unresolved,
+        ),
+        (
+            WakeRefusal::BindingUnread(NativeLaunchFailure::NotReady),
+            WakeRecovery::Unresolved,
+        ),
+        (WakeRefusal::NotResting, WakeRecovery::Unresolved),
+        (
+            WakeRefusal::HandOver(HandOverRefusal::Refused),
+            WakeRecovery::Unresolved,
+        ),
+        (
+            WakeRefusal::FreshNotStarted(FreshRefusal::ConfigurationUnread),
+            WakeRecovery::Unresolved,
+        ),
+        // A Codex thread the app-server did not open keeps only its stage
+        // and category: which of server and request it was is not shown.
+        (
+            WakeRefusal::FreshNotStarted(FreshRefusal::Rejected(
+                StartRejection::NativeLaunchRefused(native(
+                    NativeLaunchStage::CodexThread,
+                    NativeLaunchFailure::AdapterRefused,
+                )),
+            )),
+            WakeRecovery::Unresolved,
+        ),
+    ];
+    for (refusal, recovery) in cases {
+        assert_eq!(refusal.recovery(), recovery, "{refusal:?}");
+    }
 }

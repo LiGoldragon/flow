@@ -39,9 +39,17 @@
 //! Start does. While it runs, the metaflow is held in [`WakingMetaflows`], so
 //! a second request starts no second wake and a Stop does not put the waking
 //! seat to sleep.
+//!
+//! A refused wake keeps its work queued and the cause it arose from, and
+//! that cause names its recovery ([`ClassifiesWakeRefusal`]). A last flow
+//! Flow holds live is never launched beside. Only a wake whose recovery a
+//! Herdr agent event on one pane can establish is tried again before the
+//! next request queued for the metaflow or the Nexus's next start; see
+//! `awaiting`.
 
 use crate::AwaitsLaunchSettlement;
 use crate::RunningNexus;
+use crate::awaiting::HoldsAwaitedPanes;
 use crate::claude::MeasuresClaudeContext;
 use crate::composition::{
     ComposesLaunch, CompositionError, FreshSeat, HarnessedProfile, RendersQueuedWork,
@@ -54,14 +62,16 @@ use crate::generated::operation::{
 };
 use crate::generated::starter::DerivesHarness;
 use crate::generated::starter::ProfilesFreshSeat;
+use crate::generated::wake::{ClassifiesWakeRefusal, FreshRefusal, HerdrUnread, WakeRecovery};
 use crate::herdr::launch::{
-    ObservesNativeLaunchBinding, ResumesNativeHerdrHarness, WaitsForPaneRest,
+    ObservesNativeLaunchBinding, ResumesNativeHerdrHarness, SpawnFailure, WaitsForPaneRest,
 };
 use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
 use crate::herdr::{
     LocatesNativeTranscripts, OwnSession, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster,
 };
 use crate::launching::LaunchesFlows;
+use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::RecordsContextSize;
@@ -72,8 +82,9 @@ use crate::store::{
 };
 use signal_flow::{
     Address, AgentState, ContextRefusal, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind,
-    HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow, Origin,
-    PowerLevel, QueuedRequest, Request, Response,
+    HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow,
+    NativeLaunchFailure, Origin, PowerLevel, QueuedRequest, Request, Response, SpawnRefusalCause,
+    StartRejection,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -334,6 +345,21 @@ pub enum WakePlan {
 
 pub use crate::generated::starter::FreshContext;
 
+/// What Herdr shows of the last flow of an Asleep metaflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LastFlow {
+    /// Flow holds it live, and the pane Flow recorded for it runs its own
+    /// native session under its claim.
+    Runs(Box<FlowNode>),
+    /// Flow holds it live, and that pane shows its harness without the
+    /// native session reported.
+    Unsettled(HerdrRoute),
+    /// Flow holds it live, and Herdr could not be read.
+    Unread(HerdrUnread),
+    /// It is not live, or its recorded pane does not run it.
+    NotRunning,
+}
+
 /// What a flow's Stop did to its seat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtStop {
@@ -386,8 +412,10 @@ pub enum HandOverRefusal {
     Refused,
 }
 
-/// Why a wake did not leave its seat Awake. Every refusal is logged by
-/// name; the operation answers the `Failed` it maps to.
+/// Why a wake did not leave its seat Awake. Each keeps the cause it arose
+/// from, and is logged by name with the recovery that cause names
+/// ([`ClassifiesWakeRefusal`]); the operation answers the `Failed` it maps
+/// to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WakeRefusal {
     /// The store could not be read or written.
@@ -400,7 +428,11 @@ pub enum WakeRefusal {
     /// session.
     SessionLive,
     /// Herdr could not be read to see whether the session runs.
-    HerdrUnreadable,
+    HerdrUnreadable(HerdrUnread),
+    /// The last flow is live and the pane Flow recorded for it shows its
+    /// harness without the native session reported: it may be running its
+    /// session, so nothing is launched beside it.
+    AgentUnsettled(HerdrRoute),
     /// Nothing names a Herdr session to wake the seat in.
     Unplaceable,
     /// The resumed flow's system prompt was not composed again.
@@ -409,10 +441,12 @@ pub enum WakeRefusal {
     NotComposed,
     /// No pane was opened for the resumed session.
     PaneNotOpened(Failed_Data),
-    /// Herdr did not start the native session again in the new pane.
-    HarnessNotResumed,
-    /// The resumed harness's binding could not be read.
-    BindingUnread,
+    /// Herdr did not start the native session again in the new pane: the
+    /// refusal's cause, or None when Flow could not attempt the start.
+    HarnessNotResumed(Option<SpawnRefusalCause>),
+    /// The resumed harness's binding could not be read, of the category
+    /// named.
+    BindingUnread(NativeLaunchFailure),
     /// The resumed harness came up as another session or FlowId.
     BindingDiffers,
     /// The resumed flow's new route was not recorded.
@@ -421,8 +455,11 @@ pub enum WakeRefusal {
     NotResting,
     /// The work was not typed into the resumed pane.
     HandOver(HandOverRefusal),
+    /// A resume failed as named after its pane opened, and that pane could
+    /// not be closed: the resumed harness may still run in it.
+    ResumeLeftOpen(Box<WakeRefusal>),
     /// A fresh launch did not start.
-    FreshNotStarted(Failed_Data),
+    FreshNotStarted(FreshRefusal),
     /// The started flow was not recorded Awake.
     AwakeNotRecorded,
 }
@@ -441,17 +478,117 @@ impl AnswersWakeRefusal for WakeRefusal {
             }
             Self::NotAsleep => Failed_Data::NotAsleep,
             Self::NothingQueued => Failed_Data::NothingQueued,
-            Self::SessionLive | Self::BindingUnread | Self::BindingDiffers => {
+            Self::SessionLive | Self::BindingUnread(_) | Self::BindingDiffers => {
                 Failed_Data::ConflictingBinding
             }
             Self::ContextRefused(refusal) => Failed_Data::ContextRefused(refusal.clone()),
             Self::NotComposed => Failed_Data::CompositionRefused,
-            Self::PaneNotOpened(failure) | Self::FreshNotStarted(failure) => failure.clone(),
-            Self::HerdrUnreadable
+            Self::PaneNotOpened(failure) => failure.clone(),
+            Self::FreshNotStarted(FreshRefusal::ConfigurationUnread) => Failed_Data::StoreRefused,
+            Self::FreshNotStarted(FreshRefusal::NoLayerModel) => Failed_Data::CompositionRefused,
+            Self::FreshNotStarted(FreshRefusal::Rejected(_) | FreshRefusal::Unsettled) => {
+                Failed_Data::Unstarted
+            }
+            Self::ResumeLeftOpen(refusal) => refusal.failure(),
+            Self::HerdrUnreadable(_)
+            | Self::AgentUnsettled(_)
             | Self::Unplaceable
-            | Self::HarnessNotResumed
+            | Self::HarnessNotResumed(_)
             | Self::NotResting
             | Self::HandOver(_) => Failed_Data::HerdrRefused,
+        }
+    }
+}
+
+/// What can recover a refusal, read from the cause it kept alone. Only
+/// `AwaitingPane` is tried again by an event; every other class keeps its
+/// work queued for the next request queued for the metaflow or the Nexus's
+/// next start, which ask Flow's records whether a wake is still due.
+impl ClassifiesWakeRefusal for WakeRefusal {
+    fn recovery(&self) -> WakeRecovery {
+        match self {
+            Self::NotAsleep
+            | Self::NothingQueued
+            | Self::Unplaceable
+            | Self::NotComposed
+            | Self::BindingDiffers => WakeRecovery::Terminal,
+            Self::AgentUnsettled(route) => WakeRecovery::AwaitingPane(route.clone()),
+            Self::HerdrUnreadable(HerdrUnread::ServerUnreachable) => WakeRecovery::AwaitingServer,
+            Self::HerdrUnreadable(HerdrUnread::PaneUnreadable) => WakeRecovery::Unresolved,
+            Self::ContextRefused(refusal) => refusal.recovery(),
+            Self::PaneNotOpened(failure) => failure.recovery(),
+            Self::HarnessNotResumed(Some(
+                SpawnRefusalCause::ControlCharacter | SpawnRefusalCause::CommandTooLong,
+            )) => WakeRecovery::Terminal,
+            Self::HarnessNotResumed(_) => WakeRecovery::Unresolved,
+            Self::SessionLive
+            | Self::ResumeNotRecorded
+            | Self::ResumeLeftOpen(_)
+            | Self::AwakeNotRecorded => WakeRecovery::Reconcile,
+            Self::FreshNotStarted(refusal) => refusal.recovery(),
+            Self::StoreUnreadable
+            | Self::BindingUnread(_)
+            | Self::NotResting
+            | Self::HandOver(_) => WakeRecovery::Unresolved,
+        }
+    }
+}
+
+/// A context the composer did not answer is a server that did not; any
+/// other refusal is the context itself, which waiting does not change.
+impl ClassifiesWakeRefusal for ContextRefusal {
+    fn recovery(&self) -> WakeRecovery {
+        match self {
+            ContextRefusal::ComposerUnavailable => WakeRecovery::AwaitingServer,
+            _ => WakeRecovery::Terminal,
+        }
+    }
+}
+
+/// A native step Herdr could not be read for is a server that did not
+/// answer; any other category does not show which.
+impl ClassifiesWakeRefusal for NativeLaunchFailure {
+    fn recovery(&self) -> WakeRecovery {
+        match self {
+            NativeLaunchFailure::HerdrUnreadable => WakeRecovery::AwaitingServer,
+            _ => WakeRecovery::Unresolved,
+        }
+    }
+}
+
+impl ClassifiesWakeRefusal for Failed_Data {
+    fn recovery(&self) -> WakeRecovery {
+        match self {
+            Failed_Data::LaunchRefused(refusal) => refusal.native_launch_failure.recovery(),
+            Failed_Data::ContextRefused(refusal) => refusal.recovery(),
+            Failed_Data::CompositionRefused | Failed_Data::LeaveOutRefused(_) => {
+                WakeRecovery::Terminal
+            }
+            _ => WakeRecovery::Unresolved,
+        }
+    }
+}
+
+/// A Start that may have launched a flow (it holds the Address, or was
+/// neither refused nor seen Started) is reconciled, never launched again.
+impl ClassifiesWakeRefusal for FreshRefusal {
+    fn recovery(&self) -> WakeRecovery {
+        match self {
+            FreshRefusal::NoLayerModel => WakeRecovery::Terminal,
+            FreshRefusal::ConfigurationUnread => WakeRecovery::Unresolved,
+            FreshRefusal::Unsettled => WakeRecovery::Reconcile,
+            FreshRefusal::Rejected(rejection) => match rejection {
+                StartRejection::AddressAwake => WakeRecovery::Reconcile,
+                StartRejection::AddressEnded
+                | StartRejection::CompositionRefused
+                | StartRejection::LeaveOutRefused(_)
+                | StartRejection::LaunchRequestConflict => WakeRecovery::Terminal,
+                StartRejection::ContextRefused(refusal) => refusal.recovery(),
+                StartRejection::NativeLaunchRefused(refusal) => {
+                    refusal.native_launch_failure.recovery()
+                }
+                _ => WakeRecovery::Unresolved,
+            },
         }
     }
 }
@@ -497,10 +634,10 @@ pub trait PerformsSleepAndWake {
 trait WakesInParts {
     /// The body of `wake`, every early exit a typed refusal.
     fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal>;
-    /// The last flow of an Asleep metaflow, when it is still live in the
-    /// pane Flow recorded for it, running its own native session under its
-    /// claim: a wake that resumed it and failed before recording it Awake.
-    fn live_last_flow(&self, metaflow: &Metaflow) -> Option<FlowNode>;
+    /// What Herdr shows of the last flow of an Asleep metaflow when Flow
+    /// still holds it live: a wake that resumed it and failed before
+    /// recording it Awake.
+    fn live_last_flow(&self, metaflow: &Metaflow) -> LastFlow;
     /// Records such a flow Awake, taking nothing from the queue; what is
     /// queued is then typed in as work that arrived during a wake.
     fn settle_live_resumed(&self, address: &Address, flow_id: &str) -> Result<FlowId, WakeRefusal>;
@@ -519,14 +656,15 @@ trait WakesInParts {
         text: &str,
     ) -> Result<(), WakeRefusal>;
     /// Closes a pane a failed resume opened and records the flow Stopped,
-    /// so the next wake starts clean; the queue is untouched.
-    fn abandon_resumed(&self, node: &FlowNode, pane: &HerdrPaneBinding);
+    /// so the next wake starts clean; the queue is untouched. False when the
+    /// pane could not be closed.
+    fn abandon_resumed(&self, node: &FlowNode, pane: &HerdrPaneBinding) -> bool;
     fn start_fresh(
         &self,
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
-    ) -> Result<FlowId, Failed_Data>;
+    ) -> Result<FlowId, FreshRefusal>;
     /// Types text into a live flow's pane under its lease, as Flow's own
     /// write: no Priority head, since it is not a Message. A refusal is
     /// logged by its reason.
@@ -537,7 +675,8 @@ trait WakesInParts {
     /// The refresh threshold configured for this layer, in tokens.
     fn refresh_threshold(&self, layer: &Layer) -> Option<i64>;
     /// Refuses a wake while a pane already runs this flow's native session:
-    /// SessionLive when one does, HerdrUnreadable when Herdr is unreadable.
+    /// SessionLive when one does, HerdrUnreadable with its cause when Herdr
+    /// is unreadable.
     fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal>;
     fn now() -> i64;
     /// The body of `settle_stopped`: waits, boundedly and off the dispatch
@@ -749,12 +888,24 @@ impl PerformsSleepAndWake for RunningNexus {
 
     fn wake(&self, address: Address) -> Outcome {
         match self.waken(&address) {
-            Ok(flow_id) => Outcome::Woken(flow_id),
+            Ok(flow_id) => {
+                self.awaited_panes.forget(&address);
+                Outcome::Woken(flow_id)
+            }
             Err(refusal) => {
+                let recovery = refusal.recovery();
                 eprintln!(
-                    "flow-nexus: wake of {:?} {} {:?} refused: {refusal:?}",
+                    "flow-nexus: wake of {:?} {} {:?} refused: {refusal:?}; recovery {recovery:?}",
                     address.aspect, address.topic, address.layer
                 );
+                // Only a pane event can establish this recovery: the wake
+                // waits on that pane. Any other refusal replaces the wait.
+                match &recovery {
+                    WakeRecovery::AwaitingPane(route) => {
+                        self.awaited_panes.await_pane(&address, route)
+                    }
+                    _ => self.awaited_panes.forget(&address),
+                }
                 // Nothing was taken: the work is still queued, oldest first.
                 Outcome::Failed(refusal.failure())
             }
@@ -804,9 +955,14 @@ impl WakesInParts for RunningNexus {
             }
         };
         // The flow's own session, already live in the pane Flow recorded
-        // for it, is woken as it is: nothing is opened again.
-        if let Some(node) = self.live_last_flow(&metaflow) {
-            return self.settle_live_resumed(address, &node.flow_id);
+        // for it, is woken as it is: nothing is opened again. While that
+        // pane shows its harness without its session, or Herdr cannot be
+        // read, the flow may be running: nothing is launched beside it.
+        match self.live_last_flow(&metaflow) {
+            LastFlow::Runs(node) => return self.settle_live_resumed(address, &node.flow_id),
+            LastFlow::Unsettled(route) => return Err(WakeRefusal::AgentUnsettled(route)),
+            LastFlow::Unread(unread) => return Err(WakeRefusal::HerdrUnreadable(unread)),
+            LastFlow::NotRunning => {}
         }
         if metaflow.queue.is_empty() {
             return Err(WakeRefusal::NothingQueued);
@@ -871,19 +1027,27 @@ impl WakesInParts for RunningNexus {
         }
     }
 
-    fn live_last_flow(&self, metaflow: &Metaflow) -> Option<FlowNode> {
-        let node = self.store.flow_node(metaflow.past.last()?).ok().flatten()?;
-        if !node.flow_lifecycle.is_live() {
-            return None;
-        }
-        match self.herdr.own_session(&node) {
-            OwnSession::Runs => Some(node),
-            presence => {
+    fn live_last_flow(&self, metaflow: &Metaflow) -> LastFlow {
+        let Some(node) = metaflow
+            .past
+            .last()
+            .and_then(|flow_id| self.store.flow_node(flow_id).ok().flatten())
+            .filter(|node| node.flow_lifecycle.is_live())
+        else {
+            return LastFlow::NotRunning;
+        };
+        match (self.herdr.own_session(&node), &node.herdr_route_selection) {
+            (OwnSession::Runs, _) => LastFlow::Runs(Box::new(node)),
+            (OwnSession::SessionUnreported, HerdrRouteSelection::Available(route)) => {
+                LastFlow::Unsettled(route.clone())
+            }
+            (OwnSession::HerdrUnreadable(unread), _) => LastFlow::Unread(unread),
+            (presence, _) => {
                 eprintln!(
                     "flow-nexus: flow {} is not live in its own pane: {presence:?}",
                     node.flow_id
                 );
-                None
+                LastFlow::NotRunning
             }
         }
     }
@@ -942,10 +1106,8 @@ impl WakesInParts for RunningNexus {
         };
         match self.resume_in_pane(&node, &launch, &pane, text) {
             Ok(()) => Ok(node.flow_id),
-            Err(refusal) => {
-                self.abandon_resumed(&node, &pane);
-                Err(refusal)
-            }
+            Err(refusal) if self.abandon_resumed(&node, &pane) => Err(refusal),
+            Err(refusal) => Err(WakeRefusal::ResumeLeftOpen(Box::new(refusal))),
         }
     }
 
@@ -956,13 +1118,16 @@ impl WakesInParts for RunningNexus {
         pane: &HerdrPaneBinding,
         text: &str,
     ) -> Result<(), WakeRefusal> {
-        if self
-            .herdr
-            .resume_native_harness(launch, pane, &node.flow_id, &node.session_id)
-            .is_err()
+        // Adapter text may carry private paths; only Herdr's own refusal
+        // is kept.
+        if let Err(failure) =
+            self.herdr
+                .resume_native_harness(launch, pane, &node.flow_id, &node.session_id)
         {
-            // Adapter text may carry private paths; only the fact is logged.
-            return Err(WakeRefusal::HarnessNotResumed);
+            return Err(WakeRefusal::HarnessNotResumed(match failure {
+                SpawnFailure::Refused(cause) => Some(cause),
+                SpawnFailure::Unattempted(_) => None,
+            }));
         }
         // The resumed harness must come up as the same session, and its
         // claim must still name this FlowId: the flow keeps its identity or
@@ -970,7 +1135,9 @@ impl WakesInParts for RunningNexus {
         let binding = self
             .herdr
             .observe_native_binding(launch, pane, Some(&node.flow_id))
-            .map_err(|_| WakeRefusal::BindingUnread)?;
+            .map_err(|error| {
+                WakeRefusal::BindingUnread(NativeLaunchFailure::from_adapter_error(&error))
+            })?;
         if binding.native_session_id != node.session_id || binding.flow_id != node.flow_id {
             return Err(WakeRefusal::BindingDiffers);
         }
@@ -1007,7 +1174,7 @@ impl WakesInParts for RunningNexus {
             .map_err(WakeRefusal::HandOver)
     }
 
-    fn abandon_resumed(&self, node: &FlowNode, pane: &HerdrPaneBinding) {
+    fn abandon_resumed(&self, node: &FlowNode, pane: &HerdrPaneBinding) -> bool {
         let route = HerdrRoute {
             herdr_session_name: pane.herdr_session_name.clone(),
             herdr_agent_name: pane.herdr_agent_name.clone(),
@@ -1031,7 +1198,7 @@ impl WakesInParts for RunningNexus {
                 "flow-nexus: a failed resume of flow {} left its pane open",
                 node.flow_id
             );
-            return;
+            return false;
         }
         if self.perform(Operation::Record(Record_Data::Stopped(
             node.flow_id.clone(),
@@ -1042,6 +1209,7 @@ impl WakesInParts for RunningNexus {
                 node.flow_id
             );
         }
+        true
     }
 
     fn start_fresh(
@@ -1049,18 +1217,18 @@ impl WakesInParts for RunningNexus {
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
-    ) -> Result<FlowId, Failed_Data> {
+    ) -> Result<FlowId, FreshRefusal> {
         let address = &metaflow.address;
         let snapshot = match self.store.configuration_snapshot() {
             Ok(Some(snapshot)) => snapshot,
-            _ => return Err(Failed_Data::StoreRefused),
+            _ => return Err(FreshRefusal::ConfigurationUnread),
         };
         let Some(model) = snapshot
             .models
             .iter()
             .find(|model| model.layer == address.layer)
         else {
-            return Err(Failed_Data::CompositionRefused);
+            return Err(FreshRefusal::NoLayerModel);
         };
         let launch_request_id = format!(
             "wake-{}-{}",
@@ -1100,7 +1268,9 @@ impl WakesInParts for RunningNexus {
         };
         match response {
             Some(Response::Started(launched)) => Ok(launched.flow_id),
-            _ => Err(Failed_Data::Unstarted),
+            Some(Response::StartRejected(rejection)) => Err(FreshRefusal::Rejected(rejection)),
+            // Pending, still ambiguous, or another answer: its flow may run.
+            _ => Err(FreshRefusal::Unsettled),
         }
     }
 
@@ -1187,15 +1357,15 @@ impl WakesInParts for RunningNexus {
                 continue;
             }
             match self.herdr.holds_native_session(herdr_session_name, node) {
-                Some(false) => {}
-                Some(true) => {
+                Ok(false) => {}
+                Ok(true) => {
                     eprintln!(
                         "flow-nexus: flow {} is already running; not woken again",
                         node.flow_id
                     );
                     return Err(WakeRefusal::SessionLive);
                 }
-                None => return Err(WakeRefusal::HerdrUnreadable),
+                Err(unread) => return Err(WakeRefusal::HerdrUnreadable(unread)),
             }
         }
         Ok(())

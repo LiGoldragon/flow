@@ -277,6 +277,40 @@ At its start the Nexus wakes every metaflow due a wake, so a Nexus that died
 between the commit and the wake leaves none owed. A wake already running for
 the metaflow absorbs the request: it drains what arrives during it.
 
+A refused wake keeps its work queued and keeps the cause it arose from:
+Herdr unreadable is kept as its server unreachable (the CLI did not run or
+the session's server refused it) or its answer unreadable; a pane open or a
+native step refused keeps its stage and category; a harness Herdr would not
+start again keeps Herdr's own refusal; a fresh launch keeps its
+`StartRejection`, or that its Start was neither refused nor seen Started.
+That cause alone names the recovery (`WakeRecovery`, `ethos/wake.ethos`):
+
+| Class | Refusals | What tries it again |
+|---|---|---|
+| Terminal | not Asleep, nothing queued, unplaceable, profile or context that does not compose, harness command refused by Flow, binding of another session, no layer model, Address Ended | a change to what the wake reads; the next request or start reads it again |
+| AwaitingPane | the last flow is live and its recorded pane shows the harness with no native session reported | `pane.agent_detected` or `pane.agent_status_changed` for that pane |
+| AwaitingServer | Herdr's server unreachable; a pane open or native step for which Herdr could not be read; the context composer unavailable | the next request queued for the metaflow, or the Nexus's next start |
+| Reconcile | a session already live elsewhere, a resume or wake not recorded, a resumed pane that could not be closed, a Start that holds the Address or did not settle | the next request or start settles the running flow from Flow's records; nothing is launched again |
+| Unresolved | store unreadable, Herdr's answer unreadable, a binding unread, a pane not at rest, work not typed, any other Herdr, Codex or Start refusal | the next request queued for the metaflow, or the Nexus's next start |
+
+A last flow Flow holds live is never launched beside: while its recorded
+pane shows its harness without a session, or Herdr cannot be read, the wake
+is refused, not resumed again in a new pane. Such a wake waits on the pane:
+one Herdr event subscription per awaited pane is opened when the wait is
+recorded, and on subscribing and on each agent event for that pane the
+waiting wakes are taken and asked through the same path a queued request
+takes, so Flow's records decide whether each is still due, the binding and
+claim are read again, and a running wake absorbs it. An event for another
+pane does nothing; once the seat is woken a repeated event finds nothing
+waiting. A pane Herdr reports closed or exited releases its wait. The wait
+lives in memory and is derived again at the Nexus's start, which wakes every
+metaflow due a wake. No server or endpoint announces its return: a wake
+refused because Herdr's server or a Codex endpoint did not answer is tried
+again only at the next request queued for the metaflow or the Nexus's next
+start. A Codex thread the app-server did not open keeps only
+`NativeLaunchRefused.{ CodexThread AdapterRefused }`, which does not show
+whether the endpoint was unreachable, so it is Unresolved.
+
 Every queued request carries who sent it, `QueuedRequest.{ SentBy Request }`:
 the Sender a Deliver's Lock named (which the bound Message peer asserts) or
 the metaflow a send-tool call is attributed to. A request queued before Flow

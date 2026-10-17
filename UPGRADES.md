@@ -1,3 +1,32 @@
+# Flow 0.35.9
+
+No wire change and no store change: signal-flow 20.0.0 and meta-signal-flow
+24.0.1 stay pinned, no table or family changes.
+
+- **A refused wake keeps its cause and is classed by it.** `WakeRefusal`
+  keeps Herdr unreadable as `ServerUnreachable` or `PaneUnreadable`, the
+  native category of an unread binding, Herdr's refusal of a resumed
+  harness, and a fresh launch's `StartRejection` or that it did not settle
+  (`FreshRefusal`). Each refusal is logged with its `WakeRecovery`:
+  Terminal, AwaitingPane, AwaitingServer, Reconcile or Unresolved
+  (`crates/flow-nexus/ethos/wake.ethos`). The operation's `Failed` answers
+  are unchanged.
+- **A live last flow is never launched beside.** When the last flow is live
+  and its recorded pane shows its harness with no native session reported,
+  or Herdr cannot be read, the wake is refused instead of resuming the
+  session again in a new pane. A resume whose pane could not be closed is
+  `ResumeLeftOpen`, Reconcile.
+- **A wake refused until its pane settles is tried again on that pane's
+  event.** The Nexus opens one Herdr subscription per awaited pane
+  (`pane.agent_detected`, `pane.agent_status_changed`, `pane.closed`,
+  `pane.exited`) and on subscribing and on each agent event asks
+  `wake_due` again for the waiting metaflow. The wait is in memory; the
+  Nexus's start derives it again.
+- **Server-down and Codex-endpoint recovery stay pending.** A wake refused
+  because Herdr's server or a Codex endpoint did not answer is tried again
+  only at the next request queued for the metaflow or at the Nexus's next
+  start; no event or timer retries it.
+
 # Flow 0.35.8
 
 No wire change and no store change: signal-flow 20.0.0 and meta-signal-flow

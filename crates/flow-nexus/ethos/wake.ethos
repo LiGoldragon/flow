@@ -1,0 +1,45 @@
+; Wake recovery: what can recover a refused wake. A wake that did not leave
+; its seat Awake keeps its work queued, and Flow's records alone decide
+; whether it is still due. The refusal keeps the cause it arose from, and
+; that cause alone names the recovery.
+;
+; HerdrUnread names why Herdr could not be read: ServerUnreachable, the
+; Herdr CLI did not run or the session's server did not answer it;
+; PaneUnreadable, Herdr answered with no readable agent roster.
+;
+; FreshRefusal names why a fresh wake's launch did not start:
+; ConfigurationUnread, the configuration snapshot was not read;
+; NoLayerModel, no model is configured for the layer; Rejected, the Start
+; was refused with its rejection; Unsettled, the Start was neither refused
+; nor seen Started, so its flow may run.
+;
+; WakeRecovery classes a refusal by its preserved cause. Terminal: waiting
+; recovers nothing; the work waits for a change to what the wake reads.
+; AwaitingPane: a Herdr agent event on that pane can establish recovery, and
+; the wake is tried again on pane.agent_detected or pane.agent_status_changed
+; for it. AwaitingServer: a server or endpoint did not answer and no event
+; announces its return; the wake is tried again at the next request queued
+; for the metaflow or at the Nexus's next start. Reconcile: a flow of the
+; metaflow may already run; nothing is launched again, and the next wake
+; settles the running flow from Flow's records and Herdr. Unresolved: the
+; preserved cause does not show which; the wake is tried again at the next
+; request or start.
+;
+; AgentPaneEvent is one Herdr agent event, named by the session and the pane
+; it is about.
+
+Library
+[ signal_flow:[ Address HerdrRoute HerdrSessionName StartRejection ] ]
+[ HerdrUnread.[ ServerUnreachable PaneUnreadable ]
+  FreshRefusal.[ ConfigurationUnread NoLayerModel Rejected.StartRejection Unsettled ]
+  WakeRecovery.[ Terminal AwaitingPane.HerdrRoute AwaitingServer Reconcile Unresolved ]
+  PaneId.String
+  AgentPaneEvent.{ HerdrSessionName PaneId } ]
+[ ; A refusal, read for what can recover it.
+  ClassifiesWakeRefusal.[ recovery.[ WakeRecovery ] ]
+  ; The event a pane awaiter reacts to.
+  PaneEventing.[ pane_event.[ AgentPaneEvent ] ]
+  ; Tries again every wake awaiting the event's pane; answers the metaflows
+  ; it tried.
+  WakesOnPaneEvent.[ wake_on_pane_event.{ [ PaneEventing ] [ Vector<Address> ] } ] ]
+[]

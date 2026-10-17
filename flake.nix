@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.8";
+            version = "0.35.9";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -425,6 +425,22 @@
             "tests::waking::a_nexus_start_wakes_a_seat_whose_wake_did_not_finish";
           flow-v1-metaflow-queue-upgrades-sender-unknown = context.exactTest "flow-nexus"
             "store::tests::a_v1_metaflow_queue_upgrades_with_its_senders_unknown";
+          flow-wake-unsettled-seat-not-launched-again = context.exactTest "flow-nexus"
+            "tests::waking::a_resumed_seat_not_yet_reporting_its_session_is_never_launched_again";
+          flow-wake-awaited-pane-event-wakes-once = context.exactTest "flow-nexus"
+            "tests::waking::the_awaited_pane_event_wakes_the_seat_exactly_once";
+          flow-wake-other-pane-event-wakes-nothing = context.exactTest "flow-nexus"
+            "tests::waking::an_event_for_another_pane_wakes_nothing";
+          flow-wake-terminal-refusal-stays-refused = context.exactTest "flow-nexus"
+            "tests::waking::a_terminal_refusal_waits_on_no_pane_and_stays_refused_on_events";
+          flow-wake-herdr-down-waits-next-request = context.exactTest "flow-nexus"
+            "tests::waking::a_wake_refused_while_herdr_is_unreachable_wakes_at_the_next_request";
+          flow-wake-herdr-down-waits-nexus-start = context.exactTest "flow-nexus"
+            "tests::waking::a_wake_refused_while_herdr_is_unreachable_wakes_at_the_nexus_start";
+          flow-wake-pane-await-derived-at-start = context.exactTest "flow-nexus"
+            "tests::waking::a_nexus_start_awaits_an_unsettled_seats_pane_again";
+          flow-wake-refusal-recovery-classified = context.exactTest "flow-nexus"
+            "tests::waking::each_wake_refusal_names_the_recovery_its_cause_allows";
         }
       );
 

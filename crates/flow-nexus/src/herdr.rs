@@ -2,6 +2,7 @@
 
 use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
+use crate::generated::wake::HerdrUnread;
 pub mod launch;
 pub mod pane;
 pub mod reservation;
@@ -378,12 +379,23 @@ pub trait ReadsHerdrPanes {
     fn snapshot(&self, route: &HerdrRoute) -> Option<serde_json::Value>;
     /// The snapshot of one Herdr session.
     fn session_snapshot(&self, herdr_session_name: &str) -> Option<serde_json::Value>;
+    /// The snapshot of one Herdr session, or why it was not read: the CLI
+    /// did not run or the session's server refused it (ServerUnreachable),
+    /// or its answer is not a snapshot (PaneUnreadable).
+    fn read_session_snapshot(
+        &self,
+        herdr_session_name: &str,
+    ) -> Result<serde_json::Value, HerdrUnread>;
     /// Whether a pane of this Herdr session runs the flow's native session
-    /// now; None when Herdr cannot be read. A pane whose agent reports the
+    /// now; the cause when Herdr cannot be read. A pane whose agent reports the
     /// session runs it. A remote-resumed Codex TUI reports none: the pane
     /// Flow recorded for the flow, Herdr recognizing a Codex agent in it,
     /// runs the flow's opened thread unless it reports another session.
-    fn holds_native_session(&self, herdr_session_name: &str, node: &FlowNode) -> Option<bool>;
+    fn holds_native_session(
+        &self,
+        herdr_session_name: &str,
+        node: &FlowNode,
+    ) -> Result<bool, HerdrUnread>;
     /// What a fresh snapshot says of whether the pane Flow recorded for
     /// this flow runs the flow's own native session now, under its FlowId
     /// claim.
@@ -392,7 +404,7 @@ pub trait ReadsHerdrPanes {
 
 /// What a fresh Herdr snapshot says of whether the pane Flow recorded for a
 /// flow runs the flow's own native session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnSession {
     /// The recorded pane shows the flow's harness running its session: its
     /// agent reports the session, or, for Codex, reports none.
@@ -401,8 +413,8 @@ pub enum OwnSession {
     NoRecordedPane,
     /// The flow's FlowId claim is not held.
     Unclaimed,
-    /// Herdr could not be read.
-    HerdrUnreadable,
+    /// Herdr could not be read, for the cause named.
+    HerdrUnreadable(HerdrUnread),
     /// The snapshot shows no agent of the flow's harness at the recorded
     /// pane and terminal: the pane is gone.
     PaneGone,
@@ -490,11 +502,16 @@ impl ReadsHerdrPanes for HerdrCli {
         self.session_snapshot(&route.herdr_session_name)
     }
 
-    fn holds_native_session(&self, herdr_session_name: &str, node: &FlowNode) -> Option<bool> {
-        let snapshot = self.session_snapshot(herdr_session_name)?;
+    fn holds_native_session(
+        &self,
+        herdr_session_name: &str,
+        node: &FlowNode,
+    ) -> Result<bool, HerdrUnread> {
+        let snapshot = self.read_session_snapshot(herdr_session_name)?;
         let agents = snapshot
             .pointer("/result/snapshot/agents")
-            .and_then(serde_json::Value::as_array)?;
+            .and_then(serde_json::Value::as_array)
+            .ok_or(HerdrUnread::PaneUnreadable)?;
         // The pane Flow recorded for a Codex flow that opened its thread, in
         // this Herdr session.
         let recorded = match (&node.harness_kind, &node.herdr_route_selection) {
@@ -506,7 +523,7 @@ impl ReadsHerdrPanes for HerdrCli {
             }
             _ => None,
         };
-        Some(agents.iter().any(|agent| {
+        Ok(agents.iter().any(|agent| {
             match agent
                 .pointer("/agent_session/value")
                 .and_then(serde_json::Value::as_str)
@@ -529,14 +546,15 @@ impl ReadsHerdrPanes for HerdrCli {
         if !self.identity_is_claimed(node) {
             return OwnSession::Unclaimed;
         }
-        let Some(agents) = self
-            .snapshot(route)
-            .as_ref()
-            .and_then(|snapshot| snapshot.pointer("/result/snapshot/agents"))
+        let snapshot = match self.read_session_snapshot(&route.herdr_session_name) {
+            Ok(snapshot) => snapshot,
+            Err(unread) => return OwnSession::HerdrUnreadable(unread),
+        };
+        let Some(agents) = snapshot
+            .pointer("/result/snapshot/agents")
             .and_then(serde_json::Value::as_array)
-            .cloned()
         else {
-            return OwnSession::HerdrUnreadable;
+            return OwnSession::HerdrUnreadable(HerdrUnread::PaneUnreadable);
         };
         let Some(agent) = agents
             .iter()
@@ -558,15 +576,21 @@ impl ReadsHerdrPanes for HerdrCli {
     }
 
     fn session_snapshot(&self, herdr_session_name: &str) -> Option<serde_json::Value> {
+        self.read_session_snapshot(herdr_session_name).ok()
+    }
+
+    fn read_session_snapshot(
+        &self,
+        herdr_session_name: &str,
+    ) -> Result<serde_json::Value, HerdrUnread> {
         let output = Command::new(&self.executable)
             .args(["--session", herdr_session_name, "api", "snapshot"])
             .output()
-            .ok()?;
-        output
-            .status
-            .success()
-            .then(|| serde_json::from_slice(&output.stdout).ok())
-            .flatten()
+            .map_err(|_| HerdrUnread::ServerUnreachable)?;
+        if !output.status.success() {
+            return Err(HerdrUnread::ServerUnreachable);
+        }
+        serde_json::from_slice(&output.stdout).map_err(|_| HerdrUnread::PaneUnreadable)
     }
 }
 

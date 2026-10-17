@@ -1,8 +1,6 @@
-pub mod awaiting;
 pub mod curriculum;
 pub mod operation;
 pub mod send_tool;
-pub mod starter;
+pub use crate::context::starter;
 pub mod startup;
-pub mod verification;
-pub mod wake;
+pub use crate::awaiting::wake;

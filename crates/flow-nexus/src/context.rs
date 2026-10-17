@@ -20,18 +20,19 @@
 //! asked for it.
 
 use crate::generated::curriculum::{
-    CallerMetaflow, Outcome as CurriculumOutcome, Query as CurriculumQuery, StartupComposition,
-    StartupSelection, Target,
+    CallerMetaflow, ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery,
+    StartupComposition, StartupPlacement, StartupSelection, Target,
 };
-#[cfg(test)]
-use crate::generated::curriculum::{ContextProvenance, StartupPlacement};
-pub use crate::generated::starter::{
+#[allow(unexpected_cfgs, clippy::large_enum_variant)]
+#[path = "generated/starter.rs"]
+pub mod starter;
+use sha2::{Digest, Sha256};
+use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Layer};
+pub use starter::{
     ComposesFlowContext, ContextRequest, ContextRequesting, CurriculumQuerying, CutsRenderedText,
     ExchangesCurriculumFrames, OpensCurriculumComposer, ProvenanceListing, ReadsVerifiedContext,
     SelectsStartup, StartupComposing, Textual, VerifiedContext, VerifiesContext,
 };
-use sha2::{Digest, Sha256};
-use signal_flow::{Aspect, ContextRefusal, HarnessKind, Layer};
 use std::{
     io::{Read, Write},
     os::unix::net::UnixStream,
@@ -230,6 +231,85 @@ impl CutsRenderedText for str {
     }
 }
 
+impl VerifiesContext for VerifiedContext {
+    fn verified<N: ContextRequesting, O: StartupComposing>(
+        input_0: N,
+        input_1: O,
+    ) -> Result<Self, ContextRefusal> {
+        let request = input_0.context_request();
+        let composition = input_1.composition();
+        let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
+        if digest(&composition.system_text) != composition.system_payload_sha256
+            || digest(&composition.user_text) != composition.user_payload_sha256
+        {
+            return Err(ContextRefusal::PayloadMismatch);
+        }
+        let rows = &composition.context_provenance_vector;
+        let placed = |placement: StartupPlacement| -> Vec<ContextProvenance> {
+            rows.iter()
+                .filter(|row| row.startup_placement == placement)
+                .cloned()
+                .collect()
+        };
+        let system_rows = placed(StartupPlacement::System);
+        let user_rows = placed(StartupPlacement::User);
+        let present = |identities: &[String], placed: &[ContextProvenance]| {
+            identities
+                .iter()
+                .all(|identity| placed.iter().any(|row| &row.module_identity == identity))
+        };
+        if !present(&request.system_modules, &system_rows)
+            || !present(&request.user_modules, &user_rows)
+        {
+            return Err(ContextRefusal::ModuleMissing);
+        }
+        let ordered = |placed: &[ContextProvenance]| {
+            placed
+                .iter()
+                .enumerate()
+                .all(|(ordinal, row)| row.integer == ordinal as i64)
+        };
+        if !ordered(&system_rows) || !ordered(&user_rows) {
+            return Err(ContextRefusal::PayloadMismatch);
+        }
+        if composition
+            .system_text
+            .rendered_segments(&system_rows)
+            .is_none()
+        {
+            return Err(ContextRefusal::PayloadMismatch);
+        }
+        let user_segments = composition
+            .user_text
+            .rendered_segments(&user_rows)
+            .ok_or(ContextRefusal::PayloadMismatch)?;
+        Ok(Self {
+            address: request.address.clone(),
+            system_text: composition.system_text,
+            user_segments,
+        })
+    }
+}
+
+/// What a verified context holds: the Address it was composed for, the
+/// system text, and the USER text cut where each module begins, the first
+/// segment holding the opening lines with the first module. The segments'
+/// concatenation is the USER text exactly; there are none when no module is
+/// USER placed.
+impl ReadsVerifiedContext for VerifiedContext {
+    fn address(&self) -> Address {
+        self.address.clone()
+    }
+
+    fn system_text(&self) -> String {
+        self.system_text.clone()
+    }
+
+    fn user_segments(&self) -> Vec<String> {
+        self.user_segments.clone()
+    }
+}
+
 /// A composer for tests: each identity's body is held in memory and
 /// rendered as Curriculum renders it. An identity it does not hold is
 /// rejected, as Curriculum rejects one outside its repositories.
@@ -360,6 +440,49 @@ mod tests {
         assert!(verified.user_segments()[1].starts_with("\n<!-- module: knowledge-flow -->\n"));
         assert!(verified.system_text().contains("Spirit body."));
         assert_eq!(verified.address(), request.address);
+    }
+
+    /// Whether a type is read from data: by datom (`Composing`) or by rkyv
+    /// (`Deserialize`). Method resolution picks the first impl whose bound
+    /// holds, so a type bearing neither falls to the refusing one.
+    struct Probe<T>(std::marker::PhantomData<T>);
+    trait ReadsDatom {
+        fn built_from_datom(&self) -> bool {
+            true
+        }
+    }
+    impl<T: datom_codec::Composing> ReadsDatom for Probe<T> {}
+    trait NoDatom {
+        fn built_from_datom(&self) -> bool {
+            false
+        }
+    }
+    impl<T> NoDatom for &Probe<T> {}
+    trait ReadsArchive {
+        fn built_from_archive(&self) -> bool {
+            true
+        }
+    }
+    impl<T: rkyv::Archive> ReadsArchive for Probe<T> where
+        T::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
+    {
+    }
+    trait NoArchive {
+        fn built_from_archive(&self) -> bool {
+            false
+        }
+    }
+    impl<T> NoArchive for &Probe<T> {}
+
+    #[test]
+    fn data_cannot_construct_a_verified_context() {
+        let sealed = Probe::<VerifiedContext>(std::marker::PhantomData);
+        assert!(!(&sealed).built_from_datom());
+        assert!(!(&sealed).built_from_archive());
+        // The control: a type that derives both is seen as read from data.
+        let open = Probe::<ContextRequest>(std::marker::PhantomData);
+        assert!(open.built_from_datom());
+        assert!(open.built_from_archive());
     }
 
     #[test]

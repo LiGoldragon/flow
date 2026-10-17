@@ -224,7 +224,7 @@ dependencies = [
 [[package]]
 name = "ethos-zero"
 version = "17.0.0"
-source = "git+https://github.com/LiGoldragon/ethos-zero?rev=ac10f9e8673592f55feed6f71491d44ec8613a34#ac10f9e8673592f55feed6f71491d44ec8613a34"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=b31e3db22caf21adeb50594cd1124f3e4acbe130#b31e3db22caf21adeb50594cd1124f3e4acbe130"
 dependencies = [
  "datom-codec 0.32.2 (git+https://github.com/LiGoldragon/datom-codec?rev=dfecb24df5ce28c0b4ecfc3abc9663b42e2c1895#dfecb24df5ce28c0b4ecfc3abc9663b42e2c1895)",
  "prettyplease",
@@ -293,7 +293,7 @@ version = "0.35.9"
 dependencies = [
  "base64",
  "datom-codec 0.32.2 (git+https://github.com/LiGoldragon/datom-codec?rev=4dff16b4f7412febc3b71aac8b49680cd20988cb#4dff16b4f7412febc3b71aac8b49680cd20988cb)",
- "ethos-zero 17.0.0 (git+https://github.com/LiGoldragon/ethos-zero?rev=ac10f9e8673592f55feed6f71491d44ec8613a34#ac10f9e8673592f55feed6f71491d44ec8613a34)",
+ "ethos-zero 17.0.0 (git+https://github.com/LiGoldragon/ethos-zero?rev=b31e3db22caf21adeb50594cd1124f3e4acbe130#b31e3db22caf21adeb50594cd1124f3e4acbe130)",
  "flow-defaults",
  "flow-ethos",
  "libc",

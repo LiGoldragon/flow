@@ -146,8 +146,8 @@ pub type SystemText = String;
 #[rustfmt::skip]
 pub type UserSegments = std::vec::Vec<String>;
 #[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+#[derive(rkyv::Archive, rkyv::Serialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable))]
 pub struct VerifiedContext {
     pub(super) address: signal_flow::Address,
     pub(super) system_text: SystemText,

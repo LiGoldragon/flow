@@ -52,25 +52,25 @@ Library.
   Addressed.[ address.[ Address ] ]
   Routed.[ route.[ HerdrRoute ] ]
   Subscribing.[ subscription.[ PaneSubscription ] ]
-  ; The pane awaits. Every capability takes the shared handle by `.`: the
-  ; state is changed under its lock, and a `!` capability would demand
-  ; `&mut self` of a handle that threads share. A capability yields a
-  ; value, so a change answers whether it changed anything.
+  ; The pane awaits. A `!` capability changes the state under its lock and
+  ; is generated `&self`, because the handle is shared by threads. A
+  ; capability yields a value, so a change answers whether it changed
+  ; anything.
   HoldsAwaitedPanes.[ create:[ Self ]
                       ; The metaflow waits on the route's pane; announced.
-                      await_pane.{ [ Addressed Routed ] [ Boolean ] }
-                      forget.{ [ Addressed ] [ Boolean ] }
+                      await_pane!{ [ Addressed Routed ] [ Boolean ] }
+                      forget!{ [ Addressed ] [ Boolean ] }
                       ; Takes every metaflow waiting on the event's pane.
-                      take.{ [ PaneEventing ] [ Vector<Address> ] }
+                      take!{ [ PaneEventing ] [ Vector<Address> ] }
                       ; Releases every wait on a pane that is gone.
-                      release.{ [ PaneEventing ] [ Boolean ] }
+                      release!{ [ PaneEventing ] [ Boolean ] }
                       is_awaited.{ [ PaneEventing ] [ Boolean ] }
                       awaited.[ Vector<AwaitedPane> ]
                       ; The awaited panes no subscription is open on.
                       unsubscribed_panes.[ Vector<AgentPaneEvent> ]
-                      subscribed.{ [ Subscribing ] [ Boolean ] }
-                      unsubscribed.{ [ PaneEventing ] [ Boolean ] }
+                      subscribed!{ [ Subscribing ] [ Boolean ] }
+                      unsubscribed!{ [ PaneEventing ] [ Boolean ] }
                       ; Shuts every open subscription down and announces it.
-                      close_all.[ Boolean ]
+                      close_all![ Boolean ]
                       changes.[ LaunchChanges ] ] ]
 [ AwaitedPanes.[ HoldsAwaitedPanes ] ] }

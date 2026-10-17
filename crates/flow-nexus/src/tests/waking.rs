@@ -1595,7 +1595,7 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
 fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
     use crate::launching::LaunchesFlows;
     use crate::store::address_hold::HoldsLaunchAddress;
-    use signal_flow::{Response, StartRejection};
+    use signal_flow::Response;
 
     let fixture = NexusFixture::new();
     // An Address that was Asleep: refused, it is Asleep again.

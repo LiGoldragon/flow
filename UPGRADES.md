@@ -1,3 +1,23 @@
+# Flow 0.35.13
+
+No wire change and no store change. Version 0.35.12 is the separate
+exact-model branch.
+
+- **A Claude launch receipt rebuilds the native paste element.** Claude Code
+  2.1.294 records a pasted part as `"\n\n<pasted_content id=\"ID\">\n"`, the
+  part under its paste escape, a newline only when the escaped part does
+  not already end in one, then `"</pasted_content id=\"ID\">\n"`; ID is four
+  lowercase hexadecimal digits. The escape writes `<\` for each opening
+  character that begins a `pasted_content` tag as Claude Code reads one,
+  lookalike characters included. A recorded user turn matches the part
+  whose hash is next when it is exactly the part's bytes, or exactly the
+  element rebuilt from that part under the turn's ID. A part ending in a
+  newline, which the 0.35.5 rule refused (`PartDiffers`), now matches; any
+  other ID, newline count or escaping does not. The part is sought among the
+  texts the turn can have been built from; one whose tag opened with a
+  lookalike of `<`, or a turn with more than eight escaped tags, is not
+  matched.
+
 # Flow 0.35.11
 
 No wire change. The store adds one table, `flow_nexus_launch_cleanups`; a

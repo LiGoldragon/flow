@@ -6205,6 +6205,34 @@ mod tests {
             self.directory.path().join("flow.sema")
         }
 
+        /// A configured current-version store, as a deployment holds one.
+        fn configured(&self) {
+            let defaults = super::DefaultConfiguration {
+                home: self.directory.path().join("home"),
+                runtime_directory: self.directory.path().join("runtime"),
+            };
+            let config = ConfigurationOnlyStore::open(&self.path()).expect("fresh Memory opens");
+            let settings = defaults.configuration();
+            config
+                .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+                    meta_signal_flow::ConfigureNexus {
+                        source_root: settings.source_root,
+                        stable_codex: settings.stable_codex,
+                        next_codex: settings.next_codex,
+                        harness_profiles: settings.harness_profile_vector,
+                        meta_aspects: settings.meta_aspects,
+                        message_nexus_path: settings.message_nexus_path,
+                        message_nexus_binary: "/fixture/message-nexus".into(),
+                        lease: 60,
+                    },
+                ))
+                .expect("configuration commits");
+        }
+
+        fn configured_store(&self) -> FlowStore {
+            FlowStore::open_configured(&self.path()).expect("configured store opens")
+        }
+
         /// Replaces the store's leave-out family with its v1 shape, holding
         /// each default given under its Address alone, as 0.35.0 to 0.35.12
         /// kept it.
@@ -9099,7 +9127,7 @@ mod tests {
         use super::ManagesMetaflowState;
         use crate::lean::BelongsToHarness;
         let fixture = StoreFixture::new();
-        drop(fixture.store());
+        fixture.configured();
         let defaults = production_leave_out_defaults();
         fixture.seed_v1_leave_outs(&defaults);
         let expected = defaults
@@ -9120,7 +9148,7 @@ mod tests {
             5
         );
         for reopening in 0..2 {
-            let store = fixture.store();
+            let store = fixture.configured_store();
             let snapshot = store
                 .configuration_snapshot()
                 .expect("snapshot reads")
@@ -9170,7 +9198,7 @@ mod tests {
     #[test]
     fn the_configuration_only_open_upgrades_v1_leave_out_defaults() {
         let fixture = StoreFixture::new();
-        drop(fixture.store());
+        fixture.configured();
         let defaults = production_leave_out_defaults();
         fixture.seed_v1_leave_outs(&defaults);
         let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
@@ -9189,7 +9217,7 @@ mod tests {
         }
         drop(configuration);
         use super::ManagesMetaflowState;
-        let store = fixture.store();
+        let store = fixture.configured_store();
         let (address, leave_outs) = &defaults[1];
         assert_eq!(
             store
@@ -9213,7 +9241,7 @@ mod tests {
             (Vec::new(), super::LeaveOutUpgradeRefusal::NoHarness),
         ] {
             let fixture = StoreFixture::new();
-            drop(fixture.store());
+            fixture.configured();
             let mixed = Address {
                 aspect: Aspect::Psyche,
                 topic: "flow".into(),
@@ -9228,7 +9256,7 @@ mod tests {
                 other => panic!("not a leave-out refusal: {other}"),
             };
             let expected = (FlowStore::address_record_key(&mixed), reason);
-            match <FlowStore as OpensFlowStore>::open(&fixture.path()) {
+            match FlowStore::open_configured(&fixture.path()) {
                 Ok(_) => panic!("the open must refuse"),
                 Err(error) => assert_eq!(refusal(error), expected),
             }

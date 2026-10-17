@@ -357,7 +357,10 @@ pub trait ReadsStartupRecord {
         &mut self,
         input_0: N,
         input_1: O,
-    ) -> std::result::Result<std::option::Option<String>, signal_flow::NativeLaunchFailure>;
+    ) -> std::result::Result<
+        std::option::Option<String>,
+        signal_flow::NativeLaunchFailure,
+    >;
     fn read_part<N: Textual, O: DeliveryIntended>(
         &mut self,
         input_0: N,

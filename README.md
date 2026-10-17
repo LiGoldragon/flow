@@ -169,8 +169,14 @@ family whole, `Nexus`, `Models`, `Thresholds` or `LeaveOuts`, and replaces
 the committed family in one commit, so the effective configuration is always
 the last declaration of each family: an entry the declaration leaves out is
 removed. It answers `Configured.Replaced`, or `Configured.Unchanged` when
-nothing differs; `ConfigureRejected.DuplicateEntry` (one Layer or Address
-named twice) and `ConfigureRejected.CodexModelsOverlap` change nothing. A
+nothing differs; `ConfigureRejected.DuplicateEntry` (one Layer, or one
+Address and harness, named twice), `ConfigureRejected.CodexModelsOverlap`
+and `ConfigureRejected.LeaveOutNotForHarness` change nothing. A `LeaveOuts`
+entry names one metaflow's default leave-outs on one harness,
+`{ { Psyche flow Secondary } Claude [ SkillTool WorkflowTool ] }`, and is
+refused `LeaveOutNotForHarness` when it names a leave-out of the other
+harness. A Start takes its own leave-outs, otherwise the default for its
+Address and the harness its model derives, otherwise none. A
 running Nexus serves replaced Codex endpoints from its next start. No `FLOW_` variable reaches the
 Nexus's configuration. The source root selects the bounded root used for
 exact-byte composition, the Codex native skill catalog working directory, the

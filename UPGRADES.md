@@ -1,3 +1,35 @@
+# Flow 0.35.13
+
+meta-signal-flow 25.0.0 (5bb519c5): a leave-out default names its harness,
+`ConfigureLeaveOut.{ Address HarnessKind LeaveOuts }`, and `Configure`
+refuses `ConfigureRejected.LeaveOutNotForHarness`. The meta contract digest
+changes, so every meta-wire peer repins with it. The leave-out family
+`flow-nexus-meta-leave-out-configuration` moves from v1 to v2.
+
+- **A Start takes the default of its own harness.** A Start naming no
+  leave-outs takes its metaflow's default for the harness its model derives,
+  and none when that harness has no default for its Address. A Codex Start
+  of a metaflow with only a Claude default is no longer refused
+  `LeaveOutRefused.NotForHarness`. A Start naming its own leave-outs is
+  checked against its harness as before, at composition, before any launch
+  is reserved or any pane opened.
+- **A declared default belongs to its harness.** `Configure.LeaveOuts`
+  holds one entry per Address and harness. An entry naming a leave-out of
+  another harness than its own is refused `LeaveOutNotForHarness` and the
+  whole declaration writes nothing. `recommended_plugins` stays outside the
+  leave-out vocabulary.
+- **Each stored default is carried under its harness.** Opening a store,
+  the full Nexus or the configuration-only listener, carries each v1
+  default, kept under its Address alone, whole under the harness every one
+  of its leave-outs belongs to, and re-keys it by its Address and that
+  harness. A default whose leave-outs belong to both harnesses, or that
+  names none, refuses the open with
+  `the leave-out default of <Aspect:len:topic:Layer> cannot be carried under
+  one harness`, and the store keeps its v1 family unchanged.
+
+A declarer of `Configure.LeaveOuts` names each entry's harness:
+`Configure.LeaveOuts.[ { { Psyche flow Secondary } Claude [ SkillTool WorkflowTool ] } { { Mind core Primary } Codex [ CodexAgentsMd ] } ]`.
+
 # Flow 0.35.11
 
 No wire change. The store adds one table, `flow_nexus_launch_cleanups`; a

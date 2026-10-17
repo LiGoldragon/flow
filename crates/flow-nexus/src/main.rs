@@ -261,6 +261,9 @@ trait RunsConfigurationStartup {
                 Err(StoreError::CodexModelsOverlap) => {
                     MetaResponse::ConfigureRejected(ConfigureRejection::CodexModelsOverlap)
                 }
+                Err(StoreError::LeaveOutNotForHarness) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::LeaveOutNotForHarness)
+                }
                 Err(error) => {
                     MetaResponse::Refused(meta_signal_flow::Refusal::Store(error.to_string()))
                 }

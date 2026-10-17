@@ -1,5 +1,6 @@
 //! Ordinary metaflow mutations. The connection supplies the witnessed peer;
 //! the serial dispatcher holds exclusion across authorization and mutation.
+use super::refresh::MarksFreshWakes;
 use super::*;
 use signal_flow::{
     Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Recipient, Refusal, StartRejection,
@@ -306,6 +307,7 @@ impl SleepsMetaflows for FlowStore {
             return Ok(false);
         };
         let commit = taken.written(self, self.engine.begin_atomic_commit());
+        let commit = self.fresh_wake_cleared(address, commit)?;
         self.engine.commit_atomic(commit)?;
         Ok(true)
     }

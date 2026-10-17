@@ -75,6 +75,7 @@ pub enum Record_Data {
     Context(Record_Data_Context_Data),
     Asleep(Record_Data_Asleep_Data),
     Awoken(Record_Data_Awoken_Data),
+    Refresh(signal_flow::Address),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

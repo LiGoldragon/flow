@@ -52,6 +52,13 @@
 ; removes it once typed, answering what it typed. Wake runs off the
 ; dispatch gate and takes it per step.
 ;
+; Record.Refresh marks one Asleep metaflow so its next wake starts a fresh
+; launch composed from the modules and leave-outs its last launch named,
+; whatever its context size; the mark is a row of its own, keyed by the
+; Address, and Record.Awoken retracts it in the write that records the wake.
+; A mark already held is left as it is. It fails NotAsleep for a metaflow
+; that is not Asleep.
+;
 ; LaunchOutcome and Replacement are the store's own types, imported from
 ; the Nexus crate until the Memory root is compiled.
 
@@ -75,7 +82,8 @@ Operation
            Harness.{ FlowId Event }
            Context.{ FlowId Tokens.Integer }
            Asleep.{ Address FlowId }
-           Awoken.{ Address FlowId Delivered.Integer } ]
+           Awoken.{ Address FlowId Delivered.Integer }
+           Refresh.Address ]
   Register.{ FlowNode Caller }
   Confirm.FlowId
   Open.ComposedLaunch

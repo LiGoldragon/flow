@@ -576,7 +576,15 @@ impl SleepsAndWakesSeats for RunningNexus {
         let last = metaflow.past.last();
         let node = last.and_then(|flow_id| self.store.flow_node(flow_id).ok().flatten());
         let profile = last.and_then(|flow_id| self.last_launch_profile(flow_id));
+        // A Refresh asked for this metaflow's next wake to be fresh.
+        let refreshed = {
+            use crate::store::refresh::MarksFreshWakes;
+            self.store
+                .fresh_wake_marked(&metaflow.address)
+                .unwrap_or(false)
+        };
         if let (Some(node), Some(profile)) = (&node, &profile)
+            && !refreshed
             && Self::can_resume(node)
             && node.harness_kind == HarnessKind::Claude
             && Self::resumes(
@@ -631,6 +639,45 @@ impl SleepsAndWakesSeats for RunningNexus {
         };
         for address in due {
             self.wake_due(address);
+        }
+    }
+}
+
+/// A privileged request that an Asleep metaflow's next wake be fresh.
+pub trait RefreshesMetaflows {
+    /// Marks the metaflow at `address` for a fresh wake: Refreshed when it
+    /// is Asleep and its last flow has a recorded launch profile to compose
+    /// from (a repeat while marked answers the same), else the typed
+    /// rejection. Its queue, past and models are not touched.
+    fn refresh(&self, address: Address) -> meta_signal_flow::Response;
+}
+
+impl RefreshesMetaflows for RunningNexus {
+    fn refresh(&self, address: Address) -> meta_signal_flow::Response {
+        use meta_signal_flow::{RefreshRejection, Response};
+        let rejected = |rejection| Response::RefreshRejected(rejection);
+        self.rest_ended_awake(&address);
+        let metaflow = match self.store.metaflow(&address) {
+            Ok(Some(metaflow)) => metaflow,
+            Ok(None) => return rejected(RefreshRejection::Unknown),
+            Err(_) => return rejected(RefreshRejection::StoreRefused),
+        };
+        match metaflow.state {
+            flow_ethos::State::Awake(_) => return rejected(RefreshRejection::Awake),
+            flow_ethos::State::Ended => return rejected(RefreshRejection::Ended),
+            flow_ethos::State::Asleep => {}
+        }
+        let profiled = metaflow
+            .past
+            .last()
+            .is_some_and(|flow_id| self.last_launch_profile(flow_id).is_some());
+        if !profiled {
+            return rejected(RefreshRejection::NoLaunchProfile);
+        }
+        match self.perform(Operation::Record(Record_Data::Refresh(address.clone()))) {
+            Outcome::Recorded => Response::Refreshed(address),
+            Outcome::Failed(Failed_Data::NotAsleep) => rejected(RefreshRejection::Awake),
+            _ => rejected(RefreshRejection::StoreRefused),
         }
     }
 }

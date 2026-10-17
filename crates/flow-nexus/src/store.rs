@@ -11,6 +11,7 @@ mod created_pane;
 pub mod delivery;
 pub mod events;
 pub(crate) mod metaflow;
+pub(crate) mod refresh;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -1592,6 +1593,7 @@ pub struct FlowStore {
     event_tables: events::EventTables,
     context_sizes: TableReference<context::FlowContextSize>,
     address_holds: TableReference<address_hold::AddressHold>,
+    refreshes: TableReference<refresh::MetaflowRefresh>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
@@ -2191,6 +2193,8 @@ impl OpensFlowStore for FlowStore {
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
         let address_holds_descriptor =
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor();
+        let refreshes_descriptor =
+            <refresh::MetaflowRefresh as refresh::DescribesRefreshTable>::descriptor();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -2216,7 +2220,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_leave_outs_descriptor)
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
-                .with_family(&address_holds_descriptor),
+                .with_family(&address_holds_descriptor)
+                .with_family(&refreshes_descriptor),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -2240,6 +2245,7 @@ impl OpensFlowStore for FlowStore {
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let context_sizes = engine.register_table(context_sizes_descriptor)?;
         let address_holds = engine.register_table(address_holds_descriptor)?;
+        let refreshes = engine.register_table(refreshes_descriptor)?;
         let store = Self {
             engine,
             flows,
@@ -2261,6 +2267,7 @@ impl OpensFlowStore for FlowStore {
             event_tables,
             context_sizes,
             address_holds,
+            refreshes,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -2373,6 +2380,9 @@ impl OpensFlowStore for FlowStore {
         let address_holds = engine.register_table(
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor(),
         )?;
+        let refreshes = engine.register_table(
+            <refresh::MetaflowRefresh as refresh::DescribesRefreshTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             flows,
@@ -2394,6 +2404,7 @@ impl OpensFlowStore for FlowStore {
             event_tables,
             context_sizes,
             address_holds,
+            refreshes,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -4906,6 +4917,10 @@ pub(crate) trait ReadsFlowMemory {
                 address_hold::ADDRESS_HOLD_FAMILY,
                 address_hold::ADDRESS_HOLD_SCHEMA,
             ),
+            "flow_nexus_metaflow_refreshes" => (
+                refresh::METAFLOW_REFRESH_FAMILY,
+                refresh::METAFLOW_REFRESH_SCHEMA,
+            ),
             _ => return None,
         };
         Some((family, SchemaHash::for_label(version)))
@@ -5019,11 +5034,13 @@ pub(crate) trait ReadsFlowMemory {
         // before either opens, and its first full open adds the table, as
         // the first full open of a configuration-only store adds the running
         // tables.
-        // A store keeps its metaflows' default leave-outs from 0.35.0 on.
+        // A store keeps its metaflows' default leave-outs from 0.35.0 on,
+        // and its fresh-wake marks from 0.35.2 on.
         const ADDED_LATER: &[&str] = &[
             "flow_nexus_flow_context_sizes",
             "flow_nexus_address_holds",
             "flow_nexus_meta_leave_out_configuration",
+            "flow_nexus_metaflow_refreshes",
         ];
         // A store before 0.35.0 may still hold a table 0.35.0 drops.
         let retired = |name: &String| RETIRED_TABLES.iter().any(|(table, _, _)| table == name);
@@ -7294,6 +7311,14 @@ mod tests {
                     engine
                         .match_records(QueryPlan::all(self.address_holds))
                         .expect("address holds read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_metaflow_refreshes",
+                    engine
+                        .match_records(QueryPlan::all(self.refreshes))
+                        .expect("fresh-wake marks read")
                         .records()
                         .len(),
                 ),

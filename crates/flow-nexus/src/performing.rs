@@ -521,6 +521,14 @@ impl PerformsInParts for RunningNexus {
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
                 }
             }
+            Record_Data::Refresh(address) => {
+                use crate::store::refresh::MarksFreshWakes;
+                match self.store.mark_fresh_wake(&address) {
+                    Ok(true) => Outcome::Recorded,
+                    Ok(false) => Outcome::Failed(Failed_Data::NotAsleep),
+                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
+                }
+            }
             Record_Data::Context(Record_Data_Context_Data { flow_id, tokens }) => {
                 use crate::store::context::RecordsContextSize;
                 self.store.record_context_size(&flow_id, tokens).recorded()

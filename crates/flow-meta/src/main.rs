@@ -262,6 +262,22 @@ mod tests {
     }
 
     #[test]
+    fn refresh_is_one_inline_datom_naming_a_metaflow() {
+        let client = FlowMetaClient {
+            socket: "unused".into(),
+        };
+        let datom = "Refresh.{ Mind flow Secondary }";
+        let query = client
+            .parse_command([datom.to_owned()].into_iter())
+            .expect("Refresh datom parses");
+        let Query::Refresh(address) = &query else {
+            panic!("Refresh datom must stay a Refresh query")
+        };
+        assert_eq!(address.topic, "flow");
+        assert_eq!(query.datomize(vec![]).protosize().compact(), datom);
+    }
+
+    #[test]
     fn deliver_is_one_inline_datom_carrying_a_typed_message() {
         let client = FlowMetaClient {
             socket: "unused".into(),

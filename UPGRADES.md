@@ -1,3 +1,25 @@
+# Flow 0.35.2
+
+Wire change on the meta socket only: meta-signal-flow 22.0.0 (4ccf6f0d)
+adds `Refresh.Address`, answered `Refreshed.Address` or
+`RefreshRejected.[ Unknown Awake Ended NoLaunchProfile StoreRefused ]`. The
+ordinary socket is unchanged (signal-flow 17.0.0, b619ea08). The new
+variants change meta-signal-flow's contract digest, so every meta-wire peer
+must repin it (Message pins e9ec03d) before it can greet this Flow.
+
+- **A Refresh makes one metaflow's next wake fresh.** `flow-meta
+  'Refresh.{ Mind flow Secondary }'` is accepted only for an Asleep
+  metaflow whose last flow has a recorded launch profile; the wake then
+  composes a new native session from that launch's module identities and
+  leave-outs instead of resuming, whatever the context size. Models,
+  thresholds, the queue and the past are untouched. A repeat while marked
+  answers the same `Refreshed`. The queued requests are delivered once, by
+  the fresh wake.
+- **The mark is a table of its own.** `flow_nexus_metaflow_refreshes`, one
+  row per Address, written by `Record.Refresh`; `Record.Awoken` retracts it
+  in the write that records the wake, so it governs one wake. A store from
+  before opens with the table added and holds no marks.
+
 # Flow 0.35.1
 
 No wire change. Store change: the launch-attempt family upgrades from v1 to

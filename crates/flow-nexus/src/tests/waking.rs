@@ -1865,3 +1865,158 @@ fn a_nexus_start_puts_every_metaflow_left_awake_as_an_ended_flow_to_sleep() {
         State::Awake("flow-0000000000000001".into())
     );
 }
+
+fn fresh_after_refresh() -> WakePlan {
+    WakePlan::Fresh(FreshContext {
+        herdr_session_name: "fixture-session".into(),
+        system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+        user_modules: vec!["operation-main-flow".into()],
+        leave_outs_option: None,
+    })
+}
+
+fn refresh(fixture: &NexusFixture, at: &Address) -> meta_signal_flow::Response {
+    use crate::Dispatches;
+    fixture
+        .nexus
+        .dispatch_meta(meta_signal_flow::Query::Refresh(at.clone()))
+}
+
+/// A Refresh makes the next wake fresh although the session is small enough
+/// to resume, answers a repeat the same, keeps the queue and every
+/// threshold, and is spent by the wake that follows.
+#[test]
+fn a_refresh_makes_exactly_the_next_wake_fresh_and_keeps_the_queue() {
+    use crate::store::refresh::MarksFreshWakes;
+    let fixture = NexusFixture::new();
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("abc123".into()),
+        vec![],
+        vec![],
+    ));
+    resumable(&fixture);
+    refresh_at(&fixture, Layer::Secondary, 200_000);
+    fixture
+        .nexus
+        .store
+        .record_context_size("abc123", 1_000)
+        .unwrap();
+    let at = address(Layer::Secondary);
+    let mut asleep = stored(&fixture, Layer::Secondary);
+    asleep.queue = vec![Request::Order("A".into()), Request::Order("B".into())];
+    fixture.nexus.store.seed_metaflow(asleep.clone());
+    assert!(
+        matches!(fixture.nexus.wake_plan(&asleep), WakePlan::Resume { .. }),
+        "without the mark the session resumes"
+    );
+
+    let accepted = meta_signal_flow::Response::Refreshed(at.clone());
+    assert_eq!(refresh(&fixture, &at), accepted);
+    assert_eq!(refresh(&fixture, &at), accepted, "idempotent while marked");
+    assert!(fixture.nexus.store.fresh_wake_marked(&at).unwrap());
+    assert_eq!(fixture.nexus.wake_plan(&asleep), fresh_after_refresh());
+    assert_eq!(
+        stored(&fixture, Layer::Secondary),
+        asleep,
+        "the queue and the past are untouched"
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .configured_threshold(&Layer::Secondary)
+            .unwrap()
+            .map(|threshold| threshold.refresh),
+        Some(200_000),
+        "no threshold changed"
+    );
+    let other = address(Layer::Tertiary);
+    assert!(
+        !fixture.nexus.store.fresh_wake_marked(&other).unwrap(),
+        "the mark is of one metaflow"
+    );
+
+    // The wake hands over the whole queue and records Awoken: the queue
+    // leaves once and the mark with it.
+    assert!(
+        fixture
+            .nexus
+            .store
+            .awaken_metaflow(&at, "fresh01", 2)
+            .unwrap()
+    );
+    assert!(!fixture.nexus.store.fresh_wake_marked(&at).unwrap());
+    let woken = stored(&fixture, Layer::Secondary);
+    assert!(woken.queue.is_empty());
+    assert_eq!(woken.state, State::Awake("fresh01".into()));
+
+    // A later sleep of the resumable flow wakes by resume again.
+    let mut again = metaflow(Layer::Secondary, State::Asleep, vec!["abc123"], vec![]);
+    again.queue = vec![Request::Order("C".into())];
+    assert!(matches!(
+        fixture.nexus.wake_plan(&again),
+        WakePlan::Resume { .. }
+    ));
+}
+
+#[test]
+fn a_refresh_is_refused_typed_unless_the_metaflow_is_asleep_with_a_launch_of_record() {
+    use crate::store::refresh::MarksFreshWakes;
+    use meta_signal_flow::{RefreshRejection, Response};
+    let fixture = NexusFixture::new();
+    let unknown = address(Layer::Tertiary);
+    assert_eq!(
+        refresh(&fixture, &unknown),
+        Response::RefreshRejected(RefreshRejection::Unknown)
+    );
+
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Tertiary,
+        State::Awake("aaaaaa".into()),
+        vec![],
+        vec![],
+    ));
+    assert_eq!(
+        refresh(&fixture, &unknown),
+        Response::RefreshRejected(RefreshRejection::Awake)
+    );
+
+    let ended = address(Layer::Quaternary);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Layer::Quaternary, State::Ended, vec![], vec![]));
+    assert_eq!(
+        refresh(&fixture, &ended),
+        Response::RefreshRejected(RefreshRejection::Ended)
+    );
+
+    // Asleep, but no launch of record names its last flow, or it has no
+    // last flow: a fresh wake has nothing to compose from.
+    let unlaunched = address(Layer::Secondary);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["908786"],
+        vec![],
+    ));
+    assert_eq!(
+        refresh(&fixture, &unlaunched),
+        Response::RefreshRejected(RefreshRejection::NoLaunchProfile)
+    );
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Layer::Secondary, State::Asleep, vec![], vec![]));
+    assert_eq!(
+        refresh(&fixture, &unlaunched),
+        Response::RefreshRejected(RefreshRejection::NoLaunchProfile)
+    );
+    for at in [&unknown, &ended, &unlaunched] {
+        assert!(
+            !fixture.nexus.store.fresh_wake_marked(at).unwrap(),
+            "a refused Refresh marks nothing"
+        );
+    }
+}

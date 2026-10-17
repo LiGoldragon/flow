@@ -15,7 +15,7 @@ const DELIVERY_ATTEMPT_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_
 const COUNTER_KEY: &str = "counter";
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(super) struct DeliveryCounter {
+pub(crate) struct DeliveryCounter {
     next_request: u64,
     next_attempt: u64,
 }
@@ -33,7 +33,7 @@ enum RequestState {
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(super) struct StoredDeliveryRequest {
+pub(crate) struct StoredDeliveryRequest {
     request_id: String,
     address: Address,
     queued: QueuedRequest,
@@ -99,7 +99,7 @@ pub(crate) struct QueueDeliveryTables {
     attempts: TableReference<QueueDeliveryAttempt>,
 }
 
-pub(super) type QueueDeliveryDescriptors = (
+pub(crate) type QueueDeliveryDescriptors = (
     TableDescriptor<DeliveryCounter>,
     TableDescriptor<StoredDeliveryRequest>,
     TableDescriptor<QueueDeliveryAttempt>,

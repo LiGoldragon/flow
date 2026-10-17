@@ -1440,7 +1440,7 @@ impl SeatsAwakeCodexSeat for NexusFixture {
                     model_name: "gpt-sol".into(),
                 },
             ),
-            Ok(crate::store::FlowRegistration::Registered)
+            Ok(crate::store::FlowRegistration::Registered(_))
         ));
         self.nexus.store.seed_metaflow(Metaflow {
             address: seat_at(),

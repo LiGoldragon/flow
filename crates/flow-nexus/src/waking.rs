@@ -1141,10 +1141,7 @@ impl WakesInParts for RunningNexus {
             if !checked.insert(herdr_session_name) {
                 continue;
             }
-            match self
-                .herdr
-                .holds_native_session(herdr_session_name, &node.session_id)
-            {
+            match self.herdr.holds_native_session(herdr_session_name, node) {
                 Some(false) => {}
                 Some(true) => {
                     eprintln!(

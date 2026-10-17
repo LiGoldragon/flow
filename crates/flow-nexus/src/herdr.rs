@@ -378,13 +378,12 @@ pub trait ReadsHerdrPanes {
     fn snapshot(&self, route: &HerdrRoute) -> Option<serde_json::Value>;
     /// The snapshot of one Herdr session.
     fn session_snapshot(&self, herdr_session_name: &str) -> Option<serde_json::Value>;
-    /// Whether a pane of this Herdr session runs this native session now;
-    /// None when Herdr cannot be read.
-    fn holds_native_session(
-        &self,
-        herdr_session_name: &str,
-        native_session_id: &str,
-    ) -> Option<bool>;
+    /// Whether a pane of this Herdr session runs the flow's native session
+    /// now; None when Herdr cannot be read. A pane whose agent reports the
+    /// session runs it. A remote-resumed Codex TUI reports none: the pane
+    /// Flow recorded for the flow, Herdr recognizing a Codex agent in it,
+    /// runs the flow's opened thread unless it reports another session.
+    fn holds_native_session(&self, herdr_session_name: &str, node: &FlowNode) -> Option<bool>;
     /// Whether the pane Flow recorded for this flow runs the flow's own
     /// native session now, under its FlowId claim: the binding verified.
     fn runs_own_session(&self, node: &FlowNode) -> bool;
@@ -468,20 +467,32 @@ impl ReadsHerdrPanes for HerdrCli {
         self.session_snapshot(&route.herdr_session_name)
     }
 
-    fn holds_native_session(
-        &self,
-        herdr_session_name: &str,
-        native_session_id: &str,
-    ) -> Option<bool> {
+    fn holds_native_session(&self, herdr_session_name: &str, node: &FlowNode) -> Option<bool> {
         let snapshot = self.session_snapshot(herdr_session_name)?;
         let agents = snapshot
             .pointer("/result/snapshot/agents")
             .and_then(serde_json::Value::as_array)?;
+        // The pane Flow recorded for a Codex flow that opened its thread, in
+        // this Herdr session.
+        let recorded = match (&node.harness_kind, &node.herdr_route_selection) {
+            (HarnessKind::Codex, HerdrRouteSelection::Available(route))
+                if route.herdr_session_name == herdr_session_name
+                    && !node.session_id.is_empty() =>
+            {
+                Some(route)
+            }
+            _ => None,
+        };
         Some(agents.iter().any(|agent| {
-            agent
+            match agent
                 .pointer("/agent_session/value")
                 .and_then(serde_json::Value::as_str)
-                == Some(native_session_id)
+            {
+                Some(session) => session == node.session_id,
+                None => {
+                    recorded.is_some_and(|route| agent.matches_binding(route, &node.harness_kind))
+                }
+            }
         }))
     }
 

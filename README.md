@@ -240,14 +240,24 @@ session's latest transcript title record, once one is written, must be the
 title. A Claude start without a reserved FlowId carries no name and its title
 is refused. Codex is named with `thread/name/set` and
 read back with `thread/read`. The Herdr pane label is set to the same title
-and read back. A refused title refuses the Start with `NativeLaunchRefused`,
-and the Nexus log names the typed reason
-(`flow-nexus: herdr stage=title category=<reason>`). A Codex TUI is started
+and read back. A refused title refuses the Start with
+`NativeLaunchRefused.{ Naming <category> }`, and the Nexus log names the same
+reason (`flow-nexus: herdr stage=title category=<category>`). Every native
+step that refuses a Start carries its stage and fixed category the same way
+(`Open`, `CodexThread`, `Spawn`, `Bind`, `Naming`, `Receipt`, `Confirm`), and
+a refused registration carries its stage
+(`RegistrationRefused.NativeTarget.IdentityInexact`); LaunchStatus reports
+the same answer. A Codex TUI is started
 as `resume <thread>` on the thread Flow opened through the app-server and gave
 its first turn. Herdr reports no agent session for such a TUI, and the
 app-server names no client attached to a thread, so the pane binds to that
 thread once Herdr recognizes the pane's Codex agent, exact and interactively
-ready; a session Herdr does report must be the thread. The launch receipt
+ready; a session Herdr does report must be the thread. Spawn records that
+thread for the launch request before the TUI attaches, so a launch recovered
+after its start binds to it the same way. A wake is refused while a pane runs
+the sleeping flow's session: a pane whose agent reports it, or, for Codex,
+the pane Flow recorded for the flow with Herdr recognizing a Codex agent in
+it and no other session reported. The launch receipt
 then reads that thread's first turn and answer. A launch refused once its
 pane exists closes that pane and records the flow it registered Stopped
 before it gives back its claim. Before Claude starts, the pane's shell drops inherited

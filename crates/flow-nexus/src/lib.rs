@@ -1214,6 +1214,22 @@ mod tests {
         fn typed(&self) -> Option<String>;
     }
 
+    /// The answer to a launch whose pane Herdr did not open.
+    fn pane_unopened() -> StartRejection {
+        StartRejection::NativeLaunchRefused(signal_flow::NativeLaunchRefusal {
+            native_launch_stage: signal_flow::NativeLaunchStage::Open,
+            native_launch_failure: signal_flow::NativeLaunchFailure::AdapterRefused,
+        })
+    }
+
+    /// The answer to a launch whose claimed flow was not ready for its title.
+    fn title_not_ready() -> StartRejection {
+        StartRejection::NativeLaunchRefused(signal_flow::NativeLaunchRefusal {
+            native_launch_stage: signal_flow::NativeLaunchStage::Naming,
+            native_launch_failure: signal_flow::NativeLaunchFailure::NotReady,
+        })
+    }
+
     fn current_process_identity() -> meta_signal_flow::ProcessIdentity {
         let process_id = i64::from(std::process::id());
         let metadata = fs::metadata(format!("/proc/{process_id}")).expect("current process");
@@ -1745,9 +1761,9 @@ mod tests {
         assert_eq!(
             fixture.nexus.settle(
                 "refused-title-request",
-                Response::StartRejected(StartRejection::NativeLaunchRefused)
+                Response::StartRejected(title_not_ready())
             ),
-            Response::StartRejected(StartRejection::NativeLaunchRefused)
+            Response::StartRejected(title_not_ready())
         );
     }
 
@@ -3757,6 +3773,7 @@ mod tests {
         let address = seat.profile.address.clone();
         seat.stage_to_ambiguity(&fixture.nexus);
         let rows = [
+            serde_json::json!({"type":"session_meta","payload":{"id":STAGED_SESSION}}),
             serde_json::json!({"type":"turn_context","payload":{"model":"other-model","effort":"medium","turn_id":"turn-staged"}}),
             serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":seat.composed.first_prompt_payload.first_prompt_body}]}}}),
         ]
@@ -3770,15 +3787,17 @@ mod tests {
         )
         .expect("transcript written");
 
+        let model_differs = StartRejection::NativeLaunchRefused(signal_flow::NativeLaunchRefusal {
+            native_launch_stage: signal_flow::NativeLaunchStage::Receipt,
+            native_launch_failure: signal_flow::NativeLaunchFailure::ModelOrEffortDiffers,
+        });
         assert_eq!(
             fixture.nexus.dispatch(Query::Start(seat.request())),
-            Response::StartRejected(StartRejection::NativeLaunchRefused)
+            Response::StartRejected(model_differs.clone())
         );
         assert_eq!(
             fixture.nexus.store.launch_outcome("seat-request").unwrap(),
-            Some(LaunchOutcome::StartRejected(
-                StartRejection::NativeLaunchRefused
-            ))
+            Some(LaunchOutcome::StartRejected(model_differs))
         );
         assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Stopped);
         assert!(
@@ -3933,16 +3952,13 @@ mod tests {
         let mut rejected = fixture.staged_launch("rejected-request", None);
         rejected.profile.model_name = "claude-fixture".into();
         let rejection = fixture.nexus.dispatch(Query::Start(rejected.request()));
-        assert_eq!(
-            rejection,
-            Response::StartRejected(StartRejection::NativeLaunchRefused)
-        );
+        assert_eq!(rejection, Response::StartRejected(pane_unopened()));
         assert_inspection_outcome(
             fixture
                 .nexus
                 .dispatch(Query::LaunchStatus("rejected-request".into())),
             "rejected-request",
-            LaunchStatusOutcome::StartRejected(StartRejection::NativeLaunchRefused),
+            LaunchStatusOutcome::StartRejected(pane_unopened()),
             None,
         );
         assert_eq!(
@@ -3961,9 +3977,9 @@ mod tests {
         let rejection = fixture.nexus.dispatch(Query::Replace(refused.request()));
         assert_eq!(
             rejection,
-            Response::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
-                StartRejection::NativeLaunchRefused
-            ))
+            Response::ReplaceRejected(
+                signal_flow::ReplaceRejection::LaunchRefused(pane_unopened())
+            )
         );
         assert_inspection_outcome(
             fixture
@@ -3971,7 +3987,7 @@ mod tests {
                 .dispatch(Query::LaunchStatus("refused-request".into())),
             "refused-request",
             LaunchStatusOutcome::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
-                StartRejection::NativeLaunchRefused,
+                pane_unopened(),
             )),
             None,
         );

@@ -357,12 +357,12 @@ pub trait ReadsStartupRecord {
         &mut self,
         input_0: N,
         input_1: O,
-    ) -> std::result::Result<std::option::Option<String>, String>;
+    ) -> std::result::Result<std::option::Option<String>, signal_flow::NativeLaunchFailure>;
     fn read_part<N: Textual, O: DeliveryIntended>(
         &mut self,
         input_0: N,
         input_1: O,
-    ) -> std::result::Result<i64, String>;
+    ) -> std::result::Result<i64, signal_flow::NativeLaunchFailure>;
 }
 #[rustfmt::skip]
 pub trait ReadsTypedUserText {

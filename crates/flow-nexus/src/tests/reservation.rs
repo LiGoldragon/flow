@@ -78,7 +78,12 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
     launch.profile.model_name = "claude-fixture".into();
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::NativeLaunchRefused)
+        Response::StartRejected(StartRejection::NativeLaunchRefused(
+            signal_flow::NativeLaunchRefusal {
+                native_launch_stage: signal_flow::NativeLaunchStage::Open,
+                native_launch_failure: signal_flow::NativeLaunchFailure::AdapterRefused,
+            }
+        ))
     );
 
     let calls = fixture.flow_id_calls();
@@ -115,7 +120,12 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
     // The settled launch is not reserved again.
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::NativeLaunchRefused)
+        Response::StartRejected(StartRejection::NativeLaunchRefused(
+            signal_flow::NativeLaunchRefusal {
+                native_launch_stage: signal_flow::NativeLaunchStage::Open,
+                native_launch_failure: signal_flow::NativeLaunchFailure::AdapterRefused,
+            }
+        ))
     );
     assert_eq!(fixture.flow_id_calls().len(), 1);
 }
@@ -144,7 +154,12 @@ fn a_codex_launch_reserves_no_flow_id() {
     let launch = fixture.staged_launch("codex-request", None);
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::NativeLaunchRefused)
+        Response::StartRejected(StartRejection::NativeLaunchRefused(
+            signal_flow::NativeLaunchRefusal {
+                native_launch_stage: signal_flow::NativeLaunchStage::Open,
+                native_launch_failure: signal_flow::NativeLaunchFailure::AdapterRefused,
+            }
+        ))
     );
     assert!(fixture.flow_id_calls().is_empty());
 }
@@ -207,4 +222,148 @@ esac
         .expect("the start reached Herdr");
     assert!(start.contains(" --system-prompt-file /proc/"));
     assert!(!start.contains("--system-prompt "));
+}
+
+impl NexusFixture {
+    /// A Codex launch left at its native intent with its pane created and
+    /// its harness start requested, as a Nexus that died after Spawn left
+    /// it; Herdr shows the pane's Codex agent ready and reports no agent
+    /// session, as for a remote-resumed TUI; the `flow-id` stand-in claims
+    /// the fixture's Codex flow for exactly the staged thread.
+    fn codex_launch_left_after_spawn(&self, launch_request_id: &str) -> super::StagedLaunch {
+        use crate::store::RecordsCreatedLaunchPane;
+        let launch = self.staged_launch(launch_request_id, None);
+        launch.reserve(&self.nexus);
+        launch.record_native_intent(&self.nexus);
+        assert!(
+            self.nexus
+                .store
+                .record_created_launch_pane(launch.pane.clone())
+                .unwrap()
+        );
+        assert!(
+            self.nexus
+                .store
+                .request_harness_start(launch_request_id)
+                .unwrap()
+                .is_some()
+        );
+        let agent = serde_json::json!({"result":{"agent":{
+            "name":"fixture-agent",
+            "agent":"codex",
+            "workspace_id":"fixture-workspace",
+            "pane_id":"w1:p1",
+            "terminal_id":"fixture-terminal",
+            "interactive_ready":true
+        }}});
+        FixtureExecutable {
+            path: self.snapshot_program.clone(),
+        }
+        .install(&format!(
+            "#!/bin/sh\ncase \"$3 $4\" in\n  \"agent wait\") ;;\n  \"agent get\") printf '%s\\n' '{agent}' ;;\n  *) exit 64 ;;\nesac\n"
+        ));
+        let helper_root = self.directory.path().join("native-transcripts");
+        fs::create_dir_all(&helper_root).expect("flow-id root");
+        FixtureExecutable {
+            path: helper_root.join("flow-id"),
+        }
+        .install(&format!(
+            "#!/bin/sh\n[ \"$1\" = codex ] && [ \"$2\" = --flows-root ] && [ \"$CODEX_SESSION_ID\" = '{}' ] || exit 2\nprintf '908786\\n'\n",
+            super::STAGED_SESSION
+        ));
+        launch
+    }
+}
+
+/// A Codex launch recovered after its harness start binds to the thread its
+/// Spawn recorded: Herdr reports no session for the remote-resumed TUI, and
+/// the recognized pane, the claim and that thread are the binding.
+#[test]
+fn a_codex_launch_recovered_after_its_start_binds_to_the_recorded_thread() {
+    use crate::store::opened_thread::RecordsOpenedThreads;
+    let fixture = NexusFixture::new();
+    let launch = fixture.codex_launch_left_after_spawn("recovered-request");
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_opened_thread("recovered-request", super::STAGED_SESSION)
+            .unwrap()
+    );
+    let Response::LaunchPending(attempt) = fixture.nexus.dispatch(Query::Start(launch.request()))
+    else {
+        panic!("the recovered launch is pending with its binding");
+    };
+    assert_eq!(
+        attempt.launch_attempt_phase,
+        signal_flow::LaunchAttemptPhase::NativeBound
+    );
+    let binding = attempt
+        .native_launch_binding_option
+        .expect("the recovered binding is recorded");
+    assert_eq!(binding.native_session_id, super::STAGED_SESSION);
+    assert_eq!(binding.flow_id, "908786");
+}
+
+/// With no thread recorded, the same recovery has only Herdr's report,
+/// which names no session: the Start is refused at Bind, the stage and
+/// category on the wire, and LaunchStatus reports the same.
+#[test]
+fn a_codex_launch_recovered_without_its_thread_is_refused_at_bind_on_the_wire() {
+    let fixture = NexusFixture::new();
+    let launch = fixture.codex_launch_left_after_spawn("unrecorded-request");
+    let expected = StartRejection::NativeLaunchRefused(signal_flow::NativeLaunchRefusal {
+        native_launch_stage: signal_flow::NativeLaunchStage::Bind,
+        native_launch_failure: signal_flow::NativeLaunchFailure::NativeSessionMissing,
+    });
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Start(launch.request())),
+        Response::StartRejected(expected.clone())
+    );
+    let Response::LaunchInspected(inspection) = fixture
+        .nexus
+        .dispatch(Query::LaunchStatus("unrecorded-request".into()))
+    else {
+        panic!("the refused launch is inspected");
+    };
+    assert_eq!(
+        inspection.launch_status_outcome_option,
+        Some(signal_flow::LaunchStatusOutcome::StartRejected(expected))
+    );
+}
+
+/// A registration refused at a stage is settled with that stage, and
+/// LaunchStatus reports it: here the native target was not exact.
+#[test]
+fn a_refused_registration_is_reported_with_its_stage() {
+    use crate::herdr::launch::{NativeTargetRefusal, RegistrationRefusal};
+    use crate::launching::LaunchesFlows;
+    let fixture = NexusFixture::new();
+    let launch = fixture.staged_launch("registration-request", None);
+    launch.reserve(&fixture.nexus);
+    let refused = RegistrationRefusal::NativeTarget(NativeTargetRefusal::IdentityInexact);
+    let expected = StartRejection::RegistrationRefused((&refused).into());
+    assert_eq!(
+        expected,
+        StartRejection::RegistrationRefused(signal_flow::RegistrationRefusal::NativeTarget(
+            signal_flow::NativeTargetRefusal::IdentityInexact
+        ))
+    );
+    assert_eq!(
+        fixture.nexus.settle(
+            "registration-request",
+            Response::StartRejected(expected.clone())
+        ),
+        Response::StartRejected(expected.clone())
+    );
+    let Response::LaunchInspected(inspection) = fixture
+        .nexus
+        .dispatch(Query::LaunchStatus("registration-request".into()))
+    else {
+        panic!("the refused launch is inspected");
+    };
+    assert_eq!(
+        inspection.launch_status_outcome_option,
+        Some(signal_flow::LaunchStatusOutcome::StartRejected(expected))
+    );
 }

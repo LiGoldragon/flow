@@ -1,3 +1,47 @@
+# Flow 0.35.6
+
+Wire change on the ordinary socket: signal-flow 19.0.0 (37a41014); its
+contract digest changes from c573701bba34c200 to baa84beb4f2cc84b, so every
+ordinary-socket peer (Message, signal-message) repins it before it can greet
+this Flow. The meta socket's contract is unchanged (meta-signal-flow 23.0.1,
+af4eaab9, pins signal-flow 19.0.0; digest 371d348ad5b3fbad). The store
+upgrades its launch outcomes and adds one table.
+
+- **A refused registration names its stage on the wire.**
+  `StartRejected.RegistrationRefused.RegistrationRefusal`: `RouteUnverified`
+  (the Herdr route was not verified under the FlowId claim), `RoleConflict`,
+  `RoleUnrecorded`, then the stages `accept_registration` names:
+  `PaneBindingForeign`, `AcknowledgementMismatch`, `PromptNotCanonical`,
+  `NativeTarget.[ HerdrUnreadable PaneMismatch NoNativeSession
+  IdentityInexact ]`, `TranscriptBoundary`, `ThreadNotNamed`.
+- **A refused native step names its stage and category on the wire.**
+  `StartRejected.NativeLaunchRefused.{ NativeLaunchStage NativeLaunchFailure }`,
+  stage `Open`, `CodexThread`, `Spawn` (a start Flow did not attempt),
+  `Bind`, `Naming`, `Receipt` or `Confirm`; the category is the fixed one the
+  Nexus log already printed, no adapter text. The receipt's own:
+  `BoundaryMismatch`, `ThreadNotNamed`, `PartDiffers`, `LeaveOutShown`,
+  `ModelOrEffortDiffers`; the confirmation's `SessionUnrecorded`. The
+  operation outcome is `Failed.LaunchRefused.NativeLaunchRefusal` for Open, a
+  Codex thread's opening, an unattempted Spawn, Bind and Title. LaunchStatus
+  and a `ReplaceRejected.LaunchRefused` carry the same value.
+- **The launch-outcome family upgrades v4 (and v3, v2) to v5.** A stored
+  unit `NativeLaunchRefused` reads `{ Unclassified Unclassified }`, a stored
+  `RegistrationRefused` reads `RegistrationRefused.Unclassified`; every other
+  outcome reads as it was.
+- **A Codex launch recovered after its start binds to its thread.** Spawn
+  records the thread it opened in `flow_nexus_launch_opened_threads` (keyed by
+  launch request) before the TUI attaches; a Start that resumes a Codex
+  attempt left at its native intent binds through the recorded thread, the
+  recognized pane and the claim, as Bind does. Without a recorded thread it
+  is refused `NativeLaunchRefused.{ Bind NativeSessionMissing }`.
+- **The wake pane check is Codex-aware.** `holds_native_session` takes the
+  flow: a pane whose agent reports the flow's session holds it; for Codex,
+  the pane Flow recorded for the flow, in that Herdr session, with Herdr
+  recognizing a Codex agent in it and no session reported, holds the opened
+  thread; a reported session must equal the thread. A wake of such a flow is
+  refused `ConflictingBinding` rather than starting a second seat.
+- A Start applied to the store alone answers `LaunchPersistenceRefused`.
+
 # Flow 0.35.5
 
 No protocol change; no wire, contract or store change.

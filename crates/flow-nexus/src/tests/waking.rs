@@ -888,6 +888,136 @@ fn a_wake_is_refused_while_a_pane_already_runs_the_session() {
     assert_eq!(asleep.queue, queue);
 }
 
+/// A Codex flow left in its recorded pane by a remote-resumed TUI: Herdr
+/// recognizes the pane's Codex agent and reports no agent session.
+fn codex_left_running(fixture: &NexusFixture) {
+    let mut node = fixture.node();
+    node.flow_lifecycle = FlowLifecycle::Active;
+    fixture
+        .nexus
+        .store
+        .register_flow(node)
+        .expect("Codex seat registered");
+    fixture
+        .nexus
+        .store
+        .record_stopped("908786")
+        .expect("Codex seat recorded Stopped");
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["908786"],
+        vec![Request::Order("A".into())],
+    ));
+}
+
+/// The wake check is Codex-aware: the pane Flow recorded for a Codex flow,
+/// with Herdr recognizing a Codex agent in it and no session reported,
+/// runs the flow's opened thread, so the wake is refused and the seat stays
+/// Asleep with its work queued.
+#[test]
+fn a_wake_is_refused_while_a_remote_resumed_codex_tui_runs_the_thread() {
+    let fixture = NexusFixture::new();
+    codex_left_running(&fixture);
+    fixture.set_agents(vec![fixture.settled_agent()]);
+    assert_eq!(
+        fixture
+            .nexus
+            .perform(Operation::Wake(address(Layer::Secondary))),
+        Outcome::Failed(crate::generated::operation::Failed_Data::ConflictingBinding)
+    );
+    let asleep = stored(&fixture, Layer::Secondary);
+    assert_eq!(asleep.state, State::Asleep);
+    assert_eq!(asleep.queue, vec![Request::Order("A".into())]);
+}
+
+/// A session Herdr does report for the recorded pane must be the flow's
+/// thread: another thread there does not run the flow, so the wake is not
+/// refused as a live session (it then has no launch of record to place).
+#[test]
+fn a_recorded_codex_pane_reporting_another_thread_does_not_hold_the_flow() {
+    let fixture = NexusFixture::new();
+    codex_left_running(&fixture);
+    let mut other = fixture.settled_agent();
+    other["agent_session"] = serde_json::json!({
+        "source":"herdr:codex","agent":"codex","kind":"id",
+        "value":"01a0b22c-0000-7000-8000-000000000000"
+    });
+    fixture.set_agents(vec![other]);
+    assert_eq!(
+        fixture
+            .nexus
+            .perform(Operation::Wake(address(Layer::Secondary))),
+        Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
+    );
+    assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
+}
+
+/// The pane check itself: a Codex flow is held by its recorded pane's
+/// Codex agent reporting no session or its own thread, and by any pane
+/// reporting its thread; not by its recorded pane reporting another
+/// thread, by a Codex agent without a session in another pane, by its
+/// recorded pane in another Herdr session, or, for a Claude flow, by a
+/// pane reporting no session.
+#[test]
+fn the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread() {
+    use crate::herdr::ReadsHerdrPanes;
+    let fixture = NexusFixture::new();
+    let node = fixture.node();
+    let held = |agents: Vec<serde_json::Value>, node: &FlowNode, session: &str| {
+        fixture.set_agents(agents);
+        fixture.nexus.herdr.holds_native_session(session, node)
+    };
+    let quiet = fixture.settled_agent();
+    let reporting = |value: &str| {
+        let mut agent = fixture.settled_agent();
+        agent["agent_session"] = serde_json::json!({
+            "source":"herdr:codex","agent":"codex","kind":"id","value":value
+        });
+        agent
+    };
+    let mut elsewhere = fixture.settled_agent();
+    elsewhere["pane_id"] = serde_json::Value::String("w1:p9".into());
+    elsewhere["terminal_id"] = serde_json::Value::String("term-elsewhere".into());
+    let mut elsewhere_reporting = reporting(&node.session_id);
+    elsewhere_reporting["pane_id"] = serde_json::Value::String("w1:p9".into());
+    elsewhere_reporting["terminal_id"] = serde_json::Value::String("term-elsewhere".into());
+
+    assert_eq!(
+        held(vec![quiet.clone()], &node, "messaging-build"),
+        Some(true)
+    );
+    assert_eq!(
+        held(vec![reporting(&node.session_id)], &node, "messaging-build"),
+        Some(true)
+    );
+    assert_eq!(
+        held(vec![elsewhere_reporting], &node, "messaging-build"),
+        Some(true)
+    );
+    assert_eq!(
+        held(
+            vec![reporting("01a0b22c-0000-7000-8000-000000000000")],
+            &node,
+            "messaging-build"
+        ),
+        Some(false)
+    );
+    assert_eq!(held(vec![elsewhere], &node, "messaging-build"), Some(false));
+    assert_eq!(
+        held(vec![quiet.clone()], &node, "other-session"),
+        Some(false)
+    );
+    let mut claude = node.clone();
+    claude.harness_kind = HarnessKind::Claude;
+    let mut claude_agent = quiet;
+    claude_agent["agent"] = serde_json::Value::String("claude".into());
+    assert_eq!(
+        held(vec![claude_agent], &claude, "messaging-build"),
+        Some(false)
+    );
+}
+
 fn typed_prompts(fixture: &NexusFixture) -> Vec<String> {
     fs::read_to_string(fixture.directory.path().join("pane-typed.txt"))
         .unwrap_or_default()
@@ -1487,11 +1617,10 @@ fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
     fixture.nexus.store.seed_metaflow(queued);
 
     assert_eq!(
-        fixture.nexus.settle(
-            "asleep-request",
-            Response::StartRejected(StartRejection::NativeLaunchRefused)
-        ),
-        Response::StartRejected(StartRejection::NativeLaunchRefused)
+        fixture
+            .nexus
+            .settle("asleep-request", Response::StartRejected(naming_refused())),
+        Response::StartRejected(naming_refused())
     );
     assert_eq!(
         stored(&fixture, Layer::Secondary),
@@ -2039,4 +2168,11 @@ fn a_refresh_is_refused_typed_unless_the_metaflow_is_asleep_with_a_launch_of_rec
             "a refused Refresh marks nothing"
         );
     }
+}
+
+fn naming_refused() -> signal_flow::StartRejection {
+    signal_flow::StartRejection::NativeLaunchRefused(signal_flow::NativeLaunchRefusal {
+        native_launch_stage: signal_flow::NativeLaunchStage::Naming,
+        native_launch_failure: signal_flow::NativeLaunchFailure::NotReady,
+    })
 }

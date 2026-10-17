@@ -29,28 +29,25 @@ use crate::store::{
 };
 use crate::title::TitleRefused;
 use crate::waking::PerformsSleepAndWake;
-use signal_flow::{HarnessKind, LaunchAttemptReservation, Response, StartRejection};
+use signal_flow::{
+    HarnessKind, LaunchAttemptReservation, NativeLaunchFailure, NativeLaunchRefusal,
+    NativeLaunchStage, Response, StartRejection,
+};
 
-/// The internal stage at which the Herdr adapter refused an operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HerdrFailureStage {
-    Open,
-    Spawn,
-    Bind,
-    Title,
+trait LabelsNativeLaunchStage {
+    fn label(&self) -> &'static str;
 }
 
-trait LabelsHerdrFailureStage {
-    fn label(self) -> &'static str;
-}
-
-impl LabelsHerdrFailureStage for HerdrFailureStage {
-    fn label(self) -> &'static str {
+impl LabelsNativeLaunchStage for NativeLaunchStage {
+    fn label(&self) -> &'static str {
         match self {
             Self::Open => "open",
+            Self::CodexThread => "codex-thread",
             Self::Spawn => "spawn",
             Self::Bind => "bind",
-            Self::Title => "title",
+            Self::Naming => "title",
+            Self::Receipt => "receipt",
+            Self::Unclassified => "unclassified",
         }
     }
 }
@@ -58,31 +55,13 @@ impl LabelsHerdrFailureStage for HerdrFailureStage {
 /// The fixed, actionable categories Flow may retain from an adapter failure.
 /// Adapter error text and stderr may contain private paths, arguments, or
 /// provider output, so they are deliberately never stored or printed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HerdrFailureCategory {
-    PaneTargetMismatch,
-    NativeSessionMissing,
-    NativeIdentityConflict,
-    FlowClaimUnavailable,
-    HarnessMismatch,
-    HerdrUnreadable,
-    ForeignBinding,
-    InvalidFlowId,
-    NotReady,
-    TranscriptUnreadable,
-    TitleReadbackDiffers,
-    CodexNamingRefused,
-    PaneLabelRefused,
-    AdapterRefused,
-}
-
-trait ClassifiesHerdrFailureCategory {
-    fn label(self) -> &'static str;
+pub(crate) trait ClassifiesNativeLaunchFailure {
+    fn label(&self) -> &'static str;
     fn from_adapter_error(error: &str) -> Self;
 }
 
-impl ClassifiesHerdrFailureCategory for HerdrFailureCategory {
-    fn label(self) -> &'static str {
+impl ClassifiesNativeLaunchFailure for NativeLaunchFailure {
+    fn label(&self) -> &'static str {
         match self {
             Self::PaneTargetMismatch => "pane-target-mismatch",
             Self::NativeSessionMissing => "native-session-missing",
@@ -98,6 +77,12 @@ impl ClassifiesHerdrFailureCategory for HerdrFailureCategory {
             Self::CodexNamingRefused => "codex-naming-refused",
             Self::PaneLabelRefused => "pane-label-refused",
             Self::AdapterRefused => "adapter-refused",
+            Self::BoundaryMismatch => "boundary-mismatch",
+            Self::ThreadNotNamed => "thread-not-named",
+            Self::PartDiffers => "part-differs",
+            Self::LeaveOutShown => "leave-out-shown",
+            Self::ModelOrEffortDiffers => "model-or-effort-differs",
+            Self::Unclassified => "unclassified",
         }
     }
 
@@ -126,19 +111,12 @@ impl ClassifiesHerdrFailureCategory for HerdrFailureCategory {
     }
 }
 
-impl From<&TitleRefusal> for HerdrFailureCategory {
+impl From<&TitleRefusal> for NativeLaunchFailure {
     fn from(refusal: &TitleRefusal) -> Self {
         match refusal {
             TitleRefusal::ForeignBinding => Self::ForeignBinding,
             TitleRefusal::Title(TitleRefused::InvalidFlowId) => Self::InvalidFlowId,
-            TitleRefusal::Target(NativeTargetRefusal::HerdrUnreadable(_)) => Self::HerdrUnreadable,
-            TitleRefusal::Target(NativeTargetRefusal::PaneMismatch) => Self::PaneTargetMismatch,
-            TitleRefusal::Target(NativeTargetRefusal::NoNativeSession) => {
-                Self::NativeSessionMissing
-            }
-            TitleRefusal::Target(NativeTargetRefusal::IdentityInexact) => {
-                Self::NativeIdentityConflict
-            }
+            TitleRefusal::Target(target) => target.into(),
             TitleRefusal::NotReady => Self::NotReady,
             TitleRefusal::TranscriptUnreadable => Self::TranscriptUnreadable,
             TitleRefusal::ReadbackDiffers => Self::TitleReadbackDiffers,
@@ -148,35 +126,40 @@ impl From<&TitleRefusal> for HerdrFailureCategory {
     }
 }
 
-/// A bounded, typed internal diagnostic retained before the public operation
-/// outcome is intentionally reduced to `HerdrRefused`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct HerdrFailure {
-    pub(crate) stage: HerdrFailureStage,
-    pub(crate) category: HerdrFailureCategory,
+impl From<&NativeTargetRefusal> for NativeLaunchFailure {
+    fn from(refusal: &NativeTargetRefusal) -> Self {
+        match refusal {
+            NativeTargetRefusal::HerdrUnreadable(_) => Self::HerdrUnreadable,
+            NativeTargetRefusal::PaneMismatch => Self::PaneTargetMismatch,
+            NativeTargetRefusal::NoNativeSession => Self::NativeSessionMissing,
+            NativeTargetRefusal::IdentityInexact => Self::NativeIdentityConflict,
+        }
+    }
 }
 
-trait RefusesHerdrOperation {
-    fn refused(stage: HerdrFailureStage, adapter_error: String) -> Outcome;
+/// A native launch step's refusal: logged as a fixed line, then answered
+/// on the operation's outcome with its stage and category.
+pub(crate) trait RefusesNativeLaunch {
+    fn refused(stage: NativeLaunchStage, adapter_error: String) -> Outcome;
     /// A typed Title refusal, logged by its own category.
     fn refused_title(refusal: &TitleRefusal) -> Outcome;
     fn logged(self) -> Outcome;
-    fn log_line(self) -> String;
+    fn log_line(&self) -> String;
 }
 
-impl RefusesHerdrOperation for HerdrFailure {
-    fn refused(stage: HerdrFailureStage, adapter_error: String) -> Outcome {
+impl RefusesNativeLaunch for NativeLaunchRefusal {
+    fn refused(stage: NativeLaunchStage, adapter_error: String) -> Outcome {
         Self {
-            stage,
-            category: HerdrFailureCategory::from_adapter_error(&adapter_error),
+            native_launch_stage: stage,
+            native_launch_failure: NativeLaunchFailure::from_adapter_error(&adapter_error),
         }
         .logged()
     }
 
     fn refused_title(refusal: &TitleRefusal) -> Outcome {
         Self {
-            stage: HerdrFailureStage::Title,
-            category: refusal.into(),
+            native_launch_stage: NativeLaunchStage::Naming,
+            native_launch_failure: refusal.into(),
         }
         .logged()
     }
@@ -185,14 +168,14 @@ impl RefusesHerdrOperation for HerdrFailure {
         // This fixed-format line has no adapter text, stderr, paths, IDs, or
         // request content. Its bounded fields remain useful for diagnosis.
         eprintln!("{}", self.log_line());
-        Outcome::Failed(Failed_Data::HerdrRefused)
+        Outcome::Failed(Failed_Data::LaunchRefused(self))
     }
 
-    fn log_line(self) -> String {
+    fn log_line(&self) -> String {
         format!(
             "flow-nexus: herdr stage={} category={}",
-            self.stage.label(),
-            self.category.label()
+            self.native_launch_stage.label(),
+            self.native_launch_failure.label()
         )
     }
 }
@@ -283,7 +266,7 @@ impl Performs for RunningNexus {
             },
             Operation::Open(launch) => match self.herdr.create_launch_pane(&launch) {
                 Ok(pane) => Outcome::Opened(pane),
-                Err(error) => HerdrFailure::refused(HerdrFailureStage::Open, error),
+                Err(error) => NativeLaunchRefusal::refused(NativeLaunchStage::Open, error),
             },
             Operation::Spawn(PaneLaunch {
                 composed_launch,
@@ -299,13 +282,36 @@ impl Performs for RunningNexus {
                         .adapter_for(&composed_launch.launch_profile.model_name)
                         .and_then(|adapter| adapter.open_thread_with_first_turn(&composed_launch))
                     {
-                        Ok(thread) => Some(thread),
+                        // The thread is recorded before the TUI attaches: a
+                        // remote-resumed TUI never reports it to Herdr, so a
+                        // launch recovered after this start binds to it.
+                        Ok(thread) => {
+                            use crate::store::opened_thread::RecordsOpenedThreads;
+                            if !self
+                                .store
+                                .record_opened_thread(
+                                    &composed_launch.launch_profile.launch_request_id,
+                                    &thread,
+                                )
+                                .unwrap_or(false)
+                            {
+                                eprintln!(
+                                    "flow-nexus: launch {} opened thread {thread} not recorded",
+                                    composed_launch.launch_profile.launch_request_id
+                                );
+                            }
+                            Some(thread)
+                        }
                         Err(error) => {
                             eprintln!(
                                 "flow-nexus: launch {} Codex thread not opened: {error}",
                                 composed_launch.launch_profile.launch_request_id
                             );
-                            return Outcome::Failed(Failed_Data::CodexRefused);
+                            return NativeLaunchRefusal {
+                                native_launch_stage: NativeLaunchStage::CodexThread,
+                                native_launch_failure: NativeLaunchFailure::AdapterRefused,
+                            }
+                            .logged();
                         }
                     },
                     HarnessKind::Claude => None,
@@ -329,9 +335,9 @@ impl Performs for RunningNexus {
                     Err(SpawnFailure::Refused(spawn_refusal_cause)) => {
                         eprintln!(
                             "{}",
-                            HerdrFailure {
-                                stage: HerdrFailureStage::Spawn,
-                                category: HerdrFailureCategory::AdapterRefused,
+                            NativeLaunchRefusal {
+                                native_launch_stage: NativeLaunchStage::Spawn,
+                                native_launch_failure: NativeLaunchFailure::AdapterRefused,
                             }
                             .log_line()
                         );
@@ -356,7 +362,7 @@ impl Performs for RunningNexus {
                         ))
                     }
                     Err(SpawnFailure::Unattempted(error)) => {
-                        HerdrFailure::refused(HerdrFailureStage::Spawn, error)
+                        NativeLaunchRefusal::refused(NativeLaunchStage::Spawn, error)
                     }
                 }
             }
@@ -380,7 +386,7 @@ impl Performs for RunningNexus {
                 };
                 match observed {
                     Ok(binding) => Outcome::Bound(binding),
-                    Err(error) => HerdrFailure::refused(HerdrFailureStage::Bind, error),
+                    Err(error) => NativeLaunchRefusal::refused(NativeLaunchStage::Bind, error),
                 }
             }
             Operation::Title(Title_Data {
@@ -391,7 +397,7 @@ impl Performs for RunningNexus {
                 .title_native_flow(&composed_launch, &native_launch_binding)
             {
                 Ok(_) => Outcome::Titled,
-                Err(refusal) => HerdrFailure::refused_title(&refusal),
+                Err(refusal) => NativeLaunchRefusal::refused_title(&refusal),
             },
             Operation::Submit(Submit_Data {
                 composed_launch,
@@ -579,47 +585,45 @@ impl PerformsInParts for RunningNexus {
 
 #[cfg(test)]
 mod failure_tests {
-    use super::{
-        ClassifiesHerdrFailureCategory, HerdrFailure, HerdrFailureCategory, HerdrFailureStage,
-        RefusesHerdrOperation,
-    };
+    use super::{ClassifiesNativeLaunchFailure, RefusesNativeLaunch};
     use crate::generated::operation::{Failed_Data, Outcome};
+    use signal_flow::{NativeLaunchFailure, NativeLaunchRefusal, NativeLaunchStage};
 
     #[test]
-    fn binding_failure_keeps_a_useful_allowlisted_category_before_wire_erasure() {
-        let category = HerdrFailureCategory::from_adapter_error(
-            "official Herdr integration reported no native session",
-        );
-        let failure = HerdrFailure {
-            stage: HerdrFailureStage::Bind,
-            category,
-        };
-        assert_eq!(failure.stage, HerdrFailureStage::Bind);
-        assert_eq!(failure.category, HerdrFailureCategory::NativeSessionMissing);
+    fn a_binding_failure_is_answered_with_its_stage_and_allowlisted_category() {
         assert_eq!(
-            HerdrFailure::refused(
-                failure.stage,
+            NativeLaunchFailure::from_adapter_error(
+                "official Herdr integration reported no native session",
+            ),
+            NativeLaunchFailure::NativeSessionMissing
+        );
+        assert_eq!(
+            NativeLaunchRefusal::refused(
+                NativeLaunchStage::Bind,
                 "official Herdr integration reported no native session".into()
             ),
-            Outcome::Failed(Failed_Data::HerdrRefused)
+            Outcome::Failed(Failed_Data::LaunchRefused(NativeLaunchRefusal {
+                native_launch_stage: NativeLaunchStage::Bind,
+                native_launch_failure: NativeLaunchFailure::NativeSessionMissing,
+            }))
         );
     }
 
     #[test]
-    fn a_title_refusal_is_logged_by_its_typed_category() {
+    fn a_title_refusal_is_answered_and_logged_by_its_typed_category() {
         use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
         let missing = TitleRefusal::Target(NativeTargetRefusal::NoNativeSession);
-        let failure = HerdrFailure {
-            stage: HerdrFailureStage::Title,
-            category: (&missing).into(),
+        let failure = NativeLaunchRefusal {
+            native_launch_stage: NativeLaunchStage::Naming,
+            native_launch_failure: (&missing).into(),
         };
         assert_eq!(
             failure.log_line(),
             "flow-nexus: herdr stage=title category=native-session-missing"
         );
         assert_eq!(
-            HerdrFailure::refused_title(&missing),
-            Outcome::Failed(Failed_Data::HerdrRefused)
+            NativeLaunchRefusal::refused_title(&missing),
+            Outcome::Failed(Failed_Data::LaunchRefused(failure))
         );
         for (refusal, label) in [
             (TitleRefusal::NotReady, "not-ready"),
@@ -635,9 +639,9 @@ mod failure_tests {
                 "herdr-unreadable",
             ),
         ] {
-            let line = HerdrFailure {
-                stage: HerdrFailureStage::Title,
-                category: (&refusal).into(),
+            let line = NativeLaunchRefusal {
+                native_launch_stage: NativeLaunchStage::Naming,
+                native_launch_failure: (&refusal).into(),
             }
             .log_line();
             assert!(line.ends_with(&format!("category={label}")), "{line}");
@@ -646,24 +650,28 @@ mod failure_tests {
         // The adapter's own words for a missing session are classified, not
         // filed as a catch-all refusal.
         assert_eq!(
-            HerdrFailureCategory::from_adapter_error(
+            NativeLaunchFailure::from_adapter_error(
                 "receipt target has no official native session"
             ),
-            HerdrFailureCategory::NativeSessionMissing
+            NativeLaunchFailure::NativeSessionMissing
         );
     }
 
     #[test]
     fn malicious_or_long_adapter_text_is_not_retained_or_rendered() {
         let attacker_text = format!("secret=/private/socket {}", "x".repeat(20_000));
-        let failure = HerdrFailure {
-            stage: HerdrFailureStage::Spawn,
-            category: HerdrFailureCategory::from_adapter_error(&attacker_text),
+        let failure = NativeLaunchRefusal {
+            native_launch_stage: NativeLaunchStage::Spawn,
+            native_launch_failure: NativeLaunchFailure::from_adapter_error(&attacker_text),
         };
         let line = failure.log_line();
-        assert_eq!(failure.category, HerdrFailureCategory::AdapterRefused);
+        assert_eq!(
+            failure.native_launch_failure,
+            NativeLaunchFailure::AdapterRefused
+        );
         assert!(!line.contains("secret="));
         assert!(!line.contains("/private/socket"));
         assert!(line.len() <= 96, "bounded fixed diagnostic");
+        assert!(!format!("{failure:?}").contains("secret="));
     }
 }

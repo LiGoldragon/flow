@@ -11,6 +11,7 @@ mod created_pane;
 pub mod delivery;
 pub mod events;
 pub(crate) mod metaflow;
+pub(crate) mod opened_thread;
 pub(crate) mod refresh;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
@@ -1223,6 +1224,31 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v5")
+    }
+}
+
+/// An outcome as Flow 0.35.3 to 0.35.5 archived it, its rejections
+/// signal-flow 18's, before a refused registration or native step carried
+/// its stage. This shape is read only by the v4-to-v5 family upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcomeV4 {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcomeV4,
+}
+
+impl EngineRecord for StoredLaunchOutcomeV4 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchOutcomeV4 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(4)
     }
 
@@ -1231,9 +1257,108 @@ impl MemoryDefinition for StoredLaunchOutcome {
     }
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LaunchOutcomeV4 {
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
+    StartRejected(StartRejectionV18),
+    ReplaceRejected(ReplaceRejectionV18),
+}
+
+/// A start rejection as signal-flow 18.0.0 archived it: a refused native
+/// step and a refused registration carry no stage, in the same order.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum StartRejectionV18 {
+    CompositionRefused,
+    LaunchRequestConflict,
+    LaunchPersistenceRefused,
+    NativeLaunchRefused,
+    BindingRefused(signal_flow::BindingRefusal),
+    RegistrationRefused,
+    IntentPersistenceRefused,
+    OriginUnavailable,
+    AddressAwake,
+    AddressEnded,
+    ContextRefused(signal_flow::ContextRefusal),
+    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
+}
+
+/// A replace rejection as signal-flow 18.0.0 archived it.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ReplaceRejectionV18 {
+    PredecessorAbsent,
+    UnknownPredecessor,
+    PredecessorStopped,
+    LaunchRefused(StartRejectionV18),
+    ReapRefused(signal_flow::StopRejection),
+}
+
+impl From<StartRejectionV18> for StartRejection {
+    fn from(rejection: StartRejectionV18) -> Self {
+        match rejection {
+            StartRejectionV18::CompositionRefused => Self::CompositionRefused,
+            StartRejectionV18::LaunchRequestConflict => Self::LaunchRequestConflict,
+            StartRejectionV18::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
+            // The stage was not kept.
+            StartRejectionV18::NativeLaunchRefused => {
+                Self::NativeLaunchRefused(signal_flow::NativeLaunchRefusal {
+                    native_launch_stage: signal_flow::NativeLaunchStage::Unclassified,
+                    native_launch_failure: signal_flow::NativeLaunchFailure::Unclassified,
+                })
+            }
+            StartRejectionV18::BindingRefused(refusal) => Self::BindingRefused(refusal),
+            StartRejectionV18::RegistrationRefused => {
+                Self::RegistrationRefused(signal_flow::RegistrationRefusal::Unclassified)
+            }
+            StartRejectionV18::IntentPersistenceRefused => Self::IntentPersistenceRefused,
+            StartRejectionV18::OriginUnavailable => Self::OriginUnavailable,
+            StartRejectionV18::AddressAwake => Self::AddressAwake,
+            StartRejectionV18::AddressEnded => Self::AddressEnded,
+            StartRejectionV18::ContextRefused(refusal) => Self::ContextRefused(refusal),
+            StartRejectionV18::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+            StartRejectionV18::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
+        }
+    }
+}
+
+impl From<ReplaceRejectionV18> for ReplaceRejection {
+    fn from(rejection: ReplaceRejectionV18) -> Self {
+        match rejection {
+            ReplaceRejectionV18::PredecessorAbsent => Self::PredecessorAbsent,
+            ReplaceRejectionV18::UnknownPredecessor => Self::UnknownPredecessor,
+            ReplaceRejectionV18::PredecessorStopped => Self::PredecessorStopped,
+            ReplaceRejectionV18::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
+            ReplaceRejectionV18::ReapRefused(rejection) => Self::ReapRefused(rejection),
+        }
+    }
+}
+
+impl From<LaunchOutcomeV4> for LaunchOutcome {
+    fn from(outcome: LaunchOutcomeV4) -> Self {
+        match outcome {
+            LaunchOutcomeV4::Started(launched) => Self::Started(launched),
+            LaunchOutcomeV4::Replaced(replaced) => Self::Replaced(replaced),
+            LaunchOutcomeV4::StartRejected(rejection) => Self::StartRejected(rejection.into()),
+            LaunchOutcomeV4::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
+        }
+    }
+}
+
+impl UpgradeFrom<StoredLaunchOutcomeV4> for StoredLaunchOutcome {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredLaunchOutcomeV4) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            launch_request_id: previous.launch_request_id,
+            launch_outcome: previous.launch_outcome.into(),
+        })
+    }
+}
+
 /// An outcome as Flow 0.35.2 archived it, its rejections signal-flow 17's,
 /// before a refused harness start carried its cause. This shape is read
-/// only by the v3-to-v4 family upgrade.
+/// only by the v3-to-v5 family upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct StoredLaunchOutcomeV3 {
     launch_request_id: String,
@@ -1293,6 +1418,12 @@ enum ReplaceRejectionV17 {
 }
 
 impl From<StartRejectionV17> for StartRejection {
+    fn from(rejection: StartRejectionV17) -> Self {
+        StartRejectionV18::from(rejection).into()
+    }
+}
+
+impl From<StartRejectionV17> for StartRejectionV18 {
     fn from(rejection: StartRejectionV17) -> Self {
         match rejection {
             StartRejectionV17::CompositionRefused => Self::CompositionRefused,
@@ -1592,21 +1723,37 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredLaunchOutcome>,
     ) -> Result<TableReference<StoredLaunchOutcome>, StoreError> {
-        // A 0.35.2 store holds v3 rows and a 0.34 store v2 rows; the v3
-        // edge is tried first, and a store it does not admit is tried on the
-        // v2 edge. An admission refusal writes nothing.
+        // A 0.35.3 to 0.35.5 store holds v4 rows, a 0.35.2 store v3 rows
+        // and a 0.34 store v2 rows; the newest edge is tried first, and a
+        // store it does not admit is tried on the next. An admission refusal
+        // writes nothing.
+        let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
-        match self.upgrade_table::<StoredLaunchOutcomeV3, StoredLaunchOutcome>(descriptor) {
+        match self.upgrade_table::<StoredLaunchOutcomeV4, StoredLaunchOutcome>(descriptor) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
             UpgradeOutcome::Failed(failure)
                 if failure.phase() == sema_engine::StoragePhase::Admission =>
             {
-                match self.upgrade_table::<StoredLaunchOutcomeV2, StoredLaunchOutcome>(from_v2) {
+                match self.upgrade_table::<StoredLaunchOutcomeV3, StoredLaunchOutcome>(from_v3) {
                     UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
                     UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
                     UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                    UpgradeOutcome::Failed(failure)
+                        if failure.phase() == sema_engine::StoragePhase::Admission =>
+                    {
+                        match self
+                            .upgrade_table::<StoredLaunchOutcomeV2, StoredLaunchOutcome>(from_v2)
+                        {
+                            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                            UpgradeOutcome::Failed(failure) => {
+                                Err(StoreError::LaunchOutcomeUpgrade(format!("{failure:?}")))
+                            }
+                        }
+                    }
                     UpgradeOutcome::Failed(failure) => {
                         Err(StoreError::LaunchOutcomeUpgrade(format!("{failure:?}")))
                     }
@@ -1724,6 +1871,7 @@ pub struct FlowStore {
     context_sizes: TableReference<context::FlowContextSize>,
     address_holds: TableReference<address_hold::AddressHold>,
     refreshes: TableReference<refresh::MetaflowRefresh>,
+    opened_threads: TableReference<opened_thread::OpenedLaunchThread>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
@@ -2262,7 +2410,8 @@ impl OpensFlowStore for FlowStore {
             StoredLaunchOutcome::schema_hash(),
         )
         .with_predecessor::<StoredLaunchOutcomeV2>()
-        .with_predecessor::<StoredLaunchOutcomeV3>();
+        .with_predecessor::<StoredLaunchOutcomeV3>()
+        .with_predecessor::<StoredLaunchOutcomeV4>();
         let replacements_descriptor = TableDescriptor::<Replacement>::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -2325,6 +2474,9 @@ impl OpensFlowStore for FlowStore {
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor();
         let refreshes_descriptor =
             <refresh::MetaflowRefresh as refresh::DescribesRefreshTable>::descriptor();
+        let opened_threads_descriptor =
+            <opened_thread::OpenedLaunchThread as opened_thread::DescribesOpenedThreadTable>::descriptor(
+            );
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -2351,7 +2503,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
                 .with_family(&address_holds_descriptor)
-                .with_family(&refreshes_descriptor),
+                .with_family(&refreshes_descriptor)
+                .with_family(&opened_threads_descriptor),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -2376,6 +2529,7 @@ impl OpensFlowStore for FlowStore {
         let context_sizes = engine.register_table(context_sizes_descriptor)?;
         let address_holds = engine.register_table(address_holds_descriptor)?;
         let refreshes = engine.register_table(refreshes_descriptor)?;
+        let opened_threads = engine.register_table(opened_threads_descriptor)?;
         let store = Self {
             engine,
             flows,
@@ -2398,6 +2552,7 @@ impl OpensFlowStore for FlowStore {
             context_sizes,
             address_holds,
             refreshes,
+            opened_threads,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -2475,7 +2630,8 @@ impl OpensFlowStore for FlowStore {
                 StoredLaunchOutcome::schema_hash(),
             )
             .with_predecessor::<StoredLaunchOutcomeV2>()
-            .with_predecessor::<StoredLaunchOutcomeV3>(),
+            .with_predecessor::<StoredLaunchOutcomeV3>()
+            .with_predecessor::<StoredLaunchOutcomeV4>(),
         )?;
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
@@ -2514,6 +2670,10 @@ impl OpensFlowStore for FlowStore {
         let refreshes = engine.register_table(
             <refresh::MetaflowRefresh as refresh::DescribesRefreshTable>::descriptor(),
         )?;
+        let opened_threads = engine.register_table(
+            <opened_thread::OpenedLaunchThread as opened_thread::DescribesOpenedThreadTable>::descriptor(
+            ),
+        )?;
         let store = Self {
             engine,
             flows,
@@ -2536,6 +2696,7 @@ impl OpensFlowStore for FlowStore {
             context_sizes,
             address_holds,
             refreshes,
+            opened_threads,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -2849,7 +3010,10 @@ impl ManagesMetaflowState for FlowStore {
 impl AppliesFlowQuery for FlowStore {
     fn apply(&self, query: Query) -> Result<Response, StoreError> {
         match query {
-            Query::Start(_) => Ok(Response::StartRejected(StartRejection::NativeLaunchRefused)),
+            // The store alone launches nothing.
+            Query::Start(_) => Ok(Response::StartRejected(
+                StartRejection::LaunchPersistenceRefused,
+            )),
             Query::Restart(_) => Ok(Response::RestartRejected(RestartRejection::ResumeRefused)),
             Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
             Query::Stop(_) => Ok(Response::StopRejected(
@@ -2864,7 +3028,7 @@ impl AppliesFlowQuery for FlowStore {
             Query::Current(address) => self.current_metaflow(&address),
             Query::Metaflows => self.list_metaflows().map(Response::Listed),
             Query::Replace(_) => Ok(Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                StartRejection::NativeLaunchRefused,
+                StartRejection::LaunchPersistenceRefused,
             ))),
             // The caller is read from the socket, which the store never sees.
             Query::ResolveCaller(_) => Ok(Response::CallerResolutionRejected(
@@ -4447,11 +4611,19 @@ impl WritesFlowStore for FlowStore {
     }
 
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError> {
+        let unrecorded = || {
+            Response::StartRejected(StartRejection::NativeLaunchRefused(
+                signal_flow::NativeLaunchRefusal {
+                    native_launch_stage: signal_flow::NativeLaunchStage::Confirm,
+                    native_launch_failure: signal_flow::NativeLaunchFailure::SessionUnrecorded,
+                },
+            ))
+        };
         let Some(mut flow) = self.flow(flow_id)? else {
-            return Ok(Response::StartRejected(StartRejection::NativeLaunchRefused));
+            return Ok(unrecorded());
         };
         if flow.thread_id.is_none() {
-            return Ok(Response::StartRejected(StartRejection::NativeLaunchRefused));
+            return Ok(unrecorded());
         }
         let origin = flow.origin.clone();
         let session_id = flow.thread_id.clone().expect("checked thread identity");
@@ -5051,6 +5223,10 @@ pub(crate) trait ReadsFlowMemory {
                 refresh::METAFLOW_REFRESH_FAMILY,
                 refresh::METAFLOW_REFRESH_SCHEMA,
             ),
+            "flow_nexus_launch_opened_threads" => (
+                opened_thread::OPENED_THREAD_FAMILY,
+                opened_thread::OPENED_THREAD_SCHEMA,
+            ),
             _ => return None,
         };
         Some((family, SchemaHash::for_label(version)))
@@ -5076,6 +5252,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     "flow-nexus-launch-outcome",
                     StoredLaunchOutcomeV3::schema_hash(),
+                ),
+                (
+                    "flow-nexus-launch-outcome",
+                    StoredLaunchOutcomeV4::schema_hash(),
                 ),
             ],
             "flow_nexus_launch_attempts" => &[(
@@ -5173,12 +5353,14 @@ pub(crate) trait ReadsFlowMemory {
         // the first full open of a configuration-only store adds the running
         // tables.
         // A store keeps its metaflows' default leave-outs from 0.35.0 on,
-        // and its fresh-wake marks from 0.35.2 on.
+        // its fresh-wake marks from 0.35.2 on, and the Codex thread each
+        // launch opened from 0.35.6 on.
         const ADDED_LATER: &[&str] = &[
             "flow_nexus_flow_context_sizes",
             "flow_nexus_address_holds",
             "flow_nexus_meta_leave_out_configuration",
             "flow_nexus_metaflow_refreshes",
+            "flow_nexus_launch_opened_threads",
         ];
         // A store before 0.35.0 may still hold a table 0.35.0 drops.
         let retired = |name: &String| RETIRED_TABLES.iter().any(|(table, _, _)| table == name);
@@ -5636,6 +5818,7 @@ mod tests {
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
     use super::{FlowRecordV5, LaunchedRecordV2, OriginClueBeforeOrigin, ReplacedRecordV2};
     use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
+    use super::{LaunchOutcomeV4, ReplaceRejectionV18, StartRejectionV18, StoredLaunchOutcomeV4};
     use super::{LaunchedRecord, ReplacedRecord};
     use super::{LaysOutDefaults, SeedsConfiguration};
     use crate::store::RegistersBindings;
@@ -7492,6 +7675,14 @@ mod tests {
                         .records()
                         .len(),
                 ),
+                read(
+                    "flow_nexus_launch_opened_threads",
+                    engine
+                        .match_records(QueryPlan::all(self.opened_threads))
+                        .expect("opened threads read")
+                        .records()
+                        .len(),
+                ),
             ]
             .into_iter()
             .collect()
@@ -7938,6 +8129,117 @@ mod tests {
         );
     }
 
+    /// A 0.35.5 store's outcomes, each rejection in signal-flow 18's shape,
+    /// open as the current outcomes: a refused native step or registration,
+    /// whose stage was not kept, reads Unclassified, every other outcome as
+    /// it was; the store then keeps a refusal with its stage.
+    #[test]
+    fn v4_launch_outcomes_upgrade_to_the_staged_refusal_shape() {
+        let fixture = StoreFixture::new();
+        let started = LaunchedRecord {
+            flow_id: "started-flow".into(),
+            session_id: "started-session".into(),
+            origin: Origin::Unbound,
+        };
+        let spawn = signal_flow::HarnessSpawnRefusal {
+            spawn_refusal_cause: signal_flow::SpawnRefusalCause::CommandTooLong,
+            opened_thread_option: None,
+        };
+        let rows = [
+            StoredLaunchOutcomeV4 {
+                launch_request_id: "v4-started".into(),
+                launch_outcome: LaunchOutcomeV4::Started(started.clone()),
+            },
+            StoredLaunchOutcomeV4 {
+                launch_request_id: "v4-native".into(),
+                launch_outcome: LaunchOutcomeV4::StartRejected(
+                    StartRejectionV18::NativeLaunchRefused,
+                ),
+            },
+            StoredLaunchOutcomeV4 {
+                launch_request_id: "v4-registration".into(),
+                launch_outcome: LaunchOutcomeV4::ReplaceRejected(
+                    ReplaceRejectionV18::LaunchRefused(StartRejectionV18::RegistrationRefused),
+                ),
+            },
+            StoredLaunchOutcomeV4 {
+                launch_request_id: "v4-spawn".into(),
+                launch_outcome: LaunchOutcomeV4::StartRejected(
+                    StartRejectionV18::HarnessSpawnRefused(spawn.clone()),
+                ),
+            },
+        ];
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("outcome store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_launch_outcomes"),
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    SchemaHash::for_label("flow-nexus-launch-outcome-v4"),
+                ))
+                .expect("v4 outcome family registers");
+            for row in rows {
+                engine
+                    .assert(Assertion::new(outcomes, row))
+                    .expect("v4 outcome persists");
+            }
+        }
+        let expected = [
+            ("v4-started", LaunchOutcome::Started(started)),
+            (
+                "v4-native",
+                LaunchOutcome::StartRejected(StartRejection::NativeLaunchRefused(
+                    signal_flow::NativeLaunchRefusal {
+                        native_launch_stage: signal_flow::NativeLaunchStage::Unclassified,
+                        native_launch_failure: signal_flow::NativeLaunchFailure::Unclassified,
+                    },
+                )),
+            ),
+            (
+                "v4-registration",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::RegistrationRefused(
+                        signal_flow::RegistrationRefusal::Unclassified,
+                    ),
+                )),
+            ),
+            (
+                "v4-spawn",
+                LaunchOutcome::StartRejected(StartRejection::HarnessSpawnRefused(spawn)),
+            ),
+        ];
+        let store = fixture.store();
+        for (request, outcome) in &expected {
+            assert_eq!(
+                store
+                    .launch_outcome(request)
+                    .expect("upgraded outcome reads"),
+                Some(outcome.clone()),
+                "the v4 outcome for {request} survives the family upgrade"
+            );
+        }
+        let staged = LaunchOutcome::StartRejected(StartRejection::RegistrationRefused(
+            signal_flow::RegistrationRefusal::NativeTarget(
+                signal_flow::NativeTargetRefusal::IdentityInexact,
+            ),
+        ));
+        store
+            .record_launch_outcome("v5-staged", staged.clone())
+            .expect("a staged refusal persists");
+        drop(store);
+        let reopened = fixture.store();
+        for (request, outcome) in expected.iter().chain([("v5-staged", staged)].iter()) {
+            assert_eq!(
+                reopened
+                    .launch_outcome(request)
+                    .expect("outcome reads after reopening"),
+                Some(outcome.clone()),
+                "the outcome for {request} reads unchanged after reopening"
+            );
+        }
+    }
+
     /// A 0.35.2 store's outcomes, each rejection in signal-flow 17's shape,
     /// open as the current outcomes, and the store then keeps a refused
     /// harness start with its cause and its opened thread.
@@ -8005,7 +8307,12 @@ mod tests {
             ),
             (
                 "v3-native",
-                LaunchOutcome::StartRejected(StartRejection::NativeLaunchRefused),
+                LaunchOutcome::StartRejected(StartRejection::NativeLaunchRefused(
+                    signal_flow::NativeLaunchRefusal {
+                        native_launch_stage: signal_flow::NativeLaunchStage::Unclassified,
+                        native_launch_failure: signal_flow::NativeLaunchFailure::Unclassified,
+                    },
+                )),
             ),
             (
                 "v3-replace",

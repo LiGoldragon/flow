@@ -16,7 +16,7 @@
 ; a generated type's fields are public.
 
 Library
-[ signal_flow:[ Address HarnessKind PowerLevel LaunchProfile PromptDeliveryIntent NativeTargetReceipt FlowId SessionId Origin SystemModules UserModules HerdrSessionName LeaveOuts LeaveOutRefusal ComposedLaunch ContextRefusal SystemPrompt HerdrPaneBinding PromptDeliveryResult Response Launched ]
+[ signal_flow:[ Address HarnessKind PowerLevel LaunchProfile PromptDeliveryIntent NativeTargetReceipt FlowId SessionId Origin SystemModules UserModules HerdrSessionName LeaveOuts LeaveOutRefusal ComposedLaunch ContextRefusal SystemPrompt HerdrPaneBinding PromptDeliveryResult Response Launched NativeLaunchFailure ]
   flow_nexus:[ StartupSelection StartupComposition ContextProvenance CurriculumQuery CurriculumOutcome CompositionError VerifiedContext OperationOutcome CallerProcess ]
   serde_json:JsonValue.Value ]
 [ ; What a launch asks of the context composer.
@@ -108,8 +108,8 @@ Library
   ProfilesFreshSeat.[ fresh_profile.[ LaunchProfile ] ]
   PromptsThroughHerdrSocket.[ herdr_session_socket.{ [ Textual ] [ Result<String String> ] }
                               prompt_through_socket.{ [ PaneBound Textual ] [ Result<JsonValue String> ] } ]
-  ReadsStartupRecord.[ read_record!{ [ JsonRow DeliveryIntended ] [ Result<Option<String> String> ] }
-                       read_part!{ [ Textual DeliveryIntended ] [ Result<Integer String> ] } ]
+  ReadsStartupRecord.[ read_record!{ [ JsonRow DeliveryIntended ] [ Result<Option<String> NativeLaunchFailure> ] }
+                       read_part!{ [ Textual DeliveryIntended ] [ Result<Integer NativeLaunchFailure> ] } ]
   ReadsTypedUserText.[ claude_typed_text.[ Option<String> ] ]
   RendersLeanStart.[ refusal.[ Option<LeaveOutRefusal> ]
                      arguments.[ Vector<String> ]

@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.5";
+            version = "0.35.6";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -365,6 +365,26 @@
             "codex::tests::an_opened_thread_is_accounted_for_and_archived";
           flow-v3-outcomes-upgrade-to-refused-spawn = context.exactTest "flow-nexus"
             "store::tests::v3_launch_outcomes_upgrade_to_the_refused_spawn_shape";
+          flow-registration-stage-on-wire = context.exactTest "flow-nexus"
+            "herdr::launch::tests::every_registration_stage_is_carried_on_the_wire";
+          flow-registration-refusal-reported = context.exactTest "flow-nexus"
+            "tests::reservation::a_refused_registration_is_reported_with_its_stage";
+          flow-native-step-refusal-answered = context.exactTest "flow-nexus"
+            "performing::failure_tests::a_binding_failure_is_answered_with_its_stage_and_allowlisted_category";
+          flow-receipt-refusal-staged = context.exactTest "flow-nexus"
+            "tests::a_receipt_that_contradicts_the_launch_rejects_it";
+          flow-v4-outcomes-upgrade-to-staged-refusal = context.exactTest "flow-nexus"
+            "store::tests::v4_launch_outcomes_upgrade_to_the_staged_refusal_shape";
+          flow-codex-recovery-binds-recorded-thread = context.exactTest "flow-nexus"
+            "tests::reservation::a_codex_launch_recovered_after_its_start_binds_to_the_recorded_thread";
+          flow-codex-recovery-refused-at-bind = context.exactTest "flow-nexus"
+            "tests::reservation::a_codex_launch_recovered_without_its_thread_is_refused_at_bind_on_the_wire";
+          flow-codex-wake-refused-while-tui-runs = context.exactTest "flow-nexus"
+            "tests::waking::a_wake_is_refused_while_a_remote_resumed_codex_tui_runs_the_thread";
+          flow-codex-pane-other-thread-not-held = context.exactTest "flow-nexus"
+            "tests::waking::a_recorded_codex_pane_reporting_another_thread_does_not_hold_the_flow";
+          flow-wake-pane-check-codex-aware = context.exactTest "flow-nexus"
+            "tests::waking::the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread";
         }
       );
 

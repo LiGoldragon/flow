@@ -21,8 +21,8 @@ use crate::herdr::reservation::ChoosesNativeSession;
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use sha2::{Digest, Sha256};
 use signal_flow::{
-    ComposedLaunch, HarnessKind, HerdrPaneBinding, NativeLaunchBinding, NativeTargetReceipt,
-    NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor,
+    ComposedLaunch, HarnessKind, HerdrPaneBinding, NativeLaunchBinding, NativeLaunchFailure,
+    NativeTargetReceipt, NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor,
     PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
 };
 use std::{
@@ -160,6 +160,72 @@ pub enum RegistrationRefusal {
     ThreadNotNamed,
 }
 
+impl From<&RegistrationRefusal> for signal_flow::RegistrationRefusal {
+    fn from(refusal: &RegistrationRefusal) -> Self {
+        match refusal {
+            RegistrationRefusal::PaneBindingForeign => Self::PaneBindingForeign,
+            RegistrationRefusal::AcknowledgementMismatch => Self::AcknowledgementMismatch,
+            RegistrationRefusal::PromptNotCanonical => Self::PromptNotCanonical,
+            RegistrationRefusal::NativeTarget(target) => Self::NativeTarget(target.into()),
+            RegistrationRefusal::TranscriptBoundary(_) => Self::TranscriptBoundary,
+            RegistrationRefusal::ThreadNotNamed => Self::ThreadNotNamed,
+        }
+    }
+}
+
+impl From<&NativeTargetRefusal> for signal_flow::NativeTargetRefusal {
+    fn from(refusal: &NativeTargetRefusal) -> Self {
+        match refusal {
+            NativeTargetRefusal::HerdrUnreadable(_) => Self::HerdrUnreadable,
+            NativeTargetRefusal::PaneMismatch => Self::PaneMismatch,
+            NativeTargetRefusal::NoNativeSession => Self::NoNativeSession,
+            NativeTargetRefusal::IdentityInexact => Self::IdentityInexact,
+        }
+    }
+}
+
+/// Why a launch's native transcript was not read as its receipt: the pane
+/// is not the bound native target, the transcript could not be read (the
+/// adapter's text, which holds no secret, kept for the log), or what it
+/// shows contradicts the launch.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TranscriptRefusal {
+    #[error("{0}")]
+    Target(#[from] NativeTargetRefusal),
+    #[error("{0}")]
+    Unreadable(String),
+    #[error("the native transcript contradicts the launch: {0:?}")]
+    Contradicted(signal_flow::NativeLaunchFailure),
+}
+
+impl From<String> for TranscriptRefusal {
+    fn from(error: String) -> Self {
+        Self::Unreadable(error)
+    }
+}
+
+impl From<signal_flow::NativeLaunchFailure> for TranscriptRefusal {
+    fn from(failure: signal_flow::NativeLaunchFailure) -> Self {
+        Self::Contradicted(failure)
+    }
+}
+
+impl From<TranscriptRefusal> for String {
+    fn from(refusal: TranscriptRefusal) -> Self {
+        refusal.to_string()
+    }
+}
+
+impl From<&TranscriptRefusal> for signal_flow::NativeLaunchFailure {
+    fn from(refusal: &TranscriptRefusal) -> Self {
+        match refusal {
+            TranscriptRefusal::Target(target) => target.into(),
+            TranscriptRefusal::Unreadable(_) => Self::TranscriptUnreadable,
+            TranscriptRefusal::Contradicted(failure) => failure.clone(),
+        }
+    }
+}
+
 /// Whether a Codex rollout row is the session meta of exactly this thread.
 pub(crate) trait NamesCodexThread {
     fn names_thread(&self, thread: &str) -> bool;
@@ -238,7 +304,7 @@ pub trait ObservesNativeTargetReceipt {
     fn observe_native_target_receipt(
         &self,
         durable_intent: &PromptDeliveryIntent,
-    ) -> Result<StartupProgress, String>;
+    ) -> Result<StartupProgress, TranscriptRefusal>;
 }
 
 /// How each Codex block a launch may leave out opens when Codex puts it in a
@@ -684,7 +750,7 @@ pub(crate) trait CapturesTranscripts {
         native_session_id: &str,
         harness: &HarnessKind,
         model_name: Option<&str>,
-    ) -> Result<(PathBuf, Metadata, Vec<PathBuf>), String>;
+    ) -> Result<(PathBuf, Metadata, Vec<PathBuf>), TranscriptRefusal>;
     fn capture_transcript_boundary(
         &self,
         binding: &NativeLaunchBinding,
@@ -695,7 +761,10 @@ pub(crate) trait CapturesTranscripts {
         binding: &NativeLaunchBinding,
         model_name: &str,
     ) -> Result<NativeTranscriptBoundary, String>;
-    fn receipt_input(&self, intent: &PromptDeliveryIntent) -> Result<Option<(File, bool)>, String>;
+    fn receipt_input(
+        &self,
+        intent: &PromptDeliveryIntent,
+    ) -> Result<Option<(File, bool)>, TranscriptRefusal>;
 }
 
 impl CapturesTranscripts for HerdrCli {
@@ -705,32 +774,41 @@ impl CapturesTranscripts for HerdrCli {
         native_session_id: &str,
         harness: &HarnessKind,
         model_name: Option<&str>,
-    ) -> Result<(PathBuf, Metadata, Vec<PathBuf>), String> {
+    ) -> Result<(PathBuf, Metadata, Vec<PathBuf>), TranscriptRefusal> {
         self.verify_native_target(pane, native_session_id, harness)?;
-        let root = match harness {
-            HarnessKind::Codex => {
-                &self
-                    .codex_endpoints
-                    .endpoint_for(model_name.ok_or("Codex transcript selection requires a model")?)
-                    .map_err(|error| error.to_string())?
-                    .transcript_root
-            }
-            HarnessKind::Claude => &self.claude_transcript_root,
-        };
+        let root =
+            match harness {
+                HarnessKind::Codex => {
+                    &self
+                        .codex_endpoints
+                        .endpoint_for(model_name.ok_or_else(|| {
+                            "Codex transcript selection requires a model".to_owned()
+                        })?)
+                        .map_err(|error| error.to_string())?
+                        .transcript_root
+                }
+                HarnessKind::Claude => &self.claude_transcript_root,
+            };
         let canonical_root = root.canonicalize().map_err(|error| {
             format!("configured native transcript root is unavailable: {error}")
         })?;
         let root_before = fs::metadata(&canonical_root)
             .map_err(|error| format!("native transcript root metadata failed: {error}"))?;
         if !root_before.is_dir() {
-            return Err("configured native transcript root is not a directory".into());
+            return Err("configured native transcript root is not a directory"
+                .to_owned()
+                .into());
         }
         let mut found = Vec::new();
         canonical_root.collect_native_transcripts(native_session_id, harness, 0, &mut found)?;
         let root_after = fs::metadata(&canonical_root)
             .map_err(|error| format!("native transcript root metadata failed: {error}"))?;
         if root_before.dev() != root_after.dev() || root_before.ino() != root_after.ino() {
-            return Err("configured native transcript root changed during observation".into());
+            return Err(
+                "configured native transcript root changed during observation"
+                    .to_owned()
+                    .into(),
+            );
         }
         Ok((canonical_root, root_after, found))
     }
@@ -812,9 +890,12 @@ impl CapturesTranscripts for HerdrCli {
         }))
     }
 
-    fn receipt_input(&self, intent: &PromptDeliveryIntent) -> Result<Option<(File, bool)>, String> {
+    fn receipt_input(
+        &self,
+        intent: &PromptDeliveryIntent,
+    ) -> Result<Option<(File, bool)>, TranscriptRefusal> {
         if !intent.boundary_matches_intent() {
-            return Err("native transcript boundary does not match prompt intent".into());
+            return Err(signal_flow::NativeLaunchFailure::BoundaryMismatch.into());
         }
         let (root, root_metadata, found) = self.transcript_candidates(
             &intent.herdr_pane_binding,
@@ -831,7 +912,9 @@ impl CapturesTranscripts for HerdrCli {
                     .transcript_root_inode
                     .decimal_identity("root inode")?;
                 if root_metadata.dev() != expected_device || root_metadata.ino() != expected_inode {
-                    return Err("configured native transcript root was replaced".into());
+                    return Err("configured native transcript root was replaced"
+                        .to_owned()
+                        .into());
                 }
                 if found.is_empty() {
                     return Ok(None);
@@ -839,7 +922,7 @@ impl CapturesTranscripts for HerdrCli {
                 let transcript = root.one_resolved_transcript(found)?;
                 File::open(transcript)
                     .map(|file| Some((file, true)))
-                    .map_err(|error| format!("native transcript is unreadable: {error}"))
+                    .map_err(|error| format!("native transcript is unreadable: {error}").into())
             }
             NativeTranscriptBoundary::Existing(cursor) => {
                 let transcript = root.one_resolved_transcript(found)?;
@@ -853,14 +936,16 @@ impl CapturesTranscripts for HerdrCli {
                 let byte_offset = u64::try_from(cursor.transcript_byte_offset)
                     .map_err(|_| "native transcript boundary is negative".to_owned())?;
                 if metadata.dev() != expected_device || metadata.ino() != expected_inode {
-                    return Err("native transcript file was replaced".into());
+                    return Err("native transcript file was replaced".to_owned().into());
                 }
                 if metadata.len() < byte_offset {
-                    return Err("native transcript file was truncated".into());
+                    return Err("native transcript file was truncated".to_owned().into());
                 }
                 let (prefix_sha256, _) = file.hash_prefix(byte_offset)?;
                 if prefix_sha256 != cursor.transcript_prefix_sha256 {
-                    return Err("native transcript prefix changed after intent persistence".into());
+                    return Err("native transcript prefix changed after intent persistence"
+                        .to_owned()
+                        .into());
                 }
                 file.seek(SeekFrom::Start(byte_offset))
                     .map_err(|error| format!("native transcript seek failed: {error}"))?;
@@ -2094,7 +2179,7 @@ impl AcceptsLaunchRegistration for HerdrCli {
                     &binding.harness_kind,
                     Some(&launch.launch_profile.model_name),
                 )
-                .map_err(RegistrationRefusal::TranscriptBoundary)?;
+                .map_err(|refusal| RegistrationRefusal::TranscriptBoundary(refusal.to_string()))?;
             let transcript = root
                 .one_resolved_transcript(found)
                 .map_err(RegistrationRefusal::TranscriptBoundary)?;
@@ -2195,7 +2280,7 @@ impl ReadsStartupRecord for StartupReading {
         &mut self,
         input_0: N,
         input_1: O,
-    ) -> Result<i64, String> {
+    ) -> Result<i64, NativeLaunchFailure> {
         let text = input_0.text();
         let intent = input_1.intent();
         let expected = usize::try_from(self.seen_parts)
@@ -2207,14 +2292,14 @@ impl ReadsStartupRecord for StartupReading {
             self.last_part_answered = false;
             return Ok(self.seen_parts);
         }
-        Err("a native user turn differs from the startup parts".into())
+        Err(NativeLaunchFailure::PartDiffers)
     }
 
     fn read_record<N: JsonRow, O: DeliveryIntended>(
         &mut self,
         input_0: N,
         input_1: O,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<String>, NativeLaunchFailure> {
         let row = &input_0.row();
         let intent = &input_1.intent();
         let every_part =
@@ -2257,7 +2342,7 @@ impl ReadsStartupRecord for StartupReading {
                         .and_then(serde_json::Value::as_str)
                         == Some("skill_listing");
                 if used_removed || listed_skills {
-                    return Err("the native session shows a part its leave-outs removed".into());
+                    return Err(NativeLaunchFailure::LeaveOutShown);
                 }
                 if kind == Some("user")
                     && !every_part
@@ -2275,7 +2360,7 @@ impl ReadsStartupRecord for StartupReading {
                             != Some(intent.model_name.as_str())
                             || !row.claude_effort_matches(intent.effort.as_str())
                         {
-                            return Err("native Claude model or effort differs from intent".into());
+                            return Err(NativeLaunchFailure::ModelOrEffortDiffers);
                         }
                         return Ok(row.assistant_turn(&intent.native_session_id));
                     }
@@ -2306,26 +2391,21 @@ impl ReadsStartupRecord for StartupReading {
                         .flatten()
                         .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str));
                     for text in texts {
-                        if let Some((leave_out, opening)) =
-                            CODEX_LEFT_OUT_OPENINGS.iter().find(|(leave_out, opening)| {
-                                intent.leave_outs.contains(leave_out) && text.starts_with(opening)
-                            })
-                        {
-                            return Err(format!(
-                                "native Codex request carried {opening:?} while {leave_out:?} is left out"
-                            ));
+                        if CODEX_LEFT_OUT_OPENINGS.iter().any(|(leave_out, opening)| {
+                            intent.leave_outs.contains(leave_out) && text.starts_with(opening)
+                        }) {
+                            return Err(NativeLaunchFailure::LeaveOutShown);
                         }
                     }
                 }
                 if kind == Some("turn_context") {
-                    let payload = payload
-                        .ok_or_else(|| "native Codex turn context has no payload".to_owned())?;
+                    let payload = payload.ok_or(NativeLaunchFailure::TranscriptUnreadable)?;
                     if payload.get("model").and_then(serde_json::Value::as_str)
                         != Some(intent.model_name.as_str())
                         || payload.get("effort").and_then(serde_json::Value::as_str)
                             != Some(intent.effort.as_str())
                     {
-                        return Err("native Codex model or effort differs from intent".into());
+                        return Err(NativeLaunchFailure::ModelOrEffortDiffers);
                     }
                     self.native_turn_option = payload
                         .get("turn_id")
@@ -2349,7 +2429,7 @@ impl ReadsStartupRecord for StartupReading {
                     let content = row
                         .pointer("/payload/item/content")
                         .and_then(serde_json::Value::as_array)
-                        .ok_or_else(|| "native Codex user turn has no input vector".to_owned())?;
+                        .ok_or(NativeLaunchFailure::PartDiffers)?;
                     let text = match content.as_slice() {
                         [item]
                             if item.get("type").and_then(serde_json::Value::as_str)
@@ -2359,9 +2439,9 @@ impl ReadsStartupRecord for StartupReading {
                         }
                         _ => None,
                     }
-                    .ok_or_else(|| "native Codex user turn is not one text item".to_owned())?;
+                    .ok_or(NativeLaunchFailure::PartDiffers)?;
                     if every_part || turn.is_none() || turn != self.native_turn_option.as_deref() {
-                        return Err("native Codex user turn differs from the startup parts".into());
+                        return Err(NativeLaunchFailure::PartDiffers);
                     }
                     self.read_part(text, intent)?;
                     self.part_turn_option = turn.map(str::to_owned);
@@ -2401,7 +2481,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
     fn observe_native_target_receipt(
         &self,
         durable_intent: &PromptDeliveryIntent,
-    ) -> Result<StartupProgress, String> {
+    ) -> Result<StartupProgress, TranscriptRefusal> {
         let Some((input, adopted_after_absence)) = self.receipt_input(durable_intent)? else {
             return Ok(StartupProgress::Waiting(durable_intent.clone()));
         };
@@ -2433,9 +2513,7 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             };
             if thread_unnamed {
                 if !row.names_thread(&durable_intent.native_session_id) {
-                    return Err(
-                        "native Codex transcript does not begin by naming the bound thread".into(),
-                    );
+                    return Err(NativeLaunchFailure::ThreadNotNamed.into());
                 }
                 thread_unnamed = false;
             }
@@ -2472,7 +2550,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             let boundary =
                 self.capture_transcript_start_boundary(&binding, &durable_intent.model_name)?;
             if !matches!(boundary, NativeTranscriptBoundary::Existing(_)) {
-                return Err("new native transcript disappeared during adoption".into());
+                return Err("new native transcript disappeared during adoption"
+                    .to_owned()
+                    .into());
             }
             intent.native_transcript_boundary = boundary;
             // The adopted cursor is recorded before any part advances.
@@ -2511,7 +2591,7 @@ pub(crate) mod tests {
     use crate::title::ShowsNativeTitle;
     use signal_flow::{
         Aspect, ComposedLaunch, Effort, FirstPromptPayload, HarnessKind, HerdrPaneBinding,
-        LaunchProfile, ModelName, NativeLaunchBinding, NativeTargetReceipt,
+        LaunchProfile, ModelName, NativeLaunchBinding, NativeLaunchFailure, NativeTargetReceipt,
         NativeTranscriptBoundary, PromptDeliveryIntent, PromptDeliveryResult, PromptPart,
         RegistrationAcknowledgement, SystemPrompt, TargetReceiptRequest,
     };
@@ -3001,10 +3081,8 @@ printf '%s\n' 123456
             .unwrap();
         writeln!(append, "{user}\n{skill_call}").unwrap();
         assert!(
-            adapter
-                .observe_native_target_receipt(&intent)
-                .unwrap_err()
-                .contains("leave-outs removed")
+            adapter.observe_native_target_receipt(&intent).unwrap_err()
+                == super::TranscriptRefusal::Contradicted(NativeLaunchFailure::LeaveOutShown)
         );
     }
 
@@ -3622,9 +3700,10 @@ printf '%s\n' 123456
             launch.leave_outs = vec![leave_out.clone()];
             let intent = registered_intent(&adapter, &launch, pane, native_session);
             let refusal = adapter.observe_native_target_receipt(&intent).unwrap_err();
-            assert!(
-                refusal.contains(&format!("while {leave_out:?} is left out")),
-                "{refusal}"
+            assert_eq!(
+                refusal,
+                super::TranscriptRefusal::Contradicted(NativeLaunchFailure::LeaveOutShown),
+                "{leave_out:?}"
             );
         }
     }
@@ -3785,6 +3864,48 @@ printf '%s\n' 123456
 
     /// The transcript is the authority for the Codex thread when Herdr
     /// reports none: its first record names exactly the thread Flow opened.
+    /// Every registration stage reaches the wire as its own variant; the
+    /// adapter text a stage keeps for the log does not.
+    #[test]
+    fn every_registration_stage_is_carried_on_the_wire() {
+        use super::RegistrationRefusal as Stage;
+        use signal_flow::RegistrationRefusal as Wire;
+        for (stage, wire) in [
+            (Stage::PaneBindingForeign, Wire::PaneBindingForeign),
+            (
+                Stage::AcknowledgementMismatch,
+                Wire::AcknowledgementMismatch,
+            ),
+            (Stage::PromptNotCanonical, Wire::PromptNotCanonical),
+            (
+                Stage::NativeTarget(NativeTargetRefusal::HerdrUnreadable(
+                    "secret=/private/socket".into(),
+                )),
+                Wire::NativeTarget(signal_flow::NativeTargetRefusal::HerdrUnreadable),
+            ),
+            (
+                Stage::NativeTarget(NativeTargetRefusal::PaneMismatch),
+                Wire::NativeTarget(signal_flow::NativeTargetRefusal::PaneMismatch),
+            ),
+            (
+                Stage::NativeTarget(NativeTargetRefusal::NoNativeSession),
+                Wire::NativeTarget(signal_flow::NativeTargetRefusal::NoNativeSession),
+            ),
+            (
+                Stage::NativeTarget(NativeTargetRefusal::IdentityInexact),
+                Wire::NativeTarget(signal_flow::NativeTargetRefusal::IdentityInexact),
+            ),
+            (
+                Stage::TranscriptBoundary("secret=/private/root".into()),
+                Wire::TranscriptBoundary,
+            ),
+            (Stage::ThreadNotNamed, Wire::ThreadNotNamed),
+        ] {
+            assert_eq!(Wire::from(&stage), wire);
+            assert!(!format!("{wire:?}").contains("secret="));
+        }
+    }
+
     #[test]
     fn a_codex_transcript_must_name_the_opened_thread() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
@@ -3828,10 +3949,8 @@ printf '%s\n' 123456
         )
         .unwrap();
         assert!(
-            adapter
-                .observe_native_target_receipt(&intent)
-                .unwrap_err()
-                .contains("naming the bound thread")
+            adapter.observe_native_target_receipt(&intent).unwrap_err()
+                == super::TranscriptRefusal::Contradicted(NativeLaunchFailure::ThreadNotNamed)
         );
     }
 
@@ -3873,10 +3992,8 @@ printf '%s\n' 123456
             writeln!(append, "{row}").expect("append receipt row");
         }
         assert!(
-            adapter
-                .observe_native_target_receipt(&intent)
-                .unwrap_err()
-                .contains("differs from the startup parts")
+            adapter.observe_native_target_receipt(&intent).unwrap_err()
+                == super::TranscriptRefusal::Contradicted(NativeLaunchFailure::PartDiffers)
         );
     }
 
@@ -4005,10 +4122,10 @@ printf '%s\n' 123456
         )
         .expect("receipt with another effort");
         assert!(
-            adapter
-                .observe_native_target_receipt(&intent)
-                .unwrap_err()
-                .contains("model or effort differs")
+            adapter.observe_native_target_receipt(&intent).unwrap_err()
+                == super::TranscriptRefusal::Contradicted(
+                    NativeLaunchFailure::ModelOrEffortDiffers
+                )
         );
     }
 
@@ -4030,6 +4147,7 @@ printf '%s\n' 123456
             adapter
                 .observe_native_target_receipt(&intent)
                 .unwrap_err()
+                .to_string()
                 .contains("native identity is no longer exact")
         );
     }
@@ -4061,6 +4179,7 @@ printf '%s\n' 123456
             adapter
                 .observe_native_target_receipt(&intent)
                 .unwrap_err()
+                .to_string()
                 .contains("truncated")
         );
 
@@ -4069,6 +4188,7 @@ printf '%s\n' 123456
             adapter
                 .observe_native_target_receipt(&intent)
                 .unwrap_err()
+                .to_string()
                 .contains("prefix changed")
         );
 
@@ -4079,6 +4199,7 @@ printf '%s\n' 123456
             adapter
                 .observe_native_target_receipt(&intent)
                 .unwrap_err()
+                .to_string()
                 .contains("file was replaced")
         );
     }
@@ -4265,10 +4386,8 @@ printf '%s\n' 123456
         )
         .unwrap();
         assert!(
-            adapter
-                .observe_native_target_receipt(&next)
-                .unwrap_err()
-                .contains("differs from the startup parts")
+            adapter.observe_native_target_receipt(&next).unwrap_err()
+                == super::TranscriptRefusal::Contradicted(NativeLaunchFailure::PartDiffers)
         );
     }
 

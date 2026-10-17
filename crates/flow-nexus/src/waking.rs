@@ -50,7 +50,9 @@ use crate::herdr::launch::{
     ObservesNativeLaunchBinding, ResumesNativeHerdrHarness, WaitsForPaneRest,
 };
 use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
-use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster};
+use crate::herdr::{
+    LocatesNativeTranscripts, OwnSession, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster,
+};
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::store::address_hold::HoldsLaunchAddress;
@@ -840,7 +842,19 @@ impl WakesInParts for RunningNexus {
 
     fn live_last_flow(&self, metaflow: &Metaflow) -> Option<FlowNode> {
         let node = self.store.flow_node(metaflow.past.last()?).ok().flatten()?;
-        (node.flow_lifecycle.is_live() && self.herdr.runs_own_session(&node)).then_some(node)
+        if !node.flow_lifecycle.is_live() {
+            return None;
+        }
+        match self.herdr.own_session(&node) {
+            OwnSession::Runs => Some(node),
+            presence => {
+                eprintln!(
+                    "flow-nexus: flow {} is not live in its own pane: {presence:?}",
+                    node.flow_id
+                );
+                None
+            }
+        }
     }
 
     fn settle_live_resumed(&self, address: &Address, flow_id: &str) -> Result<FlowId, WakeRefusal> {

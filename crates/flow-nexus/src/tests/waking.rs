@@ -1018,6 +1018,127 @@ fn the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread() {
     );
 }
 
+/// The live-seat check names why a flow's recorded pane does not run its
+/// own session: a stale pane (the recorded pane gone from Herdr), a missing
+/// pane (none recorded), a pane running another thread or session, a Claude
+/// pane reporting none, an unclaimed FlowId, an unreadable Herdr; a Codex
+/// pane reporting no session runs the flow's thread.
+#[test]
+fn the_live_seat_check_names_why_a_recorded_pane_is_not_the_flows_own() {
+    use crate::herdr::{OwnSession, ReadsHerdrPanes};
+    let fixture = NexusFixture::new();
+    let codex = fixture.node();
+    let reporting = |harness: &str, value: &str| {
+        let mut agent = fixture.settled_agent();
+        agent["agent"] = serde_json::Value::String(harness.into());
+        agent["agent_session"] = serde_json::json!({
+            "source":format!("herdr:{harness}"),"agent":harness,"kind":"id","value":value
+        });
+        agent
+    };
+    let presence = |agents: Vec<serde_json::Value>, node: &FlowNode| {
+        fixture.set_agents(agents);
+        fixture.nexus.herdr.own_session(node)
+    };
+
+    // Codex.
+    assert_eq!(
+        presence(vec![fixture.settled_agent()], &codex),
+        OwnSession::Runs
+    );
+    assert_eq!(
+        presence(vec![reporting("codex", &codex.session_id)], &codex),
+        OwnSession::Runs
+    );
+    assert_eq!(presence(vec![], &codex), OwnSession::PaneGone);
+    let mut replaced = fixture.settled_agent();
+    replaced["terminal_id"] = serde_json::Value::String("term-replaced".into());
+    assert_eq!(presence(vec![replaced], &codex), OwnSession::PaneGone);
+    assert_eq!(
+        presence(
+            vec![reporting("codex", "01a0b22c-0000-7000-8000-000000000000")],
+            &codex
+        ),
+        OwnSession::OtherSession
+    );
+    let mut unrecorded = codex.clone();
+    unrecorded.herdr_route_selection = HerdrRouteSelection::Unavailable;
+    assert_eq!(
+        presence(vec![fixture.settled_agent()], &unrecorded),
+        OwnSession::NoRecordedPane
+    );
+
+    // Claude, in the same pane, claimed as the Claude seat.
+    claude_seat(&fixture, 1_000);
+    let mut claude = codex.clone();
+    claude.flow_id = CLAUDE_SEAT.into();
+    claude.session_id = CLAUDE_SESSION.into();
+    claude.harness_kind = HarnessKind::Claude;
+    assert_eq!(
+        presence(vec![reporting("claude", CLAUDE_SESSION)], &claude),
+        OwnSession::Runs
+    );
+    assert_eq!(
+        presence(vec![claude_agent(&fixture)], &claude),
+        OwnSession::SessionUnreported
+    );
+    assert_eq!(
+        presence(
+            vec![reporting("claude", "c1a0de00-0000-4000-8000-00000000ffff")],
+            &claude
+        ),
+        OwnSession::OtherSession
+    );
+    assert_eq!(presence(vec![], &claude), OwnSession::PaneGone);
+
+    // An unclaimed FlowId and an unreadable Herdr.
+    fs::remove_file(fixture.directory.path().join("flows/.908786.flow-id")).unwrap();
+    assert_eq!(
+        presence(vec![fixture.settled_agent()], &codex),
+        OwnSession::Unclaimed
+    );
+    crate::fixture_executable::FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install("#!/bin/sh\nexit 64\n");
+    assert_eq!(
+        fixture.nexus.herdr.own_session(&claude),
+        OwnSession::HerdrUnreadable
+    );
+}
+
+/// A live Codex last flow whose recorded pane runs another thread is not
+/// taken as the seat left live: the wake does not adopt it (here it then
+/// has no launch to place), and the metaflow stays Asleep.
+#[test]
+fn a_live_codex_flow_whose_pane_runs_another_thread_is_not_adopted() {
+    let fixture = NexusFixture::new();
+    fixture
+        .nexus
+        .store
+        .register_flow(fixture.node())
+        .expect("Codex seat registered");
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["908786"],
+        vec![Request::Order("A".into())],
+    ));
+    let mut other = fixture.settled_agent();
+    other["agent_session"] = serde_json::json!({
+        "source":"herdr:codex","agent":"codex","kind":"id",
+        "value":"01a0b22c-0000-7000-8000-000000000000"
+    });
+    fixture.set_agents(vec![other]);
+    assert_eq!(
+        fixture
+            .nexus
+            .perform(Operation::Wake(address(Layer::Secondary))),
+        Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
+    );
+    assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
+}
+
 fn typed_prompts(fixture: &NexusFixture) -> Vec<String> {
     fs::read_to_string(fixture.directory.path().join("pane-typed.txt"))
         .unwrap_or_default()

@@ -231,8 +231,11 @@ impl NexusFixture {
     /// session, as for a remote-resumed TUI; the `flow-id` stand-in claims
     /// the fixture's Codex flow for exactly the staged thread.
     fn codex_launch_left_after_spawn(&self, launch_request_id: &str) -> super::StagedLaunch {
+        use crate::herdr::launch::ChecksComposedLaunch;
         use crate::store::RecordsCreatedLaunchPane;
-        let launch = self.staged_launch(launch_request_id, None);
+        let mut launch = self.staged_launch(launch_request_id, None);
+        // The pane Open created carries the launch's own agent name.
+        launch.pane.herdr_agent_name = launch.composed.launch_agent_name();
         launch.reserve(&self.nexus);
         launch.record_native_intent(&self.nexus);
         assert!(
@@ -249,7 +252,7 @@ impl NexusFixture {
                 .is_some()
         );
         let agent = serde_json::json!({"result":{"agent":{
-            "name":"fixture-agent",
+            "name":launch.pane.herdr_agent_name,
             "agent":"codex",
             "workspace_id":"fixture-workspace",
             "pane_id":"w1:p1",

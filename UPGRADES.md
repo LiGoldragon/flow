@@ -1,11 +1,12 @@
 # Flow 0.35.6
 
-Wire change on the ordinary socket: signal-flow 19.0.0 (37a41014); its
+Wire change on both sockets. Ordinary: signal-flow 19.0.0 (37a41014); its
 contract digest changes from c573701bba34c200 to baa84beb4f2cc84b, so every
 ordinary-socket peer (Message, signal-message) repins it before it can greet
-this Flow. The meta socket's contract is unchanged (meta-signal-flow 23.0.1,
-af4eaab9, pins signal-flow 19.0.0; digest 371d348ad5b3fbad). The store
-upgrades its launch outcomes and adds one table.
+this Flow. Meta: meta-signal-flow 24.0.0 (a0f8d075, pins signal-flow 19.0.0);
+its digest changes from 371d348ad5b3fbad to 7bbc37359da8843c, so every
+meta-wire peer repins it. The store upgrades its launch outcomes and adds one
+table.
 
 - **A refused registration names its stage on the wire.**
   `StartRejected.RegistrationRefused.RegistrationRefusal`: `RouteUnverified`
@@ -40,6 +41,27 @@ upgrades its launch outcomes and adds one table.
   recognizing a Codex agent in it and no session reported, holds the opened
   thread; a reported session must equal the thread. A wake of such a flow is
   refused `ConflictingBinding` rather than starting a second seat.
+- **The live-seat check is typed.** `own_session` answers `Runs`,
+  `NoRecordedPane`, `Unclaimed`, `HerdrUnreadable`, `PaneGone` (the recorded
+  pane is gone from Herdr), `OtherSession` or `SessionUnreported` (a Claude
+  pane reporting none); a wake adopts a live last flow only on `Runs` and
+  logs the reason otherwise. A Codex pane reporting no session runs its
+  thread.
+- **MetaBindExisting verifies each binding with Herdr.** The pane must be in
+  the container's Herdr session with the binding's harness at its workspace,
+  pane and terminal (`PaneAbsent`); `herdr pane process-info --pane` must list
+  the binding's process in the pane's foreground (`ProcessMismatch`); a session
+  Herdr reports must be the binding's (`SessionMismatch`); a Claude pane must
+  report one (`SessionUnreported`); a Codex pane reporting none is proven only
+  by a rollout whose first record is the `session_meta` naming the session
+  (`SessionUnproven`); an unreadable snapshot or process list is
+  `HerdrUnreadable`. A refused binding stores nothing.
+- **A Codex TUI's terminal title is the thread title alone.** The TUI starts
+  with `-c tui.terminal_title=["thread-title"]`; codex-tui 0.161.0-alpha.2
+  names its title items in `[tui].terminal_title` (`project-name`,
+  `current-dir`, `run-state`, `thread-title`, ...), and its default appended
+  the project name (" | primary"). The title check for Codex reads the thread
+  name and the exact Herdr pane label, not the terminal title.
 - A Start applied to the store alone answers `LaunchPersistenceRefused`.
 
 # Flow 0.35.5

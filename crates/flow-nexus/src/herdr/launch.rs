@@ -307,6 +307,11 @@ pub trait ObservesNativeTargetReceipt {
     ) -> Result<StartupProgress, TranscriptRefusal>;
 }
 
+/// The Codex TUI's terminal title items: the thread title alone. The items
+/// codex-tui 0.161.0-alpha.2 accepts in `[tui].terminal_title` include
+/// `project-name`, `current-dir`, `run-state` and `thread-title`.
+const CODEX_TERMINAL_TITLE: &str = "tui.terminal_title=[\"thread-title\"]";
+
 /// How each Codex block a launch may leave out opens when Codex puts it in a
 /// request: the openings of the developer and user context messages in the
 /// rollout codex-tui 0.161.0-alpha.2 wrote for thread
@@ -1687,6 +1692,12 @@ impl SpawnsNativeHarness for HerdrCli {
                     "model_reasoning_effort={}",
                     launch.launch_profile.effort
                 ));
+                // The terminal title is the thread title alone, which Title
+                // sets to the seat's struct: codex-tui 0.161.0-alpha.2 names
+                // its items in `[tui].terminal_title`, and without this list
+                // appends the project name (" | primary").
+                arguments.push("-c".into());
+                arguments.push(CODEX_TERMINAL_TITLE.into());
             }
         }
         // The launch's leave-outs, as its harness's own switches.
@@ -2855,7 +2866,11 @@ printf '%s\n' 123456
         assert!(!start.contains(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG));
         // The harness starts with no positional prompt; the one first prompt
         // travels later in a single app-server turn/start.
-        assert!(start.ends_with("-c model_reasoning_effort=high"));
+        assert!(
+            start.ends_with(
+                "-c model_reasoning_effort=high -c tui.terminal_title=[\"thread-title\"]"
+            )
+        );
         assert!(!start.contains('$'));
         assert!(!calls.contains("agent prompt"));
     }

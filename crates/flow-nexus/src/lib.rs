@@ -48,7 +48,10 @@ pub mod title;
 pub mod values;
 pub mod waking;
 
-use binding::{ChecksFlowBinding, ChecksFlowContainer, ChecksProcessIdentity, RefusesBinding};
+use binding::{
+    ChecksFlowBinding, ChecksFlowContainer, ChecksProcessIdentity, RefusesBinding,
+    VerifiesExistingBinding,
+};
 use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchComposer, OpensLaunchComposer};
@@ -373,6 +376,13 @@ impl Dispatches for RunningNexus {
                             meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch
                                 .refusal_of(flow_id),
                         );
+                        continue;
+                    }
+                    if let Err(reason) = self
+                        .herdr
+                        .verify_existing_binding(&container.herdr_session_name, &binding)
+                    {
+                        results.push(reason.refusal_of(flow_id));
                         continue;
                     }
                     // A flow already in the store is not imported again: the
@@ -1267,6 +1277,243 @@ mod tests {
         }
     }
 
+    /// Herdr and the Codex rollouts as they show `bindings` live, for the
+    /// one MetaBindExisting `run` performs: each pane in the snapshot with
+    /// its harness, this test process in its foreground, each Codex session
+    /// named by a rollout's session_meta. The fixture's own Herdr returns
+    /// after it.
+    fn with_bound_world<T>(
+        fixture: &NexusFixture,
+        bindings: &[&meta_signal_flow::FlowBinding],
+        run: impl FnOnce() -> T,
+    ) -> T {
+        use crate::herdr::launch::NamesHerdrHarness;
+        let agents = bindings
+            .iter()
+            .map(|binding| {
+                serde_json::json!({
+                    "agent": binding.harness_kind.expected_harness(),
+                    "agent_status": "idle",
+                    "name": binding.herdr_agent_name,
+                    "pane_id": binding.herdr_pane_id,
+                    "terminal_id": binding.herdr_terminal_id,
+                    "workspace_id": binding.herdr_workspace_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let rollouts = fixture.directory.path().join("native-transcripts/codex");
+        fs::create_dir_all(&rollouts).expect("rollout root");
+        for binding in bindings
+            .iter()
+            .filter(|binding| binding.harness_kind == HarnessKind::Codex)
+        {
+            fs::write(
+                rollouts.join(format!("rollout-{}.jsonl", binding.native_session_id)),
+                format!(
+                    "{}\n",
+                    serde_json::json!({"type":"session_meta","payload":{"id":binding.native_session_id}})
+                ),
+            )
+            .expect("rollout written");
+        }
+        let previous = fs::read(&fixture.snapshot_program).ok();
+        herdr_world(fixture, agents, std::process::id());
+        let result = run();
+        match previous {
+            Some(bytes) => fs::write(&fixture.snapshot_program, bytes).expect("Herdr restored"),
+            None => {
+                let _ = fs::remove_file(&fixture.snapshot_program);
+            }
+        }
+        result
+    }
+
+    /// A Herdr whose session snapshot shows `agents` and whose every pane
+    /// runs `pid` in its foreground.
+    fn herdr_world(fixture: &NexusFixture, agents: Vec<serde_json::Value>, pid: u32) {
+        let snapshot = serde_json::json!({
+            "id":"cli:api:snapshot",
+            "result":{"snapshot":{"agents":agents,"protocol":20,"version":"0.8.2"},
+            "type":"session_snapshot"}
+        });
+        FixtureExecutable {
+            path: fixture.snapshot_program.clone(),
+        }
+        .install(&format!(
+            "#!/bin/sh\n{}\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"pane process-info\") printf '{{\"result\":{{\"process_info\":{{\"pane_id\":\"%s\",\"foreground_processes\":[{{\"pid\":{}}}]}}}}}}\\n' \"$6\" ;;\n  *) exit 64 ;;\nesac\n",
+            fixture.session_listing(),
+            snapshot,
+            pid,
+        ));
+    }
+
+    /// One binding's MetaBindExisting result against the fixture's Herdr.
+    fn bound_once(
+        fixture: &NexusFixture,
+        binding: meta_signal_flow::FlowBinding,
+    ) -> meta_signal_flow::FlowBindingResult {
+        let socket_path = fixture.directory.path().join("herdr-verify.sock");
+        let _ = fs::remove_file(&socket_path);
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let meta_signal_flow::Response::BoundExisting(bound) =
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                    meta_signal_flow::MetaBindExisting {
+                        flow_container: flow_container(&socket_path),
+                        flow_binding_vector: vec![binding],
+                    },
+                ))
+        else {
+            panic!("a live container answers per binding")
+        };
+        let [result] = bound.flow_binding_result_vector.as_slice() else {
+            panic!("one binding, one result")
+        };
+        result.clone()
+    }
+
+    fn refused_for(
+        result: &meta_signal_flow::FlowBindingResult,
+    ) -> Option<meta_signal_flow::FlowBindingRefusalReason> {
+        match result {
+            meta_signal_flow::FlowBindingResult::Refused(refused) => {
+                Some(refused.flow_binding_refusal_reason.clone())
+            }
+            meta_signal_flow::FlowBindingResult::Bound(_) => None,
+        }
+    }
+
+    /// MetaBindExisting takes no pane or session as given: the pane must be
+    /// in the container's Herdr session with the binding's harness, run the
+    /// binding's process, and run its session, as Herdr reports it for
+    /// Claude and as a rollout's session_meta proves it for a Codex pane
+    /// that reports none. Each failure is refused with its reason and
+    /// nothing is stored.
+    #[test]
+    fn meta_bind_existing_verifies_the_pane_process_and_session_with_herdr() {
+        use meta_signal_flow::FlowBindingRefusalReason as Reason;
+        let fixture = NexusFixture::new();
+        let shown = |binding: &meta_signal_flow::FlowBinding| {
+            serde_json::json!({
+                "agent": if binding.harness_kind == HarnessKind::Claude { "claude" } else { "codex" },
+                "agent_status": "idle",
+                "pane_id": binding.herdr_pane_id,
+                "terminal_id": binding.herdr_terminal_id,
+                "workspace_id": binding.herdr_workspace_id,
+            })
+        };
+        let me = std::process::id();
+
+        // Herdr unreadable.
+        FixtureExecutable {
+            path: fixture.snapshot_program.clone(),
+        }
+        .install("#!/bin/sh\nexit 64\n");
+        let codex = existing_binding("codex-unread", "pane-1");
+        assert_eq!(
+            refused_for(&bound_once(&fixture, codex)),
+            Some(Reason::HerdrUnreadable)
+        );
+
+        // The pane is not in the session, or another harness runs in it.
+        let absent = existing_binding("codex-absent", "pane-2");
+        let mut elsewhere = shown(&absent);
+        elsewhere["pane_id"] = serde_json::Value::String("pane-9".into());
+        herdr_world(&fixture, vec![elsewhere], me);
+        assert_eq!(
+            refused_for(&bound_once(&fixture, absent.clone())),
+            Some(Reason::PaneAbsent)
+        );
+        let mut claude_there = shown(&absent);
+        claude_there["agent"] = serde_json::Value::String("claude".into());
+        herdr_world(&fixture, vec![claude_there], me);
+        assert_eq!(
+            refused_for(&bound_once(&fixture, absent)),
+            Some(Reason::PaneAbsent)
+        );
+
+        // The pane runs another process.
+        let other_process = existing_binding("codex-other-process", "pane-3");
+        herdr_world(&fixture, vec![shown(&other_process)], 1);
+        assert_eq!(
+            refused_for(&bound_once(&fixture, other_process)),
+            Some(Reason::ProcessMismatch)
+        );
+
+        // Herdr reports another session.
+        let mismatched = existing_binding("codex-mismatched", "pane-4");
+        let mut reporting = shown(&mismatched);
+        reporting["agent_session"] = serde_json::json!({
+            "source":"herdr:codex","agent":"codex","kind":"id","value":"native-someone-else"
+        });
+        herdr_world(&fixture, vec![reporting], me);
+        assert_eq!(
+            refused_for(&bound_once(&fixture, mismatched)),
+            Some(Reason::SessionMismatch)
+        );
+
+        // A Codex pane reporting no session, and no rollout names it.
+        let unproven = existing_binding("codex-unproven", "pane-5");
+        herdr_world(&fixture, vec![shown(&unproven)], me);
+        assert_eq!(
+            refused_for(&bound_once(&fixture, unproven.clone())),
+            Some(Reason::SessionUnproven)
+        );
+        // A rollout under that name whose session_meta names another thread
+        // proves nothing either.
+        let rollouts = fixture.directory.path().join("native-transcripts/codex");
+        fs::create_dir_all(&rollouts).unwrap();
+        fs::write(
+            rollouts.join("rollout-native-codex-unproven.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"another-thread\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            refused_for(&bound_once(&fixture, unproven.clone())),
+            Some(Reason::SessionUnproven)
+        );
+        // The rollout naming it proves it.
+        fs::write(
+            rollouts.join("rollout-native-codex-unproven.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-codex-unproven\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(refused_for(&bound_once(&fixture, unproven)), None);
+
+        // A Claude pane must report its session, and that session.
+        let mut claude = existing_binding("claude-quiet", "pane-6");
+        claude.harness_kind = HarnessKind::Claude;
+        herdr_world(&fixture, vec![shown(&claude)], me);
+        assert_eq!(
+            refused_for(&bound_once(&fixture, claude.clone())),
+            Some(Reason::SessionUnreported)
+        );
+        let mut reporting = shown(&claude);
+        reporting["agent_session"] = serde_json::json!({
+            "source":"herdr:claude","agent":"claude","kind":"id","value":"native-claude-quiet"
+        });
+        herdr_world(&fixture, vec![reporting], me);
+        assert_eq!(refused_for(&bound_once(&fixture, claude)), None);
+
+        // Nothing refused was stored.
+        for refused in [
+            "codex-unread",
+            "codex-absent",
+            "codex-other-process",
+            "codex-mismatched",
+        ] {
+            assert!(matches!(
+                fixture
+                    .nexus
+                    .dispatch(Query::ResolveRecipient(refused.into())),
+                Response::RecipientResolutionRejected(
+                    signal_flow::RecipientResolutionRejection::UnknownFlow
+                )
+            ));
+        }
+    }
+
     fn flow_container(socket: &Path) -> meta_signal_flow::FlowContainer {
         meta_signal_flow::FlowContainer {
             herdr_session_name: "messaging-build".into(),
@@ -2005,14 +2252,16 @@ mod tests {
             .display()
             .to_string();
 
-        let response = fixture
-            .nexus
-            .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
-                meta_signal_flow::MetaBindExisting {
-                    flow_container: container.clone(),
-                    flow_binding_vector: vec![accepted, ambiguous, dead, duplicate, wrong_cwd],
-                },
-            ));
+        let response = with_bound_world(&fixture, &[&accepted.clone()], || {
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                    meta_signal_flow::MetaBindExisting {
+                        flow_container: container.clone(),
+                        flow_binding_vector: vec![accepted, ambiguous, dead, duplicate, wrong_cwd],
+                    },
+                ))
+        });
         let meta_signal_flow::Response::BoundExisting(bound) = response else {
             panic!("valid container must return ordered per-flow results")
         };
@@ -2223,14 +2472,16 @@ mod tests {
         let _ = fs::remove_file(&socket_path);
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let meta_signal_flow::Response::BoundExisting(bound) =
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
-                    meta_signal_flow::MetaBindExisting {
-                        flow_container: flow_container(&socket_path),
-                        flow_binding_vector: vec![binding],
-                    },
-                ))
+            with_bound_world(fixture, &[&binding.clone()], || {
+                fixture
+                    .nexus
+                    .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                        meta_signal_flow::MetaBindExisting {
+                            flow_container: flow_container(&socket_path),
+                            flow_binding_vector: vec![binding],
+                        },
+                    ))
+            })
         else {
             panic!("a live container answers per binding")
         };
@@ -4218,14 +4469,17 @@ mod tests {
             .path()
             .join(format!("herdr-{flow_id}.sock"));
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
-        let response = fixture
-            .nexus
-            .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
-                meta_signal_flow::MetaBindExisting {
-                    flow_container: flow_container(&socket_path),
-                    flow_binding_vector: vec![existing_binding(flow_id, pane)],
-                },
-            ));
+        let binding = existing_binding(flow_id, pane);
+        let response = with_bound_world(fixture, &[&binding.clone()], || {
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
+                    meta_signal_flow::MetaBindExisting {
+                        flow_container: flow_container(&socket_path),
+                        flow_binding_vector: vec![binding],
+                    },
+                ))
+        });
         assert!(matches!(
             response,
             meta_signal_flow::Response::BoundExisting(bound)

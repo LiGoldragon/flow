@@ -919,12 +919,13 @@ impl WakesInParts for RunningNexus {
     ) -> Result<FlowId, WakeRefusal> {
         // The system prompt is composed again from the module identities
         // the flow was launched with; nothing of it was kept on disk.
+        let harness_kind = self.codex_endpoints.harness_for(&profile.model_name);
         let default = self
             .store
-            .default_leave_outs(&profile.address)
+            .default_leave_outs(&profile.address, &harness_kind)
             .unwrap_or_default();
         let harnessed = HarnessedProfile {
-            harness_kind: self.codex_endpoints.harness_for(&profile.model_name),
+            harness_kind,
             launch_profile: profile,
         };
         let launch = match self.composer.resumption(&harnessed, default, text) {

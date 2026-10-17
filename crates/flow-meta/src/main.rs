@@ -247,7 +247,7 @@ mod tests {
         let client = FlowMetaClient {
             socket: "unused".into(),
         };
-        let datom = "Configure.LeaveOuts.[ { { Field core Primary } [ CodexAgentsMd CodexSkillListing ] } { { Psyche flow Secondary } [ SkillTool ClaudeMd ] } ]";
+        let datom = "Configure.LeaveOuts.[ { { Field core Primary } Codex [ CodexAgentsMd CodexSkillListing ] } { { Psyche flow Secondary } Claude [ SkillTool ClaudeMd ] } ]";
         let query = client
             .parse_command([datom.to_owned()].into_iter())
             .expect("LeaveOuts declaration parses");
@@ -255,7 +255,18 @@ mod tests {
             panic!("a LeaveOuts declaration must stay one Configure query")
         };
         assert_eq!(leave_outs.len(), 2);
+        assert_eq!(leave_outs[0].harness_kind, signal_flow::HarnessKind::Codex);
         assert_eq!(query.datomize(vec![]).protosize().compact(), datom);
+        // An entry that names no harness is not a leave-out default.
+        assert!(
+            client
+                .parse_command(
+                    ["Configure.LeaveOuts.[ { { Psyche flow Secondary } [ SkillTool ClaudeMd ] } ]"
+                        .to_owned()]
+                    .into_iter()
+                )
+                .is_err()
+        );
         // Reconfigure is not a request: Configure.Nexus replaces the Nexus.
         assert!(
             client

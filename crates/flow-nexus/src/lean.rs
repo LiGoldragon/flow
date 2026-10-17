@@ -34,8 +34,9 @@ const CLAUDE_DEFERRED_TOOLS: [&str; 15] = [
     "WebSearch",
 ];
 
-/// Which harness a leave-out belongs to.
-trait BelongsToHarness {
+/// Which harness a leave-out belongs to: the one a Start may take it on,
+/// and the one a configured default naming it must be keyed by.
+pub(crate) trait BelongsToHarness {
     fn harness(&self) -> HarnessKind;
 }
 

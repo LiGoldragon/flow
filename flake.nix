@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.11";
+            version = "0.35.13";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -249,6 +249,18 @@
             "herdr::launch::tests::a_claude_start_carries_its_leave_outs_as_flags_environment_and_settings";
           flow-start-leave-outs-replace-the-default = context.exactTest "flow-nexus"
             "composition::tests::a_start_naming_leave_outs_replaces_its_metaflow_default";
+          flow-leave-out-default-for-another-harness-refused = context.exactTest "flow-nexus"
+            "tests::configuring::a_leave_out_default_naming_another_harness_is_refused_and_writes_nothing";
+          flow-codex-start-takes-no-claude-default = context.exactTest "flow-nexus"
+            "tests::configuring::a_codex_start_naming_none_takes_no_claude_default";
+          flow-codex-start-claude-leave-out-refused-before-reserve = context.exactTest "flow-nexus"
+            "tests::reservation::a_codex_start_naming_a_claude_leave_out_is_refused_before_reserve_or_open";
+          flow-leave-out-defaults-upgrade-under-their-harness = context.exactTest "flow-nexus"
+            "store::tests::production_leave_out_defaults_upgrade_each_under_its_harness";
+          flow-configuration-only-upgrades-leave-out-defaults = context.exactTest "flow-nexus"
+            "store::tests::the_configuration_only_open_upgrades_v1_leave_out_defaults";
+          flow-mixed-leave-out-default-refuses-upgrade = context.exactTest "flow-nexus"
+            "store::tests::a_v1_leave_out_default_mixing_harnesses_refuses_the_upgrade_by_its_entry";
           flow-codex-frame-sixty-four-bit-length = context.exactTest "flow-nexus"
             "codex::tests::an_outbound_frame_past_sixty_five_kilobytes_takes_the_sixty_four_bit_length";
           flow-gone-pane-lists-exited = context.exactTest "flow-nexus"

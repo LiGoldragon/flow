@@ -265,6 +265,11 @@ impl Dispatches for RunningNexus {
                             meta_signal_flow::ConfigureRejection::CodexModelsOverlap,
                         )
                     }
+                    Err(store::StoreError::LeaveOutNotForHarness) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::LeaveOutNotForHarness,
+                        )
+                    }
                     Err(error) => meta_signal_flow::Response::Refused(
                         meta_signal_flow::Refusal::Store(error.to_string()),
                     ),

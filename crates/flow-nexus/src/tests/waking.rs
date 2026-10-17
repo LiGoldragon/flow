@@ -2479,6 +2479,30 @@ esac
 }
 
 fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
+    use crate::store::SeedsConfiguration;
+    // A wake reads its layer's model from the committed configuration,
+    // which exists once the Nexus family is declared.
+    let settings = crate::store::DefaultConfiguration {
+        home: fixture.directory.path().join("home"),
+        runtime_directory: fixture.directory.path().join("runtime"),
+    }
+    .configuration();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+            meta_signal_flow::ConfigureNexus {
+                source_root: settings.source_root,
+                stable_codex: settings.stable_codex,
+                next_codex: settings.next_codex,
+                harness_profiles: settings.harness_profile_vector,
+                meta_aspects: settings.meta_aspects,
+                message_nexus_path: settings.message_nexus_path,
+                message_nexus_binary: "/fixture/message-nexus".into(),
+                lease: 30,
+            },
+        ))
+        .expect("Nexus configured");
     fixture
         .nexus
         .store

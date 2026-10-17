@@ -2464,6 +2464,9 @@ esac
             counter = invocations.display(),
         ));
         self.nexus.codex_endpoints.stable.client_path = app_server;
+        // A Codex TUI is started only against an absolute endpoint socket.
+        self.nexus.codex_endpoints.stable.socket =
+            root.join("codex.sock").to_string_lossy().into_owned();
         let endpoints = self.nexus.codex_endpoints.clone();
         let flows = root.join("flows");
         let herdr = std::mem::replace(

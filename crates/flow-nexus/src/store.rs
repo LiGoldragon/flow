@@ -10,6 +10,7 @@ pub mod context;
 mod created_pane;
 pub mod delivery;
 pub mod events;
+pub(crate) mod launch_cleanup;
 pub(crate) mod metaflow;
 pub(crate) mod opened_thread;
 pub(crate) mod refresh;
@@ -1990,6 +1991,7 @@ pub struct FlowStore {
     refreshes: TableReference<refresh::MetaflowRefresh>,
     opened_threads: TableReference<opened_thread::OpenedLaunchThread>,
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
+    launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
@@ -2597,6 +2599,8 @@ impl OpensFlowStore for FlowStore {
             <opened_thread::OpenedLaunchThread as opened_thread::DescribesOpenedThreadTable>::descriptor(
             );
         let send_calls_descriptor = <crate::generated::send_tool::SendCall as send_call::DescribesSendCallTable>::descriptor();
+        let launch_cleanups_descriptor =
+            <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -2625,7 +2629,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&address_holds_descriptor)
                 .with_family(&refreshes_descriptor)
                 .with_family(&opened_threads_descriptor)
-                .with_family(&send_calls_descriptor),
+                .with_family(&send_calls_descriptor)
+                .with_family(&launch_cleanups_descriptor),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -2652,6 +2657,7 @@ impl OpensFlowStore for FlowStore {
         let refreshes = engine.register_table(refreshes_descriptor)?;
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
         let send_calls = engine.register_table(send_calls_descriptor)?;
+        let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let store = Self {
             engine,
             flows,
@@ -2676,6 +2682,7 @@ impl OpensFlowStore for FlowStore {
             refreshes,
             opened_threads,
             send_calls,
+            launch_cleanups,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -2803,6 +2810,9 @@ impl OpensFlowStore for FlowStore {
         let send_calls = engine.register_table(
             <crate::generated::send_tool::SendCall as send_call::DescribesSendCallTable>::descriptor(),
         )?;
+        let launch_cleanups = engine.register_table(
+            <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             flows,
@@ -2827,6 +2837,7 @@ impl OpensFlowStore for FlowStore {
             refreshes,
             opened_threads,
             send_calls,
+            launch_cleanups,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -5362,6 +5373,10 @@ pub(crate) trait ReadsFlowMemory {
                 opened_thread::OPENED_THREAD_SCHEMA,
             ),
             "flow_nexus_send_calls" => (send_call::SEND_CALL_FAMILY, send_call::SEND_CALL_SCHEMA),
+            "flow_nexus_launch_cleanups" => (
+                launch_cleanup::LAUNCH_CLEANUP_FAMILY,
+                launch_cleanup::LAUNCH_CLEANUP_SCHEMA,
+            ),
             _ => return None,
         };
         Some((family, SchemaHash::for_label(version)))
@@ -5494,8 +5509,8 @@ pub(crate) trait ReadsFlowMemory {
         // tables.
         // A store keeps its metaflows' default leave-outs from 0.35.0 on,
         // its fresh-wake marks from 0.35.2 on, the Codex thread each
-        // launch opened from 0.35.6 on, and the send tool's calls from
-        // 0.35.7 on.
+        // launch opened from 0.35.6 on, the send tool's calls from 0.35.7
+        // on, and the cleanup of each interrupted launch from 0.35.11 on.
         const ADDED_LATER: &[&str] = &[
             "flow_nexus_flow_context_sizes",
             "flow_nexus_address_holds",
@@ -5503,6 +5518,7 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_metaflow_refreshes",
             "flow_nexus_launch_opened_threads",
             "flow_nexus_send_calls",
+            "flow_nexus_launch_cleanups",
         ];
         // A store before 0.35.0 may still hold a table 0.35.0 drops.
         let retired = |name: &String| RETIRED_TABLES.iter().any(|(table, _, _)| table == name);
@@ -7830,6 +7846,14 @@ mod tests {
                     engine
                         .match_records(QueryPlan::all(self.send_calls))
                         .expect("send calls read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_launch_cleanups",
+                    engine
+                        .match_records(QueryPlan::all(self.launch_cleanups))
+                        .expect("launch cleanups read")
                         .records()
                         .len(),
                 ),

@@ -1689,7 +1689,11 @@ mod tests {
                 "terminal_id":"term_65bb7f87270cb3",
                 "terminal_title":"primary",
                 "terminal_title_stripped":"primary",
-                "workspace_id":"w1"
+                "workspace_id":"w1",
+                "agent_session":{
+                    "source":"herdr:codex","agent":"codex","kind":"id",
+                    "value":"01a0b22c-e24f-7452-9940-64490878680f"
+                }
             })
         }
     }
@@ -1946,7 +1950,11 @@ mod tests {
         serde_json::json!({
             "agent":"codex","agent_status":"unknown","interactive_ready":false,
             "name":"fixture-agent","pane_id":"w1:p1","terminal_id":"fixture-terminal",
-            "workspace_id":"fixture-workspace"
+            "workspace_id":"fixture-workspace",
+            "agent_session":{
+                "source":"herdr:codex","agent":"codex","kind":"id",
+                "value":STAGED_SESSION
+            }
         })
     }
 
@@ -2040,11 +2048,15 @@ mod tests {
     }
 
     /// A pane whose harness never appeared shows in Herdr's snapshot as a
-    /// pane with no agent; the refused launch closes it.
+    /// pane with no agent; the refused launch closes it once it holds the
+    /// session the pane was created for. Without one, nothing is closed and
+    /// the pane stays recorded for a later reconciliation.
     #[test]
     fn a_refused_launch_closes_a_pane_whose_harness_never_appeared() {
-        use crate::launching::AbandonsRefusedLaunch;
-        use crate::store::RecordsCreatedLaunchPane;
+        use crate::herdr::PaneOwnership;
+        use crate::launching::{AbandonsRefusedLaunch, LaunchTeardown};
+        use crate::store::opened_thread::RecordsOpenedThreads;
+        use crate::store::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
         let fixture = NexusFixture::new();
         let launch = fixture.staged_launch("bare-pane-request", None);
         launch.reserve(&fixture.nexus);
@@ -2078,13 +2090,48 @@ mod tests {
             snapshot,
             log.display(),
         ));
-        fixture
-            .nexus
-            .abandon_refused_launch("bare-pane-request", &HarnessKind::Codex, None);
+        // No session recorded for the pane: missing identity closes nothing.
+        assert_eq!(
+            fixture
+                .nexus
+                .abandon_refused_launch("bare-pane-request", &HarnessKind::Codex, None),
+            LaunchTeardown::Kept(PaneOwnership::Unidentified)
+        );
+        assert!(fs::read_to_string(&log).unwrap_or_default().is_empty());
+        assert!(
+            fixture
+                .nexus
+                .store
+                .recoverable_launch_pane("bare-pane-request")
+                .unwrap()
+                .is_some()
+        );
+        // The thread the launch opened is the pane's session.
+        assert!(
+            fixture
+                .nexus
+                .store
+                .record_opened_thread("bare-pane-request", "bare-pane-thread")
+                .unwrap()
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .abandon_refused_launch("bare-pane-request", &HarnessKind::Codex, None),
+            LaunchTeardown::TakenDown
+        );
         let operations = fs::read_to_string(&log).expect("Herdr operation log");
         assert!(
             operations.contains(&format!("pane close {}", launch.pane.herdr_pane_id)),
             "{operations}"
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .recoverable_launch_pane("bare-pane-request")
+                .unwrap(),
+            None
         );
     }
 
@@ -3373,7 +3420,11 @@ mod tests {
                 "pane_id":"w1:p1",
                 "revision":1,
                 "terminal_id":"fixture-terminal",
-                "workspace_id":"fixture-workspace"
+                "workspace_id":"fixture-workspace",
+                "agent_session":{
+                    "source":"herdr:codex","agent":"codex","kind":"id",
+                    "value":STAGED_SESSION
+                }
             })
         }
 

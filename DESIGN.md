@@ -267,10 +267,25 @@ A Codex launch a Nexus left between opening its thread and acknowledging its
 seat is never finished, and its registration would wait on a seat that a
 pending call keeps from resting. Before serving anything, the Nexus takes
 each unsettled Codex launch whose thread is recorded and whose phase is
-NativeLaunchIntentRecorded or NativeBound: it resumes the thread, refuses each
-replayed call `ThreadUnowned` without queuing it, archives the thread, takes
-down its pane and any flow it registered, and last settles the launch
-`NativeLaunchRefused.{ Spawn Unclassified }`.
+NativeLaunchIntentRecorded or NativeBound. Its outcome and its cleanup are
+apart: the Nexus first records the launch's cleanup, a thread step and a
+pane step both Pending, then settles the launch
+`NativeLaunchRefused.{ Spawn Unclassified }`. The thread step resumes the
+thread and answers each replayed call: one the earlier Nexus committed is
+answered from its record and queues nothing more, any other is refused
+`ThreadUnowned` and queues nothing; then it archives the thread, and is Done
+only once the archive succeeded. The pane step takes down its pane and any
+flow it registered, and is Done only once nothing of it is left running. A
+step still Pending is taken again at every start, the launch already
+settled.
+
+A pane is closed only when Herdr shows it the Flow's own: the agent at the
+recorded pane and terminal, of the recorded harness, reports the recorded
+native session, or, a Codex agent reporting none, one of the pane's
+foreground processes runs `resume <thread>` for the recorded thread; or the
+pane shows no agent at all. A pane running another session, a session
+nothing proves, or a Flow with no recorded session closes nothing, and a
+launch's pane left so stays recorded for the next reconciliation.
 
 A call is handled under the dispatch gate. Its sender is read from Flow's
 records each time it is handled, a replayed call included: the one live flow

@@ -1,18 +1,32 @@
 # Flow 0.35.11
 
-No wire change and no store change.
+No wire change. The store adds one table, `flow_nexus_launch_cleanups`; a
+store written before opens with it added and holding none.
 
 - **A Codex launch a Nexus left mid-way is reconciled at the next start.**
   Nothing replays such a launch, and its registration waits on a seat at
   rest that a first turn pending on a send call never reaches. Before it
   serves anything, the Nexus takes each unsettled Codex launch whose thread
-  is recorded and whose phase is NativeLaunchIntentRecorded or NativeBound:
-  the calls the app-server replays on that thread are refused
-  (`ThreadUnowned`) and nothing is queued, the thread is accounted for and
-  archived, its pane and any flow it registered are taken down, and last the
-  launch is settled `NativeLaunchRefused.{ Spawn Unclassified }`. A crash
-  midway reconciles it again at the next start. A launch past its
-  acknowledgement, or settled, is left alone and is never a sender here.
+  is recorded and whose phase is NativeLaunchIntentRecorded or NativeBound.
+  It records the launch's cleanup (a thread step and a pane step, both
+  Pending), then settles it `NativeLaunchRefused.{ Spawn Unclassified }`.
+  The thread step answers the calls the app-server replays on the thread:
+  one the earlier Nexus committed is answered from its record, its one
+  request left queued from the launch's Address and its target due the wake
+  `recover_wakes` takes; any other is refused (`ThreadUnowned`) and nothing
+  is queued. It then archives the thread and is Done only once the archive
+  succeeded. The pane step takes down its pane and any flow it registered
+  and is Done only once nothing of it is left running. A step still Pending
+  is taken again at the next start. A launch past its acknowledgement, or
+  settled with its cleanup complete, is left alone and is never a sender
+  here.
+- **A pane is closed only when Herdr shows it the Flow's own.** Every close
+  requires the agent at the recorded pane and terminal to report the
+  recorded native session, or, for a Codex agent reporting none, a
+  foreground process of the pane running `resume <thread>` for the recorded
+  thread; a pane with no agent is closed too. A pane running another
+  session, one nothing proves, or a Flow with no recorded session is left
+  open, and a refused launch's pane so left stays recorded.
 
 # Flow 0.35.10
 

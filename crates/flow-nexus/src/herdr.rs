@@ -51,7 +51,38 @@ pub enum PanePresence {
     Unknown,
 }
 
-/// Closes one Herdr pane whose recorded binding a fresh snapshot shows. Every write into a pane is the pane
+/// What a fresh Herdr snapshot proves of whether the pane recorded for a
+/// Flow is still that Flow's own: the recorded pane and terminal running
+/// the recorded native session. A pane is closed only when it is `Owned`
+/// or `Bare`; every other answer leaves it as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneOwnership {
+    /// The agent at the recorded pane and terminal, of the recorded
+    /// harness, reports the recorded native session; or, a Codex agent
+    /// reporting none, one of the pane's foreground processes runs
+    /// `resume <thread>` for the recorded thread.
+    Owned,
+    /// The recorded pane and terminal show no agent: no native session runs
+    /// there.
+    Bare,
+    /// A readable snapshot shows neither the recorded binding nor its pane.
+    Absent,
+    /// Another native session runs at the recorded pane: its agent reports
+    /// another session, a Codex agent's foreground process resumes another
+    /// thread, or an agent of another terminal or harness holds the pane.
+    Foreign,
+    /// The agent there reports no session and nothing proves the recorded
+    /// one runs: a Claude agent, or a Codex agent whose foreground
+    /// processes do not show its thread.
+    Unproven,
+    /// No native session is recorded to prove ownership by.
+    Unidentified,
+    /// Herdr could not be read, or its snapshot carries no agent roster.
+    Unknown,
+}
+
+/// Closes one Herdr pane a fresh snapshot shows is the Flow's own
+/// (`PaneOwnership::Owned` or `Bare`). Every write into a pane is the pane
 /// writer's (see `pane` and `crate::delivery`).
 pub trait OperatesHerdrPane {
     fn close(&self, node: &FlowNode) -> bool;
@@ -200,12 +231,14 @@ impl OperatesHerdrPane for HerdrCli {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return false;
         };
-        // A pane is closed when Herdr still shows the recorded binding there,
-        // whatever its readiness and whether its FlowId claim was given back:
-        // closing needs the pane, not a route a prompt could take.
+        // A pane is closed when Herdr shows it running the Flow's own native
+        // session, or running none, whatever its readiness and whether its
+        // FlowId claim was given back: closing needs the pane, not a route a
+        // prompt could take. A pane now running another session is never
+        // closed, and a Flow with no recorded session closes nothing.
         if !matches!(
-            self.pane_presence(node),
-            PanePresence::Present | PanePresence::Bare
+            self.pane_ownership(node),
+            PaneOwnership::Owned | PaneOwnership::Bare
         ) {
             return false;
         }
@@ -374,6 +407,12 @@ pub trait ReadsHerdrPanes {
     /// Whether the Flow's recorded pane is still in Herdr. An unreadable
     /// Herdr is `Unknown`, never `Absent`.
     fn pane_presence(&self, node: &FlowNode) -> PanePresence;
+    /// Whether the Flow's recorded pane still runs its recorded native
+    /// session (`PaneOwnership`).
+    fn pane_ownership(&self, node: &FlowNode) -> PaneOwnership;
+    /// Whether a foreground process of the pane runs `resume <thread>`;
+    /// None when Herdr's process information cannot be read.
+    fn foreground_resumes(&self, route: &HerdrRoute, thread: &str) -> Option<bool>;
     fn refresh_route(&self, node: FlowNode) -> FlowNode;
     fn snapshot(&self, route: &HerdrRoute) -> Option<serde_json::Value>;
     /// The snapshot of one Herdr session.
@@ -463,6 +502,94 @@ impl ReadsHerdrPanes for HerdrCli {
             return PanePresence::Bare;
         }
         PanePresence::Absent
+    }
+
+    fn pane_ownership(&self, node: &FlowNode) -> PaneOwnership {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return PaneOwnership::Absent;
+        };
+        if node.session_id.is_empty() {
+            return PaneOwnership::Unidentified;
+        }
+        let Some(snapshot) = self.snapshot(route) else {
+            return PaneOwnership::Unknown;
+        };
+        let Some(agents) = snapshot
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return PaneOwnership::Unknown;
+        };
+        if let Some(agent) = agents
+            .iter()
+            .find(|agent| agent.matches_binding(route, &node.harness_kind))
+        {
+            return match (
+                agent
+                    .pointer("/agent_session/value")
+                    .and_then(serde_json::Value::as_str),
+                &node.harness_kind,
+            ) {
+                (Some(session), _) if session == node.session_id => PaneOwnership::Owned,
+                (Some(_), _) => PaneOwnership::Foreign,
+                (None, HarnessKind::Codex) => {
+                    match self.foreground_resumes(route, &node.session_id) {
+                        Some(true) => PaneOwnership::Owned,
+                        Some(false) => PaneOwnership::Unproven,
+                        None => PaneOwnership::Unknown,
+                    }
+                }
+                (None, HarnessKind::Claude) => PaneOwnership::Unproven,
+            };
+        }
+        if agents.iter().any(|agent| {
+            agent.get("pane_id").and_then(serde_json::Value::as_str)
+                == Some(route.herdr_pane_id.as_str())
+        }) {
+            return PaneOwnership::Foreign;
+        }
+        match self.pane_presence(node) {
+            PanePresence::Bare => PaneOwnership::Bare,
+            PanePresence::Absent => PaneOwnership::Absent,
+            PanePresence::Present | PanePresence::Unknown => PaneOwnership::Unknown,
+        }
+    }
+
+    fn foreground_resumes(&self, route: &HerdrRoute, thread: &str) -> Option<bool> {
+        use crate::herdr::launch::RunsHerdr;
+        let processes = self
+            .run_json(&[
+                "--session".into(),
+                route.herdr_session_name.clone(),
+                "pane".into(),
+                "process-info".into(),
+                "--pane".into(),
+                route.herdr_pane_id.clone(),
+            ])
+            .ok()?;
+        let information = processes.pointer("/result/process_info")?;
+        if information
+            .get("pane_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(route.herdr_pane_id.as_str())
+        {
+            return None;
+        }
+        let foreground = information
+            .get("foreground_processes")
+            .and_then(serde_json::Value::as_array)?;
+        Some(foreground.iter().any(|process| {
+            process
+                .get("pid")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|pid| fs::read(format!("/proc/{pid}/cmdline")).ok())
+                .is_some_and(|cmdline| {
+                    let arguments = cmdline.split(|byte| *byte == 0).collect::<Vec<_>>();
+                    arguments
+                        .windows(2)
+                        .any(|pair| pair[0] == b"resume" && pair[1] == thread.as_bytes())
+                })
+        }))
     }
 
     fn refresh_route(&self, mut node: FlowNode) -> FlowNode {

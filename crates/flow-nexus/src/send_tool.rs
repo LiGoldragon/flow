@@ -668,30 +668,48 @@ impl ServesLaunchCalls for RunningNexus {
     }
 }
 
+/// What the calls replayed on an interrupted launch's thread were answered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InterruptedCalls {
+    /// Calls the earlier Nexus had committed, answered from their records:
+    /// nothing queued again.
+    pub answered_from_record: usize,
+    /// Calls with no record, refused and never queued.
+    pub refused: usize,
+}
+
 /// The calls left pending on the thread of a launch an earlier Nexus never
-/// finished: refused, never queued, on a connection that resumes the thread
-/// (the app-server replays a pending call to it).
+/// finished, on a connection that resumes the thread (the app-server
+/// replays a pending call to it). Nothing is queued here: a call the
+/// earlier Nexus committed (queued and recorded in one commit) before it
+/// could answer is answered from its record, the request it queued, its
+/// sender and its target's wake obligation left as they stand; any other
+/// call is refused.
 pub(crate) trait RefusesInterruptedCalls {
     /// How long the resumed connection is read for replayed calls.
     const REPLAY_WINDOW: Duration = Duration::from_secs(2);
-    /// Refuses, `ThreadUnowned`, every call the app-server replays on
-    /// `thread` within the window; the number refused.
-    fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> usize;
+    /// Answers every call the app-server replays on `thread` within the
+    /// window: from its record when one holds the same call, else refused
+    /// (`ThreadUnowned`; `KeyReused` when its key's record holds another
+    /// call).
+    fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls;
+    /// The answer to one replayed call; true when it came from its record.
+    fn interrupted_call_outcome(&self, thread: &str, call: Option<ToolCall>)
+    -> (SendOutcome, bool);
 }
 
 impl RefusesInterruptedCalls for RunningNexus {
-    fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> usize {
+    fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls {
+        let mut tally = InterruptedCalls::default();
         let (signals, inbox) = mpsc::channel();
         let mut subscription = match adapter.subscribe_thread(thread, 1, &signals, &inbox) {
             Ok(subscription) => subscription,
             Err(SubscriptionEnd::Failed(error)) => {
                 eprintln!("flow-nexus: interrupted launch thread {thread} not resumed: {error}");
-                return 0;
+                return tally;
             }
-            Err(SubscriptionEnd::Stopped) => return 0,
+            Err(SubscriptionEnd::Stopped) => return tally,
         };
-        let refusal = Self::refused(SendRefusal::ThreadUnowned).tool_response();
-        let mut refused = 0;
         let mut answer = |subscription: &mut ThreadSubscription, request: serde_json::Value| {
             if request.get("method").and_then(serde_json::Value::as_str) != Some("item/tool/call") {
                 return true;
@@ -699,8 +717,17 @@ impl RefusesInterruptedCalls for RunningNexus {
             let Some(id) = request.get("id").cloned() else {
                 return true;
             };
-            refused += 1;
-            subscription.answer(id, refusal.clone()).is_ok()
+            let call = request
+                .get("params")
+                .cloned()
+                .and_then(ToolCall::read_tool_call::<serde_json::Value>);
+            let (outcome, recorded) = self.interrupted_call_outcome(thread, call);
+            if recorded {
+                tally.answered_from_record += 1;
+            } else {
+                tally.refused += 1;
+            }
+            subscription.answer(id, outcome.tool_response()).is_ok()
         };
         let early = std::mem::take(&mut subscription.early);
         let mut open = early
@@ -715,7 +742,33 @@ impl RefusesInterruptedCalls for RunningNexus {
             }
         }
         subscription.close();
-        refused
+        tally
+    }
+
+    fn interrupted_call_outcome(
+        &self,
+        thread: &str,
+        call: Option<ToolCall>,
+    ) -> (SendOutcome, bool) {
+        let Some(call) = call.filter(|call| {
+            call.tool_name == SendTool::tool_name() && call.tool_call_key.thread_id == thread
+        }) else {
+            return (Self::refused(SendRefusal::ThreadUnowned), false);
+        };
+        match self.store.send_call(&call.tool_call_key) {
+            Ok(Some(recorded)) if recorded.content_sha256 == call.content_sha256() => {
+                (recorded.send_outcome, true)
+            }
+            Ok(Some(_)) => (Self::refused(SendRefusal::KeyReused), false),
+            Ok(None) => (Self::refused(SendRefusal::ThreadUnowned), false),
+            Err(error) => {
+                eprintln!(
+                    "flow-nexus: replayed call {} of thread {thread} refused by the store: {error}",
+                    call.tool_call_key.call_id
+                );
+                (Self::refused(SendRefusal::Store), false)
+            }
+        }
     }
 }
 

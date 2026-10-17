@@ -36,7 +36,7 @@ use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation, WakePolicy};
 use crate::{
     RunningNexus,
     herdr::{
-        LocatesNativeTranscripts, PanePresence,
+        LocatesNativeTranscripts, PaneOwnership, PanePresence,
         launch::{AcceptsLaunchRegistration, ObservesNativeTargetReceipt},
     },
     store::{
@@ -676,14 +676,25 @@ impl LaunchesFlows for RunningNexus {
 /// registration waits on a seat at rest that a first turn pending on a send
 /// call never reaches. At the Nexus's start, before any socket or responder
 /// is served, each such launch (unsettled, Codex, its thread recorded, its
-/// phase NativeLaunchIntentRecorded or NativeBound) is reconciled: the calls
-/// the app-server replays on its thread are refused, `ThreadUnowned`, and
-/// nothing is queued; the thread is accounted for and archived; its pane and
-/// any flow it registered are taken down; and last the launch is settled
-/// refused, `NativeLaunchRefused.{ Spawn Unclassified }`, so a crash midway
-/// reconciles it again at the next start. A launch past its acknowledgement
-/// holds its Address and is served by the Nexus's responders; a settled one
-/// is left alone. No launch is granted send authority here.
+/// phase NativeLaunchIntentRecorded or NativeBound) is reconciled.
+///
+/// Its outcome and its cleanup are apart. First its cleanup is begun, a
+/// durable record with every step Pending; then its outcome is settled
+/// refused, `NativeLaunchRefused.{ Spawn Unclassified }`, so it is never a
+/// sender again and a replayed Start answers the settlement. Then each step
+/// still Pending is taken: the thread step answers the calls the
+/// app-server replays on the thread (a call whose commit the earlier Nexus
+/// recorded is answered from its record and queued nothing more; any other
+/// is refused, `ThreadUnowned`, and queues nothing), then accounts for the
+/// thread and archives it, and is Done only once the archive succeeded; the
+/// pane step takes down its pane and any flow it registered, closing only a
+/// pane proven its own, and is Done only once nothing of it is left
+/// running. A step not Done is taken again at the next start, the launch
+/// already settled. A launch past its acknowledgement holds its Address and
+/// is served by the Nexus's responders; a settled one with no unfinished
+/// cleanup is left alone. No launch is granted send authority here, and the
+/// queue of a target a recorded call reached is left as it is: its wake is
+/// the Nexus's start's `recover_wakes`, or the next request queued for it.
 pub trait ReconcilesInterruptedLaunches {
     fn reconcile_interrupted_launches(&self);
 }
@@ -692,6 +703,9 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
     fn reconcile_interrupted_launches(&self) {
         use crate::codex::{AccountsOpenedThread, SelectsCodexEndpoint};
         use crate::send_tool::RefusesInterruptedCalls;
+        use crate::store::launch_cleanup::{
+            CleanupPart, CleanupStep, CompletesCleanup, KeepsLaunchCleanups,
+        };
         let _turn = self
             .dispatch_gate
             .lock()
@@ -709,60 +723,129 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
             let Ok(Some(attempt)) = self.store.launch_attempt(&launch_request_id) else {
                 continue;
             };
-            let interrupted = attempt
-                .native_launch_intent_option
-                .as_ref()
-                .is_some_and(|intent| intent.harness_kind == HarnessKind::Codex)
+            let unsettled = self
+                .store
+                .launch_attempt_unsettled(&attempt)
+                .unwrap_or(false);
+            let interrupted = unsettled
+                && attempt
+                    .native_launch_intent_option
+                    .as_ref()
+                    .is_some_and(|intent| intent.harness_kind == HarnessKind::Codex)
                 && matches!(
                     attempt.launch_attempt_phase,
                     LaunchAttemptPhase::NativeLaunchIntentRecorded
                         | LaunchAttemptPhase::NativeBound
-                )
-                && self
-                    .store
-                    .launch_attempt_unsettled(&attempt)
-                    .unwrap_or(false);
-            if !interrupted {
-                continue;
-            }
-            let account = match self
-                .codex_endpoints
-                .adapter_for(&attempt.launch_profile.model_name)
-            {
-                Ok(adapter) => {
-                    let refused = self.refuse_interrupted_calls(&thread, &adapter);
-                    let account = adapter.account_opened_thread(&thread);
-                    format!("{refused} pending call(s) refused, {account:?}")
+                );
+            let cleanup = if interrupted {
+                // The cleanup is durable before the launch is settled, so a
+                // settled launch never loses what is left to clean.
+                match self.store.begin_launch_cleanup(&launch_request_id, &thread) {
+                    Ok(cleanup) => cleanup,
+                    Err(error) => {
+                        eprintln!(
+                            "flow-nexus: launch {launch_request_id} interrupted after opening thread {thread} left as it is: its cleanup is not recorded: {error}"
+                        );
+                        continue;
+                    }
                 }
-                Err(error) => format!("no Codex endpoint: {error}"),
+            } else {
+                match self.store.launch_cleanup(&launch_request_id) {
+                    Ok(Some(cleanup)) if !cleanup.is_complete() => cleanup,
+                    _ => continue,
+                }
             };
-            eprintln!(
-                "flow-nexus: launch {launch_request_id} interrupted after opening thread {thread}: {account}"
-            );
-            self.abandon_refused_launch(&launch_request_id, &HarnessKind::Codex, None);
-            self.settle(
-                &launch_request_id,
-                Response::StartRejected(StartRejection::NativeLaunchRefused(NativeLaunchRefusal {
-                    native_launch_stage: NativeLaunchStage::Spawn,
-                    native_launch_failure: NativeLaunchFailure::Unclassified,
-                })),
-            );
+            if unsettled {
+                self.settle(
+                    &launch_request_id,
+                    Response::StartRejected(StartRejection::NativeLaunchRefused(
+                        NativeLaunchRefusal {
+                            native_launch_stage: NativeLaunchStage::Spawn,
+                            native_launch_failure: NativeLaunchFailure::Unclassified,
+                        },
+                    )),
+                );
+            }
+            if cleanup.step(CleanupPart::Thread) == CleanupStep::Pending {
+                match self
+                    .codex_endpoints
+                    .adapter_for(&attempt.launch_profile.model_name)
+                {
+                    Ok(adapter) => {
+                        let answered = self.refuse_interrupted_calls(&thread, &adapter);
+                        let account = adapter.account_opened_thread(&thread);
+                        eprintln!(
+                            "flow-nexus: launch {launch_request_id} interrupted after opening thread {thread}: {answered:?}, {account:?}"
+                        );
+                        if matches!(account.thread_archive, signal_flow::ThreadArchive::Archived)
+                            && let Err(error) = self
+                                .store
+                                .finish_cleanup_step(&launch_request_id, CleanupPart::Thread)
+                        {
+                            eprintln!(
+                                "flow-nexus: launch {launch_request_id}: archived thread {thread} not recorded: {error}"
+                            );
+                        }
+                    }
+                    Err(error) => eprintln!(
+                        "flow-nexus: launch {launch_request_id} thread {thread} left for the next start: no Codex endpoint: {error}"
+                    ),
+                }
+            }
+            if cleanup.step(CleanupPart::Pane) == CleanupStep::Pending {
+                match self.abandon_refused_launch(&launch_request_id, &HarnessKind::Codex, None) {
+                    LaunchTeardown::TakenDown => {
+                        if let Err(error) = self
+                            .store
+                            .finish_cleanup_step(&launch_request_id, CleanupPart::Pane)
+                        {
+                            eprintln!(
+                                "flow-nexus: launch {launch_request_id}: teardown not recorded: {error}"
+                            );
+                        }
+                    }
+                    kept => eprintln!(
+                        "flow-nexus: launch {launch_request_id} pane left for the next start: {kept:?}"
+                    ),
+                }
+            }
         }
     }
 }
 
+/// What taking down a refused launch came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchTeardown {
+    /// Nothing the launch recorded is left running: the flow it registered
+    /// is recorded Stopped, its pane closed or gone; or it registered no
+    /// flow and recorded no pane to recover.
+    TakenDown,
+    /// The pane is left as it is: Herdr did not prove it the launch's own
+    /// (`PaneOwnership`), and any flow it registered stays as it was.
+    Kept(PaneOwnership),
+    /// The pane was the launch's own and closing it failed.
+    CloseFailed,
+    /// The pane is gone and the flow it registered was not recorded
+    /// Stopped.
+    StopUnrecorded,
+}
+
 /// What a launch refused after Reserve leaves in Herdr is taken down.
 pub(crate) trait AbandonsRefusedLaunch {
-    /// Closes the pane a refused launch created. A flow it registered is
-    /// recorded Stopped once its pane is closed or Herdr shows it gone; when
-    /// Herdr cannot be read the flow stays Pending, for Stop to finish. A
-    /// pane with no registered flow is closed through its created binding.
+    /// Closes the pane a refused launch created, only when Herdr shows it
+    /// running that launch's own native session, or running none: the
+    /// session of the flow it registered, else the thread it opened (Codex)
+    /// or the session its reserved FlowId claims (Claude). A launch with no
+    /// recorded session closes nothing, and its pane stays recorded for a
+    /// later reconciliation. A flow it registered is recorded Stopped once
+    /// its pane is closed or Herdr shows it gone; otherwise it stays as it
+    /// was, for Stop to finish.
     fn abandon_refused_launch(
         &self,
         launch_request_id: &str,
         harness_kind: &HarnessKind,
         reserved: Option<&str>,
-    );
+    ) -> LaunchTeardown;
 }
 
 impl AbandonsRefusedLaunch for RunningNexus {
@@ -771,7 +854,8 @@ impl AbandonsRefusedLaunch for RunningNexus {
         launch_request_id: &str,
         harness_kind: &HarnessKind,
         reserved: Option<&str>,
-    ) {
+    ) -> LaunchTeardown {
+        use crate::herdr::launch::ClaimsNativeIdentity;
         let bound = self
             .store
             .launch_attempt(launch_request_id)
@@ -786,22 +870,27 @@ impl AbandonsRefusedLaunch for RunningNexus {
             .filter(|node| node.flow_lifecycle.is_live());
         if let Some(node) = registered {
             let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-                return;
+                return LaunchTeardown::Kept(PaneOwnership::Unknown);
             };
-            let gone = match self.herdr.pane_presence(&node) {
-                PanePresence::Absent => true,
-                PanePresence::Unknown => false,
-                PanePresence::Present | PanePresence::Bare => {
+            match self.herdr.pane_ownership(&node) {
+                PaneOwnership::Absent => {}
+                PaneOwnership::Owned | PaneOwnership::Bare => {
                     let _lease = self.pane_leases.hold(route);
-                    self.perform(Operation::Close(node.clone())) == Outcome::Closed
+                    if self.perform(Operation::Close(node.clone())) != Outcome::Closed {
+                        eprintln!(
+                            "flow-nexus: refused launch {launch_request_id} left flow {} Pending: its pane was not closed",
+                            node.flow_id
+                        );
+                        return LaunchTeardown::CloseFailed;
+                    }
                 }
-            };
-            if !gone {
-                eprintln!(
-                    "flow-nexus: refused launch {launch_request_id} left flow {} Pending: its pane was not closed",
-                    node.flow_id
-                );
-                return;
+                kept => {
+                    eprintln!(
+                        "flow-nexus: refused launch {launch_request_id} left flow {} and its pane as they are: {kept:?}",
+                        node.flow_id
+                    );
+                    return LaunchTeardown::Kept(kept);
+                }
             }
             if self.perform(Operation::Record(Record_Data::Stopped(
                 node.flow_id.clone(),
@@ -811,15 +900,27 @@ impl AbandonsRefusedLaunch for RunningNexus {
                     "flow-nexus: refused launch {launch_request_id}: flow {} not recorded Stopped",
                     node.flow_id
                 );
+                return LaunchTeardown::StopUnrecorded;
             }
-            return;
+            return LaunchTeardown::TakenDown;
         }
         let Ok(Some(pane)) = self.store.recoverable_launch_pane(launch_request_id) else {
-            return;
+            return LaunchTeardown::TakenDown;
         };
+        // The session the pane was created for: the thread a Codex launch
+        // opened, or the session a Claude launch's reserved FlowId claims.
+        let session_id = match harness_kind {
+            HarnessKind::Codex => self.store.opened_thread(launch_request_id).ok().flatten(),
+            HarnessKind::Claude => reserved.and_then(|flow_id| {
+                self.herdr
+                    .claimed_native_identity(flow_id, &HarnessKind::Claude)
+                    .ok()
+            }),
+        }
+        .unwrap_or_default();
         let node = FlowNode {
             flow_id: reserved.unwrap_or_default().into(),
-            session_id: String::new(),
+            session_id,
             harness_kind: harness_kind.clone(),
             endpoint_selection: EndpointSelection::Unavailable,
             herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
@@ -831,13 +932,28 @@ impl AbandonsRefusedLaunch for RunningNexus {
             origin: Origin::Unbound,
             flow_lifecycle: FlowLifecycle::Pending,
         };
-        if matches!(
-            self.herdr.pane_presence(&node),
-            PanePresence::Present | PanePresence::Bare
-        ) {
-            let _ = self.perform(Operation::Close(node));
+        let teardown = match self.herdr.pane_ownership(&node) {
+            PaneOwnership::Absent => LaunchTeardown::TakenDown,
+            PaneOwnership::Owned | PaneOwnership::Bare => {
+                if self.perform(Operation::Close(node)) == Outcome::Closed {
+                    LaunchTeardown::TakenDown
+                } else {
+                    LaunchTeardown::CloseFailed
+                }
+            }
+            kept => LaunchTeardown::Kept(kept),
+        };
+        // Only a pane taken down stops being recoverable; any other stays
+        // recorded, for the next reconciliation to look at again.
+        if teardown == LaunchTeardown::TakenDown {
+            let _ = self.store.orphan_launch_pane(launch_request_id);
+        } else {
+            eprintln!(
+                "flow-nexus: refused launch {launch_request_id} left its pane {} as it is: {teardown:?}",
+                pane.herdr_pane_id
+            );
         }
-        let _ = self.store.orphan_launch_pane(launch_request_id);
+        teardown
     }
 }
 

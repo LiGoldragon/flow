@@ -98,6 +98,19 @@ const CLAUDE_SESSION: &str = "c1a0de00-0000-4000-8000-000000000001";
 fn claude_agent(fixture: &NexusFixture) -> serde_json::Value {
     let mut agent = fixture.settled_agent();
     agent["agent"] = serde_json::Value::String("claude".into());
+    agent["agent_session"] = serde_json::json!({
+        "source":"herdr:claude","agent":"claude","kind":"id","value":CLAUDE_SESSION
+    });
+    agent
+}
+
+/// An agent that reports no native session, as a remote-resumed Codex TUI
+/// shows in Herdr.
+fn quiet_agent(fixture: &NexusFixture) -> serde_json::Value {
+    let mut agent = fixture.settled_agent();
+    if let Some(fields) = agent.as_object_mut() {
+        fields.remove("agent_session");
+    }
     agent
 }
 
@@ -682,7 +695,7 @@ case "$*" in
   *"workspace create"*) printf '%s\n' '{"result":{"workspace":{"workspace_id":"w9"},"root_pane":{"pane_id":"w9:p1","terminal_id":"term-resumed"}}}' ;;
   *"pane run"*) sh -c "$6" > 'MARKER' ;;
   *"pane wait-output"*) line=$(grep -F FLOW_CLAUDE_ENV_READY_ 'MARKER'); printf '{"result":{"pane_id":"w9:p1","matched_line":"%s"}}\n' "$line" ;;
-  *"agent start"*) prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > 'SYSTEMREAD'; prev=$a; done; printf '%s\n' '{"result":{"agent":{"name":"x"}}}' ;;
+  *"agent start"*) prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > 'SYSTEMREAD'; prev=$a; done; [ -f 'ONSTARTFILE' ] && : > 'LIVE'; printf '%s\n' '{"result":{"agent":{"name":"x"}}}' ;;
   *"agent get"*) printf '%s\n' 'RECORD' ;;
   *"api snapshot"*) if [ -f 'LIVE' ]; then printf '%s\n' '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":[SESSIONED],"protocol":20,"version":"0.8.2"},"type":"session_snapshot"}}'; else printf '%s\n' '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":[AGENT],"protocol":20,"version":"0.8.2"},"type":"session_snapshot"}}'; fi ;;
   *"agent wait"*) printf '%s\n' '{"result":{"status":"idle"}}' ;;
@@ -693,6 +706,15 @@ case "$*" in
   *) exit 64 ;;
 esac
 "#
+    .replace(
+        "ONSTARTFILE",
+        &fixture
+            .directory
+            .path()
+            .join("resume-reports-session")
+            .display()
+            .to_string(),
+    )
     .replace("SESSIONS", &fixture.session_listing())
     .replace("CALLS", &calls.display().to_string())
     .replace(
@@ -1015,7 +1037,7 @@ fn the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread() {
         fixture.set_agents(agents);
         fixture.nexus.herdr.holds_native_session(session, node)
     };
-    let quiet = fixture.settled_agent();
+    let quiet = quiet_agent(&fixture);
     let reporting = |value: &str| {
         let mut agent = fixture.settled_agent();
         agent["agent_session"] = serde_json::json!({
@@ -1023,7 +1045,7 @@ fn the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread() {
         });
         agent
     };
-    let mut elsewhere = fixture.settled_agent();
+    let mut elsewhere = quiet_agent(&fixture);
     elsewhere["pane_id"] = serde_json::Value::String("w1:p9".into());
     elsewhere["terminal_id"] = serde_json::Value::String("term-elsewhere".into());
     let mut elsewhere_reporting = reporting(&node.session_id);
@@ -1076,7 +1098,7 @@ fn the_live_seat_check_names_why_a_recorded_pane_is_not_the_flows_own() {
     let fixture = NexusFixture::new();
     let codex = fixture.node();
     let reporting = |harness: &str, value: &str| {
-        let mut agent = fixture.settled_agent();
+        let mut agent = quiet_agent(&fixture);
         agent["agent"] = serde_json::Value::String(harness.into());
         agent["agent_session"] = serde_json::json!({
             "source":format!("herdr:{harness}"),"agent":harness,"kind":"id","value":value
@@ -1090,7 +1112,7 @@ fn the_live_seat_check_names_why_a_recorded_pane_is_not_the_flows_own() {
 
     // Codex.
     assert_eq!(
-        presence(vec![fixture.settled_agent()], &codex),
+        presence(vec![quiet_agent(&fixture)], &codex),
         OwnSession::Runs
     );
     assert_eq!(
@@ -1098,7 +1120,7 @@ fn the_live_seat_check_names_why_a_recorded_pane_is_not_the_flows_own() {
         OwnSession::Runs
     );
     assert_eq!(presence(vec![], &codex), OwnSession::PaneGone);
-    let mut replaced = fixture.settled_agent();
+    let mut replaced = quiet_agent(&fixture);
     replaced["terminal_id"] = serde_json::Value::String("term-replaced".into());
     assert_eq!(presence(vec![replaced], &codex), OwnSession::PaneGone);
     assert_eq!(
@@ -1111,7 +1133,7 @@ fn the_live_seat_check_names_why_a_recorded_pane_is_not_the_flows_own() {
     let mut unrecorded = codex.clone();
     unrecorded.herdr_route_selection = HerdrRouteSelection::Unavailable;
     assert_eq!(
-        presence(vec![fixture.settled_agent()], &unrecorded),
+        presence(vec![quiet_agent(&fixture)], &unrecorded),
         OwnSession::NoRecordedPane
     );
 
@@ -1126,7 +1148,14 @@ fn the_live_seat_check_names_why_a_recorded_pane_is_not_the_flows_own() {
         OwnSession::Runs
     );
     assert_eq!(
-        presence(vec![claude_agent(&fixture)], &claude),
+        presence(
+            vec![{
+                let mut agent = quiet_agent(&fixture);
+                agent["agent"] = serde_json::Value::String("claude".into());
+                agent
+            }],
+            &claude
+        ),
         OwnSession::SessionUnreported
     );
     assert_eq!(
@@ -1141,7 +1170,7 @@ fn the_live_seat_check_names_why_a_recorded_pane_is_not_the_flows_own() {
     // An unclaimed FlowId and an unreadable Herdr.
     fs::remove_file(fixture.directory.path().join("flows/.908786.flow-id")).unwrap();
     assert_eq!(
-        presence(vec![fixture.settled_agent()], &codex),
+        presence(vec![quiet_agent(&fixture)], &codex),
         OwnSession::Unclaimed
     );
     crate::fixture_executable::FixtureExecutable {
@@ -1287,6 +1316,9 @@ fn a_resumed_composer_not_yet_clear_is_waited_for_before_the_work() {
 fn a_wake_failing_after_its_pane_opened_closes_it_and_keeps_the_queue() {
     let fixture = NexusFixture::new();
     resumable(&fixture);
+    // The resumed harness reports its session once started, so its pane is
+    // proven the flow's own.
+    fs::write(fixture.directory.path().join("resume-reports-session"), "").unwrap();
     // The composer never clears: nothing may be typed into it.
     fs::write(
         fixture.directory.path().join("composer-busy-reads"),
@@ -2442,6 +2474,11 @@ case "$*" in
       prev=$a
     done
     printf '%s' "$harness" > "$S/harness"
+    # The Codex TUI runs `resume <thread>` in the pane's foreground.
+    if [ "$harness" = codex ]; then
+      sh -c 'sleep 120; :' resume "$(cat "$S/session")" < /dev/null > /dev/null 2>&1 &
+      printf '%s' "$!" > "$S/pid"
+    fi
     if [ "$harness" = claude ]; then
       printf '{{"type":"custom-title","customTitle":"%s","sessionId":"%s"}}\n' "$(cat "$S/title")" "$(cat "$S/session")" >> '{claude_root}/'"$(cat "$S/session")"'.jsonl'
     fi
@@ -2459,6 +2496,7 @@ case "$*" in
   *"api snapshot"*) a=; [ -f "$S/harness" ] && a=$(agent); printf '{{"id":"cli:api:snapshot","result":{{"snapshot":{{"agents":[%s],"protocol":20,"version":"0.8.2"}},"type":"session_snapshot"}}}}\n' "$a" ;;
   *"pane rename "*) printf '%s' "$6" > "$S/label"; printf '%s\n' '{{"result":{{}}}}' ;;
   *"pane get "*) printf '{{"result":{{"pane":{{"pane_id":"%s","terminal_id":"%s","label":"%s"}}}}}}\n' "$pane" "$term" "$(cat "$S/label")" ;;
+  *"pane process-info"*) printf '{{"result":{{"process_info":{{"pane_id":"%s","foreground_processes":[{{"pid":%s}}]}}}}}}\n' "$pane" "$(cat "$S/pid" 2>/dev/null || printf 1)" ;;
   *"pane close"*) printf '%s\n' '{{"result":{{}}}}' ;;
   *) exit 64 ;;
 esac
@@ -3368,9 +3406,15 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
     ]
     .concat();
     let account = [
-        initialized,
+        initialized.clone(),
         websocket_frame(r#"{"id":2,"result":{"data":[{"status":"inProgress"}]}}"#),
         websocket_frame(r#"{"id":3,"result":{}}"#),
+    ]
+    .concat();
+    let archive_refused = [
+        initialized,
+        websocket_frame(r#"{"id":2,"result":{"data":[{"status":"inProgress"}]}}"#),
+        websocket_frame(r#"{"id":3,"error":{"code":-32603,"message":"archive refused"}}"#),
     ]
     .concat();
     let app_server = fixture.directory.path().join("restarted-codex");
@@ -3378,7 +3422,7 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
         path: app_server.clone(),
     }
     .install(&format!(
-        "#!/bin/sh\nS='{state}'\nn=$(cat \"$S/restart-invocations\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$S/restart-invocations\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/restart-record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$n\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{resumed}'; printf '%b' \"$(cat \"$S/first-call\")\"; exec sleep 30 ;;\n  3) printf '%b' '{account}' ;;\n  *) exit 1 ;;\nesac\nexec sleep 5\n",
+        "#!/bin/sh\nS='{state}'\nn=$(cat \"$S/restart-invocations\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$S/restart-invocations\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/restart-record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$((n % 3))\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{resumed}'; printf '%b' \"$(cat \"$S/first-call\")\"; exec sleep 30 ;;\n  0) if [ -e \"$S/archive-refused\" ]; then printf '%b' '{archive_refused}'; else printf '%b' '{account}'; fi ;;\nesac\nexec sleep 5\n",
         state = setup.world.state.display(),
     ));
     fixture.nexus.codex_endpoints.stable.client_path = app_server;
@@ -3505,5 +3549,357 @@ fn a_launch_whose_address_another_flow_holds_sends_nothing() {
         settled.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
         Err(crate::generated::send_tool::SendRefusal::ThreadUnowned),
         "a settled launch is no sender"
+    );
+}
+
+/// A Herdr for the pane an interrupted launch created, w7:p1 on terminal
+/// term-fresh of `fixture-session`: its snapshot shows the agents written to
+/// `agents` beside that pane, its process information shows the pid written
+/// to `pid` in the pane's foreground, and every call is logged to `calls`.
+fn launch_pane_herdr(fixture: &NexusFixture) -> std::path::PathBuf {
+    let directory = fixture.directory.path().join("launch-pane-herdr");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("agents"), "[]").unwrap();
+    fs::write(directory.join("pid"), "1").unwrap();
+    let script = r#"#!/bin/sh
+LISTING
+D='DIRECTORY'
+printf '%s\n' "$*" >> "$D/calls"
+case "$3 $4" in
+  "api snapshot") printf '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":%s,"panes":[{"pane_id":"w7:p1","terminal_id":"term-fresh"}],"protocol":20,"version":"0.8.2"},"type":"session_snapshot"}}\n' "$(cat "$D/agents")" ;;
+  "pane process-info") printf '{"result":{"process_info":{"pane_id":"%s","foreground_processes":[{"pid":%s}]}}}\n' "$6" "$(cat "$D/pid")" ;;
+  "pane close") printf '%s\n' '{"result":{}}' ;;
+  *) exit 64 ;;
+esac
+"#
+    .replace("LISTING", &fixture.session_listing())
+    .replace("DIRECTORY", &directory.display().to_string());
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script);
+    directory
+}
+
+/// The Codex agent Herdr shows at the launch's pane, reporting `session`
+/// when one is given.
+fn launch_pane_agent(session: Option<&str>) -> serde_json::Value {
+    let mut agent = serde_json::json!({
+        "agent":"codex","agent_status":"idle","name":"fixture-agent",
+        "pane_id":"w7:p1","terminal_id":"term-fresh","workspace_id":"w7"
+    });
+    if let Some(session) = session {
+        agent["agent_session"] = serde_json::json!({
+            "source":"herdr:codex","agent":"codex","kind":"id","value":session
+        });
+    }
+    agent
+}
+
+/// A process whose command line resumes `thread`, as a Codex TUI attached
+/// to it runs; killed when dropped.
+struct ResumingProcess(std::process::Child);
+
+impl Drop for ResumingProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+trait SpawnsResumingProcess {
+    fn resuming(thread: &str) -> ResumingProcess;
+}
+
+impl SpawnsResumingProcess for ResumingProcess {
+    fn resuming(thread: &str) -> ResumingProcess {
+        ResumingProcess(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "sleep 60; :", "resume", thread])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("resuming process"),
+        )
+    }
+}
+
+/// Teardown closes only a pane proven the launch's own. An interrupted
+/// launch's pane, recorded for recovery, now runs a replacement session:
+/// Herdr reports another session there, then reports none while the pane's
+/// foreground process resumes another thread. Neither restart closes
+/// anything; the launch is settled, its pane stays recorded and its pane
+/// step Pending. Once the pane's foreground process resumes the launch's
+/// own thread, the next start closes it and the cleanup completes.
+#[test]
+fn an_interrupted_launch_pane_running_a_replacement_session_is_never_closed() {
+    use crate::launching::ReconcilesInterruptedLaunches;
+    use crate::store::launch_cleanup::{
+        CleanupStep, CompletesCleanup, KeepsLaunchCleanups, LaunchCleanup,
+    };
+    use crate::store::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane, RecordsLaunchOutcome};
+    let mut fixture = NexusFixture::new();
+    let setup = interrupted_launch(&mut fixture);
+    let launch = setup.sender.launch_request_id.clone();
+    fixture.nexus.store.request_harness_start(&launch).unwrap();
+    let herdr = launch_pane_herdr(&fixture);
+    let cleanup = |fixture: &NexusFixture| -> LaunchCleanup {
+        fixture
+            .nexus
+            .store
+            .launch_cleanup(&launch)
+            .unwrap()
+            .expect("the cleanup is recorded")
+    };
+
+    // A replacement session reported at the recorded pane and terminal.
+    fs::write(
+        herdr.join("agents"),
+        serde_json::json!([launch_pane_agent(Some("replacement-thread"))]).to_string(),
+    )
+    .unwrap();
+    fixture.nexus.reconcile_interrupted_launches();
+    let calls = fs::read_to_string(herdr.join("calls")).unwrap_or_default();
+    assert!(!calls.contains("pane close"), "{calls}");
+    assert!(
+        fixture
+            .nexus
+            .store
+            .launch_outcome(&launch)
+            .unwrap()
+            .is_some(),
+        "the launch is settled whatever its cleanup came to"
+    );
+    assert_eq!(cleanup(&fixture).thread_step, CleanupStep::Done);
+    assert_eq!(cleanup(&fixture).pane_step, CleanupStep::Pending);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .recoverable_launch_pane(&launch)
+            .unwrap()
+            .is_some()
+    );
+
+    // A replacement reporting no session, its foreground process resuming
+    // another thread.
+    let other = ResumingProcess::resuming("another-thread");
+    fs::write(
+        herdr.join("agents"),
+        serde_json::json!([launch_pane_agent(None)]).to_string(),
+    )
+    .unwrap();
+    fs::write(herdr.join("pid"), other.0.id().to_string()).unwrap();
+    fixture.nexus.reconcile_interrupted_launches();
+    let calls = fs::read_to_string(herdr.join("calls")).unwrap_or_default();
+    assert!(calls.contains("pane process-info"), "{calls}");
+    assert!(!calls.contains("pane close"), "{calls}");
+    assert_eq!(cleanup(&fixture).pane_step, CleanupStep::Pending);
+    drop(other);
+
+    // The pane's foreground process resumes the launch's own thread.
+    let own = ResumingProcess::resuming(FRESH_THREAD);
+    fs::write(herdr.join("pid"), own.0.id().to_string()).unwrap();
+    fixture.nexus.reconcile_interrupted_launches();
+    let calls = fs::read_to_string(herdr.join("calls")).unwrap_or_default();
+    assert!(calls.contains("pane close w7:p1"), "{calls}");
+    assert!(cleanup(&fixture).is_complete());
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .recoverable_launch_pane(&launch)
+            .unwrap(),
+        None
+    );
+    // The app-server was met once: the thread step was not taken again.
+    assert_eq!(
+        fs::read_to_string(setup.world.state.join("restart-invocations")).unwrap(),
+        "3"
+    );
+}
+
+/// The launch's settlement and its cleanup are apart. A restart whose
+/// archive of the thread is refused, and whose Herdr cannot be read,
+/// settles the launch but leaves both cleanup steps Pending; the next
+/// start resumes them (the replayed call refused again, nothing queued),
+/// the settlement unchanged, and only then is the cleanup complete.
+#[test]
+fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed() {
+    use super::send_tool::ReadsClientFrames;
+    use crate::launching::ReconcilesInterruptedLaunches;
+    use crate::store::launch_cleanup::{CleanupStep, CompletesCleanup, KeepsLaunchCleanups};
+    use crate::store::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane, RecordsLaunchOutcome};
+    let mut fixture = NexusFixture::new();
+    let setup = interrupted_launch(&mut fixture);
+    let state = setup.world.state.clone();
+    let launch = setup.sender.launch_request_id.clone();
+    fixture.nexus.store.request_harness_start(&launch).unwrap();
+    fs::write(state.join("archive-refused"), "").unwrap();
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install("#!/bin/sh\nexit 64\n");
+
+    fixture.nexus.reconcile_interrupted_launches();
+
+    let settled = fixture.nexus.store.launch_outcome(&launch).unwrap();
+    assert!(settled.is_some(), "the launch is settled");
+    let cleanup = fixture
+        .nexus
+        .store
+        .launch_cleanup(&launch)
+        .unwrap()
+        .unwrap();
+    assert_eq!(cleanup.thread_step, CleanupStep::Pending, "archive refused");
+    assert_eq!(cleanup.pane_step, CleanupStep::Pending, "Herdr unreadable");
+    assert!(!cleanup.is_complete());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .recoverable_launch_pane(&launch)
+            .unwrap()
+            .is_some()
+    );
+
+    // The next start: the archive succeeds, and Herdr's snapshot shows
+    // neither the pane nor its binding.
+    fs::remove_file(state.join("archive-refused")).unwrap();
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&format!(
+        "#!/bin/sh\n{}\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{{\"id\":\"cli:api:snapshot\",\"result\":{{\"snapshot\":{{\"agents\":[],\"panes\":[],\"protocol\":20,\"version\":\"0.8.2\"}},\"type\":\"session_snapshot\"}}}}' ;;\n  *) exit 64 ;;\nesac\n",
+        fixture.session_listing()
+    ));
+    fixture.nexus.reconcile_interrupted_launches();
+
+    assert_eq!(
+        fixture.nexus.store.launch_outcome(&launch).unwrap(),
+        settled
+    );
+    let replayed = state.join("restart-record-5").client_messages();
+    assert!(
+        replayed
+            .iter()
+            .any(|message| message.to_string().contains("ThreadUnowned")),
+        "{replayed:?}"
+    );
+    assert!(stored(&fixture, Layer::Secondary).queue.is_empty());
+    let archived = state.join("restart-record-6").client_messages();
+    assert!(
+        archived.iter().any(|message| {
+            message.get("method").and_then(serde_json::Value::as_str) == Some("thread/archive")
+        }),
+        "{archived:?}"
+    );
+    let cleanup = fixture
+        .nexus
+        .store
+        .launch_cleanup(&launch)
+        .unwrap()
+        .unwrap();
+    assert!(cleanup.is_complete(), "{cleanup:?}");
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .recoverable_launch_pane(&launch)
+            .unwrap(),
+        None
+    );
+    // Complete and settled: a further start does nothing.
+    fixture.nexus.reconcile_interrupted_launches();
+    assert_eq!(
+        fs::read_to_string(state.join("restart-invocations")).unwrap(),
+        "6"
+    );
+}
+
+/// A send call the earlier Nexus committed (its request queued and the call
+/// recorded in one commit) before it could answer, then the Nexus exited:
+/// the restarted Nexus answers the replayed call from its record, Queued,
+/// and queues nothing more. The one request stays queued from the
+/// launch's Address, and the target is due its wake, which the start's
+/// `recover_wakes` (or the next request queued for it) takes.
+#[test]
+fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_restart() {
+    use super::send_tool::ReadsClientFrames;
+    use crate::generated::send_tool::{HandlesSendCall, ReadsToolCall, SendOutcome, ToolCall};
+    use crate::launching::ReconcilesInterruptedLaunches;
+    use crate::store::send_call::KeepsSendCalls;
+    let mut fixture = NexusFixture::new();
+    let setup = interrupted_launch(&mut fixture);
+    let state = setup.world.state.clone();
+    let recipient = setup.recipient.clone();
+    let params = serde_json::json!({
+        "threadId": FRESH_THREAD,
+        "turnId": "turn-fresh",
+        "callId": "call-first",
+        "tool": "send",
+        "arguments": {
+            "target": {
+                "aspect": "Mind",
+                "topic": recipient.topic,
+                "layer": format!("{:?}", recipient.layer)
+            },
+            "kind": "Order",
+            "body": FIRST_CALL_BODY
+        }
+    });
+    let call = ToolCall::read_tool_call(params).expect("the call reads");
+    // The earlier Nexus commits the call; its answer never leaves.
+    let committed = fixture.nexus.handle_send_call(call);
+    let SendOutcome::Queued(queued) = &committed else {
+        panic!("the call is committed Queued: {committed:?}")
+    };
+    assert_eq!(queued.sender, setup.sender.address);
+    assert_eq!(stored(&fixture, Layer::Secondary).queue.len(), 1);
+
+    // The Nexus exits: the store as it lies on disk opens in a new one.
+    let app_server = fixture.nexus.codex_endpoints.stable.client_path.clone();
+    let written = fixture.directory.path().join("flow.sema");
+    let mut restarted = NexusFixture::with_store(|store| {
+        fs::copy(&written, store).expect("the store as written");
+    });
+    restarted.nexus.codex_endpoints.stable.client_path = app_server;
+
+    restarted.nexus.reconcile_interrupted_launches();
+
+    let replayed = state.join("restart-record-2").client_messages();
+    let answer = replayed
+        .iter()
+        .find(|message| message.get("id") == Some(&serde_json::json!(FIRST_CALL_REQUEST)))
+        .unwrap_or_else(|| panic!("the replayed call is answered: {replayed:?}"));
+    assert_eq!(
+        answer.pointer("/result/success"),
+        Some(&serde_json::json!(true))
+    );
+    assert!(answer.to_string().contains("Queued"), "{answer}");
+    assert_eq!(
+        restarted
+            .nexus
+            .store
+            .send_call(&first_call_key())
+            .unwrap()
+            .map(|call| call.send_outcome),
+        Some(committed.clone())
+    );
+    let target = stored(&restarted, Layer::Secondary);
+    assert_eq!(target.queue.len(), 1, "exactly one enqueue");
+    assert_eq!(
+        target.queue[0].sent_by,
+        SentBy::Sender(setup.sender.address.clone()),
+        "its sender is kept"
+    );
+    assert_eq!(
+        target.queue[0].request,
+        Request::Order(FIRST_CALL_BODY.into())
+    );
+    assert!(
+        restarted.nexus.wake_is_due(&target),
+        "the target is due the wake the start's recover_wakes takes"
     );
 }

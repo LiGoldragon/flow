@@ -600,14 +600,16 @@ impl ServesConnection for Connection {
             | Query::Deliver(_)
             | Query::Release(_)
             | Query::End(_)) => {
-                // A request queued for an Asleep seat wakes it once the
-                // sender has its answer, off the dispatch gate.
+                // A queued request is durable: the recipient's wake is read
+                // from Flow's records after the answer, whether or not the
+                // answer reached the sender, off the dispatch gate.
                 let answer = nexus.dispatch_metaflow_peer(query, self.process.as_ref());
-                self.peer.write_response(&answer.response)?;
+                let written = self.peer.write_response(&answer.response);
+                drop(self);
                 if let Some(address) = answer.wake {
                     nexus.wake_due(address);
                 }
-                return Ok(());
+                return written;
             }
             // A launch's origin is the calling process, as Identify reads
             // it: its pane's bound flow and that flow's native session.

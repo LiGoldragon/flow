@@ -9,6 +9,12 @@
 ; the turn and the call, so a replayed call is answered from the record and
 ; queued once.
 ;
+; A request queued for an Asleep metaflow wakes it by what Flow's records
+; hold, never by what the answer to the call carries: after the commit
+; that queues it, after a replayed call is answered from its record, and
+; at the Nexus's start, the target is woken when it is Asleep holding work
+; that wakes it and no wake runs for it already.
+;
 ; Kinds are the requests a flow may send. The living's words (Psyche,
 ; Psyches) are not among them: Flow admits a Lock and a Deliver from the
 ; bound Message process alone, so no route through Flow lets a flow send
@@ -59,10 +65,7 @@ Library
   SendOutcome.[ Queued.{ Sender Target }
                 Refused.SendRefusal ]
   ; The record a handled call leaves.
-  SendCall.{ ToolCallKey ContentSha256 SendOutcome }
-  ; What handling a call comes to: the outcome the call is answered with,
-  ; and the Asleep target its request is due to wake once it is answered.
-  SendAnswer.{ SendOutcome Wake.Option<Target> } ]
+  SendCall.{ ToolCallKey ContentSha256 SendOutcome } ]
 [ ; The values the capabilities read, each through the trait that yields it.
   ParamsCarrying.[ params.[ JsonValue ] ]
   ToolCallCarrying.[ tool_call.[ ToolCall ] ]
@@ -78,6 +81,8 @@ Library
   ; The DynamicToolCallResponse a call is answered with: one inputText
   ; item, the outcome as its datom; success only when it was queued.
   AnswersToolCall.[ tool_response.[ JsonValue ] ]
-  ; The Nexus handles one call under the dispatch gate.
-  HandlesSendCall.[ handle_send_call.{ [ ToolCallCarrying ] [ SendAnswer ] } ] ]
+  ; The Nexus handles one call under the dispatch gate. A Queued outcome
+  ; names the target whose wake is then decided from Flow's records,
+  ; whether or not the answer reaches the app-server.
+  HandlesSendCall.[ handle_send_call.{ [ ToolCallCarrying ] [ SendOutcome ] } ] ]
 []

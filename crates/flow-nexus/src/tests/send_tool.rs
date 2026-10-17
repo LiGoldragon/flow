@@ -9,7 +9,8 @@ use super::NexusFixture;
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
-    HandlesSendCall, Queued_Data, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,
+    HandlesSendCall, Queued_Data, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall,
+    ToolCallKey,
 };
 use crate::send_tool::{RespondsToSendCalls, SendTool, ServesSendTool};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
@@ -66,8 +67,21 @@ fn frame(json: &serde_json::Value) -> String {
     bytes.iter().map(|byte| format!("\\{byte:03o}")).collect()
 }
 
-/// The app-server's item/tool/call server request.
+/// The app-server's item/tool/call server request, sending an Order to
+/// the target.
 fn tool_call_request(request_id: u64, thread: &str, call: &str, body: &str) -> serde_json::Value {
+    send_request(request_id, thread, call, &target(), "Order", body)
+}
+
+/// The app-server's item/tool/call server request, sending `kind` to `to`.
+fn send_request(
+    request_id: u64,
+    thread: &str,
+    call: &str,
+    to: &Address,
+    kind: &str,
+    body: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "method": "item/tool/call",
         "id": request_id,
@@ -78,8 +92,12 @@ fn tool_call_request(request_id: u64, thread: &str, call: &str, body: &str) -> s
             "namespace": null,
             "tool": "send",
             "arguments": {
-                "target": { "aspect": "Mind", "topic": "gamma", "layer": "Secondary" },
-                "kind": "Order",
+                "target": {
+                    "aspect": format!("{:?}", to.aspect),
+                    "topic": to.topic,
+                    "layer": format!("{:?}", to.layer)
+                },
+                "kind": kind,
                 "body": body
             }
         }
@@ -104,11 +122,13 @@ fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
 }
 
 /// What one subscribed connection of the fake does: the server requests it
-/// sends after the initialize and resume answers, and whether it closes
-/// once it has sent them.
+/// sends after the initialize and resume answers, whether it closes once it
+/// has sent them, and whether it stops reading first, so the client's
+/// answer to them fails to be written.
 struct FakeConnection {
     requests: Vec<serde_json::Value>,
     closes: bool,
+    deaf: bool,
 }
 
 struct FakeAppServer {
@@ -144,14 +164,18 @@ impl RunsFakeAppServer for FakeAppServer {
         for (index, connection) in connections.iter().enumerate() {
             let run = 2 * index + 1;
             std::fs::write(root.join(format!("frames-{run}")), &probe).unwrap();
-            let mut frames = vec![
+            let frames = [
                 initialized.clone(),
                 frame(&serde_json::json!({ "id": 2, "result": { "thread": {} } })),
             ];
-            frames.extend(connection.requests.iter().map(frame));
             std::fs::write(root.join(format!("frames-{}", run + 1)), frames.concat()).unwrap();
+            let calls = connection.requests.iter().map(frame).collect::<String>();
+            std::fs::write(root.join(format!("calls-{}", run + 1)), calls).unwrap();
             if connection.closes {
                 std::fs::write(root.join(format!("close-{}", run + 1)), "").unwrap();
+            }
+            if connection.deaf {
+                std::fs::write(root.join(format!("deaf-{}", run + 1)), "").unwrap();
             }
         }
         let executable = root.join("codex");
@@ -159,7 +183,7 @@ impl RunsFakeAppServer for FakeAppServer {
             path: executable.clone(),
         }
         .install(&format!(
-            "#!/bin/sh\nd='{root}'\nn=$(cat \"$d/count\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$d/count\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$d/record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\n[ -f \"$d/frames-$n\" ] || exit 1\nprintf '%b' \"$(cat \"$d/frames-$n\")\"\n[ -f \"$d/close-$n\" ] && exit 0\nsleep 30\n",
+            "#!/bin/sh\nd='{root}'\nn=$(cat \"$d/count\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$d/count\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$d/record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\n[ -f \"$d/frames-$n\" ] || exit 1\nprintf '%b' \"$(cat \"$d/frames-$n\")\"\nif [ -f \"$d/deaf-$n\" ]; then sleep 1; kill $! 2>/dev/null; exec 0<&- 3<&-; printf '%b' \"$(cat \"$d/calls-$n\")\"; exit 0; fi\n[ -f \"$d/calls-$n\" ] && printf '%b' \"$(cat \"$d/calls-$n\")\"\n[ -f \"$d/close-$n\" ] && exit 0\nsleep 30\n",
             root = root.display(),
         ));
         FakeAppServer {
@@ -174,7 +198,7 @@ impl RunsFakeAppServer for FakeAppServer {
         wanted: impl Fn(&serde_json::Value) -> bool,
     ) -> Vec<serde_json::Value> {
         let path = self.directory.path().join(format!("record-{run}"));
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let messages = path.client_messages();
             if messages.iter().any(&wanted) || Instant::now() > deadline {
@@ -363,10 +387,12 @@ fn two_threads_are_each_attributed_to_their_own_metaflow() {
     let fake_a = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(10, THREAD_A, "call-a", "from a")],
         closes: false,
+        deaf: false,
     }]);
     let fake_b = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(11, THREAD_B, "call-b", "from b")],
         closes: false,
+        deaf: false,
     }]);
     let adapter_a = fixture.adapter("gpt-sol", &fake_a);
     let adapter_b = fixture.adapter("gpt-6-sol", &fake_b);
@@ -429,6 +455,7 @@ fn a_call_from_a_thread_flow_does_not_hold_is_refused_and_queues_nothing() {
     let fake = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(12, foreign, "call-x", "intruder")],
         closes: false,
+        deaf: false,
     }]);
     let adapter = fixture.adapter("gpt-sol", &fake);
     let answer = responding(&fixture, THREAD_A, &adapter, || {
@@ -456,16 +483,13 @@ fn a_replayed_call_of_a_retired_or_superseded_flow_is_refused() {
     fixture.awake_target();
     let call_a = tool_call(THREAD_A, "call-a", "before retirement");
     assert!(matches!(
-        fixture.nexus.handle_send_call(call_a.clone()).send_outcome,
+        fixture.nexus.handle_send_call(call_a.clone()),
         SendOutcome::Queued(_)
     ));
     // Retired: the replay finds the flow ended, though its call was queued.
     assert!(fixture.nexus.store.record_retired("a1a1a1").unwrap());
     let replayed = fixture.nexus.handle_send_call(call_a);
-    assert_eq!(
-        replayed.send_outcome,
-        SendOutcome::Refused(SendRefusal::FlowEnded)
-    );
+    assert_eq!(replayed, SendOutcome::Refused(SendRefusal::FlowEnded));
     // Superseded: a fresh wake made the metaflow Awake as a successor.
     let call_b = tool_call(THREAD_B, "call-b", "pending while superseded");
     assert!(
@@ -482,7 +506,7 @@ fn a_replayed_call_of_a_retired_or_superseded_flow_is_refused() {
         queue: vec![],
     });
     assert_eq!(
-        fixture.nexus.handle_send_call(call_b).send_outcome,
+        fixture.nexus.handle_send_call(call_b),
         SendOutcome::Refused(SendRefusal::NotAwake)
     );
     assert_eq!(
@@ -500,11 +524,12 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
     let handled = fixture
         .nexus
         .handle_send_call(tool_call(THREAD_A, "call-a", "exactly once"));
-    assert!(matches!(handled.send_outcome, SendOutcome::Queued(_)));
+    assert!(matches!(handled, SendOutcome::Queued(_)));
     // The app-server replays the pending call to the next subscriber.
     let fake = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(13, THREAD_A, "call-a", "exactly once")],
         closes: false,
+        deaf: false,
     }]);
     let adapter = fixture.adapter("gpt-sol", &fake);
     let answer = responding(&fixture, THREAD_A, &adapter, || {
@@ -521,6 +546,182 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
     );
 }
 
+/// The resumable Claude seat's metaflow, Asleep with nothing queued.
+fn asleep_target() -> Address {
+    address("flow", Layer::Secondary)
+}
+
+trait SeatsAsleepTargets {
+    /// The metaflow at `at`, Asleep, its last flow the resumable abc123.
+    fn asleep_at(&self, at: Address);
+    fn stored_at(&self, at: &Address) -> Metaflow;
+}
+
+impl SeatsAsleepTargets for NexusFixture {
+    fn asleep_at(&self, at: Address) {
+        self.nexus.store.seed_metaflow(Metaflow {
+            address: at,
+            state: State::Asleep,
+            past: vec!["abc123".into()],
+            queue: vec![],
+        });
+    }
+
+    fn stored_at(&self, at: &Address) -> Metaflow {
+        self.nexus
+            .store
+            .metaflow(at)
+            .expect("metaflow readable")
+            .expect("metaflow held")
+    }
+}
+
+/// The Order a woken seat was handed, with its sender, counted in what was
+/// typed into its pane.
+fn typed_orders(fixture: &NexusFixture, body: &str) -> usize {
+    super::waking::typed_prompts(fixture)
+        .concat()
+        .matches(&format!(
+            "{{ Sender.{{ Mind alpha Tertiary }} Order.{body} }}"
+        ))
+        .count()
+}
+
+/// A call queued for an Asleep metaflow wakes it although the answer to the
+/// call is never written: the connection stopped reading before it. The
+/// app-server replays the call to the next connection, which is answered
+/// from its record, queues nothing more and wakes nothing more.
+#[test]
+fn an_asleep_target_wakes_once_though_the_answer_fails_and_the_call_is_replayed() {
+    let mut fixture = NexusFixture::new();
+    super::waking::resumable(&fixture);
+    fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
+    fixture.asleep_at(asleep_target());
+    let call = send_request(15, THREAD_A, "call-w", &asleep_target(), "Order", "wake-me");
+    let fake = FakeAppServer::install(vec![
+        FakeConnection {
+            requests: vec![call.clone()],
+            closes: true,
+            deaf: true,
+        },
+        FakeConnection {
+            requests: vec![call],
+            closes: false,
+            deaf: false,
+        },
+    ]);
+    let adapter = fixture.adapter("gpt-sol", &fake);
+    let replayed = responding(&fixture, THREAD_A, &adapter, || {
+        answer_to(&fake.written_on(4, |m| m["id"] == 15), 15)
+    })
+    .expect("the replayed call answered on the second connection");
+
+    assert_eq!(
+        answer_to(&fake.written_on(2, |_| true), 15),
+        None,
+        "the first answer was never written"
+    );
+    assert_eq!(
+        replayed["contentItems"][0]["text"],
+        queued_text(sender_a(), asleep_target()),
+        "the replay is answered from the record, its sender kept"
+    );
+    let woken = fixture.stored_at(&asleep_target());
+    assert_eq!(woken.state, State::Awake("abc123".into()));
+    assert!(woken.queue.is_empty());
+    assert_eq!(
+        super::waking::herdr_calls(&fixture)
+            .matches("agent start")
+            .count(),
+        1,
+        "woken once"
+    );
+    assert_eq!(typed_orders(&fixture, "wake-me"), 1, "handed over once");
+}
+
+/// A call the last Nexus queued and recorded for an Asleep metaflow, then
+/// died before answering or waking, wakes the target when it is replayed.
+#[test]
+fn a_replayed_call_wakes_the_asleep_target_its_first_handling_did_not() {
+    let mut fixture = NexusFixture::new();
+    super::waking::resumable(&fixture);
+    fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
+    fixture.asleep_at(asleep_target());
+    let request = send_request(
+        16,
+        THREAD_A,
+        "call-r",
+        &asleep_target(),
+        "Order",
+        "replayed",
+    );
+    let handled = fixture.nexus.handle_send_call(
+        ToolCall::read_tool_call::<serde_json::Value>(request["params"].clone()).unwrap(),
+    );
+    assert!(matches!(handled, SendOutcome::Queued(_)));
+    assert_eq!(fixture.stored_at(&asleep_target()).state, State::Asleep);
+
+    let fake = FakeAppServer::install(vec![FakeConnection {
+        requests: vec![request],
+        closes: false,
+        deaf: false,
+    }]);
+    let adapter = fixture.adapter("gpt-sol", &fake);
+    let answer = responding(&fixture, THREAD_A, &adapter, || {
+        answer_to(&fake.written_on(2, |m| m["id"] == 16), 16)
+    })
+    .expect("the replayed call answered");
+    assert_eq!(
+        answer["contentItems"][0]["text"],
+        queued_text(sender_a(), asleep_target())
+    );
+    let woken = fixture.stored_at(&asleep_target());
+    assert_eq!(woken.state, State::Awake("abc123".into()));
+    assert!(woken.queue.is_empty());
+    assert_eq!(
+        super::waking::herdr_calls(&fixture)
+            .matches("agent start")
+            .count(),
+        1
+    );
+    assert_eq!(typed_orders(&fixture, "replayed"), 1);
+}
+
+/// An Order for an Asleep Primary, and a Result or a Notice for an Asleep
+/// Secondary, are queued and wake nothing.
+#[test]
+fn a_send_to_an_asleep_primary_or_of_a_result_or_notice_wakes_nothing() {
+    let mut fixture = NexusFixture::new();
+    super::waking::resumable(&fixture);
+    fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
+    let primary = address("flow", Layer::Primary);
+    fixture.asleep_at(primary.clone());
+    fixture.asleep_at(asleep_target());
+    let fake = FakeAppServer::install(vec![FakeConnection {
+        requests: vec![
+            send_request(17, THREAD_A, "call-p", &primary, "Order", "wait"),
+            send_request(18, THREAD_A, "call-s", &asleep_target(), "Result", "done"),
+            send_request(19, THREAD_A, "call-n", &asleep_target(), "Notice", "fyi"),
+        ],
+        closes: false,
+        deaf: false,
+    }]);
+    let adapter = fixture.adapter("gpt-sol", &fake);
+    let written = responding(&fixture, THREAD_A, &adapter, || {
+        fake.written_on(2, |m| m["id"] == 19)
+    });
+    for id in [17, 18, 19] {
+        assert_eq!(answer_to(&written, id).expect("answered")["success"], true);
+    }
+    let held = fixture.stored_at(&primary);
+    assert_eq!(held.state, State::Asleep);
+    assert_eq!(held.queue, vec![sent(sender_a(), "wait")]);
+    let held = fixture.stored_at(&asleep_target());
+    assert_eq!(held.state, State::Asleep);
+    assert_eq!(held.queue.len(), 2);
+    assert!(!super::waking::herdr_calls(&fixture).contains("agent start"));
+}
+
 #[test]
 fn a_call_key_recorded_with_other_content_is_refused() {
     let fixture = NexusFixture::new();
@@ -532,8 +733,7 @@ fn a_call_key_recorded_with_other_content_is_refused() {
     assert_eq!(
         fixture
             .nexus
-            .handle_send_call(tool_call(THREAD_A, "call-a", "second"))
-            .send_outcome,
+            .handle_send_call(tool_call(THREAD_A, "call-a", "second")),
         SendOutcome::Refused(SendRefusal::KeyReused)
     );
     assert_eq!(fixture.target_queue(), vec![sent(sender_a(), "first")]);
@@ -565,10 +765,12 @@ fn a_pending_call_is_answered_after_start_and_reconnect() {
         FakeConnection {
             requests: vec![],
             closes: true,
+            deaf: false,
         },
         FakeConnection {
             requests: vec![tool_call_request(14, THREAD_A, "call-a", "after restart")],
             closes: false,
+            deaf: false,
         },
     ]);
     fixture.adapter("gpt-sol", &fake);
@@ -606,7 +808,7 @@ fn a_malformed_call_is_refused_and_recorded() {
     })
     .to_string();
     assert_eq!(
-        fixture.nexus.handle_send_call(call.clone()).send_outcome,
+        fixture.nexus.handle_send_call(call.clone()),
         SendOutcome::Refused(SendRefusal::Malformed)
     );
     assert!(fixture.target_queue().is_empty());
@@ -624,12 +826,14 @@ fn a_malformed_call_is_refused_and_recorded() {
 /// by `FLOW_SEND_TOOL_WITNESS_CODEX` (the codex client) and
 /// `FLOW_SEND_TOOL_WITNESS_SOCKET` (its control socket), serving
 /// `gpt-6-luna`. Flow's own adapter opens the thread, declaring the send
-/// tool, with a first turn asking the model to call it once. A first
-/// connection subscribes and receives the call; the Nexus handles it,
-/// queueing and recording it, and the connection is closed before it
-/// answers, as a Nexus dying there would leave it. The responder then
-/// subscribes, the app-server replays the pending call to it, and it is
-/// answered from its record: the target holds one request. No repository
+/// tool, with a first turn asking the model to call it once. The target is
+/// Asleep, its last flow a resumable Claude seat in the fixture Herdr. A
+/// first connection subscribes and receives the call; the Nexus handles
+/// it, queueing and recording it, and the connection is closed before it
+/// answers or wakes anything, as a Nexus dying there would leave it. The
+/// responder then subscribes, the app-server replays the pending call to
+/// it, it is answered from its record, and the target is woken once, the
+/// request handed to it once with its sender. No repository
 /// holds such an app-server, so the test runs only when asked for by name
 /// with `--ignored` and both variables set.
 #[test]
@@ -638,7 +842,6 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     use crate::codex::{ExchangesOnSubscription, OpensCodexThread, ProxyEvent, SubscribesThread};
     use crate::composition::ComposesLaunch;
     use crate::composition::tests::{fixture_composer, fixture_profile};
-    use crate::generated::send_tool::ReadsToolCall;
     use sha2::{Digest, Sha256};
     let client = std::env::var_os("FLOW_SEND_TOOL_WITNESS_CODEX").expect("codex client");
     let socket = std::env::var("FLOW_SEND_TOOL_WITNESS_SOCKET").expect("app-server socket");
@@ -664,7 +867,7 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
             vec![signal_flow::LeaveOut::CodexAgentsMd],
         )
         .expect("launch composes");
-    let instruction = "Call the send tool exactly once with target aspect Mind, topic gamma, layer Secondary, kind Order and body witness-order. Then reply with the exact text the tool returned.";
+    let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, layer Secondary, kind Order and body witness-order. Then reply with the exact text the tool returned.";
     let digest = format!("{:x}", Sha256::digest(instruction.as_bytes()));
     launch.first_prompt_payload.first_prompt_body = instruction.into();
     launch.first_prompt_payload.prompt_sha256 = digest.clone();
@@ -678,8 +881,9 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         .open_thread_with_first_turn(&launch)
         .expect("the thread opens declaring the send tool");
     eprintln!("witness thread {thread}");
+    super::waking::resumable(&fixture);
     fixture.codex_seat("a1a1a1", &thread, "w1:p5", "gpt-6-luna", sender_a());
-    fixture.awake_target();
+    fixture.asleep_at(asleep_target());
 
     // The first connection receives the call, the Nexus queues and records
     // it, and the connection closes unanswered.
@@ -710,8 +914,8 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     let tool_call = ToolCall::read_tool_call::<serde_json::Value>(call["params"].clone())
         .expect("the call reads");
     let handled = fixture.nexus.handle_send_call(tool_call.clone());
-    eprintln!("witness first handling {:?}", handled.send_outcome);
-    assert!(matches!(handled.send_outcome, SendOutcome::Queued(_)));
+    eprintln!("witness first handling {:?}", handled);
+    assert!(matches!(handled, SendOutcome::Queued(_)));
     first.close();
     drop(signals);
     drop(inbox);
@@ -732,9 +936,18 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         stop.send(ResponderSignal::Stop).unwrap();
         responder.join().expect("responder stops");
     });
-    let queue = fixture.target_queue();
-    eprintln!("witness target queue {queue:?}");
-    assert_eq!(queue, vec![sent(sender_a(), "witness-order")]);
+    let woken = fixture.stored_at(&asleep_target());
+    eprintln!("witness target {:?} queue {:?}", woken.state, woken.queue);
+    let starts = super::waking::herdr_calls(&fixture)
+        .matches("agent start")
+        .count();
+    eprintln!("witness herdr agent starts {starts}");
+    let handed = typed_orders(&fixture, "witness-order");
+    eprintln!("witness typed orders {handed}");
+    assert_eq!(woken.state, State::Awake("abc123".into()));
+    assert!(woken.queue.is_empty());
+    assert_eq!(starts, 1);
+    assert_eq!(handed, 1);
     let recorded = fixture
         .nexus
         .store

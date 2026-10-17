@@ -7,15 +7,6 @@ use signal_flow::{
     SentBy, StartRejection, Unknown_Data,
 };
 
-/// What a Deliver did to its recipient's queue: the wire answer, and
-/// whether the recipient was Asleep when the request was queued, which is
-/// what a wake is decided on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Enqueuing {
-    pub response: Response,
-    pub recipient_asleep: bool,
-}
-
 pub(crate) trait MutatesMetaflows {
     fn message_peer(&self, peer: &Process) -> Result<bool, StoreError>;
     /// Binds the peer to its Address. `launched` is the FlowId of the
@@ -28,7 +19,7 @@ pub(crate) trait MutatesMetaflows {
         launched: Option<FlowId>,
     ) -> Result<Response, StoreError>;
     fn lock_metaflow(&self, request: Lock_Data, now: i64) -> Result<Response, StoreError>;
-    fn queue_metaflow(&self, request: Deliver_Data, now: i64) -> Result<Enqueuing, StoreError>;
+    fn queue_metaflow(&self, request: Deliver_Data, now: i64) -> Result<Response, StoreError>;
 }
 
 /// The sleep and wake transitions of a metaflow. Each is one atomic write
@@ -239,35 +230,28 @@ impl MutatesMetaflows for FlowStore {
         Ok(Response::Locked(lock))
     }
 
-    fn queue_metaflow(&self, request: Deliver_Data, now: i64) -> Result<Enqueuing, StoreError> {
-        let refused = |response| Enqueuing {
-            response,
-            recipient_asleep: false,
-        };
+    fn queue_metaflow(&self, request: Deliver_Data, now: i64) -> Result<Response, StoreError> {
         let Some(held) = self.stored_metaflow_lock(&request.lock.address)? else {
-            return Ok(refused(Response::Refused(Refusal::Unknown(
-                Unknown_Data::Lock(request.lock),
+            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Lock(
+                request.lock,
             ))));
         };
         if held.lock != request.lock {
-            return Ok(refused(Response::Refused(Refusal::Unknown(
-                Unknown_Data::Lock(request.lock),
+            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Lock(
+                request.lock,
             ))));
         }
         if held.lock.until <= now {
-            return Ok(refused(Response::Refused(Refusal::Lapsed)));
+            return Ok(Response::Refused(Refusal::Lapsed));
         }
         let Some(mut stored) = self.stored_metaflow(&request.lock.address)? else {
-            return Ok(refused(Response::Refused(Refusal::Unknown(
-                Unknown_Data::Address(request.lock.address),
+            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
+                request.lock.address,
             ))));
         };
         if stored.metaflow.state == MetaflowState::Ended {
-            return Ok(refused(Response::Refused(Refusal::Ended(
-                request.lock.address,
-            ))));
+            return Ok(Response::Refused(Refusal::Ended(request.lock.address)));
         }
-        let recipient_asleep = stored.metaflow.state == MetaflowState::Asleep;
         // The request is queued with the Sender its Lock named, which the
         // bound Message peer asserted.
         stored.metaflow.queue.push(QueuedRequest {
@@ -284,10 +268,7 @@ impl MutatesMetaflows for FlowStore {
             );
         self.engine.commit_atomic(commit)?;
         // This is durable enqueue, never a claim of native delivery or wake.
-        Ok(Enqueuing {
-            response: Response::Queued,
-            recipient_asleep,
-        })
+        Ok(Response::Queued)
     }
 }
 
@@ -704,8 +685,7 @@ mod tests {
                     },
                     101
                 )
-                .unwrap()
-                .response,
+                .unwrap(),
             Response::Refused(Refusal::Unknown(_))
         ));
         assert!(fixture.store.list_metaflows().unwrap()[0].queue.is_empty());
@@ -719,8 +699,7 @@ mod tests {
                     },
                     101
                 )
-                .unwrap()
-                .response,
+                .unwrap(),
             Response::Queued
         );
         // Queued with the Sender its Lock named.
@@ -748,8 +727,7 @@ mod tests {
                     },
                     102
                 )
-                .unwrap()
-                .response,
+                .unwrap(),
             Response::Refused(Refusal::Unknown(_))
         ));
     }
@@ -794,8 +772,7 @@ mod tests {
                     },
                     40
                 )
-                .unwrap()
-                .response,
+                .unwrap(),
             Response::Refused(Refusal::Lapsed)
         );
         assert!(fixture.store.list_metaflows().unwrap()[0].queue.is_empty());

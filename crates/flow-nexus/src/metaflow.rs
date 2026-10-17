@@ -2,13 +2,13 @@
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
-use crate::waking::{RestsEndedAwake, WakePolicy};
+use crate::waking::RestsEndedAwake;
 use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
 use signal_flow::{Address, Process, Query, Refusal, Response};
 
-/// A metaflow dispatch's answer, and the Asleep recipient a queued request
-/// is due to wake. The wake itself runs after the answer is written, off the
-/// dispatch gate.
+/// A metaflow dispatch's answer, and the recipient a Deliver queued for.
+/// Whether it wakes is read from Flow's records after the answer is written
+/// or failed to be (`SleepsAndWakesSeats::wake_due`), off the dispatch gate.
 pub(crate) struct MetaflowAnswer {
     pub response: Response,
     pub wake: Option<Address>,
@@ -123,18 +123,13 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Query::Lock(request) => self.store.lock_metaflow(request, now),
                 Query::Deliver(request) => {
                     let address = request.lock.address.clone();
-                    let wakes = Self::wakes_for(&request.request);
                     // Queued for a metaflow left Awake as an ended flow, the
                     // request wakes it as it would an Asleep one.
                     self.rest_ended_awake(&address);
                     return match self.store.queue_metaflow(request, now) {
-                        Ok(enqueuing) => MetaflowAnswer {
-                            wake: (enqueuing.response == Response::Queued
-                                && enqueuing.recipient_asleep
-                                && wakes
-                                && Self::wakes_layer(&address.layer))
-                            .then_some(address),
-                            response: enqueuing.response,
+                        Ok(response) => MetaflowAnswer {
+                            wake: (response == Response::Queued).then_some(address),
+                            response,
                         },
                         Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
                     };

@@ -524,14 +524,14 @@ fn an_asleep_seat_no_launch_of_record_names_is_unplaceable() {
 }
 
 /// The resumed seat: a Claude flow `abc123` that slept, its launch kept.
-struct Resumable {
+pub(super) struct Resumable {
     profile: LaunchProfile,
     session: String,
 }
 
 const RESUMED_AGENT: &str = r#"{"agent":"claude","agent_status":"idle","interactive_ready":true,"name":"AGENT","pane_id":"w9:p1","tab_id":"w9:t1","terminal_id":"term-resumed","workspace_id":"w9","revision":1}"#;
 
-fn resumable(fixture: &NexusFixture) -> Resumable {
+pub(super) fn resumable(fixture: &NexusFixture) -> Resumable {
     resumable_ended_by(fixture, |store| store.record_stopped("abc123").unwrap())
 }
 
@@ -873,6 +873,16 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
         vec![Request::Result("r".into())],
     ));
 
+    // An Order queued for a Primary waits: nothing wakes a Primary.
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Primary,
+        State::Asleep,
+        vec![],
+        vec![Request::Order("p".into())],
+    ));
+
+    fixture.nexus.recover_wakes();
+    // A second pass, as a second start would make, finds nothing due.
     fixture.nexus.recover_wakes();
 
     let woken = stored(&fixture, Layer::Secondary);
@@ -880,7 +890,15 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
     assert!(woken.queue.is_empty());
     let typed = fs::read_to_string(fixture.directory.path().join("pane-typed.txt")).unwrap();
     assert!(typed.starts_with(&queue.clone().unsent().prompt_text()));
+    assert_eq!(
+        herdr_calls(&fixture).matches("agent start").count(),
+        1,
+        "woken once"
+    );
     assert_eq!(stored(&fixture, Layer::Tertiary).state, State::Asleep);
+    let primary = stored(&fixture, Layer::Primary);
+    assert_eq!(primary.state, State::Asleep);
+    assert_eq!(primary.queue, vec![Request::Order("p".into())].unsent());
 }
 
 /// A wake is refused while a pane already runs the sleeping flow's native
@@ -1168,7 +1186,7 @@ fn a_live_codex_flow_whose_pane_runs_another_thread_is_not_adopted() {
     assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
 }
 
-fn typed_prompts(fixture: &NexusFixture) -> Vec<String> {
+pub(super) fn typed_prompts(fixture: &NexusFixture) -> Vec<String> {
     fs::read_to_string(fixture.directory.path().join("pane-typed.txt"))
         .unwrap_or_default()
         .split("\n--\n")
@@ -1177,7 +1195,7 @@ fn typed_prompts(fixture: &NexusFixture) -> Vec<String> {
         .collect()
 }
 
-fn herdr_calls(fixture: &NexusFixture) -> String {
+pub(super) fn herdr_calls(fixture: &NexusFixture) -> String {
     fs::read_to_string(fixture.directory.path().join("herdr-calls.log")).unwrap_or_default()
 }
 

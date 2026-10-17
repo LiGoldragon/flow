@@ -1,3 +1,21 @@
+# Flow 0.35.8
+
+No wire change and no store change: signal-flow 20.0.0 and meta-signal-flow
+24.0.1 stay pinned, no table or family changes.
+
+- **A queued request wakes its Asleep target whether or not the answer is
+  written.** A metaflow is due a wake when it is Asleep, not a Primary, and
+  holds an Order, a Question or the living's words (or its last flow is still
+  live). That is read from the store after every commit that queues a
+  request, a send-tool call's or a Deliver's, and after a replayed send call
+  is answered from its record; the wake runs after the answer is attempted,
+  never only after it succeeded. The Nexus's start wakes every metaflow so
+  due. A second ask while a wake runs, or once the target is Awake, wakes
+  nothing more.
+- A Deliver's connection is closed before the recipient's wake runs.
+- The internal `SendAnswer` type is removed: handling a send call yields its
+  `SendOutcome`.
+
 # Flow 0.35.7
 
 Wire change on both sockets. Ordinary: signal-flow 20.0.0 (6a496646); its

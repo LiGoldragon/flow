@@ -16,6 +16,12 @@
 //! would queue it, and the call and its outcome are recorded in the commit
 //! that queues it (`store::send_call`), so a replayed call is answered from
 //! its record and queued once. The answer is the outcome as a datom.
+//!
+//! Whether the target wakes is never carried by the answer. Once a call's
+//! outcome is Queued, a new one or a replayed one, the target's wake is
+//! decided from Flow's records (`SleepsAndWakesSeats::wake_due`), whether
+//! the answer was written or not; a Nexus that died before it is replaced
+//! by one whose start wakes every metaflow so left.
 
 use crate::codex::{
     CodexAdapter, ExchangesOnSubscription, ProxyEvent, ResponderSignal, SelectsCodexEndpoint,
@@ -23,12 +29,12 @@ use crate::codex::{
 };
 use crate::generated::send_tool::{
     AnswersToolCall, DeclaresSendTool, HandlesSendCall, ParamsCarrying, ReadsSendArguments,
-    ReadsToolCall, SendAnswer, SendArguments, SendCall, SendKind, SendOutcome, SendRefusal,
-    ToolCall, ToolCallCarrying, ToolCallKey, ToolName,
+    ReadsToolCall, SendArguments, SendCall, SendKind, SendOutcome, SendRefusal, ToolCall,
+    ToolCallCarrying, ToolCallKey, ToolName,
 };
-use crate::store::send_call::{KeepsSendCalls, SendEnqueuing};
+use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
-use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats, WakePolicy};
+use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
 use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
@@ -239,20 +245,17 @@ impl AnswersToolCall for SendOutcome {
     }
 }
 
-/// A refusal as the answer to a call, waking nothing.
+/// A refusal as the answer to a call.
 trait RefusesSendCall {
-    fn refused(refusal: SendRefusal) -> SendAnswer {
-        SendAnswer {
-            send_outcome: SendOutcome::Refused(refusal),
-            wake: None,
-        }
+    fn refused(refusal: SendRefusal) -> SendOutcome {
+        SendOutcome::Refused(refusal)
     }
 }
 
 impl RefusesSendCall for RunningNexus {}
 
 impl HandlesSendCall for RunningNexus {
-    fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendAnswer {
+    fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
         let call = input.tool_call();
         if call.tool_name != SendTool::tool_name() {
             return Self::refused(SendRefusal::UnknownTool);
@@ -278,10 +281,7 @@ impl HandlesSendCall for RunningNexus {
         let content_sha256 = call.content_sha256();
         match self.store.send_call(key) {
             Ok(Some(recorded)) if recorded.content_sha256 == content_sha256 => {
-                return SendAnswer {
-                    send_outcome: recorded.send_outcome,
-                    wake: None,
-                };
+                return recorded.send_outcome;
             }
             Ok(Some(_)) => return Self::refused(SendRefusal::KeyReused),
             Ok(None) => {}
@@ -294,10 +294,7 @@ impl HandlesSendCall for RunningNexus {
                 content_sha256,
                 send_outcome: outcome.clone(),
             }) {
-                Ok(()) => SendAnswer {
-                    send_outcome: outcome,
-                    wake: None,
-                },
+                Ok(()) => outcome,
                 Err(error) => store_refused(error),
             };
         };
@@ -309,31 +306,19 @@ impl HandlesSendCall for RunningNexus {
             return Self::refused(SendRefusal::Store);
         };
         let request = arguments.request();
-        let wakes = Self::wakes_for(&request);
         // Queued for a metaflow left Awake as an ended flow, the request
         // wakes it as it would an Asleep one.
         self.rest_ended_awake(&arguments.target);
-        match self.store.queue_send(
-            key,
-            &content_sha256,
-            sender,
-            &arguments.target,
-            request,
-            now,
-        ) {
-            Ok(SendEnqueuing {
-                outcome,
-                recipient_asleep,
-            }) => SendAnswer {
-                wake: (matches!(outcome, SendOutcome::Queued(_))
-                    && recipient_asleep
-                    && wakes
-                    && Self::wakes_layer(&arguments.target.layer))
-                .then(|| arguments.target.clone()),
-                send_outcome: outcome,
-            },
-            Err(error) => store_refused(error),
-        }
+        self.store
+            .queue_send(
+                key,
+                &content_sha256,
+                sender,
+                &arguments.target,
+                request,
+                now,
+            )
+            .unwrap_or_else(store_refused)
     }
 }
 
@@ -374,8 +359,9 @@ pub(crate) trait RespondsToSendCalls {
         inbox: mpsc::Receiver<ResponderSignal>,
     );
     /// Handles one server request the connection brought, when it is a
-    /// tool call, and answers it; then wakes the Asleep target it queued
-    /// for. Err when the answer could not be written.
+    /// tool call, and answers it; then, whether the answer was written or
+    /// not, wakes the target a Queued outcome names when Flow's records
+    /// show it due. Err when the answer could not be written.
     fn answer_request(
         &self,
         subscription: &mut ThreadSubscription,
@@ -460,7 +446,7 @@ impl RespondsToSendCalls for RunningNexus {
         let Some(id) = request.get("id").cloned() else {
             return Ok(());
         };
-        let answer = match request
+        let outcome = match request
             .get("params")
             .cloned()
             .and_then(ToolCall::read_tool_call::<serde_json::Value>)
@@ -468,11 +454,13 @@ impl RespondsToSendCalls for RunningNexus {
             Some(call) => self.handle_send_call(call),
             None => Self::refused(SendRefusal::Malformed),
         };
-        subscription.answer(id, answer.send_outcome.tool_response())?;
-        if let Some(target) = answer.wake {
-            self.wake_due(target);
+        let answered = subscription.answer(id, outcome.tool_response());
+        // The request is durable once queued: its wake does not wait on the
+        // answer reaching the app-server, and a replayed call checks again.
+        if let SendOutcome::Queued(queued) = outcome {
+            self.wake_due(queued.target);
         }
-        Ok(())
+        answered
     }
 }
 

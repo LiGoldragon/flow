@@ -86,15 +86,6 @@ pub struct SendCall {
     pub send_outcome: SendOutcome,
 }
 #[rustfmt::skip]
-pub type Wake = std::option::Option<Target>;
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct SendAnswer {
-    pub send_outcome: SendOutcome,
-    pub wake: Wake,
-}
-#[rustfmt::skip]
 pub trait ParamsCarrying {
     fn params(&self) -> serde_json::Value;
 }
@@ -122,5 +113,5 @@ pub trait AnswersToolCall {
 }
 #[rustfmt::skip]
 pub trait HandlesSendCall {
-    fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendAnswer;
+    fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome;
 }

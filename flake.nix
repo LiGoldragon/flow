@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.7";
+            version = "0.35.8";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -415,6 +415,14 @@
             "codex::tests::an_app_server_that_does_not_gate_the_send_tool_opens_no_thread";
           flow-queued-request-rendered-with-sender = context.exactTest "flow-nexus"
             "tests::send_tool::a_queued_request_is_rendered_with_its_sender";
+          flow-send-tool-wake-survives-failed-answer = context.exactTest "flow-nexus"
+            "tests::send_tool::an_asleep_target_wakes_once_though_the_answer_fails_and_the_call_is_replayed";
+          flow-send-tool-replay-wakes-asleep-target = context.exactTest "flow-nexus"
+            "tests::send_tool::a_replayed_call_wakes_the_asleep_target_its_first_handling_did_not";
+          flow-send-tool-primary-result-notice-wake-nothing = context.exactTest "flow-nexus"
+            "tests::send_tool::a_send_to_an_asleep_primary_or_of_a_result_or_notice_wakes_nothing";
+          flow-nexus-start-wakes-each-due-metaflow-once = context.exactTest "flow-nexus"
+            "tests::waking::a_nexus_start_wakes_a_seat_whose_wake_did_not_finish";
           flow-v1-metaflow-queue-upgrades-sender-unknown = context.exactTest "flow-nexus"
             "store::tests::a_v1_metaflow_queue_upgrades_with_its_senders_unknown";
         }

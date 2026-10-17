@@ -257,8 +257,7 @@ flow of Flow's runs is `ThreadUnowned`, a Stopped, Retired or Exited flow is
 moved on by a Refresh or a fresh wake) is `NotAwake`; none is recorded. The
 request is queued for the target, with that sender, under the rules a Lock and a Deliver follow
 (an absent target is `UnknownRecipient`, an Ended one `RecipientEnded`, one
-Message holds an unexpired lock on is `Held`), an Asleep target that a
-request of its kind wakes is woken once the call is answered, and the call is
+Message holds an unexpired lock on is `Held`), and the call is
 recorded with its outcome in the commit that queues it, in
 `flow_nexus_send_calls`, keyed by thread, turn and call id with the digest of
 its tool and arguments. A call whose key is recorded with the same digest is
@@ -266,6 +265,17 @@ answered from its record and queued nothing more; with another digest it is
 `KeyReused`. The answer is one `inputText` item holding the outcome as a
 datom, `Queued.{ Sender Target }` or `Refused.SendRefusal`, with `success`
 true only when queued.
+
+Whether a target wakes is read from Flow's records, never carried with the
+answer. A metaflow is due a wake when it is Asleep, its layer is not Primary,
+and it holds an Order, a Question or the living's words, or its last flow is
+still live. After every commit that queues a request, from a send-tool call
+or a Deliver, and after a replayed call is answered from its record, the
+target is held against a second wake, read again under the dispatch gate,
+and woken when due; this runs whether or not the answer reached the caller.
+At its start the Nexus wakes every metaflow due a wake, so a Nexus that died
+between the commit and the wake leaves none owed. A wake already running for
+the metaflow absorbs the request: it drains what arrives during it.
 
 Every queued request carries who sent it, `QueuedRequest.{ SentBy Request }`:
 the Sender a Deliver's Lock named (which the bound Message peer asserts) or

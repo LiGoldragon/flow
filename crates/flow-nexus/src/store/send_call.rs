@@ -64,15 +64,6 @@ impl DescribesSendCallTable for SendCall {
     }
 }
 
-/// What queueing a call's request did: the outcome its row records, and
-/// whether the target was Asleep when it was queued, which a wake is
-/// decided on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SendEnqueuing {
-    pub outcome: SendOutcome,
-    pub recipient_asleep: bool,
-}
-
 pub(crate) trait KeepsSendCalls {
     /// The Address a thread's calls are sent from: the metaflow Awake as
     /// the one live flow Flow holds on that Codex thread. ThreadUnowned
@@ -97,7 +88,7 @@ pub(crate) trait KeepsSendCalls {
         target: &Target,
         request: Request,
         now: i64,
-    ) -> Result<SendEnqueuing, StoreError>;
+    ) -> Result<SendOutcome, StoreError>;
 }
 
 impl KeepsSendCalls for FlowStore {
@@ -158,19 +149,16 @@ impl KeepsSendCalls for FlowStore {
         target: &Target,
         request: Request,
         now: i64,
-    ) -> Result<SendEnqueuing, StoreError> {
+    ) -> Result<SendOutcome, StoreError> {
         let call = |send_outcome| SendCall {
             tool_call_key: key.clone(),
             content_sha256: content_sha256.to_owned(),
             send_outcome,
         };
-        let refused = |refusal| -> Result<SendEnqueuing, StoreError> {
+        let refused = |refusal| -> Result<SendOutcome, StoreError> {
             let outcome = SendOutcome::Refused(refusal);
             self.record_send_call(call(outcome.clone()))?;
-            Ok(SendEnqueuing {
-                outcome,
-                recipient_asleep: false,
-            })
+            Ok(outcome)
         };
         let Some(mut stored) = self.stored_metaflow(target)? else {
             return refused(SendRefusal::UnknownRecipient(target.clone()));
@@ -186,7 +174,6 @@ impl KeepsSendCalls for FlowStore {
         {
             return refused(SendRefusal::Held);
         }
-        let recipient_asleep = stored.metaflow.state == MetaflowState::Asleep;
         stored.metaflow.queue.push(QueuedRequest {
             sent_by: SentBy::Sender(sender.clone()),
             request,
@@ -202,9 +189,6 @@ impl KeepsSendCalls for FlowStore {
             .assert(self.send_calls, call(outcome.clone()));
         self.engine.commit_atomic(commit)?;
         // This is durable enqueue, never a claim of native delivery or wake.
-        Ok(SendEnqueuing {
-            outcome,
-            recipient_asleep,
-        })
+        Ok(outcome)
     }
 }

@@ -26,11 +26,19 @@
 //! sleep, and when to resume is one function of [`WakePolicy`], so a ruling
 //! changes one place.
 //!
-//! A wake runs on the connection thread that queued the request, after its
-//! answer is written, off the dispatch gate: it takes the gate for each store
-//! step and releases it while a fresh launch settles, as Start does. While it
-//! runs, the metaflow is held in [`WakingMetaflows`], so a second request
-//! starts no second wake and a Stop does not put the waking seat to sleep.
+//! Whether a metaflow is due a wake is read from Flow's records alone
+//! ([`SleepsAndWakesSeats::wake_is_due`]): it is Asleep, its layer wakes, and
+//! it holds work that wakes it, or its last flow is still live. Nothing
+//! carried beside a commit decides it, so every path that may leave a wake
+//! owed asks the same question: the connection or send-tool responder that
+//! queued a request, after its answer was written or failed to be, a
+//! replayed send call answered from its record, and the Nexus's start.
+//!
+//! A wake runs on the thread that asked, off the dispatch gate: it takes the
+//! gate for each store step and releases it while a fresh launch settles, as
+//! Start does. While it runs, the metaflow is held in [`WakingMetaflows`], so
+//! a second request starts no second wake and a Stop does not put the waking
+//! seat to sleep.
 
 use crate::AwaitsLaunchSettlement;
 use crate::RunningNexus;
@@ -455,19 +463,23 @@ pub trait SleepsAndWakesSeats {
     /// the oldest queued request into its resting seat, or puts the
     /// metaflow Awake as it to sleep when nothing waits for it.
     fn settle_stopped(&self, flow_id: &str) -> AtStop;
-    /// After a request was queued for an Asleep metaflow: wakes it and
-    /// drains what arrived meanwhile. Nothing when a wake already runs.
+    /// After a request was queued for `address`, or a queued one was
+    /// answered again: holds the metaflow, and when Flow's records show it
+    /// due a wake, wakes it and drains what arrived meanwhile. Nothing when
+    /// a wake already runs or none is due, so asking twice wakes once.
     fn wake_due(&self, address: Address);
+    /// Whether Flow's records show the metaflow due a wake: Asleep, of a
+    /// layer that wakes, holding work that wakes it, or with its last flow
+    /// still live, as a wake that failed after resuming its session left it.
+    fn wake_is_due(&self, metaflow: &Metaflow) -> bool;
     /// Types what arrived during a wake into the woken flow, oldest first,
     /// until the queue is seen empty under the gate; the hold is released
     /// there.
     fn drain_woken(&self, address: &Address, lease: WakingLease<'_>);
     /// Which way an Asleep metaflow is woken.
     fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan;
-    /// At the Nexus's start: wakes every Asleep metaflow still holding work
-    /// that wakes it, as a wake the last Nexus did not finish left it, and
-    /// every Asleep metaflow whose last flow is still live, which a wake
-    /// that failed after resuming its session left so.
+    /// At the Nexus's start: wakes every metaflow due a wake, as a wake the
+    /// last Nexus did not start or did not finish left it.
     fn recover_wakes(&self);
 }
 
@@ -546,6 +558,20 @@ impl SleepsAndWakesSeats for RunningNexus {
         let Some(lease) = self.waking.hold(&address) else {
             return;
         };
+        let due = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.rest_ended_awake(&address);
+            matches!(
+                self.store.metaflow(&address),
+                Ok(Some(metaflow)) if self.wake_is_due(&metaflow)
+            )
+        };
+        if !due {
+            return;
+        }
         // A refused wake has logged its reason; its work stays queued.
         if let Outcome::Woken(_) = self.perform(Operation::Wake(address.clone())) {
             self.drain_woken(&address, lease);
@@ -610,6 +636,21 @@ impl SleepsAndWakesSeats for RunningNexus {
         }
     }
 
+    fn wake_is_due(&self, metaflow: &Metaflow) -> bool {
+        metaflow.state == flow_ethos::State::Asleep
+            && Self::wakes_layer(&metaflow.address.layer)
+            && (metaflow
+                .queue
+                .iter()
+                .any(|queued| Self::wakes_for(&queued.request))
+                || metaflow.past.last().is_some_and(|flow_id| {
+                    matches!(
+                        self.store.flow_node(flow_id),
+                        Ok(Some(node)) if node.flow_lifecycle.is_live()
+                    )
+                }))
+    }
+
     fn recover_wakes(&self) {
         let due = {
             let _turn = self
@@ -620,20 +661,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             match self.store.list_metaflows() {
                 Ok(metaflows) => metaflows
                     .into_iter()
-                    .filter(|metaflow| {
-                        metaflow.state == flow_ethos::State::Asleep
-                            && Self::wakes_layer(&metaflow.address.layer)
-                            && (metaflow
-                                .queue
-                                .iter()
-                                .any(|queued| Self::wakes_for(&queued.request))
-                                || metaflow.past.last().is_some_and(|flow_id| {
-                                    matches!(
-                                        self.store.flow_node(flow_id),
-                                        Ok(Some(node)) if node.flow_lifecycle.is_live()
-                                    )
-                                }))
-                    })
+                    .filter(|metaflow| self.wake_is_due(metaflow))
                     .map(|metaflow| metaflow.address)
                     .collect::<Vec<_>>(),
                 Err(_) => {

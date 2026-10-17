@@ -1313,7 +1313,7 @@ impl ReadsLaunchText for str {
                 })
             })
             .find(|part| {
-                &part.text_sha256() == part_sha256 && &part.claude_paste_element(identifier) == row
+                part.text_sha256() == *part_sha256 && part.claude_paste_element(identifier) == *row
             })
     }
 
@@ -4574,7 +4574,7 @@ printf '%s\n' 123456
         ];
         for row in wrong {
             assert_eq!(
-                claude_rows_read(&[part], &[row.clone()]),
+                claude_rows_read(&[part], std::slice::from_ref(&row)),
                 Err(NativeLaunchFailure::PartDiffers),
                 "{row:?}"
             );

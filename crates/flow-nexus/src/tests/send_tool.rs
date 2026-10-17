@@ -5,7 +5,7 @@
 //! the send-tool probe, so connection `n` of a responder is run `2n` of its
 //! script, and run `2n - 1` is the probe.
 
-use super::NexusFixture;
+use super::{ControlsHerdrSnapshot, NexusFixture};
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
@@ -1384,7 +1384,7 @@ trait SeatsAwakeCodexSeat {
 
 impl SeatsAwakeCodexSeat for NexusFixture {
     fn awake_codex_seat(&self, queue: Vec<QueuedRequest>) {
-        use super::{ControlsHerdrSnapshot, PromptFixture};
+        use super::PromptFixture;
         self.accept_pane_operations(vec![self.settled_agent()], PromptFixture::Prompted("w1:p3"));
         self.register_with(signal_flow::FlowLifecycle::Active);
         self.nexus.store.seed_metaflow(Metaflow {
@@ -1406,7 +1406,6 @@ impl SeatsAwakeCodexSeat for NexusFixture {
     }
 
     fn typed_count(&self, request: &QueuedRequest) -> usize {
-        use super::ControlsHerdrSnapshot;
         use datom_codec::Datomizable;
         use protos::{Compactable, Protosizable};
         let datom = request.datomize(Vec::new()).protosize().compact();

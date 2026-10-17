@@ -26,9 +26,9 @@
 //! thread's status from its responder's `thread/resume`.
 
 use crate::RunningNexus;
-use crate::store::ReadsFlowRows;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::metaflow::SleepsMetaflows;
+use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::waking::{HoldsWakingMetaflows, NotesStopsAtConfirmation, SleepsAndWakesSeats};
 use signal_flow::{Address, FlowId, FlowNode, HarnessKind};
 use std::collections::{HashMap, VecDeque};

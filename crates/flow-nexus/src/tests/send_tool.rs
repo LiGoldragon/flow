@@ -826,7 +826,15 @@ fn a_pending_call_is_answered_after_start_and_reconnect() {
         server.join().expect("the send tool stops with the Nexus");
         answer
     })
-    .expect("the pending call answered on the second connection");
+    .unwrap_or_else(|| {
+        panic!(
+            "the pending call was not answered; runs={}, run2={:?}, run3={:?}, run4={:?}",
+            fake.runs(),
+            fake.directory.path().join("record-2").client_messages(),
+            fake.directory.path().join("record-3").client_messages(),
+            fake.directory.path().join("record-4").client_messages(),
+        )
+    });
     assert_eq!(
         answer["contentItems"][0]["text"],
         queued_text(sender_a(), target())

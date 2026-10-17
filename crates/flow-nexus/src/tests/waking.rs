@@ -2681,9 +2681,13 @@ fn a_refreshed_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         identity = FRESH_THREAD.replace('-', ""),
     ));
 
+    let outcome = fixture.nexus.perform(Operation::Wake(at.clone()));
     assert_eq!(
-        fixture.nexus.perform(Operation::Wake(at.clone())),
-        Outcome::Woken(FRESH_CODEX_FLOW.into())
+        outcome,
+        Outcome::Woken(FRESH_CODEX_FLOW.into()),
+        "Herdr calls: {}; app-server invocations: {:?}",
+        fs::read_to_string(world.state.join("calls")).unwrap_or_default(),
+        fs::read_to_string(&world.codex_invocations).ok()
     );
 
     let woken = stored(&fixture, Layer::Secondary);

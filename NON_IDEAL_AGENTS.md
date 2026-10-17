@@ -36,3 +36,16 @@ No test needs them.
 **Proper fix:** undecided. A wrapper that sets `XDG_RUNTIME_DIR` to its
 slot's runtime anchor reaches the same path with no Flow variable, but a
 moved socket would then have no way to be named.
+
+## A queued request names no sender
+
+A metaflow's queue holds `Request` values, and `Request` (flow-ethos) has no
+sender. A Deliver from Message checks the Lock's Sender and then queues the
+request alone, and a send-tool call is queued the same way: the sender Flow
+attributed it to is in the call's record and in the tool's answer, but the
+recipient reads only `Order.«body»`. No test needs it.
+
+**Proper fix:** the queued item carries its Sender (flow-ethos `Metaflow`
+queue of `{ Sender Request }`), which changes the signal-flow and
+meta-signal-flow contracts and the metaflow store family.
+

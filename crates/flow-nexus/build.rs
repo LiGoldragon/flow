@@ -5,7 +5,14 @@ use ethos_zero::{Actualizing, File, Generating, Potential};
 
 fn main() {
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest"));
-    for name in ["operation", "startup", "library", "curriculum", "starter"] {
+    for name in [
+        "operation",
+        "startup",
+        "library",
+        "curriculum",
+        "starter",
+        "send_tool",
+    ] {
         let source_path = format!("ethos/{name}.ethos");
         let generated_path = format!("src/generated/{name}.rs");
         println!("cargo:rerun-if-changed={source_path}");

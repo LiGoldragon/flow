@@ -13,6 +13,7 @@ pub mod events;
 pub(crate) mod metaflow;
 pub(crate) mod opened_thread;
 pub(crate) mod refresh;
+pub(crate) mod send_call;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -1576,7 +1577,8 @@ impl EngineRecord for Replacement {
 }
 
 /// The store's announcement of launch movement: every change to a launch
-/// attempt or outcome advances the count and wakes whoever waits on it.
+/// attempt or outcome, and every flow that ends or resumes, advances the
+/// count and wakes whoever waits on it.
 /// Nothing re-reads on a timer; a waiter sleeps until a change is announced.
 #[derive(Clone, Default)]
 pub struct LaunchChanges {
@@ -1872,6 +1874,7 @@ pub struct FlowStore {
     address_holds: TableReference<address_hold::AddressHold>,
     refreshes: TableReference<refresh::MetaflowRefresh>,
     opened_threads: TableReference<opened_thread::OpenedLaunchThread>,
+    send_calls: TableReference<crate::generated::send_tool::SendCall>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
@@ -2477,6 +2480,7 @@ impl OpensFlowStore for FlowStore {
         let opened_threads_descriptor =
             <opened_thread::OpenedLaunchThread as opened_thread::DescribesOpenedThreadTable>::descriptor(
             );
+        let send_calls_descriptor = <crate::generated::send_tool::SendCall as send_call::DescribesSendCallTable>::descriptor();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -2504,7 +2508,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&context_sizes_descriptor)
                 .with_family(&address_holds_descriptor)
                 .with_family(&refreshes_descriptor)
-                .with_family(&opened_threads_descriptor),
+                .with_family(&opened_threads_descriptor)
+                .with_family(&send_calls_descriptor),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -2530,6 +2535,7 @@ impl OpensFlowStore for FlowStore {
         let address_holds = engine.register_table(address_holds_descriptor)?;
         let refreshes = engine.register_table(refreshes_descriptor)?;
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
+        let send_calls = engine.register_table(send_calls_descriptor)?;
         let store = Self {
             engine,
             flows,
@@ -2553,6 +2559,7 @@ impl OpensFlowStore for FlowStore {
             address_holds,
             refreshes,
             opened_threads,
+            send_calls,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -2674,6 +2681,9 @@ impl OpensFlowStore for FlowStore {
             <opened_thread::OpenedLaunchThread as opened_thread::DescribesOpenedThreadTable>::descriptor(
             ),
         )?;
+        let send_calls = engine.register_table(
+            <crate::generated::send_tool::SendCall as send_call::DescribesSendCallTable>::descriptor(),
+        )?;
         let store = Self {
             engine,
             flows,
@@ -2697,6 +2707,7 @@ impl OpensFlowStore for FlowStore {
             address_holds,
             refreshes,
             opened_threads,
+            send_calls,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -4479,6 +4490,7 @@ impl RecordsFlowLifecycle for FlowStore {
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         self.engine
             .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
+        self.launch_changes.announce();
         Ok(true)
     }
 
@@ -4495,6 +4507,7 @@ impl RecordsFlowLifecycle for FlowStore {
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         self.engine
             .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
+        self.launch_changes.announce();
         Ok(true)
     }
 
@@ -4511,6 +4524,7 @@ impl RecordsFlowLifecycle for FlowStore {
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         self.engine
             .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
+        self.launch_changes.announce();
         Ok(true)
     }
 
@@ -4533,6 +4547,7 @@ impl RecordsFlowLifecycle for FlowStore {
             commit.assert(self.herdr_routes, route)
         };
         self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
         Ok(true)
     }
 }
@@ -5227,6 +5242,7 @@ pub(crate) trait ReadsFlowMemory {
                 opened_thread::OPENED_THREAD_FAMILY,
                 opened_thread::OPENED_THREAD_SCHEMA,
             ),
+            "flow_nexus_send_calls" => (send_call::SEND_CALL_FAMILY, send_call::SEND_CALL_SCHEMA),
             _ => return None,
         };
         Some((family, SchemaHash::for_label(version)))
@@ -5353,14 +5369,16 @@ pub(crate) trait ReadsFlowMemory {
         // the first full open of a configuration-only store adds the running
         // tables.
         // A store keeps its metaflows' default leave-outs from 0.35.0 on,
-        // its fresh-wake marks from 0.35.2 on, and the Codex thread each
-        // launch opened from 0.35.6 on.
+        // its fresh-wake marks from 0.35.2 on, the Codex thread each
+        // launch opened from 0.35.6 on, and the send tool's calls from
+        // 0.35.7 on.
         const ADDED_LATER: &[&str] = &[
             "flow_nexus_flow_context_sizes",
             "flow_nexus_address_holds",
             "flow_nexus_meta_leave_out_configuration",
             "flow_nexus_metaflow_refreshes",
             "flow_nexus_launch_opened_threads",
+            "flow_nexus_send_calls",
         ];
         // A store before 0.35.0 may still hold a table 0.35.0 drops.
         let retired = |name: &String| RETIRED_TABLES.iter().any(|(table, _, _)| table == name);
@@ -7680,6 +7698,14 @@ mod tests {
                     engine
                         .match_records(QueryPlan::all(self.opened_threads))
                         .expect("opened threads read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_send_calls",
+                    engine
+                        .match_records(QueryPlan::all(self.send_calls))
+                        .expect("send calls read")
                         .records()
                         .len(),
                 ),

@@ -3,12 +3,12 @@
 //! JSON-RPC conversation; it never falls back to a direct Unix-socket client.
 
 use crate::composition::ValidatesComposedPrompt;
+use crate::generated::send_tool::DeclaresSendTool;
+use crate::send_tool::SendTool;
 use crate::store::{CodexEndpointConfiguration, RuntimeConfiguration};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
-use signal_flow::{
-    ComposedLaunch, HarnessKind, Origin, PromptDeliveryIntent, PromptDeliveryResult,
-};
+use signal_flow::{ComposedLaunch, HarnessKind, PromptDeliveryIntent, PromptDeliveryResult};
 use std::{
     collections::BTreeSet,
     io::{BufRead, BufReader, Read, Write},
@@ -140,24 +140,11 @@ pub enum CodexAdapterUnavailable {
     Refused { method: String, detail: String },
     #[error("Codex app-server protocol error: {0}")]
     Protocol(String),
-}
-
-pub trait StartsCodex {
-    fn start_codex(
-        &self,
-        flow_id: &str,
-        goal: &str,
-        origin: &Origin,
-    ) -> Result<String, CodexAdapterUnavailable>;
-}
-
-pub trait ResumesCodex {
-    fn resume_codex(
-        &self,
-        thread_id: &str,
-        goal: &str,
-        origin: &Origin,
-    ) -> Result<(), CodexAdapterUnavailable>;
+    /// The deployed app-server was not shown to accept a thread's dynamic
+    /// tools behind the experimental API, so no thread is opened without
+    /// Flow's send tool.
+    #[error("Codex app-server does not support the send tool: {0}")]
+    SendToolUnsupported(String),
 }
 
 pub trait ConsumesResetCredit {
@@ -196,6 +183,16 @@ pub trait OpensCodexThread {
     ) -> Result<String, CodexAdapterUnavailable>;
 }
 
+/// Shows that the deployed app-server accepts a thread's dynamic tools only
+/// behind the experimental API: on a connection initialized without it, a
+/// `thread/start` declaring the send tool must be refused for that reason,
+/// before any thread exists. Only then does Flow open a connection with the
+/// experimental API. An app-server that answers otherwise, or starts the
+/// (ephemeral) thread, does not support the tool: `SendToolUnsupported`.
+pub trait ProbesSendTool {
+    fn probe_send_tool(&self) -> Result<(), CodexAdapterUnavailable>;
+}
+
 /// Names the exact Herdr-bound thread through the app-server and reads the
 /// name back from the same thread.
 pub trait NamesBoundCodexThread {
@@ -212,13 +209,40 @@ struct ProxySession {
     replies: Receiver<ProxyEvent>,
 }
 
-enum ProxyEvent {
+/// One running `codex app-server proxy` whose WebSocket upgrade was sent;
+/// its reader thread hands each event to the sink it was spawned with.
+pub(crate) struct ProxyChild {
+    pub(crate) child: Child,
+    pub(crate) input: ChildStdin,
+}
+
+pub(crate) enum ProxyEvent {
     Upgraded,
+    /// A ping the app-server sent; its payload is answered with a pong.
+    Ping(Vec<u8>),
     Reply(Result<serde_json::Value, CodexAdapterUnavailable>),
+}
+
+/// One WebSocket frame read from the proxy: a text message, or a ping or
+/// pong, which carry no JSON.
+enum ProxyFrame {
+    Text(serde_json::Value),
+    Ping(Vec<u8>),
+    Pong,
 }
 
 trait OpensCodexProxy {
     fn open_proxy(&self) -> Result<ProxySession, CodexAdapterUnavailable>;
+}
+
+/// Starts the proxy and sends its WebSocket upgrade; the reader thread
+/// hands the upgrade, then every frame, to `sink` until the sink refuses or
+/// the proxy closes.
+pub(crate) trait SpawnsCodexProxy {
+    fn spawn_proxy(
+        &self,
+        sink: impl FnMut(ProxyEvent) -> bool + Send + 'static,
+    ) -> Result<ProxyChild, CodexAdapterUnavailable>;
 }
 
 trait ExchangesCodexRpc {
@@ -240,18 +264,11 @@ trait StopsCodexProxy {
     fn stop_proxy(&mut self);
 }
 
-trait BuildsCodexTurn {
-    fn turn_params(
+impl SpawnsCodexProxy for CodexAdapter {
+    fn spawn_proxy(
         &self,
-        thread_id: &str,
-        flow_id: &str,
-        goal: &str,
-        origin: &Origin,
-    ) -> serde_json::Value;
-}
-
-impl OpensCodexProxy for CodexAdapter {
-    fn open_proxy(&self) -> Result<ProxySession, CodexAdapterUnavailable> {
+        mut sink: impl FnMut(ProxyEvent) -> bool + Send + 'static,
+    ) -> Result<ProxyChild, CodexAdapterUnavailable> {
         let mut child = Command::new(&self.executable)
             .args(["app-server", "proxy", "--sock", &self.socket])
             .stdin(Stdio::piped())
@@ -284,11 +301,14 @@ impl OpensCodexProxy for CodexAdapter {
         let upgrade = format!(
             "GET / HTTP/1.1\r\nHost: flow-nexus\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         );
-        input
+        if let Err(error) = input
             .write_all(upgrade.as_bytes())
             .and_then(|_| input.flush())
-            .map_err(|error| CodexAdapterUnavailable::Proxy(error.to_string()))?;
-        let (sender, replies) = mpsc::channel();
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CodexAdapterUnavailable::Proxy(error.to_string()));
+        }
         thread::spawn(move || {
             let mut output = BufReader::new(output);
             let outcome = ProxySessionReader {
@@ -296,23 +316,41 @@ impl OpensCodexProxy for CodexAdapter {
             }
             .read_upgrade(&accept);
             if let Err(error) = outcome {
-                let _ = sender.send(ProxyEvent::Reply(Err(error)));
+                let _ = sink(ProxyEvent::Reply(Err(error)));
                 return;
             }
-            if sender.send(ProxyEvent::Upgraded).is_err() {
+            if !sink(ProxyEvent::Upgraded) {
                 return;
             }
             loop {
-                let result = ProxySessionReader {
+                let event = match (ProxySessionReader {
                     output: &mut output,
-                }
-                .read_message();
-                let closed = matches!(result, Err(CodexAdapterUnavailable::Closed));
-                if sender.send(ProxyEvent::Reply(result)).is_err() || closed {
+                })
+                .read_frame()
+                {
+                    Ok(ProxyFrame::Text(message)) => ProxyEvent::Reply(Ok(message)),
+                    Ok(ProxyFrame::Ping(payload)) => ProxyEvent::Ping(payload),
+                    Ok(ProxyFrame::Pong) => continue,
+                    Err(error) => ProxyEvent::Reply(Err(error)),
+                };
+                let closed = matches!(
+                    event,
+                    ProxyEvent::Reply(Err(CodexAdapterUnavailable::Closed))
+                );
+                if !sink(event) || closed {
                     return;
                 }
             }
         });
+        Ok(ProxyChild { child, input })
+    }
+}
+
+impl OpensCodexProxy for CodexAdapter {
+    fn open_proxy(&self) -> Result<ProxySession, CodexAdapterUnavailable> {
+        let (sender, replies) = mpsc::channel();
+        let ProxyChild { child, input } =
+            self.spawn_proxy(move |event| sender.send(event).is_ok())?;
         let mut session = ProxySession {
             child,
             input,
@@ -323,7 +361,7 @@ impl OpensCodexProxy for CodexAdapter {
                 session.stop_proxy();
                 Err(error)
             }
-            Ok(ProxyEvent::Reply(Ok(_))) => {
+            Ok(ProxyEvent::Reply(Ok(_)) | ProxyEvent::Ping(_)) => {
                 session.stop_proxy();
                 Err(CodexAdapterUnavailable::Protocol(
                     "proxy sent a WebSocket message before completing its upgrade".into(),
@@ -344,7 +382,9 @@ struct ProxySessionReader<'a, R: BufRead> {
 
 trait ReadsCodexProxy {
     fn read_upgrade(&mut self, accept: &str) -> Result<(), CodexAdapterUnavailable>;
-    fn read_message(&mut self) -> Result<serde_json::Value, CodexAdapterUnavailable>;
+    /// One whole frame. A frame past the size limit is read through and
+    /// refused, so the stream stays at a frame boundary.
+    fn read_frame(&mut self) -> Result<ProxyFrame, CodexAdapterUnavailable>;
 }
 
 impl<R: BufRead> ReadsCodexProxy for ProxySessionReader<'_, R> {
@@ -398,7 +438,7 @@ impl<R: BufRead> ReadsCodexProxy for ProxySessionReader<'_, R> {
         Ok(())
     }
 
-    fn read_message(&mut self) -> Result<serde_json::Value, CodexAdapterUnavailable> {
+    fn read_frame(&mut self) -> Result<ProxyFrame, CodexAdapterUnavailable> {
         let mut first = [0; 2];
         match self.output.read_exact(&mut first) {
             Ok(()) => {}
@@ -428,16 +468,18 @@ impl<R: BufRead> ReadsCodexProxy for ProxySessionReader<'_, R> {
                 .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
             length = u64::from_be_bytes(bytes);
         }
-        if length > MAX_MESSAGE_BYTES as u64 {
-            return Err(CodexAdapterUnavailable::Protocol(
-                "WebSocket message exceeds limit".into(),
-            ));
-        }
         let mut mask = [0; 4];
         if masked {
             self.output
                 .read_exact(&mut mask)
                 .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
+        }
+        if length > MAX_MESSAGE_BYTES as u64 {
+            std::io::copy(&mut (&mut *self.output).take(length), &mut std::io::sink())
+                .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
+            return Err(CodexAdapterUnavailable::Protocol(
+                "WebSocket message exceeds limit".into(),
+            ));
         }
         let mut bytes = vec![0; length as usize];
         self.output
@@ -448,16 +490,17 @@ impl<R: BufRead> ReadsCodexProxy for ProxySessionReader<'_, R> {
                 *byte ^= mask[index % mask.len()];
             }
         }
-        if opcode == 8 {
-            return Err(CodexAdapterUnavailable::Closed);
-        }
-        if opcode != 1 {
-            return Err(CodexAdapterUnavailable::Protocol(
+        match opcode {
+            8 => Err(CodexAdapterUnavailable::Closed),
+            9 => Ok(ProxyFrame::Ping(bytes)),
+            10 => Ok(ProxyFrame::Pong),
+            1 => serde_json::from_slice(&bytes)
+                .map(ProxyFrame::Text)
+                .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string())),
+            _ => Err(CodexAdapterUnavailable::Protocol(
                 "non-text WebSocket frame".into(),
-            ));
+            )),
         }
-        serde_json::from_slice(&bytes)
-            .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))
     }
 }
 
@@ -483,17 +526,25 @@ impl ExchangesCodexRpc for ProxySession {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .ok_or(CodexAdapterUnavailable::TimedOut)?;
-            let ProxyEvent::Reply(reply) = self
+            let reply = match self
                 .replies
                 .recv_timeout(remaining)
                 .map_err(|_| CodexAdapterUnavailable::TimedOut)?
-            else {
-                return Err(CodexAdapterUnavailable::Protocol(
-                    "duplicate WebSocket upgrade".into(),
-                ));
+            {
+                ProxyEvent::Reply(reply) => reply?,
+                ProxyEvent::Ping(payload) => {
+                    self.input.write_frame(0x8a, &payload)?;
+                    continue;
+                }
+                ProxyEvent::Upgraded => {
+                    return Err(CodexAdapterUnavailable::Protocol(
+                        "duplicate WebSocket upgrade".into(),
+                    ));
+                }
             };
-            let reply = reply?;
-            if reply.get("id") != Some(&serde_json::json!(id)) {
+            // A server request or notification is no reply, whatever its
+            // id: the app-server numbers its own requests apart from ours.
+            if reply.get("method").is_some() || reply.get("id") != Some(&serde_json::json!(id)) {
                 continue;
             }
             if let Some(error) = reply.get("error") {
@@ -509,7 +560,7 @@ impl ExchangesCodexRpc for ProxySession {
     }
 }
 
-trait WritesCodexProxy {
+pub(crate) trait WritesCodexProxy {
     /// The masked payload length of a client WebSocket frame (RFC 6455
     /// 5.2): seven bits, else 126 and sixteen bits, else 127 and sixty-four
     /// bits, so one text frame carries a whole part.
@@ -526,14 +577,18 @@ trait WritesCodexProxy {
             bytes
         }
     }
-    fn write_json(&mut self, value: serde_json::Value) -> Result<(), CodexAdapterUnavailable>;
-}
-
-impl WritesCodexProxy for ProxySession {
+    /// One masked client frame: `head` is its first byte (FIN and opcode).
+    fn write_frame(&mut self, head: u8, payload: &[u8]) -> Result<(), CodexAdapterUnavailable>;
     fn write_json(&mut self, value: serde_json::Value) -> Result<(), CodexAdapterUnavailable> {
         let payload = serde_json::to_vec(&value)
             .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
-        let mut frame = vec![0x81];
+        self.write_frame(0x81, &payload)
+    }
+}
+
+impl WritesCodexProxy for ChildStdin {
+    fn write_frame(&mut self, head: u8, payload: &[u8]) -> Result<(), CodexAdapterUnavailable> {
+        let mut frame = vec![head];
         frame.extend(Self::masked_length(payload.len()));
         let mut mask = [0; 4];
         std::fs::File::open("/dev/urandom")
@@ -546,10 +601,15 @@ impl WritesCodexProxy for ProxySession {
                 .enumerate()
                 .map(|(index, byte)| byte ^ mask[index % mask.len()]),
         );
-        self.input
-            .write_all(&frame)
-            .and_then(|_| self.input.flush())
+        self.write_all(&frame)
+            .and_then(|_| self.flush())
             .map_err(|error| CodexAdapterUnavailable::Proxy(error.to_string()))
+    }
+}
+
+impl WritesCodexProxy for ProxySession {
+    fn write_frame(&mut self, head: u8, payload: &[u8]) -> Result<(), CodexAdapterUnavailable> {
+        self.input.write_frame(head, payload)
     }
 }
 
@@ -571,29 +631,15 @@ impl LocatesFlowDirectory for CodexAdapter {
     }
 }
 
-impl BuildsCodexTurn for CodexAdapter {
-    fn turn_params(
-        &self,
-        thread_id: &str,
-        flow_id: &str,
-        goal: &str,
-        origin: &Origin,
-    ) -> serde_json::Value {
-        serde_json::json!({
-            "threadId": thread_id,
-            "input": [{ "type": "text", "text": format!("{goal}\n\nFlow identity:\nFLOW_ID={flow_id}\nFLOW_DIRECTORY={}\n\nOrigin:\n{}", self.flow_directory(flow_id).display(), match origin {
-                Origin::Flow(caller) => format!("flow: {}\nsession: {}", caller.flow_id, caller.session_id),
-                Origin::Unbound => "unbound".to_owned(),
-            }) }],
-            "model": self.model,
-            "effort": "medium",
-            "turnTrigger": "flow-nexus"
-        })
-    }
-}
-
 trait OpensBoundCodexSession {
-    fn initialize_bound_session(&self) -> Result<ProxySession, CodexAdapterUnavailable>;
+    fn initialize_bound_session(&self) -> Result<ProxySession, CodexAdapterUnavailable> {
+        self.initialize_session(serde_json::Value::Null)
+    }
+    /// Initializes a connection declaring `capabilities`.
+    fn initialize_session(
+        &self,
+        capabilities: serde_json::Value,
+    ) -> Result<ProxySession, CodexAdapterUnavailable>;
     /// The `turn/start` of the part the intent last counted as submitted:
     /// its text as the one input item.
     fn bound_turn_params(
@@ -629,20 +675,22 @@ trait OpensBoundCodexSession {
 }
 
 impl OpensBoundCodexSession for CodexAdapter {
-    fn initialize_bound_session(&self) -> Result<ProxySession, CodexAdapterUnavailable> {
+    fn initialize_session(
+        &self,
+        capabilities: serde_json::Value,
+    ) -> Result<ProxySession, CodexAdapterUnavailable> {
         let mut session = self.open_proxy()?;
+        let mut params = serde_json::json!({
+            "clientInfo": {
+                "name": "flow-nexus",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        });
+        if !capabilities.is_null() {
+            params["capabilities"] = capabilities;
+        }
         if let Err(error) = (|| {
-            session.request(
-                1,
-                "initialize",
-                serde_json::json!({
-                    "clientInfo": {
-                        "name": "flow-nexus",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }),
-                self.timeout,
-            )?;
+            session.request(1, "initialize", params, self.timeout)?;
             session.notify("initialized", serde_json::Value::Null)
         })() {
             session.stop_proxy();
@@ -812,22 +860,29 @@ impl OpensCodexThread for CodexAdapter {
                 "the composed launch is no Codex launch this endpoint serves".into(),
             ));
         };
-        let mut session = self.initialize_bound_session()?;
+        // The send tool is declared behind the experimental API, which is
+        // opened only once the app-server is shown to gate the tool on it.
+        self.probe_send_tool()?;
+        let mut session =
+            self.initialize_session(serde_json::json!({ "experimentalApi": true }))?;
         let result = (|| {
-            let started = session.request(
-                2,
-                "thread/start",
-                serde_json::json!({
-                    "model": launch.launch_profile.model_name,
-                    "cwd": self.workspace_root,
-                    "approvalPolicy": "never",
-                    "sandbox": "danger-full-access",
-                    "baseInstructions": launch.system_prompt.system_prompt_text,
-                    "ephemeral": false,
-                    "config": Self::exclusion_config(launch)
-                }),
-                self.timeout,
-            )?;
+            let started = session
+                .request(
+                    2,
+                    "thread/start",
+                    serde_json::json!({
+                        "model": launch.launch_profile.model_name,
+                        "cwd": self.workspace_root,
+                        "approvalPolicy": "never",
+                        "sandbox": "danger-full-access",
+                        "baseInstructions": launch.system_prompt.system_prompt_text,
+                        "ephemeral": false,
+                        "config": Self::exclusion_config(launch),
+                        "dynamicTools": [SendTool::tool_spec()]
+                    }),
+                    self.timeout,
+                )
+                .map_err(<CodexAdapterUnavailable as SendToolRefusal>::named)?;
             let thread = started
                 .pointer("/thread/id")
                 .and_then(serde_json::Value::as_str)
@@ -910,6 +965,75 @@ impl SubmitsBoundCodexPart for CodexAdapter {
     }
 }
 
+/// Reads an app-server refusal of a `thread/start` that declared the send
+/// tool: the refusal codex 0.161.0-alpha.2 gives a connection without the
+/// experimental API (JSON-RPC -32600, "thread/start.dynamicTools requires
+/// experimentalApi capability") is the gate the probe looks for; any
+/// refusal naming the dynamic tools is the tool unsupported.
+trait SendToolRefusal {
+    const GATE_CODE: i64 = -32600;
+    /// Whether a refusal's detail is the experimental-API gate on the tool.
+    fn is_tool_gate(detail: &str) -> bool;
+    /// A refusal naming the dynamic tools, as `SendToolUnsupported`.
+    fn named(error: CodexAdapterUnavailable) -> CodexAdapterUnavailable;
+}
+
+impl SendToolRefusal for CodexAdapterUnavailable {
+    fn is_tool_gate(detail: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(detail).is_ok_and(|error| {
+            error.get("code").and_then(serde_json::Value::as_i64) == Some(Self::GATE_CODE)
+                && error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|message| {
+                        message.contains("dynamicTools") && message.contains("experimentalApi")
+                    })
+        })
+    }
+
+    fn named(error: CodexAdapterUnavailable) -> CodexAdapterUnavailable {
+        match error {
+            CodexAdapterUnavailable::Refused { method, detail }
+                if detail.contains("dynamicTools") =>
+            {
+                CodexAdapterUnavailable::SendToolUnsupported(format!("{method}: {detail}"))
+            }
+            error => error,
+        }
+    }
+}
+
+impl ProbesSendTool for CodexAdapter {
+    fn probe_send_tool(&self) -> Result<(), CodexAdapterUnavailable> {
+        let mut session = self.initialize_bound_session()?;
+        let probed = session.request(
+            2,
+            "thread/start",
+            serde_json::json!({
+                "cwd": self.workspace_root,
+                "ephemeral": true,
+                "dynamicTools": [SendTool::tool_spec()]
+            }),
+            self.timeout,
+        );
+        session.stop_proxy();
+        match probed {
+            Err(CodexAdapterUnavailable::Refused { detail, .. })
+                if <CodexAdapterUnavailable as SendToolRefusal>::is_tool_gate(&detail) =>
+            {
+                Ok(())
+            }
+            Err(CodexAdapterUnavailable::Refused { method, detail }) => Err(
+                CodexAdapterUnavailable::SendToolUnsupported(format!("{method}: {detail}")),
+            ),
+            Ok(_) => Err(CodexAdapterUnavailable::SendToolUnsupported(
+                "thread/start accepted dynamic tools without the experimental API".into(),
+            )),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 impl NamesBoundCodexThread for CodexAdapter {
     fn name_bound_thread(
         &self,
@@ -942,6 +1066,224 @@ impl NamesBoundCodexThread for CodexAdapter {
         })();
         session.stop_proxy();
         result
+    }
+}
+
+/// What reaches a send-tool responder: an event of one of its connections,
+/// named by the connection's generation, or the order to stop.
+pub(crate) enum ResponderSignal {
+    Proxy(u64, ProxyEvent),
+    Stop,
+}
+
+/// Why a responder's connection ended.
+pub(crate) enum SubscriptionEnd {
+    /// The responder was told to stop.
+    Stopped,
+    Failed(CodexAdapterUnavailable),
+}
+
+/// One connection subscribed to one thread: initialized with the
+/// experimental API once the app-server was shown to gate the send tool on
+/// it, then `thread/resume`d, which subscribes it to the thread's server
+/// requests, a call left pending replayed to it. It starts no turn and
+/// carries no model content. `early` holds the server requests that arrived
+/// before the resume was answered.
+pub(crate) struct ThreadSubscription {
+    pub(crate) proxy: ProxyChild,
+    pub(crate) generation: u64,
+    pub(crate) early: Vec<serde_json::Value>,
+    timeout: Duration,
+}
+
+pub(crate) trait SubscribesThread {
+    fn subscribe_thread(
+        &self,
+        thread: &str,
+        generation: u64,
+        signals: &mpsc::Sender<ResponderSignal>,
+        inbox: &Receiver<ResponderSignal>,
+    ) -> Result<ThreadSubscription, SubscriptionEnd>;
+}
+
+pub(crate) trait ExchangesOnSubscription {
+    /// The next event of this connection; a ping is answered and skipped,
+    /// another generation's event dropped. `deadline` bounds the wait.
+    fn next_event(
+        &mut self,
+        inbox: &Receiver<ResponderSignal>,
+        deadline: Option<Instant>,
+    ) -> Result<ProxyEvent, SubscriptionEnd>;
+    /// One request and its answer; a server request met meanwhile is kept
+    /// in `early`, a notification dropped.
+    fn exchange(
+        &mut self,
+        inbox: &Receiver<ResponderSignal>,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, SubscriptionEnd>;
+    /// Answers one server request.
+    fn answer(
+        &mut self,
+        id: serde_json::Value,
+        result: serde_json::Value,
+    ) -> Result<(), CodexAdapterUnavailable>;
+    fn close(&mut self);
+}
+
+impl ExchangesOnSubscription for ThreadSubscription {
+    fn next_event(
+        &mut self,
+        inbox: &Receiver<ResponderSignal>,
+        deadline: Option<Instant>,
+    ) -> Result<ProxyEvent, SubscriptionEnd> {
+        loop {
+            let signal = match deadline {
+                None => inbox.recv().map_err(|_| SubscriptionEnd::Stopped)?,
+                Some(deadline) => {
+                    let remaining = deadline
+                        .checked_duration_since(Instant::now())
+                        .ok_or(SubscriptionEnd::Failed(CodexAdapterUnavailable::TimedOut))?;
+                    match inbox.recv_timeout(remaining) {
+                        Ok(signal) => signal,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            return Err(SubscriptionEnd::Failed(CodexAdapterUnavailable::TimedOut));
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(SubscriptionEnd::Stopped);
+                        }
+                    }
+                }
+            };
+            match signal {
+                ResponderSignal::Stop => return Err(SubscriptionEnd::Stopped),
+                ResponderSignal::Proxy(generation, _) if generation != self.generation => {}
+                ResponderSignal::Proxy(_, ProxyEvent::Ping(payload)) => self
+                    .proxy
+                    .input
+                    .write_frame(0x8a, &payload)
+                    .map_err(SubscriptionEnd::Failed)?,
+                ResponderSignal::Proxy(_, event) => return Ok(event),
+            }
+        }
+    }
+
+    fn exchange(
+        &mut self,
+        inbox: &Receiver<ResponderSignal>,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, SubscriptionEnd> {
+        self.proxy
+            .input
+            .write_json(serde_json::json!({ "id": id, "method": method, "params": params }))
+            .map_err(SubscriptionEnd::Failed)?;
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            let message = match self.next_event(inbox, Some(deadline))? {
+                ProxyEvent::Reply(Ok(message)) => message,
+                ProxyEvent::Reply(Err(error)) => return Err(SubscriptionEnd::Failed(error)),
+                ProxyEvent::Upgraded | ProxyEvent::Ping(_) => continue,
+            };
+            if message.get("method").is_some() {
+                if message.get("id").is_some() {
+                    self.early.push(message);
+                }
+                continue;
+            }
+            if message.get("id") != Some(&serde_json::json!(id)) {
+                continue;
+            }
+            if let Some(error) = message.get("error") {
+                return Err(SubscriptionEnd::Failed(CodexAdapterUnavailable::Refused {
+                    method: method.into(),
+                    detail: error.to_string(),
+                }));
+            }
+            return message.get("result").cloned().ok_or_else(|| {
+                SubscriptionEnd::Failed(CodexAdapterUnavailable::Protocol(format!(
+                    "{method} response has no result"
+                )))
+            });
+        }
+    }
+
+    fn answer(
+        &mut self,
+        id: serde_json::Value,
+        result: serde_json::Value,
+    ) -> Result<(), CodexAdapterUnavailable> {
+        self.proxy
+            .input
+            .write_json(serde_json::json!({ "id": id, "result": result }))
+    }
+
+    fn close(&mut self) {
+        let _ = self.proxy.child.kill();
+        let _ = self.proxy.child.wait();
+    }
+}
+
+impl SubscribesThread for CodexAdapter {
+    fn subscribe_thread(
+        &self,
+        thread: &str,
+        generation: u64,
+        signals: &mpsc::Sender<ResponderSignal>,
+        inbox: &Receiver<ResponderSignal>,
+    ) -> Result<ThreadSubscription, SubscriptionEnd> {
+        self.probe_send_tool().map_err(SubscriptionEnd::Failed)?;
+        let sink = signals.clone();
+        let proxy = self
+            .spawn_proxy(move |event| sink.send(ResponderSignal::Proxy(generation, event)).is_ok())
+            .map_err(SubscriptionEnd::Failed)?;
+        let mut subscription = ThreadSubscription {
+            proxy,
+            generation,
+            early: Vec::new(),
+            timeout: self.timeout,
+        };
+        let subscribed = (|| {
+            match subscription.next_event(inbox, Some(Instant::now() + self.timeout))? {
+                ProxyEvent::Upgraded => {}
+                ProxyEvent::Reply(Err(error)) => return Err(SubscriptionEnd::Failed(error)),
+                ProxyEvent::Reply(Ok(_)) | ProxyEvent::Ping(_) => {
+                    return Err(SubscriptionEnd::Failed(CodexAdapterUnavailable::Protocol(
+                        "proxy sent a WebSocket message before completing its upgrade".into(),
+                    )));
+                }
+            }
+            subscription.exchange(
+                inbox,
+                1,
+                "initialize",
+                serde_json::json!({
+                    "clientInfo": { "name": "flow-nexus", "version": env!("CARGO_PKG_VERSION") },
+                    "capabilities": { "experimentalApi": true }
+                }),
+            )?;
+            subscription
+                .proxy
+                .input
+                .write_json(serde_json::json!({ "method": "initialized", "params": null }))
+                .map_err(SubscriptionEnd::Failed)?;
+            subscription.exchange(
+                inbox,
+                2,
+                "thread/resume",
+                serde_json::json!({ "threadId": thread, "excludeTurns": true }),
+            )?;
+            Ok(())
+        })();
+        match subscribed {
+            Ok(()) => Ok(subscription),
+            Err(end) => {
+                subscription.close();
+                Err(end)
+            }
+        }
     }
 }
 
@@ -996,165 +1338,6 @@ impl AccountsOpenedThread for CodexAdapter {
             thread_archive,
             ..unread
         }
-    }
-}
-
-impl StartsCodex for CodexAdapter {
-    fn start_codex(
-        &self,
-        flow_id: &str,
-        goal: &str,
-        origin: &Origin,
-    ) -> Result<String, CodexAdapterUnavailable> {
-        let mut session = self.open_proxy()?;
-        let result = (|| {
-            session.request(1, "initialize", serde_json::json!({ "clientInfo": { "name": "flow-nexus", "version": env!("CARGO_PKG_VERSION") } }), self.timeout)?;
-            session.notify("initialized", serde_json::Value::Null)?;
-            let flow_directory = if cfg!(test) {
-                format!("/tmp/flow-nexus-test-{flow_id}")
-            } else {
-                self.flow_directory(flow_id).to_string_lossy().into_owned()
-            };
-            std::fs::create_dir_all(&flow_directory)
-                .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
-            let started = session.request(
-                2,
-                "thread/start",
-                serde_json::json!({
-                    "cwd": self.workspace_root,
-                    "model": self.model,
-                    "sandbox": "danger-full-access",
-                    "approvalPolicy": "never",
-                    "ephemeral": false,
-                    "threadSource": "flow-nexus",
-                    "config": { "shell_environment_policy": { "inherit": "core", "set": {
-                        "FLOW_ID": flow_id,
-                        "FLOW_DIRECTORY": flow_directory
-                    }}}
-                }),
-                self.timeout,
-            )?;
-            let thread_id = started
-                .pointer("/thread/id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    CodexAdapterUnavailable::Protocol("thread/start returned no thread id".into())
-                })?
-                .to_owned();
-            session.request(
-                3,
-                "turn/start",
-                self.turn_params(&thread_id, flow_id, goal, origin),
-                self.timeout,
-            )?;
-            Ok(thread_id)
-        })();
-        session.stop_proxy();
-        result
-    }
-}
-pub trait StartsObservedCodex {
-    fn start_codex_observed(
-        &self,
-        flow_id: &str,
-        goal: &str,
-        origin: &Origin,
-        observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
-    ) -> Result<String, CodexAdapterUnavailable>;
-}
-
-impl StartsObservedCodex for CodexAdapter {
-    fn start_codex_observed(
-        &self,
-        flow_id: &str,
-        goal: &str,
-        origin: &Origin,
-        observer: impl FnOnce(&str) -> Result<(), CodexAdapterUnavailable>,
-    ) -> Result<String, CodexAdapterUnavailable> {
-        let mut session = self.open_proxy()?;
-        let result = (|| {
-            session.request(1,"initialize",serde_json::json!({"clientInfo":{"name":"flow-nexus","version":env!("CARGO_PKG_VERSION")}}),self.timeout)?;
-            session.notify("initialized", serde_json::Value::Null)?;
-            let flow_directory = if cfg!(test) {
-                format!("/tmp/flow-nexus-test-{flow_id}")
-            } else {
-                self.flow_directory(flow_id).to_string_lossy().into_owned()
-            };
-            std::fs::create_dir_all(&flow_directory)
-                .map_err(|e| CodexAdapterUnavailable::Protocol(e.to_string()))?;
-            let started = session.request(
-                2,
-                "thread/start",
-                serde_json::json!({
-                    "cwd":self.workspace_root,
-                    "model":self.model,
-                    "sandbox":"danger-full-access",
-                    "approvalPolicy":"never",
-                    "ephemeral":false,
-                    "threadSource":"flow-nexus",
-                    "config": { "shell_environment_policy": { "inherit": "core", "set": {
-                        "FLOW_ID": flow_id,
-                        "FLOW_DIRECTORY": flow_directory
-                    }}}
-                }),
-                self.timeout,
-            )?;
-            let thread = started
-                .pointer("/thread/id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    CodexAdapterUnavailable::Protocol("thread/start returned no thread id".into())
-                })?
-                .to_owned();
-            observer(&thread)?;
-            session.request(
-                3,
-                "turn/start",
-                self.turn_params(&thread, flow_id, goal, origin),
-                self.timeout,
-            )?;
-            Ok(thread)
-        })();
-        session.stop_proxy();
-        result
-    }
-}
-
-impl ResumesCodex for CodexAdapter {
-    fn resume_codex(
-        &self,
-        thread_id: &str,
-        goal: &str,
-        origin: &Origin,
-    ) -> Result<(), CodexAdapterUnavailable> {
-        let mut session = self.open_proxy()?;
-        let result = (|| {
-            session.request(1, "initialize", serde_json::json!({ "clientInfo": { "name": "flow-nexus", "version": env!("CARGO_PKG_VERSION") } }), self.timeout)?;
-            session.notify("initialized", serde_json::Value::Null)?;
-            session.request(
-                2,
-                "thread/resume",
-                serde_json::json!({ "threadId": thread_id }),
-                self.timeout,
-            )?;
-            session.request(
-                3,
-                "turn/start",
-                self.turn_params(
-                    thread_id,
-                    match origin {
-                        Origin::Flow(caller) => caller.flow_id.as_str(),
-                        Origin::Unbound => "",
-                    },
-                    goal,
-                    origin,
-                ),
-                self.timeout,
-            )?;
-            Ok(())
-        })();
-        session.stop_proxy();
-        result
     }
 }
 
@@ -1247,6 +1430,10 @@ mod tests {
 
     trait InstallsRecordingFakeProxy {
         fn install(&self, frames: &[String]) -> (tempfile::TempDir, PathBuf, PathBuf);
+        /// A fake app-server whose first connection is the send-tool probe,
+        /// answered as codex 0.161.0-alpha.2 answers it; every later
+        /// connection answers `frames` and is recorded.
+        fn install_probed(&self, frames: &[String]) -> (tempfile::TempDir, PathBuf, PathBuf);
     }
 
     impl InstallsRecordingFakeProxy for RecordingFakeProxy {
@@ -1266,6 +1453,30 @@ mod tests {
                 path: executable.clone(),
             }
             .install(&script);
+            (directory, executable, record)
+        }
+
+        fn install_probed(&self, frames: &[String]) -> (tempfile::TempDir, PathBuf, PathBuf) {
+            let directory = tempfile::tempdir().unwrap();
+            let executable = directory.path().join("codex");
+            let record = directory.path().join("requests");
+            let counter = directory.path().join("connections");
+            let probe = [
+                FakeProxy.websocket_frame(r#"{"id":1,"result":{}}"#),
+                FakeProxy.websocket_frame(
+                    r#"{"id":2,"error":{"code":-32600,"message":"thread/start.dynamicTools requires experimentalApi capability"}}"#,
+                ),
+            ]
+            .concat();
+            FixtureExecutable {
+                path: executable.clone(),
+            }
+            .install(&format!(
+                "#!/bin/sh\nn=$(cat '{counter}' 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > '{counter}'\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nif [ \"$n\" -gt 1 ]; then exec 3<&0; cat <&3 > '{record}' & fi\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nif [ \"$n\" -eq 1 ]; then printf '%b' '{probe}'; else printf '%b' '{frames}'; fi\nsleep 2\n",
+                counter = counter.display(),
+                record = record.display(),
+                frames = frames.join(""),
+            ));
             (directory, executable, record)
         }
     }
@@ -1331,13 +1542,6 @@ mod tests {
             .install(&self.executable(frames));
             (directory, executable)
         }
-    }
-
-    fn origin() -> Origin {
-        Origin::Flow(signal_flow::FlowOrigin {
-            flow_id: "parent-flow".into(),
-            session_id: "session-1".into(),
-        })
     }
 
     fn adapter() -> CodexAdapter {
@@ -1491,22 +1695,6 @@ mod tests {
     }
 
     #[test]
-    fn turn_brief_carries_assigned_flow_identity_and_origin() {
-        let origin = origin();
-        let params = adapter().turn_params("thread-1", "flow-0000000000000001", "start", &origin);
-        let brief = params
-            .pointer("/input/0/text")
-            .and_then(serde_json::Value::as_str)
-            .unwrap();
-        assert!(brief.contains("FLOW_ID=flow-0000000000000001"));
-        let expected = std::env::current_dir()
-            .unwrap()
-            .join("flows/flow-0000000000000001");
-        assert!(brief.contains(&format!("FLOW_DIRECTORY={}", expected.display())));
-        assert!(brief.contains("Origin:\nflow: parent-flow\nsession: session-1"));
-    }
-
-    #[test]
     fn a_codex_part_is_one_text_item_and_nothing_else() {
         use crate::composition::ComposesLaunch;
         use crate::composition::tests::{fixture_composer, fixture_profile};
@@ -1574,24 +1762,6 @@ mod tests {
     }
 
     #[test]
-    fn fake_proxy_starts_a_thread_after_turn_start_is_accepted() {
-        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
-        let fake = FakeProxy;
-        let frames = [
-            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
-            fake.websocket_frame(r#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#),
-            fake.websocket_frame(r#"{"id":3,"result":{}}"#),
-        ];
-        let (_directory, executable) = fake.install(&frames);
-        assert_eq!(
-            adapter_at(executable)
-                .start_codex("flow-test", "start", &origin())
-                .unwrap(),
-            "thread-1"
-        );
-    }
-
-    #[test]
     fn fake_proxy_names_the_bound_thread_and_reads_the_name_back() {
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let fake = FakeProxy;
@@ -1623,38 +1793,6 @@ mod tests {
         assert!(matches!(
             adapter_at(executable).name_bound_thread("thread-1", "Field.{ Astra 123456 }"),
             Err(CodexAdapterUnavailable::Protocol(detail)) if detail.contains("readback differs")
-        ));
-    }
-
-    #[test]
-    fn fake_proxy_refusal_does_not_report_a_started_thread() {
-        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
-        let fake = FakeProxy;
-        let frames = [
-            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
-            fake.websocket_frame(r#"{"id":2,"error":{"code":-32000,"message":"denied"}}"#),
-        ];
-        let (_directory, executable) = fake.install(&frames);
-        assert!(matches!(
-            adapter_at(executable).start_codex("flow-test", "start", &origin()),
-            Err(CodexAdapterUnavailable::Refused { method, .. }) if method == "thread/start"
-        ));
-    }
-
-    #[test]
-    fn fake_proxy_timeout_does_not_report_a_started_thread() {
-        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
-        let fake = FakeProxy;
-        let frames = [fake.websocket_frame(r#"{"id":1,"result":{}}"#)];
-        let (_directory, executable) = fake.install(&frames);
-        // Shorter than the proxy's two-second silence after its last frame.
-        let adapter = CodexAdapter {
-            timeout: Duration::from_secs(1),
-            ..adapter_at(executable)
-        };
-        assert!(matches!(
-            adapter.start_codex("flow-test", "start", &origin()),
-            Err(CodexAdapterUnavailable::TimedOut)
         ));
     }
 
@@ -1721,7 +1859,7 @@ mod tests {
             ),
             fake.websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#),
         ];
-        let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
+        let (_directory, executable, record) = RecordingFakeProxy.install_probed(&frames);
         assert_eq!(
             lean_adapter_at(executable, &launch)
                 .open_thread_with_first_turn(&launch)
@@ -1757,6 +1895,17 @@ mod tests {
         );
         assert_eq!(start["config"]["model_reasoning_effort"], "medium");
         assert_eq!(start["model"], "gpt-6-astra");
+        // The thread declares the send tool, on a connection opened with
+        // the experimental API once the probe showed the app-server gates
+        // the tool on it.
+        assert_eq!(
+            start["dynamicTools"],
+            serde_json::json!([SendTool::tool_spec()])
+        );
+        assert_eq!(
+            requests[0]["params"]["capabilities"]["experimentalApi"],
+            true
+        );
         let turn = &requests[3]["params"];
         assert_eq!(turn["threadId"], "thread-lean");
         assert_eq!(
@@ -1764,6 +1913,43 @@ mod tests {
             launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text
         );
         assert_eq!(turn["input"].as_array().unwrap().len(), 1);
+    }
+
+    /// An app-server that does not refuse the send tool without the
+    /// experimental API, by starting the probe's thread or by another
+    /// refusal, is not shown to support it: no connection with the
+    /// experimental API is opened and no thread is started for the launch.
+    #[test]
+    fn an_app_server_that_does_not_gate_the_send_tool_opens_no_thread() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let launch = lean_codex_launch();
+        let fake = FakeProxy;
+        for probe_answer in [
+            r#"{"id":2,"result":{"thread":{"id":"probe-thread"}}}"#,
+            r#"{"id":2,"error":{"code":-32602,"message":"unknown field `dynamicTools`"}}"#,
+        ] {
+            let frames = [
+                fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+                fake.websocket_frame(probe_answer),
+            ];
+            let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
+            assert!(matches!(
+                lean_adapter_at(executable, &launch).open_thread_with_first_turn(&launch),
+                Err(CodexAdapterUnavailable::SendToolUnsupported(_))
+            ));
+            let requests = record.requests(3);
+            let methods = requests
+                .iter()
+                .map(|request| request["method"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(methods, ["initialize", "initialized", "thread/start"]);
+            assert!(requests[0]["params"].get("capabilities").is_none());
+            assert_eq!(requests[2]["params"]["ephemeral"], true);
+            assert_eq!(
+                requests[2]["params"]["dynamicTools"],
+                serde_json::json!([SendTool::tool_spec()])
+            );
+        }
     }
 
     /// The whole Codex start against a fake app-server and a fake Herdr that
@@ -1789,7 +1975,7 @@ mod tests {
             )),
             fake.websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#),
         ];
-        let (_proxy, executable, record) = RecordingFakeProxy.install(&frames);
+        let (_proxy, executable, record) = RecordingFakeProxy.install_probed(&frames);
         let mut codex_endpoints = endpoints();
         codex_endpoints.next.client_path = executable;
         codex_endpoints.next.socket = "/tmp/fake-codex-next.sock".into();
@@ -1887,7 +2073,7 @@ mod tests {
             ),
             fake.websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#),
         ];
-        let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
+        let (_directory, executable, record) = RecordingFakeProxy.install_probed(&frames);
         assert!(matches!(
             lean_adapter_at(executable, &launch).open_thread_with_first_turn(&launch),
             Err(CodexAdapterUnavailable::Protocol(detail))

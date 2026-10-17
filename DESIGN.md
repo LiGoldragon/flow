@@ -223,6 +223,56 @@ produces it: a pane going away never retires a flow, because an exit retains
 the flow's record and retirement is a decision, not an inference. None of the
 three deletes anything.
 
+Every Codex thread Flow opens declares one dynamic tool, `send`, whose
+arguments are a target Address, a kind (`Order`, `Question`, `Result`,
+`Notice`) and a body. The living's words are not among the kinds: Flow admits
+a Lock and a Deliver from the bound Message process alone, so no route through
+Flow lets a flow send `Psyche` or `Psyches`. The app-server accepts a
+thread's dynamic tools only on a connection initialized with its experimental
+API. Before Flow opens such a connection it probes the deployed app-server: on
+a connection initialized without it, a `thread/start` declaring the tool must
+be refused for exactly that reason (codex 0.161.0-alpha.2 answers -32600,
+"thread/start.dynamicTools requires experimentalApi capability") before any
+thread exists. Any other answer, a started thread included, is
+`SendToolUnsupported`, and the launch is refused at its Codex thread stage
+(`NativeLaunchRefused.{ CodexThread AdapterRefused }`) rather than started
+without the tool.
+
+The app-server sends each call as an `item/tool/call` server request to every
+connection subscribed to the thread, and takes the first answer. A call left
+pending while no answer came is replayed to the next connection that resumes
+the thread. The Nexus keeps one connection per live Codex thread it holds,
+subscribed by `thread/resume` (without its turns) when the Nexus starts, when
+the store announces a change that brings the thread's flow, and after every
+reconnect. That connection starts no turn and carries no model content, and it
+is the one intended responder. First answer wins is how the app-server
+behaves, not a security guarantee: any process of the same user that resumes
+the thread can answer a call first.
+
+A call is handled under the dispatch gate. Its sender is read from Flow's
+records each time it is handled, a replayed call included: the one live flow
+Flow holds on the calling thread, and the metaflow Awake as it. A thread no
+flow of Flow's runs is `ThreadUnowned`, a Stopped, Retired or Exited flow is
+`FlowEnded`, and a flow whose metaflow is no longer Awake as it (Asleep, or
+moved on by a Refresh or a fresh wake) is `NotAwake`; none is recorded. The
+request is queued for the target under the rules a Lock and a Deliver follow
+(an absent target is `UnknownRecipient`, an Ended one `RecipientEnded`, one
+Message holds an unexpired lock on is `Held`), an Asleep target that a
+request of its kind wakes is woken once the call is answered, and the call is
+recorded with its outcome in the commit that queues it, in
+`flow_nexus_send_calls`, keyed by thread, turn and call id with the digest of
+its tool and arguments. A call whose key is recorded with the same digest is
+answered from its record and queued nothing more; with another digest it is
+`KeyReused`. The answer is one `inputText` item holding the outcome as a
+datom, `Queued.{ Sender Target }` or `Refused.SendRefusal`, with `success`
+true only when queued.
+
+This establishes which metaflow a call is attributed to, from Flow's records
+of the thread. It does not authenticate a human or a process as the call's
+initiator: a call carries no initiator identity, and any process of the same
+user can start a turn on any thread through the app-server socket, so it can
+start turns whose calls Flow attributes to that thread's metaflow.
+
 `RegisterFlow` is a meta Signal for importing sessions created before Flow
 Nexus. It preserves the same `FlowNode` shape used by resolution, so imported
 and Nexus-launched identities share one registry and one read contract.

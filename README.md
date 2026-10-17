@@ -249,7 +249,9 @@ a refused registration carries its stage
 (`RegistrationRefused.NativeTarget.IdentityInexact`); LaunchStatus reports
 the same answer. A Codex TUI is started
 as `resume <thread>` on the thread Flow opened through the app-server and gave
-its first turn. Herdr reports no agent session for such a TUI, and the
+its first turn. That thread declares Flow's `send` tool, and the Nexus answers
+its calls by queueing a request for the named Address from the thread's own
+metaflow (see `DESIGN.md`). Herdr reports no agent session for such a TUI, and the
 app-server names no client attached to a thread, so the pane binds to that
 thread once Herdr recognizes the pane's Codex agent, exact and interactively
 ready; a session Herdr does report must be the thread. Spawn records that

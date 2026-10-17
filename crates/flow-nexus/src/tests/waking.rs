@@ -2429,8 +2429,9 @@ esac
         });
         self.list_herdr_sessions(&[("fixture-session", socket)]);
 
-        // The Codex app-server: the opening, the naming and the settings
-        // readback a fresh launch makes, in that order, each its own proxy.
+        // The Codex app-server: the send-tool probe, the opening, the
+        // naming and the settings readback a fresh launch makes, in that
+        // order, each its own proxy.
         let invocations = state.join("codex-invocations");
         let opened = |id: u64| {
             websocket_frame(
@@ -2439,6 +2440,13 @@ esac
             )
         };
         let initialized = websocket_frame(r#"{"id":1,"result":{}}"#);
+        let probe = [
+            initialized.clone(),
+            websocket_frame(
+                r#"{"id":2,"error":{"code":-32600,"message":"thread/start.dynamicTools requires experimentalApi capability"}}"#,
+            ),
+        ]
+        .concat();
         let opening = [
             initialized.clone(),
             opened(2),
@@ -2460,7 +2468,7 @@ esac
             path: app_server.clone(),
         }
         .install(&format!(
-            "#!/bin/sh\nn=$(cat '{counter}' 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > '{counter}'\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$n\" in\n  1) printf '%b' '{opening}' ;;\n  2) printf '%b' '{naming}' ;;\n  3) printf '%b' '{readback}' ;;\n  *) exit 1 ;;\nesac\nsleep 5\n",
+            "#!/bin/sh\nn=$(cat '{counter}' 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > '{counter}'\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$n\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{opening}' ;;\n  3) printf '%b' '{naming}' ;;\n  4) printf '%b' '{readback}' ;;\n  *) exit 1 ;;\nesac\nsleep 5\n",
             counter = invocations.display(),
         ));
         self.nexus.codex_endpoints.stable.client_path = app_server;
@@ -2715,10 +2723,10 @@ fn a_refreshed_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
     assert_eq!(old_after.session_id, old_thread);
     assert_eq!(old_after.flow_lifecycle, FlowLifecycle::Stopped);
     assert_eq!(fs::read(&old_rollout).unwrap(), old_bytes);
-    // Exactly the opening, the naming and the readback reached the
-    // app-server; the naming and the readback each read back the new thread,
-    // so none addressed another.
-    assert_eq!(fs::read_to_string(&world.codex_invocations).unwrap(), "3");
+    // Exactly the probe, the opening, the naming and the readback reached
+    // the app-server; the naming and the readback each read back the new
+    // thread, so none addressed another.
+    assert_eq!(fs::read_to_string(&world.codex_invocations).unwrap(), "4");
     let calls = fs::read_to_string(world.state.join("calls")).unwrap();
     assert!(calls.contains(&format!("resume {FRESH_THREAD}")), "{calls}");
     assert!(!calls.contains(&old_thread), "{calls}");

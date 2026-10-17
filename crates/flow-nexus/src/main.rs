@@ -6,6 +6,7 @@ use flow_nexus::{
     WatchesTerminationSignals,
     caller::{IdentifiesPeer, LocatesCallerPane},
     launching::PromotesAmbiguousLaunches,
+    send_tool::ServesSendTool,
     store::{ConfigurationOnlyStore, DefaultConfiguration, ReadsAnchors, StoreError},
     waking::SleepsAndWakesSeats,
 };
@@ -152,6 +153,9 @@ fn main() -> ExitCode {
     // ended them all the Nexus drops here and its store closes cleanly.
     std::thread::scope(|scope| {
         scope.spawn(|| nexus.promote_ambiguous_launches());
+        // One connection per live Codex thread answers its send-tool calls.
+        let send_tool_nexus = &nexus;
+        scope.spawn(move || send_tool_nexus.serve_send_tool(scope));
         // A wake the last Nexus did not finish left its work queued: wake it.
         scope.spawn(|| nexus.recover_wakes());
         scope.spawn(|| {

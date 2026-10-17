@@ -43,6 +43,7 @@ pub mod observe_agent;
 pub mod peer;
 pub mod performing;
 pub mod reporting;
+pub mod send_tool;
 pub mod store;
 pub mod title;
 pub mod values;
@@ -1090,6 +1091,7 @@ mod tests {
     mod delivery;
     mod launching_nexus;
     mod reservation;
+    mod send_tool;
     mod submission;
     mod waking;
 

@@ -1,3 +1,35 @@
+# Flow 0.35.7
+
+No wire change: signal-flow 19.0.0 and meta-signal-flow 24.0.0 as in 0.35.6,
+their digests unchanged. The store adds one table.
+
+- **Every Codex thread Flow opens declares the send tool.** `thread/start`
+  carries `dynamicTools: [ send ]` on a connection initialized with
+  `capabilities.experimentalApi`. Before that connection is opened the
+  app-server is probed: a `thread/start` declaring the tool on a connection
+  without the experimental API must be refused with -32600 naming
+  `dynamicTools` and `experimentalApi`. Any other answer is
+  `SendToolUnsupported`, logged, and the launch is refused
+  `NativeLaunchRefused.{ CodexThread AdapterRefused }`; no thread is opened
+  without the tool. Each Codex launch now makes one more app-server
+  connection, the probe, before its opening.
+- **The Nexus answers send-tool calls.** One connection per live Codex flow's
+  thread, resumed at start, on each store change that brings a thread, and
+  after each reconnect, answers `item/tool/call`: the sender is the metaflow
+  Awake as the thread's one live flow, read at handling time; the request is
+  queued for the target under the Lock and Deliver rules; the answer is
+  `Queued.{ Sender Target }` or `Refused.SendRefusal` as a datom.
+- **`flow_nexus_send_calls`** (family `flow-nexus-send-call`, schema
+  `flow-nexus-send-call-v1`) records each handled call, keyed by thread, turn
+  and call id, with its content digest and outcome; a queued call's row is
+  written in the commit that queues it. A store written before 0.35.7 opens
+  with the table added and empty.
+- The Codex adapter's unused `start_codex`, `start_codex_observed` and
+  `resume_codex` paths are removed: they opened threads without the tool.
+- A server request whose id equals a pending client request's id is no
+  longer taken for its answer; the WebSocket reader answers pings and reads an
+  oversized frame through before refusing it.
+
 # Flow 0.35.6
 
 Wire change on both sockets. Ordinary: signal-flow 19.0.0 (37a41014); its

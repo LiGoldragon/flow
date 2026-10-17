@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.6";
+            version = "0.35.7";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -397,6 +397,22 @@
             "tests::waking::a_refreshed_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it";
           flow-refreshed-claude-wakes-to-new-session = context.exactTest "flow-nexus"
             "tests::waking::a_refreshed_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it";
+          flow-send-tool-threads-attributed = context.exactTest "flow-nexus"
+            "tests::send_tool::two_threads_are_each_attributed_to_their_own_metaflow";
+          flow-send-tool-unowned-thread-refused = context.exactTest "flow-nexus"
+            "tests::send_tool::a_call_from_a_thread_flow_does_not_hold_is_refused_and_queues_nothing";
+          flow-send-tool-stale-binding-refused = context.exactTest "flow-nexus"
+            "tests::send_tool::a_replayed_call_of_a_retired_or_superseded_flow_is_refused";
+          flow-send-tool-crash-replay-queued-once = context.exactTest "flow-nexus"
+            "tests::send_tool::a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed";
+          flow-send-tool-key-reuse-refused = context.exactTest "flow-nexus"
+            "tests::send_tool::a_call_key_recorded_with_other_content_is_refused";
+          flow-send-tool-pending-call-after-restart = context.exactTest "flow-nexus"
+            "tests::send_tool::a_pending_call_is_answered_after_start_and_reconnect";
+          flow-send-tool-malformed-refused = context.exactTest "flow-nexus"
+            "tests::send_tool::a_malformed_call_is_refused_and_recorded";
+          flow-send-tool-ungated-app-server-refused = context.exactTest "flow-nexus"
+            "codex::tests::an_app_server_that_does_not_gate_the_send_tool_opens_no_thread";
         }
       );
 

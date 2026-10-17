@@ -1,0 +1,126 @@
+#![allow(dead_code, non_camel_case_types, non_snake_case)]
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum SendKind {
+    Order,
+    Question,
+    Result,
+    Notice,
+}
+#[rustfmt::skip]
+pub type Target = signal_flow::Address;
+#[rustfmt::skip]
+pub type Body = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SendArguments {
+    pub target: Target,
+    pub send_kind: SendKind,
+    pub body: Body,
+}
+#[rustfmt::skip]
+pub type ThreadId = String;
+#[rustfmt::skip]
+pub type TurnId = String;
+#[rustfmt::skip]
+pub type CallId = String;
+#[rustfmt::skip]
+pub type ToolName = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ToolCallKey {
+    pub thread_id: ThreadId,
+    pub turn_id: TurnId,
+    pub call_id: CallId,
+}
+#[rustfmt::skip]
+pub type Arguments = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ToolCall {
+    pub tool_call_key: ToolCallKey,
+    pub tool_name: ToolName,
+    pub arguments: Arguments,
+}
+#[rustfmt::skip]
+pub type ContentSha256 = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum SendRefusal {
+    UnknownTool,
+    Malformed,
+    ThreadUnowned,
+    FlowEnded,
+    NotAwake,
+    KeyReused,
+    UnknownRecipient(Target),
+    RecipientEnded(Target),
+    Held,
+    Store,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Queued_Data {
+    pub sender: signal_flow::Sender,
+    pub target: Target,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum SendOutcome {
+    Queued(Queued_Data),
+    Refused(SendRefusal),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SendCall {
+    pub tool_call_key: ToolCallKey,
+    pub content_sha256: ContentSha256,
+    pub send_outcome: SendOutcome,
+}
+#[rustfmt::skip]
+pub type Wake = std::option::Option<Target>;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SendAnswer {
+    pub send_outcome: SendOutcome,
+    pub wake: Wake,
+}
+#[rustfmt::skip]
+pub trait ParamsCarrying {
+    fn params(&self) -> serde_json::Value;
+}
+#[rustfmt::skip]
+pub trait ToolCallCarrying {
+    fn tool_call(&self) -> ToolCall;
+}
+#[rustfmt::skip]
+pub trait DeclaresSendTool {
+    fn tool_name() -> ToolName;
+    fn tool_spec() -> serde_json::Value;
+}
+#[rustfmt::skip]
+pub trait ReadsToolCall {
+    fn read_tool_call<N: ParamsCarrying>(input: N) -> std::option::Option<ToolCall>;
+}
+#[rustfmt::skip]
+pub trait ReadsSendArguments {
+    fn send_arguments(&self) -> std::option::Option<SendArguments>;
+    fn content_sha256(&self) -> ContentSha256;
+}
+#[rustfmt::skip]
+pub trait AnswersToolCall {
+    fn tool_response(&self) -> serde_json::Value;
+}
+#[rustfmt::skip]
+pub trait HandlesSendCall {
+    fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendAnswer;
+}

@@ -2297,3 +2297,455 @@ fn naming_refused() -> signal_flow::StartRejection {
         native_launch_failure: signal_flow::NativeLaunchFailure::NotReady,
     })
 }
+
+/// A whole fresh launch run by a wake, against fakes of everything outside
+/// the Nexus: a Herdr that opens one pane (w7:p1), starts the harness the
+/// Nexus asks for in it and reports it as Herdr 0.8.2 does (a Claude pane
+/// with its session, a remote-resumed Codex pane with none), labels it and
+/// lists it; a Claude-side Herdr server socket that, given the typed first
+/// part, writes the user turn and the flow's answer to the Claude
+/// transcript; and a Codex app-server that opens one new thread, names it
+/// and reads its settings back.
+struct FreshWorld {
+    state: std::path::PathBuf,
+    codex_invocations: std::path::PathBuf,
+}
+
+const FRESH_THREAD: &str = "01a0b22c-f00d-7000-8000-00000000f7e5";
+const FRESH_CODEX_FLOW: &str = "f7e5a1";
+
+/// One server-to-client WebSocket text frame, as `printf %b` octal escapes.
+fn websocket_frame(json: &str) -> String {
+    let mut bytes = vec![0x81];
+    match u8::try_from(json.len()) {
+        Ok(short) if short < 126 => bytes.push(short),
+        _ => {
+            bytes.push(126);
+            bytes.extend_from_slice(&u16::try_from(json.len()).unwrap().to_be_bytes());
+        }
+    }
+    bytes.extend_from_slice(json.as_bytes());
+    bytes.iter().map(|byte| format!("\\{byte:03o}")).collect()
+}
+
+trait BuildsFreshWorld {
+    /// Installs the fake Herdr, the Claude-side Herdr server socket for the
+    /// session `fixture-session`, and the Codex app-server, all with empty
+    /// state.
+    fn fresh_world(&mut self, codex_title: &str) -> FreshWorld;
+}
+
+impl BuildsFreshWorld for NexusFixture {
+    fn fresh_world(&mut self, codex_title: &str) -> FreshWorld {
+        use crate::herdr::ConfiguresHerdrCli;
+        let root = self.directory.path().to_path_buf();
+        let state = root.join("fresh-world");
+        fs::create_dir_all(&state).unwrap();
+        let claude_root = root.join("native-transcripts/claude");
+        fs::create_dir_all(&claude_root).unwrap();
+        let herdr = format!(
+            r##"#!/bin/sh
+{sessions}
+S='{state}'
+printf '%s\n' "$*" >> "$S/calls"
+agent() {{
+  harness=$(cat "$S/harness"); title=$(cat "$S/title" 2>/dev/null)
+  session=''
+  [ "$harness" = claude ] && session=$(printf ',"agent_session":{{"source":"herdr:claude","agent":"claude","kind":"id","value":"%s"}}' "$(cat "$S/session")")
+  printf '{{"name":"%s","agent":"%s","agent_status":"idle","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-fresh","interactive_ready":true,"terminal_title_stripped":"%s"%s}}' "$(cat "$S/name")" "$harness" "$title" "$session"
+}}
+case "$*" in
+  *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-fresh"}}}}}}' ;;
+  *"pane run"*) sh -c "$6" > "$S/marker" ;;
+  *"pane wait-output"*) line=$(grep -F FLOW_CLAUDE_ENV_READY_ "$S/marker"); printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
+  *"agent start"*)
+    printf '%s' "$5" > "$S/name"; harness=codex; prev=
+    for a in "$@"; do
+      case "$prev" in
+        --session-id) harness=claude; printf '%s' "$a" > "$S/session" ;;
+        --name) printf '%s' "$a" > "$S/title" ;;
+        resume) printf '%s' "$a" > "$S/session" ;;
+      esac
+      prev=$a
+    done
+    printf '%s' "$harness" > "$S/harness"
+    if [ "$harness" = claude ]; then
+      printf '{{"type":"custom-title","customTitle":"%s","sessionId":"%s"}}\n' "$(cat "$S/title")" "$(cat "$S/session")" >> '{claude_root}/'"$(cat "$S/session")"'.jsonl'
+    fi
+    printf '{{"result":{{"agent":{{"name":"%s"}}}}}}\n' "$5" ;;
+  *"agent wait"*) printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
+  *"agent get"*) printf '{{"result":{{"agent":%s}}}}\n' "$(agent)" ;;
+  *"api snapshot"*) a=; [ -f "$S/harness" ] && a=$(agent); printf '{{"id":"cli:api:snapshot","result":{{"snapshot":{{"agents":[%s],"protocol":20,"version":"0.8.2"}},"type":"session_snapshot"}}}}\n' "$a" ;;
+  *"pane rename w7:p1 "*) printf '%s' "$6" > "$S/label"; printf '%s\n' '{{"result":{{}}}}' ;;
+  *"pane get w7:p1"*) printf '{{"result":{{"pane":{{"pane_id":"w7:p1","terminal_id":"term-fresh","label":"%s"}}}}}}\n' "$(cat "$S/label")" ;;
+  *) exit 64 ;;
+esac
+"##,
+            sessions = self.session_listing(),
+            state = state.display(),
+            claude_root = claude_root.display(),
+        );
+        FixtureExecutable {
+            path: self.snapshot_program.clone(),
+        }
+        .install(&herdr);
+
+        // The Claude-side Herdr server: the typed part becomes the user turn,
+        // and the flow answers it, in the session's own transcript.
+        let socket = root.join("fresh-herdr.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let served_state = state.clone();
+        let served_root = claude_root.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut line = String::new();
+                if std::io::BufReader::new(&stream)
+                    .read_line(&mut line)
+                    .is_err()
+                {
+                    continue;
+                }
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let text = request
+                    .pointer("/params/text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let session = fs::read_to_string(served_state.join("session")).unwrap_or_default();
+                let rows = [
+                    serde_json::json!({"type":"user","sessionId":session,"message":{"role":"user","content":text}}),
+                    serde_json::json!({"type":"assistant","sessionId":session,"uuid":"fresh-answer","message":{"model":"claude-fixture","content":[{"type":"text","text":"Woken."}]}}),
+                ];
+                let _ = fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(served_root.join(format!("{session}.jsonl")))
+                    .and_then(|mut file| rows.iter().try_for_each(|row| writeln!(file, "{row}")));
+                let _ = stream.write_all(
+                    b"{\"id\":\"flow:prompt\",\"result\":{\"type\":\"agent_prompted\"}}\n",
+                );
+            }
+        });
+        self.list_herdr_sessions(&[("fixture-session", socket)]);
+
+        // The Codex app-server: the opening, the naming and the settings
+        // readback a fresh launch makes, in that order, each its own proxy.
+        let invocations = state.join("codex-invocations");
+        let opened = |id: u64| {
+            websocket_frame(
+                &serde_json::json!({"id":id,"result":{"thread":{"id":FRESH_THREAD},"model":"fixture-model","reasoningEffort":"medium","instructionSources":[]}})
+                    .to_string(),
+            )
+        };
+        let initialized = websocket_frame(r#"{"id":1,"result":{}}"#);
+        let opening = [
+            initialized.clone(),
+            opened(2),
+            websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-fresh"}}}"#),
+        ]
+        .concat();
+        let naming = [
+            initialized.clone(),
+            websocket_frame(r#"{"id":2,"result":{}}"#),
+            websocket_frame(
+                &serde_json::json!({"id":3,"result":{"thread":{"id":FRESH_THREAD,"name":codex_title}}})
+                    .to_string(),
+            ),
+        ]
+        .concat();
+        let readback = [initialized, opened(2)].concat();
+        let app_server = root.join("fresh-codex");
+        FixtureExecutable {
+            path: app_server.clone(),
+        }
+        .install(&format!(
+            "#!/bin/sh\nn=$(cat '{counter}' 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > '{counter}'\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$n\" in\n  1) printf '%b' '{opening}' ;;\n  2) printf '%b' '{naming}' ;;\n  3) printf '%b' '{readback}' ;;\n  *) exit 1 ;;\nesac\nsleep 5\n",
+            counter = invocations.display(),
+        ));
+        self.nexus.codex_endpoints.stable.client_path = app_server;
+        let endpoints = self.nexus.codex_endpoints.clone();
+        let flows = root.join("flows");
+        let herdr = std::mem::replace(
+            &mut self.nexus.herdr,
+            crate::herdr::HerdrCli::at(self.snapshot_program.clone(), flows),
+        );
+        self.nexus.herdr = herdr.with_codex_endpoints(endpoints);
+        FreshWorld {
+            state,
+            codex_invocations: invocations,
+        }
+    }
+}
+
+fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
+            meta_signal_flow::ConfigureModel {
+                layer: Layer::Secondary,
+                native: native.into(),
+            },
+        ]))
+        .expect("model configured");
+}
+
+/// A Refresh'd sleeping Codex address wakes fresh: the Nexus opens a new
+/// thread through the app-server, attaches a TUI to it in a new pane, binds
+/// the flow to that thread although Herdr reports no session, names it,
+/// reads its settings back, reads the receipt from the new rollout, and
+/// records the address Awake as the new flow. The old thread and its flow
+/// are untouched: its rollout is byte-identical, nothing addresses it, and
+/// the old flow stays Stopped on it.
+#[test]
+fn a_refreshed_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
+    use crate::title::{ShowsNativeTitle, TitlesFlow};
+    let mut fixture = NexusFixture::new();
+    // The old Codex flow 908786 on thread OLD, Stopped, its launch of record.
+    let old = fixture.node();
+    let old_thread = old.session_id.clone();
+    let profile = LaunchProfile {
+        launch_request_id: "old-codex-request".into(),
+        system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+        user_modules: vec!["operation-main-flow".into()],
+        address: address(Layer::Secondary),
+        model_name: "fixture-model".into(),
+        effort: "medium".into(),
+        flow_id_option: None,
+        remembered_flow_vector: vec![],
+        herdr_session_name: "fixture-session".into(),
+        leave_outs_option: None,
+        instruction_prompt: "fixture instruction".into(),
+    };
+    let composed = fixture
+        .nexus
+        .composer
+        .compose(
+            crate::composition::HarnessedProfile {
+                harness_kind: HarnessKind::Codex,
+                launch_profile: profile.clone(),
+            },
+            Vec::<signal_flow::LeaveOut>::new(),
+        )
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .reserve_launch_attempt(&composed, Origin::Unbound)
+        .unwrap();
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_intent(NativeLaunchIntent {
+                launch_request_id: profile.launch_request_id.clone(),
+                prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: HarnessKind::Codex,
+                model_name: profile.model_name.clone(),
+                effort: profile.effort.clone(),
+                system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: composed.part_hashes(),
+            })
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_binding(NativeLaunchBinding {
+                launch_request_id: profile.launch_request_id.clone(),
+                flow_id: old.flow_id.clone(),
+                native_session_id: old_thread.clone(),
+                harness_kind: HarnessKind::Codex,
+                herdr_pane_binding: signal_flow::HerdrPaneBinding {
+                    launch_request_id: profile.launch_request_id.clone(),
+                    herdr_session_name: "fixture-session".into(),
+                    herdr_agent_name: composed.launch_agent_name(),
+                    herdr_workspace_id: "w1".into(),
+                    herdr_pane_id: "w1:p3".into(),
+                    herdr_terminal_id: "term-old".into(),
+                },
+            })
+            .unwrap()
+    );
+    let mut old_node = old.clone();
+    old_node.herdr_route_selection = HerdrRouteSelection::Available(HerdrRoute {
+        herdr_session_name: "fixture-session".into(),
+        herdr_agent_name: composed.launch_agent_name(),
+        herdr_pane_id: "w1:p3".into(),
+        herdr_terminal_id: "term-old".into(),
+    });
+    fixture.nexus.store.register_flow(old_node).unwrap();
+    assert!(fixture.nexus.store.record_stopped(&old.flow_id).unwrap());
+    let rollouts = fixture.directory.path().join("native-transcripts/codex");
+    fs::create_dir_all(&rollouts).unwrap();
+    let old_rollout = rollouts.join(format!("rollout-{old_thread}.jsonl"));
+    fs::write(
+        &old_rollout,
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":old_thread}})
+        ),
+    )
+    .unwrap();
+    let old_bytes = fs::read(&old_rollout).unwrap();
+    let queue = vec![Request::Order("A".into())];
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec![old.flow_id.as_str()],
+        queue.clone(),
+    ));
+    configure_secondary_model(&fixture, "fixture-model");
+    let at = address(Layer::Secondary);
+    assert_eq!(
+        refresh(&fixture, &at),
+        meta_signal_flow::Response::Refreshed(at.clone())
+    );
+
+    // The fresh seat the wake composes, and so the first turn the new thread
+    // holds, and the title it is named with.
+    let fresh = FreshSeat {
+        address: at.clone(),
+        launch_request_id: "any".into(),
+        model_name: "fixture-model".into(),
+        effort: "medium".into(),
+        herdr_session_name: "fixture-session".into(),
+        system_modules: profile.system_modules.clone(),
+        user_modules: profile.user_modules.clone(),
+        leave_outs_option: None,
+        prompt: queue.prompt_text(),
+    }
+    .fresh_profile();
+    let title = fresh.native_title(FRESH_CODEX_FLOW).unwrap();
+    let first_part = fixture
+        .nexus
+        .composer
+        .compose(
+            crate::composition::HarnessedProfile {
+                harness_kind: HarnessKind::Codex,
+                launch_profile: fresh,
+            },
+            Vec::<signal_flow::LeaveOut>::new(),
+        )
+        .unwrap()
+        .first_prompt_payload
+        .prompt_part_vector[0]
+        .prompt_part_text
+        .clone();
+    let world = fixture.fresh_world(title.as_str());
+    let rows = [
+        serde_json::json!({"type":"session_meta","payload":{"id":FRESH_THREAD}}),
+        serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-fresh"}}),
+        serde_json::json!({"type":"event_msg","payload":{"thread_id":FRESH_THREAD,"turn_id":"turn-fresh","item":{"type":"UserMessage","content":[{"type":"text","text":first_part}]}}}),
+        serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Woken."}]}}),
+    ];
+    fs::write(
+        rollouts.join(format!("rollout-{FRESH_THREAD}.jsonl")),
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    // The new thread's FlowId claim, as `flow-id codex` makes it.
+    FixtureExecutable {
+        path: fixture.directory.path().join("native-transcripts/flow-id"),
+    }
+    .install(&format!(
+        "#!/bin/sh\n[ \"$1\" = codex ] && [ \"$CODEX_SESSION_ID\" = '{FRESH_THREAD}' ] || exit 2\nprintf 'version=1\\nharness=codex\\nidentity={identity}\\nalias={FRESH_CODEX_FLOW}\\n' > \"$3/.{FRESH_CODEX_FLOW}.flow-id\"\nprintf '{FRESH_CODEX_FLOW}\\n'\n",
+        identity = FRESH_THREAD.replace('-', ""),
+    ));
+
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Woken(FRESH_CODEX_FLOW.into())
+    );
+
+    let woken = stored(&fixture, Layer::Secondary);
+    assert_eq!(woken.state, State::Awake(FRESH_CODEX_FLOW.into()));
+    assert!(woken.queue.is_empty());
+    assert_eq!(woken.past, vec![old.flow_id.clone()]);
+    let new_node = fixture
+        .nexus
+        .store
+        .flow_node(FRESH_CODEX_FLOW)
+        .unwrap()
+        .unwrap();
+    assert_eq!(new_node.session_id, FRESH_THREAD);
+    assert_eq!(new_node.harness_kind, HarnessKind::Codex);
+    assert_eq!(new_node.flow_lifecycle, FlowLifecycle::Active);
+    let old_after = fixture
+        .nexus
+        .store
+        .flow_node(&old.flow_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(old_after.session_id, old_thread);
+    assert_eq!(old_after.flow_lifecycle, FlowLifecycle::Stopped);
+    assert_eq!(fs::read(&old_rollout).unwrap(), old_bytes);
+    // Exactly the opening, the naming and the readback reached the
+    // app-server; the naming and the readback each read back the new thread,
+    // so none addressed another.
+    assert_eq!(fs::read_to_string(&world.codex_invocations).unwrap(), "3");
+    let calls = fs::read_to_string(world.state.join("calls")).unwrap();
+    assert!(calls.contains(&format!("resume {FRESH_THREAD}")), "{calls}");
+    assert!(!calls.contains(&old_thread), "{calls}");
+    assert_eq!(
+        fs::read_to_string(world.state.join("label")).unwrap(),
+        title.as_str()
+    );
+    use crate::store::refresh::MarksFreshWakes;
+    assert!(!fixture.nexus.store.fresh_wake_marked(&at).unwrap());
+}
+
+/// The Claude equivalent: a Refresh'd sleeping Claude address wakes fresh
+/// to a new native session Flow chose, not a resume of the old one; the new
+/// flow binds to that session and the old flow keeps its own.
+#[test]
+fn a_refreshed_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
+    let mut fixture = NexusFixture::new();
+    let seat = resumable(&fixture);
+    fixture.claims_flow_ids();
+    let queue = vec![Request::Order("A".into())];
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        queue,
+    ));
+    configure_secondary_model(&fixture, "claude-fixture");
+    let at = address(Layer::Secondary);
+    assert_eq!(
+        refresh(&fixture, &at),
+        meta_signal_flow::Response::Refreshed(at.clone())
+    );
+    let world = fixture.fresh_world("unused");
+
+    let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
+        panic!(
+            "the fresh Claude wake starts; Herdr calls: {}",
+            fs::read_to_string(world.state.join("calls")).unwrap_or_default()
+        );
+    };
+    assert_ne!(flow_id, "abc123");
+    let woken = stored(&fixture, Layer::Secondary);
+    assert_eq!(woken.state, State::Awake(flow_id.clone()));
+    assert!(woken.queue.is_empty());
+    let new_node = fixture.nexus.store.flow_node(&flow_id).unwrap().unwrap();
+    let new_session = fs::read_to_string(world.state.join("session")).unwrap();
+    assert_eq!(new_node.session_id, new_session);
+    assert_ne!(new_session, seat.session);
+    assert_eq!(new_node.harness_kind, HarnessKind::Claude);
+    assert_eq!(new_node.flow_lifecycle, FlowLifecycle::Active);
+    let old_after = fixture.nexus.store.flow_node("abc123").unwrap().unwrap();
+    assert_eq!(old_after.session_id, seat.session);
+    assert_eq!(old_after.flow_lifecycle, FlowLifecycle::Stopped);
+    let calls = fs::read_to_string(world.state.join("calls")).unwrap();
+    assert!(
+        calls.contains(&format!("--session-id {new_session}")),
+        "{calls}"
+    );
+    assert!(!calls.contains("--resume"), "{calls}");
+    assert!(!calls.contains(&seat.session), "{calls}");
+}

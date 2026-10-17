@@ -1,3 +1,10 @@
+# Flow 0.35.16
+
+No protocol change. The store adds durable queue-delivery request and attempt families.
+
+- **A resting Codex thread receives queued work through its app-server.** Flow records distinct request, attempt, and JSON-RPC identities before `turn/start`. The exact app-server response is recorded before the queued request is removed. A restart settles a receipt-recorded attempt without another native submission; a receipt-less attempt becomes Uncertain and blocks automatic redelivery until reconciled. The native call and local store are explicitly not one atomic transaction.
+- **Turn completion remains the drain trigger.** Duplicate or unrelated events do not repeat delivery, completion during registration is retained until confirmation, and queued sender and order are preserved. Flow never falls back to a pane prompt for this Codex drain.
+
 # Flow 0.35.15
 
 No wire change and no store change.

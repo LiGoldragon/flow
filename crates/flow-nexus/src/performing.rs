@@ -47,6 +47,7 @@ impl LabelsNativeLaunchStage for NativeLaunchStage {
             Self::Bind => "bind",
             Self::Naming => "title",
             Self::Receipt => "receipt",
+            Self::Confirm => "confirm",
             Self::Unclassified => "unclassified",
         }
     }
@@ -82,6 +83,7 @@ impl ClassifiesNativeLaunchFailure for NativeLaunchFailure {
             Self::PartDiffers => "part-differs",
             Self::LeaveOutShown => "leave-out-shown",
             Self::ModelOrEffortDiffers => "model-or-effort-differs",
+            Self::SessionUnrecorded => "session-unrecorded",
             Self::Unclassified => "unclassified",
         }
     }

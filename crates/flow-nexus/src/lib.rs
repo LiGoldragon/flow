@@ -1291,14 +1291,26 @@ mod tests {
         let agents = bindings
             .iter()
             .map(|binding| {
-                serde_json::json!({
-                    "agent": binding.harness_kind.expected_harness(),
+                let harness = binding.harness_kind.expected_harness();
+                let mut agent = serde_json::json!({
+                    "agent": harness,
                     "agent_status": "idle",
                     "name": binding.herdr_agent_name,
                     "pane_id": binding.herdr_pane_id,
                     "terminal_id": binding.herdr_terminal_id,
                     "workspace_id": binding.herdr_workspace_id,
-                })
+                });
+                // A Claude pane reports its session; a Codex one reports
+                // none, and its rollout below proves it.
+                if binding.harness_kind == HarnessKind::Claude {
+                    agent["agent_session"] = serde_json::json!({
+                        "source": format!("herdr:{harness}"),
+                        "agent": harness,
+                        "kind": "id",
+                        "value": binding.native_session_id,
+                    });
+                }
+                agent
             })
             .collect::<Vec<_>>();
         let rollouts = fixture.directory.path().join("native-transcripts/codex");

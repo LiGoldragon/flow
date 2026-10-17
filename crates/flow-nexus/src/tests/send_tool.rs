@@ -1429,7 +1429,8 @@ impl SeatsAwakeCodexSeat for NexusFixture {
     fn awake_codex_seat(&self, queue: Vec<QueuedRequest>) {
         use super::PromptFixture;
         self.accept_pane_operations(vec![self.settled_agent()], PromptFixture::Prompted("w1:p3"));
-        let node = self.node();
+        let mut node = self.node();
+        node.flow_lifecycle = signal_flow::FlowLifecycle::Pending;
         assert!(matches!(
             self.nexus.store.register_existing_flow(
                 node,

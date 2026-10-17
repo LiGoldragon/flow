@@ -29,10 +29,15 @@ Library
   Aspect.[ Psyche Mind Field ]
   Address.{ Aspect Topic Layer }
   Recipient.[ Address Up ]
+  ; Who a queued request is from: the Address Flow resolved for its sender
+  ; (the Lock's Sender of a Deliver, the thread's metaflow of a send-tool
+  ; call), or Unknown for a request queued before Flow kept senders.
+  SentBy.[ Sender Unknown ]
+  QueuedRequest.{ SentBy Request }
   Metaflow.{ Address
              State.[ Awake.FlowId Asleep Ended ]
              Past.Vector<FlowId>
-             Queue.Vector<Request> }
+             Queue.Vector<QueuedRequest> }
   Lock.{ Sender Address Until.Integer }
   Process.{ Pid.Integer Started.Integer }
   Sender.Address

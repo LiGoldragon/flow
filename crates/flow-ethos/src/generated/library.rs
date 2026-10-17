@@ -96,6 +96,20 @@ pub enum Recipient {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum SentBy {
+    Sender(Sender),
+    Unknown,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct QueuedRequest {
+    pub sent_by: SentBy,
+    pub request: Request,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum State {
     Awake(FlowId),
     Asleep,
@@ -104,7 +118,7 @@ pub enum State {
 #[rustfmt::skip]
 pub type Past = std::vec::Vec<FlowId>;
 #[rustfmt::skip]
-pub type Queue = std::vec::Vec<Request>;
+pub type Queue = std::vec::Vec<QueuedRequest>;
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]

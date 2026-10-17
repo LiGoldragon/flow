@@ -2032,10 +2032,11 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     );
 }
 
-/// A Stop that lands before its launch is confirmed finds the seat holding
-/// only its Address and leaves it; the confirmation settles it.
+/// A fabricated Codex Stop before confirmation never stands in for an
+/// app-server completion. Confirmation releases the Address hold, but the
+/// queued request waits for an authentic native turn event.
 #[test]
-fn a_stop_before_confirmation_is_settled_when_the_launch_is_confirmed() {
+fn a_codex_stop_before_confirmation_does_not_fabricate_completion() {
     use crate::launching::PromotesAmbiguousLaunches;
     use crate::store::address_hold::HoldsLaunchAddress;
     use std::time::{Duration, Instant};
@@ -2108,27 +2109,19 @@ fn a_stop_before_confirmation_is_settled_when_the_launch_is_confirmed() {
     launch.write_receipt();
     std::thread::spawn(move || fixture.nexus.promote_ambiguous_launches());
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !fixture
-        .nexus
-        .store
-        .metaflow(&at)
-        .unwrap()
-        .unwrap()
-        .queue
-        .is_empty()
-    {
+    while fixture.nexus.store.address_hold("908786").unwrap().is_some() {
         assert!(
             Instant::now() < deadline,
-            "the confirmation never settled the Stop: {}",
+            "the confirmation never released its hold: {}",
             fs::read_to_string(&log).unwrap_or_default()
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        fs::read_to_string(&typed)
-            .unwrap_or_default()
-            .contains("queued before confirmation")
+    assert_eq!(
+        fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue,
+        vec![Request::Notice("queued before confirmation".into()).unsent()]
     );
+    assert!(fs::read_to_string(&typed).unwrap_or_default().is_empty());
     assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
 }
 

@@ -249,10 +249,26 @@ is the one intended responder. First answer wins is how the app-server
 behaves, not a security guarantee: any process of the same user that resumes
 the thread can answer a call first.
 
+A launch's first turn can call the tool before its flow exists. Herdr's
+`agent start` returns only once the agent is idle or done and interactively
+ready, and a turn waiting on a call is neither. So a Codex launch, after
+`thread/start` and before `turn/start`, records the thread as its own
+(`flow_nexus_launch_opened_threads`); no first turn is started when that
+fails, and the thread is archived. The connection that started the thread is
+subscribed to its server requests from then on (a `thread/resume` of a
+thread with no turn yet is refused, "no rollout found"), so it is kept open
+as the launch's responder. While the launch waits for Herdr's start and for
+the bind's rest wait, holding the dispatch gate, it reads that connection and
+answers each call as the gate's holder. The connection is closed when the launch ends,
+whatever it came to; a later call is the Nexus's responders'. Targets the
+launch's calls queued work for are woken once the gate is given back.
+
 A call is handled under the dispatch gate. Its sender is read from Flow's
 records each time it is handled, a replayed call included: the one live flow
-Flow holds on the calling thread, and the metaflow Awake as it. A thread no
-flow of Flow's runs is `ThreadUnowned`, a Stopped, Retired or Exited flow is
+Flow holds on the calling thread, and the metaflow Awake as it; failing that,
+while the Codex launch that opened the thread is unsettled and no other flow
+or launch holds its Address, that launch's Address. A thread no flow of
+Flow's runs and no unsettled launch opened is `ThreadUnowned`, a Stopped, Retired or Exited flow is
 `FlowEnded`, and a flow whose metaflow is no longer Awake as it (Asleep, or
 moved on by a Refresh or a fresh wake) is `NotAwake`; none is recorded. The
 request is queued for the target, with that sender, under the rules a Lock and a Deliver follow

@@ -8,8 +8,10 @@
 //! holds none.
 
 use super::{
-    FlowStore, ManagesMetaflowState, MetaflowState, NamesLiveFlow, ReadsFlowRows, StoreError,
-    metaflow::SleepsMetaflows,
+    FlowStore, ManagesMetaflowState, MetaflowState, NamesLiveFlow, ReadsFlowRows,
+    ReadsLaunchAttempt, StoreError,
+    metaflow::{SleepsMetaflows, TakesLaunchAddress},
+    opened_thread::RecordsOpenedThreads,
 };
 use crate::generated::send_tool::{
     Queued_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,
@@ -66,11 +68,17 @@ impl DescribesSendCallTable for SendCall {
 
 pub(crate) trait KeepsSendCalls {
     /// The Address a thread's calls are sent from: the metaflow Awake as
-    /// the one live flow Flow holds on that Codex thread. ThreadUnowned
-    /// when no flow Flow holds runs it, FlowEnded when its flow is
-    /// Stopped, Retired or Exited, NotAwake when its metaflow is not Awake
-    /// as that flow.
+    /// the one live flow Flow holds on that Codex thread; else, while the
+    /// launch that opened the thread is unsettled and its Address is still
+    /// that launch's to take, that Address, the launching metaflow (a first
+    /// turn calls before its flow is bound). ThreadUnowned when no flow
+    /// Flow holds runs it and no unsettled launch opened it, FlowEnded when
+    /// its flow is Stopped, Retired or Exited, NotAwake when its metaflow is
+    /// not Awake as that flow.
     fn thread_sender(&self, thread_id: &str) -> Result<Result<Address, SendRefusal>, StoreError>;
+    /// The Address of the unsettled Codex launch that opened `thread_id`,
+    /// while no other flow or launch holds that Address.
+    fn launching_address(&self, thread_id: &str) -> Result<Option<Address>, StoreError>;
     /// The row a call left, when it was handled.
     fn send_call(&self, key: &ToolCallKey) -> Result<Option<SendCall>, StoreError>;
     /// Records a call refused before anything was queued.
@@ -102,22 +110,52 @@ impl KeepsSendCalls for FlowStore {
                     && node.session_id == thread_id
             })
             .collect::<Vec<_>>();
-        if flows.is_empty() {
-            return Ok(Err(SendRefusal::ThreadUnowned));
-        }
         let live = flows
             .iter()
             .filter(|node| node.flow_lifecycle.is_live())
             .collect::<Vec<_>>();
         let flow = match live.as_slice() {
-            [] => return Ok(Err(SendRefusal::FlowEnded)),
-            [flow] => flow,
+            [] => None,
+            [flow] => Some(flow),
             _ => return Err(StoreError::StateInvariant),
         };
-        Ok(match self.metaflow_awake_as(&flow.flow_id)? {
-            Some(metaflow) => Ok(metaflow.address),
-            None => Err(SendRefusal::NotAwake),
-        })
+        if let Some(flow) = flow
+            && let Some(metaflow) = self.metaflow_awake_as(&flow.flow_id)?
+        {
+            return Ok(Ok(metaflow.address));
+        }
+        if let Some(address) = self.launching_address(thread_id)? {
+            return Ok(Ok(address));
+        }
+        Ok(Err(if flows.is_empty() {
+            SendRefusal::ThreadUnowned
+        } else if flow.is_none() {
+            SendRefusal::FlowEnded
+        } else {
+            SendRefusal::NotAwake
+        }))
+    }
+
+    fn launching_address(&self, thread_id: &str) -> Result<Option<Address>, StoreError> {
+        let Some(launch_request_id) = self.thread_launch(thread_id)? else {
+            return Ok(None);
+        };
+        let Some(attempt) = self.launch_attempt(&launch_request_id)? else {
+            return Ok(None);
+        };
+        let codex = attempt
+            .native_launch_intent_option
+            .as_ref()
+            .is_some_and(|intent| intent.harness_kind == HarnessKind::Codex);
+        if !codex
+            || !self.launch_attempt_unsettled(&attempt)?
+            || self
+                .launch_address_refusal(&attempt.launch_profile)?
+                .is_some()
+        {
+            return Ok(None);
+        }
+        Ok(Some(attempt.launch_profile.address))
     }
 
     fn send_call(&self, key: &ToolCallKey) -> Result<Option<SendCall>, StoreError> {

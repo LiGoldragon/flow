@@ -20,6 +20,7 @@ use crate::herdr::launch::{
 };
 use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
+use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::address_hold::HoldsLaunchAddress;
@@ -224,6 +225,8 @@ impl LaunchesFlows for RunningNexus {
         };
         let harness_kind = launch.harness_kind.clone();
         let response = self.launch_reserved(launch, origin, reserved.clone());
+        // The launch's own responder ends with it, whatever it came to.
+        self.close_launch_responder();
         // A launch refused after its pane exists leaves nothing running: its
         // pane is closed and the flow it registered recorded Stopped. Then
         // it gives back the flow it held and the FlowId it claimed; the

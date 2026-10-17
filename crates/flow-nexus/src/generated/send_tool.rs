@@ -114,4 +114,5 @@ pub trait AnswersToolCall {
 #[rustfmt::skip]
 pub trait HandlesSendCall {
     fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome;
+    fn handle_held_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome;
 }

@@ -1,3 +1,30 @@
+# Flow 0.35.10
+
+No wire change and no store change: signal-flow 20.0.0 and meta-signal-flow
+24.0.1 stay pinned; no table or family changes (the opened-thread row is
+written earlier and also read by thread).
+
+- **A Codex launch serves its first turn's send call.** Herdr's `agent
+  start` returns only once the agent is idle or done and interactively
+  ready, and a first turn waiting on a send call is neither until the call is
+  answered. A Codex launch now records the thread it opened as its own before
+  starting the first turn, and keeps the connection that started the thread,
+  which is subscribed to its server requests (a `thread/resume` before the
+  first turn is refused by the app-server). While it waits for Herdr's start
+  and for the bind's rest wait (holding the dispatch gate, as every launch
+  does), it reads that connection and answers each call as the gate's
+  holder; the connection is closed when the launch ends, whatever it came
+  to. When the record fails, no first turn is started and the thread is
+  archived.
+- **A call before the flow is bound is sent from the launching metaflow.**
+  A call's sender is the metaflow Awake as the thread's one live flow, as
+  before; failing that, while the Codex launch that opened the thread is
+  unsettled and no other flow or launch holds its Address, the launch's
+  Address. A thread no flow holds and no unsettled launch opened is
+  ThreadUnowned, a refused launch's included.
+- Targets a launch's calls queued work for are woken once the launch has
+  given the gate back.
+
 # Flow 0.35.8
 
 No wire change and no store change: signal-flow 20.0.0 and meta-signal-flow

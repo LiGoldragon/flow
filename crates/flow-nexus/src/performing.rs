@@ -20,6 +20,7 @@ use crate::herdr::launch::{
     CreatesHerdrLaunchPane, NativeTargetRefusal, ObservesNativeLaunchBinding, SpawnFailure,
     StartsNativeHerdrHarness, SubmitsStartupPart, TitleRefusal, TitlesNativeFlow,
 };
+use crate::send_tool::ServesLaunchCalls;
 use crate::store::ManagesMetaflowState;
 use crate::store::{
     ConfirmsStartedFlow, FlowRegistration, RecordsFlowLifecycle, RecordsLaunchOutcome,
@@ -283,26 +284,38 @@ impl Performs for RunningNexus {
                     HarnessKind::Codex => match self
                         .codex_endpoints
                         .adapter_for(&composed_launch.launch_profile.model_name)
-                        .and_then(|adapter| adapter.open_thread_with_first_turn(&composed_launch))
-                    {
-                        // The thread is recorded before the TUI attaches: a
-                        // remote-resumed TUI never reports it to Herdr, so a
-                        // launch recovered after this start binds to it.
-                        Ok(thread) => {
-                            use crate::store::opened_thread::RecordsOpenedThreads;
-                            if !self
-                                .store
-                                .record_opened_thread(
-                                    &composed_launch.launch_profile.launch_request_id,
-                                    &thread,
-                                )
-                                .unwrap_or(false)
-                            {
-                                eprintln!(
-                                    "flow-nexus: launch {} opened thread {thread} not recorded",
-                                    composed_launch.launch_profile.launch_request_id
-                                );
-                            }
+                        .and_then(|adapter| {
+                            adapter.open_thread_with_first_turn(&composed_launch, &mut |thread| {
+                                // Before the first turn, which may call the
+                                // send tool: the thread is recorded as this
+                                // launch's, durably (a remote-resumed TUI
+                                // never reports it to Herdr, so a launch
+                                // recovered after this start binds to it,
+                                // and a call is sent from this launch's
+                                // Address). The connection that opened it
+                                // is subscribed to its calls from then on.
+                                use crate::store::opened_thread::RecordsOpenedThreads;
+                                if !self
+                                    .store
+                                    .record_opened_thread(
+                                        &composed_launch.launch_profile.launch_request_id,
+                                        thread,
+                                    )
+                                    .unwrap_or(false)
+                                {
+                                    return Err(crate::codex::CodexAdapterUnavailable::Protocol(
+                                        format!(
+                                            "opened thread {thread} not recorded as the launch's"
+                                        ),
+                                    ));
+                                }
+                                Ok(())
+                            })
+                        }) {
+                        // That connection answers the first turn's calls
+                        // while the launch waits.
+                        Ok((thread, connection)) => {
+                            self.hold_launch_responder(connection);
                             Some(thread)
                         }
                         Err(error) => {
@@ -325,11 +338,16 @@ impl Performs for RunningNexus {
                     HarnessKind::Claude => None,
                 };
                 let started = match &opened {
-                    Some(thread) => self.herdr.attach_codex_harness(
-                        &composed_launch,
-                        &herdr_pane_binding,
-                        thread,
-                    ),
+                    // Herdr's start returns once the TUI is at rest, which a
+                    // first turn waiting on the send tool never is until its
+                    // call is answered: the launch answers it meanwhile.
+                    Some(thread) => self.serving_launch_calls(|| {
+                        self.herdr.attach_codex_harness(
+                            &composed_launch,
+                            &herdr_pane_binding,
+                            thread,
+                        )
+                    }),
                     None => self.herdr.start_native_harness(
                         &composed_launch,
                         &herdr_pane_binding,
@@ -381,11 +399,14 @@ impl Performs for RunningNexus {
                 native_session_id_option,
             }) => {
                 let observed = match native_session_id_option {
-                    Some(thread) => self.herdr.observe_attached_codex_binding(
-                        &composed_launch,
-                        &herdr_pane_binding,
-                        &thread,
-                    ),
+                    // The bind waits for rest too; a call meanwhile is answered.
+                    Some(thread) => self.serving_launch_calls(|| {
+                        self.herdr.observe_attached_codex_binding(
+                            &composed_launch,
+                            &herdr_pane_binding,
+                            &thread,
+                        )
+                    }),
                     None => self.herdr.observe_native_binding(
                         &composed_launch,
                         &herdr_pane_binding,

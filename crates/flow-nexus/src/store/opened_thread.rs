@@ -4,6 +4,11 @@
 //! recognized pane and the flow's claim. The row is keyed by the launch
 //! request, written once, in its own table, so a store written before it
 //! opens with the table added and holds none.
+//!
+//! The row is written after the thread opens and before its first turn is
+//! started, so it is also the thread's authority while its launch runs: a
+//! send call the first turn makes is sent from the Address of the launch
+//! that opened the thread (`store::send_call`).
 
 use super::{FlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -55,6 +60,8 @@ pub(crate) trait RecordsOpenedThreads {
     ) -> Result<bool, StoreError>;
     /// The thread a launch request opened, when one was recorded.
     fn opened_thread(&self, launch_request_id: &str) -> Result<Option<String>, StoreError>;
+    /// The launch request that opened `native_session_id`, when one did.
+    fn thread_launch(&self, native_session_id: &str) -> Result<Option<String>, StoreError>;
 }
 
 impl RecordsOpenedThreads for FlowStore {
@@ -90,6 +97,24 @@ impl RecordsOpenedThreads for FlowStore {
         match records.as_slice() {
             [] => Ok(None),
             [opened] => Ok(Some(opened.native_session_id.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn thread_launch(&self, native_session_id: &str) -> Result<Option<String>, StoreError> {
+        let launches = self
+            .engine
+            .match_records(QueryPlan::all(self.opened_threads))?
+            .records()
+            .iter()
+            .filter(|opened| {
+                !native_session_id.is_empty() && opened.native_session_id == native_session_id
+            })
+            .map(|opened| opened.launch_request_id.clone())
+            .collect::<Vec<_>>();
+        match launches.as_slice() {
+            [] => Ok(None),
+            [launch] => Ok(Some(launch.clone())),
             _ => Err(StoreError::StateInvariant),
         }
     }

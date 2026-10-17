@@ -218,7 +218,7 @@ impl RunsFakeAppServer for FakeAppServer {
 
 /// The JSON messages a recorded client stream holds: each masked client
 /// frame unmasked (RFC 6455 5.3).
-trait ReadsClientFrames {
+pub(super) trait ReadsClientFrames {
     fn client_messages(&self) -> Vec<serde_json::Value>;
 }
 
@@ -878,7 +878,8 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     launch.target_receipt_request.prompt_sha256 = digest;
 
     let thread = adapter
-        .open_thread_with_first_turn(&launch)
+        .open_thread_with_first_turn(&launch, &mut |_| Ok(()))
+        .map(|(thread, _)| thread)
         .expect("the thread opens declaring the send tool");
     eprintln!("witness thread {thread}");
     super::waking::resumable(&fixture);
@@ -955,6 +956,179 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         .unwrap()
         .expect("the call is recorded");
     eprintln!("witness record {:?}", recorded.send_outcome);
+}
+
+/// Witness against a scratch codex app-server: a thread opened as a launch
+/// opens it, whose first turn calls the send tool before the turn can end,
+/// is served while the dispatch gate is held for the whole wait, as a
+/// launch holds it while Herdr waits for its seat to come to rest. The
+/// thread is recorded as the launch's before the first turn, and the
+/// connection that opened it answers; the call is queued once from the launching
+/// metaflow, the turn ends with the tool's answer, and once the gate is
+/// given back the sleeping target is woken and handed the order once. The
+/// wait stands in for Herdr's: it ends when the rollout under
+/// FLOW_SEND_TOOL_WITNESS_HOME shows the turn complete. Runs only by name
+/// with `--ignored` and the three variables set.
+#[test]
+#[ignore = "needs FLOW_SEND_TOOL_WITNESS_CODEX, FLOW_SEND_TOOL_WITNESS_SOCKET and FLOW_SEND_TOOL_WITNESS_HOME naming a scratch codex app-server"]
+fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
+    use crate::codex::OpensCodexThread;
+    use crate::composition::ComposesLaunch;
+    use crate::composition::tests::{fixture_composer, fixture_profile};
+    use crate::send_tool::ServesLaunchCalls;
+    use crate::store::opened_thread::RecordsOpenedThreads;
+    use crate::store::{RecordsNativeLaunchIntent, ReservesLaunchAttempt};
+    use sha2::{Digest, Sha256};
+    let client = std::env::var_os("FLOW_SEND_TOOL_WITNESS_CODEX").expect("codex client");
+    let socket = std::env::var("FLOW_SEND_TOOL_WITNESS_SOCKET").expect("app-server socket");
+    let home = PathBuf::from(std::env::var_os("FLOW_SEND_TOOL_WITNESS_HOME").expect("codex home"));
+    let mut fixture = NexusFixture::new();
+    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.next.socket = socket;
+    fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
+    let adapter = fixture
+        .nexus
+        .codex_endpoints
+        .adapter_for("gpt-6-luna")
+        .expect("gpt-6-luna selects the next endpoint");
+    let mut profile = fixture_profile();
+    profile.model_name = "gpt-6-luna".into();
+    profile.effort = "low".into();
+    let sender = profile.address.clone();
+    let mut launch = fixture_composer()
+        .compose(
+            crate::composition::HarnessedProfile {
+                harness_kind: signal_flow::HarnessKind::Codex,
+                launch_profile: profile.clone(),
+            },
+            vec![signal_flow::LeaveOut::CodexAgentsMd],
+        )
+        .expect("launch composes");
+    let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, layer Secondary, kind Order and body first-turn-witness. Then reply with the exact text the tool returned, and end your turn.";
+    let digest = format!("{:x}", Sha256::digest(instruction.as_bytes()));
+    launch.first_prompt_payload.first_prompt_body = instruction.into();
+    launch.first_prompt_payload.prompt_sha256 = digest.clone();
+    launch.first_prompt_payload.prompt_part_vector = vec![signal_flow::PromptPart {
+        prompt_part_text: instruction.into(),
+        prompt_sha256: digest.clone(),
+    }];
+    launch.target_receipt_request.prompt_sha256 = digest;
+    // The launch as Start leaves it before its Spawn: reserved, its native
+    // intent recorded.
+    fixture
+        .nexus
+        .store
+        .reserve_launch_attempt(&launch, signal_flow::Origin::Unbound)
+        .unwrap();
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_intent(signal_flow::NativeLaunchIntent {
+                launch_request_id: profile.launch_request_id.clone(),
+                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: signal_flow::HarnessKind::Codex,
+                model_name: profile.model_name.clone(),
+                effort: profile.effort.clone(),
+                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: launch
+                    .first_prompt_payload
+                    .prompt_part_vector
+                    .iter()
+                    .map(|part| part.prompt_sha256.clone())
+                    .collect(),
+            })
+            .unwrap()
+    );
+    super::waking::resumable(&fixture);
+    fixture.asleep_at(asleep_target());
+
+    let gate = fixture
+        .nexus
+        .dispatch_gate
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let nexus = &fixture.nexus;
+    let (thread, connection) = adapter
+        .open_thread_with_first_turn(&launch, &mut |thread| {
+            assert!(
+                nexus
+                    .store
+                    .record_opened_thread(&profile.launch_request_id, thread)
+                    .unwrap()
+            );
+            eprintln!("witness thread {thread} recorded before its first turn");
+            Ok(())
+        })
+        .expect("the thread opens and its first turn starts");
+    nexus.hold_launch_responder(connection);
+    let rollout_shows_turn_complete = || {
+        let deadline = Instant::now() + Duration::from_secs(180);
+        while Instant::now() < deadline {
+            let found = walk(&home.join("sessions"))
+                .into_iter()
+                .filter(|path| path.to_string_lossy().contains(&thread))
+                .filter_map(|path| std::fs::read_to_string(path).ok())
+                .find(|rollout| rollout.contains("task_complete"));
+            if let Some(rollout) = found {
+                return Some(rollout);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        None
+    };
+    let rollout = nexus.serving_launch_calls(rollout_shows_turn_complete);
+    nexus.close_launch_responder();
+    drop(gate);
+    let rollout = rollout.expect("the first turn completes while the gate is held");
+    let outputs = rollout
+        .lines()
+        .filter(|line| line.contains("tool_call_output") || line.contains("function_call_output"))
+        .collect::<Vec<_>>();
+    eprintln!("witness tool outputs {outputs:?}");
+    assert!(
+        outputs.iter().any(|line| line.contains("Queued")),
+        "{outputs:?}"
+    );
+    // Queued once, from the launching metaflow, before the target woke.
+    assert_eq!(
+        fixture.stored_at(&asleep_target()).queue,
+        vec![QueuedRequest {
+            sent_by: SentBy::Sender(sender.clone()),
+            request: Request::Order("first-turn-witness".into()),
+        }]
+    );
+    fixture.nexus.wake_deferred();
+    let woken = fixture.stored_at(&asleep_target());
+    eprintln!("witness target {:?} queue {:?}", woken.state, woken.queue);
+    assert_eq!(woken.state, State::Awake("abc123".into()));
+    assert!(woken.queue.is_empty());
+    let handed = super::waking::typed_prompts(&fixture)
+        .concat()
+        .matches("{ Sender.{ Field flow Secondary } Order.first-turn-witness }")
+        .count();
+    eprintln!("witness typed orders {handed}");
+    assert_eq!(handed, 1);
+}
+
+/// Every file under `root`, depth first.
+fn walk(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+    found
 }
 
 /// A woken or drained flow reads each queued request with who sent it.

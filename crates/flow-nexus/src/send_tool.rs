@@ -9,9 +9,20 @@
 //! first answer wins is how the app-server behaves, not a guarantee: any
 //! process of the same user that subscribes to the thread can answer first.
 //!
+//! A launch's first turn may call the tool before the launch's flow exists:
+//! a Codex launch records the thread it opened as its own before starting
+//! the first turn, and keeps the connection that opened the thread, which
+//! is subscribed to its server requests from `thread/start` on; while
+//! it waits (holding the dispatch gate) for Herdr to show its seat at rest,
+//! answers that connection's calls as the gate's holder. Herdr's start
+//! returns only once the seat is at rest, which a turn waiting on a call
+//! never is, so a launch that did not answer would wait on itself.
+//!
 //! A call is handled under the dispatch gate. Its sender is read from
 //! Flow's records each time, a replayed call included: the one live flow
-//! Flow holds on the calling thread, and the metaflow Awake as it. Its
+//! Flow holds on the calling thread, and the metaflow Awake as it; before
+//! that flow is Awake, the Address of the unsettled launch that opened the
+//! thread, while no other flow or launch holds it. Its
 //! request is queued for the target as a Lock and a Deliver from Message
 //! would queue it, and the call and its outcome are recorded in the commit
 //! that queues it (`store::send_call`), so a replayed call is answered from
@@ -25,7 +36,7 @@
 
 use crate::codex::{
     CodexAdapter, ExchangesOnSubscription, ProxyEvent, ResponderSignal, SelectsCodexEndpoint,
-    SubscribesThread, SubscriptionEnd, ThreadSubscription,
+    SubscribesThread, SubscriptionEnd, ThreadConnection, ThreadSubscription,
 };
 use crate::generated::send_tool::{
     AnswersToolCall, DeclaresSendTool, HandlesSendCall, ParamsCarrying, ReadsSendArguments,
@@ -264,6 +275,14 @@ impl HandlesSendCall for RunningNexus {
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.handle_held_send_call(call)
+    }
+
+    fn handle_held_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
+        let call = input.tool_call();
+        if call.tool_name != SendTool::tool_name() {
+            return Self::refused(SendRefusal::UnknownTool);
+        }
         let key = &call.tool_call_key;
         let store_refused = |error: crate::store::StoreError| {
             eprintln!(
@@ -461,6 +480,191 @@ impl RespondsToSendCalls for RunningNexus {
             self.wake_due(queued.target);
         }
         answered
+    }
+}
+
+/// The responder of the thread a running Codex launch opened: the
+/// connection that opened it, subscribed to its server requests from
+/// `thread/start`, before its first turn was started, so a first turn that
+/// calls the tool is served while the launch waits for its seat to come to
+/// rest. The launch holds the dispatch gate throughout, so the launch, as
+/// the gate's holder, reads and answers this connection's calls while it
+/// waits (`ServesLaunchCalls::serving_launch_calls`).
+pub(crate) type LaunchResponder = ThreadConnection;
+
+/// The responder of the launch running now, and the targets its calls
+/// queued work for, woken once the launch has given the gate back.
+#[derive(Default)]
+pub struct LaunchCalls {
+    responder: std::sync::Mutex<Option<LaunchResponder>>,
+    deferred_wakes: std::sync::Mutex<Vec<Address>>,
+}
+
+/// A running Codex launch serves its own thread's calls.
+pub(crate) trait ServesLaunchCalls {
+    /// How long one read of the launch's connection waits before the launch
+    /// looks again whether the work it waits on has ended.
+    const SERVING_SLICE: Duration = Duration::from_millis(50);
+    /// Keeps the connection that opened the launch's thread as its
+    /// responder.
+    fn hold_launch_responder(&self, responder: LaunchResponder);
+    /// Runs `work`, an outside wait that writes nothing to the store, while
+    /// the caller, holding the dispatch gate, answers the calls the
+    /// launch's connection brings. Without a launch responder, `work` runs
+    /// alone.
+    fn serving_launch_calls<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T;
+    /// Handles one server request of the launch's connection as the gate's
+    /// holder and answers it; a Queued outcome's target is woken after the
+    /// launch.
+    fn answer_launch_call(
+        &self,
+        responder: &mut LaunchResponder,
+        request: serde_json::Value,
+    ) -> Result<(), crate::codex::CodexAdapterUnavailable>;
+    /// At the launch's end, whatever it came to: answers the calls already
+    /// read, then closes the connection. A later call is the Nexus's
+    /// responders' (`ServesSendTool`).
+    fn close_launch_responder(&self);
+    /// Off the gate: wakes each target a launch's calls queued work for,
+    /// when Flow's records show it due.
+    fn wake_deferred(&self);
+}
+
+impl ServesLaunchCalls for RunningNexus {
+    fn hold_launch_responder(&self, responder: LaunchResponder) {
+        self.close_launch_responder();
+        *self
+            .launch_calls
+            .responder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(responder);
+    }
+
+    fn serving_launch_calls<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T {
+        let taken = self
+            .launch_calls
+            .responder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(mut responder) = taken else {
+            return work();
+        };
+        let mut open = true;
+        let outcome = std::thread::scope(|scope| {
+            let running = scope.spawn(work);
+            // The calls that arrived before the subscription was answered.
+            for request in std::mem::take(&mut responder.subscription.early) {
+                if let Err(error) = self.answer_launch_call(&mut responder, request) {
+                    eprintln!("flow-nexus: launch send tool: {error}");
+                    open = false;
+                }
+            }
+            while open && !running.is_finished() {
+                let deadline = Instant::now() + Self::SERVING_SLICE;
+                match responder
+                    .subscription
+                    .next_event(&responder.inbox, Some(deadline))
+                {
+                    Ok(ProxyEvent::Reply(Ok(message))) => {
+                        if let Err(error) = self.answer_launch_call(&mut responder, message) {
+                            eprintln!("flow-nexus: launch send tool: {error}");
+                            open = false;
+                        }
+                    }
+                    Ok(ProxyEvent::Upgraded | ProxyEvent::Ping(_)) => {}
+                    Err(SubscriptionEnd::Failed(
+                        crate::codex::CodexAdapterUnavailable::TimedOut,
+                    )) => {}
+                    Ok(ProxyEvent::Reply(Err(error))) | Err(SubscriptionEnd::Failed(error)) => {
+                        eprintln!("flow-nexus: launch send tool connection ended: {error}");
+                        open = false;
+                    }
+                    Err(SubscriptionEnd::Stopped) => open = false,
+                }
+            }
+            running
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        });
+        if open {
+            *self
+                .launch_calls
+                .responder
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(responder);
+        } else {
+            responder.subscription.close();
+        }
+        outcome
+    }
+
+    fn answer_launch_call(
+        &self,
+        responder: &mut LaunchResponder,
+        request: serde_json::Value,
+    ) -> Result<(), crate::codex::CodexAdapterUnavailable> {
+        if request.get("method").and_then(serde_json::Value::as_str) != Some("item/tool/call") {
+            return Ok(());
+        }
+        let Some(id) = request.get("id").cloned() else {
+            return Ok(());
+        };
+        let outcome = match request
+            .get("params")
+            .cloned()
+            .and_then(ToolCall::read_tool_call::<serde_json::Value>)
+        {
+            Some(call) => self.handle_held_send_call(call),
+            None => Self::refused(SendRefusal::Malformed),
+        };
+        let answered = responder.subscription.answer(id, outcome.tool_response());
+        if let SendOutcome::Queued(queued) = outcome {
+            self.launch_calls
+                .deferred_wakes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(queued.target);
+        }
+        answered
+    }
+
+    fn close_launch_responder(&self) {
+        let taken = self
+            .launch_calls
+            .responder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(mut responder) = taken else {
+            return;
+        };
+        for request in std::mem::take(&mut responder.subscription.early) {
+            let _ = self.answer_launch_call(&mut responder, request);
+        }
+        let deadline = Instant::now() + Self::SERVING_SLICE;
+        while let Ok(ProxyEvent::Reply(Ok(message))) = responder
+            .subscription
+            .next_event(&responder.inbox, Some(deadline))
+        {
+            if self.answer_launch_call(&mut responder, message).is_err() {
+                break;
+            }
+        }
+        responder.subscription.close();
+    }
+
+    fn wake_deferred(&self) {
+        let wakes = std::mem::take(
+            &mut *self
+                .launch_calls
+                .deferred_wakes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for target in wakes {
+            self.wake_due(target);
+        }
     }
 }
 

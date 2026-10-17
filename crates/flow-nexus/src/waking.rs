@@ -63,6 +63,7 @@ use crate::herdr::{
 };
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
+use crate::send_tool::ServesLaunchCalls;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::RecordsContextSize;
 use crate::store::events::RecordsHarnessEvents;
@@ -1092,6 +1093,9 @@ impl WakesInParts for RunningNexus {
             let response = self.start(profile, Origin::Unbound);
             self.settle(&launch_request_id, response)
         };
+        // A first turn may have queued work meanwhile; its targets are woken
+        // now that the gate is given back.
+        self.wake_deferred();
         // The gate is released before the wait: the launch is settled by the
         // Nexus's own promoter, which needs the gate to do it.
         let response = match response {

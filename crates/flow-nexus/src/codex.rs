@@ -175,12 +175,39 @@ pub trait SubmitsBoundCodexPart {
 /// base instructions and the launch's exclusions in its config, what the
 /// app-server answers is read back against them, and the first part of the
 /// first USER message (the whole message when it fits one Codex turn) is
-/// submitted as the thread's first turn. The answer is the thread's id.
-pub trait OpensCodexThread {
+/// submitted as the thread's first turn. The answer is the thread's id and
+/// the connection that opened it.
+///
+/// The connection that starts a thread is subscribed to its server
+/// requests from `thread/start` on; a `thread/resume` of a thread with no
+/// turn yet is refused (codex 0.161.0-alpha.2: "no rollout found"). So the
+/// opening connection is kept open and answered as the thread's responder
+/// until the launch ends: a first turn may call the send tool before the
+/// launch's flow exists. Between the opening and the first turn,
+/// `before_first_turn` is given the thread, for what must hold before a
+/// call can be made (the thread recorded as this launch's). When it
+/// refuses, no turn is started and the thread is archived.
+pub(crate) trait OpensCodexThread {
     fn open_thread_with_first_turn(
         &self,
         launch: &ComposedLaunch,
-    ) -> Result<String, CodexAdapterUnavailable>;
+        before_first_turn: &mut dyn FnMut(&str) -> Result<(), CodexAdapterUnavailable>,
+    ) -> Result<(String, ThreadConnection), CodexAdapterUnavailable>;
+}
+
+/// A connection subscribed to one thread's server requests, with the
+/// channel its events arrive on; closed when dropped.
+pub(crate) struct ThreadConnection {
+    pub(crate) subscription: ThreadSubscription,
+    /// Kept so the connection's reader always has a sink.
+    pub(crate) _signals: mpsc::Sender<ResponderSignal>,
+    pub(crate) inbox: Receiver<ResponderSignal>,
+}
+
+impl Drop for ThreadConnection {
+    fn drop(&mut self) {
+        self.subscription.close();
+    }
 }
 
 /// Shows that the deployed app-server accepts a thread's dynamic tools only
@@ -850,7 +877,8 @@ impl OpensCodexThread for CodexAdapter {
     fn open_thread_with_first_turn(
         &self,
         launch: &ComposedLaunch,
-    ) -> Result<String, CodexAdapterUnavailable> {
+        before_first_turn: &mut dyn FnMut(&str) -> Result<(), CodexAdapterUnavailable>,
+    ) -> Result<(String, ThreadConnection), CodexAdapterUnavailable> {
         let first = launch.first_prompt_payload.prompt_part_vector.first();
         let Some(first) = first.filter(|_| {
             launch.has_canonical_first_prompt()
@@ -864,55 +892,87 @@ impl OpensCodexThread for CodexAdapter {
         // The send tool is declared behind the experimental API, which is
         // opened only once the app-server is shown to gate the tool on it.
         self.probe_send_tool()?;
-        let mut session =
-            self.initialize_session(serde_json::json!({ "experimentalApi": true }))?;
-        let result = (|| {
-            let started = session
-                .request(
-                    2,
-                    "thread/start",
-                    serde_json::json!({
-                        "model": launch.launch_profile.model_name,
-                        "cwd": self.workspace_root,
-                        "approvalPolicy": "never",
-                        "sandbox": "danger-full-access",
-                        "baseInstructions": launch.system_prompt.system_prompt_text,
-                        "ephemeral": false,
-                        "config": Self::exclusion_config(launch),
-                        "dynamicTools": [SendTool::tool_spec()]
-                    }),
-                    self.timeout,
-                )
-                .map_err(<CodexAdapterUnavailable as SendToolRefusal>::named)?;
-            let thread = started
-                .pointer("/thread/id")
-                .and_then(serde_json::Value::as_str)
-                .filter(|thread| !thread.is_empty())
-                .ok_or_else(|| {
-                    CodexAdapterUnavailable::Protocol("thread/start returned no thread id".into())
-                })?
-                .to_owned();
-            Self::read_back_thread(launch, &thread, "thread/start", &started)?;
-            session.request(
+        let (signals, inbox) = mpsc::channel();
+        let subscription = self
+            .connect_experimental(1, &signals, &inbox)
+            .map_err(<CodexAdapterUnavailable as EndsSubscription>::ended)?;
+        let mut connection = ThreadConnection {
+            subscription,
+            _signals: signals,
+            inbox,
+        };
+        let ThreadConnection {
+            subscription,
+            inbox,
+            ..
+        } = &mut connection;
+        let mut ask = |id: u64, method: &str, params: serde_json::Value| {
+            subscription
+                .exchange(inbox, id, method, params)
+                .map_err(<CodexAdapterUnavailable as EndsSubscription>::ended)
+        };
+        let started = ask(
+            2,
+            "thread/start",
+            serde_json::json!({
+                "model": launch.launch_profile.model_name,
+                "cwd": self.workspace_root,
+                "approvalPolicy": "never",
+                "sandbox": "danger-full-access",
+                "baseInstructions": launch.system_prompt.system_prompt_text,
+                "ephemeral": false,
+                "config": Self::exclusion_config(launch),
+                "dynamicTools": [SendTool::tool_spec()]
+            }),
+        )
+        .map_err(<CodexAdapterUnavailable as SendToolRefusal>::named)?;
+        let thread = started
+            .pointer("/thread/id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|thread| !thread.is_empty())
+            .ok_or_else(|| {
+                CodexAdapterUnavailable::Protocol("thread/start returned no thread id".into())
+            })?
+            .to_owned();
+        Self::read_back_thread(launch, &thread, "thread/start", &started)?;
+        if let Err(refusal) = before_first_turn(&thread) {
+            let _ = ask(
                 3,
-                "turn/start",
-                serde_json::json!({
-                    "threadId": thread,
-                    "effort": launch.launch_profile.effort,
-                    "model": launch.launch_profile.model_name,
-                    "input": [{
-                        "type": "text",
-                        "text": first.prompt_part_text,
-                        "text_elements": []
-                    }],
-                    "turnTrigger": "flow-nexus"
-                }),
-                self.timeout,
-            )?;
-            Ok(thread)
-        })();
-        session.stop_proxy();
-        result
+                "thread/archive",
+                serde_json::json!({ "threadId": thread }),
+            );
+            return Err(refusal);
+        }
+        ask(
+            3,
+            "turn/start",
+            serde_json::json!({
+                "threadId": thread,
+                "effort": launch.launch_profile.effort,
+                "model": launch.launch_profile.model_name,
+                "input": [{
+                    "type": "text",
+                    "text": first.prompt_part_text,
+                    "text_elements": []
+                }],
+                "turnTrigger": "flow-nexus"
+            }),
+        )?;
+        Ok((thread, connection))
+    }
+}
+
+/// A connection's end, as the adapter's error.
+trait EndsSubscription {
+    fn ended(end: SubscriptionEnd) -> CodexAdapterUnavailable;
+}
+
+impl EndsSubscription for CodexAdapterUnavailable {
+    fn ended(end: SubscriptionEnd) -> CodexAdapterUnavailable {
+        match end {
+            SubscriptionEnd::Failed(error) => error,
+            SubscriptionEnd::Stopped => CodexAdapterUnavailable::Closed,
+        }
     }
 }
 
@@ -1121,6 +1181,14 @@ pub(crate) struct ThreadSubscription {
 }
 
 pub(crate) trait SubscribesThread {
+    /// A connection initialized with the experimental API, its events sent
+    /// to `signals` under `generation`, subscribed to no thread yet.
+    fn connect_experimental(
+        &self,
+        generation: u64,
+        signals: &mpsc::Sender<ResponderSignal>,
+        inbox: &Receiver<ResponderSignal>,
+    ) -> Result<ThreadSubscription, SubscriptionEnd>;
     fn subscribe_thread(
         &self,
         thread: &str,
@@ -1251,14 +1319,12 @@ impl ExchangesOnSubscription for ThreadSubscription {
 }
 
 impl SubscribesThread for CodexAdapter {
-    fn subscribe_thread(
+    fn connect_experimental(
         &self,
-        thread: &str,
         generation: u64,
         signals: &mpsc::Sender<ResponderSignal>,
         inbox: &Receiver<ResponderSignal>,
     ) -> Result<ThreadSubscription, SubscriptionEnd> {
-        self.probe_send_tool().map_err(SubscriptionEnd::Failed)?;
         let sink = signals.clone();
         let proxy = self
             .spawn_proxy(move |event| sink.send(ResponderSignal::Proxy(generation, event)).is_ok())
@@ -1269,7 +1335,7 @@ impl SubscribesThread for CodexAdapter {
             early: Vec::new(),
             timeout: self.timeout,
         };
-        let subscribed = (|| {
+        let connected = (|| {
             match subscription.next_event(inbox, Some(Instant::now() + self.timeout))? {
                 ProxyEvent::Upgraded => {}
                 ProxyEvent::Reply(Err(error)) => return Err(SubscriptionEnd::Failed(error)),
@@ -1292,17 +1358,33 @@ impl SubscribesThread for CodexAdapter {
                 .proxy
                 .input
                 .write_json(serde_json::json!({ "method": "initialized", "params": null }))
-                .map_err(SubscriptionEnd::Failed)?;
-            subscription.exchange(
-                inbox,
-                2,
-                "thread/resume",
-                serde_json::json!({ "threadId": thread, "excludeTurns": true }),
-            )?;
-            Ok(())
+                .map_err(SubscriptionEnd::Failed)
         })();
-        match subscribed {
+        match connected {
             Ok(()) => Ok(subscription),
+            Err(end) => {
+                subscription.close();
+                Err(end)
+            }
+        }
+    }
+
+    fn subscribe_thread(
+        &self,
+        thread: &str,
+        generation: u64,
+        signals: &mpsc::Sender<ResponderSignal>,
+        inbox: &Receiver<ResponderSignal>,
+    ) -> Result<ThreadSubscription, SubscriptionEnd> {
+        self.probe_send_tool().map_err(SubscriptionEnd::Failed)?;
+        let mut subscription = self.connect_experimental(generation, signals, inbox)?;
+        match subscription.exchange(
+            inbox,
+            2,
+            "thread/resume",
+            serde_json::json!({ "threadId": thread, "excludeTurns": true }),
+        ) {
+            Ok(_) => Ok(subscription),
             Err(end) => {
                 subscription.close();
                 Err(end)
@@ -1886,7 +1968,8 @@ mod tests {
         let (_directory, executable, record) = RecordingFakeProxy.install_probed(&frames);
         assert_eq!(
             lean_adapter_at(executable, &launch)
-                .open_thread_with_first_turn(&launch)
+                .open_thread_with_first_turn(&launch, &mut |_| Ok(()))
+                .map(|(thread, _)| thread)
                 .unwrap(),
             "thread-lean"
         );
@@ -1965,7 +2048,9 @@ mod tests {
             ];
             let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
             assert!(matches!(
-                lean_adapter_at(executable, &launch).open_thread_with_first_turn(&launch),
+                lean_adapter_at(executable, &launch)
+                    .open_thread_with_first_turn(&launch, &mut |_| Ok(()))
+                    .map(|(thread, _)| thread),
                 Err(CodexAdapterUnavailable::SendToolUnsupported(_))
             ));
             let requests = record.requests(if archives { 4 } else { 3 });
@@ -2029,7 +2114,8 @@ mod tests {
         let opened = codex_endpoints
             .adapter_for(&launch.launch_profile.model_name)
             .unwrap()
-            .open_thread_with_first_turn(&launch)
+            .open_thread_with_first_turn(&launch, &mut |_| Ok(()))
+            .map(|(thread, _)| thread)
             .expect("the app-server opens the thread");
         assert_eq!(opened, thread);
         let methods = record
@@ -2120,7 +2206,8 @@ mod tests {
         ];
         let (_directory, executable, record) = RecordingFakeProxy.install_probed(&frames);
         assert!(matches!(
-            lean_adapter_at(executable, &launch).open_thread_with_first_turn(&launch),
+            lean_adapter_at(executable, &launch).open_thread_with_first_turn(&launch, &mut |_| Ok(()))
+                .map(|(thread, _)| thread),
             Err(CodexAdapterUnavailable::Protocol(detail))
                 if detail.contains("loaded project instructions the launch left out")
         ));

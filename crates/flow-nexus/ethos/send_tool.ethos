@@ -3,7 +3,12 @@
 ; kind and a body; the sender is never in the call. It is the metaflow
 ; Flow's records bind to the calling thread, read again each time a call is
 ; handled, a replayed one included: the thread's flow must be live and its
-; metaflow Awake as it. The request is queued for the target under the
+; metaflow Awake as it, or, while the launch that opened the thread is
+; unsettled and no other flow or launch holds its Address, the sender is
+; that launching metaflow. The thread is recorded as its launch's before
+; the first turn is started, and the connection that started it, subscribed
+; to its calls, answers them, so a first turn's call is served while the
+; launch still waits for its seat to come to rest. The request is queued for the target under the
 ; rules a Lock and a Deliver from Message follow, and the call and its
 ; outcome are recorded in the commit that queues it, keyed by the thread,
 ; the turn and the call, so a replayed call is answered from the record and
@@ -83,6 +88,8 @@ Library
   AnswersToolCall.[ tool_response.[ JsonValue ] ]
   ; The Nexus handles one call under the dispatch gate. A Queued outcome
   ; names the target whose wake is then decided from Flow's records,
-  ; whether or not the answer reaches the app-server.
-  HandlesSendCall.[ handle_send_call.{ [ ToolCallCarrying ] [ SendOutcome ] } ] ]
+  ; whether or not the answer reaches the app-server. A launch holding the
+  ; gate handles its own thread's calls as the gate's holder.
+  HandlesSendCall.[ handle_send_call.{ [ ToolCallCarrying ] [ SendOutcome ] }
+                    handle_held_send_call.{ [ ToolCallCarrying ] [ SendOutcome ] } ] ]
 []

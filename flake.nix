@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.8";
+            version = "0.35.10";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -425,6 +425,10 @@
             "tests::waking::a_nexus_start_wakes_a_seat_whose_wake_did_not_finish";
           flow-v1-metaflow-queue-upgrades-sender-unknown = context.exactTest "flow-nexus"
             "store::tests::a_v1_metaflow_queue_upgrades_with_its_senders_unknown";
+          flow-first-turn-send-served-before-idle = context.exactTest "flow-nexus"
+            "tests::waking::a_first_turn_that_calls_send_before_idle_is_served_and_the_launch_completes";
+          flow-refused-launch-keeps-first-turn-call = context.exactTest "flow-nexus"
+            "tests::waking::a_launch_refused_after_its_first_turn_called_send_archives_its_thread_and_keeps_the_call";
         }
       );
 

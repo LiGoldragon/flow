@@ -65,6 +65,7 @@ use observe_agent::ObservesAgent;
 use peer::{AdmitsMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
+use send_tool::ServesLaunchCalls;
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
     Origin, Process, Query, Response, RestartRejection,
@@ -108,6 +109,9 @@ pub struct RunningNexus {
     pub stopped_at_confirmation: waking::StoppedAtConfirmation,
     /// Set once the Nexus is told to stop; see [`StopsNexus`].
     pub stopping: Stopping,
+    /// The send-tool responder of the Codex launch running now; see
+    /// `send_tool::ServesLaunchCalls`.
+    pub launch_calls: send_tool::LaunchCalls,
 }
 
 pub trait Dispatches {
@@ -522,6 +526,7 @@ impl OpensRunningNexus for RunningNexus {
             waking: waking::WakingMetaflows::default(),
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
             stopping: Stopping::default(),
+            launch_calls: send_tool::LaunchCalls::default(),
         })
     }
 }
@@ -983,6 +988,9 @@ impl DispatchesSerially for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.dispatch_from(query, origin)
         };
+        // A launch's first turn may have queued work meanwhile; its targets
+        // are woken now that the gate is given back.
+        self.wake_deferred();
         // The gate is released before the wait: the launch is settled by the
         // Nexus's own promoter, which needs the gate to do it.
         match (launch_request_id, &response) {
@@ -1598,6 +1606,7 @@ mod tests {
                 waking: crate::waking::WakingMetaflows::default(),
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
                 stopping: crate::Stopping::default(),
+                launch_calls: crate::send_tool::LaunchCalls::default(),
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");

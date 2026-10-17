@@ -23,15 +23,16 @@
 
 use crate::HoldsStopRequest;
 use crate::RunningNexus;
-use crate::generated::wake::{AgentPaneEvent, PaneEventing, WakesOnPaneEvent};
+use crate::generated::wake::{
+    Addressed, AgentPaneEvent, PaneEventing, Routed, Subscribing, WakesOnPaneEvent,
+};
+pub use crate::generated::wake::{AwaitedPanes, HoldsAwaitedPanes};
 use crate::observe_agent::{HerdrEvents, LocatesHerdrSession, PaneEvent, SubscribesHerdrEvents};
-use crate::store::{AnnouncesLaunchChanges, LaunchChanges};
+use crate::store::AnnouncesLaunchChanges;
 use crate::waking::SleepsAndWakesSeats;
 use signal_flow::{Address, HerdrRoute};
-use std::collections::HashMap;
-use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::thread::Scope;
 
 /// A route names the pane its events are about.
@@ -50,149 +51,37 @@ impl PaneEventing for AgentPaneEvent {
     }
 }
 
-/// The panes refused wakes wait on, and the subscription open on each.
-#[derive(Default)]
-pub struct AwaitedPanes {
-    /// Each waiting metaflow and the pane it waits on.
-    awaited: Mutex<HashMap<Address, HerdrRoute>>,
-    /// The open subscription of each awaited pane, by the handle that shuts
-    /// it down.
-    subscriptions: Mutex<HashMap<AgentPaneEvent, UnixStream>>,
-    /// Announced each time a wait is recorded and when the Nexus stops.
-    changes: LaunchChanges,
+/// One open Herdr event subscription: the pane it is about, and the handle
+/// that shuts it down. The handle is shared, so the subscription is read
+/// from the awaited panes without moving it.
+#[derive(Debug, Clone)]
+pub struct PaneSubscription {
+    pub event: AgentPaneEvent,
+    pub handle: Arc<UnixStream>,
 }
 
-pub trait HoldsAwaitedPanes {
-    /// The metaflow at `address` waits on `route`'s pane; announced.
-    fn await_pane(&self, address: &Address, route: &HerdrRoute);
-    /// The metaflow waits on no pane.
-    fn forget(&self, address: &Address);
-    /// Takes every metaflow waiting on the event's pane.
-    fn take(&self, event: &AgentPaneEvent) -> Vec<Address>;
-    /// Releases every wait on a pane that is gone.
-    fn release(&self, event: &AgentPaneEvent);
-    fn is_awaited(&self, event: &AgentPaneEvent) -> bool;
-    /// Each waiting metaflow and its pane.
-    fn awaited(&self) -> Vec<(Address, HerdrRoute)>;
-    /// The awaited panes no subscription is open on.
-    fn unsubscribed_panes(&self) -> Vec<AgentPaneEvent>;
-    fn subscribed(&self, event: AgentPaneEvent, handle: UnixStream);
-    fn unsubscribed(&self, event: &AgentPaneEvent);
-    /// Shuts every open subscription down and announces it.
-    fn close_all(&self);
-    fn changes(&self) -> &LaunchChanges;
+impl Subscribing for PaneSubscription {
+    fn subscription(&self) -> PaneSubscription {
+        self.clone()
+    }
 }
 
-impl HoldsAwaitedPanes for AwaitedPanes {
-    fn await_pane(&self, address: &Address, route: &HerdrRoute) {
-        self.awaited
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(address.clone(), route.clone());
-        self.changes.announce();
+impl Addressed for Address {
+    fn address(&self) -> Address {
+        self.clone()
     }
+}
 
-    fn forget(&self, address: &Address) {
-        self.awaited
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(address);
-    }
-
-    fn take(&self, event: &AgentPaneEvent) -> Vec<Address> {
-        let mut awaited = self
-            .awaited
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let taken = awaited
-            .iter()
-            .filter(|(_, route)| route.pane_event() == *event)
-            .map(|(address, _)| address.clone())
-            .collect::<Vec<_>>();
-        for address in &taken {
-            awaited.remove(address);
-        }
-        taken
-    }
-
-    fn release(&self, event: &AgentPaneEvent) {
-        self.awaited
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .retain(|_, route| route.pane_event() != *event);
-    }
-
-    fn is_awaited(&self, event: &AgentPaneEvent) -> bool {
-        self.awaited
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .any(|route| route.pane_event() == *event)
-    }
-
-    fn awaited(&self) -> Vec<(Address, HerdrRoute)> {
-        self.awaited
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|(address, route)| (address.clone(), route.clone()))
-            .collect()
-    }
-
-    fn unsubscribed_panes(&self) -> Vec<AgentPaneEvent> {
-        let mut panes = self
-            .awaited()
-            .into_iter()
-            .map(|(_, route)| route.pane_event())
-            .collect::<Vec<_>>();
-        panes.sort_by(|left, right| {
-            (&left.herdr_session_name, &left.pane_id)
-                .cmp(&(&right.herdr_session_name, &right.pane_id))
-        });
-        panes.dedup();
-        let subscriptions = self
-            .subscriptions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        panes.retain(|pane| !subscriptions.contains_key(pane));
-        panes
-    }
-
-    fn subscribed(&self, event: AgentPaneEvent, handle: UnixStream) {
-        self.subscriptions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(event, handle);
-    }
-
-    fn unsubscribed(&self, event: &AgentPaneEvent) {
-        self.subscriptions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(event);
-    }
-
-    fn close_all(&self) {
-        for handle in self
-            .subscriptions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-        {
-            let _ = handle.shutdown(Shutdown::Both);
-        }
-        self.changes.announce();
-    }
-
-    fn changes(&self) -> &LaunchChanges {
-        &self.changes
+impl Routed for HerdrRoute {
+    fn route(&self) -> HerdrRoute {
+        self.clone()
     }
 }
 
 impl WakesOnPaneEvent for RunningNexus {
     fn wake_on_pane_event<N: PaneEventing>(&self, input: N) -> Vec<Address> {
         let event = input.pane_event();
-        let waiting = self.awaited_panes.take(&event);
+        let waiting = self.awaited_panes.take(event.clone());
         for address in &waiting {
             // Still due, and woken once: `wake_due` asks Flow's records and
             // holds the metaflow while it wakes; a refusal waits again.
@@ -214,7 +103,7 @@ pub trait ServesPaneAwaits {
 
 impl ServesPaneAwaits for RunningNexus {
     fn serve_pane_awaits<'scope, 'env>(&'env self, scope: &'scope Scope<'scope, 'env>) {
-        let changes = self.awaited_panes.changes().clone();
+        let changes = self.awaited_panes.changes();
         while !self.stopping.requested() {
             let seen = changes.current();
             for pane in self.awaited_panes.unsubscribed_panes() {
@@ -226,7 +115,10 @@ impl ServesPaneAwaits for RunningNexus {
                     .and_then(|events| events.handle().map(|handle| (events, handle)));
                 match subscribed {
                     Ok((events, handle)) => {
-                        self.awaited_panes.subscribed(pane.clone(), handle);
+                        self.awaited_panes.subscribed(PaneSubscription {
+                            event: pane.clone(),
+                            handle: Arc::new(handle),
+                        });
                         scope.spawn(move || self.await_pane_events(pane, events));
                     }
                     // The wait stays: the next request queued for the
@@ -246,15 +138,17 @@ impl ServesPaneAwaits for RunningNexus {
         // What changed before the subscription opened is not announced:
         // the waiting wakes are tried once now.
         self.wake_on_pane_event(pane.clone());
-        while self.awaited_panes.is_awaited(&pane) && !self.stopping.requested() {
+        while self.awaited_panes.is_awaited(pane.clone()) && !self.stopping.requested() {
             match events.next_pane_event() {
                 Ok(Some(PaneEvent::Detected | PaneEvent::Status(_))) => {
                     self.wake_on_pane_event(pane.clone());
                 }
-                Ok(Some(PaneEvent::Gone)) => self.awaited_panes.release(&pane),
+                Ok(Some(PaneEvent::Gone)) => {
+                    self.awaited_panes.release(pane.clone());
+                }
                 Ok(None) | Err(_) => break,
             }
         }
-        self.awaited_panes.unsubscribed(&pane);
+        self.awaited_panes.unsubscribed(pane.clone());
     }
 }

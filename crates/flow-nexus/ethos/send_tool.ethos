@@ -24,7 +24,8 @@
 ; authenticate who started the turn. Any process of the same user can start
 ; a turn on a thread through the app-server socket.
 
-Library
+Library.
+{
 [ signal_flow:[ Address Sender ]
   serde_json:JsonValue.Value ]
 [ SendKind.[ Order Question Result Notice ]
@@ -85,4 +86,4 @@ Library
   ; names the target whose wake is then decided from Flow's records,
   ; whether or not the answer reaches the app-server.
   HandlesSendCall.[ handle_send_call.{ [ ToolCallCarrying ] [ SendOutcome ] } ] ]
-[]
+[] }

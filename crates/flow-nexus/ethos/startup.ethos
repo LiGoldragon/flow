@@ -1,7 +1,8 @@
 ; Startup paths are one explicit input to this Flow process. Refusal carries
 ; the path and reason without turning a foreign or older store into an empty
 ; database.
-Library
+Library.
+{
 []
 [ OrdinarySocketPath.String
   MetaSocketPath.String
@@ -12,4 +13,4 @@ Library
   StoreRefusal.{ Path Reason }
   StartRefusal.[ Store.StoreRefusal ] ]
 []
-[]
+[] }

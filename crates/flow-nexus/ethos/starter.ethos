@@ -15,9 +15,10 @@
 ; verified answer reaches a prompt. It stays a Rust type of its own because
 ; a generated type's fields are public.
 
-Library
+Library.
+{
 [ signal_flow:[ Address HarnessKind PowerLevel LaunchProfile PromptDeliveryIntent NativeTargetReceipt FlowId SessionId Origin SystemModules UserModules HerdrSessionName LeaveOuts LeaveOutRefusal ComposedLaunch ContextRefusal SystemPrompt HerdrPaneBinding PromptDeliveryResult Response Launched NativeLaunchFailure ]
-  flow_nexus:[ StartupSelection StartupComposition ContextProvenance CurriculumQuery CurriculumOutcome CompositionError VerifiedContext OperationOutcome CallerProcess ]
+  flow_nexus:[ StartupSelection StartupComposition ContextProvenance CurriculumQuery CurriculumOutcome CompositionError OperationOutcome CallerProcess ]
   serde_json:JsonValue.Value ]
 [ ; What a launch asks of the context composer.
   ContextRequest.{ Address HarnessKind SystemModules UserModules }
@@ -60,7 +61,13 @@ Library
   PartTurn.String
   StartupReading.{ SeenParts LastPartAnswered Option<NativeTurn> Option<PartTurn> }
   ; A harness start and the parts it leaves out.
-  LeanStart.{ HarnessKind LeaveOuts } ]
+  LeanStart.{ HarnessKind LeaveOuts }
+  ; A composed context Flow has verified: its fields are hidden from all
+  ; but the module holding the generated one, and its one constructor is
+  ; VerifiesContext.verified.
+  SystemText.String
+  UserSegments.Vector<String>
+  VerifiedContext.Sealed.{ Address SystemText UserSegments } ]
 [ ; The values capabilities read, each through the trait that yields it.
   Textual.[ text.[ String ] ]
   Profiled.[ profile.[ LaunchProfile ]
@@ -124,4 +131,4 @@ Library
   NamesLaunchedRoute.[ launched.{ [ LaunchedRecording ] [ Launched ] } ]
   DerivesOrigin.[ origin_of.{ [ CallerProcessing ] [ Origin ] } ]
   DerivesHarness.[ harness_for.{ [ Textual ] [ HarnessKind ] } ] ]
-[]
+[ VerifiedContext.[ VerifiesContext ReadsVerifiedContext ] ] }

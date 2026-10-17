@@ -28,18 +28,49 @@
 ; AgentPaneEvent is one Herdr agent event, named by the session and the pane
 ; it is about.
 
-Library
-[ signal_flow:[ Address HerdrRoute HerdrSessionName StartRejection ] ]
+Library.
+{
+[ signal_flow:[ Address HerdrRoute HerdrSessionName StartRejection ]
+  flow_nexus:[ LaunchChanges PaneSubscription ] ]
 [ HerdrUnread.[ ServerUnreachable PaneUnreadable ]
   FreshRefusal.[ ConfigurationUnread NoLayerModel Rejected.StartRejection Unsettled ]
   WakeRecovery.[ Terminal AwaitingPane.HerdrRoute AwaitingServer Reconcile Unresolved ]
   PaneId.String
-  AgentPaneEvent.{ HerdrSessionName PaneId } ]
+  AgentPaneEvent.{ HerdrSessionName PaneId }
+  ; A metaflow and the pane its refused wake waits on.
+  AwaitedPane.{ Address HerdrRoute }
+  ; The panes refused wakes wait on, the subscription open on each, and
+  ; what is announced each time a wait is recorded: one state, one lock.
+  AwaitedPanes.Shared.{ Vector<AwaitedPane> Vector<PaneSubscription> LaunchChanges } ]
 [ ; A refusal, read for what can recover it.
   ClassifiesWakeRefusal.[ recovery.[ WakeRecovery ] ]
   ; The event a pane awaiter reacts to.
   PaneEventing.[ pane_event.[ AgentPaneEvent ] ]
   ; Tries again every wake awaiting the event's pane; answers the metaflows
   ; it tried.
-  WakesOnPaneEvent.[ wake_on_pane_event.{ [ PaneEventing ] [ Vector<Address> ] } ] ]
-[]
+  WakesOnPaneEvent.[ wake_on_pane_event.{ [ PaneEventing ] [ Vector<Address> ] } ]
+  Addressed.[ address.[ Address ] ]
+  Routed.[ route.[ HerdrRoute ] ]
+  Subscribing.[ subscription.[ PaneSubscription ] ]
+  ; The pane awaits. Every capability takes the shared handle by `.`: the
+  ; state is changed under its lock, and a `!` capability would demand
+  ; `&mut self` of a handle that threads share. A capability yields a
+  ; value, so a change answers whether it changed anything.
+  HoldsAwaitedPanes.[ create:[ Self ]
+                      ; The metaflow waits on the route's pane; announced.
+                      await_pane.{ [ Addressed Routed ] [ Boolean ] }
+                      forget.{ [ Addressed ] [ Boolean ] }
+                      ; Takes every metaflow waiting on the event's pane.
+                      take.{ [ PaneEventing ] [ Vector<Address> ] }
+                      ; Releases every wait on a pane that is gone.
+                      release.{ [ PaneEventing ] [ Boolean ] }
+                      is_awaited.{ [ PaneEventing ] [ Boolean ] }
+                      awaited.[ Vector<AwaitedPane> ]
+                      ; The awaited panes no subscription is open on.
+                      unsubscribed_panes.[ Vector<AgentPaneEvent> ]
+                      subscribed.{ [ Subscribing ] [ Boolean ] }
+                      unsubscribed.{ [ PaneEventing ] [ Boolean ] }
+                      ; Shuts every open subscription down and announces it.
+                      close_all.[ Boolean ]
+                      changes.[ LaunchChanges ] ] ]
+[ AwaitedPanes.[ HoldsAwaitedPanes ] ] }

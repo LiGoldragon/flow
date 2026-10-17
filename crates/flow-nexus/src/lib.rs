@@ -11,6 +11,7 @@ use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::AnswersLaunchOutcome;
+pub use awaiting::PaneSubscription;
 pub use caller::CallerProcess;
 pub use composition::CompositionError;
 pub use context::VerifiedContext;
@@ -19,7 +20,7 @@ pub use generated::curriculum::{
     StartupSelection,
 };
 pub use generated::operation::Outcome as OperationOutcome;
-pub use store::{LaunchOutcome, Replacement};
+pub use store::{LaunchChanges, LaunchOutcome, Replacement};
 pub mod awaiting;
 pub mod binding;
 pub mod caller;
@@ -524,7 +525,10 @@ impl OpensRunningNexus for RunningNexus {
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
-            awaited_panes: awaiting::AwaitedPanes::default(),
+            awaited_panes: {
+                use awaiting::HoldsAwaitedPanes;
+                awaiting::AwaitedPanes::create()
+            },
             stopping: Stopping::default(),
         })
     }
@@ -1607,7 +1611,10 @@ mod tests {
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
-                awaited_panes: crate::awaiting::AwaitedPanes::default(),
+                awaited_panes: {
+                    use crate::awaiting::HoldsAwaitedPanes;
+                    crate::awaiting::AwaitedPanes::create()
+                },
                 stopping: crate::Stopping::default(),
             };
             let herdr_config = directory.path().join("herdr-config");

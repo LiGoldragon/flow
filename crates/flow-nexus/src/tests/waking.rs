@@ -2884,7 +2884,13 @@ fn session_reported(fixture: &NexusFixture) {
 
 fn awaited(fixture: &NexusFixture) -> Vec<(Address, HerdrRoute)> {
     use crate::awaiting::HoldsAwaitedPanes;
-    fixture.nexus.awaited_panes.awaited()
+    fixture
+        .nexus
+        .awaited_panes
+        .awaited()
+        .into_iter()
+        .map(|awaited| (awaited.address, awaited.herdr_route))
+        .collect()
 }
 
 fn still_asleep_with(fixture: &NexusFixture, queue: &[Request]) {

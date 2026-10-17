@@ -32,6 +32,6 @@ sha2 = "0.10"
 signal-flow.workspace = true
 thiserror.workspace = true
 [build-dependencies]
-ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "07714b0171802787bea1eefe4caa2d826d9c4030" }
+ethos-zero = { git = "https://github.com/LiGoldragon/ethos-zero", rev = "ac10f9e8673592f55feed6f71491d44ec8613a34" }
 [dev-dependencies]
 tempfile = "3"

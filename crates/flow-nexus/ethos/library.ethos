@@ -1,4 +1,5 @@
 ; The process identity supplied at startup. These paths select the
 ; listeners; they do not come from or mutate the durable Nexus settings.
 
-Library [] [ Start.{ OrdinarySocketPath.String MetaSocketPath.String StorePath.String } ] [] []
+Library.
+{ [] [ Start.{ OrdinarySocketPath.String MetaSocketPath.String StorePath.String } ] [] [] }

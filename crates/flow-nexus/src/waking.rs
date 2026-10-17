@@ -889,7 +889,7 @@ impl PerformsSleepAndWake for RunningNexus {
     fn wake(&self, address: Address) -> Outcome {
         match self.waken(&address) {
             Ok(flow_id) => {
-                self.awaited_panes.forget(&address);
+                self.awaited_panes.forget(address.clone());
                 Outcome::Woken(flow_id)
             }
             Err(refusal) => {
@@ -902,9 +902,12 @@ impl PerformsSleepAndWake for RunningNexus {
                 // waits on that pane. Any other refusal replaces the wait.
                 match &recovery {
                     WakeRecovery::AwaitingPane(route) => {
-                        self.awaited_panes.await_pane(&address, route)
+                        self.awaited_panes
+                            .await_pane(address.clone(), route.clone());
                     }
-                    _ => self.awaited_panes.forget(&address),
+                    _ => {
+                        self.awaited_panes.forget(address.clone());
+                    }
                 }
                 // Nothing was taken: the work is still queued, oldest first.
                 Outcome::Failed(refusal.failure())

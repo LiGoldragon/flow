@@ -142,6 +142,18 @@ pub struct LeanStart {
     pub leave_outs: signal_flow::LeaveOuts,
 }
 #[rustfmt::skip]
+pub type SystemText = String;
+#[rustfmt::skip]
+pub type UserSegments = std::vec::Vec<String>;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct VerifiedContext {
+    pub(super) address: signal_flow::Address,
+    pub(super) system_text: SystemText,
+    pub(super) user_segments: UserSegments,
+}
+#[rustfmt::skip]
 pub trait Textual {
     fn text(&self) -> String;
 }
@@ -298,7 +310,7 @@ pub trait ComposesVerifiedContext {
     fn verified_context<N: Profiled>(
         &self,
         input: N,
-    ) -> std::result::Result<flow_nexus::VerifiedContext, flow_nexus::CompositionError>;
+    ) -> std::result::Result<VerifiedContext, flow_nexus::CompositionError>;
     fn launch_system_prompt<N: Profiled, O: ReadsVerifiedContext>(
         &self,
         input_0: N,
@@ -408,3 +420,10 @@ pub trait DerivesOrigin {
 pub trait DerivesHarness {
     fn harness_for<N: Textual>(&self, input: N) -> signal_flow::HarnessKind;
 }
+#[rustfmt::skip]
+const _: () = {
+    fn assert_verifiedcontext_verifiescontext<T: VerifiesContext>() {}
+    let _ = assert_verifiedcontext_verifiescontext::<VerifiedContext>;
+    fn assert_verifiedcontext_readsverifiedcontext<T: ReadsVerifiedContext>() {}
+    let _ = assert_verifiedcontext_readsverifiedcontext::<VerifiedContext>;
+};

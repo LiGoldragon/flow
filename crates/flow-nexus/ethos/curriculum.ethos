@@ -1,5 +1,6 @@
 ; ID-only in-memory composition. No caller paths, source bodies or file projection.
-Library
+Library.
+{
 []
 [ ModuleIdentity.String
   RepositoryName.String
@@ -57,4 +58,4 @@ Library
             RoleComposed.RoleComposition
             Rejected.String ] ]
 []
-[]
+[] }

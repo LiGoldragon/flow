@@ -547,10 +547,9 @@ mod tests {
         drop(store);
 
         let reopened = fixture.reopen();
-        assert_eq!(
-            reopened.recover_outstanding_deliveries().unwrap()[0].phase,
-            QueueDeliveryPhase::ReceiptRecorded(exact.clone())
-        );
+        // Opening reconciles the durable native receipt and settles the
+        // local queue without another native submission.
+        assert!(reopened.recover_outstanding_deliveries().unwrap().is_empty());
         assert!(
             reopened
                 .settle_recorded_delivery(&prepared.attempt_id)

@@ -15,7 +15,10 @@ use crate::generated::send_tool::{
 use crate::send_tool::{RespondsToSendCalls, SendTool, ServesSendTool};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
-use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
+use crate::store::{
+    AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersExistingFlow,
+    RegistersFlowIdentity,
+};
 use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
 use signal_flow::{
@@ -1426,7 +1429,19 @@ impl SeatsAwakeCodexSeat for NexusFixture {
     fn awake_codex_seat(&self, queue: Vec<QueuedRequest>) {
         use super::PromptFixture;
         self.accept_pane_operations(vec![self.settled_agent()], PromptFixture::Prompted("w1:p3"));
-        self.register_with(signal_flow::FlowLifecycle::Active);
+        let node = self.node();
+        assert!(matches!(
+            self.nexus.store.register_existing_flow(
+                node,
+                Caller {
+                    flow_id: "908786".into(),
+                    aspect: Aspect::Mind,
+                    power_level: PowerLevel::Medium,
+                    model_name: "gpt-sol".into(),
+                },
+            ),
+            Ok(crate::store::FlowRegistration::Registered)
+        ));
         self.nexus.store.seed_metaflow(Metaflow {
             address: seat_at(),
             state: State::Awake("908786".into()),

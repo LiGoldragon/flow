@@ -5585,6 +5585,18 @@ pub(crate) trait ReadsFlowMemory {
                 launch_cleanup::LAUNCH_CLEANUP_FAMILY,
                 launch_cleanup::LAUNCH_CLEANUP_SCHEMA,
             ),
+            "flow_nexus_queue_delivery_counter" => (
+                "flow-nexus-queue-delivery-counter",
+                "flow-nexus-queue-delivery-counter-v1",
+            ),
+            "flow_nexus_queue_delivery_requests" => (
+                "flow-nexus-queue-delivery-request",
+                "flow-nexus-queue-delivery-request-v1",
+            ),
+            "flow_nexus_queue_delivery_attempts" => (
+                "flow-nexus-queue-delivery-attempt",
+                "flow-nexus-queue-delivery-attempt-v1",
+            ),
             _ => return None,
         };
         Some((family, SchemaHash::for_label(version)))
@@ -5731,6 +5743,9 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_launch_opened_threads",
             "flow_nexus_send_calls",
             "flow_nexus_launch_cleanups",
+            "flow_nexus_queue_delivery_counter",
+            "flow_nexus_queue_delivery_requests",
+            "flow_nexus_queue_delivery_attempts",
         ];
         // A store before 0.35.0 may still hold a table 0.35.0 drops.
         let retired = |name: &String| RETIRED_TABLES.iter().any(|(table, _, _)| table == name);
@@ -5744,6 +5759,9 @@ pub(crate) trait ReadsFlowMemory {
             && actual.iter().all(|name| {
                 CONFIGURATION_ONLY.contains(&name.as_str())
                     || name == "flow_nexus_meta_leave_out_configuration"
+                    || name == "flow_nexus_queue_delivery_counter"
+                    || name == "flow_nexus_queue_delivery_requests"
+                    || name == "flow_nexus_queue_delivery_attempts"
                     || retired(name)
             });
         configuration_only || running

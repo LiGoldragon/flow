@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.2";
+            version = "0.35.3";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -343,6 +343,20 @@
             "tests::waking::a_metaflow_left_awake_as_an_ended_flow_is_woken_by_an_order";
           flow-ended-awake-rested-at-start = context.exactTest "flow-nexus"
             "tests::waking::a_nexus_start_puts_every_metaflow_left_awake_as_an_ended_flow_to_sleep";
+          flow-claude-system-prompt-from-held-file = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_multiline_claude_system_prompt_is_read_whole_from_the_held_file";
+          flow-control-character-refused-before-herdr = context.exactTest "flow-nexus"
+            "herdr::launch::tests::an_argument_with_a_control_character_is_refused_before_herdr";
+          flow-long-command-refused-before-herdr = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_typed_command_longer_than_one_terminal_line_is_refused_before_herdr";
+          flow-herdr-refusal-kept = context.exactTest "flow-nexus"
+            "herdr::launch::tests::herdrs_refusal_is_kept_as_herdr_wrote_it";
+          flow-herdr-refusal-answered = context.exactTest "flow-nexus"
+            "tests::reservation::a_claude_start_herdr_refuses_is_answered_with_herdrs_own_refusal";
+          flow-opened-thread-accounted = context.exactTest "flow-nexus"
+            "codex::tests::an_opened_thread_is_accounted_for_and_archived";
+          flow-v3-outcomes-upgrade-to-refused-spawn = context.exactTest "flow-nexus"
+            "store::tests::v3_launch_outcomes_upgrade_to_the_refused_spawn_shape";
         }
       );
 

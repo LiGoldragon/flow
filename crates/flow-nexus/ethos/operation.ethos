@@ -27,7 +27,9 @@
 ; the app-server with the system prompt as its base instructions and the
 ; launch's exclusions in its config, reads them back, and submits the first
 ; part of the first USER message as the thread's first turn; only then
-; does the TUI attach to that thread, and Spawned names it. Bind claims the
+; does the TUI attach to that thread, and Spawned names it. A start Herdr
+; refuses, or one Flow refuses before calling Herdr, fails SpawnRefused with
+; its cause and, for Codex, the thread it had opened, archived. Bind claims the
 ; flow's identity from the harness's integration report, and for Codex
 ; requires the thread Spawn opened; Title names the claimed flow; Submit
 ; types the next part of the first USER message once (the last part
@@ -63,7 +65,7 @@
 ; the Nexus crate until the Memory root is compiled.
 
 Operation
-[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request ContextRefusal LeaveOutRefusal NativeSessionId ]
+[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request ContextRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal ]
   flow_nexus:[ LaunchOutcome Replacement ] ]
 [ Compose.LaunchProfile
   Reserve.{ ComposedLaunch Origin }
@@ -125,5 +127,6 @@ Operation
            AddressAwake
            AddressEnded
            ContextRefused.ContextRefusal
-           LeaveOutRefused.LeaveOutRefusal ] ]
+           LeaveOutRefused.LeaveOutRefusal
+           SpawnRefused.HarnessSpawnRefusal ] ]
 [ PaneLaunch.{ ComposedLaunch HerdrPaneBinding Option<FlowId> Option<NativeSessionId> } ]

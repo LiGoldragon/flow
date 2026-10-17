@@ -5,7 +5,9 @@
 //! paths decide what to do next; this is the only place they act.
 
 use crate::RunningNexus;
-use crate::codex::{OpensCodexThread, SelectsCodexEndpoint, SubmitsBoundCodexPart};
+use crate::codex::{
+    AccountsOpenedThread, OpensCodexThread, SelectsCodexEndpoint, SubmitsBoundCodexPart,
+};
 use crate::composition::{ComposesLaunch, CompositionError, HarnessedProfile};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
@@ -15,7 +17,7 @@ use crate::generated::operation::{
 use crate::generated::starter::DerivesHarness;
 use crate::herdr::OperatesHerdrPane;
 use crate::herdr::launch::{
-    CreatesHerdrLaunchPane, NativeTargetRefusal, ObservesNativeLaunchBinding,
+    CreatesHerdrLaunchPane, NativeTargetRefusal, ObservesNativeLaunchBinding, SpawnFailure,
     StartsNativeHerdrHarness, SubmitsStartupPart, TitleRefusal, TitlesNativeFlow,
 };
 use crate::store::ManagesMetaflowState;
@@ -325,7 +327,40 @@ impl Performs for RunningNexus {
                 };
                 match started {
                     Ok(()) => Outcome::Spawned(opened),
-                    Err(error) => HerdrFailure::refused(HerdrFailureStage::Spawn, error),
+                    // A refused start keeps its cause, and the thread a
+                    // Codex start opened is accounted for and archived.
+                    Err(SpawnFailure::Refused(spawn_refusal_cause)) => {
+                        eprintln!(
+                            "{}",
+                            HerdrFailure {
+                                stage: HerdrFailureStage::Spawn,
+                                category: HerdrFailureCategory::AdapterRefused,
+                            }
+                            .log_line()
+                        );
+                        let opened_thread_option = opened.map(|thread| {
+                            match self
+                                .codex_endpoints
+                                .adapter_for(&composed_launch.launch_profile.model_name)
+                            {
+                                Ok(adapter) => adapter.account_opened_thread(&thread),
+                                Err(_) => signal_flow::OpenedThread {
+                                    native_session_id: thread,
+                                    first_turn: signal_flow::FirstTurn::Unread,
+                                    thread_archive: signal_flow::ThreadArchive::ArchiveRefused,
+                                },
+                            }
+                        });
+                        Outcome::Failed(Failed_Data::SpawnRefused(
+                            signal_flow::HarnessSpawnRefusal {
+                                spawn_refusal_cause,
+                                opened_thread_option,
+                            },
+                        ))
+                    }
+                    Err(SpawnFailure::Unattempted(error)) => {
+                        HerdrFailure::refused(HerdrFailureStage::Spawn, error)
+                    }
                 }
             }
             Operation::Bind(PaneLaunch {

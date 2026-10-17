@@ -1,3 +1,49 @@
+# Flow 0.35.3
+
+Wire change on the ordinary socket: signal-flow 18.0.0 (59aab725) appends
+`StartRejection.HarnessSpawnRefused.HarnessSpawnRefusal`, so the ordinary
+contract digest changes and every ordinary-socket peer repins it. The meta
+socket is unchanged: meta-signal-flow 22.0.1 (5d1ac92f) only repins
+signal-flow, and its digest is the same. Store change: the launch-outcome
+family upgrades from v3 to v4 (and from v2 to v4) on the first open.
+
+- **A Claude system prompt is never typed.** The composed system text is
+  written into an in-memory file (memfd) the Nexus holds, and Claude is
+  started with `--system-prompt-file /proc/<nexus pid>/fd/<n>`. The file is
+  closed once the session's binding has been observed, or at once when the
+  start is refused. Herdr 0.8.2 refuses any `agent start` argument holding a
+  control character, so the multiline `--system-prompt` argument Flow 0.35.2
+  passed was refused before the pane was touched.
+- **A Codex TUI is not given the system prompt.** The thread already holds it
+  as its base instructions (given at `thread/start`, given again after the
+  TUI attaches), and a TUI remote resume keeps them. The `-c instructions=`
+  argument made a typed command of tens of kilobytes; Herdr types the command
+  into the pane's shell, a line over about 16 KiB arrived cut short, the
+  shell waited at its continuation prompt, and Herdr's readiness wait timed
+  out.
+- **Flow refuses a command no shell line holds before calling Herdr.** An
+  argument holding a control character, or a typed command longer than 4095
+  bytes as Herdr quotes it, refuses the start as
+  `HarnessSpawnRefused.{ ControlCharacter … }` or `{ CommandTooLong … }`.
+- **A refused start keeps Herdr's own words.** `HarnessSpawnRefused` carries
+  `Herdr.{ Option<code> message }`: the code and message of Herdr's JSON
+  error body, or no code and its whole printed text. LaunchStatus answers the
+  same. `NativeLaunchRefused` now names only a failure after the harness
+  started.
+- **A Codex thread opened before a refused start is accounted for.** The
+  refusal carries `Some.{ thread FirstTurn ThreadArchive }`: the first turn
+  read once through `thread/turns/list` (`Answered`, `InProgress`,
+  `Unanswered`, `Unread`), then the thread archived with `thread/archive`
+  (`Archived` or `ArchiveRefused`).
+- **`CodexDeveloperInstructions` also removes the multi-agent messages.** The
+  leave-out sets `features.multi_agent_v2.root_agent_usage_hint_text` and
+  `features.multi_agent_v2.multi_agent_mode_hint_text` to `""` at
+  `thread/start`, `thread/resume` and on the TUI, which removes the
+  `<multi_agent_role>` and `<multi_agent_mode>` developer messages, and the
+  Codex receipt refuses a request carrying either while it is left out. The
+  `<recommended_plugins>` message has no witnessed per-thread removal and is
+  not part of the leave-out.
+
 # Flow 0.35.2
 
 Wire change on the meta socket only: meta-signal-flow 22.0.0 (4ccf6f0d)

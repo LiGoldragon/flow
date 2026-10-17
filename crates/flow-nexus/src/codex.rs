@@ -691,6 +691,17 @@ impl OpensBoundCodexSession for CodexAdapter {
                     ("include_permissions_instructions", serde_json::json!(false))
                 }
                 signal_flow::LeaveOut::CodexDeveloperInstructions => {
+                    // The multi-agent role and mode developer messages
+                    // codex 0.161.0-alpha.2 sends a v2 multi-agent model
+                    // are its root-agent usage hint and its mode hint; an
+                    // empty hint is no message. A per-thread
+                    // `features.multi_agent` setting does not remove them.
+                    for hint in [
+                        "features.multi_agent_v2.root_agent_usage_hint_text",
+                        "features.multi_agent_v2.multi_agent_mode_hint_text",
+                    ] {
+                        config.insert(hint.into(), serde_json::json!(""));
+                    }
                     ("developer_instructions", serde_json::json!(""))
                 }
                 _ => continue,
@@ -931,6 +942,60 @@ impl NamesBoundCodexThread for CodexAdapter {
         })();
         session.stop_proxy();
         result
+    }
+}
+
+/// Accounts for a thread Flow opened before its harness start was refused:
+/// what its first turn had come to, read once, and its archiving through
+/// the app-server. The account is given whatever the app-server answers.
+pub trait AccountsOpenedThread {
+    fn account_opened_thread(&self, thread: &str) -> signal_flow::OpenedThread;
+}
+
+impl AccountsOpenedThread for CodexAdapter {
+    fn account_opened_thread(&self, thread: &str) -> signal_flow::OpenedThread {
+        let unread = signal_flow::OpenedThread {
+            native_session_id: thread.to_owned(),
+            first_turn: signal_flow::FirstTurn::Unread,
+            thread_archive: signal_flow::ThreadArchive::ArchiveRefused,
+        };
+        let Ok(mut session) = self.initialize_bound_session() else {
+            return unread;
+        };
+        let first_turn = session
+            .request(
+                2,
+                "thread/turns/list",
+                serde_json::json!({ "threadId": thread, "limit": 1, "sortDirection": "asc" }),
+                self.timeout,
+            )
+            .ok()
+            .and_then(|turns| {
+                turns
+                    .pointer("/data/0/status")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|status| match status {
+                        "completed" => signal_flow::FirstTurn::Answered,
+                        "inProgress" => signal_flow::FirstTurn::InProgress,
+                        _ => signal_flow::FirstTurn::Unanswered,
+                    })
+            })
+            .unwrap_or(signal_flow::FirstTurn::Unread);
+        let thread_archive = match session.request(
+            3,
+            "thread/archive",
+            serde_json::json!({ "threadId": thread }),
+            self.timeout,
+        ) {
+            Ok(_) => signal_flow::ThreadArchive::Archived,
+            Err(_) => signal_flow::ThreadArchive::ArchiveRefused,
+        };
+        session.stop_proxy();
+        signal_flow::OpenedThread {
+            first_turn,
+            thread_archive,
+            ..unread
+        }
     }
 }
 
@@ -1627,6 +1692,7 @@ mod tests {
                 vec![
                     signal_flow::LeaveOut::CodexAgentsMd,
                     signal_flow::LeaveOut::CodexSkillListing,
+                    signal_flow::LeaveOut::CodexDeveloperInstructions,
                 ],
             )
             .unwrap()
@@ -1678,6 +1744,17 @@ mod tests {
         );
         assert_eq!(start["config"]["project_doc_max_bytes"], 0);
         assert_eq!(start["config"]["skills.include_instructions"], false);
+        // The developer-instructions leave-out empties the developer
+        // instructions and both multi-agent hints.
+        assert_eq!(start["config"]["developer_instructions"], "");
+        assert_eq!(
+            start["config"]["features.multi_agent_v2.root_agent_usage_hint_text"],
+            ""
+        );
+        assert_eq!(
+            start["config"]["features.multi_agent_v2.multi_agent_mode_hint_text"],
+            ""
+        );
         assert_eq!(start["config"]["model_reasoning_effort"], "medium");
         assert_eq!(start["model"], "gpt-6-astra");
         let turn = &requests[3]["params"];
@@ -1687,6 +1764,48 @@ mod tests {
             launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text
         );
         assert_eq!(turn["input"].as_array().unwrap().len(), 1);
+    }
+
+    /// A thread opened before a refused harness start is accounted for: its
+    /// first turn read once, then archived through the app-server.
+    #[test]
+    fn an_opened_thread_is_accounted_for_and_archived() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let launch = lean_codex_launch();
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(
+                r#"{"id":2,"result":{"data":[{"id":"turn-1","status":"completed","items":[]}],"nextCursor":null}}"#,
+            ),
+            fake.websocket_frame(r#"{"id":3,"result":{}}"#),
+        ];
+        let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
+        assert_eq!(
+            lean_adapter_at(executable, &launch).account_opened_thread("thread-opened"),
+            signal_flow::OpenedThread {
+                native_session_id: "thread-opened".into(),
+                first_turn: signal_flow::FirstTurn::Answered,
+                thread_archive: signal_flow::ThreadArchive::Archived,
+            }
+        );
+        let requests = record.requests(4);
+        let methods = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "initialized",
+                "thread/turns/list",
+                "thread/archive"
+            ]
+        );
+        assert_eq!(requests[2]["params"]["threadId"], "thread-opened");
+        assert_eq!(requests[2]["params"]["sortDirection"], "asc");
+        assert_eq!(requests[3]["params"]["threadId"], "thread-opened");
     }
 
     /// A thread whose readback shows project instructions loaded, though

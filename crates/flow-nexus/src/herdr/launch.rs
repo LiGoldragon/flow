@@ -11,7 +11,7 @@ use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::HERDR_REQUEST_LINE_LIMIT;
-use crate::composition::{FitsOneMessage, NamesRemoteControl, ValidatesComposedPrompt};
+use crate::composition::{NamesRemoteControl, ValidatesComposedPrompt};
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
     DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
@@ -50,7 +50,7 @@ pub trait StartsNativeHerdrHarness {
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
         reserved: Option<&str>,
-    ) -> Result<(), String>;
+    ) -> Result<(), SpawnFailure>;
     /// Starts the Codex TUI attached to the thread Flow already opened and
     /// gave its first turn: `resume <thread>` after the launch's switches.
     fn attach_codex_harness(
@@ -58,7 +58,7 @@ pub trait StartsNativeHerdrHarness {
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
         thread: &str,
-    ) -> Result<(), String>;
+    ) -> Result<(), SpawnFailure>;
 }
 
 /// Starts a Claude flow's harness again, in a new pane, as the native
@@ -74,7 +74,7 @@ pub trait ResumesNativeHerdrHarness {
         pane: &HerdrPaneBinding,
         flow_id: &str,
         native_session_id: &str,
-    ) -> Result<(), String>;
+    ) -> Result<(), SpawnFailure>;
 }
 
 /// How a harness is told its native session at spawn.
@@ -98,7 +98,7 @@ trait SpawnsNativeHarness {
         pane: &HerdrPaneBinding,
         flow_id: Option<&str>,
         session: ClaudeSession,
-    ) -> Result<(), String>;
+    ) -> Result<(), SpawnFailure>;
 }
 
 /// Observes an official Herdr integration report and binds it to an exact
@@ -235,6 +235,17 @@ const CODEX_LEFT_OUT_OPENINGS: &[(signal_flow::LeaveOut, &str)] = &[
     (
         signal_flow::LeaveOut::CodexEnvironmentContext,
         "<environment_context>",
+    ),
+    // The multi-agent role and mode messages of thread
+    // 01a14773-f58c-7ca1-978b-1ac675d19399 (gpt-6-luna), which the
+    // developer-instructions leave-out removes through their hints.
+    (
+        signal_flow::LeaveOut::CodexDeveloperInstructions,
+        "<multi_agent_role>",
+    ),
+    (
+        signal_flow::LeaveOut::CodexDeveloperInstructions,
+        "<multi_agent_mode>",
     ),
 ];
 
@@ -1409,7 +1420,7 @@ impl StartsNativeHerdrHarness for HerdrCli {
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
         reserved: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SpawnFailure> {
         // A reserved FlowId was claimed for the session Flow chose; the
         // harness runs as that session.
         let session = match reserved.and_then(|_| self.reserved_native_session_id(launch)) {
@@ -1424,7 +1435,7 @@ impl StartsNativeHerdrHarness for HerdrCli {
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
         thread: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SpawnFailure> {
         if launch.harness_kind != HarnessKind::Codex {
             return Err("only a Codex harness attaches to an opened thread".into());
         }
@@ -1442,7 +1453,7 @@ impl ResumesNativeHerdrHarness for HerdrCli {
         pane: &HerdrPaneBinding,
         flow_id: &str,
         native_session_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SpawnFailure> {
         if launch.harness_kind != HarnessKind::Claude {
             return Err("only a Claude harness is resumed in a pane".into());
         }
@@ -1465,7 +1476,7 @@ impl SpawnsNativeHarness for HerdrCli {
         pane: &HerdrPaneBinding,
         reserved: Option<&str>,
         session: ClaudeSession,
-    ) -> Result<(), String> {
+    ) -> Result<(), SpawnFailure> {
         launch.binding_matches_launch(pane)?;
         if launch.harness_kind == HarnessKind::Claude {
             self.prepare_claude_pane_environment(launch, pane, reserved)?;
@@ -1484,27 +1495,32 @@ impl SpawnsNativeHarness for HerdrCli {
             "--timeout".into(),
             "30000".into(),
         ];
+        // The program Herdr types first: Herdr's own name for the kind, or
+        // the configured Codex client.
+        let mut program = harness.to_owned();
         let codex_endpoint = if launch.harness_kind == HarnessKind::Codex {
             let endpoint = self
                 .codex_endpoints
                 .endpoint_for(&launch.launch_profile.model_name)
                 .map_err(|error| error.to_string())?;
             if !endpoint.client_path.is_absolute() || !Path::new(&endpoint.socket).is_absolute() {
-                return Err("configured Codex client and socket must be absolute".into());
+                return Err("configured Codex client and socket must be absolute"
+                    .to_owned()
+                    .into());
             }
+            program = endpoint
+                .client_path
+                .to_str()
+                .ok_or("configured Codex client path must be valid UTF-8")?
+                .to_owned();
             arguments.push("--executable".into());
-            arguments.push(
-                endpoint
-                    .client_path
-                    .to_str()
-                    .ok_or("configured Codex client path must be valid UTF-8")?
-                    .into(),
-            );
+            arguments.push(program.clone());
             Some(endpoint)
         } else {
             None
         };
         arguments.push("--".into());
+        let typed_from = arguments.len();
         if let Some(endpoint) = codex_endpoint {
             arguments.push("--remote".into());
             arguments.push(format!("unix://{}", endpoint.socket));
@@ -1516,12 +1532,11 @@ impl SpawnsNativeHarness for HerdrCli {
             // begins with `-`, so the optional value binds to the flag.
             arguments.push(Self::CLAUDE_REMOTE_CONTROL_FLAG.into());
             arguments.push(launch.launch_profile.remote_control_name());
-            // The composed system prompt travels as this one argument;
-            // nothing composed is written to disk.
-            arguments.push("--system-prompt".into());
-            arguments.push(
-                HarnessKind::Claude.system_argument(&launch.system_prompt.system_prompt_text),
-            );
+            // The composed system prompt is read from the in-memory file
+            // this Nexus holds open until the session has bound; it never
+            // travels in the typed command and never touches a disk.
+            arguments.push("--system-prompt-file".into());
+            arguments.push(self.hold_system_prompt(launch)?);
             match &session {
                 ClaudeSession::Unchosen | ClaudeSession::Attached(_) => {}
                 ClaudeSession::Chosen(session) => {
@@ -1541,19 +1556,15 @@ impl SpawnsNativeHarness for HerdrCli {
                 arguments.push("--effort".into());
                 arguments.push(launch.launch_profile.effort.clone());
             }
+            // The thread already holds the composed system prompt as its
+            // base instructions, given at thread/start and given again after
+            // the TUI attaches; the TUI is not given it.
             HarnessKind::Codex => {
                 arguments.push("-c".into());
                 arguments.push(format!(
                     "model_reasoning_effort={}",
                     launch.launch_profile.effort
                 ));
-                // Codex reads `instructions` as its base instructions when
-                // no instructions file is configured; the composed system
-                // prompt travels in this one argument.
-                arguments.push("-c".into());
-                arguments.push(
-                    HarnessKind::Codex.system_argument(&launch.system_prompt.system_prompt_text),
-                );
             }
         }
         // The launch's leave-outs, as its harness's own switches.
@@ -1566,14 +1577,210 @@ impl SpawnsNativeHarness for HerdrCli {
             arguments.push("resume".into());
             arguments.push(thread.clone());
         }
-        if !launch
-            .harness_kind
-            .fits_one_argument(&launch.system_prompt.system_prompt_text)
-        {
-            return Err("the composed system prompt exceeds one argument".into());
+        let typed = std::iter::once(program)
+            .chain(arguments[typed_from..].iter().cloned())
+            .collect::<Vec<_>>();
+        if let Some(cause) = typed.typed_command_refusal() {
+            self.release_system_prompt(&launch.launch_profile.launch_request_id);
+            return Err(SpawnFailure::Refused(cause));
         }
         // No positional prompt: the first USER message is typed after.
-        self.run_json(&arguments).map(|_| ())
+        self.run_agent_start(&arguments)
+            .inspect_err(|_| self.release_system_prompt(&launch.launch_profile.launch_request_id))
+    }
+}
+
+/// Why a harness start in its launch pane did not happen: it was refused,
+/// by Herdr or by Flow before Herdr was called, or Flow could not attempt
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SpawnFailure {
+    #[error("the harness start was refused")]
+    Refused(signal_flow::SpawnRefusalCause),
+    #[error("{0}")]
+    Unattempted(String),
+}
+
+impl From<String> for SpawnFailure {
+    fn from(error: String) -> Self {
+        SpawnFailure::Unattempted(error)
+    }
+}
+
+impl From<&str> for SpawnFailure {
+    fn from(error: &str) -> Self {
+        SpawnFailure::Unattempted(error.to_owned())
+    }
+}
+
+impl From<SpawnFailure> for String {
+    fn from(failure: SpawnFailure) -> Self {
+        match failure {
+            SpawnFailure::Refused(cause) => format!("the harness start was refused: {cause:?}"),
+            SpawnFailure::Unattempted(error) => error,
+        }
+    }
+}
+
+/// The command Herdr types into the launch pane's shell, the program then
+/// each argument, as Herdr quotes them for a POSIX shell.
+pub(crate) trait ChecksTypedCommand {
+    /// The longest command typed as one terminal line: Linux's canonical
+    /// line buffer holds 4096 bytes, the last being the line's end. A
+    /// longer line is not read whole by a shell that reads it before
+    /// leaving canonical mode, and a Codex command of about 16 KiB typed
+    /// into a ready bash pane was witnessed cut short.
+    const TYPED_COMMAND_LIMIT: usize = 4095;
+    /// Why the command must not be typed: an argument carries a control
+    /// character, which Herdr 0.8.2 refuses and a shell line cannot hold
+    /// whole, or the quoted line is longer than one terminal line.
+    fn typed_command_refusal(&self) -> Option<signal_flow::SpawnRefusalCause>;
+    fn quoted_length(argument: &str) -> usize;
+}
+
+impl ChecksTypedCommand for [String] {
+    fn typed_command_refusal(&self) -> Option<signal_flow::SpawnRefusalCause> {
+        if self
+            .iter()
+            .any(|argument| argument.chars().any(char::is_control))
+        {
+            return Some(signal_flow::SpawnRefusalCause::ControlCharacter);
+        }
+        let length = self
+            .iter()
+            .map(|argument| Self::quoted_length(argument))
+            .sum::<usize>()
+            + self.len().saturating_sub(1);
+        (length > Self::TYPED_COMMAND_LIMIT)
+            .then_some(signal_flow::SpawnRefusalCause::CommandTooLong)
+    }
+
+    /// Herdr's POSIX quoting: a word of safe characters stands bare; any
+    /// other is single-quoted, each `'` written `'\''`.
+    fn quoted_length(argument: &str) -> usize {
+        let bare = !argument.is_empty()
+            && argument.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(
+                        character,
+                        '@' | '%' | '_' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
+                    )
+            });
+        if bare {
+            argument.len()
+        } else {
+            argument.len() + 2 + 3 * argument.matches('\'').count()
+        }
+    }
+}
+
+/// The composed system prompt of a Claude start, held by this Nexus in an
+/// in-memory file Claude reads through `/proc/<nexus>/fd/<n>`, from the
+/// start until the session has bound.
+pub(crate) trait HoldsSystemPrompt {
+    /// Writes the launch's composed system prompt into a new in-memory file
+    /// held under the launch request, and answers the path Claude reads it
+    /// by. A file already held for the request is replaced.
+    fn hold_system_prompt(&self, launch: &ComposedLaunch) -> Result<String, String>;
+    /// Closes the in-memory file held for the launch request, if any.
+    fn release_system_prompt(&self, launch_request_id: &str);
+    /// The path a held system prompt is read by, for the request, while
+    /// held.
+    #[cfg(test)]
+    fn held_system_prompt_path(&self, launch_request_id: &str) -> Option<String>;
+}
+
+impl HoldsSystemPrompt for HerdrCli {
+    fn hold_system_prompt(&self, launch: &ComposedLaunch) -> Result<String, String> {
+        use std::os::fd::AsRawFd;
+        let descriptor =
+            rustix::fs::memfd_create("flow-system-prompt", rustix::fs::MemfdFlags::CLOEXEC)
+                .map_err(|error| format!("cannot create the in-memory system prompt: {error}"))?;
+        let mut file = File::from(descriptor);
+        file.write_all(launch.system_prompt.system_prompt_text.as_bytes())
+            .map_err(|error| format!("cannot write the in-memory system prompt: {error}"))?;
+        let path = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd());
+        self.held_system_prompts
+            .lock()
+            .map_err(|_| "the held system prompts are unreadable".to_owned())?
+            .insert(launch.launch_profile.launch_request_id.clone(), file);
+        Ok(path)
+    }
+
+    fn release_system_prompt(&self, launch_request_id: &str) {
+        if let Ok(mut held) = self.held_system_prompts.lock() {
+            held.remove(launch_request_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn held_system_prompt_path(&self, launch_request_id: &str) -> Option<String> {
+        use std::os::fd::AsRawFd;
+        self.held_system_prompts
+            .lock()
+            .ok()?
+            .get(launch_request_id)
+            .map(|file| format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd()))
+    }
+}
+
+/// Herdr's `agent start`, whose refusal is kept as Herdr wrote it.
+pub(crate) trait StartsHerdrAgent {
+    fn run_agent_start(&self, arguments: &[String]) -> Result<(), SpawnFailure>;
+}
+
+impl StartsHerdrAgent for HerdrCli {
+    fn run_agent_start(&self, arguments: &[String]) -> Result<(), SpawnFailure> {
+        let output = Command::new(&self.executable)
+            .args(arguments)
+            .output()
+            .map_err(|error| format!("Herdr command could not start: {error}"))?;
+        if !output.status.success() {
+            return Err(SpawnFailure::Refused(
+                signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal::from_printed(
+                    &output.stderr,
+                    &output.stdout,
+                )),
+            ));
+        }
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .map(|_| ())
+            .map_err(|error| SpawnFailure::from(format!("Herdr returned unreadable JSON: {error}")))
+    }
+}
+
+/// Herdr's refusal as it printed it: the code and message of its JSON error
+/// body, or no code and its whole printed text.
+pub(crate) trait ReadsHerdrRefusal {
+    fn from_printed(stderr: &[u8], stdout: &[u8]) -> Self;
+}
+
+impl ReadsHerdrRefusal for signal_flow::HerdrRefusal {
+    fn from_printed(stderr: &[u8], stdout: &[u8]) -> Self {
+        let printed = if stderr.iter().all(u8::is_ascii_whitespace) {
+            stdout
+        } else {
+            stderr
+        };
+        let text = String::from_utf8_lossy(printed).trim().to_owned();
+        let body = serde_json::from_str::<serde_json::Value>(&text).ok();
+        let error = body.as_ref().and_then(|body| body.get("error"));
+        let code = error
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str);
+        let message = error
+            .and_then(|error| error.get("message"))
+            .and_then(serde_json::Value::as_str);
+        match (code, message) {
+            (Some(code), Some(message)) => Self {
+                herdr_error_code_option: Some(code.to_owned()),
+                herdr_error_message: message.to_owned(),
+            },
+            _ => Self {
+                herdr_error_code_option: None,
+                herdr_error_message: text,
+            },
+        }
     }
 }
 
@@ -1613,7 +1820,50 @@ impl WaitsForPaneRest for HerdrCli {
 }
 
 impl ObservesNativeLaunchBinding for HerdrCli {
+    /// Whatever it observes, the in-memory system prompt held for the
+    /// launch is closed after: the started harness has read it by the time
+    /// its session can bind.
     fn observe_native_binding(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
+    ) -> Result<NativeLaunchBinding, String> {
+        let observed = self.observe_bound_pane(launch, pane, reserved);
+        self.release_system_prompt(&launch.launch_profile.launch_request_id);
+        observed
+    }
+
+    fn observe_attached_codex_binding(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        thread: &str,
+    ) -> Result<NativeLaunchBinding, String> {
+        if launch.harness_kind != HarnessKind::Codex {
+            return Err("only a Codex harness attaches to an opened thread".into());
+        }
+        let binding = self.observe_native_binding(launch, pane, None)?;
+        if binding.native_session_id != thread {
+            return Err("the attached Codex TUI reports another thread than Flow opened".into());
+        }
+        Ok(binding)
+    }
+}
+
+/// Observes the official Herdr integration report for a launch pane and
+/// binds it to an exact native identity claim.
+pub(crate) trait ObservesBoundPane {
+    fn observe_bound_pane(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        reserved: Option<&str>,
+    ) -> Result<NativeLaunchBinding, String>;
+}
+
+impl ObservesBoundPane for HerdrCli {
+    fn observe_bound_pane(
         &self,
         launch: &ComposedLaunch,
         pane: &HerdrPaneBinding,
@@ -1729,22 +1979,6 @@ impl ObservesNativeLaunchBinding for HerdrCli {
             harness_kind: launch.harness_kind.clone(),
             herdr_pane_binding: pane.clone(),
         })
-    }
-
-    fn observe_attached_codex_binding(
-        &self,
-        launch: &ComposedLaunch,
-        pane: &HerdrPaneBinding,
-        thread: &str,
-    ) -> Result<NativeLaunchBinding, String> {
-        if launch.harness_kind != HarnessKind::Codex {
-            return Err("only a Codex harness attaches to an opened thread".into());
-        }
-        let binding = self.observe_native_binding(launch, pane, None)?;
-        if binding.native_session_id != thread {
-            return Err("the attached Codex TUI reports another thread than Flow opened".into());
-        }
-        Ok(binding)
     }
 }
 
@@ -2150,6 +2384,7 @@ pub(crate) mod tests {
     use crate::herdr::launch::PreparesClaudeEnvironment;
     use crate::herdr::launch::PreparesClaudePane;
     use crate::herdr::launch::TitlesClaudeSession;
+    use crate::herdr::launch::{ChecksTypedCommand, HoldsSystemPrompt, SpawnFailure};
     use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
     use crate::title::ShowsNativeTitle;
     use signal_flow::{
@@ -2255,7 +2490,7 @@ case "$*" in
   *"pane run"*) sh -c "$6" > '{marker_output}'; width=$(cat '{pane_width}' 2>/dev/null || printf 120); fold -w "$width" '{marker_output}' > '{visible_output}' ;;
   *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
   *"agent wait"*) [ -f '{wait_refused}' ] && exit 11; rm -f '{missing_agent_session}'; printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
-  *"agent start"*) printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
+  *"agent start"*) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; prev=$a; done; printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
   *"agent get"*) if [ -f '{pending_record}' ]; then left=$(cat '{record_delay}'); if [ "$left" -le 0 ]; then cat '{pending_record}' >> '{claude_transcript}'; rm -f '{pending_record}'; else printf '%s' $((left - 1)) > '{record_delay}'; fi; fi; reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); if [ -f '{missing_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness"; fi ;;
   *"agent prompt"*" /rename "*) title=$(printf '%s' "$*" | sed 's/.* \/rename //'); [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
@@ -2266,6 +2501,8 @@ case "$*" in
 esac
 "##,
             calls = calls.display(),
+            start_refused = root.path().join("agent-start-refused").display(),
+            system_read = root.path().join("system-prompt-read").display(),
             reported_harness = reported_harness.display(),
             missing_agent_session = root.path().join("missing-agent-session").display(),
             wait_refused = root.path().join("agent-wait-refused").display(),
@@ -2398,9 +2635,10 @@ printf '%s\n' 123456
         assert!(start.contains("--executable /fixture/codex"));
         assert!(start.contains("-- --remote unix:///tmp/stable-codex.sock --model model-current"));
         assert!(start.contains("-c model_reasoning_effort=high"));
-        let instructions = HarnessKind::Codex.system_argument(SYSTEM_TEXT);
-        assert_eq!(instructions, format!("instructions=\"{SYSTEM_TEXT}\""));
-        assert!(start.contains(&format!("-c {instructions}")));
+        // The thread holds the system prompt as its base instructions; the
+        // TUI is not given it in any form.
+        assert!(!start.contains("instructions="));
+        assert!(!start.contains(SYSTEM_TEXT));
         assert!(!start.contains("model_instructions_file"));
         assert!(!start.contains("--remote-control"));
         assert_eq!(start.matches("--remote").count(), 1);
@@ -2408,9 +2646,165 @@ printf '%s\n' 123456
         assert!(!start.contains(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG));
         // The harness starts with no positional prompt; the one first prompt
         // travels later in a single app-server turn/start.
-        assert!(start.ends_with(&format!("-c {instructions}")));
+        assert!(start.ends_with("-c model_reasoning_effort=high"));
         assert!(!start.contains('$'));
         assert!(!calls.contains("agent prompt"));
+    }
+
+    /// A Claude system prompt of many lines, tabs and quotes is never typed:
+    /// the start names the Nexus's in-memory file, the harness reads the
+    /// text whole from it, and the typed command carries no control
+    /// character.
+    #[test]
+    fn a_multiline_claude_system_prompt_is_read_whole_from_the_held_file() {
+        let mut launch = launch(HarnessKind::Claude);
+        let text = "First line.\n\tIndented 'quoted' line.\n\nLast line with \"quotes\".\n";
+        launch.system_prompt.system_prompt_text = text.into();
+        launch.system_prompt.system_prompt_sha256 = digest(text);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            "12345678-1234-4abc-8def-123456789abc",
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter
+            .start_native_harness(&launch, &pane, None)
+            .expect("a multiline system prompt starts");
+        assert_eq!(
+            fs::read_to_string(root.path().join("system-prompt-read")).unwrap(),
+            text
+        );
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        let start = calls
+            .lines()
+            .find(|line| line.contains("agent start"))
+            .expect("one start line: no argument broke it");
+        assert!(!start.contains("First line."));
+        assert!(!start.contains("Last line"));
+    }
+
+    /// An argument carrying a control character is refused by Flow before
+    /// Herdr is called, and the held system prompt is closed.
+    #[test]
+    fn an_argument_with_a_control_character_is_refused_before_herdr() {
+        let mut launch = launch(HarnessKind::Claude);
+        launch.launch_profile.effort = "high\nmedium".into();
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            "12345678-1234-4abc-8def-123456789abc",
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        assert_eq!(
+            adapter.start_native_harness(&launch, &pane, None),
+            Err(SpawnFailure::Refused(
+                signal_flow::SpawnRefusalCause::ControlCharacter
+            ))
+        );
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(!calls.contains("agent start"), "Herdr was not called");
+        assert_eq!(
+            adapter.held_system_prompt_path(&launch.launch_profile.launch_request_id),
+            None
+        );
+    }
+
+    /// A typed command longer than one terminal line is refused by Flow
+    /// before Herdr is called.
+    #[test]
+    fn a_typed_command_longer_than_one_terminal_line_is_refused_before_herdr() {
+        let mut launch = launch(HarnessKind::Claude);
+        launch.launch_profile.effort = "e".repeat(4096);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            "12345678-1234-4abc-8def-123456789abc",
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        assert_eq!(
+            adapter.start_native_harness(&launch, &pane, None),
+            Err(SpawnFailure::Refused(
+                signal_flow::SpawnRefusalCause::CommandTooLong
+            ))
+        );
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(!calls.contains("agent start"), "Herdr was not called");
+    }
+
+    /// The typed line is measured as Herdr quotes it for a POSIX shell.
+    #[test]
+    fn the_typed_command_is_measured_as_herdr_quotes_it() {
+        assert_eq!(<[String]>::quoted_length("--model"), 7);
+        assert_eq!(<[String]>::quoted_length("two words"), 11);
+        assert_eq!(<[String]>::quoted_length("a'b"), 8);
+        assert_eq!(<[String]>::quoted_length(""), 2);
+        let fits = ["claude".to_owned(), "x".repeat(4095 - 7)];
+        assert_eq!(fits.typed_command_refusal(), None);
+        let longer = ["claude".to_owned(), "x".repeat(4095 - 6)];
+        assert_eq!(
+            longer.typed_command_refusal(),
+            Some(signal_flow::SpawnRefusalCause::CommandTooLong)
+        );
+        let tab = ["claude".to_owned(), "a\tb".to_owned()];
+        assert_eq!(
+            tab.typed_command_refusal(),
+            Some(signal_flow::SpawnRefusalCause::ControlCharacter)
+        );
+    }
+
+    /// Herdr's refusal is kept as Herdr wrote it: the code and message of its
+    /// JSON error body, or no code and its whole text.
+    #[test]
+    fn herdrs_refusal_is_kept_as_herdr_wrote_it() {
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            "12345678-1234-4abc-8def-123456789abc",
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        fs::write(
+            root.path().join("agent-start-refused"),
+            r#"{"error":{"code":"invalid_agent_argument","message":"agent arguments cannot be encoded safely for the target shell"},"id":"cli:agent:start"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            adapter.start_native_harness(&launch, &pane, None),
+            Err(SpawnFailure::Refused(
+                signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal {
+                    herdr_error_code_option: Some("invalid_agent_argument".into()),
+                    herdr_error_message:
+                        "agent arguments cannot be encoded safely for the target shell".into(),
+                })
+            ))
+        );
+        assert_eq!(
+            adapter.held_system_prompt_path(&launch.launch_profile.launch_request_id),
+            None,
+            "a refused start closes the held system prompt"
+        );
+        fs::write(
+            root.path().join("agent-start-refused"),
+            "missing value for --kind\n",
+        )
+        .unwrap();
+        assert_eq!(
+            adapter.start_native_harness(&launch, &pane, None),
+            Err(SpawnFailure::Refused(
+                signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal {
+                    herdr_error_code_option: None,
+                    herdr_error_message: "missing value for --kind".into(),
+                })
+            ))
+        );
     }
 
     #[test]
@@ -2716,8 +3110,17 @@ printf '%s\n' 123456
             .expect("agent start call");
         let remote_control_name = launch.launch_profile.remote_control_name();
         assert!(remote_control_name.starts_with("flow-"));
+        let system_prompt_file = adapter
+            .held_system_prompt_path(&launch.launch_profile.launch_request_id)
+            .expect("the system prompt is held until the session binds");
+        assert!(system_prompt_file.starts_with(&format!("/proc/{}/fd/", std::process::id())));
+        assert_eq!(
+            fs::read_to_string(root.path().join("system-prompt-read")).unwrap(),
+            SYSTEM_TEXT,
+            "the harness read the composed system prompt whole from the held file"
+        );
         assert!(start_call.ends_with(&format!(
-            "-- --settings {} --remote-control {remote_control_name} --system-prompt {SYSTEM_TEXT} --model model-current --effort high",
+            "-- --settings {} --remote-control {remote_control_name} --system-prompt-file {system_prompt_file} --model model-current --effort high",
             concat!(
                 r#"{"hooks":{"#,
                 r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
@@ -2787,6 +3190,11 @@ printf '%s\n' 123456
             .observe_native_binding(&launch, &pane, None)
             .expect("official native binding");
         assert_eq!(binding.flow_id, "123456");
+        assert_eq!(
+            adapter.held_system_prompt_path(&launch.launch_profile.launch_request_id),
+            None,
+            "the held system prompt is closed once the session has bound"
+        );
         let flow_id_calls =
             fs::read_to_string(root.path().join("flow-id-calls")).expect("flow-id calls");
         assert!(flow_id_calls.contains(&format!(
@@ -3038,9 +3446,25 @@ printf '%s\n' 123456
         let skills = serde_json::json!({"type":"response_item","payload":{"type":"message",
             "role":"developer","content":[{"type":"input_text",
             "text":"<skills_instructions>\n## Skills\nA skill is"}]}});
+        let role = serde_json::json!({"type":"response_item","payload":{"type":"message",
+            "role":"developer","content":[{"type":"input_text",
+            "text":"<multi_agent_role>You are `/root`, the primary agent"}]}});
+        let mode = serde_json::json!({"type":"response_item","payload":{"type":"message",
+            "role":"developer","content":[{"type":"input_text",
+            "text":"<multi_agent_mode>Any earlier instruction enabling proactive"}]}});
         for (block, leave_out, kept) in [
             (agents, LeaveOut::CodexAgentsMd, LeaveOut::CodexSkillListing),
             (skills, LeaveOut::CodexSkillListing, LeaveOut::CodexAgentsMd),
+            (
+                role,
+                LeaveOut::CodexDeveloperInstructions,
+                LeaveOut::CodexAgentsMd,
+            ),
+            (
+                mode,
+                LeaveOut::CodexDeveloperInstructions,
+                LeaveOut::CodexAgentsMd,
+            ),
         ] {
             let mut launch = launch(HarnessKind::Codex);
             let agent_name = launch.launch_agent_name();

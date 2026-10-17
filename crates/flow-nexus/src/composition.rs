@@ -100,9 +100,10 @@ const ARGUMENT_BYTE_LIMIT: usize = 131_071;
 /// when its JSON-encoded text with the request envelope stays under that.
 /// A Codex part is one text item of `turn/start`, which the Codex
 /// app-server refuses over `MAX_USER_INPUT_TEXT_CHARS` (1 << 20)
-/// characters. The system prompt travels as one process argument
-/// (`--system-prompt` for Claude, `instructions=` for Codex), which Linux
-/// bounds at 131072 bytes with its terminating NUL.
+/// characters. The system prompt is held to what one process argument
+/// holds, 131072 bytes with its terminating NUL, though it no longer travels
+/// as one: Claude reads it from the Nexus's in-memory file and a Codex
+/// thread is given it as its base instructions.
 impl FitsOneMessage for HarnessKind {
     fn fits_one_message<N: Textual>(&self, input: N) -> bool {
         let text = input.text();

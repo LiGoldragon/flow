@@ -656,7 +656,7 @@ case "$*" in
   *"workspace create"*) printf '%s\n' '{"result":{"workspace":{"workspace_id":"w9"},"root_pane":{"pane_id":"w9:p1","terminal_id":"term-resumed"}}}' ;;
   *"pane run"*) sh -c "$6" > 'MARKER' ;;
   *"pane wait-output"*) line=$(grep -F FLOW_CLAUDE_ENV_READY_ 'MARKER'); printf '{"result":{"pane_id":"w9:p1","matched_line":"%s"}}\n' "$line" ;;
-  *"agent start"*) printf '%s\n' '{"result":{"agent":{"name":"x"}}}' ;;
+  *"agent start"*) prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > 'SYSTEMREAD'; prev=$a; done; printf '%s\n' '{"result":{"agent":{"name":"x"}}}' ;;
   *"agent get"*) printf '%s\n' 'RECORD' ;;
   *"api snapshot"*) if [ -f 'LIVE' ]; then printf '%s\n' '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":[SESSIONED],"protocol":20,"version":"0.8.2"},"type":"session_snapshot"}}'; else printf '%s\n' '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":[AGENT],"protocol":20,"version":"0.8.2"},"type":"session_snapshot"}}'; fi ;;
   *"agent wait"*) printf '%s\n' '{"result":{"status":"idle"}}' ;;
@@ -669,6 +669,15 @@ esac
 "#
     .replace("SESSIONS", &fixture.session_listing())
     .replace("CALLS", &calls.display().to_string())
+    .replace(
+        "SYSTEMREAD",
+        &fixture
+            .directory
+            .path()
+            .join("system-prompt-read.txt")
+            .display()
+            .to_string(),
+    )
     .replace("MARKER", &marker.display().to_string())
     .replace("TYPED", &typed.display().to_string())
     .replace("RECORD", &agent_record)
@@ -728,11 +737,22 @@ fn a_queued_order_resumes_the_sleeping_session_with_its_flow_id_and_the_whole_qu
     assert!(!fixture.nexus.waking.is_waking(&at), "the hold is released");
 
     let calls = fs::read_to_string(fixture.directory.path().join("herdr-calls.log")).unwrap();
-    // The composed system prompt spans lines, so the start's arguments are
-    // read from the whole log.
     assert!(calls.contains("agent start"), "the harness started again");
     assert!(calls.contains(&format!(" --resume {} ", seat.session)));
-    assert!(calls.contains("--system-prompt These are your skills"));
+    // The composed system prompt is read from the Nexus's in-memory file,
+    // never typed: the start names its path, the harness reads it whole.
+    let start = calls
+        .lines()
+        .find(|line| line.contains("agent start"))
+        .expect("one start line");
+    assert!(start.contains(&format!(
+        " --system-prompt-file /proc/{}/fd/",
+        std::process::id()
+    )));
+    assert!(!start.contains("These are your skills"));
+    let read = fs::read_to_string(fixture.directory.path().join("system-prompt-read.txt"))
+        .expect("the harness read its system prompt");
+    assert!(read.contains("These are your skills"));
     assert!(!calls.contains("--session-id"));
     assert!(
         calls

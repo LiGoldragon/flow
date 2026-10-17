@@ -88,7 +88,14 @@ impl RendersLeanStart for LeanStart {
                 }
                 LeaveOut::CodexEnvironmentContext => &["-c", "include_environment_context=false"],
                 LeaveOut::CodexPermissions => &["-c", "include_permissions_instructions=false"],
-                LeaveOut::CodexDeveloperInstructions => &["-c", "developer_instructions=\"\""],
+                LeaveOut::CodexDeveloperInstructions => &[
+                    "-c",
+                    "developer_instructions=\"\"",
+                    "-c",
+                    "features.multi_agent_v2.root_agent_usage_hint_text=\"\"",
+                    "-c",
+                    "features.multi_agent_v2.multi_agent_mode_hint_text=\"\"",
+                ],
                 _ => &[],
             };
             arguments.extend(switches.iter().map(|switch| (*switch).to_owned()));

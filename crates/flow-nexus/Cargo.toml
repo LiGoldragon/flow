@@ -21,7 +21,7 @@ datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "4dff1
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
 notify = "8"
 libc = "0.2"
-rustix = { version = "1", features = ["net", "time"] }
+rustix = { version = "1", features = ["fs", "net", "time"] }
 rkyv.workspace = true
 redb = "4"
 sema = { git = "https://github.com/LiGoldragon/sema", rev = "51d7927c872f0df12791bad8d39a4db6433b01a1" }

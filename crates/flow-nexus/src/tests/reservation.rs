@@ -148,3 +148,63 @@ fn a_codex_launch_reserves_no_flow_id() {
     );
     assert!(fixture.flow_id_calls().is_empty());
 }
+
+/// Herdr refuses a Claude start: the Start is answered HarnessSpawnRefused
+/// carrying Herdr's own error code and message, LaunchStatus keeps them, and
+/// the composed system prompt never reached Herdr's command.
+#[test]
+fn a_claude_start_herdr_refuses_is_answered_with_herdrs_own_refusal() {
+    let fixture = NexusFixture::new();
+    fixture.claims_flow_ids();
+    let log = fixture.directory.path().join("herdr-calls.log");
+    let marker = fixture.directory.path().join("marker-output");
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&format!(
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> '{log}'
+case "$*" in
+  *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
+  *"pane run"*) sh -c "$6" > '{marker}' ;;
+  *"pane wait-output"*) line=$(grep -F FLOW_CLAUDE_ENV_READY_ '{marker}'); printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
+  *"agent start"*) printf '%s\n' '{{"error":{{"code":"invalid_agent_argument","message":"agent arguments cannot be encoded safely for the target shell"}},"id":"cli:agent:start"}}' >&2; exit 1 ;;
+  *"pane close"*) printf '%s\n' '{{"result":{{}}}}' ;;
+  *) exit 64 ;;
+esac
+"#,
+        log = log.display(),
+        marker = marker.display(),
+    ));
+    let mut launch = fixture.staged_launch("herdr-refused-request", None);
+    launch.profile.model_name = "claude-fixture".into();
+    let expected = StartRejection::HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal {
+        spawn_refusal_cause: signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal {
+            herdr_error_code_option: Some("invalid_agent_argument".into()),
+            herdr_error_message: "agent arguments cannot be encoded safely for the target shell"
+                .into(),
+        }),
+        opened_thread_option: None,
+    });
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Start(launch.request())),
+        Response::StartRejected(expected.clone())
+    );
+    let Response::LaunchInspected(inspection) = fixture
+        .nexus
+        .dispatch(Query::LaunchStatus("herdr-refused-request".into()))
+    else {
+        panic!("the refused launch is inspected");
+    };
+    assert_eq!(
+        inspection.launch_status_outcome_option,
+        Some(signal_flow::LaunchStatusOutcome::StartRejected(expected))
+    );
+    let calls = fs::read_to_string(&log).expect("Herdr calls");
+    let start = calls
+        .lines()
+        .find(|line| line.contains("agent start"))
+        .expect("the start reached Herdr");
+    assert!(start.contains(" --system-prompt-file /proc/"));
+    assert!(!start.contains("--system-prompt "));
+}

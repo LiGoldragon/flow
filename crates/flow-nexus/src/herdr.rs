@@ -106,6 +106,10 @@ pub struct HerdrCli {
     /// whatever Nexus the default path under the pane's runtime directory
     /// names.
     pub(crate) ordinary_socket: PathBuf,
+    /// The in-memory file of each Claude start's composed system prompt,
+    /// by launch request, held from the start until its session has bound.
+    pub(crate) held_system_prompts:
+        std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
 }
 
 impl Default for HerdrCli {
@@ -161,6 +165,7 @@ impl Default for HerdrCli {
                 .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
                 .unwrap_or_else(|| PathBuf::from("flow-hook")),
             ordinary_socket: defaults.ordinary_socket_path(),
+            held_system_prompts: Default::default(),
         }
     }
 }
@@ -359,6 +364,7 @@ impl ConfiguresHerdrCli for HerdrCli {
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
+            held_system_prompts: Default::default(),
         }
     }
 }

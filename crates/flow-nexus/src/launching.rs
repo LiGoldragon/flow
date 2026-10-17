@@ -260,6 +260,9 @@ impl LaunchesFlows for RunningNexus {
         // in it, before the TUI attached; Bind requires that thread.
         let opened = match self.perform(Operation::Spawn(pane_launch.clone())) {
             Outcome::Spawned(opened) => opened,
+            Outcome::Failed(Failed_Data::SpawnRefused(refusal)) => {
+                return Response::StartRejected(StartRejection::HarnessSpawnRefused(refusal));
+            }
             _ => return Response::StartRejected(StartRejection::NativeLaunchRefused),
         };
         let binding = match self.perform(Operation::Bind(PaneLaunch {

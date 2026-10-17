@@ -1223,11 +1223,125 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v4")
+    }
+}
+
+/// An outcome as Flow 0.35.2 archived it, its rejections signal-flow 17's,
+/// before a refused harness start carried its cause. This shape is read
+/// only by the v3-to-v4 family upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcomeV3 {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcomeV3,
+}
+
+impl EngineRecord for StoredLaunchOutcomeV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchOutcomeV3 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-launch-outcome-v3")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LaunchOutcomeV3 {
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
+    StartRejected(StartRejectionV17),
+    ReplaceRejected(ReplaceRejectionV17),
+}
+
+/// A start rejection as signal-flow 17.0.0 archived it: every variant of
+/// the current one but the refused harness start, in the same order.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum StartRejectionV17 {
+    CompositionRefused,
+    LaunchRequestConflict,
+    LaunchPersistenceRefused,
+    NativeLaunchRefused,
+    BindingRefused(signal_flow::BindingRefusal),
+    RegistrationRefused,
+    IntentPersistenceRefused,
+    OriginUnavailable,
+    AddressAwake,
+    AddressEnded,
+    ContextRefused(signal_flow::ContextRefusal),
+    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+}
+
+/// A replace rejection as signal-flow 17.0.0 archived it.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ReplaceRejectionV17 {
+    PredecessorAbsent,
+    UnknownPredecessor,
+    PredecessorStopped,
+    LaunchRefused(StartRejectionV17),
+    ReapRefused(signal_flow::StopRejection),
+}
+
+impl From<StartRejectionV17> for StartRejection {
+    fn from(rejection: StartRejectionV17) -> Self {
+        match rejection {
+            StartRejectionV17::CompositionRefused => Self::CompositionRefused,
+            StartRejectionV17::LaunchRequestConflict => Self::LaunchRequestConflict,
+            StartRejectionV17::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
+            StartRejectionV17::NativeLaunchRefused => Self::NativeLaunchRefused,
+            StartRejectionV17::BindingRefused(refusal) => Self::BindingRefused(refusal),
+            StartRejectionV17::RegistrationRefused => Self::RegistrationRefused,
+            StartRejectionV17::IntentPersistenceRefused => Self::IntentPersistenceRefused,
+            StartRejectionV17::OriginUnavailable => Self::OriginUnavailable,
+            StartRejectionV17::AddressAwake => Self::AddressAwake,
+            StartRejectionV17::AddressEnded => Self::AddressEnded,
+            StartRejectionV17::ContextRefused(refusal) => Self::ContextRefused(refusal),
+            StartRejectionV17::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+        }
+    }
+}
+
+impl From<ReplaceRejectionV17> for ReplaceRejection {
+    fn from(rejection: ReplaceRejectionV17) -> Self {
+        match rejection {
+            ReplaceRejectionV17::PredecessorAbsent => Self::PredecessorAbsent,
+            ReplaceRejectionV17::UnknownPredecessor => Self::UnknownPredecessor,
+            ReplaceRejectionV17::PredecessorStopped => Self::PredecessorStopped,
+            ReplaceRejectionV17::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
+            ReplaceRejectionV17::ReapRefused(rejection) => Self::ReapRefused(rejection),
+        }
+    }
+}
+
+impl From<LaunchOutcomeV3> for LaunchOutcome {
+    fn from(outcome: LaunchOutcomeV3) -> Self {
+        match outcome {
+            LaunchOutcomeV3::Started(launched) => Self::Started(launched),
+            LaunchOutcomeV3::Replaced(replaced) => Self::Replaced(replaced),
+            LaunchOutcomeV3::StartRejected(rejection) => Self::StartRejected(rejection.into()),
+            LaunchOutcomeV3::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
+        }
+    }
+}
+
+impl UpgradeFrom<StoredLaunchOutcomeV3> for StoredLaunchOutcome {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredLaunchOutcomeV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            launch_request_id: previous.launch_request_id,
+            launch_outcome: previous.launch_outcome.into(),
+        })
     }
 }
 
@@ -1260,8 +1374,8 @@ impl MemoryDefinition for StoredLaunchOutcomeV2 {
 enum LaunchOutcomeV2 {
     Started(LaunchedRecordV2),
     Replaced(ReplacedRecordV2),
-    StartRejected(StartRejection),
-    ReplaceRejected(ReplaceRejection),
+    StartRejected(StartRejectionV17),
+    ReplaceRejected(ReplaceRejectionV17),
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -1295,8 +1409,8 @@ impl From<LaunchOutcomeV2> for LaunchOutcome {
                 flow_id: replaced.flow_id,
                 launched_record: replaced.launched_record.into(),
             }),
-            LaunchOutcomeV2::StartRejected(rejection) => Self::StartRejected(rejection),
-            LaunchOutcomeV2::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection),
+            LaunchOutcomeV2::StartRejected(rejection) => Self::StartRejected(rejection.into()),
+            LaunchOutcomeV2::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
         }
     }
 }
@@ -1478,10 +1592,26 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredLaunchOutcome>,
     ) -> Result<TableReference<StoredLaunchOutcome>, StoreError> {
-        match self.upgrade_table::<StoredLaunchOutcomeV2, StoredLaunchOutcome>(descriptor) {
+        // A 0.35.2 store holds v3 rows and a 0.34 store v2 rows; the v3
+        // edge is tried first, and a store it does not admit is tried on the
+        // v2 edge. An admission refusal writes nothing.
+        let from_v2 = descriptor.clone();
+        match self.upgrade_table::<StoredLaunchOutcomeV3, StoredLaunchOutcome>(descriptor) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission =>
+            {
+                match self.upgrade_table::<StoredLaunchOutcomeV2, StoredLaunchOutcome>(from_v2) {
+                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                    UpgradeOutcome::Failed(failure) => {
+                        Err(StoreError::LaunchOutcomeUpgrade(format!("{failure:?}")))
+                    }
+                }
+            }
             UpgradeOutcome::Failed(failure) => {
                 Err(StoreError::LaunchOutcomeUpgrade(format!("{failure:?}")))
             }
@@ -2132,7 +2262,8 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-outcome"),
             StoredLaunchOutcome::schema_hash(),
         )
-        .with_predecessor::<StoredLaunchOutcomeV2>();
+        .with_predecessor::<StoredLaunchOutcomeV2>()
+        .with_predecessor::<StoredLaunchOutcomeV3>();
         let replacements_descriptor = TableDescriptor::<Replacement>::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -2344,7 +2475,8 @@ impl OpensFlowStore for FlowStore {
                 FamilyName::new("flow-nexus-launch-outcome"),
                 StoredLaunchOutcome::schema_hash(),
             )
-            .with_predecessor::<StoredLaunchOutcomeV2>(),
+            .with_predecessor::<StoredLaunchOutcomeV2>()
+            .with_predecessor::<StoredLaunchOutcomeV3>(),
         )?;
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
@@ -4926,9 +5058,9 @@ pub(crate) trait ReadsFlowMemory {
         Some((family, SchemaHash::for_label(version)))
     }
 
-    /// A family registration this Flow opens: its current identity, the
-    /// 0.34 predecessor of a family the open upgrades, or a retired table
-    /// the open drops.
+    /// A family registration this Flow opens: its current identity, a
+    /// predecessor of a family the open upgrades, or a retired table the
+    /// open drops.
     fn is_current_flow_registration(table_key: &str, registration: &TableRegistration) -> bool {
         let identity = registration.identity();
         let matches = |family: &str, schema_hash: SchemaHash| {
@@ -4936,21 +5068,29 @@ pub(crate) trait ReadsFlowMemory {
                 && identity.family().as_str() == family
                 && identity.schema_hash() == schema_hash
         };
-        let predecessor = match table_key {
-            "flow_nexus_flows" => Some(("flow-nexus-flow", FlowRecordV5::schema_hash())),
-            "flow_nexus_launch_outcomes" => Some((
-                "flow-nexus-launch-outcome",
-                StoredLaunchOutcomeV2::schema_hash(),
-            )),
-            "flow_nexus_launch_attempts" => Some((
+        let predecessors: &[(&str, SchemaHash)] = match table_key {
+            "flow_nexus_flows" => &[("flow-nexus-flow", FlowRecordV5::schema_hash())],
+            "flow_nexus_launch_outcomes" => &[
+                (
+                    "flow-nexus-launch-outcome",
+                    StoredLaunchOutcomeV2::schema_hash(),
+                ),
+                (
+                    "flow-nexus-launch-outcome",
+                    StoredLaunchOutcomeV3::schema_hash(),
+                ),
+            ],
+            "flow_nexus_launch_attempts" => &[(
                 "flow-nexus-launch-attempt",
                 StoredLaunchAttemptV1::schema_hash(),
-            )),
-            _ => None,
+            )],
+            _ => &[],
         };
         FlowStore::current_flow_family_identity(table_key)
             .is_some_and(|(family, schema_hash)| matches(family, schema_hash))
-            || predecessor.is_some_and(|(family, schema_hash)| matches(family, schema_hash))
+            || predecessors
+                .iter()
+                .any(|(family, schema_hash)| matches(family, *schema_hash))
             || RETIRED_TABLES.iter().any(|(table, family, schema)| {
                 *table == table_key && matches(family, SchemaHash::for_label(schema))
             })
@@ -5468,6 +5608,7 @@ mod tests {
     };
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
     use super::{FlowRecordV5, LaunchedRecordV2, OriginClueBeforeOrigin, ReplacedRecordV2};
+    use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
     use super::{LaunchedRecord, ReplacedRecord};
     use super::{LaysOutDefaults, SeedsConfiguration};
     use crate::store::RegistersBindings;
@@ -6648,7 +6789,9 @@ mod tests {
             "flow-nexus-launch-outcome-v1",
             [StoredLaunchOutcomeV2 {
                 launch_request_id: "old-row".into(),
-                launch_outcome: LaunchOutcomeV2::StartRejected(StartRejection::CompositionRefused),
+                launch_outcome: LaunchOutcomeV2::StartRejected(
+                    StartRejectionV17::CompositionRefused,
+                ),
             }],
         );
         let before = std::fs::read(&path).expect("old store bytes read");
@@ -7768,6 +7911,124 @@ mod tests {
         );
     }
 
+    /// A 0.35.2 store's outcomes, each rejection in signal-flow 17's shape,
+    /// open as the current outcomes, and the store then keeps a refused
+    /// harness start with its cause and its opened thread.
+    #[test]
+    fn v3_launch_outcomes_upgrade_to_the_refused_spawn_shape() {
+        let fixture = StoreFixture::new();
+        let started = LaunchedRecord {
+            flow_id: "started-flow".into(),
+            session_id: "started-session".into(),
+            origin: Origin::Unbound,
+        };
+        let rows = [
+            StoredLaunchOutcomeV3 {
+                launch_request_id: "v3-started".into(),
+                launch_outcome: LaunchOutcomeV3::Started(started.clone()),
+            },
+            StoredLaunchOutcomeV3 {
+                launch_request_id: "v3-leave-out".into(),
+                launch_outcome: LaunchOutcomeV3::StartRejected(StartRejectionV17::LeaveOutRefused(
+                    signal_flow::LeaveOutRefusal::NotForHarness(
+                        signal_flow::LeaveOut::CodexPermissions,
+                    ),
+                )),
+            },
+            StoredLaunchOutcomeV3 {
+                launch_request_id: "v3-native".into(),
+                launch_outcome: LaunchOutcomeV3::StartRejected(
+                    StartRejectionV17::NativeLaunchRefused,
+                ),
+            },
+            StoredLaunchOutcomeV3 {
+                launch_request_id: "v3-replace".into(),
+                launch_outcome: LaunchOutcomeV3::ReplaceRejected(
+                    ReplaceRejectionV17::LaunchRefused(StartRejectionV17::ContextRefused(
+                        signal_flow::ContextRefusal::SystemTooLarge,
+                    )),
+                ),
+            },
+        ];
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("outcome store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_launch_outcomes"),
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    SchemaHash::for_label("flow-nexus-launch-outcome-v3"),
+                ))
+                .expect("v3 outcome family registers");
+            for row in rows {
+                engine
+                    .assert(Assertion::new(outcomes, row))
+                    .expect("v3 outcome persists");
+            }
+        }
+        let expected = [
+            ("v3-started", LaunchOutcome::Started(started)),
+            (
+                "v3-leave-out",
+                LaunchOutcome::StartRejected(StartRejection::LeaveOutRefused(
+                    signal_flow::LeaveOutRefusal::NotForHarness(
+                        signal_flow::LeaveOut::CodexPermissions,
+                    ),
+                )),
+            ),
+            (
+                "v3-native",
+                LaunchOutcome::StartRejected(StartRejection::NativeLaunchRefused),
+            ),
+            (
+                "v3-replace",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::ContextRefused(signal_flow::ContextRefusal::SystemTooLarge),
+                )),
+            ),
+        ];
+        let store = fixture.store();
+        for (request, outcome) in &expected {
+            assert_eq!(
+                store
+                    .launch_outcome(request)
+                    .expect("upgraded outcome reads"),
+                Some(outcome.clone()),
+                "the v3 outcome for {request} survives the family upgrade"
+            );
+        }
+        let refused = LaunchOutcome::StartRejected(StartRejection::HarnessSpawnRefused(
+            signal_flow::HarnessSpawnRefusal {
+                spawn_refusal_cause: signal_flow::SpawnRefusalCause::Herdr(
+                    signal_flow::HerdrRefusal {
+                        herdr_error_code_option: Some("invalid_agent_argument".into()),
+                        herdr_error_message:
+                            "agent arguments cannot be encoded safely for the target shell".into(),
+                    },
+                ),
+                opened_thread_option: Some(signal_flow::OpenedThread {
+                    native_session_id: "01a14773-f58c-7ca1-978b-1ac675d19399".into(),
+                    first_turn: signal_flow::FirstTurn::Answered,
+                    thread_archive: signal_flow::ThreadArchive::Archived,
+                }),
+            },
+        ));
+        store
+            .record_launch_outcome("v4-refused", refused.clone())
+            .expect("a refused spawn outcome persists");
+        drop(store);
+        let reopened = fixture.store();
+        for (request, outcome) in expected.iter().chain([("v4-refused", refused)].iter()) {
+            assert_eq!(
+                reopened
+                    .launch_outcome(request)
+                    .expect("outcome reads after reopening"),
+                Some(outcome.clone()),
+                "the outcome for {request} reads unchanged after reopening"
+            );
+        }
+    }
+
     #[test]
     fn v2_launch_outcomes_upgrade_to_their_derived_origin() {
         let fixture = StoreFixture::new();
@@ -7804,14 +8065,14 @@ mod tests {
                 },
                 StoredLaunchOutcomeV2 {
                     launch_request_id: "old-binding".into(),
-                    launch_outcome: LaunchOutcomeV2::StartRejected(StartRejection::BindingRefused(
-                        BindingRefusal::Unclassified,
-                    )),
+                    launch_outcome: LaunchOutcomeV2::StartRejected(
+                        StartRejectionV17::BindingRefused(BindingRefusal::Unclassified),
+                    ),
                 },
                 StoredLaunchOutcomeV2 {
                     launch_request_id: "old-reap-rejection".into(),
                     launch_outcome: LaunchOutcomeV2::ReplaceRejected(
-                        ReplaceRejection::ReapRefused(StopRejection::CloseRefused),
+                        ReplaceRejectionV17::ReapRefused(StopRejection::CloseRefused),
                     ),
                 },
             ],

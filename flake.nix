@@ -393,6 +393,10 @@
             "tests::meta_bind_existing_verifies_the_pane_process_and_session_with_herdr";
           flow-codex-terminal-title-thread-only = context.exactTest "flow-nexus"
             "herdr::launch::tests::codex_launch_selects_one_exact_executable_and_remote_socket";
+          flow-refreshed-codex-wakes-to-new-thread = context.exactTest "flow-nexus"
+            "tests::waking::a_refreshed_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it";
+          flow-refreshed-claude-wakes-to-new-session = context.exactTest "flow-nexus"
+            "tests::waking::a_refreshed_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it";
         }
       );
 

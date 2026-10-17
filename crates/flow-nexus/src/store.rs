@@ -15,7 +15,6 @@ pub(crate) mod metaflow;
 pub(crate) mod opened_thread;
 pub(crate) mod refresh;
 pub(crate) mod send_call;
-pub(crate) mod turn_end;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -1993,7 +1992,6 @@ pub struct FlowStore {
     opened_threads: TableReference<opened_thread::OpenedLaunchThread>,
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
     launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
-    turn_ends: TableReference<turn_end::TurnEndRecord>,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
@@ -2815,9 +2813,6 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups = engine.register_table(
             <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor(),
         )?;
-        let turn_ends = engine.register_table(
-            <turn_end::TurnEndRecord as turn_end::DescribesTurnEndTable>::descriptor(),
-        )?;
         let store = Self {
             engine,
             flows,
@@ -2843,7 +2838,6 @@ impl OpensFlowStore for FlowStore {
             opened_threads,
             send_calls,
             launch_cleanups,
-            turn_ends,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };

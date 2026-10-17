@@ -13,6 +13,7 @@ pub mod events;
 pub(crate) mod launch_cleanup;
 pub(crate) mod metaflow;
 pub(crate) mod opened_thread;
+pub(crate) mod queue_delivery;
 pub(crate) mod refresh;
 pub(crate) mod send_call;
 use address_hold::HoldsLaunchAddress;
@@ -20,6 +21,7 @@ use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
+use queue_delivery::QueueDeliveryTables;
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
@@ -2154,6 +2156,7 @@ pub struct FlowStore {
     opened_threads: TableReference<opened_thread::OpenedLaunchThread>,
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
     launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
+    queue_delivery: QueueDeliveryTables,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
@@ -2756,6 +2759,7 @@ impl OpensFlowStore for FlowStore {
         let send_calls_descriptor = <crate::generated::send_tool::SendCall as send_call::DescribesSendCallTable>::descriptor();
         let launch_cleanups_descriptor =
             <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor();
+        let queue_delivery_descriptors = QueueDeliveryTables::descriptors();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -2785,7 +2789,10 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&refreshes_descriptor)
                 .with_family(&opened_threads_descriptor)
                 .with_family(&send_calls_descriptor)
-                .with_family(&launch_cleanups_descriptor),
+                .with_family(&launch_cleanups_descriptor)
+                .with_family(&queue_delivery_descriptors.0)
+                .with_family(&queue_delivery_descriptors.1)
+                .with_family(&queue_delivery_descriptors.2),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -2813,6 +2820,8 @@ impl OpensFlowStore for FlowStore {
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
         let send_calls = engine.register_table(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
+        let queue_delivery =
+            QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
         let store = Self {
             engine,
             flows,
@@ -2838,6 +2847,7 @@ impl OpensFlowStore for FlowStore {
             opened_threads,
             send_calls,
             launch_cleanups,
+            queue_delivery,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -2968,6 +2978,8 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups = engine.register_table(
             <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor(),
         )?;
+        let queue_delivery =
+            QueueDeliveryTables::register(&mut engine, QueueDeliveryTables::descriptors())?;
         let store = Self {
             engine,
             flows,
@@ -2993,6 +3005,7 @@ impl OpensFlowStore for FlowStore {
             opened_threads,
             send_calls,
             launch_cleanups,
+            queue_delivery,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };

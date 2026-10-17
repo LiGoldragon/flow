@@ -43,6 +43,7 @@
 use crate::AwaitsLaunchSettlement;
 use crate::RunningNexus;
 use crate::claude::MeasuresClaudeContext;
+use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{
     ComposesLaunch, CompositionError, FreshSeat, HarnessedProfile, RendersQueuedWork,
 };
@@ -295,7 +296,8 @@ impl NotesStopsAtConfirmation for StoppedAtConfirmation {
 /// once confirmation commits.
 pub trait SettlesStopsAtConfirmation {
     /// Under the dispatch gate, as confirmation commits: notes the flow when
-    /// the last event its harness reported is `Stopped`.
+    /// the last event its harness reported is `Stopped`, or, for a Codex
+    /// flow, when its thread is resting.
     fn note_stop_at_confirmation(&self, flow_id: &str);
     /// Off the dispatch gate: settles every noted flow's Stop.
     fn settle_stops_at_confirmation(&self);
@@ -303,9 +305,13 @@ pub trait SettlesStopsAtConfirmation {
 
 impl SettlesStopsAtConfirmation for RunningNexus {
     fn note_stop_at_confirmation(&self, flow_id: &str) {
-        if let Ok(Some(events)) = self.store.events(flow_id)
-            && events.last() == Some(&Event::Stopped)
-        {
+        // A Codex flow reports no Stop: its thread's rest, as its
+        // app-server's events showed it, stands for one.
+        let stopped = matches!(
+            self.store.events(flow_id),
+            Ok(Some(events)) if events.last() == Some(&Event::Stopped)
+        );
+        if stopped || self.codex_resting(flow_id) {
             self.stopped_at_confirmation.note(flow_id);
         }
     }
@@ -364,6 +370,9 @@ pub enum KeptAtStop {
     UnknownFlow,
     /// After the bounded wait, Herdr does not show the seat resting.
     NotResting(PaneAgent),
+    /// The Codex seat's app-server shows its thread in a turn, or holding
+    /// work Flow typed whose turn has not begun.
+    InTurn,
     /// Work is queued and the Drain did not type it.
     DrainRefused(Box<Outcome>),
     /// The seat cannot be resumed, so it is not put to sleep.
@@ -556,6 +565,19 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_due(&self, address: Address) {
+        // Work queued for an Awake Codex seat whose thread rests is handed
+        // to it now, as its Stop would; one in a turn waits for the turn's
+        // completion.
+        let resting = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.resting_codex_seat(&address)
+        };
+        if let Some(flow_id) = resting {
+            self.settle_stopped(&flow_id);
+        }
         let Some(lease) = self.waking.hold(&address) else {
             return;
         };
@@ -778,6 +800,12 @@ impl PerformsSleepAndWake for RunningNexus {
         let typed = vec![oldest];
         if self.hand_over(&flow_id, &typed.prompt_text()).is_err() {
             return Outcome::Failed(Failed_Data::HerdrRefused);
+        }
+        // A Codex seat's next rest is the end of a turn begun after this.
+        if let Ok(Some(node)) = self.store.flow_node(&flow_id)
+            && node.harness_kind == HarnessKind::Codex
+        {
+            self.codex_turns.delivered(&node.session_id);
         }
         // Typed (or possibly typed): it is never typed twice.
         match self.store.remove_oldest_queued(&address, &typed[0]) {
@@ -1238,6 +1266,11 @@ impl WakesInParts for RunningNexus {
         }
         if self.waking.is_waking(&address) {
             return AtStop::Kept(KeptAtStop::Waking);
+        }
+        // A Codex seat whose app-server shows it in a turn is never taken
+        // for resting, whatever its screen shows.
+        if self.codex_in_turn(flow_id) {
+            return AtStop::Kept(KeptAtStop::InTurn);
         }
         let node = match self.store.flow_node(flow_id) {
             Ok(Some(node)) => self.herdr.refresh_route(node),

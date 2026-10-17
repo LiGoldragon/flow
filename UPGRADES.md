@@ -1,3 +1,20 @@
+# Flow 0.35.14
+
+No wire change and no store change.
+
+- **An Awake Codex seat's queue drains on its app-server's turn
+  completion.** Each connection Flow keeps on a Codex thread reads the
+  thread's `turn/started`, `turn/completed` and `thread/status/changed`, and
+  a responder's `thread/resume` answers the thread's status. When a
+  confirmed seat's thread rests with work queued, or work is queued for a
+  seat whose thread rests, the oldest request is typed as a Stop would type
+  it, and the next waits for a turn that begins after it. A completion read
+  twice types once; one that arrives while the launch is unconfirmed is
+  settled at confirmation. A seat its app-server shows in a turn is kept
+  (`KeptAtStop::InTurn`) whatever Herdr's screen shows.
+- A Bind that leaves a seat Awake asks the same question a queued request
+  does, so a resting Codex seat drains what waits for it.
+
 # Flow 0.35.11
 
 No wire change. The store adds one table, `flow_nexus_launch_cleanups`; a

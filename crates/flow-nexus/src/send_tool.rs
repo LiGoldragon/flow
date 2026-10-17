@@ -38,6 +38,7 @@ use crate::codex::{
     CodexAdapter, ExchangesOnSubscription, ProxyEvent, ResponderSignal, SelectsCodexEndpoint,
     SubscribesThread, SubscriptionEnd, ThreadConnection, ThreadSubscription,
 };
+use crate::codex_turns::{ReadsThreadStatus, ReadsTurnEvent, SettlesRestingCodexSeats, TurnEvent};
 use crate::generated::send_tool::{
     AnswersToolCall, DeclaresSendTool, HandlesSendCall, ParamsCarrying, ReadsSendArguments,
     ReadsToolCall, SendArguments, SendCall, SendKind, SendOutcome, SendRefusal, ToolCall,
@@ -422,6 +423,15 @@ impl RespondsToSendCalls for RunningNexus {
                             })
                             .is_ok()
                     });
+                    // The thread's status as the resume answered it: newer
+                    // than every event that came before the answer.
+                    if let Some(status) = subscription
+                        .resumed
+                        .take()
+                        .and_then(|status| status.thread_status())
+                    {
+                        self.codex_events(thread, vec![TurnEvent::Resumed(status)]);
+                    }
                     while open {
                         match subscription.next_event(&inbox, None) {
                             Err(SubscriptionEnd::Stopped) => {
@@ -459,6 +469,12 @@ impl RespondsToSendCalls for RunningNexus {
         subscription: &mut ThreadSubscription,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable> {
+        if let Some(thread) = subscription.thread.clone()
+            && let Some(event) = request.turn_event(&thread)
+        {
+            self.codex_events(&thread, vec![event]);
+            return Ok(());
+        }
         if request.get("method").and_then(serde_json::Value::as_str) != Some("item/tool/call") {
             return Ok(());
         }
@@ -604,6 +620,14 @@ impl ServesLaunchCalls for RunningNexus {
         responder: &mut LaunchResponder,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable> {
+        // The launch holds the dispatch gate: its thread's turn events are
+        // observed as the gate's holder.
+        if let Some(thread) = responder.subscription.thread.clone()
+            && let Some(event) = request.turn_event(&thread)
+        {
+            self.observe_codex_events(&thread, vec![event]);
+            return Ok(());
+        }
         if request.get("method").and_then(serde_json::Value::as_str) != Some("item/tool/call") {
             return Ok(());
         }

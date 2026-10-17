@@ -1319,3 +1319,345 @@ fn a_queued_request_is_rendered_with_its_sender() {
         "Work queued for this metaflow while no flow of it was running, oldest first, each with who sent it:\n{ Sender.{ Mind alpha Tertiary } Order.«Carry on.» }\n{ Unknown Notice.kept }"
     );
 }
+
+/// The fixture's Codex seat 908786: its thread, and the Address its
+/// metaflow is Awake at.
+const SEAT_THREAD: &str = "01a0b22c-e24f-7452-9940-64490878680f";
+
+fn seat_at() -> Address {
+    address("flow", Layer::Secondary)
+}
+
+/// Who sends the seat its work: the core Secondary of Psyche.
+fn core() -> Address {
+    Address {
+        aspect: Aspect::Psyche,
+        topic: "core".into(),
+        layer: Layer::Secondary,
+    }
+}
+
+fn from_core(request: Request) -> QueuedRequest {
+    QueuedRequest {
+        sent_by: SentBy::Sender(core()),
+        request,
+    }
+}
+
+/// The app-server's notification of a turn of `thread` starting or
+/// completing.
+fn turn_notice(method: &str, thread: &str, turn: &str) -> serde_json::Value {
+    let status = if method == "turn/completed" {
+        "completed"
+    } else {
+        "inProgress"
+    };
+    serde_json::json!({
+        "method": method,
+        "params": {
+            "threadId": thread,
+            "turn": { "id": turn, "items": [], "status": status, "error": null }
+        }
+    })
+}
+
+/// A call the seat's thread makes to the Awake gamma target: once it is
+/// answered, every frame sent before it has been read.
+fn fence(request_id: u64) -> serde_json::Value {
+    tool_call_request(
+        request_id,
+        SEAT_THREAD,
+        &format!("fence-{request_id}"),
+        "fence",
+    )
+}
+
+trait SeatsAwakeCodexSeat {
+    /// The fixture's Codex seat 908786, Active, resting in pane w1:p3 as
+    /// Herdr's screen shows it, its metaflow Awake as it at `seat_at`
+    /// holding `queue`; gamma Awake as a flow Flow does not hold.
+    fn awake_codex_seat(&self, queue: Vec<QueuedRequest>);
+    fn seat_queue(&self) -> Vec<QueuedRequest>;
+    /// How many times `request`, with its sender, was typed into the pane.
+    fn typed_count(&self, request: &QueuedRequest) -> usize;
+}
+
+impl SeatsAwakeCodexSeat for NexusFixture {
+    fn awake_codex_seat(&self, queue: Vec<QueuedRequest>) {
+        use super::{ControlsHerdrSnapshot, PromptFixture};
+        self.accept_pane_operations(vec![self.settled_agent()], PromptFixture::Prompted("w1:p3"));
+        self.register_with(signal_flow::FlowLifecycle::Active);
+        self.nexus.store.seed_metaflow(Metaflow {
+            address: seat_at(),
+            state: State::Awake("908786".into()),
+            past: vec![],
+            queue,
+        });
+        self.awake_target();
+    }
+
+    fn seat_queue(&self) -> Vec<QueuedRequest> {
+        self.nexus
+            .store
+            .metaflow(&seat_at())
+            .expect("seat readable")
+            .expect("seat held")
+            .queue
+    }
+
+    fn typed_count(&self, request: &QueuedRequest) -> usize {
+        use super::ControlsHerdrSnapshot;
+        use datom_codec::Datomizable;
+        use protos::{Compactable, Protosizable};
+        let datom = request.datomize(Vec::new()).protosize().compact();
+        self.typed().unwrap_or_default().matches(&datom).count()
+    }
+}
+
+/// Runs a responder on the seat's thread whose one connection sends
+/// `notices` and then the fence, and stops it once the fence is answered.
+fn seat_responding(fixture: &mut NexusFixture, notices: Vec<serde_json::Value>, fence_id: u64) {
+    let mut requests = notices;
+    requests.push(fence(fence_id));
+    let fake = FakeAppServer::install(vec![FakeConnection {
+        requests,
+        closes: false,
+        deaf: false,
+    }]);
+    let adapter = fixture.adapter("gpt-sol", &fake);
+    let answered = responding(fixture, SEAT_THREAD, &adapter, || {
+        answer_to(&fake.written_on(2, |m| m["id"] == fence_id), fence_id)
+    });
+    assert!(answered.is_some(), "the fence was answered");
+}
+
+/// The seat's first turn completes with two requests queued: the first is
+/// typed in, with its sender, and the second waits for the turn that first
+/// one starts; when that turn completes, the second is typed. Each once, in
+/// order.
+#[test]
+fn a_codex_first_turn_completion_drains_two_queued_requests_once_in_order_with_senders() {
+    let mut fixture = NexusFixture::new();
+    let psyche = from_core(Request::Psyche(flow_ethos::Said {
+        context: "The living".into(),
+        verbatim: "Make it so.".into(),
+    }));
+    let brief = from_core(Request::Order("Your brief.".into()));
+    fixture.awake_codex_seat(vec![psyche.clone(), brief.clone()]);
+
+    seat_responding(
+        &mut fixture,
+        vec![
+            turn_notice("turn/started", SEAT_THREAD, "turn-first"),
+            turn_notice("turn/completed", SEAT_THREAD, "turn-first"),
+            turn_notice("turn/started", SEAT_THREAD, "turn-psyche"),
+            turn_notice("turn/completed", SEAT_THREAD, "turn-psyche"),
+        ],
+        40,
+    );
+
+    assert_eq!(fixture.typed_count(&psyche), 1, "the psyche typed once");
+    assert_eq!(fixture.typed_count(&brief), 1, "the brief typed once");
+    let typed = fixture.typed().unwrap_or_default();
+    assert!(
+        typed.find("Make it so.") < typed.find("Your brief."),
+        "oldest first: {typed}"
+    );
+    assert!(typed.contains("Sender.{ Psyche core Secondary }"));
+    assert_eq!(fixture.seat_queue(), vec![]);
+}
+
+/// A completion read twice types nothing twice: the repeat finds the seat
+/// holding the work the first typed, whose turn has not begun.
+#[test]
+fn a_duplicated_turn_completed_delivers_nothing_twice() {
+    let mut fixture = NexusFixture::new();
+    let first = from_core(Request::Order("First.".into()));
+    let second = from_core(Request::Order("Second.".into()));
+    fixture.awake_codex_seat(vec![first.clone(), second.clone()]);
+
+    seat_responding(
+        &mut fixture,
+        vec![
+            turn_notice("turn/completed", SEAT_THREAD, "turn-first"),
+            turn_notice("turn/completed", SEAT_THREAD, "turn-first"),
+            serde_json::json!({
+                "method": "thread/status/changed",
+                "params": { "threadId": SEAT_THREAD, "status": { "type": "idle" } }
+            }),
+        ],
+        41,
+    );
+
+    assert_eq!(fixture.typed_count(&first), 1);
+    assert_eq!(fixture.typed_count(&second), 0, "the second waits");
+    assert_eq!(fixture.seat_queue(), vec![second]);
+}
+
+/// Work queued while the seat is in a turn (here by a send call its own
+/// thread makes to it) is held, not typed mid-turn; the turn's completion,
+/// read on a later connection, hands it over once.
+#[test]
+fn work_queued_while_a_codex_turn_runs_is_held_until_its_completion() {
+    let mut fixture = NexusFixture::new();
+    fixture.awake_codex_seat(vec![]);
+    let to_self = send_request(42, SEAT_THREAD, "call-self", &seat_at(), "Order", "later");
+
+    seat_responding(
+        &mut fixture,
+        vec![
+            turn_notice("turn/started", SEAT_THREAD, "turn-running"),
+            to_self,
+        ],
+        43,
+    );
+    let queued = QueuedRequest {
+        sent_by: SentBy::Sender(seat_at()),
+        request: Request::Order("later".into()),
+    };
+    assert_eq!(fixture.seat_queue(), vec![queued.clone()], "held queued");
+    assert_eq!(fixture.typed_count(&queued), 0, "nothing typed mid-turn");
+
+    seat_responding(
+        &mut fixture,
+        vec![turn_notice("turn/completed", SEAT_THREAD, "turn-running")],
+        44,
+    );
+    assert_eq!(fixture.typed_count(&queued), 1, "typed once the turn ended");
+    assert_eq!(fixture.seat_queue(), vec![]);
+}
+
+/// A seat its app-server shows in a turn is not drained, though Herdr's
+/// screen shows it idle and a Stop is reported: a psyche and then a brief
+/// stay queued.
+#[test]
+fn a_working_codex_seat_is_not_drained() {
+    let mut fixture = NexusFixture::new();
+    let psyche = from_core(Request::Psyche(flow_ethos::Said {
+        context: "The living".into(),
+        verbatim: "Words.".into(),
+    }));
+    let brief = from_core(Request::Order("Brief.".into()));
+    fixture.awake_codex_seat(vec![psyche.clone(), brief.clone()]);
+
+    seat_responding(
+        &mut fixture,
+        vec![turn_notice("turn/started", SEAT_THREAD, "turn-working")],
+        45,
+    );
+    use crate::waking::SleepsAndWakesSeats;
+    let at_stop = fixture.nexus.settle_stopped("908786");
+    fixture.nexus.wake_due(seat_at());
+
+    assert!(
+        !matches!(at_stop, crate::waking::AtStop::Drained(_)),
+        "{at_stop:?}"
+    );
+    assert_eq!(fixture.typed_count(&psyche), 0);
+    assert_eq!(fixture.seat_queue(), vec![psyche, brief]);
+}
+
+/// A first turn that completes while the launch is not yet confirmed (its
+/// registration or Bind still running) finds the seat only holding its
+/// Address and keeps its work; the confirmation hands that work over.
+#[test]
+fn a_codex_completion_during_registration_is_kept_and_drained_after_confirmation() {
+    use crate::launching::PromotesAmbiguousLaunches;
+    use crate::store::address_hold::HoldsLaunchAddress;
+    use crate::store::metaflow::SeedsMetaflow;
+
+    let fixture: &'static mut NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+    let typed = fixture.directory.path().join("pane-typed.txt");
+    let resting = serde_json::json!({
+        "agent":"codex", "agent_status":"idle", "interactive_ready":true,
+        "name":"fixture-agent", "pane_id":"w1:p1", "revision":1,
+        "terminal_id":"fixture-terminal", "workspace_id":"fixture-workspace"
+    });
+    let agent = serde_json::json!({"result":{"agent":{
+        "name":"fixture-agent", "agent":"codex", "workspace_id":"fixture-workspace",
+        "pane_id":"w1:p1", "terminal_id":"fixture-terminal",
+        "agent_session":{"source":"herdr:codex","agent":"codex","kind":"id",
+                         "value":super::STAGED_SESSION}
+    }}});
+    let snapshot = serde_json::json!({
+        "id":"cli:api:snapshot",
+        "result":{"snapshot":{"agents":[resting.clone()],"protocol":20,"version":"0.8.2"},
+        "type":"session_snapshot"}
+    });
+    let prompted = serde_json::json!({
+        "id":"cli:agent:prompt", "result":{ "type":"agent_prompted", "agent":resting }
+    });
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&format!(
+        "#!/bin/sh\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{agent}' ;;\n  *\" api snapshot\") printf '%s\\n' '{snapshot}' ;;\n  *\" agent wait \"*) ;;\n  *\" agent prompt \"*) printf '%s' \"$6\" >> '{typed}'; printf '%s\\n' '{prompted}' ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
+        typed = typed.display(),
+    ));
+    let mut launch = fixture.staged_launch("codex-completed-early", None);
+    let at = launch.profile.address.clone();
+    launch.stage_to_ambiguity(&fixture.nexus);
+    let mut held = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
+    assert_eq!(held.state, State::Awake("908786".into()));
+    let queued = from_core(Request::Order("queued before confirmation".into()));
+    held.queue.push(queued.clone());
+    fixture.nexus.store.seed_metaflow(held);
+    fixture.awake_target();
+
+    // The first turn completes on the thread while the launch is held.
+    let fake = FakeAppServer::install(vec![FakeConnection {
+        requests: vec![
+            turn_notice("turn/started", super::STAGED_SESSION, "turn-first"),
+            turn_notice("turn/completed", super::STAGED_SESSION, "turn-first"),
+            tool_call_request(46, super::STAGED_SESSION, "fence-46", "fence"),
+        ],
+        closes: false,
+        deaf: false,
+    }]);
+    let adapter = fixture.adapter("gpt-sol", &fake);
+    let fixture: &'static NexusFixture = fixture;
+    let answered = responding(fixture, super::STAGED_SESSION, &adapter, || {
+        answer_to(&fake.written_on(2, |m| m["id"] == 46), 46)
+    });
+    assert!(answered.is_some(), "the fence was answered");
+    assert!(
+        fs_text(&typed).is_empty(),
+        "nothing is typed into an unconfirmed seat"
+    );
+    assert_eq!(
+        fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue,
+        vec![queued.clone()],
+        "the work is kept"
+    );
+
+    launch.write_receipt();
+    std::thread::spawn(move || fixture.nexus.promote_ambiguous_launches());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !fixture
+        .nexus
+        .store
+        .metaflow(&at)
+        .unwrap()
+        .unwrap()
+        .queue
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the confirmation never drained the completed seat"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        fs_text(&typed)
+            .matches("queued before confirmation")
+            .count(),
+        1
+    );
+    assert!(fs_text(&typed).contains("Sender.{ Psyche core Secondary }"));
+    assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
+}
+
+fn fs_text(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}

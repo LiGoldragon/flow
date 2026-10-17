@@ -103,7 +103,17 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
                 .and_then(|pane| self.bound_caller(&pane).ok())
                 .map(|caller| caller.flow_id);
-            self.store.bind_metaflow(binding, peer, launched)
+            let address = binding.address.clone();
+            // A seat bound Awake drains what waits for it once its turn
+            // allows, as a queued request would: read after the answer.
+            return match self.store.bind_metaflow(binding, peer, launched) {
+                Ok(response @ Response::Bound(_)) => MetaflowAnswer {
+                    response,
+                    wake: Some(address),
+                },
+                Ok(response) => response.into(),
+                Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
+            };
         } else if let Query::End(address) = query {
             match self.store.identify_process(peer.clone()) {
                 Ok(Response::Identified(caller)) if caller == address => {

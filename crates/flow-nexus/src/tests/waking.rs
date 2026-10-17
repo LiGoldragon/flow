@@ -3285,3 +3285,225 @@ fn a_launch_refused_after_its_first_turn_called_send_archives_its_thread_and_kee
         Err(crate::generated::send_tool::SendRefusal::ThreadUnowned)
     );
 }
+
+/// A Codex launch as a Nexus that exited mid-way left it: reserved, its
+/// native intent recorded, its pane created and its thread recorded, its
+/// first turn pending on a send call; nothing settled. Returns the
+/// sender's profile and the state directory of the fakes.
+fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
+    use crate::store::RecordsCreatedLaunchPane;
+    use crate::store::opened_thread::RecordsOpenedThreads;
+    let recipient = address(Layer::Secondary);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Layer::Secondary, State::Asleep, vec![], vec![]));
+    let setup = fixture.first_turn_send(recipient);
+    let composed = fixture
+        .nexus
+        .composer
+        .compose(
+            crate::composition::HarnessedProfile {
+                harness_kind: HarnessKind::Codex,
+                launch_profile: setup.sender.clone(),
+            },
+            Vec::<signal_flow::LeaveOut>::new(),
+        )
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .reserve_launch_attempt(&composed, Origin::Unbound)
+        .unwrap();
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_intent(NativeLaunchIntent {
+                launch_request_id: setup.sender.launch_request_id.clone(),
+                prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: HarnessKind::Codex,
+                model_name: setup.sender.model_name.clone(),
+                effort: setup.sender.effort.clone(),
+                system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: composed.part_hashes(),
+            })
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_created_launch_pane(signal_flow::HerdrPaneBinding {
+                launch_request_id: setup.sender.launch_request_id.clone(),
+                herdr_session_name: "fixture-session".into(),
+                herdr_agent_name: composed.launch_agent_name(),
+                herdr_workspace_id: "w7".into(),
+                herdr_pane_id: "w7:p1".into(),
+                herdr_terminal_id: "term-fresh".into(),
+            })
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_opened_thread(&setup.sender.launch_request_id, FRESH_THREAD)
+            .unwrap()
+    );
+    // The app-server the restarted Nexus meets: the send-tool probe; the
+    // connection that resumes the thread, to which the pending call is
+    // replayed; and the account that archives the thread.
+    let initialized = websocket_frame(r#"{"id":1,"result":{}}"#);
+    let probe = [
+        initialized.clone(),
+        websocket_frame(
+            r#"{"id":2,"error":{"code":-32600,"message":"thread/start.dynamicTools requires experimentalApi capability"}}"#,
+        ),
+    ]
+    .concat();
+    let resumed = [
+        initialized.clone(),
+        websocket_frame(r#"{"id":2,"result":{"thread":{}}}"#),
+    ]
+    .concat();
+    let account = [
+        initialized,
+        websocket_frame(r#"{"id":2,"result":{"data":[{"status":"inProgress"}]}}"#),
+        websocket_frame(r#"{"id":3,"result":{}}"#),
+    ]
+    .concat();
+    let app_server = fixture.directory.path().join("restarted-codex");
+    FixtureExecutable {
+        path: app_server.clone(),
+    }
+    .install(&format!(
+        "#!/bin/sh\nS='{state}'\nn=$(cat \"$S/restart-invocations\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$S/restart-invocations\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/restart-record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$n\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{resumed}'; printf '%b' \"$(cat \"$S/first-call\")\"; exec sleep 30 ;;\n  3) printf '%b' '{account}' ;;\n  *) exit 1 ;;\nesac\nexec sleep 5\n",
+        state = setup.world.state.display(),
+    ));
+    fixture.nexus.codex_endpoints.stable.client_path = app_server;
+    setup
+}
+
+/// A Nexus restarted after a Codex launch had durably opened its thread
+/// and its first turn's send call was pending: the launch is reconciled at
+/// the start. The replayed call is refused and nothing is queued, the
+/// thread is archived, and the launch is settled refused; no second launch
+/// is made, a replayed Start answers the settlement, and a second start
+/// finds nothing to reconcile.
+#[test]
+fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_settled_at_restart() {
+    use super::send_tool::ReadsClientFrames;
+    use crate::DispatchesSerially;
+    use crate::launching::ReconcilesInterruptedLaunches;
+    use crate::store::RecordsLaunchOutcome;
+    use crate::store::send_call::KeepsSendCalls;
+    let mut fixture = NexusFixture::new();
+    let setup = interrupted_launch(&mut fixture);
+    let state = setup.world.state.clone();
+
+    fixture.nexus.reconcile_interrupted_launches();
+
+    let replayed = state.join("restart-record-2").client_messages();
+    let answer = replayed
+        .iter()
+        .find(|message| message.get("id") == Some(&serde_json::json!(FIRST_CALL_REQUEST)))
+        .unwrap_or_else(|| panic!("the replayed call is answered: {replayed:?}"));
+    assert_eq!(
+        answer.pointer("/result/success"),
+        Some(&serde_json::json!(false))
+    );
+    assert!(answer.to_string().contains("ThreadUnowned"), "{answer}");
+    let archived = state.join("restart-record-3").client_messages();
+    assert!(
+        archived.iter().any(|message| {
+            message.get("method").and_then(serde_json::Value::as_str) == Some("thread/archive")
+        }),
+        "{archived:?}"
+    );
+    assert!(stored(&fixture, Layer::Secondary).queue.is_empty());
+    assert_eq!(
+        fixture.nexus.store.send_call(&first_call_key()).unwrap(),
+        None
+    );
+    let refused =
+        signal_flow::StartRejection::NativeLaunchRefused(signal_flow::NativeLaunchRefusal {
+            native_launch_stage: signal_flow::NativeLaunchStage::Spawn,
+            native_launch_failure: signal_flow::NativeLaunchFailure::Unclassified,
+        });
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .launch_outcome(&setup.sender.launch_request_id)
+            .unwrap(),
+        Some(crate::store::LaunchOutcome::StartRejected(refused.clone()))
+    );
+    assert_eq!(
+        fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
+        Err(crate::generated::send_tool::SendRefusal::ThreadUnowned)
+    );
+    // No second launch: a replayed Start answers the settlement, and a
+    // second start reconciles nothing.
+    assert_eq!(
+        fixture.nexus.dispatch_serially(
+            signal_flow::Query::Start(setup.sender.clone()),
+            Origin::Unbound
+        ),
+        signal_flow::Response::StartRejected(refused)
+    );
+    fixture.nexus.reconcile_interrupted_launches();
+    assert_eq!(
+        fs::read_to_string(state.join("restart-invocations")).unwrap(),
+        "3"
+    );
+    let calls = fs::read_to_string(state.join("calls")).unwrap_or_default();
+    assert!(!calls.contains("agent start"), "{calls}");
+    assert!(!calls.contains("workspace create"), "{calls}");
+}
+
+/// While a launch runs, its thread's calls are sent from its Address only
+/// while no other flow holds that Address; and a launch settled is never
+/// a sender.
+#[test]
+fn a_launch_whose_address_another_flow_holds_sends_nothing() {
+    use crate::store::RecordsLaunchOutcome;
+    use crate::store::send_call::KeepsSendCalls;
+    let mut fixture = NexusFixture::new();
+    let setup = interrupted_launch(&mut fixture);
+    assert_eq!(
+        fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
+        Ok(setup.sender.address.clone()),
+        "an unsettled launch whose Address is free sends from it"
+    );
+    let owner = fixture.node();
+    fixture.nexus.store.register_flow(owner.clone()).unwrap();
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: setup.sender.address.clone(),
+        state: State::Awake(owner.flow_id.clone()),
+        past: vec![],
+        queue: vec![],
+    });
+    assert_eq!(
+        fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
+        Err(crate::generated::send_tool::SendRefusal::ThreadUnowned),
+        "another live flow holds the Address"
+    );
+    let mut settled = NexusFixture::new();
+    let setup = interrupted_launch(&mut settled);
+    settled
+        .nexus
+        .store
+        .record_launch_outcome(
+            &setup.sender.launch_request_id,
+            crate::store::LaunchOutcome::StartRejected(
+                signal_flow::StartRejection::LaunchPersistenceRefused,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        settled.nexus.store.thread_sender(FRESH_THREAD).unwrap(),
+        Err(crate::generated::send_tool::SendRefusal::ThreadUnowned),
+        "a settled launch is no sender"
+    );
+}

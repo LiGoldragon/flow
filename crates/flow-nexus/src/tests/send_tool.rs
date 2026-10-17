@@ -1111,6 +1111,178 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     assert_eq!(handed, 1);
 }
 
+/// The first half of a restart witness against a scratch codex app-server:
+/// a launch opens its thread as a Codex launch does, the thread recorded
+/// as its own, and its first turn calls the send tool; once the rollout
+/// shows the call, unanswered, the store is copied to
+/// FLOW_INTERRUPTED_LAUNCH_STATE and this process exits at once, as a
+/// Nexus that dies mid-launch. The second half restarts on that store.
+#[test]
+#[ignore = "needs the FLOW_SEND_TOOL_WITNESS variables and FLOW_INTERRUPTED_LAUNCH_STATE"]
+fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
+    use crate::codex::OpensCodexThread;
+    use crate::composition::ComposesLaunch;
+    use crate::composition::tests::{fixture_composer, fixture_profile};
+    use crate::store::opened_thread::RecordsOpenedThreads;
+    use crate::store::{RecordsNativeLaunchIntent, ReservesLaunchAttempt};
+    use sha2::{Digest, Sha256};
+    let client = std::env::var_os("FLOW_SEND_TOOL_WITNESS_CODEX").expect("codex client");
+    let socket = std::env::var("FLOW_SEND_TOOL_WITNESS_SOCKET").expect("app-server socket");
+    let home = PathBuf::from(std::env::var_os("FLOW_SEND_TOOL_WITNESS_HOME").expect("codex home"));
+    let state =
+        PathBuf::from(std::env::var_os("FLOW_INTERRUPTED_LAUNCH_STATE").expect("state directory"));
+    let mut fixture = NexusFixture::new();
+    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.next.socket = socket;
+    fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
+    let adapter = fixture
+        .nexus
+        .codex_endpoints
+        .adapter_for("gpt-6-luna")
+        .expect("gpt-6-luna selects the next endpoint");
+    let mut profile = fixture_profile();
+    profile.model_name = "gpt-6-luna".into();
+    profile.effort = "low".into();
+    let mut launch = fixture_composer()
+        .compose(
+            crate::composition::HarnessedProfile {
+                harness_kind: signal_flow::HarnessKind::Codex,
+                launch_profile: profile.clone(),
+            },
+            vec![signal_flow::LeaveOut::CodexAgentsMd],
+        )
+        .expect("launch composes");
+    let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, layer Secondary, kind Order and body interrupted-witness. Then reply with the exact text the tool returned, and end your turn.";
+    let digest = format!("{:x}", Sha256::digest(instruction.as_bytes()));
+    launch.first_prompt_payload.first_prompt_body = instruction.into();
+    launch.first_prompt_payload.prompt_sha256 = digest.clone();
+    launch.first_prompt_payload.prompt_part_vector = vec![signal_flow::PromptPart {
+        prompt_part_text: instruction.into(),
+        prompt_sha256: digest.clone(),
+    }];
+    launch.target_receipt_request.prompt_sha256 = digest;
+    fixture
+        .nexus
+        .store
+        .reserve_launch_attempt(&launch, signal_flow::Origin::Unbound)
+        .unwrap();
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_intent(signal_flow::NativeLaunchIntent {
+                launch_request_id: profile.launch_request_id.clone(),
+                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: signal_flow::HarnessKind::Codex,
+                model_name: profile.model_name.clone(),
+                effort: profile.effort.clone(),
+                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: launch
+                    .first_prompt_payload
+                    .prompt_part_vector
+                    .iter()
+                    .map(|part| part.prompt_sha256.clone())
+                    .collect(),
+            })
+            .unwrap()
+    );
+    fixture.asleep_at(asleep_target());
+    let nexus = &fixture.nexus;
+    let (thread, _connection) = adapter
+        .open_thread_with_first_turn(&launch, &mut |thread| {
+            assert!(
+                nexus
+                    .store
+                    .record_opened_thread(&profile.launch_request_id, thread)
+                    .unwrap()
+            );
+            Ok(())
+        })
+        .expect("the thread opens and its first turn starts");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let pending = loop {
+        assert!(Instant::now() < deadline, "no send call appeared");
+        let called = walk(&home.join("sessions"))
+            .into_iter()
+            .filter(|path| path.to_string_lossy().contains(&thread))
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .find(|rollout| rollout.contains("tools.send"));
+        if let Some(rollout) = called {
+            break rollout;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        !pending.contains("tool_call_output"),
+        "the call is unanswered"
+    );
+    std::fs::copy(
+        fixture.directory.path().join("flow.sema"),
+        state.join("flow.sema"),
+    )
+    .expect("store copied");
+    std::fs::write(state.join("thread"), &thread).unwrap();
+    eprintln!("witness thread {thread} call pending; exiting");
+    std::process::exit(0);
+}
+
+/// The second half: a Nexus started on the store the first half left
+/// reconciles the interrupted launch: the replayed call is refused, the
+/// thread archived, the launch settled refused, and nothing queued.
+#[test]
+#[ignore = "needs the FLOW_SEND_TOOL_WITNESS variables and FLOW_INTERRUPTED_LAUNCH_STATE"]
+fn witness_interrupted_launch_second_half_is_reconciled_at_restart() {
+    use crate::launching::ReconcilesInterruptedLaunches;
+    use crate::store::RecordsLaunchOutcome;
+    let client = std::env::var_os("FLOW_SEND_TOOL_WITNESS_CODEX").expect("codex client");
+    let socket = std::env::var("FLOW_SEND_TOOL_WITNESS_SOCKET").expect("app-server socket");
+    let home = PathBuf::from(std::env::var_os("FLOW_SEND_TOOL_WITNESS_HOME").expect("codex home"));
+    let state =
+        PathBuf::from(std::env::var_os("FLOW_INTERRUPTED_LAUNCH_STATE").expect("state directory"));
+    let thread = std::fs::read_to_string(state.join("thread")).expect("thread");
+    let mut fixture = NexusFixture::with_store(|store| {
+        std::fs::copy(state.join("flow.sema"), store).expect("store restored");
+    });
+    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.next.socket = socket;
+    fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
+
+    fixture.nexus.reconcile_interrupted_launches();
+
+    let outcome = fixture.nexus.store.launch_outcome("launch-42").unwrap();
+    eprintln!("witness outcome {outcome:?}");
+    assert!(matches!(
+        outcome,
+        Some(crate::store::LaunchOutcome::StartRejected(_))
+    ));
+    let target = fixture.stored_at(&asleep_target());
+    eprintln!("witness target {:?} queue {:?}", target.state, target.queue);
+    assert!(target.queue.is_empty());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let rollout = loop {
+        let found = walk(&home)
+            .into_iter()
+            .filter(|path| path.to_string_lossy().contains(&thread))
+            .collect::<Vec<_>>();
+        if let Some(path) = found
+            .iter()
+            .find(|path| path.to_string_lossy().contains("archived_sessions"))
+        {
+            break std::fs::read_to_string(path).unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the thread is not archived: {found:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let outputs = rollout
+        .lines()
+        .filter(|line| line.contains("tool_call_output") || line.contains("function_call_output"))
+        .collect::<Vec<_>>();
+    eprintln!("witness archived; tool outputs {outputs:?}");
+}
+
 /// Every file under `root`, depth first.
 fn walk(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();

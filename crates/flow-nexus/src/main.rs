@@ -5,7 +5,7 @@ use flow_nexus::{
     RunningNexus, ServesMeta, ServesOrdinary, StopsNexus, TerminationSignals,
     WatchesTerminationSignals,
     caller::{IdentifiesPeer, LocatesCallerPane},
-    launching::PromotesAmbiguousLaunches,
+    launching::{PromotesAmbiguousLaunches, ReconcilesInterruptedLaunches},
     send_tool::ServesSendTool,
     store::{ConfigurationOnlyStore, DefaultConfiguration, ReadsAnchors, StoreError},
     waking::SleepsAndWakesSeats,
@@ -149,6 +149,10 @@ fn main() -> ExitCode {
             nexus.stop(&sockets);
         }
     };
+    // A Codex launch the last Nexus left mid-way, its first turn perhaps
+    // pending on a send call, is refused and settled before anything is
+    // served.
+    nexus.reconcile_interrupted_launches();
     // Every thread borrows the Nexus inside this scope, so when a stop has
     // ended them all the Nexus drops here and its store closes cleanly.
     std::thread::scope(|scope| {

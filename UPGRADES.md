@@ -1,3 +1,19 @@
+# Flow 0.35.11
+
+No wire change and no store change.
+
+- **A Codex launch a Nexus left mid-way is reconciled at the next start.**
+  Nothing replays such a launch, and its registration waits on a seat at
+  rest that a first turn pending on a send call never reaches. Before it
+  serves anything, the Nexus takes each unsettled Codex launch whose thread
+  is recorded and whose phase is NativeLaunchIntentRecorded or NativeBound:
+  the calls the app-server replays on that thread are refused
+  (`ThreadUnowned`) and nothing is queued, the thread is accounted for and
+  archived, its pane and any flow it registered are taken down, and last the
+  launch is settled `NativeLaunchRefused.{ Spawn Unclassified }`. A crash
+  midway reconciles it again at the next start. A launch past its
+  acknowledgement, or settled, is left alone and is never a sender here.
+
 # Flow 0.35.10
 
 No wire change and no store change: signal-flow 20.0.0 and meta-signal-flow

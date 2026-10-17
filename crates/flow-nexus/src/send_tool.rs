@@ -668,6 +668,57 @@ impl ServesLaunchCalls for RunningNexus {
     }
 }
 
+/// The calls left pending on the thread of a launch an earlier Nexus never
+/// finished: refused, never queued, on a connection that resumes the thread
+/// (the app-server replays a pending call to it).
+pub(crate) trait RefusesInterruptedCalls {
+    /// How long the resumed connection is read for replayed calls.
+    const REPLAY_WINDOW: Duration = Duration::from_secs(2);
+    /// Refuses, `ThreadUnowned`, every call the app-server replays on
+    /// `thread` within the window; the number refused.
+    fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> usize;
+}
+
+impl RefusesInterruptedCalls for RunningNexus {
+    fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> usize {
+        let (signals, inbox) = mpsc::channel();
+        let mut subscription = match adapter.subscribe_thread(thread, 1, &signals, &inbox) {
+            Ok(subscription) => subscription,
+            Err(SubscriptionEnd::Failed(error)) => {
+                eprintln!("flow-nexus: interrupted launch thread {thread} not resumed: {error}");
+                return 0;
+            }
+            Err(SubscriptionEnd::Stopped) => return 0,
+        };
+        let refusal = Self::refused(SendRefusal::ThreadUnowned).tool_response();
+        let mut refused = 0;
+        let mut answer = |subscription: &mut ThreadSubscription, request: serde_json::Value| {
+            if request.get("method").and_then(serde_json::Value::as_str) != Some("item/tool/call") {
+                return true;
+            }
+            let Some(id) = request.get("id").cloned() else {
+                return true;
+            };
+            refused += 1;
+            subscription.answer(id, refusal.clone()).is_ok()
+        };
+        let early = std::mem::take(&mut subscription.early);
+        let mut open = early
+            .into_iter()
+            .all(|request| answer(&mut subscription, request));
+        let deadline = Instant::now() + Self::REPLAY_WINDOW;
+        while open {
+            match subscription.next_event(&inbox, Some(deadline)) {
+                Ok(ProxyEvent::Reply(Ok(message))) => open = answer(&mut subscription, message),
+                Ok(ProxyEvent::Upgraded | ProxyEvent::Ping(_)) => {}
+                _ => open = false,
+            }
+        }
+        subscription.close();
+        refused
+    }
+}
+
 /// The responders the Nexus keeps, one per live Codex thread it holds, each
 /// on a thread of its own with the sender that stops it.
 #[derive(Default)]

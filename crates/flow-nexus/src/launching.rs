@@ -671,6 +671,86 @@ impl LaunchesFlows for RunningNexus {
     }
 }
 
+/// A Codex launch an earlier Nexus left between opening its thread and
+/// acknowledging its seat is never finished: nothing replays it, and its
+/// registration waits on a seat at rest that a first turn pending on a send
+/// call never reaches. At the Nexus's start, before any socket or responder
+/// is served, each such launch (unsettled, Codex, its thread recorded, its
+/// phase NativeLaunchIntentRecorded or NativeBound) is reconciled: the calls
+/// the app-server replays on its thread are refused, `ThreadUnowned`, and
+/// nothing is queued; the thread is accounted for and archived; its pane and
+/// any flow it registered are taken down; and last the launch is settled
+/// refused, `NativeLaunchRefused.{ Spawn Unclassified }`, so a crash midway
+/// reconciles it again at the next start. A launch past its acknowledgement
+/// holds its Address and is served by the Nexus's responders; a settled one
+/// is left alone. No launch is granted send authority here.
+pub trait ReconcilesInterruptedLaunches {
+    fn reconcile_interrupted_launches(&self);
+}
+
+impl ReconcilesInterruptedLaunches for RunningNexus {
+    fn reconcile_interrupted_launches(&self) {
+        use crate::codex::{AccountsOpenedThread, SelectsCodexEndpoint};
+        use crate::send_tool::RefusesInterruptedCalls;
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let opened = match self.store.opened_threads() {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("flow-nexus: opened launch threads unreadable: {error}");
+                return;
+            }
+        };
+        for opened in opened {
+            let launch_request_id = opened.launch_request_id;
+            let thread = opened.native_session_id;
+            let Ok(Some(attempt)) = self.store.launch_attempt(&launch_request_id) else {
+                continue;
+            };
+            let interrupted = attempt
+                .native_launch_intent_option
+                .as_ref()
+                .is_some_and(|intent| intent.harness_kind == HarnessKind::Codex)
+                && matches!(
+                    attempt.launch_attempt_phase,
+                    LaunchAttemptPhase::NativeLaunchIntentRecorded
+                        | LaunchAttemptPhase::NativeBound
+                )
+                && self
+                    .store
+                    .launch_attempt_unsettled(&attempt)
+                    .unwrap_or(false);
+            if !interrupted {
+                continue;
+            }
+            let account = match self
+                .codex_endpoints
+                .adapter_for(&attempt.launch_profile.model_name)
+            {
+                Ok(adapter) => {
+                    let refused = self.refuse_interrupted_calls(&thread, &adapter);
+                    let account = adapter.account_opened_thread(&thread);
+                    format!("{refused} pending call(s) refused, {account:?}")
+                }
+                Err(error) => format!("no Codex endpoint: {error}"),
+            };
+            eprintln!(
+                "flow-nexus: launch {launch_request_id} interrupted after opening thread {thread}: {account}"
+            );
+            self.abandon_refused_launch(&launch_request_id, &HarnessKind::Codex, None);
+            self.settle(
+                &launch_request_id,
+                Response::StartRejected(StartRejection::NativeLaunchRefused(NativeLaunchRefusal {
+                    native_launch_stage: NativeLaunchStage::Spawn,
+                    native_launch_failure: NativeLaunchFailure::Unclassified,
+                })),
+            );
+        }
+    }
+}
+
 /// What a launch refused after Reserve leaves in Herdr is taken down.
 pub(crate) trait AbandonsRefusedLaunch {
     /// Closes the pane a refused launch created. A flow it registered is

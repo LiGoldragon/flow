@@ -263,6 +263,15 @@ answers each call as the gate's holder. The connection is closed when the launch
 whatever it came to; a later call is the Nexus's responders'. Targets the
 launch's calls queued work for are woken once the gate is given back.
 
+A Codex launch a Nexus left between opening its thread and acknowledging its
+seat is never finished, and its registration would wait on a seat that a
+pending call keeps from resting. Before serving anything, the Nexus takes
+each unsettled Codex launch whose thread is recorded and whose phase is
+NativeLaunchIntentRecorded or NativeBound: it resumes the thread, refuses each
+replayed call `ThreadUnowned` without queuing it, archives the thread, takes
+down its pane and any flow it registered, and last settles the launch
+`NativeLaunchRefused.{ Spawn Unclassified }`.
+
 A call is handled under the dispatch gate. Its sender is read from Flow's
 records each time it is handled, a replayed call included: the one live flow
 Flow holds on the calling thread, and the metaflow Awake as it; failing that,

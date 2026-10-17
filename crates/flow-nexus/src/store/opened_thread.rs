@@ -62,6 +62,8 @@ pub(crate) trait RecordsOpenedThreads {
     fn opened_thread(&self, launch_request_id: &str) -> Result<Option<String>, StoreError>;
     /// The launch request that opened `native_session_id`, when one did.
     fn thread_launch(&self, native_session_id: &str) -> Result<Option<String>, StoreError>;
+    /// Every thread a launch opened, with its launch request.
+    fn opened_threads(&self) -> Result<Vec<OpenedLaunchThread>, StoreError>;
 }
 
 impl RecordsOpenedThreads for FlowStore {
@@ -99,6 +101,14 @@ impl RecordsOpenedThreads for FlowStore {
             [opened] => Ok(Some(opened.native_session_id.clone())),
             _ => Err(StoreError::StateInvariant),
         }
+    }
+
+    fn opened_threads(&self) -> Result<Vec<OpenedLaunchThread>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::all(self.opened_threads))?
+            .records()
+            .to_vec())
     }
 
     fn thread_launch(&self, native_session_id: &str) -> Result<Option<String>, StoreError> {

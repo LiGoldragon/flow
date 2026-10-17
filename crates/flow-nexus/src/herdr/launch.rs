@@ -141,6 +141,40 @@ impl From<NativeTargetRefusal> for String {
     }
 }
 
+/// The stage at which a launch registration was refused. Each variant is a
+/// fixed diagnostic naming the stage; the one adapter text it carries is the
+/// transcript's, which holds no secret.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RegistrationRefusal {
+    #[error("the Herdr pane binding does not belong to this launch request")]
+    PaneBindingForeign,
+    #[error("the registration acknowledgement does not match the native binding")]
+    AcknowledgementMismatch,
+    #[error("the composed first prompt is not canonical")]
+    PromptNotCanonical,
+    #[error("the native target is not the thread bound: {0}")]
+    NativeTarget(#[from] NativeTargetRefusal),
+    #[error("the native transcript boundary could not be captured: {0}")]
+    TranscriptBoundary(String),
+    #[error("the native transcript does not begin by naming the opened thread")]
+    ThreadNotNamed,
+}
+
+/// Whether a Codex rollout row is the session meta of exactly this thread.
+pub(crate) trait NamesCodexThread {
+    fn names_thread(&self, thread: &str) -> bool;
+}
+
+impl NamesCodexThread for serde_json::Value {
+    fn names_thread(&self, thread: &str) -> bool {
+        self.get("type").and_then(serde_json::Value::as_str) == Some("session_meta")
+            && self
+                .pointer("/payload/id")
+                .and_then(serde_json::Value::as_str)
+                == Some(thread)
+    }
+}
+
 /// Why a launched Flow was not given its title. Each variant is a fixed
 /// diagnostic; adapter text stays in `HerdrUnreadable`'s display and is
 /// never logged.
@@ -182,7 +216,7 @@ pub trait AcceptsLaunchRegistration {
         launch: &ComposedLaunch,
         binding: &NativeLaunchBinding,
         acknowledgement: &RegistrationAcknowledgement,
-    ) -> Result<PromptDeliveryIntent, String>;
+    ) -> Result<PromptDeliveryIntent, RegistrationRefusal>;
 }
 
 /// Types the part of the first USER message the durable intent last
@@ -619,13 +653,20 @@ impl ClaimsNativeIdentity for HerdrCli {
         {
             return Err(NativeTargetRefusal::PaneMismatch);
         }
-        let session = agent
-            .get("agent_session")
-            .ok_or(NativeTargetRefusal::NoNativeSession)?;
         let expected_harness = harness.expected_harness();
-        if agent.get("agent").and_then(serde_json::Value::as_str) != Some(expected_harness)
-            || session.get("source").and_then(serde_json::Value::as_str)
-                != Some(format!("herdr:{expected_harness}").as_str())
+        if agent.get("agent").and_then(serde_json::Value::as_str) != Some(expected_harness) {
+            return Err(NativeTargetRefusal::IdentityInexact);
+        }
+        // A remote-resumed Codex TUI reports no agent session: its target is
+        // the thread Flow opened plus the recognized pane. Any session Herdr
+        // does report must be exactly that thread; Claude must report it.
+        let session = match (agent.get("agent_session"), harness) {
+            (Some(session), _) => session,
+            (None, HarnessKind::Codex) => return Ok(agent.clone()),
+            (None, HarnessKind::Claude) => return Err(NativeTargetRefusal::NoNativeSession),
+        };
+        if session.get("source").and_then(serde_json::Value::as_str)
+            != Some(format!("herdr:{expected_harness}").as_str())
             || session.get("agent").and_then(serde_json::Value::as_str) != Some(expected_harness)
             || session.get("kind").and_then(serde_json::Value::as_str) != Some("id")
             || session.get("value").and_then(serde_json::Value::as_str) != Some(native_session_id)
@@ -1097,9 +1138,11 @@ pub(crate) trait ReadsLaunchText {
     /// store the exact text inside its native pasted-content wrapper, which
     /// is normalized separately.
     fn text_sha256(&self) -> String;
-    /// Returns the exact text inside Claude Code's native paste wrapper.
-    /// Attributes are deliberately opaque but cannot contain tag or line
-    /// delimiters; the wrapper itself is not part of the persisted digest.
+    /// Returns the exact text inside Claude Code's native paste element, in
+    /// the one form Claude Code 2.1.294 records: two newlines, the opening
+    /// tag with one `id` attribute, a newline, the text, a newline, the
+    /// closing tag repeating the same `id`, and a final newline. The text is
+    /// recorded unescaped. Any other form is not a paste element.
     fn claude_pasted_content(&self) -> Option<&str>;
 }
 
@@ -1120,17 +1163,14 @@ impl ReadsLaunchText for str {
     }
 
     fn claude_pasted_content(&self) -> Option<&str> {
-        let text = self;
-        let rest = text.strip_prefix("<pasted_content")?;
-        let first = rest.chars().next()?;
-        if first != '>' && !first.is_whitespace() {
+        let rest = self.strip_prefix("\n\n<pasted_content id=\"")?;
+        let (identifier, rest) = rest.split_once("\">\n")?;
+        if identifier.is_empty()
+            || identifier.contains(|c: char| c == '"' || c == '<' || c == '>' || c.is_whitespace())
+        {
             return None;
         }
-        let (attributes, body) = rest.split_once(">\n")?;
-        if attributes.contains(['<', '>', '\r', '\n']) {
-            return None;
-        }
-        body.strip_suffix("\n</pasted_content>")
+        rest.strip_suffix(&format!("\n</pasted_content id=\"{identifier}\">\n"))
     }
 }
 
@@ -2003,29 +2043,79 @@ impl AcceptsLaunchRegistration for HerdrCli {
         launch: &ComposedLaunch,
         binding: &NativeLaunchBinding,
         acknowledgement: &RegistrationAcknowledgement,
-    ) -> Result<PromptDeliveryIntent, String> {
-        launch.binding_matches_launch(&binding.herdr_pane_binding)?;
+    ) -> Result<PromptDeliveryIntent, RegistrationRefusal> {
+        launch
+            .binding_matches_launch(&binding.herdr_pane_binding)
+            .map_err(|_| RegistrationRefusal::PaneBindingForeign)?;
         if binding.harness_kind != launch.harness_kind
             || acknowledgement.launch_request_id != binding.launch_request_id
             || acknowledgement.flow_id != binding.flow_id
             || acknowledgement.native_session_id != binding.native_session_id
             || acknowledgement.herdr_pane_binding != binding.herdr_pane_binding
         {
-            return Err("registration acknowledgement does not match native binding".into());
+            return Err(RegistrationRefusal::AcknowledgementMismatch);
         }
         if !launch.has_canonical_first_prompt() {
-            return Err("composed first prompt is not canonical".into());
+            return Err(RegistrationRefusal::PromptNotCanonical);
         }
+        // The target is the thread Flow bound and the recognized pane; the
+        // stage is named before the transcript is read.
+        self.verify_native_target(
+            &binding.herdr_pane_binding,
+            &binding.native_session_id,
+            &binding.harness_kind,
+        )?;
         // A Codex thread already holds the first turn Flow gave it before
         // its TUI attached, so its receipt is read from the thread's start.
         let native_transcript_boundary = match self
-            .capture_transcript_boundary(binding, &launch.launch_profile.model_name)?
+            .capture_transcript_boundary(binding, &launch.launch_profile.model_name)
+            .map_err(RegistrationRefusal::TranscriptBoundary)?
         {
             NativeTranscriptBoundary::Existing(_) if binding.harness_kind == HarnessKind::Codex => {
-                self.capture_transcript_start_boundary(binding, &launch.launch_profile.model_name)?
+                self.capture_transcript_start_boundary(binding, &launch.launch_profile.model_name)
+                    .map_err(RegistrationRefusal::TranscriptBoundary)?
             }
             boundary => boundary,
         };
+        // The transcript is the authority for the thread when Herdr reports
+        // none: its first record is the session meta naming exactly the
+        // thread Flow opened. The first user turn's part hashes are read
+        // against the same transcript by the receipt.
+        if binding.harness_kind == HarnessKind::Codex
+            && matches!(
+                native_transcript_boundary,
+                NativeTranscriptBoundary::Existing(_)
+            )
+        {
+            let (root, _, found) = self
+                .transcript_candidates(
+                    &binding.herdr_pane_binding,
+                    &binding.native_session_id,
+                    &binding.harness_kind,
+                    Some(&launch.launch_profile.model_name),
+                )
+                .map_err(RegistrationRefusal::TranscriptBoundary)?;
+            let transcript = root
+                .one_resolved_transcript(found)
+                .map_err(RegistrationRefusal::TranscriptBoundary)?;
+            let mut first = String::new();
+            BufReader::new(File::open(transcript).map_err(|error| {
+                RegistrationRefusal::TranscriptBoundary(format!(
+                    "native transcript is unreadable: {error}"
+                ))
+            })?)
+            .read_line(&mut first)
+            .map_err(|error| {
+                RegistrationRefusal::TranscriptBoundary(format!(
+                    "native transcript read failed: {error}"
+                ))
+            })?;
+            if !serde_json::from_str::<serde_json::Value>(&first)
+                .is_ok_and(|row| row.names_thread(&binding.native_session_id))
+            {
+                return Err(RegistrationRefusal::ThreadNotNamed);
+            }
+        }
         Ok(PromptDeliveryIntent {
             launch_request_id: binding.launch_request_id.clone(),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
@@ -2323,6 +2413,13 @@ impl ObservesNativeTargetReceipt for HerdrCli {
         };
         let mut observed = None;
         let mut reader = BufReader::new(input);
+        // A Codex transcript is read from its start: its first record must
+        // name exactly the thread bound, before any user turn counts.
+        let mut thread_unnamed = durable_intent.harness_kind == HarnessKind::Codex
+            && match &durable_intent.native_transcript_boundary {
+                NativeTranscriptBoundary::Absent(_) => true,
+                NativeTranscriptBoundary::Existing(cursor) => cursor.transcript_byte_offset == 0,
+            };
         loop {
             let mut record = Vec::new();
             let read = reader
@@ -2334,6 +2431,14 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             let Ok(row) = serde_json::from_slice::<serde_json::Value>(&record) else {
                 continue;
             };
+            if thread_unnamed {
+                if !row.names_thread(&durable_intent.native_session_id) {
+                    return Err(
+                        "native Codex transcript does not begin by naming the bound thread".into(),
+                    );
+                }
+                thread_unnamed = false;
+            }
             if let Some(turn) = reading.read_record(&row, durable_intent)? {
                 observed = Some((turn, format!("{:x}", Sha256::digest(&record))));
                 break;
@@ -2396,8 +2501,10 @@ pub(crate) mod tests {
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::HerdrCli;
     use crate::herdr::launch::ChecksComposedLaunch;
+    use crate::herdr::launch::ClaimsNativeIdentity;
     use crate::herdr::launch::PreparesClaudeEnvironment;
     use crate::herdr::launch::PreparesClaudePane;
+    use crate::herdr::launch::ReadsLaunchText;
     use crate::herdr::launch::TitlesClaudeSession;
     use crate::herdr::launch::{ChecksTypedCommand, HoldsSystemPrompt, SpawnFailure};
     use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
@@ -2601,6 +2708,15 @@ printf '%s\n' 123456
         pane: signal_flow::HerdrPaneBinding,
         native_session: &str,
     ) -> PromptDeliveryIntent {
+        registration_of(adapter, launch, pane, native_session).expect("registered prompt intent")
+    }
+
+    fn registration_of(
+        adapter: &HerdrCli,
+        launch: &ComposedLaunch,
+        pane: signal_flow::HerdrPaneBinding,
+        native_session: &str,
+    ) -> Result<PromptDeliveryIntent, super::RegistrationRefusal> {
         let binding = NativeLaunchBinding {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
             flow_id: "123456".into(),
@@ -2614,9 +2730,7 @@ printf '%s\n' 123456
             native_session_id: binding.native_session_id.clone(),
             herdr_pane_binding: pane,
         };
-        adapter
-            .accept_registration(launch, &binding, &acknowledgement)
-            .expect("registered prompt intent")
+        adapter.accept_registration(launch, &binding, &acknowledgement)
     }
 
     /// The `agent.prompt` request lines the fixture Herdr socket received.
@@ -3496,7 +3610,8 @@ printf '%s\n' 123456
                 .join(format!("rollout-{native_session}.jsonl"));
             let context = serde_json::json!({"type":"turn_context","payload":{
                 "turn_id":"turn-first","model":"model-current","effort":"high"}});
-            fs::write(&transcript, format!("{block}\n{context}\n")).expect("first request");
+            let meta = serde_json::json!({"type":"session_meta","payload":{"id":native_session}});
+            fs::write(&transcript, format!("{meta}\n{block}\n{context}\n")).expect("first request");
             // Left in, the block is the launch's own choice.
             launch.leave_outs = vec![kept];
             let intent = registered_intent(&adapter, &launch, pane.clone(), native_session);
@@ -3603,6 +3718,123 @@ printf '%s\n' 123456
         );
     }
 
+    /// The Codex target is the thread Flow opened and the recognized pane:
+    /// registration and the receipt read need no Herdr session.
+    #[test]
+    fn a_codex_registration_and_receipt_need_no_herdr_session() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Codex);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "codex",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        fs::write(root.path().join("never-agent-session"), "absent").unwrap();
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let transcript = root
+            .path()
+            .join("native-transcripts/codex")
+            .join(format!("rollout-{native_session}.jsonl"));
+        fs::write(
+            &transcript,
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{native_session}\"}}}}\n"),
+        )
+        .unwrap();
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        assert!(matches!(
+            adapter.observe_native_target_receipt(&intent).unwrap(),
+            StartupProgress::Waiting(_)
+        ));
+    }
+
+    /// A session Herdr does report must be the thread Flow opened; Claude
+    /// must report one.
+    #[test]
+    fn a_reported_session_must_be_the_opened_thread() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let other = "87654321-4321-4cba-8fed-cba987654321";
+        let launch = launch(HarnessKind::Codex);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "codex",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        assert!(
+            adapter
+                .verify_native_target(&pane, native_session, &HarnessKind::Codex)
+                .is_ok()
+        );
+        assert_eq!(
+            adapter
+                .verify_native_target(&pane, other, &HarnessKind::Codex)
+                .unwrap_err(),
+            NativeTargetRefusal::IdentityInexact
+        );
+        fs::write(root.path().join("never-agent-session"), "absent").unwrap();
+        assert!(
+            adapter
+                .verify_native_target(&pane, other, &HarnessKind::Codex)
+                .is_ok()
+        );
+    }
+
+    /// The transcript is the authority for the Codex thread when Herdr
+    /// reports none: its first record names exactly the thread Flow opened.
+    #[test]
+    fn a_codex_transcript_must_name_the_opened_thread() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Codex);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "codex",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        fs::write(root.path().join("never-agent-session"), "absent").unwrap();
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let transcript = root
+            .path()
+            .join("native-transcripts/codex")
+            .join(format!("rollout-{native_session}.jsonl"));
+        // A rollout whose session meta names another thread is refused at
+        // registration, at the stage that names it.
+        fs::write(
+            &transcript,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"another-thread\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            registration_of(&adapter, &launch, pane.clone(), native_session).unwrap_err(),
+            super::RegistrationRefusal::ThreadNotNamed
+        );
+        // One that names no thread first is refused as well.
+        fs::write(&transcript, "{\"type\":\"turn_context\"}\n").unwrap();
+        assert_eq!(
+            registration_of(&adapter, &launch, pane.clone(), native_session).unwrap_err(),
+            super::RegistrationRefusal::ThreadNotNamed
+        );
+        // A transcript that appears after registration is read the same way.
+        fs::remove_file(&transcript).unwrap();
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        fs::write(
+            &transcript,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"another-thread\"}}\n",
+        )
+        .unwrap();
+        assert!(
+            adapter
+                .observe_native_target_receipt(&intent)
+                .unwrap_err()
+                .contains("naming the bound thread")
+        );
+    }
+
     #[test]
     fn codex_receipt_rejects_a_wrong_first_text() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
@@ -3619,7 +3851,11 @@ printf '%s\n' 123456
             .path()
             .join("native-transcripts/codex")
             .join(format!("rollout-{native_session}.jsonl"));
-        fs::write(&transcript, "{\"type\":\"session_meta\"}\n").expect("initial transcript");
+        fs::write(
+            &transcript,
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{native_session}\"}}}}\n"),
+        )
+        .expect("initial transcript");
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         let rows = [
             serde_json::json!({"type":"turn_context","payload":{
@@ -3847,8 +4083,8 @@ printf '%s\n' 123456
         );
     }
 
-    /// Claude Code keeps a long typed message inside its pasted-content
-    /// wrapper; the wrapper is taken off before the part's hash is read.
+    /// Claude Code 2.1.294 keeps a long typed message inside its native
+    /// paste element; the element is taken off before the part's hash is read.
     #[test]
     fn a_pasted_part_is_read_through_its_wrapper() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
@@ -3869,7 +4105,7 @@ printf '%s\n' 123456
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         let pasted = serde_json::json!({"type":"user","sessionId":native_session,
             "message":{"role":"user","content":format!(
-                "<pasted_content id=\"1\">\n{}\n</pasted_content>",
+                "\n\n<pasted_content id=\"04ee\">\n{}\n</pasted_content id=\"04ee\">\n",
                 launch.first_prompt_payload.first_prompt_body)}});
         let answer = serde_json::json!({"type":"assistant","sessionId":native_session,
             "uuid":"turn-pasted","effort":"high","message":{"model":"model-current",
@@ -3886,6 +4122,69 @@ printf '%s\n' 123456
         };
         assert_eq!(receipt.native_turn_id, "turn-pasted");
         assert_eq!(receipt.prompt_sha256_vector, [PROMPT_HASH]);
+    }
+
+    /// The one paste element Claude Code 2.1.294 records is read; every
+    /// other form is the text itself, which no part's hash then names.
+    #[test]
+    fn only_the_exact_native_paste_element_is_unwrapped() {
+        let part = "Address.{ A }\nOrder: STARTUP_READY";
+        let element = |opening: &str, closing: &str| {
+            format!(
+                "\n\n<pasted_content id=\"{opening}\">\n{part}\n</pasted_content id=\"{closing}\">\n"
+            )
+        };
+        assert_eq!(element("04ee", "04ee").claude_pasted_content(), Some(part));
+        let refused = [
+            format!("x{}", element("04ee", "04ee")),
+            format!("{}x", element("04ee", "04ee")),
+            format!("{} ", element("04ee", "04ee")),
+            element("04ee", "04ef"),
+            element("", ""),
+            format!("{}{}", element("04ee", "04ee"), element("05ff", "05ff")),
+            format!("<pasted_content id=\"04ee\">\n{part}\n</pasted_content>"),
+            format!("\n\n<pasted_content id=\"04ee\">\n{part}\n</pasted_content>\n"),
+            format!("\n\n<pasted_content>\n{part}\n</pasted_content>\n"),
+            format!(
+                "\n\n<pasted_content id=\"04ee\" x=\"1\">\n{part}\n</pasted_content id=\"04ee\" x=\"1\">\n"
+            ),
+        ];
+        for text in &refused {
+            // Two elements unwrap to a text that is not the part.
+            assert_ne!(text.claude_pasted_content(), Some(part), "{text:?}");
+        }
+        assert_eq!(part.claude_pasted_content(), None);
+    }
+
+    /// A paste element holding other bytes than the part is not the part.
+    #[test]
+    fn a_pasted_element_with_other_content_is_not_the_part() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let transcript = root
+            .path()
+            .join("native-transcripts/claude")
+            .join(format!("{native_session}.jsonl"));
+        fs::write(&transcript, "{\"type\":\"session_meta\"}\n").unwrap();
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        let pasted = serde_json::json!({"type":"user","sessionId":native_session,
+            "message":{"role":"user","content":format!(
+                "\n\n<pasted_content id=\"04ee\">\n{} \n</pasted_content id=\"04ee\">\n",
+                launch.first_prompt_payload.first_prompt_body)}});
+        let mut append = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        writeln!(append, "{pasted}").unwrap();
+        assert!(adapter.observe_native_target_receipt(&intent).is_err());
     }
 
     /// A message sent in two parts: the first part answered is not the
@@ -3992,7 +4291,11 @@ printf '%s\n' 123456
             .path()
             .join("native-transcripts/codex")
             .join(format!("rollout-{native_session}.jsonl"));
-        fs::write(&transcript, "{\"type\":\"session_meta\"}\n").unwrap();
+        fs::write(
+            &transcript,
+            format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{native_session}\"}}}}\n"),
+        )
+        .unwrap();
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         let parts = &launch.first_prompt_payload.prompt_part_vector;
         let turn = |turn: &str, text: &str| {

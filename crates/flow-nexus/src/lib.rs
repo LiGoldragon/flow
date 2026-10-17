@@ -2568,6 +2568,7 @@ mod tests {
         let transcript = transcript_root.join(format!("rollout-{native_session_id}.jsonl"));
         let mut output = fs::File::create(transcript).unwrap();
         for row in [
+            serde_json::json!({"type":"session_meta","payload":{"id":native_session_id}}),
             serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-delayed"}}),
             serde_json::json!({"type":"event_msg","payload":{"thread_id":native_session_id,"turn_id":"turn-delayed","item":{"type":"UserMessage","content":[{"type":"text","text":composed.first_prompt_payload.first_prompt_body}]}}}),
             serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Beginning."}]}}),
@@ -3343,6 +3344,7 @@ mod tests {
         fn write_receipt(&self) {
             let mut rows = String::new();
             for row in [
+                serde_json::json!({"type":"session_meta","payload":{"id":STAGED_SESSION}}),
                 serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-staged"}}),
                 serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":self.composed.first_prompt_payload.first_prompt_body}]}}}),
                 // The flow's first answer: the receipt.

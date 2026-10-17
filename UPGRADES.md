@@ -1,3 +1,31 @@
+# Flow 0.35.5
+
+No protocol change; no wire, contract or store change.
+
+- **A Claude launch receipt reads the native paste element.** Claude Code
+  2.1.294 records a long submitted message as one user turn of exactly
+  `"\n\n<pasted_content id=\"ID\">\n" + part + "\n</pasted_content id=\"ID\">\n"`,
+  the part unescaped and the closing tag repeating the opening `id`. A
+  recorded user turn matches a part when it is exactly the part's bytes, or
+  exactly that element holding exactly the part's bytes. Nothing is trimmed;
+  any other wrapper, extra text, a differing closing `id`, a second element or
+  other content does not match. The 0.35.4 rule expected a different wrapper
+  form and refused the real one (`StartRejected.NativeLaunchRefused`).
+- **A Codex registration names its stage and needs no Herdr session.** A
+  remote-resumed Codex TUI reports no `agent_session`. The Codex target is
+  the thread Flow opened plus the recognized pane (agent, workspace, pane and
+  terminal exact); a session Herdr does report must equal that thread
+  (`IdentityInexact` otherwise); Claude must still report one. The transcript
+  is the authority for the thread: the rollout's first record must be the
+  `session_meta` whose `payload.id` is the opened thread, at registration and
+  again in the receipt read, and the receipt still matches the first user
+  turn's part hashes in that same transcript. `runs_own_session` accepts a
+  Codex pane reporting none. `accept_registration` refuses with a typed
+  `RegistrationRefusal` (pane binding, acknowledgement, prompt, native target,
+  transcript boundary, thread not named) that Nexus logs on stderr; the wire
+  answer is still `StartRejected.RegistrationRefused` because signal-flow
+  18.0.0 carries no reason there.
+
 # Flow 0.35.4
 
 Wire change on the meta socket only: meta-signal-flow 23.0.0 (dacb3fdd)

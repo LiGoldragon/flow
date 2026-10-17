@@ -340,7 +340,11 @@ impl LaunchesFlows for RunningNexus {
                 .accept_registration(&launch, &binding, &acknowledgement)
             {
                 Ok(intent) => intent,
-                Err(_) => {
+                Err(refusal) => {
+                    eprintln!(
+                        "flow-nexus: registration of flow {} refused at {refusal:?}: {refusal}",
+                        binding.flow_id
+                    );
                     return Response::StartRejected(StartRejection::RegistrationRefused);
                 }
             };

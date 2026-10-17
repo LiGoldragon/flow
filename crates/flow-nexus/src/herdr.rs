@@ -499,10 +499,15 @@ impl ReadsHerdrPanes for HerdrCli {
             .is_some_and(|agents| {
                 agents.iter().any(|agent| {
                     agent.matches_binding(route, &node.harness_kind)
-                        && agent
+                        && match agent
                             .pointer("/agent_session/value")
                             .and_then(serde_json::Value::as_str)
-                            == Some(node.session_id.as_str())
+                        {
+                            Some(session) => session == node.session_id,
+                            // A remote-resumed Codex TUI reports none: its
+                            // claimed thread and recognized pane are the proof.
+                            None => node.harness_kind == HarnessKind::Codex,
+                        }
                 })
             })
     }

@@ -450,6 +450,43 @@ fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
     );
 }
 
+/// A launch names its model exactly: the transcript's model is compared with
+/// it string for string. A Claude alias, which Claude Code resolves without
+/// telling, and a name carrying a context suffix are not composed, so no
+/// pane is opened and no prompt is typed for them; the full name the
+/// transcript records is composed; a model a Codex endpoint lists is exact
+/// by that list.
+#[test]
+fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
+    use crate::generated::starter::DerivesHarness;
+    let fixture = ConfiguredStore::new();
+    let mut nexus = fixture.open();
+    nexus.composer = crate::composition::tests::fixture_composer();
+    let mut profile = crate::composition::tests::fixture_profile();
+    profile.address = quaternary_field();
+    for inexact in [
+        "haiku",
+        "claude-opus-5-5[1m]",
+        "Claude-Haiku-5-5",
+        "claude-",
+    ] {
+        profile.model_name = inexact.into();
+        assert_eq!(
+            nexus.perform(Operation::Compose(profile.clone())),
+            Outcome::Failed(crate::generated::operation::Failed_Data::CompositionRefused),
+            "{inexact}"
+        );
+    }
+    profile.model_name = "claude-haiku-5-5".into();
+    assert!(matches!(
+        nexus.perform(Operation::Compose(profile.clone())),
+        Outcome::Composed(_)
+    ));
+    assert_eq!(nexus.codex_endpoints.harness_for(SOL), HarnessKind::Codex);
+    assert!(nexus.codex_endpoints.launches_exactly(SOL));
+    assert!(!nexus.codex_endpoints.launches_exactly("gpt-6-unlisted"));
+}
+
 #[test]
 fn a_fresh_store_takes_its_first_nexus_declaration() {
     let directory = tempfile::tempdir().expect("temporary state");

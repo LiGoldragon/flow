@@ -407,4 +407,5 @@ pub trait DerivesOrigin {
 #[rustfmt::skip]
 pub trait DerivesHarness {
     fn harness_for<N: Textual>(&self, input: N) -> signal_flow::HarnessKind;
+    fn launches_exactly<N: Textual>(&self, input: N) -> bool;
 }

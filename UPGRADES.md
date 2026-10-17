@@ -1,3 +1,23 @@
+# Flow 0.35.12
+
+No wire change and no store change: signal-flow 20.0.0 and meta-signal-flow
+24.0.1 stay pinned; no table or family changes. Version 0.35.11 is the
+separate restart-reconciliation branch.
+
+- **A launch names an exact native model.** A launch's receipt compares the
+  model the native transcript records with the model the launch named,
+  string for string, and Claude Code resolves an alias (`haiku`) to a full
+  name (`claude-haiku-5-5`) without exposing the resolution. A Start,
+  Replace or fresh wake whose model is not exact on its harness is now
+  refused at composition, `StartRejected.CompositionRefused`, before any pane
+  is opened or prompt typed: a Codex model is exact when a configured
+  endpoint lists it; a Claude model is exact when it is `claude-` then
+  lowercase letters, digits and hyphens. A fresh wake from such a layer Model
+  leaves the metaflow Asleep with its work queued.
+- **Deploying.** Redeclare every Claude layer Model by its full name, for
+  example `Configure.Models.[ { Quaternary claude-haiku-5-5 } ]`. The
+  effort comparison is unchanged.
+
 # Flow 0.35.10
 
 No wire change and no store change: signal-flow 20.0.0 and meta-signal-flow

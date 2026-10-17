@@ -935,6 +935,17 @@ impl OpensCodexThread for CodexAdapter {
             })?
             .to_owned();
         Self::read_back_thread(launch, &thread, "thread/start", &started)?;
+        connection.subscription.thread = Some(thread.clone());
+        let ThreadConnection {
+            subscription,
+            inbox,
+            ..
+        } = &mut connection;
+        let mut ask = |id: u64, method: &str, params: serde_json::Value| {
+            subscription
+                .exchange(inbox, id, method, params)
+                .map_err(<CodexAdapterUnavailable as EndsSubscription>::ended)
+        };
         if let Err(refusal) = before_first_turn(&thread) {
             let _ = ask(
                 3,
@@ -1171,12 +1182,16 @@ pub(crate) enum SubscriptionEnd {
 /// experimental API once the app-server was shown to gate the send tool on
 /// it, then `thread/resume`d, which subscribes it to the thread's server
 /// requests, a call left pending replayed to it. It starts no turn and
-/// carries no model content. `early` holds the server requests that arrived
-/// before the resume was answered.
+/// carries no model content. `early` holds the server requests and
+/// notifications that arrived while a request of its own was answered.
+/// `thread` is the one thread it is subscribed to, once known; `resumed`
+/// is the thread status the app-server answered its `thread/resume` with.
 pub(crate) struct ThreadSubscription {
     pub(crate) proxy: ProxyChild,
     pub(crate) generation: u64,
     pub(crate) early: Vec<serde_json::Value>,
+    pub(crate) thread: Option<String>,
+    pub(crate) resumed: Option<serde_json::Value>,
     timeout: Duration,
 }
 
@@ -1206,8 +1221,8 @@ pub(crate) trait ExchangesOnSubscription {
         inbox: &Receiver<ResponderSignal>,
         deadline: Option<Instant>,
     ) -> Result<ProxyEvent, SubscriptionEnd>;
-    /// One request and its answer; a server request met meanwhile is kept
-    /// in `early`, a notification dropped.
+    /// One request and its answer; a server request or a notification met
+    /// meanwhile is kept in `early`, in the order it came.
     fn exchange(
         &mut self,
         inbox: &Receiver<ResponderSignal>,
@@ -1280,9 +1295,7 @@ impl ExchangesOnSubscription for ThreadSubscription {
                 ProxyEvent::Upgraded | ProxyEvent::Ping(_) => continue,
             };
             if message.get("method").is_some() {
-                if message.get("id").is_some() {
-                    self.early.push(message);
-                }
+                self.early.push(message);
                 continue;
             }
             if message.get("id") != Some(&serde_json::json!(id)) {
@@ -1333,6 +1346,8 @@ impl SubscribesThread for CodexAdapter {
             proxy,
             generation,
             early: Vec::new(),
+            thread: None,
+            resumed: None,
             timeout: self.timeout,
         };
         let connected = (|| {
@@ -1384,7 +1399,11 @@ impl SubscribesThread for CodexAdapter {
             "thread/resume",
             serde_json::json!({ "threadId": thread, "excludeTurns": true }),
         ) {
-            Ok(_) => Ok(subscription),
+            Ok(response) => {
+                subscription.thread = Some(thread.to_owned());
+                subscription.resumed = response.pointer("/thread/status").cloned();
+                Ok(subscription)
+            }
             Err(end) => {
                 subscription.close();
                 Err(end)

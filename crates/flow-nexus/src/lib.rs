@@ -24,6 +24,7 @@ pub mod binding;
 pub mod caller;
 pub mod claude;
 pub mod codex;
+pub mod codex_turns;
 pub mod composition;
 pub mod context;
 pub mod delivery;
@@ -112,6 +113,9 @@ pub struct RunningNexus {
     /// The send-tool responder of the Codex launch running now; see
     /// `send_tool::ServesLaunchCalls`.
     pub launch_calls: send_tool::LaunchCalls,
+    /// Whether each Codex thread is in a turn, as its app-server's events
+    /// show it; see `codex_turns`.
+    pub codex_turns: codex_turns::CodexTurns,
 }
 
 pub trait Dispatches {
@@ -532,6 +536,7 @@ impl OpensRunningNexus for RunningNexus {
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
             stopping: Stopping::default(),
             launch_calls: send_tool::LaunchCalls::default(),
+            codex_turns: codex_turns::CodexTurns::default(),
         })
     }
 }
@@ -1612,6 +1617,7 @@ mod tests {
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
                 stopping: crate::Stopping::default(),
                 launch_calls: crate::send_tool::LaunchCalls::default(),
+                codex_turns: crate::codex_turns::CodexTurns::default(),
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");

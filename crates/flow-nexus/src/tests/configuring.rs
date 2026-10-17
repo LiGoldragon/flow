@@ -1,18 +1,20 @@
-//! Reconfigure replaces the committed Nexus value of a configured store as a
-//! whole, in one commit, and leaves every other row as it was. A refused
-//! value changes nothing. The running Nexus keeps the Codex endpoints it
+//! Configure declares one configuration family whole: the declaration
+//! replaces the committed family in one commit and leaves every other row as
+//! it was, so the effective family is always the last declaration. A refused
+//! declaration changes nothing. The running Nexus keeps the Codex endpoints it
 //! opened with; the next open serves the replaced ones.
 
+use crate::generated::operation::{Operation, Outcome};
+use crate::performing::Performs;
 use crate::store::metaflow::{MutatesMetaflows, SleepsMetaflows};
 use crate::store::{
     ConfigurationOnlyStore, ConfiguresOnlyStore, DefaultConfiguration, FlowStore,
     ManagesMetaflowState, OpensFlowStore, ReadsFlowRows, RegistersFlowIdentity, SeedsConfiguration,
-    StoreError,
 };
 use crate::{Dispatches, OpensRunningNexus, RunningNexus};
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureModel, ConfigureNexus, ConfigureThreshold,
-    ReconfigureRejection,
+    ConfigurationChange, ConfigurationSnapshot, ConfigureLeaveOut, ConfigureModel, ConfigureNexus,
+    ConfigureOutcome, ConfigureRejection, ConfigureThreshold, Response as MetaResponse,
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
@@ -48,7 +50,7 @@ struct ConfiguredStore {
 }
 
 impl ConfiguredStore {
-    /// A configured store: Nexus, Model and Threshold configured through
+    /// A configured store: Nexus, Models and Thresholds declared through
     /// Configure, a registered flow, Message bound and a lock held.
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("temporary state");
@@ -66,15 +68,15 @@ impl ConfiguredStore {
             .expect("configuration store");
         for change in [
             ConfigurationChange::Nexus(Self::nexus(&defaults, &[TERRA, SOL, LUNA], 30)),
-            ConfigurationChange::Model(ConfigureModel {
+            ConfigurationChange::Models(vec![ConfigureModel {
                 layer: Layer::Primary,
                 native: "gpt-6-astra".into(),
-            }),
-            ConfigurationChange::Threshold(ConfigureThreshold {
+            }]),
+            ConfigurationChange::Thresholds(vec![ConfigureThreshold {
                 layer: Layer::Primary,
                 handover: 100_000,
                 refresh: 200_000,
-            }),
+            }]),
         ] {
             configuration
                 .configure_change(change)
@@ -214,8 +216,20 @@ fn stable_models(nexus: &RunningNexus) -> BTreeSet<String> {
     nexus.codex_endpoints.stable.model_names.clone()
 }
 
+fn configure(nexus: &RunningNexus, change: ConfigurationChange) -> MetaResponse {
+    nexus.dispatch_meta(meta_signal_flow::Query::Configure(change))
+}
+
+fn quaternary_field() -> Address {
+    Address {
+        aspect: Aspect::Field,
+        topic: "flow".into(),
+        layer: Layer::Quaternary,
+    }
+}
+
 #[test]
-fn reconfigure_replaces_only_the_nexus_value_and_keeps_every_other_row() {
+fn configure_nexus_replaces_only_the_nexus_value_and_keeps_every_other_row() {
     let fixture = ConfiguredStore::new();
     let nexus = fixture.open();
     let before = other_rows(&nexus);
@@ -226,11 +240,16 @@ fn reconfigure_replaces_only_the_nexus_value_and_keeps_every_other_row() {
 
     let replaced = ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 45);
     assert_eq!(
-        nexus.dispatch_meta(meta_signal_flow::Query::Reconfigure(replaced.clone())),
-        meta_signal_flow::Response::Reconfigured
+        configure(&nexus, ConfigurationChange::Nexus(replaced.clone())),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     assert_eq!(snapshot(&nexus).nexus, replaced, "the whole value replaced");
     assert_eq!(other_rows(&nexus), before, "no other row changed");
+    // The same declaration again writes nothing.
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::Nexus(replaced.clone())),
+        MetaResponse::Configured(ConfigureOutcome::Unchanged)
+    );
 
     // The running Nexus keeps the endpoints it opened with.
     assert!(stable_models(&nexus).contains(TERRA));
@@ -247,7 +266,7 @@ fn reconfigure_replaces_only_the_nexus_value_and_keeps_every_other_row() {
 }
 
 #[test]
-fn a_refused_reconfigure_changes_nothing() {
+fn a_refused_declaration_changes_nothing() {
     let fixture = ConfiguredStore::new();
     let nexus = fixture.open();
     let before = snapshot(&nexus);
@@ -258,8 +277,20 @@ fn a_refused_reconfigure_changes_nothing() {
         .model_name_vector
         .push(LUNA.to_owned());
     assert_eq!(
-        nexus.dispatch_meta(meta_signal_flow::Query::Reconfigure(overlapping)),
-        meta_signal_flow::Response::ReconfigureRejected(ReconfigureRejection::CodexModelsOverlap)
+        configure(&nexus, ConfigurationChange::Nexus(overlapping)),
+        MetaResponse::ConfigureRejected(ConfigureRejection::CodexModelsOverlap)
+    );
+    // One key named twice is not a family.
+    let model = |native: &str| ConfigureModel {
+        layer: Layer::Secondary,
+        native: native.into(),
+    };
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::Models(vec![model("claude-opus-5-5"), model("claude-sonnet-5-5")])
+        ),
+        MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry)
     );
     assert_eq!(snapshot(&nexus), before);
     assert_eq!(other_rows(&nexus), rows);
@@ -270,7 +301,157 @@ fn a_refused_reconfigure_changes_nothing() {
 }
 
 #[test]
-fn reconfigure_needs_a_configured_store_and_configure_still_conflicts() {
+fn each_family_is_its_last_declaration() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let nexus_before = snapshot(&nexus).nexus;
+
+    // In the order the snapshot reads them, by layer name.
+    let models = vec![
+        ConfigureModel {
+            layer: Layer::Quaternary,
+            native: "claude-haiku-5-5".into(),
+        },
+        ConfigureModel {
+            layer: Layer::Secondary,
+            native: "claude-opus-5-5".into(),
+        },
+    ];
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::Models(models.clone())),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    // The Primary model the store held is gone: it is not declared.
+    assert_eq!(snapshot(&nexus).models, models);
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::Models(models.clone())),
+        MetaResponse::Configured(ConfigureOutcome::Unchanged)
+    );
+
+    let thresholds = vec![ConfigureThreshold {
+        layer: Layer::Primary,
+        handover: 150_000,
+        refresh: 250_000,
+    }];
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::Thresholds(thresholds.clone())),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(snapshot(&nexus).thresholds, thresholds);
+
+    let first = vec![
+        ConfigureLeaveOut {
+            address: quaternary_field(),
+            leave_outs: vec![signal_flow::LeaveOut::SkillTool],
+        },
+        ConfigureLeaveOut {
+            address: ConfiguredStore::message(),
+            leave_outs: vec![signal_flow::LeaveOut::ClaudeMd],
+        },
+    ];
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::LeaveOuts(first)),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let second = vec![ConfigureLeaveOut {
+        address: quaternary_field(),
+        leave_outs: vec![
+            signal_flow::LeaveOut::SkillTool,
+            signal_flow::LeaveOut::WorkflowTool,
+        ],
+    }];
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::LeaveOuts(second.clone())),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(snapshot(&nexus).default_leave_outs, second);
+    assert!(
+        nexus
+            .store
+            .default_leave_outs(&ConfiguredStore::message())
+            .unwrap()
+            .is_empty()
+    );
+    // The effective snapshot equals the last declaration of every family,
+    // across a restart.
+    drop(nexus);
+    let reopened = fixture.open();
+    assert_eq!(
+        snapshot(&reopened),
+        ConfigurationSnapshot {
+            nexus: nexus_before,
+            models,
+            thresholds,
+            default_leave_outs: second,
+        }
+    );
+    // An empty declaration empties the family.
+    assert_eq!(
+        configure(&reopened, ConfigurationChange::LeaveOuts(Vec::new())),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert!(snapshot(&reopened).default_leave_outs.is_empty());
+    assert_eq!(
+        configure(&reopened, ConfigurationChange::LeaveOuts(Vec::new())),
+        MetaResponse::Configured(ConfigureOutcome::Unchanged)
+    );
+}
+
+#[test]
+fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
+    let fixture = ConfiguredStore::new();
+    let mut nexus = fixture.open();
+    nexus.composer = crate::composition::tests::fixture_composer();
+    let mut profile = crate::composition::tests::fixture_profile();
+    profile.address = quaternary_field();
+    profile.model_name = "claude-haiku-5-5".into();
+    let composed_leave_outs =
+        |nexus: &RunningNexus| match nexus.perform(Operation::Compose(profile.clone())) {
+            Outcome::Composed(launch) => launch.leave_outs,
+            outcome => panic!("launch not composed: {outcome:?}"),
+        };
+    let declare = |nexus: &RunningNexus, leave_outs: Vec<signal_flow::LeaveOut>| {
+        configure(
+            nexus,
+            ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
+                address: quaternary_field(),
+                leave_outs,
+            }]),
+        )
+    };
+    assert_eq!(
+        declare(&nexus, vec![signal_flow::LeaveOut::WorkflowTool]),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(
+        composed_leave_outs(&nexus),
+        [signal_flow::LeaveOut::WorkflowTool]
+    );
+    // The changed default the deployment declares is the one the next launch
+    // takes.
+    assert_eq!(
+        declare(
+            &nexus,
+            vec![
+                signal_flow::LeaveOut::WorkflowTool,
+                signal_flow::LeaveOut::SkillTool,
+                signal_flow::LeaveOut::ClaudeMd
+            ]
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(
+        composed_leave_outs(&nexus),
+        [
+            signal_flow::LeaveOut::WorkflowTool,
+            signal_flow::LeaveOut::SkillTool,
+            signal_flow::LeaveOut::ClaudeMd
+        ]
+    );
+}
+
+#[test]
+fn a_fresh_store_takes_its_first_nexus_declaration() {
     let directory = tempfile::tempdir().expect("temporary state");
     let defaults = DefaultConfiguration {
         home: directory.path().join("home"),
@@ -278,73 +459,39 @@ fn reconfigure_needs_a_configured_store_and_configure_still_conflicts() {
     };
     let path = directory.path().join("flow.sema");
     let store = ConfigurationOnlyStore::open(&path).expect("fresh store");
-    assert!(matches!(
-        store.replace_nexus_configuration(ConfiguredStore::nexus(&defaults, &[SOL, LUNA], 45)),
-        Err(StoreError::NotConfigured)
-    ));
     assert_eq!(store.configuration_snapshot().expect("reads"), None);
-    drop(store);
-
-    // Configure.Nexus keeps refusing a differing value; Reconfigure is the
-    // one replacement.
-    let fixture = ConfiguredStore::new();
-    let nexus = fixture.open();
-    let before = snapshot(&nexus);
+    let declared = ConfiguredStore::nexus(&defaults, &[SOL, LUNA], 45);
     assert_eq!(
-        nexus.dispatch_meta(meta_signal_flow::Query::Configure(
-            ConfigurationChange::Nexus(ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 45))
-        )),
-        meta_signal_flow::Response::ConfigureRejected(
-            meta_signal_flow::ConfigureRejection::Conflict
-        )
+        store
+            .configure_change(ConfigurationChange::Nexus(declared.clone()))
+            .expect("first declaration commits"),
+        ConfigureOutcome::Replaced
     );
-    assert_eq!(snapshot(&nexus), before);
+    assert_eq!(
+        store
+            .configuration_snapshot()
+            .expect("reads")
+            .map(|snapshot| snapshot.nexus),
+        Some(declared)
+    );
 }
 
 #[test]
-fn a_store_reconfigured_while_stopped_opens_with_the_replaced_value() {
+fn a_store_configured_while_stopped_opens_with_the_replaced_value() {
     let fixture = ConfiguredStore::new();
     let path = std::path::Path::new(&fixture.start.store_path);
     let rows = other_rows(&fixture.open());
     let replaced = ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 30);
-    let configuration = ConfigurationOnlyStore::open(path).expect("0.28 store reopens");
-    configuration
-        .replace_nexus_configuration(replaced.clone())
-        .expect("stopped store reconfigures");
+    let configuration = ConfigurationOnlyStore::open(path).expect("stopped store reopens");
+    assert_eq!(
+        configuration
+            .configure_change(ConfigurationChange::Nexus(replaced.clone()))
+            .expect("stopped store takes the declaration"),
+        ConfigureOutcome::Replaced
+    );
     drop(configuration);
     let nexus = fixture.open();
     assert_eq!(snapshot(&nexus).nexus, replaced);
     assert_eq!(other_rows(&nexus), rows);
     assert!(!stable_models(&nexus).contains(TERRA));
-}
-
-#[test]
-fn a_metaflow_default_leave_out_set_is_configured_read_and_snapshotted() {
-    use crate::store::ManagesMetaflowState as _;
-    let fixture = ConfiguredStore::new();
-    let nexus = fixture.open();
-    let address = Address {
-        aspect: Aspect::Field,
-        topic: "flow".into(),
-        layer: Layer::Quaternary,
-    };
-    assert!(nexus.store.default_leave_outs(&address).unwrap().is_empty());
-    let leave_out = meta_signal_flow::ConfigureLeaveOut {
-        address: address.clone(),
-        leave_outs: vec![
-            signal_flow::LeaveOut::SkillTool,
-            signal_flow::LeaveOut::WorkflowTool,
-        ],
-    };
-    assert_eq!(
-        nexus.dispatch_meta(meta_signal_flow::Query::Configure(
-            ConfigurationChange::LeaveOut(leave_out.clone())
-        )),
-        meta_signal_flow::Response::Configured
-    );
-    assert_eq!(
-        nexus.store.default_leave_outs(&address).unwrap(),
-        leave_out.leave_outs
-    );
-    assert_eq!(snapshot(&nexus).default_leave_outs, vec![leave_out]);
 }

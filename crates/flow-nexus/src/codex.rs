@@ -1766,6 +1766,71 @@ mod tests {
         assert_eq!(turn["input"].as_array().unwrap().len(), 1);
     }
 
+    /// The whole Codex start against a fake app-server and a fake Herdr that
+    /// reports no agent session for the remote-resumed TUI, as Herdr does:
+    /// Flow opens the thread and gives its first turn, the TUI attaches to
+    /// it, and the pane binds to the thread Flow opened once Herdr
+    /// recognizes the pane's Codex agent.
+    #[test]
+    fn a_remote_resumed_tui_binds_to_the_thread_the_app_server_opened() {
+        use crate::herdr::ConfiguresHerdrCli;
+        use crate::herdr::launch::{
+            ChecksComposedLaunch, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
+            StartsNativeHerdrHarness,
+        };
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let thread = "12345678-1234-4abc-8def-123456789abc";
+        let launch = lean_codex_launch();
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(&format!(
+                r#"{{"id":2,"result":{{"thread":{{"id":"{thread}"}},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":[]}}}}"#
+            )),
+            fake.websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#),
+        ];
+        let (_proxy, executable, record) = RecordingFakeProxy.install(&frames);
+        let mut codex_endpoints = endpoints();
+        codex_endpoints.next.client_path = executable;
+        codex_endpoints.next.socket = "/tmp/fake-codex-next.sock".into();
+        codex_endpoints.timeout = Duration::from_secs(5);
+        codex_endpoints.workspace_root = std::env::current_dir().unwrap();
+        let opened = codex_endpoints
+            .adapter_for(&launch.launch_profile.model_name)
+            .unwrap()
+            .open_thread_with_first_turn(&launch)
+            .expect("the app-server opens the thread");
+        assert_eq!(opened, thread);
+        let methods = record
+            .requests(4)
+            .iter()
+            .map(|request| request["method"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            ["initialize", "initialized", "thread/start", "turn/start"]
+        );
+
+        let (root, herdr) = crate::herdr::launch::tests::fixture_herdr(
+            "codex",
+            thread,
+            "1234567812344abc8def123456789abc",
+            &launch.launch_agent_name(),
+        );
+        let herdr = herdr.with_codex_endpoints(codex_endpoints);
+        std::fs::write(root.path().join("never-agent-session"), "absent").unwrap();
+        let pane = herdr.create_launch_pane(&launch).expect("created pane");
+        herdr
+            .attach_codex_harness(&launch, &pane, &opened)
+            .expect("the TUI attaches to the opened thread");
+        let binding = herdr
+            .observe_attached_codex_binding(&launch, &pane, &opened)
+            .expect("the pane binds to the opened thread");
+        assert_eq!(binding.native_session_id, thread);
+        assert_eq!(binding.flow_id, "123456");
+        assert_eq!(binding.herdr_pane_binding, pane);
+    }
+
     /// A thread opened before a refused harness start is accounted for: its
     /// first turn read once, then archived through the app-server.
     #[test]

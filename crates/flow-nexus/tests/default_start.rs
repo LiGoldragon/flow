@@ -139,7 +139,10 @@ fn configure_fresh(home: &Path, runtime: &Path, start: &Start) {
     meta.read_exact(&mut reply).expect("Configure reply");
     let reply = rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(&reply)
         .expect("Configure reply decodes");
-    assert!(matches!(reply, meta_signal_flow::Response::Configured));
+    assert!(matches!(
+        reply,
+        meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
+    ));
     drop(meta);
     wait_successfully(&mut nexus);
 }
@@ -204,7 +207,10 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
     meta.read_exact(&mut reply).expect("Configure reply");
     let response = rkyv::from_bytes::<meta_signal_flow::Response, rkyv::rancor::Error>(&reply)
         .expect("Configure reply decodes");
-    assert!(matches!(response, meta_signal_flow::Response::Configured));
+    assert!(matches!(
+        response,
+        meta_signal_flow::Response::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
+    ));
     drop(meta);
     wait_successfully(&mut nexus);
 

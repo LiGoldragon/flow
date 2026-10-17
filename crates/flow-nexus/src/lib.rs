@@ -241,32 +241,20 @@ impl Dispatches for RunningNexus {
                     meta_signal_flow::Refusal::Store(error.to_string()),
                 ),
             },
+            // A declared family replaces the committed family whole; this
+            // Nexus keeps the Codex endpoints it opened with until its next
+            // start.
             meta_signal_flow::Query::Configure(change) => {
                 match self.store.configure_change(change) {
-                    Ok(()) => meta_signal_flow::Response::Configured,
-                    Err(store::StoreError::ConfigurationConflict) => {
+                    Ok(outcome) => meta_signal_flow::Response::Configured(outcome),
+                    Err(store::StoreError::DuplicateConfigurationEntry) => {
                         meta_signal_flow::Response::ConfigureRejected(
-                            meta_signal_flow::ConfigureRejection::Conflict,
-                        )
-                    }
-                    Err(error) => meta_signal_flow::Response::Refused(
-                        meta_signal_flow::Refusal::Store(error.to_string()),
-                    ),
-                }
-            }
-            // Replaces the stored Nexus value; this Nexus keeps the Codex
-            // endpoints it opened with until its next start.
-            meta_signal_flow::Query::Reconfigure(nexus) => {
-                match self.store.replace_nexus_configuration(nexus) {
-                    Ok(()) => meta_signal_flow::Response::Reconfigured,
-                    Err(store::StoreError::NotConfigured) => {
-                        meta_signal_flow::Response::ReconfigureRejected(
-                            meta_signal_flow::ReconfigureRejection::Unconfigured,
+                            meta_signal_flow::ConfigureRejection::DuplicateEntry,
                         )
                     }
                     Err(store::StoreError::CodexModelsOverlap) => {
-                        meta_signal_flow::Response::ReconfigureRejected(
-                            meta_signal_flow::ReconfigureRejection::CodexModelsOverlap,
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::CodexModelsOverlap,
                         )
                     }
                     Err(error) => meta_signal_flow::Response::Refused(
@@ -1088,9 +1076,9 @@ mod tests {
     use crate::DispatchesSerially;
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
+    mod configuring;
     mod delivery;
     mod launching_nexus;
-    mod reconfiguring;
     mod reservation;
     mod submission;
     mod waking;

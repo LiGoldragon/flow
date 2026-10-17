@@ -164,7 +164,14 @@ anchors, `HOME` and `XDG_RUNTIME_DIR` (`flow-defaults` is their one home):
   `$HOME/.codex/app-server-control/app-server-control.sock`
 
 A new store persists these; a populated store resumes what it holds; meta
-`Configure` is the only way to change them. No `FLOW_` variable reaches the
+`Configure` is the only way to change them. Each `Configure` declares one
+family whole, `Nexus`, `Models`, `Thresholds` or `LeaveOuts`, and replaces
+the committed family in one commit, so the effective configuration is always
+the last declaration of each family: an entry the declaration leaves out is
+removed. It answers `Configured.Replaced`, or `Configured.Unchanged` when
+nothing differs; `ConfigureRejected.DuplicateEntry` (one Layer or Address
+named twice) and `ConfigureRejected.CodexModelsOverlap` change nothing. A
+running Nexus serves replaced Codex endpoints from its next start. No `FLOW_` variable reaches the
 Nexus's configuration. The source root selects the bounded root used for
 exact-byte composition, the Codex native skill catalog working directory, the
 Flow workspace root, and the project Claude skill catalog. `CODEX_HOME` and
@@ -221,17 +228,27 @@ After the Flow ID is claimed and registered, and before any prompt, Start
 sets the canonical native title, the seat's Datom
 `{ <Aspect> <Topic> <Layer> <FlowId> }` (for example
 `{ Field flow Quaternary 2712d3 }`), built from the profile's Address and the
-claimed Flow ID; the model never enters it. Claude is first waited for with
-Herdr's `agent wait --until idle --until done`, then until Herdr reports its
-official native session and interactive readiness, then renamed with its own
-`/rename` and read back from the terminal title Herdr reports and a
-transcript title record written after the command (one more than before it
-was typed). A session whose latest title record already is the title, as a
-resumed one keeps from its first life, is not renamed. Codex is named with `thread/name/set` and
+claimed Flow ID; the model never enters it. Claude is named at launch: it
+starts with `--name <title>`, which Claude records in its transcript and shows
+in the prompt box, the resume picker and the terminal title. `/rename` is a
+slash command, and a launch leaving out the Skill tool starts with
+`--disable-slash-commands`, so nothing is typed to title it. After it binds,
+Claude is waited for with Herdr's `agent wait --until idle --until done`, then
+until Herdr reports its official native session and interactive readiness;
+the title is read back from the terminal title Herdr reports, and the
+session's latest transcript title record, once one is written, must be the
+title. A Claude start without a reserved FlowId carries no name and its title
+is refused. Codex is named with `thread/name/set` and
 read back with `thread/read`. The Herdr pane label is set to the same title
 and read back. A refused title refuses the Start with `NativeLaunchRefused`,
 and the Nexus log names the typed reason
-(`flow-nexus: herdr stage=title category=<reason>`). A launch refused once its
+(`flow-nexus: herdr stage=title category=<reason>`). A Codex TUI is started
+as `resume <thread>` on the thread Flow opened through the app-server and gave
+its first turn. Herdr reports no agent session for such a TUI, and the
+app-server names no client attached to a thread, so the pane binds to that
+thread once Herdr recognizes the pane's Codex agent, exact and interactively
+ready; a session Herdr does report must be the thread. The launch receipt
+then reads that thread's first turn and answer. A launch refused once its
 pane exists closes that pane and records the flow it registered Stopped
 before it gives back its claim. Before Claude starts, the pane's shell drops inherited
 `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_JOB_DIR`, `CLAUDE_CODE_SESSION_ID` and

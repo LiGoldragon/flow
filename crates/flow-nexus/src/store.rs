@@ -27,7 +27,7 @@ use std::{
 
 use meta_signal_flow::{
     ConfigurationChange, ConfigurationSnapshot, ConfigureLeaveOut, ConfigureModel, ConfigureNexus,
-    ConfigureThreshold,
+    ConfigureOutcome, ConfigureThreshold,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -1534,8 +1534,8 @@ pub enum StoreError {
     MetaflowReadViewChanged,
     #[error("configuration rows changed while being read")]
     ConfigurationReadViewChanged,
-    #[error("meta configuration conflicts with an existing value")]
-    ConfigurationConflict,
+    #[error("a configuration declaration names one key twice")]
+    DuplicateConfigurationEntry,
     #[error("store path must be an absolute file path")]
     InvalidStorePath,
     #[error("meta configuration is not configured")]
@@ -1746,8 +1746,8 @@ pub struct ConfigurationOnlyStore {
 pub trait ConfiguresOnlyStore: Sized {
     fn open(path: &Path) -> Result<Self, StoreError>;
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
-    fn configure_change(&self, change: ConfigurationChange) -> Result<(), StoreError>;
-    fn replace_nexus_configuration(&self, nexus: ConfigureNexus) -> Result<(), StoreError>;
+    fn configure_change(&self, change: ConfigurationChange)
+    -> Result<ConfigureOutcome, StoreError>;
     fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError>;
     fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError>;
 }
@@ -1846,12 +1846,11 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
     }
 
-    fn configure_change(&self, change: ConfigurationChange) -> Result<(), StoreError> {
+    fn configure_change(
+        &self,
+        change: ConfigurationChange,
+    ) -> Result<ConfigureOutcome, StoreError> {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
-    }
-
-    fn replace_nexus_configuration(&self, nexus: ConfigureNexus) -> Result<(), StoreError> {
-        FlowStore::replace_meta_nexus(&self.engine, &self.meta_configuration_tables, nexus)
     }
 
     /// Reads either a wholly unconfigured store (using its declared defaults
@@ -2600,9 +2599,9 @@ impl OpensFlowStore for FlowStore {
 
 pub(crate) trait ManagesMetaflowState: Sized {
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
-    fn configure_change(&self, change: ConfigurationChange) -> Result<(), StoreError>;
-    /// Replace the committed Nexus value as a whole; every other row stays.
-    fn replace_nexus_configuration(&self, nexus: ConfigureNexus) -> Result<(), StoreError>;
+    /// Replace one configuration family whole with its declaration.
+    fn configure_change(&self, change: ConfigurationChange)
+    -> Result<ConfigureOutcome, StoreError>;
     /// The threshold configured for one layer, if any.
     fn configured_threshold(&self, layer: &Layer)
     -> Result<Option<ConfigureThreshold>, StoreError>;
@@ -2639,12 +2638,11 @@ impl ManagesMetaflowState for FlowStore {
         FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
     }
 
-    fn configure_change(&self, change: ConfigurationChange) -> Result<(), StoreError> {
+    fn configure_change(
+        &self,
+        change: ConfigurationChange,
+    ) -> Result<ConfigureOutcome, StoreError> {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
-    }
-
-    fn replace_nexus_configuration(&self, nexus: ConfigureNexus) -> Result<(), StoreError> {
-        FlowStore::replace_meta_nexus(&self.engine, &self.meta_configuration_tables, nexus)
     }
 
     fn configured_threshold(
@@ -5407,13 +5405,18 @@ pub(crate) trait ReadsFlowMemory {
         }))
     }
 
-    fn assert_identical_or_conflict<T>(
+    /// Replace one configuration family's committed rows with the declared
+    /// rows in one atomic commit: a declared row absent from the store is
+    /// asserted, a changed one mutated, a stored row the declaration leaves
+    /// out retracted. A declaration naming one key twice is refused before
+    /// any write; one equal to the committed rows writes nothing.
+    fn replace_configuration_family<T>(
         engine: &Engine,
         table: TableReference<T>,
-        value: T,
-    ) -> Result<(), StoreError>
+        declared: Vec<T>,
+    ) -> Result<ConfigureOutcome, StoreError>
     where
-        T: sema_engine::EngineStoredRecord + PartialEq + Send + Sync + 'static,
+        T: sema_engine::EngineStoredRecord + PartialEq + Clone + Send + Sync + 'static,
         <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
             + for<'validation> rkyv::bytecheck::CheckBytes<
                 rkyv::rancor::Strategy<
@@ -5425,76 +5428,100 @@ pub(crate) trait ReadsFlowMemory {
                 >,
             >,
     {
-        let rows = engine
-            .match_records(QueryPlan::key(table, value.record_key()))?
+        let declared_keys = declared
+            .iter()
+            .map(EngineRecord::record_key)
+            .collect::<Vec<_>>();
+        if declared_keys
+            .iter()
+            .enumerate()
+            .any(|(index, key)| declared_keys[..index].contains(key))
+        {
+            return Err(StoreError::DuplicateConfigurationEntry);
+        }
+        let committed = engine
+            .match_records(QueryPlan::all(table))?
             .records()
             .to_vec();
-        match rows.as_slice() {
-            [] => {
-                engine.assert(Assertion::new(table, value))?;
-                Ok(())
+        let mut commit = engine.begin_atomic_commit();
+        let mut changed = false;
+        for stored in &committed {
+            if !declared_keys.contains(&stored.record_key()) {
+                commit = commit.retract(table, stored.record_key());
+                changed = true;
             }
-            [existing] if existing == &value => Ok(()),
-            [_] => Err(StoreError::ConfigurationConflict),
-            _ => Err(StoreError::StateInvariant),
         }
+        for row in declared {
+            match committed
+                .iter()
+                .find(|stored| stored.record_key() == row.record_key())
+            {
+                Some(stored) if stored == &row => {}
+                Some(_) => {
+                    commit = commit.mutate(table, row);
+                    changed = true;
+                }
+                None => {
+                    commit = commit.assert(table, row);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return Ok(ConfigureOutcome::Unchanged);
+        }
+        engine.commit_atomic(commit)?;
+        Ok(ConfigureOutcome::Replaced)
     }
 
+    /// One declared configuration family replaces the committed family
+    /// whole. A Nexus whose Codex endpoints share a model is refused before
+    /// any write.
     fn configure_meta_change(
         engine: &Engine,
         tables: &MetaConfigurationTables,
         change: ConfigurationChange,
-    ) -> Result<(), StoreError> {
+    ) -> Result<ConfigureOutcome, StoreError> {
         match change {
-            ConfigurationChange::Nexus(nexus) => FlowStore::assert_identical_or_conflict(
-                engine,
-                tables.nexus,
-                StoredMetaNexusConfiguration { nexus },
-            ),
-            ConfigurationChange::Model(model) => FlowStore::assert_identical_or_conflict(
+            ConfigurationChange::Nexus(nexus) => {
+                if nexus
+                    .stable_codex
+                    .model_name_vector
+                    .iter()
+                    .any(|model| nexus.next_codex.model_name_vector.contains(model))
+                {
+                    return Err(StoreError::CodexModelsOverlap);
+                }
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.nexus,
+                    vec![StoredMetaNexusConfiguration { nexus }],
+                )
+            }
+            ConfigurationChange::Models(models) => FlowStore::replace_configuration_family(
                 engine,
                 tables.models,
-                StoredMetaModelConfiguration { model },
+                models
+                    .into_iter()
+                    .map(|model| StoredMetaModelConfiguration { model })
+                    .collect(),
             ),
-            ConfigurationChange::Threshold(threshold) => FlowStore::assert_identical_or_conflict(
+            ConfigurationChange::Thresholds(thresholds) => FlowStore::replace_configuration_family(
                 engine,
                 tables.thresholds,
-                StoredMetaThresholdConfiguration { threshold },
+                thresholds
+                    .into_iter()
+                    .map(|threshold| StoredMetaThresholdConfiguration { threshold })
+                    .collect(),
             ),
-            ConfigurationChange::LeaveOut(leave_out) => FlowStore::assert_identical_or_conflict(
+            ConfigurationChange::LeaveOuts(leave_outs) => FlowStore::replace_configuration_family(
                 engine,
                 tables.leave_outs,
-                StoredMetaLeaveOutConfiguration { leave_out },
+                leave_outs
+                    .into_iter()
+                    .map(|leave_out| StoredMetaLeaveOutConfiguration { leave_out })
+                    .collect(),
             ),
-        }
-    }
-
-    /// Replace the one committed Nexus row in one atomic commit. A store with
-    /// no Nexus row, or a value whose Codex endpoints share a model, is
-    /// refused before any write; models, thresholds and all runtime
-    /// rows are never touched.
-    fn replace_meta_nexus(
-        engine: &Engine,
-        tables: &MetaConfigurationTables,
-        nexus: ConfigureNexus,
-    ) -> Result<(), StoreError> {
-        if nexus
-            .stable_codex
-            .model_name_vector
-            .iter()
-            .any(|model| nexus.next_codex.model_name_vector.contains(model))
-        {
-            return Err(StoreError::CodexModelsOverlap);
-        }
-        let stored = StoredMetaNexusConfiguration { nexus };
-        let rows = engine.match_records(QueryPlan::key(tables.nexus, stored.record_key()))?;
-        match rows.records() {
-            [] => Err(StoreError::NotConfigured),
-            [_] => {
-                engine.commit_atomic(engine.begin_atomic_commit().mutate(tables.nexus, stored))?;
-                Ok(())
-            }
-            _ => Err(StoreError::StateInvariant),
         }
     }
 

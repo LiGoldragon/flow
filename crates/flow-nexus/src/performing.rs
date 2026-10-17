@@ -69,7 +69,6 @@ pub(crate) enum HerdrFailureCategory {
     ForeignBinding,
     InvalidFlowId,
     NotReady,
-    RenameRefused,
     TranscriptUnreadable,
     TitleReadbackDiffers,
     CodexNamingRefused,
@@ -94,7 +93,6 @@ impl ClassifiesHerdrFailureCategory for HerdrFailureCategory {
             Self::ForeignBinding => "foreign-binding",
             Self::InvalidFlowId => "invalid-flow-id",
             Self::NotReady => "not-ready",
-            Self::RenameRefused => "rename-refused",
             Self::TranscriptUnreadable => "transcript-unreadable",
             Self::TitleReadbackDiffers => "title-readback-differs",
             Self::CodexNamingRefused => "codex-naming-refused",
@@ -142,7 +140,6 @@ impl From<&TitleRefusal> for HerdrFailureCategory {
                 Self::NativeIdentityConflict
             }
             TitleRefusal::NotReady => Self::NotReady,
-            TitleRefusal::RenameRefused => Self::RenameRefused,
             TitleRefusal::TranscriptUnreadable => Self::TranscriptUnreadable,
             TitleRefusal::ReadbackDiffers => Self::TitleReadbackDiffers,
             TitleRefusal::CodexNamingRefused => Self::CodexNamingRefused,

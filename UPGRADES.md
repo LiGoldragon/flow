@@ -1,3 +1,37 @@
+# Flow 0.35.4
+
+Wire change on the meta socket only: meta-signal-flow 23.0.0 (dacb3fdd)
+makes `Configure` declare one configuration family whole and removes
+`Reconfigure`; its contract digest changes from 7d19286cad9199bd to
+371d348ad5b3fbad, so every meta-wire peer repins it before it can greet this
+Flow. The ordinary socket is unchanged (signal-flow 18.0.0, 59aab725). The
+store's tables are unchanged.
+
+- **Each configuration family is its last declaration.**
+  `Configure.Models.[ … ]`, `Configure.Thresholds.[ … ]`,
+  `Configure.LeaveOuts.[ … ]` and `Configure.Nexus.{ … }` replace that
+  family's committed value in one commit; an entry the declaration leaves out
+  is removed. The answer is `Configured.Replaced`, or `Configured.Unchanged`
+  when nothing differs. `ConfigureRejected.DuplicateEntry` (one Layer or
+  Address named twice) and `ConfigureRejected.CodexModelsOverlap` change
+  nothing. A declarer sends one `Configure.LeaveOuts` holding every
+  metaflow's default leave-outs instead of one `Configure.LeaveOut` per
+  metaflow, and treats both `Configured` answers as success; a changed
+  default no longer answers `Conflict`. `Reconfigure` is gone:
+  `Configure.Nexus` sets or replaces the Nexus, on the configure-only
+  listener and on the running Nexus alike.
+- **A Claude session is named at launch.** A reserved Claude start passes
+  `--name <title>`; `/rename` is a slash command, which a launch leaving out
+  the Skill tool (`--disable-slash-commands`) cannot run. The title is read
+  back from the terminal title Herdr reports, and the latest transcript title
+  record, once written, must equal it. Nothing is typed to title a pane. The
+  `rename-refused` title category is gone.
+- **A remote-resumed Codex TUI binds to the thread Flow opened.** Herdr
+  reports no agent session for it, and the app-server names no client
+  attached to a thread, so the pane binds to that thread once Herdr
+  recognizes the pane's Codex agent, exact and interactively ready; a session
+  Herdr does report must be the thread.
+
 # Flow 0.35.3
 
 Wire change on the ordinary socket: signal-flow 18.0.0 (59aab725) appends

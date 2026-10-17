@@ -232,9 +232,10 @@ rendezvous and control sockets, process liveness, permission fields, and
 terminal lifecycle states before returning `Ready`.
 
 Fresh stores persist default sockets, source root, and Codex endpoints. Meta
-`Configure` carries all of them, writes the same store, and reports
-`NexusRestartRequired`, since rebinding live sockets and adapters is deferred
-to a Nexus restart. No environment variable is laid over the stored values;
+`Configure` declares one configuration family whole (`Nexus`, `Models`,
+`Thresholds`, `LeaveOuts`), replaces the committed family in one commit, and
+answers `Configured.Replaced` or `Configured.Unchanged`; rebinding live
+sockets and adapters is deferred to a Nexus restart. No environment variable is laid over the stored values;
 `Configure` is their only way in. The adapter is outside the Signal wire boundary: the
 Codex app-server conversation is WebSocket/JSON-RPC through the configured
 control socket. `ConsumeReset` uses the same adapter but is reachable only

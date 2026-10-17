@@ -20,8 +20,7 @@ use std::{
 };
 
 use meta_signal_flow::{
-    ConfigureRejection, MetaRefusal, Query as MetaQuery, ReconfigureRejection,
-    Response as MetaResponse,
+    ConfigureRejection, MetaRefusal, Query as MetaQuery, Response as MetaResponse,
 };
 
 /// `--version` is the only command that runs without a typed Start datom.
@@ -247,37 +246,22 @@ trait RunsConfigurationStartup {
         }
         let response = match query {
             MetaQuery::Configure(change) => match store.configure_change(change) {
-                Ok(()) => MetaResponse::Configured,
-                Err(StoreError::ConfigurationConflict) => {
-                    MetaResponse::ConfigureRejected(ConfigureRejection::Conflict)
-                }
-                Err(error) => {
-                    MetaResponse::Refused(meta_signal_flow::Refusal::Store(error.to_string()))
-                }
-            },
-            MetaQuery::Reconfigure(nexus) => match store.replace_nexus_configuration(nexus) {
-                Ok(()) => MetaResponse::Reconfigured,
-                Err(StoreError::NotConfigured) => {
-                    MetaResponse::ReconfigureRejected(ReconfigureRejection::Unconfigured)
+                Ok(outcome) => MetaResponse::Configured(outcome),
+                Err(StoreError::DuplicateConfigurationEntry) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry)
                 }
                 Err(StoreError::CodexModelsOverlap) => {
-                    MetaResponse::ReconfigureRejected(ReconfigureRejection::CodexModelsOverlap)
+                    MetaResponse::ConfigureRejected(ConfigureRejection::CodexModelsOverlap)
                 }
                 Err(error) => {
                     MetaResponse::Refused(meta_signal_flow::Refusal::Store(error.to_string()))
                 }
             },
             _ => {
-                return Err(
-                    "configuration-only listener accepts one Configure or Reconfigure request"
-                        .into(),
-                );
+                return Err("configuration-only listener accepts one Configure request".into());
             }
         };
-        let configured = matches!(
-            &response,
-            MetaResponse::Configured | MetaResponse::Reconfigured
-        );
+        let configured = matches!(&response, MetaResponse::Configured(_));
         peer.write_meta_response(&response)?;
         if configured {
             Ok(())
@@ -365,7 +349,7 @@ impl RunsConfigurationStartup for ConfigurationStartup {}
 
 #[cfg(test)]
 mod tests {
-    use super::{AnswersVersion, ConfigureRejection, ParsesStart};
+    use super::{AnswersVersion, ParsesStart};
     use super::{ConfigurationStartup, RunsConfigurationStartup};
     use datom_codec::{Actualizing, Budget, Datomizable, Potential};
     use flow_nexus::store::ConfiguresOnlyStore;
@@ -531,16 +515,16 @@ mod tests {
     }
 
     fn nexus_change(binary: &str, message_socket: &str) -> ConfigurationChange {
-        let codex = || meta_signal_flow::CodexEndpoint {
+        let codex = |model: &str| meta_signal_flow::CodexEndpoint {
             client_path: "/nix/store/codex/bin/codex".into(),
             home: "/tmp/codex".into(),
             control_socket_path: "/tmp/codex/app-server.sock".into(),
-            model_name_vector: vec!["gpt-test".into()],
+            model_name_vector: vec![model.into()],
         };
         ConfigurationChange::Nexus(ConfigureNexus {
             source_root: "/tmp/source".into(),
-            stable_codex: codex(),
-            next_codex: codex(),
+            stable_codex: codex("gpt-stable-test"),
+            next_codex: codex("gpt-next-test"),
             harness_profiles: vec![],
             meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
             message_nexus_path: message_socket.into(),
@@ -608,7 +592,10 @@ mod tests {
         let reply = peer.read_frame().expect("read Configure response");
         let response = rkyv::from_bytes::<MetaResponse, rkyv::rancor::Error>(&reply)
             .expect("decode Configure response");
-        assert!(matches!(response, MetaResponse::Configured));
+        assert!(matches!(
+            response,
+            MetaResponse::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
+        ));
         assert!(server.join().expect("server thread joins").is_ok());
         assert_eq!(
             super::ConfigurationOnlyStore::open(Path::new(&start.store_path))
@@ -642,28 +629,28 @@ mod tests {
         let mut peer = UnixStream::connect(&socket).expect("reconnect to same typed Start");
         let mut changed_nexus = expected_nexus.clone();
         changed_nexus.message_nexus_binary = "/nix/store/other-message/bin/message".into();
-        let changed = ConfigurationChange::Nexus(changed_nexus);
+        let changed = ConfigurationChange::Nexus(changed_nexus.clone());
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&MetaQuery::Configure(changed))
             .expect("encode changed Nexus configuration");
         peer.write_frame(&bytes)
             .expect("send changed Nexus configuration");
-        let reply = peer.read_frame().expect("read conflict response");
+        let reply = peer.read_frame().expect("read replacement response");
         let response = rkyv::from_bytes::<MetaResponse, rkyv::rancor::Error>(&reply)
-            .expect("decode conflict response");
+            .expect("decode replacement response");
         assert!(matches!(
             response,
-            MetaResponse::ConfigureRejected(ConfigureRejection::Conflict)
+            MetaResponse::Configured(meta_signal_flow::ConfigureOutcome::Replaced)
         ));
-        assert!(server.join().expect("second server joins").is_err());
+        assert!(server.join().expect("second server joins").is_ok());
         assert_eq!(
             super::ConfigurationOnlyStore::open(Path::new(&start.store_path))
-                .expect("reopen unchanged configuration")
+                .expect("reopen replaced configuration")
                 .configuration_snapshot()
                 .expect("snapshot rereads")
                 .expect("configuration remains present")
                 .nexus,
-            expected_nexus,
-            "a changed Message binary conflicts without replacing the whole Nexus"
+            changed_nexus,
+            "a declared Nexus replaces the committed Nexus whole"
         );
     }
 }

@@ -122,13 +122,13 @@ fn refresh_at(fixture: &NexusFixture, layer: Layer, refresh: i64) {
     fixture
         .nexus
         .store
-        .configure_change(meta_signal_flow::ConfigurationChange::Threshold(
+        .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
             meta_signal_flow::ConfigureThreshold {
                 layer,
                 handover: refresh / 2,
                 refresh,
             },
-        ))
+        ]))
         .expect("threshold configured");
 }
 

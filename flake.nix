@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.3";
+            version = "0.35.4";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -211,6 +211,8 @@
             "herdr::launch::tests::a_codex_request_carrying_a_left_out_block_is_refused";
           flow-codex-tui-attaches-to-opened-thread = context.exactTest "flow-nexus"
             "herdr::launch::tests::a_codex_tui_attaches_to_the_opened_thread_and_binds_only_to_it";
+          flow-codex-remote-resumed-tui-binds-opened-thread = context.exactTest "flow-nexus"
+            "codex::tests::a_remote_resumed_tui_binds_to_the_thread_the_app_server_opened";
           flow-retired-tables-dropped-on-open = context.exactTest "flow-nexus"
             "store::tests::a_store_from_0_34_6_drops_its_retired_tables_when_it_opens";
           flow-start-origin-derived-from-caller = context.exactTest "flow-nexus"
@@ -315,6 +317,12 @@
             "the_meta_client_reaches_the_default_meta_socket_under_the_runtime_directory";
           flow-configuration-only-over-meta = context.exactTest "flow-nexus"
             "configure_only_commits_before_normal_start_uses_the_declared_store";
+          flow-configure-family-is-its-last-declaration = context.exactTest "flow-nexus"
+            "tests::configuring::each_family_is_its_last_declaration";
+          flow-launch-takes-replaced-defaults = context.exactTest "flow-nexus"
+            "tests::configuring::a_launch_after_a_replaced_declaration_takes_the_new_defaults";
+          flow-claude-named-at-launch = context.exactTest "flow-nexus"
+            "herdr::launch::tests::claude_is_named_at_launch_and_its_title_read_back";
           flow-first-turn-sends-before-any-answer = context.exactTest "flow-nexus"
             "tests::waking::a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer";
           flow-unconfirmed-launch-gives-back-its-address = context.exactTest "flow-nexus"

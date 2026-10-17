@@ -952,9 +952,8 @@ impl WakesInParts for RunningNexus {
                 node.flow_id
             );
         }
-        // A `/rename` the title typed is taken on Herdr's Enter, 300 ms
-        // after its text: the pane must be at rest and its composer clear
-        // before the work is typed, as for a fresh seat's first prompt.
+        // The pane must be at rest and its composer clear before the work
+        // is typed, as for a fresh seat's first prompt.
         self.herdr
             .await_pane_rest(pane)
             .map_err(|_| WakeRefusal::NotResting)?;

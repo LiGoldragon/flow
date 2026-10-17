@@ -215,7 +215,7 @@ impl AccountsQueueDelivery for FlowStore {
         if flow_id.is_empty()
             || thread_id.is_empty()
             || stored.metaflow.state
-                != signal_flow::State::Awake(flow_id.to_owned())
+                != flow_ethos::State::Awake(flow_id.to_owned())
         {
             return Err(StoreError::StateInvariant);
         }
@@ -306,8 +306,11 @@ impl AccountsQueueDelivery for FlowStore {
         match &attempt.phase {
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain => {
                 attempt.phase = QueueDeliveryPhase::ReceiptRecorded(receipt);
-                self.engine
-                    .mutate_keyed(KeyedMutation::new(self.queue_delivery.attempts, attempt))?;
+                self.engine.mutate_keyed(KeyedMutation::new(
+                    self.queue_delivery.attempts,
+                    RecordKey::new(attempt_id),
+                    attempt,
+                ))?;
                 Ok(true)
             }
             QueueDeliveryPhase::ReceiptRecorded(recorded)
@@ -371,6 +374,7 @@ impl AccountsQueueDelivery for FlowStore {
                     attempt.phase = QueueDeliveryPhase::Uncertain;
                     self.engine.mutate_keyed(KeyedMutation::new(
                         self.queue_delivery.attempts,
+                        RecordKey::new(attempt.attempt_id.clone()),
                         attempt.clone(),
                     ))?;
                     outstanding.push(attempt);
@@ -408,6 +412,7 @@ impl AccountsQueueDelivery for FlowStore {
 mod tests {
     use super::*;
     use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::metaflow::SleepsMetaflows;
     use flow_defaults::DefaultConfiguration;
     use flow_ethos::{Aspect, Layer, Metaflow, Request, SentBy, State};
     use std::path::{Path, PathBuf};

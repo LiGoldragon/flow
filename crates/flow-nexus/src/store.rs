@@ -281,6 +281,78 @@ impl EngineRecord for StoredMetaflow {
     }
 }
 
+impl MemoryDefinition for StoredMetaflow {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-v2")
+    }
+}
+
+/// A metaflow as Flow kept it before 0.35.7, its queue of bare requests
+/// with no sender. It is read only by the v1-to-v2 family upgrades of the
+/// metaflows and of the Address holds that keep a metaflow as found.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MetaflowBeforeSenders {
+    address: Address,
+    state: MetaflowState,
+    past: Vec<String>,
+    queue: Vec<Request>,
+}
+
+/// Each request queued before Flow kept senders is carried with its sender
+/// Unknown; nothing else changes.
+impl From<MetaflowBeforeSenders> for Metaflow {
+    fn from(previous: MetaflowBeforeSenders) -> Self {
+        Self {
+            address: previous.address,
+            state: previous.state,
+            past: previous.past,
+            queue: previous
+                .queue
+                .into_iter()
+                .map(|request| flow_ethos::QueuedRequest {
+                    sent_by: flow_ethos::SentBy::Unknown,
+                    request,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMetaflowV1 {
+    metaflow: MetaflowBeforeSenders,
+}
+
+impl EngineRecord for StoredMetaflowV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaflowV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-v1")
+    }
+}
+
+impl UpgradeFrom<StoredMetaflowV1> for StoredMetaflow {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredMetaflowV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            metaflow: previous.metaflow.into(),
+        })
+    }
+}
+
 /// The process bound to an address, indexed by PID so a reused PID replaces
 /// only a binding whose recorded start token no longer names the process.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -1655,6 +1727,8 @@ pub enum StoreError {
     FlowUpgrade(String),
     #[error("launch attempt family upgrade failed: {0}")]
     LaunchAttemptUpgrade(String),
+    #[error("metaflow family upgrade failed: {0}")]
+    MetaflowUpgrade(String),
     #[error("retired tables could not be dropped: {0}")]
     RetiredTableDrop(String),
     #[error("flow nexus state record is absent or duplicated")]
@@ -1685,6 +1759,17 @@ pub enum StoreError {
 /// launch attempt names its context by module identity, or keeps what a
 /// 0.34 launch named instead.
 trait UpgradesFlowFamilies {
+    /// A store before 0.35.7 keeps queues of bare requests; each is carried
+    /// with its sender Unknown.
+    fn upgraded_metaflows(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaflow>,
+    ) -> Result<TableReference<StoredMetaflow>, StoreError>;
+    /// The metaflow an Address hold found is carried the same way.
+    fn upgraded_address_holds(
+        &mut self,
+        descriptor: TableDescriptor<address_hold::AddressHold>,
+    ) -> Result<TableReference<address_hold::AddressHold>, StoreError>;
     fn upgraded_flows(
         &mut self,
         descriptor: TableDescriptor<FlowRecord>,
@@ -1709,6 +1794,36 @@ trait UpgradesFlowFamilies {
 }
 
 impl UpgradesFlowFamilies for Engine {
+    fn upgraded_metaflows(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaflow>,
+    ) -> Result<TableReference<StoredMetaflow>, StoreError> {
+        match self.upgrade_table::<StoredMetaflowV1, StoredMetaflow>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => {
+                Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+            }
+        }
+    }
+
+    fn upgraded_address_holds(
+        &mut self,
+        descriptor: TableDescriptor<address_hold::AddressHold>,
+    ) -> Result<TableReference<address_hold::AddressHold>, StoreError> {
+        match self
+            .upgrade_table::<address_hold::AddressHoldV1, address_hold::AddressHold>(descriptor)
+        {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => {
+                Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+            }
+        }
+    }
+
     fn upgraded_flows(
         &mut self,
         descriptor: TableDescriptor<FlowRecord>,
@@ -2369,8 +2484,9 @@ impl OpensFlowStore for FlowStore {
         let metaflows_descriptor = TableDescriptor::<StoredMetaflow>::new(
             METAFLOW_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow"),
-            SchemaHash::for_label("flow-nexus-metaflow-v1"),
-        );
+            StoredMetaflow::schema_hash(),
+        )
+        .with_predecessor::<StoredMetaflowV1>();
         let metaflow_processes_descriptor = TableDescriptor::<StoredMetaflowProcess>::new(
             METAFLOW_PROCESS_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-process"),
@@ -2513,7 +2629,7 @@ impl OpensFlowStore for FlowStore {
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
-        let metaflows = engine.register_table(metaflows_descriptor)?;
+        let metaflows = engine.upgraded_metaflows(metaflows_descriptor)?;
         let metaflow_processes = engine.register_table(metaflow_processes_descriptor)?;
         let metaflow_locks = engine.register_table(metaflow_locks_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
@@ -2532,7 +2648,7 @@ impl OpensFlowStore for FlowStore {
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let context_sizes = engine.register_table(context_sizes_descriptor)?;
-        let address_holds = engine.register_table(address_holds_descriptor)?;
+        let address_holds = engine.upgraded_address_holds(address_holds_descriptor)?;
         let refreshes = engine.register_table(refreshes_descriptor)?;
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
         let send_calls = engine.register_table(send_calls_descriptor)?;
@@ -2595,11 +2711,14 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-state"),
             SchemaHash::for_label("flow-nexus-state-v1"),
         ))?;
-        let metaflows = engine.register_table(TableDescriptor::new(
-            METAFLOW_TABLE_NAME,
-            FamilyName::new("flow-nexus-metaflow"),
-            SchemaHash::for_label("flow-nexus-metaflow-v1"),
-        ))?;
+        let metaflows = engine.upgraded_metaflows(
+            TableDescriptor::new(
+                METAFLOW_TABLE_NAME,
+                FamilyName::new("flow-nexus-metaflow"),
+                StoredMetaflow::schema_hash(),
+            )
+            .with_predecessor::<StoredMetaflowV1>(),
+        )?;
         let metaflow_processes = engine.register_table(TableDescriptor::new(
             METAFLOW_PROCESS_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-process"),
@@ -2671,7 +2790,7 @@ impl OpensFlowStore for FlowStore {
         let context_sizes = engine.register_table(
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor(),
         )?;
-        let address_holds = engine.register_table(
+        let address_holds = engine.upgraded_address_holds(
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor(),
         )?;
         let refreshes = engine.register_table(
@@ -5195,7 +5314,7 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-quarantined-launch-attempt",
                 "flow-nexus-quarantined-launch-attempt-v1",
             ),
-            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v1"),
+            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v2"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
                 "flow-nexus-metaflow-process-v1",
@@ -5277,6 +5396,11 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_launch_attempts" => &[(
                 "flow-nexus-launch-attempt",
                 StoredLaunchAttemptV1::schema_hash(),
+            )],
+            "flow_nexus_metaflows" => &[("flow-nexus-metaflow", StoredMetaflowV1::schema_hash())],
+            "flow_nexus_address_holds" => &[(
+                address_hold::ADDRESS_HOLD_FAMILY,
+                <address_hold::AddressHoldV1 as MemoryDefinition>::schema_hash(),
             )],
             _ => &[],
         };
@@ -8061,6 +8185,88 @@ mod tests {
     /// A flow row of 0.34 named the clue its caller gave as its origin; the
     /// open upgrades it to the origin it was: the calling flow, or Unbound
     /// for the Nexus's own wake. Nothing else of the row changes.
+    /// A store before 0.35.7 keeps queues of bare requests: opening carries
+    /// every metaflow whole, each queued request with its sender Unknown.
+    #[test]
+    fn a_v1_metaflow_queue_upgrades_with_its_senders_unknown() {
+        use super::ManagesMetaflowState;
+        use signal_flow::{Address, Layer, Request};
+        let fixture = StoreFixture::new();
+        drop(fixture.store());
+        let address = Address {
+            aspect: Aspect::Mind,
+            topic: "flow".into(),
+            layer: Layer::Tertiary,
+        };
+        let database = redb::Database::open(fixture.path()).expect("store opens directly");
+        let write = database.begin_write().expect("catalog transaction starts");
+        {
+            let mut catalog = write
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            catalog
+                .remove("flow_nexus_metaflows")
+                .expect("metaflow family removes");
+        }
+        write
+            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                "flow_nexus_metaflows",
+            ))
+            .expect("metaflow rows drop");
+        write.commit().expect("catalog commits");
+        drop(database);
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("v1 store opens");
+            let metaflows = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_metaflows"),
+                    FamilyName::new("flow-nexus-metaflow"),
+                    SchemaHash::for_label("flow-nexus-metaflow-v1"),
+                ))
+                .expect("v1 metaflow family registers");
+            engine
+                .assert(Assertion::new(
+                    metaflows,
+                    super::StoredMetaflowV1 {
+                        metaflow: super::MetaflowBeforeSenders {
+                            address: address.clone(),
+                            state: flow_ethos::State::Asleep,
+                            past: vec!["a1a1a1".into()],
+                            queue: vec![
+                                Request::Order("first".into()),
+                                Request::Notice("second".into()),
+                            ],
+                        },
+                    },
+                ))
+                .expect("v1 row persists");
+        }
+
+        let store = fixture.store();
+        let metaflow = store
+            .list_metaflows()
+            .unwrap()
+            .into_iter()
+            .find(|metaflow| metaflow.address == address)
+            .expect("the metaflow is carried");
+        assert_eq!(metaflow.state, flow_ethos::State::Asleep);
+        assert_eq!(metaflow.past, vec!["a1a1a1".to_owned()]);
+        assert_eq!(
+            metaflow.queue,
+            vec![
+                flow_ethos::QueuedRequest {
+                    sent_by: flow_ethos::SentBy::Unknown,
+                    request: Request::Order("first".into()),
+                },
+                flow_ethos::QueuedRequest {
+                    sent_by: flow_ethos::SentBy::Unknown,
+                    request: Request::Notice("second".into()),
+                },
+            ]
+        );
+    }
+
     #[test]
     fn a_v5_flow_row_upgrades_to_its_derived_origin() {
         let fixture = StoreFixture::new();

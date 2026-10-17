@@ -413,6 +413,10 @@
             "tests::send_tool::a_malformed_call_is_refused_and_recorded";
           flow-send-tool-ungated-app-server-refused = context.exactTest "flow-nexus"
             "codex::tests::an_app_server_that_does_not_gate_the_send_tool_opens_no_thread";
+          flow-queued-request-rendered-with-sender = context.exactTest "flow-nexus"
+            "tests::send_tool::a_queued_request_is_rendered_with_its_sender";
+          flow-v1-metaflow-queue-upgrades-sender-unknown = context.exactTest "flow-nexus"
+            "store::tests::a_v1_metaflow_queue_upgrades_with_its_senders_unknown";
         }
       );
 

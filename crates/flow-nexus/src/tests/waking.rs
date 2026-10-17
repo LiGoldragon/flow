@@ -29,7 +29,7 @@ use flow_ethos::State;
 use signal_flow::{
     Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
     HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow, NativeLaunchBinding,
-    NativeLaunchIntent, Origin, PowerLevel, Request,
+    NativeLaunchIntent, Origin, PowerLevel, QueuedRequest, Request, SentBy,
 };
 use std::fs;
 
@@ -46,7 +46,32 @@ fn metaflow(layer: Layer, state: State, past: Vec<&str>, queue: Vec<Request>) ->
         address: address(layer),
         state,
         past: past.into_iter().map(String::from).collect(),
-        queue,
+        queue: queue.unsent(),
+    }
+}
+
+/// A request as it is queued with no sender kept: what seeding a queue in
+/// these tests stands for, and what a request queued before Flow kept
+/// senders reads as.
+trait Unsent {
+    type Queued;
+    fn unsent(self) -> Self::Queued;
+}
+
+impl Unsent for Request {
+    type Queued = QueuedRequest;
+    fn unsent(self) -> QueuedRequest {
+        QueuedRequest {
+            sent_by: SentBy::Unknown,
+            request: self,
+        }
+    }
+}
+
+impl Unsent for Vec<Request> {
+    type Queued = Vec<QueuedRequest>;
+    fn unsent(self) -> Vec<QueuedRequest> {
+        self.into_iter().map(Unsent::unsent).collect()
     }
 }
 
@@ -228,11 +253,11 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
 
     assert_eq!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
-        AtStop::Drained(Request::Notice("first".into()))
+        AtStop::Drained(Request::Notice("first".into()).unsent())
     );
     let kept = stored(&fixture, Layer::Secondary);
     assert_eq!(kept.state, State::Awake(CLAUDE_SEAT.into()));
-    assert_eq!(kept.queue, vec![Request::Result("second".into())]);
+    assert_eq!(kept.queue, vec![Request::Result("second".into())].unsent());
     assert!(!closes(&fixture), "it does not sleep with work queued");
     let typed = fixture.typed().expect("typed into the pane");
     assert!(typed.contains("first"));
@@ -351,7 +376,8 @@ fn the_store_sleeps_and_awakens_exactly_removing_only_what_the_woken_flow_was_ha
         Request::Order("A".into()),
         Request::Order("B".into()),
         Request::Order("C".into()),
-    ];
+    ]
+    .unsent();
     store.seed_metaflow(asleep);
     assert!(
         !store.awaken_metaflow(&at, "aaaaaa", 4).unwrap(),
@@ -363,18 +389,18 @@ fn the_store_sleeps_and_awakens_exactly_removing_only_what_the_woken_flow_was_ha
     assert!(woken.past.is_empty(), "a resumed flow is current, not Past");
     assert_eq!(
         woken.queue,
-        vec![Request::Order("C".into())],
+        vec![Request::Order("C".into())].unsent(),
         "what arrived after the wake read the queue stays"
     );
     assert!(
         !store
-            .remove_oldest_queued(&at, &Request::Order("A".into()))
+            .remove_oldest_queued(&at, &Request::Order("A".into()).unsent())
             .unwrap(),
         "only the oldest, as typed, is removed"
     );
     assert!(
         store
-            .remove_oldest_queued(&at, &Request::Order("C".into()))
+            .remove_oldest_queued(&at, &Request::Order("C".into()).unsent())
             .unwrap()
     );
     assert!(store.metaflow(&at).unwrap().unwrap().queue.is_empty());
@@ -429,7 +455,7 @@ fn a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work() {
         Request::Order("first".into()),
         Request::Question("second".into()),
     ];
-    let text = queue.prompt_text();
+    let text = queue.to_vec().unsent().prompt_text();
     let seat = FreshSeat {
         address: address(Layer::Secondary),
         launch_request_id: "wake-0-1".into(),
@@ -731,7 +757,7 @@ fn a_queued_order_resumes_the_sleeping_session_with_its_flow_id_and_the_whole_qu
         woken.queue.is_empty(),
         "the handed-over queue left with Awoken"
     );
-    woken.queue.push(Request::Order("D".into()));
+    woken.queue.push(Request::Order("D".into()).unsent());
     fixture.nexus.store.seed_metaflow(woken);
     fixture.nexus.drain_woken(&at, lease);
     assert!(!fixture.nexus.waking.is_waking(&at), "the hold is released");
@@ -770,8 +796,11 @@ fn a_queued_order_resumes_the_sleeping_session_with_its_flow_id_and_the_whole_qu
         2,
         "the queue in one prompt, then D: {prompts:?}"
     );
-    assert_eq!(prompts[0], queue.prompt_text());
-    assert_eq!(prompts[1], [Request::Order("D".into())].prompt_text());
+    assert_eq!(prompts[0], queue.clone().unsent().prompt_text());
+    assert_eq!(
+        prompts[1],
+        vec![Request::Order("D".into())].unsent().prompt_text()
+    );
 
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake("abc123".into()));
@@ -819,7 +848,7 @@ fn a_wake_that_cannot_start_puts_the_work_back_and_stays_asleep() {
     ));
     let asleep = stored(&fixture, Layer::Secondary);
     assert_eq!(asleep.state, State::Asleep);
-    assert_eq!(asleep.queue, queue);
+    assert_eq!(asleep.queue, queue.clone().unsent());
 }
 
 /// A wake the last Nexus did not finish left its work queued: the next
@@ -850,7 +879,7 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
     assert_eq!(woken.state, State::Awake("abc123".into()));
     assert!(woken.queue.is_empty());
     let typed = fs::read_to_string(fixture.directory.path().join("pane-typed.txt")).unwrap();
-    assert!(typed.starts_with(&queue.prompt_text()));
+    assert!(typed.starts_with(&queue.clone().unsent().prompt_text()));
     assert_eq!(stored(&fixture, Layer::Tertiary).state, State::Asleep);
 }
 
@@ -885,7 +914,7 @@ fn a_wake_is_refused_while_a_pane_already_runs_the_session() {
     );
     let asleep = stored(&fixture, Layer::Secondary);
     assert_eq!(asleep.state, State::Asleep);
-    assert_eq!(asleep.queue, queue);
+    assert_eq!(asleep.queue, queue.clone().unsent());
 }
 
 /// A Codex flow left in its recorded pane by a remote-resumed TUI: Herdr
@@ -928,7 +957,7 @@ fn a_wake_is_refused_while_a_remote_resumed_codex_tui_runs_the_thread() {
     );
     let asleep = stored(&fixture, Layer::Secondary);
     assert_eq!(asleep.state, State::Asleep);
-    assert_eq!(asleep.queue, vec![Request::Order("A".into())]);
+    assert_eq!(asleep.queue, vec![Request::Order("A".into())].unsent());
 }
 
 /// A session Herdr does report for the recorded pane must be the flow's
@@ -1184,7 +1213,10 @@ fn a_resume_whose_session_keeps_its_title_types_no_rename_and_delivers() {
         Outcome::Woken("abc123".into())
     );
     assert!(!herdr_calls(&fixture).contains("/rename"));
-    assert_eq!(typed_prompts(&fixture), vec![queue.prompt_text()]);
+    assert_eq!(
+        typed_prompts(&fixture),
+        vec![queue.clone().unsent().prompt_text()]
+    );
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake("abc123".into()));
     assert!(woken.queue.is_empty());
@@ -1224,7 +1256,10 @@ fn a_resumed_composer_not_yet_clear_is_waited_for_before_the_work() {
         .position(|line| line.contains("agent prompt w9:p1"))
         .expect("the work is typed");
     assert!(wait < prompt);
-    assert_eq!(typed_prompts(&fixture), vec![queue.prompt_text()]);
+    assert_eq!(
+        typed_prompts(&fixture),
+        vec![queue.clone().unsent().prompt_text()]
+    );
 }
 
 /// A wake that fails once its pane is open closes that pane and records the
@@ -1259,7 +1294,7 @@ fn a_wake_failing_after_its_pane_opened_closes_it_and_keeps_the_queue() {
     let asleep = stored(&fixture, Layer::Secondary);
     assert_eq!(asleep.state, State::Asleep);
     assert_eq!(asleep.past, vec!["abc123".to_owned()]);
-    assert_eq!(asleep.queue, queue);
+    assert_eq!(asleep.queue, queue.clone().unsent());
 }
 
 /// The state a wake that failed after resuming left: the flow Pending in
@@ -1300,7 +1335,7 @@ fn settled_and_delivered(fixture: &NexusFixture, queue: &[Request]) {
         typed_prompts(fixture),
         queue
             .iter()
-            .map(|request| [request.clone()].prompt_text())
+            .map(|request| vec![request.clone()].unsent().prompt_text())
             .collect::<Vec<_>>()
     );
 }
@@ -1617,7 +1652,12 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     assert_eq!(woken.state, State::Awake("abc123".into()));
     assert!(woken.queue.is_empty());
     let typed = fs::read_to_string(fixture.directory.path().join("pane-typed.txt")).unwrap();
-    assert!(typed.starts_with(&[order].prompt_text()));
+    // The woken flow reads the Order with the Sender its Lock named.
+    let sent = QueuedRequest {
+        sent_by: SentBy::Sender(sender_address.clone()),
+        request: order.clone(),
+    };
+    assert!(typed.starts_with(&[sent].prompt_text()), "{typed}");
 }
 
 /// A seat launched into the pane Message's marked processes name: its
@@ -1683,7 +1723,7 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
         .nexus
         .dispatch_metaflow_peer(
             signal_flow::Query::Lock(Lock_Data {
-                sender: sender_address,
+                sender: sender_address.clone(),
                 recipient: Recipient::Address(at.clone()),
             }),
             Some(&message),
@@ -1706,7 +1746,13 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
             .response,
         Response::Queued
     );
-    assert_eq!(stored(&fixture, Layer::Secondary).queue, vec![order]);
+    assert_eq!(
+        stored(&fixture, Layer::Secondary).queue,
+        vec![QueuedRequest {
+            sent_by: SentBy::Sender(sender_address),
+            request: order
+        }]
+    );
 }
 
 /// A launch refused before it was confirmed gives the Address back as it
@@ -1734,7 +1780,7 @@ fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
     assert_eq!(held.state, State::Awake("908786".into()));
     assert_eq!(held.past, vec!["abc123".to_owned()]);
     let mut queued = held.clone();
-    queued.queue.push(Request::Notice("B".into()));
+    queued.queue.push(Request::Notice("B".into()).unsent());
     fixture.nexus.store.seed_metaflow(queued);
 
     assert_eq!(
@@ -1993,7 +2039,7 @@ fn a_stop_before_confirmation_is_settled_when_the_launch_is_confirmed() {
     let mut held = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
     assert_eq!(held.state, State::Awake("908786".into()));
     held.queue
-        .push(Request::Notice("queued before confirmation".into()));
+        .push(Request::Notice("queued before confirmation".into()).unsent());
     fixture.nexus.store.seed_metaflow(held);
 
     assert_eq!(
@@ -2084,7 +2130,9 @@ fn a_retired_seat_sleeps_its_metaflow_and_its_order_wakes_it_fresh() {
     let mut retired = stored(&fixture, Layer::Secondary);
     assert_eq!(retired.state, State::Asleep);
     assert_eq!(retired.past, vec!["abc123".to_owned()]);
-    retired.queue.push(Request::Order("Carry on.".into()));
+    retired
+        .queue
+        .push(Request::Order("Carry on.".into()).unsent());
     fixture.nexus.store.seed_metaflow(retired.clone());
     assert_eq!(
         fixture.nexus.wake_plan(&retired),
@@ -2174,7 +2222,7 @@ fn a_refresh_makes_exactly_the_next_wake_fresh_and_keeps_the_queue() {
         .unwrap();
     let at = address(Layer::Secondary);
     let mut asleep = stored(&fixture, Layer::Secondary);
-    asleep.queue = vec![Request::Order("A".into()), Request::Order("B".into())];
+    asleep.queue = vec![Request::Order("A".into()), Request::Order("B".into())].unsent();
     fixture.nexus.store.seed_metaflow(asleep.clone());
     assert!(
         matches!(fixture.nexus.wake_plan(&asleep), WakePlan::Resume { .. }),
@@ -2223,7 +2271,7 @@ fn a_refresh_makes_exactly_the_next_wake_fresh_and_keeps_the_queue() {
 
     // A later sleep of the resumable flow wakes by resume again.
     let mut again = metaflow(Layer::Secondary, State::Asleep, vec!["abc123"], vec![]);
-    again.queue = vec![Request::Order("C".into())];
+    again.queue = vec![Request::Order("C".into())].unsent();
     assert!(matches!(
         fixture.nexus.wake_plan(&again),
         WakePlan::Resume { .. }
@@ -2650,7 +2698,7 @@ fn a_refreshed_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         system_modules: profile.system_modules.clone(),
         user_modules: profile.user_modules.clone(),
         leave_outs_option: None,
-        prompt: queue.prompt_text(),
+        prompt: queue.clone().unsent().prompt_text(),
     }
     .fresh_profile();
     let title = fresh.native_title(FRESH_CODEX_FLOW).unwrap();

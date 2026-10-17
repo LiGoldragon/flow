@@ -233,10 +233,10 @@ API. Before Flow opens such a connection it probes the deployed app-server: on
 a connection initialized without it, a `thread/start` declaring the tool must
 be refused for exactly that reason (codex 0.161.0-alpha.2 answers -32600,
 "thread/start.dynamicTools requires experimentalApi capability") before any
-thread exists. Any other answer, a started thread included, is
-`SendToolUnsupported`, and the launch is refused at its Codex thread stage
-(`NativeLaunchRefused.{ CodexThread AdapterRefused }`) rather than started
-without the tool.
+thread exists. Any other answer is `SendToolUnsupported`; a thread the probe
+started is archived at once on the same connection. The launch is refused
+at its Codex thread stage (`NativeLaunchRefused.{ CodexThread
+SendToolUnsupported }`) rather than started without the tool.
 
 The app-server sends each call as an `item/tool/call` server request to every
 connection subscribed to the thread, and takes the first answer. A call left
@@ -255,7 +255,7 @@ Flow holds on the calling thread, and the metaflow Awake as it. A thread no
 flow of Flow's runs is `ThreadUnowned`, a Stopped, Retired or Exited flow is
 `FlowEnded`, and a flow whose metaflow is no longer Awake as it (Asleep, or
 moved on by a Refresh or a fresh wake) is `NotAwake`; none is recorded. The
-request is queued for the target under the rules a Lock and a Deliver follow
+request is queued for the target, with that sender, under the rules a Lock and a Deliver follow
 (an absent target is `UnknownRecipient`, an Ended one `RecipientEnded`, one
 Message holds an unexpired lock on is `Held`), an Asleep target that a
 request of its kind wakes is woken once the call is answered, and the call is
@@ -266,6 +266,13 @@ answered from its record and queued nothing more; with another digest it is
 `KeyReused`. The answer is one `inputText` item holding the outcome as a
 datom, `Queued.{ Sender Target }` or `Refused.SendRefusal`, with `success`
 true only when queued.
+
+Every queued request carries who sent it, `QueuedRequest.{ SentBy Request }`:
+the Sender a Deliver's Lock named (which the bound Message peer asserts) or
+the metaflow a send-tool call is attributed to. A request queued before Flow
+kept senders reads `Unknown`; no address is supplied for it. A woken or
+drained flow reads each queued request as its datom, sender first:
+`{ Sender.{ Mind flow Tertiary } Order.«Run the tier tests.» }`.
 
 This establishes which metaflow a call is attributed to, from Flow's records
 of the thread. It does not authenticate a human or a process as the call's

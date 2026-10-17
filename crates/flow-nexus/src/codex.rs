@@ -188,7 +188,8 @@ pub trait OpensCodexThread {
 /// `thread/start` declaring the send tool must be refused for that reason,
 /// before any thread exists. Only then does Flow open a connection with the
 /// experimental API. An app-server that answers otherwise, or starts the
-/// (ephemeral) thread, does not support the tool: `SendToolUnsupported`.
+/// (ephemeral) thread, does not support the tool: `SendToolUnsupported`; a
+/// thread it started is archived at once, before the refusal.
 pub trait ProbesSendTool {
     fn probe_send_tool(&self) -> Result<(), CodexAdapterUnavailable>;
 }
@@ -1016,6 +1017,24 @@ impl ProbesSendTool for CodexAdapter {
             }),
             self.timeout,
         );
+        // An app-server that started the probe's thread is archived of it at
+        // once, on the same connection, before the refusal.
+        let archived = match &probed {
+            Ok(started) => started
+                .pointer("/thread/id")
+                .and_then(serde_json::Value::as_str)
+                .map(|thread| {
+                    session
+                        .request(
+                            3,
+                            "thread/archive",
+                            serde_json::json!({ "threadId": thread }),
+                            self.timeout,
+                        )
+                        .is_ok()
+                }),
+            Err(_) => None,
+        };
         session.stop_proxy();
         match probed {
             Err(CodexAdapterUnavailable::Refused { detail, .. })
@@ -1026,9 +1045,14 @@ impl ProbesSendTool for CodexAdapter {
             Err(CodexAdapterUnavailable::Refused { method, detail }) => Err(
                 CodexAdapterUnavailable::SendToolUnsupported(format!("{method}: {detail}")),
             ),
-            Ok(_) => Err(CodexAdapterUnavailable::SendToolUnsupported(
-                "thread/start accepted dynamic tools without the experimental API".into(),
-            )),
+            Ok(_) => Err(CodexAdapterUnavailable::SendToolUnsupported(format!(
+                "thread/start accepted dynamic tools without the experimental API; its thread {}",
+                match archived {
+                    Some(true) => "was archived",
+                    Some(false) => "was not archived",
+                    None => "named no id",
+                }
+            ))),
             Err(error) => Err(error),
         }
     }
@@ -1924,25 +1948,46 @@ mod tests {
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let launch = lean_codex_launch();
         let fake = FakeProxy;
-        for probe_answer in [
-            r#"{"id":2,"result":{"thread":{"id":"probe-thread"}}}"#,
-            r#"{"id":2,"error":{"code":-32602,"message":"unknown field `dynamicTools`"}}"#,
+        for (probe_answer, archives) in [
+            (
+                r#"{"id":2,"result":{"thread":{"id":"probe-thread"}}}"#,
+                true,
+            ),
+            (
+                r#"{"id":2,"error":{"code":-32602,"message":"unknown field `dynamicTools`"}}"#,
+                false,
+            ),
         ] {
             let frames = [
                 fake.websocket_frame(r#"{"id":1,"result":{}}"#),
                 fake.websocket_frame(probe_answer),
+                fake.websocket_frame(r#"{"id":3,"result":{}}"#),
             ];
             let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
             assert!(matches!(
                 lean_adapter_at(executable, &launch).open_thread_with_first_turn(&launch),
                 Err(CodexAdapterUnavailable::SendToolUnsupported(_))
             ));
-            let requests = record.requests(3);
+            let requests = record.requests(if archives { 4 } else { 3 });
             let methods = requests
                 .iter()
                 .map(|request| request["method"].as_str().unwrap())
                 .collect::<Vec<_>>();
-            assert_eq!(methods, ["initialize", "initialized", "thread/start"]);
+            // A started probe thread is archived at once; nothing else is sent.
+            if archives {
+                assert_eq!(
+                    methods,
+                    [
+                        "initialize",
+                        "initialized",
+                        "thread/start",
+                        "thread/archive"
+                    ]
+                );
+                assert_eq!(requests[3]["params"]["threadId"], "probe-thread");
+            } else {
+                assert_eq!(methods, ["initialize", "initialized", "thread/start"]);
+            }
             assert!(requests[0]["params"].get("capabilities").is_none());
             assert_eq!(requests[2]["params"]["ephemeral"], true);
             assert_eq!(

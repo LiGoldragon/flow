@@ -24,7 +24,7 @@ use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     Address, Aspect, ComposedLaunch, ContextRefusal, FirstPromptPayload, HarnessKind,
-    LaunchProfile, LeaveOut, LeaveOutRefusal, PowerLevel, PromptPart, Request, SystemPrompt,
+    LaunchProfile, LeaveOut, LeaveOutRefusal, PowerLevel, PromptPart, QueuedRequest, SystemPrompt,
     TargetReceiptRequest,
 };
 use std::collections::HashSet;
@@ -567,17 +567,18 @@ impl ComposesLaunch for LaunchComposer {
 }
 
 /// The text a metaflow's queued requests become in a flow's prompt: one
-/// opening line, then each Request as its own datom, oldest first, each on
-/// a line of its own. A Request is typed as the datom it is, as a Message
-/// is; a control character other than LF and TAB is a key to a harness, not
-/// a word, and is typed as U+FFFD.
+/// opening line, then each queued request as its own datom, oldest first,
+/// each on a line of its own: who sent it, then the Request, as
+/// `{ Sender.{ Mind flow Tertiary } Order.«...» }`, or `{ Unknown ... }` for
+/// one queued before Flow kept senders. It is typed as the datom it is, as a
+/// Message is; a control character other than LF and TAB is a key to a
+/// harness, not a word, and is typed as U+FFFD.
 pub trait RendersQueuedWork {
-    const QUEUED_WORK_OPENING: &'static str =
-        "Work queued for this metaflow while no flow of it was running, oldest first:";
+    const QUEUED_WORK_OPENING: &'static str = "Work queued for this metaflow while no flow of it was running, oldest first, each with who sent it:";
     fn prompt_text(&self) -> String;
 }
 
-impl RendersQueuedWork for [Request] {
+impl RendersQueuedWork for [QueuedRequest] {
     fn prompt_text(&self) -> String {
         let mut text = String::from(Self::QUEUED_WORK_OPENING);
         for request in self {

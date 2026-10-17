@@ -3,8 +3,8 @@
 use super::refresh::MarksFreshWakes;
 use super::*;
 use signal_flow::{
-    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Recipient, Refusal, StartRejection,
-    Unknown_Data,
+    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, QueuedRequest, Recipient, Refusal,
+    SentBy, StartRejection, Unknown_Data,
 };
 
 /// What a Deliver did to its recipient's queue: the wire answer, and
@@ -51,7 +51,11 @@ pub(crate) trait SleepsMetaflows {
     ) -> Result<bool, StoreError>;
     /// Removes the oldest queued request once it was typed into the Awake
     /// flow; refused unless it is still the oldest.
-    fn remove_oldest_queued(&self, address: &Address, typed: &Request) -> Result<bool, StoreError>;
+    fn remove_oldest_queued(
+        &self,
+        address: &Address,
+        typed: &QueuedRequest,
+    ) -> Result<bool, StoreError>;
     /// The metaflow currently Awake as this flow, if any.
     fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Metaflow>, StoreError>;
     /// The metaflow at this Address, if any.
@@ -264,7 +268,12 @@ impl MutatesMetaflows for FlowStore {
             ))));
         }
         let recipient_asleep = stored.metaflow.state == MetaflowState::Asleep;
-        stored.metaflow.queue.push(request.request);
+        // The request is queued with the Sender its Lock named, which the
+        // bound Message peer asserted.
+        stored.metaflow.queue.push(QueuedRequest {
+            sent_by: SentBy::Sender(request.lock.sender.clone()),
+            request: request.request,
+        });
         let commit = self
             .engine
             .begin_atomic_commit()
@@ -312,7 +321,11 @@ impl SleepsMetaflows for FlowStore {
         Ok(true)
     }
 
-    fn remove_oldest_queued(&self, address: &Address, typed: &Request) -> Result<bool, StoreError> {
+    fn remove_oldest_queued(
+        &self,
+        address: &Address,
+        typed: &QueuedRequest,
+    ) -> Result<bool, StoreError> {
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
         };
@@ -710,7 +723,14 @@ mod tests {
                 .response,
             Response::Queued
         );
-        assert_eq!(fixture.store.list_metaflows().unwrap()[0].queue, vec![body]);
+        // Queued with the Sender its Lock named.
+        assert_eq!(
+            fixture.store.list_metaflows().unwrap()[0].queue,
+            vec![QueuedRequest {
+                sent_by: SentBy::Sender(lock.sender.clone()),
+                request: body
+            }]
+        );
         assert!(
             fixture
                 .store

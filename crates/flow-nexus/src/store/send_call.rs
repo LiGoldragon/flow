@@ -18,7 +18,7 @@ use sema_engine::{
     Assertion, EngineRecord, FamilyName, QueryPlan, RecordKey, SchemaHash, TableDescriptor,
     TableName,
 };
-use signal_flow::{Address, HarnessKind, Request};
+use signal_flow::{Address, HarnessKind, QueuedRequest, Request, SentBy};
 
 pub(super) const SEND_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_send_calls");
 pub(super) const SEND_CALL_FAMILY: &str = "flow-nexus-send-call";
@@ -187,7 +187,10 @@ impl KeepsSendCalls for FlowStore {
             return refused(SendRefusal::Held);
         }
         let recipient_asleep = stored.metaflow.state == MetaflowState::Asleep;
-        stored.metaflow.queue.push(request);
+        stored.metaflow.queue.push(QueuedRequest {
+            sent_by: SentBy::Sender(sender.clone()),
+            request,
+        });
         let outcome = SendOutcome::Queued(Queued_Data {
             sender,
             target: target.clone(),

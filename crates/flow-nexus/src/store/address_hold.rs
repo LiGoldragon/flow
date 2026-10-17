@@ -24,14 +24,14 @@ use super::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    AtomicCommit, EngineRecord, FamilyName, QueryPlan, RecordKey, SchemaHash, TableDescriptor,
-    TableName,
+    AtomicCommit, Decision, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan,
+    RecordKey, SchemaHash, TableDescriptor, TableName, UpgradeFrom,
 };
 use signal_flow::{Address, LaunchProfile, Metaflow, StartRejection};
 
 pub(super) const ADDRESS_HOLD_TABLE_NAME: TableName = TableName::new("flow_nexus_address_holds");
 pub(super) const ADDRESS_HOLD_FAMILY: &str = "flow-nexus-address-hold";
-pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v1";
+pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v2";
 
 /// The Address a launched flow holds, and the metaflow it found there.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -47,6 +47,53 @@ impl EngineRecord for AddressHold {
     }
 }
 
+impl MemoryDefinition for AddressHold {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(ADDRESS_HOLD_SCHEMA)
+    }
+}
+
+/// An Address hold as Flow kept it before 0.35.7, the metaflow it found
+/// holding bare requests. It is read only by the v1-to-v2 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AddressHoldV1 {
+    flow_id: String,
+    address: Address,
+    found: Option<super::MetaflowBeforeSenders>,
+}
+
+impl EngineRecord for AddressHoldV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+
+impl MemoryDefinition for AddressHoldV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-address-hold-v1")
+    }
+}
+
+impl UpgradeFrom<AddressHoldV1> for AddressHold {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: AddressHoldV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            flow_id: previous.flow_id,
+            address: previous.address,
+            found: previous.found.map(Metaflow::from),
+        })
+    }
+}
+
 pub(super) trait DescribesAddressHoldTable {
     fn descriptor() -> TableDescriptor<AddressHold>;
 }
@@ -58,6 +105,7 @@ impl DescribesAddressHoldTable for AddressHold {
             FamilyName::new(ADDRESS_HOLD_FAMILY),
             SchemaHash::for_label(ADDRESS_HOLD_SCHEMA),
         )
+        .with_predecessor::<AddressHoldV1>()
     }
 }
 

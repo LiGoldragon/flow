@@ -172,6 +172,6 @@ pub enum Outcome {
     Released,
     Slept,
     Woken(signal_flow::FlowId),
-    Drained(std::vec::Vec<signal_flow::Request>),
+    Drained(std::vec::Vec<signal_flow::QueuedRequest>),
     Failed(Failed_Data),
 }

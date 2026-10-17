@@ -19,7 +19,7 @@ use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
 use signal_flow::{
     Address, Aspect, Caller, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Metaflow,
-    PowerLevel, Request,
+    PowerLevel, QueuedRequest, Request, SentBy,
 };
 use std::{
     path::{Path, PathBuf},
@@ -243,6 +243,14 @@ fn answer_to(messages: &[serde_json::Value], request_id: u64) -> Option<serde_js
         .map(|message| message["result"].clone())
 }
 
+/// An Order as the target's queue holds it: with the Sender Flow resolved.
+fn sent(sender: Address, body: &str) -> QueuedRequest {
+    QueuedRequest {
+        sent_by: SentBy::Sender(sender),
+        request: Request::Order(body.into()),
+    }
+}
+
 fn queued_text(sender: Address, target: Address) -> String {
     use datom_codec::Datomizable;
     use protos::{Compactable, Protosizable};
@@ -259,7 +267,7 @@ trait SeatsCodexFlows {
     /// The target metaflow, Awake as a flow Flow does not hold, so nothing
     /// queued for it wakes anything.
     fn awake_target(&self);
-    fn target_queue(&self) -> Vec<Request>;
+    fn target_queue(&self) -> Vec<QueuedRequest>;
     /// The adapter of the endpoint `model` selects, its client the fake.
     fn adapter(&mut self, model: &str, fake: &FakeAppServer) -> CodexAdapter;
 }
@@ -304,7 +312,7 @@ impl SeatsCodexFlows for NexusFixture {
         });
     }
 
-    fn target_queue(&self) -> Vec<Request> {
+    fn target_queue(&self) -> Vec<QueuedRequest> {
         self.nexus
             .store
             .metaflow(&target())
@@ -383,10 +391,7 @@ fn two_threads_are_each_attributed_to_their_own_metaflow() {
     );
     assert_eq!(
         fixture.target_queue(),
-        vec![
-            Request::Order("from a".into()),
-            Request::Order("from b".into())
-        ]
+        vec![sent(sender_a(), "from a"), sent(sender_b(), "from b")]
     );
     // Each subscribed connection initialized with the experimental API and
     // resumed exactly its own thread.
@@ -482,7 +487,7 @@ fn a_replayed_call_of_a_retired_or_superseded_flow_is_refused() {
     );
     assert_eq!(
         fixture.target_queue(),
-        vec![Request::Order("before retirement".into())]
+        vec![sent(sender_a(), "before retirement")]
     );
 }
 
@@ -512,7 +517,7 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
     );
     assert_eq!(
         fixture.target_queue(),
-        vec![Request::Order("exactly once".into())]
+        vec![sent(sender_a(), "exactly once")]
     );
 }
 
@@ -531,7 +536,7 @@ fn a_call_key_recorded_with_other_content_is_refused() {
             .send_outcome,
         SendOutcome::Refused(SendRefusal::KeyReused)
     );
-    assert_eq!(fixture.target_queue(), vec![Request::Order("first".into())]);
+    assert_eq!(fixture.target_queue(), vec![sent(sender_a(), "first")]);
     // The record keeps what the key first asked.
     let recorded: SendCall = fixture
         .nexus
@@ -583,7 +588,7 @@ fn a_pending_call_is_answered_after_start_and_reconnect() {
     );
     assert_eq!(
         fixture.target_queue(),
-        vec![Request::Order("after restart".into())]
+        vec![sent(sender_a(), "after restart")]
     );
     assert!(fake.runs() >= 4, "probe, connection, probe, connection");
 }
@@ -729,7 +734,7 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     });
     let queue = fixture.target_queue();
     eprintln!("witness target queue {queue:?}");
-    assert_eq!(queue, vec![Request::Order("witness-order".into())]);
+    assert_eq!(queue, vec![sent(sender_a(), "witness-order")]);
     let recorded = fixture
         .nexus
         .store
@@ -737,4 +742,21 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         .unwrap()
         .expect("the call is recorded");
     eprintln!("witness record {:?}", recorded.send_outcome);
+}
+
+/// A woken or drained flow reads each queued request with who sent it.
+#[test]
+fn a_queued_request_is_rendered_with_its_sender() {
+    use crate::composition::RendersQueuedWork;
+    let queue = [
+        sent(sender_a(), "Carry on."),
+        QueuedRequest {
+            sent_by: SentBy::Unknown,
+            request: Request::Notice("kept".into()),
+        },
+    ];
+    assert_eq!(
+        queue.prompt_text(),
+        "Work queued for this metaflow while no flow of it was running, oldest first, each with who sent it:\n{ Sender.{ Mind alpha Tertiary } Order.«Carry on.» }\n{ Unknown Notice.kept }"
+    );
 }

@@ -1,29 +1,47 @@
 # Flow 0.35.7
 
-No wire change: signal-flow 19.0.0 and meta-signal-flow 24.0.0 as in 0.35.6,
-their digests unchanged. The store adds one table.
+Wire change on both sockets. Ordinary: signal-flow 20.0.0 (6a496646); its
+contract digest changes from baa84beb4f2cc84b to 5bf78e23e2f14c52, so every
+ordinary-socket peer (Message, signal-message) repins. Meta:
+meta-signal-flow 24.0.1 (a918b7db) only repins signal-flow 20.0.0; its source
+and digest 7bbc37359da8843c are unchanged, but a meta-wire peer rebuilds
+against it so the shared types have one identity. flow-ethos (this
+repository, 9e417bb) changes `Metaflow`'s queue. The store upgrades two
+families and adds one table.
 
+- **A queued request carries its sender.** A metaflow's queue holds
+  `QueuedRequest.{ SentBy Request }`, `SentBy.[ Sender Unknown ]`. A Deliver
+  queues with its Lock's Sender, a send-tool call with the metaflow it is
+  attributed to. The metaflows family upgrades v1 to v2, and the Address
+  holds family, which keeps a metaflow as found, v1 to v2; every stored
+  queued request reads `SentBy Unknown`, every other value as it was. A
+  woken or drained flow's prompt shows each request with its sender, one
+  datom per line under "Work queued for this metaflow while no flow of it was
+  running, oldest first, each with who sent it:", e.g.
+  `{ Sender.{ Mind alpha Tertiary } Order.«Carry on.» }` or
+  `{ Unknown Notice.kept }`. `Drained` carries `QueuedRequest`.
 - **Every Codex thread Flow opens declares the send tool.** `thread/start`
   carries `dynamicTools: [ send ]` on a connection initialized with
   `capabilities.experimentalApi`. Before that connection is opened the
   app-server is probed: a `thread/start` declaring the tool on a connection
   without the experimental API must be refused with -32600 naming
-  `dynamicTools` and `experimentalApi`. Any other answer is
-  `SendToolUnsupported`, logged, and the launch is refused
-  `NativeLaunchRefused.{ CodexThread AdapterRefused }`; no thread is opened
-  without the tool. Each Codex launch now makes one more app-server
-  connection, the probe, before its opening.
+  `dynamicTools` and `experimentalApi`. Any other answer refuses the launch
+  `NativeLaunchRefused.{ CodexThread SendToolUnsupported }` (appended last to
+  `NativeLaunchFailure`, so stored outcomes read as they were), and a thread
+  the probe started is archived at once. No thread is opened without the
+  tool. Each Codex launch makes one more app-server connection, the probe.
 - **The Nexus answers send-tool calls.** One connection per live Codex flow's
   thread, resumed at start, on each store change that brings a thread, and
   after each reconnect, answers `item/tool/call`: the sender is the metaflow
   Awake as the thread's one live flow, read at handling time; the request is
-  queued for the target under the Lock and Deliver rules; the answer is
+  queued under the Lock and Deliver rules; the answer is
   `Queued.{ Sender Target }` or `Refused.SendRefusal` as a datom.
 - **`flow_nexus_send_calls`** (family `flow-nexus-send-call`, schema
   `flow-nexus-send-call-v1`) records each handled call, keyed by thread, turn
   and call id, with its content digest and outcome; a queued call's row is
   written in the commit that queues it. A store written before 0.35.7 opens
   with the table added and empty.
+- A flow that ends or resumes announces a launch change, so watchers re-read.
 - The Codex adapter's unused `start_codex`, `start_codex_observed` and
   `resume_codex` paths are removed: they opened threads without the tool.
 - A server request whose id equals a pending client request's id is no

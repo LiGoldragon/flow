@@ -85,6 +85,7 @@ impl ClassifiesNativeLaunchFailure for NativeLaunchFailure {
             Self::ModelOrEffortDiffers => "model-or-effort-differs",
             Self::SessionUnrecorded => "session-unrecorded",
             Self::Unclassified => "unclassified",
+            Self::SendToolUnsupported => "send-tool-unsupported",
         }
     }
 
@@ -311,7 +312,12 @@ impl Performs for RunningNexus {
                             );
                             return NativeLaunchRefusal {
                                 native_launch_stage: NativeLaunchStage::CodexThread,
-                                native_launch_failure: NativeLaunchFailure::AdapterRefused,
+                                native_launch_failure: match error {
+                                    crate::codex::CodexAdapterUnavailable::SendToolUnsupported(
+                                        _,
+                                    ) => NativeLaunchFailure::SendToolUnsupported,
+                                    _ => NativeLaunchFailure::AdapterRefused,
+                                },
                             }
                             .logged();
                         }

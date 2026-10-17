@@ -65,7 +65,7 @@ use crate::store::{
 use signal_flow::{
     Address, AgentState, ContextRefusal, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind,
     HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow, Origin,
-    PowerLevel, Request, Response,
+    PowerLevel, QueuedRequest, Request, Response,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -332,7 +332,7 @@ pub enum AtStop {
     /// The seat rested with nothing queued and could be resumed: it sleeps.
     Slept,
     /// The seat rested with work queued: the oldest request was typed in.
-    Drained(Request),
+    Drained(QueuedRequest),
     /// The seat stays as it is, for the reason named.
     Kept(KeptAtStop),
 }
@@ -623,7 +623,10 @@ impl SleepsAndWakesSeats for RunningNexus {
                     .filter(|metaflow| {
                         metaflow.state == flow_ethos::State::Asleep
                             && Self::wakes_layer(&metaflow.address.layer)
-                            && (metaflow.queue.iter().any(Self::wakes_for)
+                            && (metaflow
+                                .queue
+                                .iter()
+                                .any(|queued| Self::wakes_for(&queued.request))
                                 || metaflow.past.last().is_some_and(|flow_id| {
                                     matches!(
                                         self.store.flow_node(flow_id),

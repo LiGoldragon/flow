@@ -1,3 +1,9 @@
+# Flow 0.35.15
+
+No wire change and no store change.
+
+- **A Claude launch receipt rebuilds the native paste element.** Claude Code records a pasted part with its native wrapper and exact newline framing. A recorded user turn matches only the exact part bytes or the exact rebuilt element under the turn’s identifier. A different identifier, newline count, or escaping is refused.
+
 # Flow 0.35.14
 
 No wire change and no store change.

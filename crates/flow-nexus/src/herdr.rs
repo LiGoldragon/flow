@@ -2,6 +2,7 @@
 
 use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
+pub(crate) mod claude_paste;
 pub mod launch;
 pub mod pane;
 pub mod reservation;

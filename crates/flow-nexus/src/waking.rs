@@ -68,6 +68,7 @@ use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::RecordsContextSize;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SleepsMetaflows;
+use crate::store::turn_end::KeepsTurnEnds;
 use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle,
 };
@@ -303,9 +304,12 @@ pub trait SettlesStopsAtConfirmation {
 
 impl SettlesStopsAtConfirmation for RunningNexus {
     fn note_stop_at_confirmation(&self, flow_id: &str) {
-        if let Ok(Some(events)) = self.store.events(flow_id)
-            && events.last() == Some(&Event::Stopped)
-        {
+        let stopped = matches!(
+            self.store.events(flow_id),
+            Ok(Some(events)) if events.last() == Some(&Event::Stopped)
+        );
+        let native_turn_completed = self.store.has_completed_turn(flow_id).unwrap_or(false);
+        if stopped || native_turn_completed {
             self.stopped_at_confirmation.note(flow_id);
         }
     }

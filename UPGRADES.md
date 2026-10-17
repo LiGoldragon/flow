@@ -1,3 +1,19 @@
+# Flow 0.35.12
+
+No wire change. The store adds `flow_nexus_turn_ends`; an older store opens
+with the table empty.
+
+- **A native turn completion drains one queued request.** `QueueTurnEnd`
+  validates the exact recorded native session, turn and transcript, commits
+  the request, and answers `TurnEndQueued` without waiting. A filesystem
+  subscription observes the transcript; only its matching Codex
+  `task_complete` row completes the request and hands the oldest queued
+  request to an Awake resting metaflow. The completed native session and
+  turn remain recorded, so duplicate hooks and unrelated file events drain
+  nothing. A completion that arrives before launch confirmation is settled
+  after confirmation. Restart reattaches subscriptions to pending records;
+  no transcript is polled and no native prompt is replayed.
+
 # Flow 0.35.11
 
 No wire change. The store adds one table, `flow_nexus_launch_cleanups`; a

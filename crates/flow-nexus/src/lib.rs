@@ -46,6 +46,7 @@ pub mod reporting;
 pub mod send_tool;
 pub mod store;
 pub mod title;
+pub mod turn_end;
 pub mod values;
 pub mod waking;
 
@@ -89,6 +90,7 @@ use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, FlowStore, NamesLiveFlow, OpensFlowStore,
     ReadsFlowRows, RecordsLaunchOutcome, RegistersExistingFlow, RegistersFlowIdentity,
 };
+use turn_end::HandlesTurnEnds;
 use waking::RefreshesMetaflows;
 use waking::SettlesStopsAtConfirmation;
 use waking::SleepsAndWakesSeats;
@@ -214,11 +216,7 @@ impl Dispatches for RunningNexus {
             }
             // A dispatch without a connection has no peer to read.
             Query::ResolveCaller(claim) => self.resolve_caller(None, claim),
-            // Flow holds no turn-end queue yet, so nothing is enqueued and
-            // the request is refused rather than acknowledged.
-            Query::QueueTurnEnd(_) => {
-                Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
-            }
+            Query::QueueTurnEnd(request) => self.queue_turn_end(request),
             Query::Report(report) => self.report(report),
             Query::Current(address) => {
                 self.store
@@ -1103,6 +1101,7 @@ mod tests {
     mod reservation;
     mod send_tool;
     mod submission;
+    mod turn_end;
     mod waking;
 
     use super::{Dispatches, ReconcilesListedFlows, RunningNexus};
@@ -3128,7 +3127,7 @@ mod tests {
                 ],
             })
         );
-        // Stop's turn-end wakeup stays refused: Flow holds no turn-end queue.
+        // A turn for no native session Flow holds is refused.
         assert_eq!(
             fixture
                 .nexus
@@ -3137,7 +3136,7 @@ mod tests {
                     turn_id: "t".into(),
                     transcript_path_option: None,
                 })),
-            Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
+            Response::TurnEndRejected(signal_flow::TurnEndRejection::UnknownSession)
         );
     }
 
@@ -4834,7 +4833,7 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_end_is_refused_while_flow_holds_no_queue() {
+    fn a_turn_end_for_an_unknown_session_is_refused() {
         let fixture = NexusFixture::new();
         let request = signal_flow::TurnEndRequest {
             session_id: "session-1".into(),
@@ -4843,7 +4842,7 @@ mod tests {
         };
         assert_eq!(
             fixture.nexus.dispatch(Query::QueueTurnEnd(request)),
-            Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
+            Response::TurnEndRejected(signal_flow::TurnEndRejection::UnknownSession)
         );
     }
 

@@ -9227,7 +9227,7 @@ mod tests {
                 super::StoreError::LeaveOutUpgrade { entry, reason } => (entry, reason),
                 other => panic!("not a leave-out refusal: {other}"),
             };
-            let expected = (FlowStore::address_record_key(&mixed), reason.clone());
+            let expected = (FlowStore::address_record_key(&mixed), reason);
             match <FlowStore as OpensFlowStore>::open(&fixture.path()) {
                 Ok(_) => panic!("the open must refuse"),
                 Err(error) => assert_eq!(refusal(error), expected),

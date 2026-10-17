@@ -22,6 +22,7 @@ pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
 use queue_delivery::QueueDeliveryTables;
+use queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
@@ -3062,6 +3063,26 @@ impl OpensFlowStore for FlowStore {
                 "flow-nexus: delivery {} to {} was interrupted under its lease; settled Uncertain",
                 delivery.delivery_id, delivery.flow_id
             );
+        }
+        // Native queue delivery is not atomic with this store. A durable
+        // native receipt is enough to finish the local settlement after a
+        // restart; an attempt without one becomes Uncertain and is never
+        // submitted again automatically.
+        for attempt in store.recover_outstanding_deliveries()? {
+            match attempt.phase {
+                QueueDeliveryPhase::ReceiptRecorded(_) => {
+                    if !store.settle_recorded_delivery(&attempt.attempt_id)? {
+                        return Err(StoreError::StateInvariant);
+                    }
+                }
+                QueueDeliveryPhase::Uncertain => eprintln!(
+                    "flow-nexus: queued delivery {} is uncertain; native reconciliation is required",
+                    attempt.attempt_id
+                ),
+                QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Settled(_) => {
+                    return Err(StoreError::StateInvariant);
+                }
+            }
         }
         Ok(store)
     }

@@ -43,6 +43,7 @@
 use crate::AwaitsLaunchSettlement;
 use crate::RunningNexus;
 use crate::claude::MeasuresClaudeContext;
+use crate::codex::{SelectsCodexEndpoint, SubmitsQueuedCodexTurn};
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{
     ComposesLaunch, CompositionError, FreshSeat, HarnessedProfile, RendersQueuedWork,
@@ -69,8 +70,13 @@ use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::RecordsContextSize;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SleepsMetaflows;
+use crate::store::queue_delivery::{
+    AccountsQueueDelivery, NativeDeliveryReceipt, PrepareQueueDelivery,
+    QueueDeliveryPhase,
+};
 use crate::store::{
-    ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, RecordsFlowLifecycle,
+    ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows,
+    ReadsLaunchAttempt, RecordsFlowLifecycle,
 };
 use signal_flow::{
     Address, AgentState, ContextRefusal, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind,
@@ -798,15 +804,82 @@ impl PerformsSleepAndWake for RunningNexus {
             return Outcome::Drained(Vec::new());
         };
         let typed = vec![oldest];
+        let node = match self.store.flow_node(&flow_id) {
+            Ok(Some(node)) => node,
+            _ => return Outcome::Failed(Failed_Data::StoreRefused),
+        };
+        if node.harness_kind == HarnessKind::Codex {
+            let attempt = match self.store.prepare_oldest_delivery(
+                &address,
+                &flow_id,
+                &node.session_id,
+            ) {
+                Ok(PrepareQueueDelivery::Prepared(attempt)) => attempt,
+                Ok(PrepareQueueDelivery::Outstanding(attempt)) => {
+                    return match attempt.phase {
+                        QueueDeliveryPhase::ReceiptRecorded(_) => {
+                            if self
+                                .store
+                                .settle_recorded_delivery(&attempt.attempt_id)
+                                .unwrap_or(false)
+                            {
+                                self.codex_turns.delivered(&node.session_id);
+                                Outcome::Drained(vec![attempt.queued])
+                            } else {
+                                Outcome::Failed(Failed_Data::StoreRefused)
+                            }
+                        }
+                        QueueDeliveryPhase::Prepared
+                        | QueueDeliveryPhase::Uncertain
+                        | QueueDeliveryPhase::Settled(_) => {
+                            Outcome::Failed(Failed_Data::HerdrRefused)
+                        }
+                    };
+                }
+                Ok(PrepareQueueDelivery::Empty) => return Outcome::Drained(Vec::new()),
+                Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+            };
+            let model = match self.store.role(&flow_id) {
+                Ok(Some(role)) => role.model_name,
+                _ => return Outcome::Failed(Failed_Data::StoreRefused),
+            };
+            let adapter = match self.codex_endpoints.adapter_for(&model) {
+                Ok(adapter) => adapter,
+                Err(_) => return Outcome::Failed(Failed_Data::HerdrRefused),
+            };
+            let receipt = match adapter.submit_queued_turn(
+                &node.session_id,
+                &attempt.attempt_id,
+                attempt.native_request_id,
+                &typed.prompt_text(),
+            ) {
+                Ok(receipt) => receipt,
+                Err(_) => return Outcome::Failed(Failed_Data::HerdrRefused),
+            };
+            let receipt = NativeDeliveryReceipt {
+                native_request_id: receipt.native_request_id,
+                thread_id: receipt.thread_id,
+                turn_id: receipt.turn_id,
+                native_receipt: receipt.native_receipt,
+            };
+            if !self
+                .store
+                .record_delivery_receipt(&attempt.attempt_id, receipt)
+                .unwrap_or(false)
+                || !self
+                    .store
+                    .settle_recorded_delivery(&attempt.attempt_id)
+                    .unwrap_or(false)
+            {
+                return Outcome::Failed(Failed_Data::StoreRefused);
+            }
+            self.codex_turns.delivered(&node.session_id);
+            return Outcome::Drained(typed);
+        }
         if self.hand_over(&flow_id, &typed.prompt_text()).is_err() {
             return Outcome::Failed(Failed_Data::HerdrRefused);
         }
         // A Codex seat's next rest is the end of a turn begun after this.
-        if let Ok(Some(node)) = self.store.flow_node(&flow_id)
-            && node.harness_kind == HarnessKind::Codex
-        {
-            self.codex_turns.delivered(&node.session_id);
-        }
         // Typed (or possibly typed): it is never typed twice.
         match self.store.remove_oldest_queued(&address, &typed[0]) {
             Ok(true) => Outcome::Drained(typed),

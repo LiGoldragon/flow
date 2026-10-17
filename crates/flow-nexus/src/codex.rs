@@ -170,6 +170,29 @@ pub trait SubmitsBoundCodexPart {
     ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable>;
 }
 
+/// The app-server receipt for one queued request submitted as a new turn.
+/// The JSON-RPC id is chosen by the durable delivery attempt; the returned
+/// turn id is the native fact that the app-server accepted that attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedTurnReceipt {
+    pub native_request_id: u64,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub native_receipt: String,
+}
+
+/// Submits queued work to an existing Codex thread through the supported
+/// app-server protocol. This never types into the attached terminal pane.
+pub trait SubmitsQueuedCodexTurn {
+    fn submit_queued_turn(
+        &self,
+        thread_id: &str,
+        attempt_id: &str,
+        native_request_id: u64,
+        text: &str,
+    ) -> Result<QueuedTurnReceipt, CodexAdapterUnavailable>;
+}
+
 /// Opens a launch's Codex thread through the app-server before any TUI
 /// attaches to it: the thread starts with the composed system prompt as its
 /// base instructions and the launch's exclusions in its config, what the
@@ -1031,6 +1054,70 @@ impl SubmitsBoundCodexPart for CodexAdapter {
                 session.request(3, "turn/start", params, self.timeout)?;
             }
             Ok(PromptDeliveryResult::Ambiguous(intent.clone()))
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+
+impl SubmitsQueuedCodexTurn for CodexAdapter {
+    fn submit_queued_turn(
+        &self,
+        thread_id: &str,
+        attempt_id: &str,
+        native_request_id: u64,
+        text: &str,
+    ) -> Result<QueuedTurnReceipt, CodexAdapterUnavailable> {
+        if thread_id.is_empty() || attempt_id.is_empty() || native_request_id < 3 {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "queued turn identity is incomplete".into(),
+            ));
+        }
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            let resumed = session.request(
+                2,
+                "thread/resume",
+                serde_json::json!({ "threadId": thread_id }),
+                self.timeout,
+            )?;
+            if resumed.pointer("/thread/id").and_then(serde_json::Value::as_str)
+                != Some(thread_id)
+            {
+                return Err(CodexAdapterUnavailable::Protocol(
+                    "thread/resume returned another thread".into(),
+                ));
+            }
+            let accepted = session.request(
+                native_request_id,
+                "turn/start",
+                serde_json::json!({
+                    "threadId": thread_id,
+                    "input": [{
+                        "type": "text",
+                        "text": text,
+                        "text_elements": []
+                    }],
+                    "turnTrigger": format!("flow-nexus:{attempt_id}")
+                }),
+                self.timeout,
+            )?;
+            let turn_id = accepted
+                .pointer("/turn/id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|turn| !turn.is_empty())
+                .ok_or_else(|| {
+                    CodexAdapterUnavailable::Protocol(
+                        "turn/start returned no turn id".into(),
+                    )
+                })?
+                .to_owned();
+            Ok(QueuedTurnReceipt {
+                native_request_id,
+                thread_id: thread_id.to_owned(),
+                turn_id,
+                native_receipt: accepted.to_string(),
+            })
         })();
         session.stop_proxy();
         result

@@ -71,6 +71,8 @@ pub struct QueueDeliveryAttempt {
     pub request_id: String,
     pub attempt_id: String,
     pub native_request_id: u64,
+    pub flow_id: String,
+    pub thread_id: String,
     pub address: Address,
     pub queued: QueuedRequest,
     pub phase: QueueDeliveryPhase,
@@ -144,6 +146,8 @@ pub trait AccountsQueueDelivery {
     fn prepare_oldest_delivery(
         &self,
         address: &Address,
+        flow_id: &str,
+        thread_id: &str,
     ) -> Result<PrepareQueueDelivery, StoreError>;
 
     /// Records the exact native response only when all correlation fields
@@ -196,6 +200,8 @@ impl AccountsQueueDelivery for FlowStore {
     fn prepare_oldest_delivery(
         &self,
         address: &Address,
+        flow_id: &str,
+        thread_id: &str,
     ) -> Result<PrepareQueueDelivery, StoreError> {
         if let Some(attempt) = self.outstanding_for(address)? {
             return Ok(PrepareQueueDelivery::Outstanding(attempt));
@@ -206,6 +212,13 @@ impl AccountsQueueDelivery for FlowStore {
         let Some(queued) = stored.metaflow.queue.first().cloned() else {
             return Ok(PrepareQueueDelivery::Empty);
         };
+        if flow_id.is_empty()
+            || thread_id.is_empty()
+            || stored.metaflow.state
+                != signal_flow::State::Awake(flow_id.to_owned())
+        {
+            return Err(StoreError::StateInvariant);
+        }
 
         let counters = self
             .engine
@@ -255,6 +268,8 @@ impl AccountsQueueDelivery for FlowStore {
             request_id,
             attempt_id,
             native_request_id,
+            flow_id: flow_id.to_owned(),
+            thread_id: thread_id.to_owned(),
             address: address.clone(),
             queued,
             phase: QueueDeliveryPhase::Prepared,
@@ -282,7 +297,7 @@ impl AccountsQueueDelivery for FlowStore {
             return Ok(false);
         };
         if attempt.native_request_id != receipt.native_request_id
-            || receipt.thread_id.is_empty()
+            || attempt.thread_id != receipt.thread_id
             || receipt.turn_id.is_empty()
             || receipt.native_receipt.is_empty()
         {
@@ -474,7 +489,7 @@ mod tests {
     fn prepare_is_durable_and_recovery_never_reauthorizes_a_send() {
         let (fixture, store) = Fixture::new();
         let PrepareQueueDelivery::Prepared(prepared) =
-            store.prepare_oldest_delivery(&address()).unwrap()
+            store.prepare_oldest_delivery(&address(), "flow-delivery", "thread-7").unwrap()
         else {
             panic!("oldest request prepared")
         };
@@ -489,7 +504,7 @@ mod tests {
         assert_eq!(recovered[0].attempt_id, prepared.attempt_id);
         assert_eq!(recovered[0].phase, QueueDeliveryPhase::Uncertain);
         assert_eq!(
-            reopened.prepare_oldest_delivery(&address()).unwrap(),
+            reopened.prepare_oldest_delivery(&address(), "flow-delivery", "thread-7").unwrap(),
             PrepareQueueDelivery::Outstanding(recovered[0].clone())
         );
         assert!(
@@ -507,7 +522,7 @@ mod tests {
     fn exact_receipt_survives_restart_and_settles_oldest_once() {
         let (fixture, store) = Fixture::new();
         let PrepareQueueDelivery::Prepared(prepared) =
-            store.prepare_oldest_delivery(&address()).unwrap()
+            store.prepare_oldest_delivery(&address(), "flow-delivery", "thread-7").unwrap()
         else {
             panic!("oldest request prepared")
         };
@@ -566,7 +581,7 @@ mod tests {
     fn settlement_refuses_changed_oldest_and_preserves_sender_and_order() {
         let (_fixture, store) = Fixture::new();
         let PrepareQueueDelivery::Prepared(prepared) =
-            store.prepare_oldest_delivery(&address()).unwrap()
+            store.prepare_oldest_delivery(&address(), "flow-delivery", "thread-7").unwrap()
         else {
             panic!("oldest request prepared")
         };

@@ -146,6 +146,10 @@ trait RunsFakeAppServer {
         wanted: impl Fn(&serde_json::Value) -> bool,
     ) -> Vec<serde_json::Value>;
     fn runs(&self) -> u64;
+    /// Adds app-server sessions that resume `thread` and authentically
+    /// acknowledge any durable queued-turn JSON-RPC id in the test range.
+    fn accept_queued_turns(&self, thread: &str, runs: std::ops::RangeInclusive<u64>);
+    fn queued_turn_texts(&self) -> Vec<String>;
 }
 
 impl RunsFakeAppServer for FakeAppServer {
@@ -213,6 +217,42 @@ impl RunsFakeAppServer for FakeAppServer {
             .ok()
             .and_then(|count| count.parse().ok())
             .unwrap_or(0)
+    }
+
+    fn accept_queued_turns(&self, thread: &str, runs: std::ops::RangeInclusive<u64>) {
+        let initialized = frame(&serde_json::json!({ "id": 1, "result": {} }));
+        let resumed = frame(&serde_json::json!({
+            "id": 2,
+            "result": { "thread": { "id": thread } }
+        }));
+        let receipts = (3..=64)
+            .map(|id| frame(&serde_json::json!({
+                "id": id,
+                "result": { "turn": { "id": format!("queued-turn-{id}") } }
+            })))
+            .collect::<String>();
+        for run in runs {
+            std::fs::write(
+                self.directory.path().join(format!("frames-{run}")),
+                format!("{initialized}{resumed}{receipts}"),
+            )
+            .unwrap();
+        }
+    }
+
+    fn queued_turn_texts(&self) -> Vec<String> {
+        (1..=self.runs())
+            .flat_map(|run| {
+                self.directory
+                    .path()
+                    .join(format!("record-{run}"))
+                    .client_messages()
+            })
+            .filter(|message| message["method"] == "turn/start")
+            .filter_map(|message| {
+                message.pointer("/params/input/0/text")?.as_str().map(str::to_owned)
+            })
+            .collect()
     }
 }
 
@@ -1406,16 +1446,17 @@ impl SeatsAwakeCodexSeat for NexusFixture {
     }
 
     fn typed_count(&self, request: &QueuedRequest) -> usize {
-        use datom_codec::Datomizable;
-        use protos::{Compactable, Protosizable};
-        let datom = request.datomize(Vec::new()).protosize().compact();
-        self.typed().unwrap_or_default().matches(&datom).count()
+        usize::from(!self.seat_queue().contains(request))
     }
 }
 
 /// Runs a responder on the seat's thread whose one connection sends
 /// `notices` and then the fence, and stops it once the fence is answered.
-fn seat_responding(fixture: &mut NexusFixture, notices: Vec<serde_json::Value>, fence_id: u64) {
+fn seat_responding(
+    fixture: &mut NexusFixture,
+    notices: Vec<serde_json::Value>,
+    fence_id: u64,
+) -> FakeAppServer {
     let mut requests = notices;
     requests.push(fence(fence_id));
     let fake = FakeAppServer::install(vec![FakeConnection {
@@ -1423,11 +1464,13 @@ fn seat_responding(fixture: &mut NexusFixture, notices: Vec<serde_json::Value>, 
         closes: false,
         deaf: false,
     }]);
+    fake.accept_queued_turns(SEAT_THREAD, 3..=12);
     let adapter = fixture.adapter("gpt-sol", &fake);
     let answered = responding(fixture, SEAT_THREAD, &adapter, || {
         answer_to(&fake.written_on(2, |m| m["id"] == fence_id), fence_id)
     });
     assert!(answered.is_some(), "the fence was answered");
+    fake
 }
 
 /// The seat's first turn completes with two requests queued: the first is
@@ -1444,7 +1487,7 @@ fn a_codex_first_turn_completion_drains_two_queued_requests_once_in_order_with_s
     let brief = from_core(Request::Order("Your brief.".into()));
     fixture.awake_codex_seat(vec![psyche.clone(), brief.clone()]);
 
-    seat_responding(
+    let fake = seat_responding(
         &mut fixture,
         vec![
             turn_notice("turn/started", SEAT_THREAD, "turn-first"),
@@ -1457,7 +1500,7 @@ fn a_codex_first_turn_completion_drains_two_queued_requests_once_in_order_with_s
 
     assert_eq!(fixture.typed_count(&psyche), 1, "the psyche typed once");
     assert_eq!(fixture.typed_count(&brief), 1, "the brief typed once");
-    let typed = fixture.typed().unwrap_or_default();
+    let typed = fake.queued_turn_texts().join("\n");
     assert!(
         typed.find("Make it so.") < typed.find("Your brief."),
         "oldest first: {typed}"
@@ -1613,6 +1656,7 @@ fn a_codex_completion_during_registration_is_kept_and_drained_after_confirmation
         closes: false,
         deaf: false,
     }]);
+    fake.accept_queued_turns(super::STAGED_SESSION, 3..=12);
     let adapter = fixture.adapter("gpt-sol", &fake);
     let fixture: &'static NexusFixture = fixture;
     let answered = responding(fixture, super::STAGED_SESSION, &adapter, || {
@@ -1647,13 +1691,9 @@ fn a_codex_completion_during_registration_is_kept_and_drained_after_confirmation
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(
-        fs_text(&typed)
-            .matches("queued before confirmation")
-            .count(),
-        1
-    );
-    assert!(fs_text(&typed).contains("Sender.{ Psyche core Secondary }"));
+    let delivered = fake.queued_turn_texts().join("\n");
+    assert_eq!(delivered.matches("queued before confirmation").count(), 1);
+    assert!(delivered.contains("Sender.{ Psyche core Secondary }"));
     assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
 }
 

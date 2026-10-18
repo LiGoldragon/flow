@@ -21,8 +21,8 @@ use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
-use queue_delivery::QueueDeliveryTables;
 use queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
+use queue_delivery::{DeclaresQueueDeliveryTables, QueueDeliveryTables};
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
@@ -5595,7 +5595,7 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v1",
+                "flow-nexus-queue-delivery-attempt-v2",
             ),
             _ => return None,
         };

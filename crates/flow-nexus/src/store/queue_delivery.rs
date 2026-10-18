@@ -7,7 +7,7 @@
 
 use super::*;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use signal_flow::{Address, QueuedRequest};
+use signal_flow::{Address, HarnessKind, QueuedRequest};
 
 const DELIVERY_COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_counter");
 const DELIVERY_REQUEST_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_requests");
@@ -57,6 +57,13 @@ pub struct NativeDeliveryReceipt {
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NativeTranscriptCursor {
+    pub device: u64,
+    pub inode: u64,
+    pub offset: u64,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub enum QueueDeliveryPhase {
     Prepared,
     /// Recovery found a prepared attempt with no durable native receipt.
@@ -73,6 +80,8 @@ pub struct QueueDeliveryAttempt {
     pub native_request_id: u64,
     pub flow_id: String,
     pub thread_id: String,
+    pub harness_kind: HarnessKind,
+    pub transcript_cursor: Option<NativeTranscriptCursor>,
     pub address: Address,
     pub queued: QueuedRequest,
     pub phase: QueueDeliveryPhase,
@@ -105,8 +114,16 @@ pub(crate) type QueueDeliveryDescriptors = (
     TableDescriptor<QueueDeliveryAttempt>,
 );
 
-impl QueueDeliveryTables {
-    pub(crate) fn descriptors() -> QueueDeliveryDescriptors {
+pub(crate) trait DeclaresQueueDeliveryTables: Sized {
+    fn descriptors() -> QueueDeliveryDescriptors;
+    fn register(
+        engine: &mut Engine,
+        descriptors: QueueDeliveryDescriptors,
+    ) -> Result<Self, StoreError>;
+}
+
+impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
+    fn descriptors() -> QueueDeliveryDescriptors {
         (
             TableDescriptor::new(
                 DELIVERY_COUNTER_TABLE_NAME,
@@ -121,12 +138,12 @@ impl QueueDeliveryTables {
             TableDescriptor::new(
                 DELIVERY_ATTEMPT_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-attempt"),
-                SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v1"),
+                SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v2"),
             ),
         )
     }
 
-    pub(crate) fn register(
+    fn register(
         engine: &mut Engine,
         descriptors: QueueDeliveryDescriptors,
     ) -> Result<Self, StoreError> {
@@ -148,6 +165,8 @@ pub trait AccountsQueueDelivery {
         address: &Address,
         flow_id: &str,
         thread_id: &str,
+        harness_kind: HarnessKind,
+        transcript_cursor: Option<NativeTranscriptCursor>,
     ) -> Result<PrepareQueueDelivery, StoreError>;
 
     /// Records the exact native response only when all correlation fields
@@ -162,6 +181,11 @@ pub trait AccountsQueueDelivery {
     /// settled attempt, so a duplicate completion is idempotent.
     fn settle_recorded_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
 
+    /// Native submission returned without an exactly correlated receipt.
+    /// The request stays queued and this attempt can only be reconciled,
+    /// never submitted again by assumption.
+    fn mark_delivery_uncertain(&self, attempt_id: &str) -> Result<bool, StoreError>;
+
     /// On process recovery, makes every receipt-less prepared attempt
     /// explicitly uncertain.  Receipt-recorded attempts remain settleable.
     fn recover_outstanding_deliveries(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
@@ -172,7 +196,15 @@ pub trait AccountsQueueDelivery {
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError>;
 }
 
-impl FlowStore {
+trait ReadsQueueDelivery {
+    fn delivery_attempts(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
+    fn outstanding_for(
+        &self,
+        address: &Address,
+    ) -> Result<Option<QueueDeliveryAttempt>, StoreError>;
+}
+
+impl ReadsQueueDelivery for FlowStore {
     fn delivery_attempts(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
         Ok(self
             .engine
@@ -202,6 +234,8 @@ impl AccountsQueueDelivery for FlowStore {
         address: &Address,
         flow_id: &str,
         thread_id: &str,
+        harness_kind: HarnessKind,
+        transcript_cursor: Option<NativeTranscriptCursor>,
     ) -> Result<PrepareQueueDelivery, StoreError> {
         if let Some(attempt) = self.outstanding_for(address)? {
             return Ok(PrepareQueueDelivery::Outstanding(attempt));
@@ -214,8 +248,7 @@ impl AccountsQueueDelivery for FlowStore {
         };
         if flow_id.is_empty()
             || thread_id.is_empty()
-            || stored.metaflow.state
-                != flow_ethos::State::Awake(flow_id.to_owned())
+            || stored.metaflow.state != flow_ethos::State::Awake(flow_id.to_owned())
         {
             return Err(StoreError::StateInvariant);
         }
@@ -270,6 +303,8 @@ impl AccountsQueueDelivery for FlowStore {
             native_request_id,
             flow_id: flow_id.to_owned(),
             thread_id: thread_id.to_owned(),
+            harness_kind,
+            transcript_cursor,
             address: address.clone(),
             queued,
             phase: QueueDeliveryPhase::Prepared,
@@ -364,6 +399,25 @@ impl AccountsQueueDelivery for FlowStore {
                 .mutate(self.queue_delivery.attempts, attempt),
         )?;
         Ok(true)
+    }
+
+    fn mark_delivery_uncertain(&self, attempt_id: &str) -> Result<bool, StoreError> {
+        let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
+            return Ok(false);
+        };
+        match attempt.phase {
+            QueueDeliveryPhase::Prepared => {
+                attempt.phase = QueueDeliveryPhase::Uncertain;
+                self.engine.mutate_keyed(KeyedMutation::new(
+                    self.queue_delivery.attempts,
+                    RecordKey::new(attempt_id),
+                    attempt,
+                ))?;
+                Ok(true)
+            }
+            QueueDeliveryPhase::Uncertain => Ok(true),
+            QueueDeliveryPhase::ReceiptRecorded(_) | QueueDeliveryPhase::Settled(_) => Ok(false),
+        }
     }
 
     fn recover_outstanding_deliveries(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
@@ -493,8 +547,19 @@ mod tests {
     #[test]
     fn prepare_is_durable_and_recovery_never_reauthorizes_a_send() {
         let (fixture, store) = Fixture::new();
-        let PrepareQueueDelivery::Prepared(prepared) =
-            store.prepare_oldest_delivery(&address(), "flow-delivery", "thread-7").unwrap()
+        let PrepareQueueDelivery::Prepared(prepared) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Claude,
+                Some(NativeTranscriptCursor {
+                    device: 1,
+                    inode: 2,
+                    offset: 3,
+                }),
+            )
+            .unwrap()
         else {
             panic!("oldest request prepared")
         };
@@ -509,7 +574,19 @@ mod tests {
         assert_eq!(recovered[0].attempt_id, prepared.attempt_id);
         assert_eq!(recovered[0].phase, QueueDeliveryPhase::Uncertain);
         assert_eq!(
-            reopened.prepare_oldest_delivery(&address(), "flow-delivery", "thread-7").unwrap(),
+            reopened
+                .prepare_oldest_delivery(
+                    &address(),
+                    "flow-delivery",
+                    "thread-7",
+                    HarnessKind::Claude,
+                    Some(NativeTranscriptCursor {
+                        device: 1,
+                        inode: 2,
+                        offset: 3,
+                    })
+                )
+                .unwrap(),
             PrepareQueueDelivery::Outstanding(recovered[0].clone())
         );
         assert!(
@@ -524,10 +601,79 @@ mod tests {
     }
 
     #[test]
+    fn native_acceptance_after_a_crash_reconciles_without_another_attempt() {
+        let (fixture, store) = Fixture::new();
+        let PrepareQueueDelivery::Prepared(prepared) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Claude,
+                Some(NativeTranscriptCursor {
+                    device: 4,
+                    inode: 5,
+                    offset: 6,
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("oldest request prepared")
+        };
+        drop(store);
+
+        let reopened = fixture.reopen();
+        let recovered = reopened.recover_outstanding_deliveries().unwrap();
+        let [uncertain] = recovered.as_slice() else {
+            panic!("one uncertain attempt survives")
+        };
+        assert_eq!(uncertain.attempt_id, prepared.attempt_id);
+        assert_eq!(uncertain.phase, QueueDeliveryPhase::Uncertain);
+        assert!(
+            reopened
+                .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap()
+        );
+        assert_eq!(
+            reopened.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("second")]
+        );
+        let PrepareQueueDelivery::Prepared(next) = reopened
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Claude,
+                Some(NativeTranscriptCursor {
+                    device: 4,
+                    inode: 5,
+                    offset: 7,
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("next request gets its own attempt")
+        };
+        assert_ne!(next.attempt_id, prepared.attempt_id);
+        assert_eq!(next.queued, queued("second"));
+    }
+
+    #[test]
     fn exact_receipt_survives_restart_and_settles_oldest_once() {
         let (fixture, store) = Fixture::new();
-        let PrepareQueueDelivery::Prepared(prepared) =
-            store.prepare_oldest_delivery(&address(), "flow-delivery", "thread-7").unwrap()
+        let PrepareQueueDelivery::Prepared(prepared) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Codex,
+                None,
+            )
+            .unwrap()
         else {
             panic!("oldest request prepared")
         };
@@ -549,7 +695,12 @@ mod tests {
         let reopened = fixture.reopen();
         // Opening reconciles the durable native receipt and settles the
         // local queue without another native submission.
-        assert!(reopened.recover_outstanding_deliveries().unwrap().is_empty());
+        assert!(
+            reopened
+                .recover_outstanding_deliveries()
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             reopened
                 .settle_recorded_delivery(&prepared.attempt_id)
@@ -584,8 +735,15 @@ mod tests {
     #[test]
     fn settlement_refuses_changed_oldest_and_preserves_sender_and_order() {
         let (_fixture, store) = Fixture::new();
-        let PrepareQueueDelivery::Prepared(prepared) =
-            store.prepare_oldest_delivery(&address(), "flow-delivery", "thread-7").unwrap()
+        let PrepareQueueDelivery::Prepared(prepared) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Codex,
+                None,
+            )
+            .unwrap()
         else {
             panic!("oldest request prepared")
         };

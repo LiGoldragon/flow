@@ -687,6 +687,11 @@ fn resumable_ended_by(
     let busy = fixture.directory.path().join("composer-busy-reads");
     let calls = fixture.directory.path().join("herdr-calls.log");
     let typed = fixture.directory.path().join("pane-typed.txt");
+    let transcript = fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary")
+        .join(format!("{session}.jsonl"));
     let marker = fixture.directory.path().join("marker-output");
     let script = r#"#!/bin/sh
 SESSIONS
@@ -702,7 +707,7 @@ case "$*" in
   *"agent read"*) left=$(cat 'BUSY' 2>/dev/null || printf 0); if [ "$left" -gt 0 ]; then printf '%s' $((left - 1)) > 'BUSY'; printf '%s\n' '❯ /rename kept' ; else printf '%s\n' '❯ ' ; fi ;;
   *"pane close"*) printf '%s\n' '{"result":{}}' ;;
   *"agent prompt /rename "*|*"agent prompt "*" /rename "*) printf '%s\n' '{"result":{"accepted":true}}' ;;
-  *"agent prompt"*) printf '%s\n--\n' "$6" >> 'TYPED'; printf '%s\n' '{"id":"cli:agent:prompt","result":{"type":"agent_prompted","agent":AGENT}}' ;;
+  *"agent prompt"*) printf '%s\n--\n' "$6" >> 'TYPED'; escaped=$(printf '%s' "$6" | sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g'); printf '{"type":"user","sessionId":"RECEIPTSESSION","uuid":"fixture-%s","message":{"content":"%s"}}\n' "$(wc -l < 'TRANSCRIPT')" "$escaped" >> 'TRANSCRIPT'; printf '%s\n' '{"id":"cli:agent:prompt","result":{"type":"agent_prompted","agent":AGENT}}' ;;
   *) exit 64 ;;
 esac
 "#
@@ -728,6 +733,8 @@ esac
     )
     .replace("MARKER", &marker.display().to_string())
     .replace("TYPED", &typed.display().to_string())
+    .replace("TRANSCRIPT", &transcript.display().to_string())
+    .replace("RECEIPTSESSION", &session)
     .replace("RECORD", &agent_record)
     .replace("SESSIONED", &sessioned)
     .replace("LIVE", &live.display().to_string())
@@ -743,6 +750,20 @@ esac
         path: transcripts.join("flow-id"),
     }
     .install("#!/bin/sh\nprintf '%s\\n' abc123\n");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(
+        transcript,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "sessionId": session,
+                "uuid": "fixture-end-turn",
+                "message": { "stop_reason": "end_turn" }
+            })
+        ),
+    )
+    .unwrap();
     Resumable { profile, session }
 }
 
@@ -2109,7 +2130,13 @@ fn a_codex_stop_before_confirmation_does_not_fabricate_completion() {
     launch.write_receipt();
     std::thread::spawn(move || fixture.nexus.promote_ambiguous_launches());
     let deadline = Instant::now() + Duration::from_secs(20);
-    while fixture.nexus.store.address_hold("908786").unwrap().is_some() {
+    while fixture
+        .nexus
+        .store
+        .address_hold("908786")
+        .unwrap()
+        .is_some()
+    {
         assert!(
             Instant::now() < deadline,
             "the confirmation never released its hold: {}",

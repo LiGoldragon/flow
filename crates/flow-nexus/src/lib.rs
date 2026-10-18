@@ -1203,8 +1203,19 @@ mod tests {
     }
 
     impl PromptFixture<'_> {
-        fn shell(&self, typed: &std::path::Path, agents: &[serde_json::Value]) -> String {
-            let typing = format!("printf '%s' \"$6\" >> '{}'", typed.display());
+        fn shell(
+            &self,
+            typed: &std::path::Path,
+            agents: &[serde_json::Value],
+            claude_receipt: Option<(&std::path::Path, &str)>,
+        ) -> String {
+            let mut typing = format!("printf '%s' \"$6\" >> '{}'", typed.display());
+            if let Some((transcript, session)) = claude_receipt {
+                typing.push_str(&format!(
+                    "; escaped=$(printf '%s' \"$6\" | sed ':a;N;$!ba;s/\\\\/\\\\\\\\/g;s/\"/\\\\\"/g;s/\\n/\\\\n/g'); printf '{{\"type\":\"user\",\"sessionId\":\"{session}\",\"uuid\":\"fixture-receipt\",\"message\":{{\"content\":\"%s\"}}}}\\n' \"$escaped\" >> '{}'",
+                    transcript.display()
+                ));
+            }
             let error = |code: &str| {
                 format!(
                     "printf '%s\\n' '{{\"id\":\"cli:agent:prompt\",\"error\":{{\"code\":\"{code}\",\"message\":\"fixture\"}}}}' >&2; exit 1"
@@ -1745,12 +1756,26 @@ mod tests {
             });
             let log = self.directory.path().join("herdr-operations.log");
             let typed = self.directory.path().join("pane-typed.txt");
+            let claude_session = agents.iter().find_map(|agent| {
+                let session = agent.pointer("/agent_session/value")?.as_str()?;
+                (agent.pointer("/agent_session/agent")?.as_str()? == "claude").then_some(session)
+            });
+            let claude_transcript = claude_session.map(|session| {
+                self.directory
+                    .path()
+                    .join("native-transcripts/claude/-home-li-primary")
+                    .join(format!("{session}.jsonl"))
+            });
             let body = format!(
                 "#!/bin/sh\n{}\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; {} ;;\n  \"pane close\"|\"pane send-keys\"|\"agent wait\") printf '%s\\n' \"$*\" >> '{}' ;;\n  \"agent read\") printf '%s\\n' '❯ ' '› ' ;;\n  *) exit 64 ;;\nesac\n",
                 self.session_listing(),
                 snapshot,
                 log.display(),
-                prompt.shell(&typed, &agents),
+                prompt.shell(
+                    &typed,
+                    &agents,
+                    claude_transcript.as_deref().zip(claude_session),
+                ),
                 log.display(),
             );
             FixtureExecutable {

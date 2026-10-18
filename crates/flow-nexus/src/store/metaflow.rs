@@ -40,8 +40,7 @@ pub(crate) trait SleepsMetaflows {
         flow_id: &str,
         delivered: usize,
     ) -> Result<bool, StoreError>;
-    /// Removes the oldest queued request once it was typed into the Awake
-    /// flow; refused unless it is still the oldest.
+    #[cfg(test)]
     fn remove_oldest_queued(
         &self,
         address: &Address,
@@ -302,6 +301,7 @@ impl SleepsMetaflows for FlowStore {
         Ok(true)
     }
 
+    #[cfg(test)]
     fn remove_oldest_queued(
         &self,
         address: &Address,

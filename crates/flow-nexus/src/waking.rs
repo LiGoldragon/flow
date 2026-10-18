@@ -42,7 +42,7 @@
 
 use crate::AwaitsLaunchSettlement;
 use crate::RunningNexus;
-use crate::claude::MeasuresClaudeContext;
+use crate::claude::{MeasuresClaudeContext, ReadsClaudeTurns};
 use crate::codex::{SelectsCodexEndpoint, SubmitsQueuedCodexTurn};
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{
@@ -71,12 +71,12 @@ use crate::store::context::RecordsContextSize;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{
-    AccountsQueueDelivery, NativeDeliveryReceipt, PrepareQueueDelivery,
-    QueueDeliveryPhase,
+    AccountsQueueDelivery, NativeDeliveryReceipt, NativeTranscriptCursor, PrepareQueueDelivery,
+    QueueDeliveryAttempt, QueueDeliveryPhase,
 };
 use crate::store::{
-    ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows,
-    ReadsLaunchAttempt, RecordsFlowLifecycle,
+    ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
+    RecordsFlowLifecycle,
 };
 use signal_flow::{
     Address, AgentState, ContextRefusal, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind,
@@ -561,6 +561,72 @@ trait WakesInParts {
     fn settle_rested(&self, flow_id: &str) -> AtStop;
 }
 
+trait ReadsClaudeDelivery {
+    fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf>;
+    fn claude_main_turn_ended(&self, node: &FlowNode) -> bool;
+    fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor>;
+    fn claude_delivery_receipt(
+        &self,
+        attempt: &QueueDeliveryAttempt,
+    ) -> Option<NativeDeliveryReceipt>;
+}
+
+impl ReadsClaudeDelivery for RunningNexus {
+    fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf> {
+        self.herdr
+            .native_transcript_root(&HarnessKind::Claude, "")
+            .ok()?
+            .session_transcript(&node.session_id)
+    }
+
+    fn claude_main_turn_ended(&self, node: &FlowNode) -> bool {
+        node.harness_kind == HarnessKind::Claude
+            && self
+                .claude_transcript(node)
+                .is_some_and(|transcript| transcript.main_turn_ended(&node.session_id))
+    }
+
+    fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor> {
+        let cursor = self.claude_transcript(node)?.claude_cursor()?;
+        Some(NativeTranscriptCursor {
+            device: cursor.device,
+            inode: cursor.inode,
+            offset: cursor.offset,
+        })
+    }
+
+    fn claude_delivery_receipt(
+        &self,
+        attempt: &QueueDeliveryAttempt,
+    ) -> Option<NativeDeliveryReceipt> {
+        if attempt.harness_kind != HarnessKind::Claude {
+            return None;
+        }
+        let cursor = attempt.transcript_cursor.as_ref()?;
+        let node = self.store.flow_node(&attempt.flow_id).ok()??;
+        if node.session_id != attempt.thread_id {
+            return None;
+        }
+        let cursor = crate::claude::ClaudeTranscriptCursor {
+            device: cursor.device,
+            inode: cursor.inode,
+            offset: cursor.offset,
+        };
+        let text = [attempt.queued.clone()].prompt_text();
+        let receipt = self.claude_transcript(&node)?.queued_receipt_after(
+            &node.session_id,
+            &cursor,
+            &text,
+        )?;
+        Some(NativeDeliveryReceipt {
+            native_request_id: attempt.native_request_id,
+            thread_id: attempt.thread_id.clone(),
+            turn_id: receipt.turn_id,
+            native_receipt: receipt.row,
+        })
+    }
+}
+
 impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
         let at_stop = self.settle_rested(flow_id);
@@ -808,37 +874,56 @@ impl PerformsSleepAndWake for RunningNexus {
             Ok(Some(node)) => node,
             _ => return Outcome::Failed(Failed_Data::StoreRefused),
         };
-        if node.harness_kind == HarnessKind::Codex {
-            let attempt = match self.store.prepare_oldest_delivery(
-                &address,
-                &flow_id,
-                &node.session_id,
-            ) {
-                Ok(PrepareQueueDelivery::Prepared(attempt)) => attempt,
-                Ok(PrepareQueueDelivery::Outstanding(attempt)) => {
-                    return match attempt.phase {
-                        QueueDeliveryPhase::ReceiptRecorded(_) => {
-                            if self
-                                .store
-                                .settle_recorded_delivery(&attempt.attempt_id)
-                                .unwrap_or(false)
-                            {
-                                self.codex_turns.delivered(&node.session_id);
-                                Outcome::Drained(vec![attempt.queued])
-                            } else {
-                                Outcome::Failed(Failed_Data::StoreRefused)
-                            }
+        let cursor = match node.harness_kind {
+            HarnessKind::Claude => match self.claude_delivery_cursor(&node) {
+                Some(cursor) => Some(cursor),
+                None => return Outcome::Failed(Failed_Data::HerdrRefused),
+            },
+            HarnessKind::Codex => None,
+        };
+        let attempt = match self.store.prepare_oldest_delivery(
+            &address,
+            &flow_id,
+            &node.session_id,
+            node.harness_kind.clone(),
+            cursor,
+        ) {
+            Ok(PrepareQueueDelivery::Prepared(attempt)) => attempt,
+            Ok(PrepareQueueDelivery::Outstanding(attempt)) => {
+                if let QueueDeliveryPhase::ReceiptRecorded(_) = &attempt.phase {
+                    if self
+                        .store
+                        .settle_recorded_delivery(&attempt.attempt_id)
+                        .unwrap_or(false)
+                    {
+                        if node.harness_kind == HarnessKind::Codex {
+                            self.codex_turns.delivered(&node.session_id);
                         }
-                        QueueDeliveryPhase::Prepared
-                        | QueueDeliveryPhase::Uncertain
-                        | QueueDeliveryPhase::Settled(_) => {
-                            Outcome::Failed(Failed_Data::HerdrRefused)
-                        }
-                    };
+                        return Outcome::Drained(vec![attempt.queued]);
+                    }
+                    return Outcome::Failed(Failed_Data::StoreRefused);
                 }
-                Ok(PrepareQueueDelivery::Empty) => return Outcome::Drained(Vec::new()),
-                Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
-            };
+                if matches!(
+                    attempt.phase,
+                    QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain
+                ) && let Some(receipt) = self.claude_delivery_receipt(&attempt)
+                    && self
+                        .store
+                        .record_delivery_receipt(&attempt.attempt_id, receipt)
+                        .unwrap_or(false)
+                    && self
+                        .store
+                        .settle_recorded_delivery(&attempt.attempt_id)
+                        .unwrap_or(false)
+                {
+                    return Outcome::Drained(vec![attempt.queued]);
+                }
+                return Outcome::Failed(Failed_Data::HerdrRefused);
+            }
+            Ok(PrepareQueueDelivery::Empty) => return Outcome::Drained(Vec::new()),
+            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+        };
+        if node.harness_kind == HarnessKind::Codex {
             let model = match self.store.role(&flow_id) {
                 Ok(Some(role)) => role.model_name,
                 _ => return Outcome::Failed(Failed_Data::StoreRefused),
@@ -876,18 +961,28 @@ impl PerformsSleepAndWake for RunningNexus {
             self.codex_turns.delivered(&node.session_id);
             return Outcome::Drained(typed);
         }
-        if self.hand_over(&flow_id, &typed.prompt_text()).is_err() {
+        let handed = self.hand_over(&flow_id, &typed.prompt_text());
+        let receipt = self.claude_delivery_receipt(&attempt);
+        if let Some(receipt) = receipt
+            && self
+                .store
+                .record_delivery_receipt(&attempt.attempt_id, receipt)
+                .unwrap_or(false)
+            && self
+                .store
+                .settle_recorded_delivery(&attempt.attempt_id)
+                .unwrap_or(false)
+        {
+            return Outcome::Drained(typed);
+        }
+        let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
+        if handed.is_err() {
             return Outcome::Failed(Failed_Data::HerdrRefused);
         }
-        // A Codex seat's next rest is the end of a turn begun after this.
-        // Typed (or possibly typed): it is never typed twice.
-        match self.store.remove_oldest_queued(&address, &typed[0]) {
-            Ok(true) => Outcome::Drained(typed),
-            _ => {
-                eprintln!("flow-nexus: work typed into flow {flow_id} is still queued");
-                Outcome::Failed(Failed_Data::StoreRefused)
-            }
-        }
+        // Claude accepted transport but its exact native row is not yet a
+        // receipt.  The FIFO entry remains queued and the durable attempt is
+        // Uncertain; another event may reconcile it, but never resend it.
+        Outcome::Failed(Failed_Data::HerdrRefused)
     }
 }
 
@@ -1316,7 +1411,13 @@ impl WakesInParts for RunningNexus {
             && let HerdrRouteSelection::Available(route) =
                 &self.herdr.refresh_route(node).herdr_route_selection
         {
-            self.herdr.rested(route);
+            let node = self.store.flow_node(flow_id).ok().flatten();
+            if !node
+                .as_ref()
+                .is_some_and(|node| self.claude_main_turn_ended(node))
+            {
+                self.herdr.rested(route);
+            }
         }
         let _turn = self
             .dispatch_gate
@@ -1351,9 +1452,21 @@ impl WakesInParts for RunningNexus {
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        match self.herdr.pane_agent(&node) {
-            PaneAgent::Present { agent_state, .. } if Self::sleeps_at(&agent_state) => {}
-            pane_agent => return AtStop::Kept(KeptAtStop::NotResting(pane_agent)),
+        let pane_agent = self.herdr.pane_agent(&node);
+        let native_resting = matches!(
+            &pane_agent,
+            PaneAgent::Present { agent_state, .. } if Self::sleeps_at(agent_state)
+        );
+        let claude_main_ready = node.harness_kind == HarnessKind::Claude
+            && self.claude_main_turn_ended(&node)
+            && matches!(
+                self.delivery_target(flow_id)
+                    .ok()
+                    .and_then(|target| self.writable_state(&target).ok()),
+                Some(AgentState::Working | AgentState::Idle | AgentState::Done)
+            );
+        if !native_resting && !claude_main_ready {
+            return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
         }
         if !metaflow.queue.is_empty() {
             return match self.perform(Operation::Drain(address)) {

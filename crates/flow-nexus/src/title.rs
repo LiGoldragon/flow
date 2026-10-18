@@ -46,6 +46,45 @@ pub trait TitlesFlow {
     fn native_title(&self, flow_id: &str) -> Result<NativeTitle, TitleRefused>;
 }
 
+/// The Herdr transport name of a flow. This is the old native launcher's
+/// name: snake case, Core omitted, the exact Flow ID retained as the suffix,
+/// and at most Herdr's 32-character limit. It is deliberately not the
+/// native title and carries neither a model nor a native session identity.
+pub trait NamesHerdrFlow {
+    fn herdr_flow_name(&self, flow_id: &str) -> Result<String, TitleRefused>;
+}
+
+impl NamesHerdrFlow for LaunchProfile {
+    fn herdr_flow_name(&self, flow_id: &str) -> Result<String, TitleRefused> {
+        // The title and transport name share the exact Flow-ID admission
+        // rule; deriving either from a partial or guessed identity refuses.
+        self.native_title(flow_id)?;
+        let suffix = format!("_{flow_id}");
+        let room = 32usize
+            .checked_sub(suffix.len())
+            .ok_or(TitleRefused::InvalidFlowId)?;
+        let topic = self.address.topic.to_lowercase();
+        let prefix = format!(
+            "{}_{}{}",
+            self.address.aspect.display_spelling().to_lowercase(),
+            if topic == "core" {
+                String::new()
+            } else {
+                format!("{topic}_")
+            },
+            self.address.layer.display_spelling().to_lowercase()
+        );
+        let prefix = prefix
+            .get(..prefix.len().min(room))
+            .ok_or(TitleRefused::InvalidFlowId)?
+            .trim_end_matches('_');
+        if prefix.is_empty() {
+            return Err(TitleRefused::InvalidFlowId);
+        }
+        Ok(format!("{prefix}{suffix}"))
+    }
+}
+
 impl TitlesFlow for LaunchProfile {
     fn native_title(&self, flow_id: &str) -> Result<NativeTitle, TitleRefused> {
         if flow_id.len() != 6
@@ -78,7 +117,7 @@ impl ShowsNativeTitle for NativeTitle {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShowsNativeTitle, TitleRefused, TitlesFlow};
+    use super::{NamesHerdrFlow, ShowsNativeTitle, TitleRefused, TitlesFlow};
     use signal_flow::{Aspect, LaunchProfile, Layer};
 
     fn profile(aspect: Aspect, layer: Layer, model: &str) -> LaunchProfile {
@@ -134,5 +173,27 @@ mod tests {
                 Err(TitleRefused::InvalidFlowId)
             );
         }
+    }
+
+    #[test]
+    fn herdr_name_is_the_old_launcher_snake_case_name() {
+        assert_eq!(
+            profile(Aspect::Psyche, Layer::Secondary, "claude")
+                .herdr_flow_name("17c364")
+                .unwrap(),
+            "psyche_flow_secondary_17c364"
+        );
+        let mut core = profile(Aspect::Field, Layer::Primary, "codex");
+        core.address.topic = "Core".into();
+        assert_eq!(
+            core.herdr_flow_name("44cda5").unwrap(),
+            "field_primary_44cda5"
+        );
+
+        let mut long = profile(Aspect::Mind, Layer::Secondary, "codex");
+        long.address.topic = "Prototyping".into();
+        let name = long.herdr_flow_name("e4b7d7").unwrap();
+        assert_eq!(name, "mind_prototyping_secondar_e4b7d7");
+        assert_eq!(name.len(), 32);
     }
 }

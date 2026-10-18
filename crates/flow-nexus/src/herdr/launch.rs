@@ -18,7 +18,7 @@ use crate::generated::starter::{
     ReadsTypedUserText, RendersLeanStart, StartupReading, Textual,
 };
 use crate::herdr::reservation::ChoosesNativeSession;
-use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
+use crate::title::{NamesHerdrFlow, NativeTitle, ShowsNativeTitle, TitlesFlow};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     ComposedLaunch, HarnessKind, HerdrPaneBinding, NativeLaunchBinding, NativeLaunchFailure,
@@ -1030,11 +1030,13 @@ impl NamesHerdrHarness for HarnessKind {
 
 pub(crate) trait ChecksComposedLaunch {
     fn launch_agent_name(&self) -> String;
+    fn bound_agent_name(&self, flow_id: &str) -> Result<String, String>;
     /// The SHA-256 of every part of the first USER message, in order.
     fn part_hashes(&self) -> Vec<String>;
     /// The launch's harness and its effective leave-outs.
     fn lean_start(&self) -> LeanStart;
     fn binding_matches_launch(&self, pane: &HerdrPaneBinding) -> Result<(), String>;
+    fn bound_binding_matches_launch(&self, binding: &NativeLaunchBinding) -> Result<(), String>;
     fn prompt_intent_matches_launch(&self, intent: &PromptDeliveryIntent) -> Result<(), String>;
 }
 
@@ -1052,6 +1054,12 @@ impl ChecksComposedLaunch for ComposedLaunch {
             )
         );
         format!("{}-{}", launch.harness_kind.expected_harness(), &hash[..24])
+    }
+
+    fn bound_agent_name(&self, flow_id: &str) -> Result<String, String> {
+        self.launch_profile
+            .herdr_flow_name(flow_id)
+            .map_err(|refusal| refusal.to_string())
     }
 
     fn lean_start(&self) -> LeanStart {
@@ -1076,6 +1084,19 @@ impl ChecksComposedLaunch for ComposedLaunch {
             || pane.herdr_agent_name != launch.launch_agent_name()
         {
             return Err("Herdr pane binding does not belong to this launch request".into());
+        }
+        Ok(())
+    }
+
+    fn bound_binding_matches_launch(&self, binding: &NativeLaunchBinding) -> Result<(), String> {
+        if binding.launch_request_id != self.launch_profile.launch_request_id
+            || binding.herdr_pane_binding.launch_request_id != self.launch_profile.launch_request_id
+            || binding.herdr_pane_binding.herdr_session_name
+                != self.launch_profile.herdr_session_name
+            || binding.herdr_pane_binding.herdr_agent_name
+                != self.bound_agent_name(&binding.flow_id)?
+        {
+            return Err("Herdr pane binding does not belong to this bound flow".into());
         }
         Ok(())
     }
@@ -1572,9 +1593,7 @@ impl TitlesNativeFlow for HerdrCli {
         launch: &ComposedLaunch,
         binding: &NativeLaunchBinding,
     ) -> Result<NativeTitle, TitleRefusal> {
-        if launch
-            .binding_matches_launch(&binding.herdr_pane_binding)
-            .is_err()
+        if launch.bound_binding_matches_launch(binding).is_err()
             || binding.launch_request_id != launch.launch_profile.launch_request_id
             || binding.harness_kind != launch.harness_kind
         {
@@ -2108,6 +2127,78 @@ impl ObservesNativeLaunchBinding for HerdrCli {
     }
 }
 
+/// Gives a claimed flow's Herdr workspace and agent their one final transport
+/// name, then reads both back before that identity may be registered. Herdr's
+/// generated launch name is staging identity only; a rename refusal is a
+/// launch refusal, never a reason to register the staging name.
+pub(crate) trait NamesBoundHerdrFlow {
+    fn name_bound_flow(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        flow_id: &str,
+        native_session_id: &str,
+    ) -> Result<HerdrPaneBinding, String>;
+}
+
+impl NamesBoundHerdrFlow for HerdrCli {
+    fn name_bound_flow(
+        &self,
+        launch: &ComposedLaunch,
+        pane: &HerdrPaneBinding,
+        flow_id: &str,
+        native_session_id: &str,
+    ) -> Result<HerdrPaneBinding, String> {
+        launch.binding_matches_launch(pane)?;
+        let name = launch.bound_agent_name(flow_id)?;
+        self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "workspace".into(),
+            "rename".into(),
+            pane.herdr_workspace_id.clone(),
+            name.clone(),
+        ])?;
+        self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "agent".into(),
+            "rename".into(),
+            pane.herdr_pane_id.clone(),
+            name.clone(),
+        ])?;
+
+        let workspace = self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "workspace".into(),
+            "get".into(),
+            pane.herdr_workspace_id.clone(),
+        ])?;
+        let workspace = workspace
+            .pointer("/result/workspace")
+            .ok_or_else(|| "Herdr workspace rename returned no readable workspace".to_owned())?;
+        if workspace
+            .get("workspace_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(pane.herdr_workspace_id.as_str())
+            || workspace.get("label").and_then(serde_json::Value::as_str) != Some(name.as_str())
+        {
+            return Err("Herdr workspace name readback differs".into());
+        }
+
+        let mut named = pane.clone();
+        named.herdr_agent_name = name.clone();
+        let agent = self
+            .verify_native_target(&named, native_session_id, &launch.harness_kind)
+            .map_err(String::from)?;
+        if agent.get("name").and_then(serde_json::Value::as_str) != Some(name.as_str()) {
+            return Err("Herdr agent name readback differs".into());
+        }
+        Ok(named)
+    }
+}
+
 /// Observes the official Herdr integration report for a launch pane and
 /// binds it to an exact native identity claim. `attached` is the Codex
 /// thread Flow opened, which the pane's TUI resumed.
@@ -2255,7 +2346,7 @@ impl AcceptsLaunchRegistration for HerdrCli {
         acknowledgement: &RegistrationAcknowledgement,
     ) -> Result<PromptDeliveryIntent, RegistrationRefusal> {
         launch
-            .binding_matches_launch(&binding.herdr_pane_binding)
+            .bound_binding_matches_launch(binding)
             .map_err(|_| RegistrationRefusal::PaneBindingForeign)?;
         if binding.harness_kind != launch.harness_kind
             || acknowledgement.launch_request_id != binding.launch_request_id
@@ -2701,9 +2792,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
-        ObservesNativeTargetReceipt, StartsNativeHerdrHarness, StartupProgress, SubmitsStartupPart,
-        TitlesNativeFlow,
+        AcceptsLaunchRegistration, CreatesHerdrLaunchPane, NamesBoundHerdrFlow,
+        ObservesNativeLaunchBinding, ObservesNativeTargetReceipt, RegistrationRefusal,
+        StartsNativeHerdrHarness, StartupProgress, SubmitsStartupPart, TitlesNativeFlow,
     };
     use crate::composition::{FitsOneMessage, NamesRemoteControl, SplitsStartupMessage};
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
@@ -2813,6 +2904,9 @@ pub(crate) mod tests {
         let calls = root.path().join("calls");
         let reported_harness = root.path().join("reported-harness");
         fs::write(&reported_harness, harness).expect("reported harness");
+        fs::write(root.path().join("agent-name"), agent_name).expect("initial agent name");
+        fs::write(root.path().join("workspace-label"), agent_name)
+            .expect("initial workspace label");
         let script = format!(
             r##"#!/bin/sh
 printf '%s\n' "$*" >> '{calls}'
@@ -2822,7 +2916,10 @@ case "$*" in
   *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
   *"agent wait"*) [ -f '{wait_refused}' ] && exit 11; rm -f '{missing_agent_session}'; printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
   *"agent start"*) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; if [ "$prev" = --name ]; then title=$a; [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; fi; prev=$a; done; printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
-  *"agent get"*) if [ -f '{pending_record}' ]; then left=$(cat '{record_delay}'); if [ "$left" -le 0 ]; then cat '{pending_record}' >> '{claude_transcript}'; rm -f '{pending_record}'; else printf '%s' $((left - 1)) > '{record_delay}'; fi; fi; reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); if [ -f '{missing_agent_session}' ] || [ -f '{never_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness"; fi ;;
+  *"workspace rename"*) [ -f '{workspace_rename_refused}' ] && exit 12; for last do :; done; printf '%s' "$last" > '{workspace_label}'; printf '%s\n' '{{"result":{{}}}}' ;;
+  *"workspace get"*) label=$(cat '{workspace_label}'); printf '{{"result":{{"workspace":{{"workspace_id":"w7","label":"%s"}}}}}}\n' "$label" ;;
+  *"agent rename"*) [ -f '{agent_rename_refused}' ] && exit 13; for last do :; done; printf '%s' "$last" > '{agent_name_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
+  *"agent get"*) if [ -f '{pending_record}' ]; then left=$(cat '{record_delay}'); if [ "$left" -le 0 ]; then cat '{pending_record}' >> '{claude_transcript}'; rm -f '{pending_record}'; else printf '%s' $((left - 1)) > '{record_delay}'; fi; fi; reported_harness=$(cat '{reported_harness}'); current_name=$(cat '{agent_name_file}'); title=$(cat '{title_file}' 2>/dev/null); if [ -f '{missing_agent_session}' ] || [ -f '{never_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"%s","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$current_name" "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"%s","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$current_name" "$reported_harness" "$title" "$reported_harness" "$reported_harness"; fi ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"pane rename w7:p1 "*) printf '%s' "$*" | sed 's/.*pane rename w7:p1 //' > '{label_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
   *"pane get w7:p1"*) label=$(cat '{label_file}' 2>/dev/null); printf '{{"result":{{"pane":{{"pane_id":"w7:p1","terminal_id":"term-native","label":"%s"}}}}}}\n' "$label" ;;
@@ -2837,6 +2934,10 @@ esac
             missing_agent_session = root.path().join("missing-agent-session").display(),
             never_agent_session = root.path().join("never-agent-session").display(),
             wait_refused = root.path().join("agent-wait-refused").display(),
+            workspace_rename_refused = root.path().join("workspace-rename-refused").display(),
+            agent_rename_refused = root.path().join("agent-rename-refused").display(),
+            workspace_label = root.path().join("workspace-label").display(),
+            agent_name_file = root.path().join("agent-name").display(),
             marker_output = root.path().join("marker-unwrapped").display(),
             visible_output = root.path().join("marker-visible").display(),
             pane_width = root.path().join("pane-width").display(),
@@ -2923,9 +3024,10 @@ printf '%s\n' 123456
     fn registration_of(
         adapter: &HerdrCli,
         launch: &ComposedLaunch,
-        pane: signal_flow::HerdrPaneBinding,
+        mut pane: signal_flow::HerdrPaneBinding,
         native_session: &str,
     ) -> Result<PromptDeliveryIntent, super::RegistrationRefusal> {
+        pane.herdr_agent_name = launch.bound_agent_name("123456").unwrap();
         let binding = NativeLaunchBinding {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
             flow_id: "123456".into(),
@@ -2991,6 +3093,114 @@ printf '%s\n' 123456
         );
         assert!(!start.contains('$'));
         assert!(!calls.contains("agent prompt"));
+    }
+
+    #[test]
+    fn both_harnesses_bind_registration_to_the_named_workspace_and_agent() {
+        for (kind, harness) in [
+            (HarnessKind::Claude, "claude"),
+            (HarnessKind::Codex, "codex"),
+        ] {
+            let launch = launch(kind);
+            let staging = launch.launch_agent_name();
+            let native = "12345678-1234-4abc-8def-123456789abc";
+            let (root, adapter) = fixture_herdr(
+                harness,
+                native,
+                "1234567812344abc8def123456789abc",
+                &staging,
+            );
+            let pane = adapter.create_launch_pane(&launch).expect("created pane");
+            adapter
+                .start_native_harness(&launch, &pane, None)
+                .expect("started harness");
+            let mut binding = adapter
+                .observe_native_binding(&launch, &pane, None)
+                .expect("bound flow");
+            binding.herdr_pane_binding = adapter
+                .name_bound_flow(
+                    &launch,
+                    &binding.herdr_pane_binding,
+                    &binding.flow_id,
+                    &binding.native_session_id,
+                )
+                .expect("named flow");
+            let expected = "field_flow_secondary_123456";
+            assert_eq!(binding.herdr_pane_binding.herdr_agent_name, expected);
+            assert_eq!(
+                fs::read_to_string(root.path().join("workspace-label")).unwrap(),
+                expected
+            );
+            assert_eq!(
+                fs::read_to_string(root.path().join("agent-name")).unwrap(),
+                expected
+            );
+            let acknowledgement = RegistrationAcknowledgement {
+                launch_request_id: binding.launch_request_id.clone(),
+                flow_id: binding.flow_id.clone(),
+                native_session_id: binding.native_session_id.clone(),
+                herdr_pane_binding: binding.herdr_pane_binding.clone(),
+            };
+            adapter
+                .accept_registration(&launch, &binding, &acknowledgement)
+                .expect("exact named binding registers");
+            let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+            assert!(calls.contains(&format!("workspace rename w7 {expected}")));
+            assert!(calls.contains(&format!("agent rename w7:p1 {expected}")));
+        }
+    }
+
+    #[test]
+    fn a_name_collision_refuses_without_registering_the_staging_identity() {
+        let launch = launch(HarnessKind::Claude);
+        let staging = launch.launch_agent_name();
+        let native = "12345678-1234-4abc-8def-123456789abc";
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native,
+            "1234567812344abc8def123456789abc",
+            &staging,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter
+            .start_native_harness(&launch, &pane, None)
+            .expect("started harness");
+        fs::write(root.path().join("agent-rename-refused"), "collision").unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .expect("bound flow");
+        assert!(
+            adapter
+                .name_bound_flow(
+                    &launch,
+                    &binding.herdr_pane_binding,
+                    &binding.flow_id,
+                    &binding.native_session_id,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("agent-name")).unwrap(),
+            staging
+        );
+
+        let binding = NativeLaunchBinding {
+            launch_request_id: launch.launch_profile.launch_request_id.clone(),
+            flow_id: "123456".into(),
+            native_session_id: native.into(),
+            harness_kind: HarnessKind::Claude,
+            herdr_pane_binding: pane.clone(),
+        };
+        let acknowledgement = RegistrationAcknowledgement {
+            launch_request_id: binding.launch_request_id.clone(),
+            flow_id: binding.flow_id.clone(),
+            native_session_id: binding.native_session_id.clone(),
+            herdr_pane_binding: pane,
+        };
+        assert_eq!(
+            adapter.accept_registration(&launch, &binding, &acknowledgement),
+            Err(RegistrationRefusal::PaneBindingForeign)
+        );
     }
 
     /// A Claude system prompt of many lines, tabs and quotes is never typed:
@@ -4873,9 +5083,17 @@ printf '%s\n' 123456
         // The title is a launch argument, beside the slash-command leave-out.
         assert!(start.contains(&format!(" --name {expected} ")), "{start}");
         assert!(start.contains(" --disable-slash-commands"), "{start}");
-        let binding = adapter
+        let mut binding = adapter
             .observe_native_binding(&launch, &pane, Some("123456"))
             .expect("claimed binding");
+        binding.herdr_pane_binding = adapter
+            .name_bound_flow(
+                &launch,
+                &binding.herdr_pane_binding,
+                &binding.flow_id,
+                &binding.native_session_id,
+            )
+            .expect("named binding");
         let title = adapter
             .title_native_flow(&launch, &binding)
             .expect("title read back");

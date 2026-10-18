@@ -15,11 +15,12 @@ use crate::generated::starter::{
 };
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::{
-    ChecksComposedLaunch, ObservesNativeLaunchBinding, StartupProgress, TranscriptRefusal,
-    WaitsForPaneRest,
+    ChecksComposedLaunch, NamesBoundHerdrFlow, ObservesNativeLaunchBinding, StartupProgress,
+    TranscriptRefusal, WaitsForPaneRest,
 };
 use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
+use crate::performing::RefusesNativeLaunch;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
@@ -289,12 +290,26 @@ impl LaunchesFlows for RunningNexus {
             }
             outcome => return Self::native_refused(NativeLaunchStage::Spawn, outcome),
         };
-        let binding = match self.perform(Operation::Bind(PaneLaunch {
+        let mut binding = match self.perform(Operation::Bind(PaneLaunch {
             native_session_id_option: opened,
             ..pane_launch
         })) {
             Outcome::Bound(binding) => binding,
             outcome => return Self::native_refused(NativeLaunchStage::Bind, outcome),
+        };
+        binding.herdr_pane_binding = match self.herdr.name_bound_flow(
+            &launch,
+            &binding.herdr_pane_binding,
+            &binding.flow_id,
+            &binding.native_session_id,
+        ) {
+            Ok(pane) => pane,
+            Err(error) => {
+                return Self::native_refused(
+                    NativeLaunchStage::Naming,
+                    NativeLaunchRefusal::refused(NativeLaunchStage::Naming, error),
+                );
+            }
         };
         if self.perform(Operation::Record(Record_Data::Binding(binding.clone())))
             != Outcome::Recorded

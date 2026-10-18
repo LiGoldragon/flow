@@ -335,6 +335,12 @@
             "tests::configuring::a_launch_after_a_replaced_declaration_takes_the_new_defaults";
           flow-claude-named-at-launch = context.exactTest "flow-nexus"
             "herdr::launch::tests::claude_is_named_at_launch_and_its_title_read_back";
+          flow-starter-names-both-harnesses = context.exactTest "flow-nexus"
+            "herdr::launch::tests::both_harnesses_bind_registration_to_the_named_workspace_and_agent";
+          flow-starter-name-collision-refused = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_name_collision_refuses_without_registering_the_staging_identity";
+          flow-starter-name-derivation = context.exactTest "flow-nexus"
+            "title::tests::herdr_name_is_the_old_launcher_snake_case_name";
           flow-first-turn-sends-before-any-answer = context.exactTest "flow-nexus"
             "tests::waking::a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer";
           flow-unconfirmed-launch-gives-back-its-address = context.exactTest "flow-nexus"

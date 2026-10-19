@@ -3413,7 +3413,7 @@ fn a_first_turn_that_calls_send_is_served_and_the_launch_completes() {
 fn a_codex_first_turn_starts_after_the_tui_attached_and_a_long_turn_refuses_nothing() {
     use crate::DispatchesSerially;
     let mut fixture = NexusFixture::new();
-    resumable(&fixture);
+    ended_claude(&fixture);
     let recipient = address(Layer::Secondary);
     fixture
         .nexus

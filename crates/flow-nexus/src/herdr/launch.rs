@@ -5164,9 +5164,10 @@ printf '%s\n' "$alias"
             assert!(!create.contains(&agent_name), "{create}");
             // The agent name reaches Herdr only as the internal start key;
             // every labelling call carries the title.
-            for line in calls.lines().filter(|line| {
-                line.contains(" rename ") || line.contains("report-metadata")
-            }) {
+            for line in calls
+                .lines()
+                .filter(|line| line.contains(" rename ") || line.contains("report-metadata"))
+            {
                 assert!(line.ends_with(&title), "{line}");
                 assert!(!line.contains(&agent_name), "{line}");
             }

@@ -1710,6 +1710,229 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     assert!(typed.starts_with(&[sent].prompt_text()), "{typed}");
 }
 
+/// A process spawned for a test, killed when it is dropped.
+struct SpawnedProcess(std::process::Child);
+
+impl Drop for SpawnedProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The one child of `parent`, read from the kernel once it has started.
+fn child_of(parent: u32) -> signal_flow::Process {
+    use crate::store::{FlowStore, ReadsFlowMemory};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let child = fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+            .find(|pid| {
+                fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .ok()
+                    .and_then(|stat| {
+                        let (_, fields) = stat.rsplit_once(") ")?;
+                        fields.split_whitespace().nth(1)?.parse::<u32>().ok()
+                    })
+                    == Some(parent)
+            })
+            .and_then(FlowStore::process_identity_for_pid);
+        if let Some(child) = child {
+            return child;
+        }
+        assert!(std::time::Instant::now() < deadline, "the child started");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// A Codex thread on a shared app-server sends through an MCP send server
+/// the app-server runs for it: a process in no pane, whose only account of
+/// its flow is the thread id Codex stamped on the call. Message names that
+/// process and the thread; Flow trusts it only as the configured send
+/// server under its paired app-server (here the test process itself), and
+/// names the metaflow Awake as the Codex flow it recorded on that thread.
+#[test]
+fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
+    use crate::metaflow::DispatchesMetaflowPeer;
+    use crate::store::metaflow::TakesLaunchAddress;
+    use crate::store::{FlowStore, ReadsFlowMemory};
+    use signal_flow::{IdentifyThread_Data, Refusal, Response};
+
+    let fixture = NexusFixture::new();
+    let (_message_child, message) = message_peer(&fixture);
+    let thread = "01a0fdcc-c1a1-7f43-8c23-06d41fa34438";
+    let identify = |process: &signal_flow::Process, thread: &str, peer: &signal_flow::Process| {
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::IdentifyThread(IdentifyThread_Data {
+                    process: process.clone(),
+                    native_session_id: thread.into(),
+                }),
+                Some(peer),
+            )
+            .response
+    };
+
+    // The send server: a child of the app-server, in no pane.
+    let send_server = SpawnedProcess(
+        std::process::Command::new("sleep")
+            .arg("30")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_SESSION")
+            .spawn()
+            .unwrap(),
+    );
+    let send_server_process = FlowStore::process_identity_for_pid(send_server.0.id()).unwrap();
+    let send_server_executable = fs::canonicalize(format!("/proc/{}/exe", send_server.0.id()))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let app_server_executable = fs::canonicalize(std::env::current_exe().unwrap())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    // While no send server is configured, none is trusted.
+    assert_eq!(
+        identify(&send_server_process, thread, &message),
+        Response::Refused(Refusal::NotConfigured)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .configure_change(meta_signal_flow::ConfigurationChange::SendServers(vec![
+                meta_signal_flow::ConfigureSendServer {
+                    codex_app_server_binary: app_server_executable,
+                    mcp_send_server_binary: send_server_executable,
+                },
+            ]))
+            .unwrap(),
+        meta_signal_flow::ConfigureOutcome::Replaced
+    );
+
+    // The Codex flow Flow recorded on the thread, Awake at its Address. Its
+    // TUI runs in a pane; the send server runs under the app-server, in none.
+    let sender_address = Address {
+        aspect: Aspect::Mind,
+        topic: "flow".into(),
+        layer: Layer::Tertiary,
+    };
+    let registration = fixture
+        .nexus
+        .store
+        .register_flow_in_role(
+            FlowNode {
+                flow_id: "41fa34".into(),
+                session_id: thread.into(),
+                harness_kind: HarnessKind::Codex,
+                endpoint_selection: EndpointSelection::Unavailable,
+                herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                    herdr_session_name: "messaging-build".into(),
+                    herdr_agent_name: "codex-agent".into(),
+                    herdr_pane_id: "w6:p1".into(),
+                    herdr_terminal_id: "term-codex".into(),
+                }),
+                origin: Origin::Unbound,
+                flow_lifecycle: FlowLifecycle::Active,
+            },
+            signal_flow::Caller {
+                flow_id: "41fa34".into(),
+                aspect: Aspect::Mind,
+                power_level: PowerLevel::Low,
+                model_name: "gpt-6.1-luna".into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(registration, crate::store::FlowRegistration::Registered(_)),
+        "the Codex flow is registered: {registration:?}"
+    );
+    assert!(matches!(
+        fixture
+            .nexus
+            .store
+            .address_taking(&sender_address, "41fa34", None, 0)
+            .unwrap(),
+        crate::store::metaflow::AddressTaking::Takes(_)
+    ));
+    assert!(
+        fixture
+            .nexus
+            .store
+            .awaken_metaflow(&sender_address, "41fa34", 0)
+            .unwrap()
+    );
+
+    // The trusted send server names the flow of its thread.
+    assert_eq!(
+        identify(&send_server_process, thread, &message),
+        Response::Identified(sender_address.clone())
+    );
+    // A thread Flow recorded for no flow names no one.
+    assert_eq!(
+        identify(
+            &send_server_process,
+            "01a0fdcc-0000-7000-8000-000000000000",
+            &message
+        ),
+        Response::Refused(Refusal::Unidentified(send_server_process.clone()))
+    );
+    assert_eq!(
+        identify(&send_server_process, "", &message),
+        Response::Refused(Refusal::Unidentified(send_server_process.clone()))
+    );
+    // The right thread from another executable is refused.
+    let shell = SpawnedProcess(
+        std::process::Command::new("sh")
+            .args(["-c", "sleep 30; :"])
+            .spawn()
+            .unwrap(),
+    );
+    let shell_process = FlowStore::process_identity_for_pid(shell.0.id()).unwrap();
+    assert_eq!(
+        identify(&shell_process, thread, &message),
+        Response::Refused(Refusal::NotSendServer(shell_process.clone()))
+    );
+    // The send server's own executable under another parent is refused.
+    let foreign_child = child_of(shell.0.id());
+    assert_eq!(
+        identify(&foreign_child, thread, &message),
+        Response::Refused(Refusal::NotSendServer(foreign_child.clone()))
+    );
+    // Only the bound Message process may ask.
+    assert_eq!(
+        identify(&send_server_process, thread, &send_server_process),
+        Response::Refused(Refusal::NotMessage)
+    );
+    // The send server runs in no pane: pane identification names no one.
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::Identify(send_server_process.clone()),
+                Some(&message)
+            )
+            .response,
+        Response::Refused(Refusal::Unidentified(send_server_process.clone()))
+    );
+
+    // Once its metaflow sleeps, the thread names no one.
+    assert!(
+        fixture
+            .nexus
+            .store
+            .sleep_metaflow(&sender_address, "41fa34")
+            .unwrap()
+    );
+    assert_eq!(
+        identify(&send_server_process, thread, &message),
+        Response::Refused(Refusal::Unidentified(send_server_process.clone()))
+    );
+}
+
 /// A seat launched into the pane Message's marked processes name: its
 /// binding witnessed and acknowledged, its first prompt typed, and no answer
 /// of its yet recorded.

@@ -372,6 +372,20 @@ fn each_family_is_its_last_declaration() {
             .unwrap()
             .is_empty()
     );
+    // A fresh store trusts no send server; a declaration names each pair.
+    assert!(snapshot(&nexus).send_servers.is_empty());
+    let send_servers = vec![meta_signal_flow::ConfigureSendServer {
+        codex_app_server_binary: "/nix/store/codex/bin/codex".into(),
+        mcp_send_server_binary: "/nix/store/send/bin/flow-send-mcp".into(),
+    }];
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::SendServers(send_servers.clone())
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(snapshot(&nexus).send_servers, send_servers);
     // The effective snapshot equals the last declaration of every family,
     // across a restart.
     drop(nexus);
@@ -383,6 +397,7 @@ fn each_family_is_its_last_declaration() {
             models,
             thresholds,
             default_leave_outs: second,
+            send_servers,
         }
     );
     // An empty declaration empties the family.

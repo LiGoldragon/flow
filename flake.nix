@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.11";
+            version = "0.35.13";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -311,6 +311,8 @@
             "tests::a_pane_id_whose_herdr_server_serves_two_sessions_names_no_pane";
           flow-launched-seat-identifies-and-wakes = context.exactTest "flow-nexus"
             "tests::waking::a_launched_seat_identifies_through_its_pane_and_its_order_wakes_an_asleep_seat";
+          flow-send-server-identifies-codex-thread = context.exactTest "flow-nexus"
+            "tests::waking::a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread";
           flow-client-default-socket = context.exactTest "flow"
             "the_client_reaches_the_default_ordinary_socket_under_the_runtime_directory";
           flow-meta-client-default-socket = context.exactTest "flow-meta"

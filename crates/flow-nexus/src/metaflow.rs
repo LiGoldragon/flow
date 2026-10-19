@@ -1,10 +1,11 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane};
 use crate::store::metaflow::SleepsMetaflows;
+use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
 use crate::waking::RestsEndedAwake;
 use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
-use signal_flow::{Address, Process, Query, Refusal, Response};
+use signal_flow::{Address, IdentifyThread_Data, Process, Query, Refusal, Response};
 
 /// A metaflow dispatch's answer, and the recipient a Deliver queued for.
 /// Whether it wakes is read from Flow's records after the answer is written
@@ -69,6 +70,41 @@ impl IdentifiesPeerProcess for RunningNexus {
     }
 }
 
+/// Names the metaflow a Codex thread runs as, for the MCP send server
+/// serving it.
+pub(crate) trait IdentifiesThread {
+    /// The process Message names must run a configured send server under
+    /// its paired Codex app-server (`TrustsSendServers`): otherwise
+    /// NotSendServer, or NotConfigured while no send server is configured.
+    /// The thread then names the Address of the metaflow Awake as the one
+    /// live Codex flow whose thread Flow recorded at its Start; any other
+    /// thread is Unidentified. The shared app-server is never bound, and the
+    /// process's environment is never read.
+    fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Response, StoreError>;
+}
+
+impl IdentifiesThread for RunningNexus {
+    fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Response, StoreError> {
+        let IdentifyThread_Data {
+            process,
+            native_session_id,
+        } = request;
+        match self.store.send_server_trust(&process)? {
+            SendServerTrust::Unconfigured => return Ok(Response::Refused(Refusal::NotConfigured)),
+            SendServerTrust::Untrusted => {
+                return Ok(Response::Refused(Refusal::NotSendServer(process)));
+            }
+            SendServerTrust::Trusted => {}
+        }
+        match self.store.thread_metaflow(&native_session_id)? {
+            Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
+                Ok(Response::Identified(metaflow.address))
+            }
+            _ => Ok(Response::Refused(Refusal::Unidentified(process))),
+        }
+    }
+}
+
 pub(crate) trait DispatchesMetaflowPeer {
     fn dispatch_metaflow_peer(&self, query: Query, peer: Option<&Process>) -> MetaflowAnswer;
 }
@@ -120,6 +156,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
             }
             match query {
                 Query::Identify(process) => self.identify_peer_process(process),
+                Query::IdentifyThread(request) => self.identify_thread(request),
                 Query::Lock(request) => self.store.lock_metaflow(request, now),
                 Query::Deliver(request) => {
                     let address = request.lock.address.clone();

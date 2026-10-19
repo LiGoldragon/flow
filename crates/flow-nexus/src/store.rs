@@ -15,6 +15,7 @@ pub(crate) mod metaflow;
 pub(crate) mod opened_thread;
 pub(crate) mod refresh;
 pub(crate) mod send_call;
+pub(crate) mod send_server;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -1934,6 +1935,7 @@ pub(crate) struct MetaConfigurationTables {
     models: TableReference<StoredMetaModelConfiguration>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
     leave_outs: TableReference<StoredMetaLeaveOutConfiguration>,
+    send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -1963,6 +1965,9 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 FamilyName::new("flow-nexus-meta-leave-out-configuration"),
                 SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
             ))?,
+            send_servers: engine.register_table(
+                <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor(),
+            )?,
         })
     }
 }
@@ -2066,6 +2071,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             FamilyName::new("flow-nexus-meta-leave-out-configuration"),
             SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
         );
+        let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         if recognized {
             FlowStore::drop_retired_tables(path)?;
         }
@@ -2081,7 +2087,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_nexus_descriptor)
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
-                .with_family(&meta_leave_outs_descriptor),
+                .with_family(&meta_leave_outs_descriptor)
+                .with_family(&meta_send_servers_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
@@ -2092,6 +2099,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             models: engine.register_table(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
             leave_outs: engine.register_table(meta_leave_outs_descriptor)?,
+            send_servers: engine.register_table(meta_send_servers_descriptor)?,
         };
         if !recognized {
             engine.assert(Assertion::new(
@@ -2624,6 +2632,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
                 .with_family(&meta_leave_outs_descriptor)
+                .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
                 .with_family(&address_holds_descriptor)
@@ -3162,6 +3171,7 @@ impl AppliesFlowQuery for FlowStore {
             )),
             Query::Bind(_)
             | Query::Identify(_)
+            | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
             | Query::Release(_)
@@ -3215,6 +3225,7 @@ impl ReservesPendingStart for FlowStore {
             | Query::Report(_)
             | Query::Bind(_)
             | Query::Identify(_)
+            | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
             | Query::Release(_)
@@ -5355,6 +5366,10 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-meta-leave-out-configuration",
                 "flow-nexus-meta-leave-out-configuration-v1",
             ),
+            "flow_nexus_meta_send_server_configuration" => (
+                send_server::META_SEND_SERVER_CONFIGURATION_FAMILY,
+                send_server::META_SEND_SERVER_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_flow_events" => ("flow-nexus-flow-events", "flow-nexus-flow-events-v1"),
             "flow_nexus_flow_context_sizes" => (
                 context::FLOW_CONTEXT_SIZE_FAMILY,
@@ -5510,7 +5525,8 @@ pub(crate) trait ReadsFlowMemory {
         // A store keeps its metaflows' default leave-outs from 0.35.0 on,
         // its fresh-wake marks from 0.35.2 on, the Codex thread each
         // launch opened from 0.35.6 on, the send tool's calls from 0.35.7
-        // on, and the cleanup of each interrupted launch from 0.35.11 on.
+        // on, the cleanup of each interrupted launch from 0.35.11 on, and
+        // its trusted send servers from 0.35.13 on.
         const ADDED_LATER: &[&str] = &[
             "flow_nexus_flow_context_sizes",
             "flow_nexus_address_holds",
@@ -5519,6 +5535,7 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_launch_opened_threads",
             "flow_nexus_send_calls",
             "flow_nexus_launch_cleanups",
+            "flow_nexus_meta_send_server_configuration",
         ];
         // A store before 0.35.0 may still hold a table 0.35.0 drops.
         let retired = |name: &String| RETIRED_TABLES.iter().any(|(table, _, _)| table == name);
@@ -5532,6 +5549,7 @@ pub(crate) trait ReadsFlowMemory {
             && actual.iter().all(|name| {
                 CONFIGURATION_ONLY.contains(&name.as_str())
                     || name == "flow_nexus_meta_leave_out_configuration"
+                    || name == "flow_nexus_meta_send_server_configuration"
                     || retired(name)
             });
         configuration_only || running
@@ -5708,9 +5726,11 @@ pub(crate) trait ReadsFlowMemory {
         let models_rows = engine.match_records(QueryPlan::all(tables.models))?;
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
         let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
+        let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
         if models_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
             || leave_out_rows.database_marker() != marker
+            || send_server_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -5737,11 +5757,21 @@ pub(crate) trait ReadsFlowMemory {
             .collect::<Vec<_>>();
         default_leave_outs
             .sort_by_key(|leave_out| FlowStore::address_record_key(&leave_out.address));
+        let mut send_servers = send_server_rows
+            .records()
+            .iter()
+            .map(|stored| stored.send_server.clone())
+            .collect::<Vec<_>>();
+        send_servers.sort_by(|left, right| {
+            left.codex_app_server_binary
+                .cmp(&right.codex_app_server_binary)
+        });
         Ok(Some(ConfigurationSnapshot {
             nexus,
             models,
             thresholds,
             default_leave_outs,
+            send_servers,
         }))
     }
 
@@ -5862,6 +5892,20 @@ pub(crate) trait ReadsFlowMemory {
                     .map(|leave_out| StoredMetaLeaveOutConfiguration { leave_out })
                     .collect(),
             ),
+            ConfigurationChange::SendServers(send_servers) => {
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.send_servers,
+                    send_servers
+                        .into_iter()
+                        .map(
+                            |send_server| send_server::StoredMetaSendServerConfiguration {
+                                send_server,
+                            },
+                        )
+                        .collect(),
+                )
+            }
         }
     }
 

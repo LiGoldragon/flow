@@ -65,6 +65,13 @@ names. A resumed wake takes its Address through the same rule with
 from the Herdr marks as ResolveCaller finds it, as the Address that flow is
 Awake at, so a launched seat sends through Message; a process bound by Bind,
 or descended from one, keeps naming that binding first.
+`IdentifyThread` names a Codex thread's MCP send server, a child of a shared
+app-server in no pane, from the thread id Codex stamped on its tool call:
+Message sends the process its socket reports with that thread id, and Flow
+accepts it only when the kernel reports the process running a configured
+`McpSendServerBinary` under its paired `CodexAppServerBinary` (the meta
+`SendServers` family). The thread names the Address of the metaflow Awake as
+the one live Codex flow whose thread Flow recorded at its Start.
 
 ```mermaid
 sequenceDiagram

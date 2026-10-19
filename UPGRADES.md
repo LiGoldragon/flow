@@ -1,3 +1,28 @@
+# Flow 0.35.13
+
+signal-flow 21.0.0 (contract digest 28e4f853ba798c44) and meta-signal-flow
+25.0.0 (81907c3b3f56108a): every ordinary- and meta-socket peer repins. The
+store adds one table, `flow_nexus_meta_send_server_configuration`; a store
+written before opens with it added and holding none.
+
+- **A Codex thread's send server identifies the flow it serves.** On a shared
+  app-server a Codex tool command runs as the app-server's child, in no pane,
+  so `Identify` finds no flow. Codex stamps every MCP tool call's `_meta`
+  with the calling thread's `threadId`; an MCP send server reads it, and
+  Message, which reads that server's process from its socket, asks
+  `IdentifyThread.{ Process NativeSessionId }`. Flow answers it only for the
+  bound Message process, and only when the kernel reports the process running
+  a configured `McpSendServerBinary` whose parent runs the paired
+  `CodexAppServerBinary`: else `Refused.NotSendServer.Process`, or
+  `Refused.NotConfigured` while no send server is configured. The thread then
+  names `Identified.Address`, the metaflow Awake as the one live Codex flow
+  whose thread Flow recorded at its Start; an unknown thread, or one whose
+  metaflow is not Awake, is `Refused.Unidentified.Process`.
+- **Configure the trusted pairs before Message asks.** Each path is the
+  executable the kernel reports for the running process, never a wrapper
+  script that execs it:
+  `flow-meta 'Configure.SendServers.[ { /nix/store/…-codex/bin/codex /nix/store/…/bin/<send-server> } ]'`.
+
 # Flow 0.35.11
 
 No wire change. The store adds one table, `flow_nexus_launch_cleanups`; a

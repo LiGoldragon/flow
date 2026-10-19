@@ -498,6 +498,14 @@ pub trait SleepsAndWakesSeats {
     /// due a wake, wakes it and drains what arrived meanwhile. Nothing when
     /// a wake already runs or none is due, so asking twice wakes once.
     fn wake_due(&self, address: Address);
+    /// After the owner's resolution of a hand-over committed: when the
+    /// metaflow's Awake seat still has queued work and is known resting by
+    /// the evidence the drain at a turn end uses (a Claude transcript whose
+    /// main turn ended with no later prompt; a Codex thread the app-server
+    /// reports resting), runs that same drain now. A seat not known resting
+    /// waits for its turn end. Takes the dispatch gate, so the caller holds
+    /// none.
+    fn drain_after_resolution(&self, address: &Address);
     /// Whether Flow's records show the metaflow due a wake: Asleep, of a
     /// layer that wakes, holding work that wakes it, or with its last flow
     /// still live, as a wake that failed after resuming its session left it.
@@ -1013,6 +1021,35 @@ impl SleepsAndWakesSeats for RunningNexus {
             eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
         }
         at_stop
+    }
+
+    fn drain_after_resolution(&self, address: &Address) {
+        let resting = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Ok(Some(metaflow)) = self.store.metaflow(address) else {
+                return;
+            };
+            let flow_ethos::State::Awake(flow_id) = metaflow.state else {
+                return;
+            };
+            let known_resting = !metaflow.queue.is_empty()
+                && !self.waking.is_waking(address)
+                && matches!(self.store.address_hold(&flow_id), Ok(None))
+                && match self.store.flow_node(&flow_id) {
+                    Ok(Some(node)) => match node.harness_kind {
+                        HarnessKind::Codex => self.codex_resting(&flow_id),
+                        HarnessKind::Claude => self.claude_main_turn_ended(&node),
+                    },
+                    _ => false,
+                };
+            known_resting.then_some(flow_id)
+        };
+        if let Some(flow_id) = resting {
+            self.settle_stopped(&flow_id);
+        }
     }
 
     fn wake_due(&self, address: Address) {

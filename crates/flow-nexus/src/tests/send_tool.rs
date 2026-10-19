@@ -1994,3 +1994,66 @@ fn a_completion_on_another_thread_drains_nothing() {
     assert_eq!(fixture.typed_count(&first), 0);
     assert_eq!(fixture.seat_queue(), vec![first]);
 }
+
+/// An Uncertain Codex hand-over, resolved Absent as the meta socket serves
+/// it; `first_event` is the thread's last turn event. Returns the fake
+/// app-server and the fixture.
+fn codex_resolved_absent(
+    first_event: crate::codex_turns::TurnEvent,
+) -> (NexusFixture, FakeAppServer, QueuedRequest) {
+    use crate::DispatchesSerially;
+    use crate::codex_turns::TracksCodexTurns;
+    use meta_signal_flow::{QueueDeliveryResolution, QueueResolutionOutcome};
+    let mut fixture = NexusFixture::new();
+    let first = from_core(Request::Order("First.".into()));
+    fixture.awake_codex_seat(vec![first.clone()]);
+    let fake = FakeAppServer::install(vec![]);
+    fixture.adapter("gpt-sol", &fake);
+    crashed_before_receipt(&fixture);
+    let attempt = match fixture
+        .nexus
+        .dispatch_meta(meta_signal_flow::Query::ReadQueueDeliveries(seat_at()))
+    {
+        meta_signal_flow::Response::QueueDeliveriesRead(read) => {
+            read.queue_delivery_vector[0].queue_attempt_id.clone()
+        }
+        other => panic!("not read: {other:?}"),
+    };
+    fixture.nexus.codex_turns.observe(SEAT_THREAD, first_event);
+    fake.accept_queued_turns(SEAT_THREAD, 2..=3);
+    let response = fixture.nexus.dispatch_meta_serially(
+        meta_signal_flow::Query::ResolveQueueDelivery(QueueDeliveryResolution {
+            queue_attempt_id: attempt,
+            queue_resolution_outcome: QueueResolutionOutcome::Absent,
+            queue_resolution_reason: "the owner looked".into(),
+        }),
+        Some(crate::tests::queue_drain::resolver()),
+    );
+    assert!(matches!(
+        response,
+        meta_signal_flow::Response::QueueDeliveryResolved(_)
+    ));
+    (fixture, fake, first)
+}
+
+/// A Codex seat its app-server shows resting is handed the request at the
+/// resolution, exactly once.
+#[test]
+fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_once() {
+    use crate::codex_turns::{ThreadStatus, TurnEvent};
+    use crate::waking::SleepsAndWakesSeats;
+    let (fixture, fake, first) = codex_resolved_absent(TurnEvent::Status(ThreadStatus::Idle));
+    assert_eq!(fake.queued_turn_texts().len(), 1, "handed over at once");
+    fixture.nexus.drain_after_resolution(&seat_at());
+    assert_eq!(fake.queued_turn_texts().len(), 1, "never twice");
+    assert_eq!(fixture.seat_queue(), vec![first]);
+}
+
+/// A Codex seat in a turn waits for its completion.
+#[test]
+fn a_working_codex_seat_resolved_absent_waits_for_its_turn_end() {
+    use crate::codex_turns::TurnEvent;
+    let (fixture, fake, first) = codex_resolved_absent(TurnEvent::Started("turn-running".into()));
+    assert!(fake.queued_turn_texts().is_empty(), "a turn runs");
+    assert_eq!(fixture.seat_queue(), vec![first]);
+}

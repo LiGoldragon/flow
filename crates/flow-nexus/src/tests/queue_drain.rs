@@ -470,7 +470,7 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     assert_eq!(queue(&fixture), vec![first]);
 }
 
-fn resolver() -> ResolverIdentity {
+pub(super) fn resolver() -> ResolverIdentity {
     ResolverIdentity {
         process_identity: ProcessIdentity {
             process_id: 4242,
@@ -508,6 +508,24 @@ fn resolve(
             queue_attempt_id: attempt.into(),
             queue_resolution_outcome: outcome,
             queue_resolution_reason: reason.into(),
+        }),
+        Some(resolver()),
+    )
+}
+
+/// The resolution as the meta socket serves it: the gate given back after
+/// the commit, a resting seat handed its request at once.
+fn resolve_served(
+    fixture: &NexusFixture,
+    attempt: &str,
+    outcome: QueueResolutionOutcome,
+) -> MetaResponse {
+    use crate::DispatchesSerially;
+    fixture.nexus.dispatch_meta_serially(
+        MetaQuery::ResolveQueueDelivery(QueueDeliveryResolution {
+            queue_attempt_id: attempt.into(),
+            queue_resolution_outcome: outcome,
+            queue_resolution_reason: "the owner looked".into(),
         }),
         Some(resolver()),
     )
@@ -665,4 +683,60 @@ fn a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attemp
         resolve(&fixture, &attempt, QueueResolutionOutcome::Absent, "again"),
         MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotUncertain)
     );
+}
+
+/// A resting Claude seat resolved Absent is handed the request at once,
+/// exactly one new attempt; its later Stop does not type it again.
+#[test]
+fn a_resting_claude_seat_resolved_absent_is_handed_the_request_at_once_exactly_once() {
+    let fixture = NexusFixture::new();
+    let first = from_core("first-request-body");
+    let attempt = stuck_hand_over(&fixture, vec![first.clone()]);
+    assert_eq!(typed_count(&fixture, "first-request-body"), 1);
+
+    assert!(matches!(
+        resolve_served(&fixture, &attempt, QueueResolutionOutcome::Absent),
+        MetaResponse::QueueDeliveryResolved(_)
+    ));
+    assert_eq!(typed_count(&fixture, "first-request-body"), 2);
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(typed_count(&fixture, "first-request-body"), 2);
+    assert_eq!(queue(&fixture), vec![first]);
+}
+
+/// A seat in a turn (a prompt after its last end_turn) is not handed the
+/// request by the resolution; its turn end does.
+#[test]
+fn a_working_claude_seat_resolved_absent_waits_for_its_turn_end() {
+    let fixture = NexusFixture::new();
+    let first = from_core("first-request-body");
+    let attempt = stuck_hand_over(&fixture, vec![first.clone()]);
+    append_main_rows(
+        &fixture,
+        &[serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u9",
+        "message":{"content":"still working"}})],
+    );
+
+    resolve_served(&fixture, &attempt, QueueResolutionOutcome::Absent);
+    assert_eq!(typed_count(&fixture, "first-request-body"), 1);
+    assert_eq!(queue(&fixture), vec![first]);
+
+    append_main_rows(&fixture, &[end_turn("done")]);
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(typed_count(&fixture, "first-request-body"), 2);
+}
+
+/// A resting seat resolved Delivered with a second entry queued is handed
+/// the second at once; the first is not typed again.
+#[test]
+fn a_resting_claude_seat_resolved_delivered_is_handed_the_second_at_once() {
+    let fixture = NexusFixture::new();
+    let first = from_core("first-request-body");
+    let second = from_core("second-request-body");
+    let attempt = stuck_hand_over(&fixture, vec![first, second.clone()]);
+
+    resolve_served(&fixture, &attempt, QueueResolutionOutcome::Delivered);
+    assert_eq!(typed_count(&fixture, "first-request-body"), 1);
+    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
+    assert_eq!(queue(&fixture), vec![second]);
 }

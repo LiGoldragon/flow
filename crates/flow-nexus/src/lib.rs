@@ -1042,11 +1042,20 @@ impl DispatchesSerially for RunningNexus {
         query: meta_signal_flow::Query,
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Response {
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.dispatch_meta_from(query, resolver)
+        let response = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.dispatch_meta_from(query, resolver)
+        };
+        // A resolution that committed leaves the oldest request queued (Absent)
+        // or the next one oldest (Delivered): a seat already resting gets no
+        // turn end, so it is handed that request now, the gate given back.
+        if let meta_signal_flow::Response::QueueDeliveryResolved(resolved) = &response {
+            self.drain_after_resolution(&resolved.address);
+        }
+        response
     }
 }
 

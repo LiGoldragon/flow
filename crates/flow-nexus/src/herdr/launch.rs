@@ -11,7 +11,7 @@ use super::{DecodesFlowClaim, FlowClaim, HerdrCli, claude_paste};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::HERDR_REQUEST_LINE_LIMIT;
-use crate::composition::{NamesRemoteControl, ValidatesComposedPrompt};
+use crate::composition::ValidatesComposedPrompt;
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
     DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
@@ -1774,6 +1774,24 @@ impl SpawnsNativeHarness for HerdrCli {
         session: ClaudeSession,
     ) -> Result<(), SpawnFailure> {
         launch.binding_matches_launch(pane)?;
+        // A Claude session is named at start with its title, so its Flow ID
+        // is known before the harness exists: Reserve claimed it for the
+        // session Flow chose. The title is the one name the living sees,
+        // given as the session name and the Remote Control name alike.
+        let claude_title = match (&launch.harness_kind, reserved) {
+            (HarnessKind::Claude, Some(flow_id)) => Some(
+                launch
+                    .launch_profile
+                    .native_title(flow_id)
+                    .map_err(|refusal| SpawnFailure::Unattempted(refusal.to_string()))?,
+            ),
+            (HarnessKind::Claude, None) => {
+                return Err(SpawnFailure::Unattempted(
+                    "a Claude start needs its reserved Flow ID to be named by its title".into(),
+                ));
+            }
+            (HarnessKind::Codex, _) => None,
+        };
         if launch.harness_kind == HarnessKind::Claude {
             self.prepare_claude_pane_environment(launch, pane, reserved)?;
         }
@@ -1821,26 +1839,21 @@ impl SpawnsNativeHarness for HerdrCli {
             arguments.push("--remote".into());
             arguments.push(format!("unix://{}", endpoint.socket));
         }
-        if launch.harness_kind == HarnessKind::Claude {
+        if let Some(title) = &claude_title {
             arguments.push("--settings".into());
             arguments.push(self.claude_flag_settings(&launch.lean_start()));
-            // Every Claude Flow is remotely controllable; the name never
-            // begins with `-`, so the optional value binds to the flag.
+            // Every Claude Flow is remotely controllable under its title;
+            // the title begins with `{`, never `-`, so the optional value
+            // binds to the flag.
             arguments.push(Self::CLAUDE_REMOTE_CONTROL_FLAG.into());
-            arguments.push(launch.launch_profile.remote_control_name());
-            // The session is named at launch with its canonical title: the
-            // name Claude records in its transcript and shows in the prompt
-            // box, the resume picker and the terminal title. `/rename` is a
+            arguments.push(title.as_str().into());
+            // The session is named at launch with the same title: the name
+            // Claude records in its transcript and shows in the prompt box,
+            // the resume picker and the terminal title. `/rename` is a
             // slash command, which a launch leaving out the Skill tool
             // (`--disable-slash-commands`) cannot run.
-            if let Some(flow_id) = reserved {
-                let title = launch
-                    .launch_profile
-                    .native_title(flow_id)
-                    .map_err(|refusal| SpawnFailure::Unattempted(refusal.to_string()))?;
-                arguments.push(Self::CLAUDE_NAME_FLAG.into());
-                arguments.push(title.as_str().into());
-            }
+            arguments.push(Self::CLAUDE_NAME_FLAG.into());
+            arguments.push(title.as_str().into());
             // The composed system prompt is read from the in-memory file
             // this Nexus holds open until the session has bound; it never
             // travels in the typed command and never touches a disk.
@@ -2773,7 +2786,7 @@ pub(crate) mod tests {
         ObservesNativeTargetReceipt, StartsNativeHerdrHarness, StartupProgress, SubmitsStartupPart,
         TitlesNativeFlow,
     };
-    use crate::composition::{FitsOneMessage, NamesRemoteControl, SplitsStartupMessage};
+    use crate::composition::{FitsOneMessage, SplitsStartupMessage};
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::HerdrCli;
@@ -3088,7 +3101,7 @@ printf '%s\n' "$alias"
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
-            .start_native_harness(&launch, &pane, None)
+            .start_native_harness(&launch, &pane, Some("123456"))
             .expect("a multiline system prompt starts");
         assert_eq!(
             fs::read_to_string(root.path().join("system-prompt-read")).unwrap(),
@@ -3118,7 +3131,7 @@ printf '%s\n' "$alias"
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         assert_eq!(
-            adapter.start_native_harness(&launch, &pane, None),
+            adapter.start_native_harness(&launch, &pane, Some("123456")),
             Err(SpawnFailure::Refused(
                 signal_flow::SpawnRefusalCause::ControlCharacter
             ))
@@ -3146,7 +3159,7 @@ printf '%s\n' "$alias"
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         assert_eq!(
-            adapter.start_native_harness(&launch, &pane, None),
+            adapter.start_native_harness(&launch, &pane, Some("123456")),
             Err(SpawnFailure::Refused(
                 signal_flow::SpawnRefusalCause::CommandTooLong
             ))
@@ -3195,7 +3208,7 @@ printf '%s\n' "$alias"
         )
         .unwrap();
         assert_eq!(
-            adapter.start_native_harness(&launch, &pane, None),
+            adapter.start_native_harness(&launch, &pane, Some("123456")),
             Err(SpawnFailure::Refused(
                 signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal {
                     herdr_error_code_option: Some("invalid_agent_argument".into()),
@@ -3215,7 +3228,7 @@ printf '%s\n' "$alias"
         )
         .unwrap();
         assert_eq!(
-            adapter.start_native_harness(&launch, &pane, None),
+            adapter.start_native_harness(&launch, &pane, Some("123456")),
             Err(SpawnFailure::Refused(
                 signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal {
                     herdr_error_code_option: None,
@@ -3244,7 +3257,7 @@ printf '%s\n' "$alias"
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
-            .start_native_harness(&launch, &pane, None)
+            .start_native_harness(&launch, &pane, Some("123456"))
             .expect("started");
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(calls.contains(" --disable-slash-commands"));
@@ -3475,6 +3488,7 @@ printf '%s\n' "$alias"
     fn a_reserved_claude_launch_that_came_up_as_another_session_is_not_bound() {
         let launch = launch(HarnessKind::Claude);
         let agent_name = launch.launch_agent_name();
+        // Herdr reports a session other than the one Flow chose.
         let (root, adapter) = fixture_herdr(
             "claude",
             "12345678-1234-4abc-8def-123456789abc",
@@ -3483,18 +3497,10 @@ printf '%s\n' "$alias"
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
-            .start_native_harness(&launch, &pane, None)
+            .start_native_harness(&launch, &pane, Some("123456"))
             .expect("started");
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
-        // Unreserved: no FlowId exported, no session chosen; the launching
-        // Nexus's socket is exported all the same.
-        assert!(!calls.contains("export FLOW_ID"));
-        assert!(
-            calls.contains(
-                " && export FLOW_SOCKET='/fixture/run/flow-next/flow/flow.sock' && printf "
-            )
-        );
-        assert!(!calls.contains("--session-id"));
+        assert!(calls.contains("--session-id"));
         assert!(
             adapter
                 .observe_native_binding(&launch, &pane, Some("123456"))
@@ -3505,6 +3511,8 @@ printf '%s\n' "$alias"
 
     #[test]
     fn stages_pane_native_claim_registration_and_one_ambiguous_prompt_write() {
+        use crate::herdr::reservation::ChoosesNativeSession;
+        use crate::title::TitlesFlow;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
         let agent_name = launch.launch_agent_name();
@@ -3516,7 +3524,7 @@ printf '%s\n' "$alias"
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
-            .start_native_harness(&launch, &pane, None)
+            .start_native_harness(&launch, &pane, Some("123456"))
             .expect("started without prompt");
         let calls_after_start =
             fs::read_to_string(root.path().join("calls")).expect("launch calls");
@@ -3524,8 +3532,18 @@ printf '%s\n' "$alias"
             .lines()
             .find(|line| line.contains("agent start"))
             .expect("agent start call");
-        let remote_control_name = launch.launch_profile.remote_control_name();
-        assert!(remote_control_name.starts_with("flow-"));
+        // The Remote Control name is the title, the same string as the
+        // session name; no other name is given.
+        let title = launch
+            .launch_profile
+            .native_title("123456")
+            .expect("a title")
+            .as_str()
+            .to_owned();
+        assert_eq!(title, "{ Field flow Secondary 123456 }");
+        let session = adapter
+            .reserved_native_session_id(&launch)
+            .expect("a Claude launch chooses its session");
         let system_prompt_file = adapter
             .held_system_prompt_path(&launch.launch_profile.launch_request_id)
             .expect("the system prompt is held until the session binds");
@@ -3536,7 +3554,7 @@ printf '%s\n' "$alias"
             "the harness read the composed system prompt whole from the held file"
         );
         assert!(start_call.ends_with(&format!(
-            "-- --settings {} --remote-control {remote_control_name} --system-prompt-file {system_prompt_file} --model model-current --effort high",
+            "-- --settings {} --remote-control {title} --name {title} --system-prompt-file {system_prompt_file} --session-id {session} --model model-current --effort high",
             concat!(
                 r#"{"hooks":{"#,
                 r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
@@ -3577,6 +3595,7 @@ printf '%s\n' "$alias"
             );
         }
         assert!(!start_call.contains("launch-42"));
+        assert!(!start_call.contains("flow-"), "{start_call}");
         assert!(!start_call.contains("composed body"));
         let pane_run = calls_after_start
             .lines()
@@ -5113,10 +5132,10 @@ printf '%s\n' "$alias"
         assert!(!root.path().join("pane-label").exists());
     }
 
-    /// A Claude harness started without a reserved FlowId has no title to
-    /// be named with, and its title is refused.
+    /// A Claude harness has no name but its title, so a start without a
+    /// reserved FlowId is refused before Herdr is called.
     #[test]
-    fn an_unreserved_claude_start_carries_no_name_and_is_not_titled() {
+    fn an_unreserved_claude_start_is_refused_before_herdr() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
         let agent_name = launch.launch_agent_name();
@@ -5127,16 +5146,13 @@ printf '%s\n' "$alias"
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).unwrap();
-        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        assert!(matches!(
+            adapter.start_native_harness(&launch, &pane, None),
+            Err(SpawnFailure::Unattempted(_))
+        ));
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
-        assert!(!calls.contains(" --name "), "{calls}");
-        let binding = adapter
-            .observe_native_binding(&launch, &pane, None)
-            .unwrap();
-        assert_eq!(
-            adapter.title_native_flow(&launch, &binding).unwrap_err(),
-            TitleRefusal::ReadbackDiffers
-        );
+        assert!(!calls.contains("pane run"), "{calls}");
+        assert!(!calls.contains("agent start"), "{calls}");
     }
 
     #[test]
@@ -5205,7 +5221,7 @@ printf '%s\n' "$alias"
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).unwrap();
-        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        adapter.start_native_harness(&launch, &pane, Some("123456")).unwrap();
         let binding = adapter
             .observe_native_binding(&launch, &pane, None)
             .unwrap();
@@ -5241,7 +5257,7 @@ printf '%s\n' "$alias"
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).unwrap();
-        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        adapter.start_native_harness(&launch, &pane, Some("123456")).unwrap();
         adapter
             .observe_native_binding(&launch, &pane, None)
             .expect("bound once Herdr reports rest");
@@ -5269,7 +5285,7 @@ printf '%s\n' "$alias"
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).unwrap();
-        adapter.start_native_harness(&launch, &pane, None).unwrap();
+        adapter.start_native_harness(&launch, &pane, Some("123456")).unwrap();
         fs::write(root.path().join("agent-wait-refused"), "timeout").unwrap();
         let error = adapter
             .observe_native_binding(&launch, &pane, None)

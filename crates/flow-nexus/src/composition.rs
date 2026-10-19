@@ -241,47 +241,6 @@ impl ValidatesComposedPrompt for ComposedLaunch {
     }
 }
 
-/// Names how a launched Flow stays remotely controllable. A Claude launch
-/// passes `--remote-control <name>` with this name; a Codex launch is already
-/// driven through its app-server endpoint. The launch body records the same
-/// line.
-///
-/// The name is unique per Flow. The Flow ID is claimed from the native
-/// session only after the harness has started, and the flag must be given at
-/// start, so the name is `flow-` followed by the launch request ID's short
-/// form: the first sixteen hex digits of its SHA-256. Sixteen digits (64
-/// bits) keep two launch requests from sharing a name, where eight digits
-/// already collide between `launch-4646` and `launch-72333`; they also keep
-/// it distinct from a six-digit Flow ID, and the request ID itself never
-/// enters the prompt.
-pub trait NamesRemoteControl {
-    fn remote_control_name(&self) -> String;
-}
-
-/// The launch request ID's short form, used where a per-Flow name is needed
-/// before the Flow ID is claimed.
-pub trait ShortensLaunchRequest {
-    const SHORT_FORM_LENGTH: usize = 16;
-    fn launch_request_short_form(&self) -> String;
-}
-
-/// The launch request ID itself.
-impl ShortensLaunchRequest for str {
-    fn launch_request_short_form(&self) -> String {
-        let digest = format!(
-            "{:x}",
-            Sha256::digest(format!("flow-remote-control-v1\0{self}").as_bytes())
-        );
-        digest[..Self::SHORT_FORM_LENGTH].to_owned()
-    }
-}
-
-impl ShortensLaunchRequest for LaunchProfile {
-    fn launch_request_short_form(&self) -> String {
-        self.launch_request_id.launch_request_short_form()
-    }
-}
-
 trait NamesRole {
     fn aspect_name(&self) -> &'static str;
     fn power_name(&self) -> &'static str;
@@ -303,12 +262,6 @@ impl NamesRole for LaunchProfile {
             PowerLevel::Low => "Low",
             PowerLevel::UltraLow => "Ultra Low",
         }
-    }
-}
-
-impl NamesRemoteControl for LaunchProfile {
-    fn remote_control_name(&self) -> String {
-        format!("flow-{}", self.launch_request_short_form())
     }
 }
 
@@ -641,8 +594,8 @@ impl ProfilesFreshSeat for FreshSeat {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        ComposesLaunch, CompositionError, FitsOneMessage, LaunchComposer, NamesRemoteControl,
-        OpensLaunchComposer, ShortensLaunchRequest, SplitsStartupMessage, ValidatesComposedPrompt,
+        ComposesLaunch, CompositionError, FitsOneMessage, LaunchComposer,
+        OpensLaunchComposer, SplitsStartupMessage, ValidatesComposedPrompt,
     };
     use crate::context::FixtureComposer;
     use signal_flow::{
@@ -1035,27 +988,5 @@ pub(crate) mod tests {
         );
         assert!(HarnessKind::part_header((1, 3)).contains("part 3 of 3"));
         assert!(!HarnessKind::part_header((1, 3)).contains("seat"));
-    }
-
-    #[test]
-    fn launches_with_distinct_request_ids_never_share_a_name() {
-        // These two request IDs share the first eight hex digits of their
-        // SHA-256 (0ed0b35c), so an eight-digit short form named both
-        // launches `flow-0ed0b35c`.
-        let mut first = fixture_profile();
-        first.launch_request_id = "launch-4646".into();
-        let mut second = first.clone();
-        second.launch_request_id = "launch-72333".into();
-        assert_eq!(
-            first.launch_request_short_form()[..8],
-            second.launch_request_short_form()[..8]
-        );
-        assert_ne!(first.remote_control_name(), second.remote_control_name());
-        let mut names = std::collections::BTreeSet::new();
-        for index in 0..20_000 {
-            let mut profile = first.clone();
-            profile.launch_request_id = format!("launch-{index}");
-            assert!(names.insert(profile.remote_control_name()));
-        }
     }
 }

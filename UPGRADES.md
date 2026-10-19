@@ -1,3 +1,15 @@
+# Flow 0.35.20
+
+No contract, store or deployment change.
+
+- **A Claude seat's Remote Control name is its title.** A Claude launch
+  passes `--remote-control` the same title it passes `--name`,
+  `{ <Aspect> <topic> <Layer> <FlowId> }`, so the Remote Control session list
+  shows the flow's title where it showed `flow-` and sixteen hex digits. The
+  Flow ID is known before the harness starts because Reserve claims it for
+  the session id Flow chooses (`--session-id`). A Claude start without a
+  reserved Flow ID has no title and is refused before Herdr is called.
+
 # Flow 0.35.19
 
 Pins signal-flow 22.0.0 (e6ccbddb, contract digest 5aa2992669c14992) and

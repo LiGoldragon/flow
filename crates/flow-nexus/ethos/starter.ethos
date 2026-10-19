@@ -103,8 +103,7 @@ Library
   ComposesVerifiedContext.[ verified_context.{ [ Profiled ] [ Result<VerifiedContext CompositionError> ] }
                             launch_system_prompt.{ [ Profiled ReadsVerifiedContext ] [ Result<SystemPrompt ContextRefusal> ] } ]
   AssemblesComposedLaunch.[ assembled:{ [ Profiled SystemPrompted Textual SegmentListing LeaveOutListing ] [ ComposedLaunch ] } ]
-  ComposesLaunch.[ compose.{ [ Profiled LeaveOutListing ] [ Result<ComposedLaunch CompositionError> ] }
-                   resumption.{ [ Profiled LeaveOutListing Textual ] [ Result<ComposedLaunch CompositionError> ] } ]
+  ComposesLaunch.[ compose.{ [ Profiled LeaveOutListing ] [ Result<ComposedLaunch CompositionError> ] } ]
   ProfilesFreshSeat.[ fresh_profile.[ LaunchProfile ] ]
   PromptsThroughHerdrSocket.[ herdr_session_socket.{ [ Textual ] [ Result<String String> ] }
                               prompt_through_socket.{ [ PaneBound Textual ] [ Result<JsonValue String> ] } ]

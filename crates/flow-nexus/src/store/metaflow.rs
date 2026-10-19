@@ -1,6 +1,5 @@
 //! Ordinary metaflow mutations. The connection supplies the witnessed peer;
 //! the serial dispatcher holds exclusion across authorization and mutation.
-use super::refresh::MarksFreshWakes;
 use super::*;
 use signal_flow::{
     Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, QueuedRequest, Recipient, Refusal,
@@ -286,7 +285,6 @@ impl SleepsMetaflows for FlowStore {
             return Ok(false);
         };
         let commit = taken.written(self, self.engine.begin_atomic_commit());
-        let commit = self.fresh_wake_cleared(address, commit)?;
         self.engine.commit_atomic(commit)?;
         Ok(true)
     }
@@ -350,7 +348,7 @@ pub(crate) struct TakenAddress {
 /// one is taken, a displaced flow
 /// joining Past. A launch takes over the predecessor its profile names,
 /// live or not, and a flow already Awake there keeps it. A taken flow is
-/// never also Past: a resumed one leaves it.
+/// never also Past.
 pub(crate) trait TakesLaunchAddress {
     /// What taking `address` as `flow_id` does, with the `delivered`
     /// oldest queued requests leaving the queue.

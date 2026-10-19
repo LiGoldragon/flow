@@ -400,7 +400,7 @@
           flow-v1-stop-upgrades-unknown-identity = context.exactTest "flow-nexus"
             "store::tests::a_v1_stop_upgrades_to_a_stop_of_unknown_identity";
           flow-stop-sleeps-the-metaflow = context.exactTest "flow-nexus"
-            "tests::waking::the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_and_resumable";
+            "tests::waking::the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_to_wake_fresh";
           flow-retired-seat-wakes-fresh = context.exactTest "flow-nexus"
             "tests::waking::a_retired_seat_sleeps_its_metaflow_and_its_order_wakes_it_fresh";
           flow-ended-awake-woken-by-an-order = context.exactTest "flow-nexus"
@@ -441,18 +441,22 @@
             "tests::waking::a_recorded_codex_pane_reporting_another_thread_does_not_hold_the_flow";
           flow-wake-pane-check-codex-aware = context.exactTest "flow-nexus"
             "tests::waking::the_wake_pane_check_binds_a_codex_flow_by_pane_agent_and_thread";
-          flow-live-seat-check-typed = context.exactTest "flow-nexus"
-            "tests::waking::the_live_seat_check_names_why_a_recorded_pane_is_not_the_flows_own";
-          flow-live-codex-other-thread-not-adopted = context.exactTest "flow-nexus"
-            "tests::waking::a_live_codex_flow_whose_pane_runs_another_thread_is_not_adopted";
           flow-bind-existing-verified-with-herdr = context.exactTest "flow-nexus"
             "tests::meta_bind_existing_verifies_the_pane_process_and_session_with_herdr";
           flow-codex-terminal-title-thread-only = context.exactTest "flow-nexus"
             "herdr::launch::tests::codex_launch_selects_one_exact_executable_and_remote_socket";
-          flow-refreshed-codex-wakes-to-new-thread = context.exactTest "flow-nexus"
-            "tests::waking::a_refreshed_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it";
-          flow-refreshed-claude-wakes-to-new-session = context.exactTest "flow-nexus"
-            "tests::waking::a_refreshed_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it";
+          flow-sleeping-codex-wakes-to-new-thread = context.exactTest "flow-nexus"
+            "tests::waking::a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it";
+          flow-sleeping-claude-wakes-to-new-session = context.exactTest "flow-nexus"
+            "tests::waking::a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it";
+          flow-codex-seat-sleeps-at-rest = context.exactTest "flow-nexus"
+            "tests::waking::a_resting_codex_seat_with_nothing_queued_sleeps";
+          flow-primary-sleeps-at-rest = context.exactTest "flow-nexus"
+            "tests::waking::a_resting_primary_with_nothing_queued_sleeps";
+          flow-order-wakes-primary-fresh = context.exactTest "flow-nexus"
+            "tests::waking::an_order_wakes_a_sleeping_primary_fresh";
+          flow-wake-fresh-with-queue-oldest-first = context.exactTest "flow-nexus"
+            "tests::waking::a_queued_order_wakes_a_fresh_claude_flow_with_the_whole_queue_then_what_arrived";
           flow-send-tool-threads-attributed = context.exactTest "flow-nexus"
             "tests::send_tool::two_threads_are_each_attributed_to_their_own_metaflow";
           flow-send-tool-unowned-thread-refused = context.exactTest "flow-nexus"
@@ -475,8 +479,8 @@
             "tests::send_tool::an_asleep_target_wakes_once_though_the_answer_fails_and_the_call_is_replayed";
           flow-send-tool-replay-wakes-asleep-target = context.exactTest "flow-nexus"
             "tests::send_tool::a_replayed_call_wakes_the_asleep_target_its_first_handling_did_not";
-          flow-send-tool-primary-result-notice-wake-nothing = context.exactTest "flow-nexus"
-            "tests::send_tool::a_send_to_an_asleep_primary_or_of_a_result_or_notice_wakes_nothing";
+          flow-send-tool-result-notice-wait-order-wakes-primary = context.exactTest "flow-nexus"
+            "tests::send_tool::a_send_of_a_result_or_notice_wakes_nothing_and_an_order_wakes_a_primary";
           flow-nexus-start-wakes-each-due-metaflow-once = context.exactTest "flow-nexus"
             "tests::waking::a_nexus_start_wakes_a_seat_whose_wake_did_not_finish";
           flow-v1-metaflow-queue-upgrades-sender-unknown = context.exactTest "flow-nexus"

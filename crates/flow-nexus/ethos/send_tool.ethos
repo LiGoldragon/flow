@@ -51,8 +51,8 @@ Library
   ; UnknownTool: the call names no tool Flow declared. Malformed: its
   ; arguments are no SendArguments. ThreadUnowned: no flow Flow holds runs
   ; the thread. FlowEnded: the thread's flow is Stopped, Retired or Exited.
-  ; NotAwake: its metaflow is not Awake as it (Asleep, or a Refresh or a
-  ; fresh wake moved it on). KeyReused: the call's key was recorded with
+  ; NotAwake: its metaflow is not Awake as it (Asleep, or a fresh wake
+  ; moved it on). KeyReused: the call's key was recorded with
   ; other content. UnknownRecipient: the target is no metaflow. Held:
   ; Message holds a lock on the target, about to deliver. Store: the store
   ; refused; the Nexus log names why.

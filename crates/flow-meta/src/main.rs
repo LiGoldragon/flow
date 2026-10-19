@@ -276,19 +276,16 @@ mod tests {
     }
 
     #[test]
-    fn refresh_is_one_inline_datom_naming_a_metaflow() {
+    fn refresh_is_not_a_request() {
+        // Every wake is fresh, so no request marks one.
         let client = FlowMetaClient {
             socket: "unused".into(),
         };
-        let datom = "Refresh.{ Mind flow Secondary }";
-        let query = client
-            .parse_command([datom.to_owned()].into_iter())
-            .expect("Refresh datom parses");
-        let Query::Refresh(address) = &query else {
-            panic!("Refresh datom must stay a Refresh query")
-        };
-        assert_eq!(address.topic, "flow");
-        assert_eq!(query.datomize(vec![]).protosize().compact(), datom);
+        assert!(
+            client
+                .parse_command(["Refresh.{ Mind flow Secondary }".to_owned()].into_iter())
+                .is_err()
+        );
     }
 
     #[test]

@@ -14,7 +14,6 @@ pub(crate) mod launch_cleanup;
 pub(crate) mod metaflow;
 pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
-pub(crate) mod refresh;
 pub(crate) mod send_call;
 pub(crate) mod send_server;
 mod staged_upgrade;
@@ -81,11 +80,13 @@ const META_THRESHOLD_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_threshold_configuration");
 const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_leave_out_configuration");
-/// The tables a store before 0.35.0 kept and 0.35.0 drops when it opens:
-/// the meta configuration's topic modules, which meta-signal-flow 20.0.0
-/// no longer configures, and the system-prompt bundle 0.34.6 kept for each
-/// Address, which a fresh wake no longer reads. Each is named with the
-/// family identity it was registered under.
+/// The tables an older store kept and an open drops: the meta
+/// configuration's topic modules, which meta-signal-flow 20.0.0 no longer
+/// configures, and the system-prompt bundle 0.34.6 kept for each Address,
+/// both dropped from 0.35.0 on; and the fresh-wake marks, which chose
+/// between resuming a sleeping flow and waking it fresh, dropped from
+/// 0.35.22 on, since every wake is fresh. Each is named with the family
+/// identity it was registered under.
 const RETIRED_TABLES: &[(&str, &str, &str)] = &[
     (
         "flow_nexus_meta_module_configuration",
@@ -96,6 +97,11 @@ const RETIRED_TABLES: &[(&str, &str, &str)] = &[
         "flow_nexus_start_bundles",
         "flow-nexus-start-bundle",
         "flow-nexus-start-bundle-v1",
+    ),
+    (
+        "flow_nexus_metaflow_refreshes",
+        "flow-nexus-metaflow-refresh",
+        "flow-nexus-metaflow-refresh-v1",
     ),
 ];
 /// The tables a configuration-only store holds, all of them.
@@ -137,9 +143,8 @@ const RUNNING_TABLES: &[&str] = &[
 // before either opens, and its first full open adds the table, as
 // the first full open of a configuration-only store adds the running
 // tables.
-// A store keeps its metaflows' default leave-outs from 0.35.0 on,
-// its fresh-wake marks from 0.35.2 on, the Codex thread each
-// launch opened from 0.35.6 on, the send tool's calls from 0.35.7
+// A store keeps its metaflows' default leave-outs from 0.35.0 on, the
+// Codex thread each launch opened from 0.35.6 on, the send tool's calls from 0.35.7
 // on, the cleanup of each interrupted launch from 0.35.11 on, and
 // its trusted send servers and queued-delivery accounting from
 // 0.35.19 on.
@@ -148,7 +153,6 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_flow_context_sizes",
     "flow_nexus_address_holds",
     "flow_nexus_meta_leave_out_configuration",
-    "flow_nexus_metaflow_refreshes",
     "flow_nexus_launch_opened_threads",
     "flow_nexus_send_calls",
     "flow_nexus_launch_cleanups",
@@ -2676,7 +2680,6 @@ pub struct FlowStore {
     event_tables: events::EventTables,
     context_sizes: TableReference<context::FlowContextSize>,
     address_holds: TableReference<address_hold::AddressHold>,
-    refreshes: TableReference<refresh::MetaflowRefresh>,
     opened_threads: TableReference<opened_thread::OpenedLaunchThread>,
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
     launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
@@ -3133,10 +3136,6 @@ pub trait RecordsFlowLifecycle {
     /// its history stay, and it is live no longer. This is what a witnessed
     /// exit records — never Retired, which only authority writes.
     fn record_exited(&self, flow_id: &str) -> Result<bool, StoreError>;
-    /// A Stopped flow whose native session was resumed in a new pane is
-    /// Pending again on that pane's route. Only a Stopped flow resumes: an
-    /// exited or retired one stays as it went.
-    fn record_resumed(&self, flow_id: &str, route: HerdrRoute) -> Result<bool, StoreError>;
 }
 
 trait ReadsFlowStore {
@@ -3304,8 +3303,6 @@ impl OpensFlowStore for FlowStore {
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
         let address_holds_descriptor =
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor();
-        let refreshes_descriptor =
-            <refresh::MetaflowRefresh as refresh::DescribesRefreshTable>::descriptor();
         let opened_threads_descriptor =
             <opened_thread::OpenedLaunchThread as opened_thread::DescribesOpenedThreadTable>::descriptor(
             );
@@ -3340,7 +3337,6 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
                 .with_family(&address_holds_descriptor)
-                .with_family(&refreshes_descriptor)
                 .with_family(&opened_threads_descriptor)
                 .with_family(&send_calls_descriptor)
                 .with_family(&launch_cleanups_descriptor)
@@ -3370,7 +3366,6 @@ impl OpensFlowStore for FlowStore {
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let context_sizes = engine.register_table(context_sizes_descriptor)?;
         let address_holds = engine.upgraded_address_holds(address_holds_descriptor)?;
-        let refreshes = engine.register_table(refreshes_descriptor)?;
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
         let send_calls = engine.upgraded_send_calls(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
@@ -3397,7 +3392,6 @@ impl OpensFlowStore for FlowStore {
             event_tables,
             context_sizes,
             address_holds,
-            refreshes,
             opened_threads,
             send_calls,
             launch_cleanups,
@@ -3521,9 +3515,6 @@ impl OpensFlowStore for FlowStore {
         let address_holds = engine.upgraded_address_holds(
             <address_hold::AddressHold as address_hold::DescribesAddressHoldTable>::descriptor(),
         )?;
-        let refreshes = engine.register_table(
-            <refresh::MetaflowRefresh as refresh::DescribesRefreshTable>::descriptor(),
-        )?;
         let opened_threads = engine.register_table(
             <opened_thread::OpenedLaunchThread as opened_thread::DescribesOpenedThreadTable>::descriptor(
             ),
@@ -3557,7 +3548,6 @@ impl OpensFlowStore for FlowStore {
             event_tables,
             context_sizes,
             address_holds,
-            refreshes,
             opened_threads,
             send_calls,
             launch_cleanups,
@@ -5367,29 +5357,6 @@ impl RecordsFlowLifecycle for FlowStore {
         self.launch_changes.announce();
         Ok(true)
     }
-
-    fn record_resumed(&self, flow_id: &str, route: HerdrRoute) -> Result<bool, StoreError> {
-        let Some(mut flow) = self.flow(flow_id)? else {
-            return Ok(false);
-        };
-        if !matches!(flow.lifecycle, FlowLifecycle::Stopped) {
-            return Ok(false);
-        }
-        flow.lifecycle = FlowLifecycle::Pending;
-        let route = FlowHerdrRouteRecord {
-            flow_id: flow_id.to_owned(),
-            route,
-        };
-        let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
-        let commit = if self.herdr_route(flow_id)?.is_some() {
-            commit.mutate(self.herdr_routes, route)
-        } else {
-            commit.assert(self.herdr_routes, route)
-        };
-        self.engine.commit_atomic(commit)?;
-        self.launch_changes.announce();
-        Ok(true)
-    }
 }
 
 impl WritesFlowStore for FlowStore {
@@ -6100,10 +6067,6 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_address_holds" => (
                 address_hold::ADDRESS_HOLD_FAMILY,
                 address_hold::ADDRESS_HOLD_SCHEMA,
-            ),
-            "flow_nexus_metaflow_refreshes" => (
-                refresh::METAFLOW_REFRESH_FAMILY,
-                refresh::METAFLOW_REFRESH_SCHEMA,
             ),
             "flow_nexus_launch_opened_threads" => (
                 opened_thread::OPENED_THREAD_FAMILY,
@@ -7885,8 +7848,8 @@ mod tests {
         assert_eq!(reopened.context_size("5a4d0b").unwrap(), Some(90_000));
     }
 
-    /// A row of a table 0.35.0 retired: the meta topic modules and the
-    /// 0.34.6 start bundles. Its shape is never read; it only fills a table.
+    /// A row of a retired table. Its shape is never read; it only fills a
+    /// table.
     #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
     struct RetiredRow {
         key: String,
@@ -7899,9 +7862,10 @@ mod tests {
         }
     }
 
-    /// A store from 0.34.6 holds the meta topic modules and the start
-    /// bundles with rows in them; its next open drops both tables, rows and
-    /// registrations, and the store keeps opening without them.
+    /// An older store holds every retired table with rows in it: the meta
+    /// topic modules and start bundles of 0.34.6, the fresh-wake marks of
+    /// 0.35.21. Its next open drops each table, rows and registration, and
+    /// the store keeps opening without them.
     #[test]
     fn a_store_from_0_34_6_drops_its_retired_tables_when_it_opens() {
         let fixture = StoreFixture::new();
@@ -7929,7 +7893,7 @@ mod tests {
         drop(config);
         drop(FlowStore::open_configured(&path).expect("configured Memory opens"));
 
-        // The tables as 0.34.6 kept them, each holding a row.
+        // The retired tables as an older store kept them, each holding a row.
         {
             let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(2)))
                 .expect("store opens under the engine");
@@ -7982,7 +7946,7 @@ mod tests {
             );
         }
 
-        drop(FlowStore::open_configured(&path).expect("the 0.34.6 store opens"));
+        drop(FlowStore::open_configured(&path).expect("the older store opens"));
         let (registered, stored) = tables();
         for (table, _, _) in super::RETIRED_TABLES {
             assert!(
@@ -8802,14 +8766,6 @@ mod tests {
                     engine
                         .match_records(QueryPlan::all(self.address_holds))
                         .expect("address holds read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_metaflow_refreshes",
-                    engine
-                        .match_records(QueryPlan::all(self.refreshes))
-                        .expect("fresh-wake marks read")
                         .records()
                         .len(),
                 ),

@@ -328,12 +328,6 @@ pub trait ComposesLaunch {
         input_0: N,
         input_1: O,
     ) -> std::result::Result<signal_flow::ComposedLaunch, flow_nexus::CompositionError>;
-    fn resumption<N: Profiled, O: LeaveOutListing, P: Textual>(
-        &self,
-        input_0: N,
-        input_1: O,
-        input_2: P,
-    ) -> std::result::Result<signal_flow::ComposedLaunch, flow_nexus::CompositionError>;
 }
 #[rustfmt::skip]
 pub trait ProfilesFreshSeat {

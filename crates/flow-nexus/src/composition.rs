@@ -466,9 +466,7 @@ impl AssemblesComposedLaunch for LaunchComposer {
 /// Composes one launch from a profile and the harness the Nexus derived
 /// for it. The launch's leave-outs are its profile's when it names them,
 /// else the metaflow's default; a set its harness refuses refuses the
-/// launch. A resumption is the original profile with its system prompt
-/// composed again, carrying the text as its one part; a resumed flow is not
-/// observed as a launch, and the hash only names the text.
+/// launch.
 impl ComposesLaunch for LaunchComposer {
     fn compose<N: Profiled, O: LeaveOutListing>(
         &self,
@@ -491,29 +489,6 @@ impl ComposesLaunch for LaunchComposer {
             &system_prompt,
             &body,
             &parts,
-            &leave_outs,
-        ))
-    }
-
-    fn resumption<N: Profiled, O: LeaveOutListing, P: Textual>(
-        &self,
-        input_0: N,
-        input_1: O,
-        input_2: P,
-    ) -> Result<ComposedLaunch, CompositionError> {
-        let harnessed = HarnessedProfile {
-            launch_profile: input_0.profile(),
-            harness_kind: input_0.harness_kind(),
-        };
-        let leave_outs = harnessed.effective_leave_outs(input_1)?;
-        let verified = self.verified_context(&harnessed)?;
-        let system_prompt = self.launch_system_prompt(&harnessed, &verified)?;
-        let text = input_2.text();
-        Ok(Self::assembled(
-            &harnessed,
-            &system_prompt,
-            &text,
-            &[text.clone()][..],
             &leave_outs,
         ))
     }
@@ -886,39 +861,6 @@ pub(crate) mod tests {
             .prompt_part_text
             .push('x');
         assert!(!composed.has_canonical_first_prompt());
-    }
-
-    #[test]
-    fn a_resumption_composes_the_system_prompt_again_and_carries_the_text() {
-        let profile = fixture_profile();
-        let harness = HarnessKind::Claude;
-        let composer = fixture_composer();
-        let launched = composer
-            .compose(
-                crate::composition::HarnessedProfile {
-                    harness_kind: harness.clone(),
-                    launch_profile: profile.clone(),
-                },
-                Vec::<signal_flow::LeaveOut>::new(),
-            )
-            .unwrap();
-        let resumed = composer
-            .resumption(
-                crate::composition::HarnessedProfile {
-                    harness_kind: harness.clone(),
-                    launch_profile: profile.clone(),
-                },
-                Vec::<LeaveOut>::new(),
-                "Work queued.",
-            )
-            .unwrap();
-        assert_eq!(resumed.system_prompt, launched.system_prompt);
-        assert_eq!(
-            resumed.first_prompt_payload.first_prompt_body,
-            "Work queued."
-        );
-        assert_eq!(resumed.first_prompt_payload.prompt_part_vector.len(), 1);
-        assert!(resumed.has_canonical_first_prompt());
     }
 
     #[test]

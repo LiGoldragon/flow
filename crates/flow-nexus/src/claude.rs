@@ -110,16 +110,11 @@ impl ProjectsClaudeReadiness for ClaudeDaemon {
     }
 }
 
-/// A Claude session's native transcript, read for the size of the context
-/// its last turn carried: the last main-thread usage entry's input tokens,
-/// cache reads and cache writes together. Read once, when the flow's hook
-/// reports `Stopped`; nothing watches the file.
-pub trait MeasuresClaudeContext {
+/// Where a Claude session's native transcript is.
+pub trait LocatesClaudeTranscript {
     /// Under a Claude transcript root (`projects/`): the one transcript of
     /// this session, `<project>/<session>.jsonl`.
     fn session_transcript(&self, session_id: &str) -> Option<PathBuf>;
-    /// In a transcript: the tokens of the context its last turn carried.
-    fn context_tokens(&self) -> Option<i64>;
 }
 
 /// A stable position in one exact Claude transcript file.  It is recorded
@@ -290,10 +285,7 @@ impl ReadsClaudeTurns for Path {
     }
 }
 
-/// How much of a transcript's end is read first for its last usage entry.
-const CONTEXT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
-
-impl MeasuresClaudeContext for Path {
+impl LocatesClaudeTranscript for Path {
     fn session_transcript(&self, session_id: &str) -> Option<PathBuf> {
         if session_id.is_empty() || session_id.contains('/') {
             return None;
@@ -307,7 +299,21 @@ impl MeasuresClaudeContext for Path {
         let transcript = found.next()?;
         found.next().is_none().then_some(transcript)
     }
+}
 
+/// A Claude session's native transcript, read for the size of the context
+/// its last turn carried: the last main-thread usage entry's input tokens,
+/// cache reads and cache writes together. Read once, when the flow's hook
+/// reports `Stopped`; nothing watches the file.
+pub trait MeasuresClaudeContext {
+    /// In a transcript: the tokens of the context its last turn carried.
+    fn context_tokens(&self) -> Option<i64>;
+}
+
+/// How much of a transcript's end is read first for its last usage entry.
+const CONTEXT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+impl MeasuresClaudeContext for Path {
     fn context_tokens(&self) -> Option<i64> {
         let mut file = fs::File::open(self).ok()?;
         let length = file.metadata().ok()?.len();
@@ -408,8 +414,8 @@ impl NormalizesState for str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeDaemon, ClaudeQueuedHistory, MeasuresClaudeContext, ProjectsClaudeReadiness,
-        ReadsClaudeTurns,
+        ClaudeDaemon, ClaudeQueuedHistory, LocatesClaudeTranscript, MeasuresClaudeContext,
+        ProjectsClaudeReadiness, ReadsClaudeTurns,
     };
     use signal_flow::{
         Available_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
@@ -647,15 +653,30 @@ mod tests {
         ));
     }
 
-    /// The context is the last main-thread turn's input, cache reads and
-    /// cache writes; a subagent's turn and a line without usage are passed
-    /// over, and the session's transcript is found under its project.
+    /// A session's transcript is found under its project, by its session
+    /// id alone.
     #[test]
-    fn the_context_size_is_the_last_main_thread_usage_of_the_session_transcript() {
+    fn a_session_transcript_is_found_under_its_project() {
         let directory = tempdir().unwrap();
         let project = directory.path().join("-home-li-primary");
         fs::create_dir_all(&project).unwrap();
         let transcript = project.join("da1e3f9d-full.jsonl");
+        fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+        assert_eq!(
+            directory.path().session_transcript("da1e3f9d-full"),
+            Some(transcript)
+        );
+        assert_eq!(directory.path().session_transcript("absent"), None);
+        assert_eq!(directory.path().session_transcript("../escape"), None);
+    }
+
+    /// The context is the last main-thread turn's input, cache reads and
+    /// cache writes; a subagent's turn and a line without usage are passed
+    /// over.
+    #[test]
+    fn the_context_size_is_the_last_main_thread_usage_of_the_session_transcript() {
+        let directory = tempdir().unwrap();
+        let transcript = directory.path().join("da1e3f9d-full.jsonl");
         fs::write(
             &transcript,
             concat!(
@@ -670,13 +691,8 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(
-            directory.path().session_transcript("da1e3f9d-full"),
-            Some(transcript.clone())
-        );
-        assert_eq!(directory.path().session_transcript("absent"), None);
         assert_eq!(transcript.context_tokens(), Some(2 + 150_385 + 575));
-        let empty = project.join("empty.jsonl");
+        let empty = directory.path().join("empty.jsonl");
         fs::write(&empty, "{\"type\":\"user\"}\n").unwrap();
         assert_eq!(empty.context_tokens(), None);
     }

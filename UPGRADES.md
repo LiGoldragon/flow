@@ -1,24 +1,40 @@
 # Flow 0.35.22
 
 Pins signal-flow 23.0.0 (c7dcc074, contract digest 32765a41a9454b06) and
-meta-signal-flow 29.0.0 (573a2c59, contract digest 72678ba9f74bda5d): every
+meta-signal-flow 29.0.0 (2b03b506, contract digest 73ce9b26e5cd4583): every
 ordinary- and meta-socket peer repins.
 
+- **Every idle metaflow sleeps.** When a flow's turn ends with nothing
+  queued, its metaflow sleeps whatever its layer and harness: a Primary as
+  a Secondary, a Codex seat as a Claude seat. A Claude seat's turn end is
+  its `Stopped` report; a Codex seat's is its app-server thread coming to
+  rest. Sleep closes the pane, records the flow Stopped and the metaflow
+  Asleep; the flow's row and native transcript stay.
+- **Every wake is fresh.** An Order, a Question or the living's words queued
+  for an Asleep metaflow of any layer start a new flow, composed from the
+  configured layer model and the modules the metaflow's last launch named,
+  on a new native session (Claude) or thread (Codex), its first prompt
+  carrying the whole queue oldest first. A sleeping session is never
+  resumed; a Result or a Notice still waits for a wake. `Refresh`,
+  `Refreshed`, `RefreshRejected` and `RefreshRejection` are gone from the
+  meta contract.
 - **A topic never dies; it goes idle.** flow-ethos `State` is
   `[ Awake.FlowId Asleep ]`. `Query.End`, `Response.Ended`, `Current.Ended`,
-  `Refusal.Ended`, `Refusal.OffRoute`, `StartRejection.AddressEnded`,
-  `RefreshRejection.Ended` and the send tool's `RecipientEnded` are gone:
-  `End.{ Psyche flow Primary }` no longer reads.
+  `Refusal.Ended`, `Refusal.OffRoute`, `StartRejection.AddressEnded` and the
+  send tool's `RecipientEnded` are gone: `End.{ Psyche flow Primary }` no
+  longer reads.
 - **A Primary starts after its Secondary.** A Start whose Address is a
   Primary is refused `StartRejected.NoSecondary`, before anything is
   written, claimed, composed or opened, unless a metaflow is recorded, Awake
   or Asleep, at the Secondary of its aspect and topic.
 - **Compaction is refused below the Refresh threshold.** `Command.Compact`
   is refused, before anything reaches the pane, unless the flow's context at
-  its last Stop reached the Refresh threshold of its layer:
+  its last Stop reached the Refresh threshold of its layer, the `Refresh` of
+  that layer's `Configure.Thresholds` entry, still one per layer:
   `CommandRejected.CompactionRefused.BelowThreshold.{ 120000 200000 }`,
-  `.Unmeasured`, `.NoThreshold`. A Codex flow records no context size, so
-  its Compact answers `Unmeasured`.
+  `.Unmeasured`, `.NoThreshold`. The context size is still written at each
+  Claude Stop; a Codex flow records none, so its Compact answers
+  `Unmeasured`.
 
 The store changes, carried in one open by the Nexus: the metaflow family
 `flow-nexus-metaflow` v2 (and v1) to v3 and the Address-hold family
@@ -28,7 +44,10 @@ Asleep with its past and queue; the launch-outcome family
 `flow-nexus-send-call` v1 to v2. A kept launch outcome refused
 `AddressEnded`, or a kept send call refused `RecipientEnded`, refuses the
 open, naming its key: no current refusal says what it said. Such a row
-exists only where a metaflow was once Ended.
+exists only where a metaflow was once Ended. The same open drops the
+fresh-wake marks, `flow_nexus_metaflow_refreshes`
+(`flow-nexus-metaflow-refresh` v1), rows and registration; the context
+sizes, `flow_nexus_flow_context_sizes`, stay.
 
 # Flow 0.35.21
 

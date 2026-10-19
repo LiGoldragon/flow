@@ -78,6 +78,7 @@ impl ClassifiesNativeLaunchFailure for NativeLaunchFailure {
             Self::TitleReadbackDiffers => "title-readback-differs",
             Self::CodexNamingRefused => "codex-naming-refused",
             Self::PaneLabelRefused => "pane-label-refused",
+            Self::WorkspaceLabelRefused => "workspace-label-refused",
             Self::AdapterRefused => "adapter-refused",
             Self::BoundaryMismatch => "boundary-mismatch",
             Self::ThreadNotNamed => "thread-not-named",
@@ -125,11 +126,8 @@ impl From<&TitleRefusal> for NativeLaunchFailure {
             TitleRefusal::TranscriptUnreadable => Self::TranscriptUnreadable,
             TitleRefusal::ReadbackDiffers => Self::TitleReadbackDiffers,
             TitleRefusal::CodexNamingRefused => Self::CodexNamingRefused,
-            // The contract names one Herdr label refusal; the workspace
-            // label is a Herdr label the title sets beside the pane's.
-            TitleRefusal::PaneLabelRefused | TitleRefusal::WorkspaceLabelRefused => {
-                Self::PaneLabelRefused
-            }
+            TitleRefusal::PaneLabelRefused => Self::PaneLabelRefused,
+            TitleRefusal::WorkspaceLabelRefused => Self::WorkspaceLabelRefused,
         }
     }
 }
@@ -688,6 +686,36 @@ mod failure_tests {
             ),
             NativeLaunchFailure::NativeSessionMissing
         );
+    }
+
+    #[test]
+    fn a_workspace_label_refusal_reaches_the_wire_as_its_own_category() {
+        use crate::herdr::launch::TitleRefusal;
+        for (refusal, category, label) in [
+            (
+                TitleRefusal::WorkspaceLabelRefused,
+                NativeLaunchFailure::WorkspaceLabelRefused,
+                "workspace-label-refused",
+            ),
+            (
+                TitleRefusal::PaneLabelRefused,
+                NativeLaunchFailure::PaneLabelRefused,
+                "pane-label-refused",
+            ),
+        ] {
+            let failure = NativeLaunchRefusal {
+                native_launch_stage: NativeLaunchStage::Naming,
+                native_launch_failure: category,
+            };
+            assert_eq!(
+                NativeLaunchRefusal::refused_title(&refusal),
+                Outcome::Failed(Failed_Data::LaunchRefused(failure.clone()))
+            );
+            assert_eq!(
+                failure.log_line(),
+                format!("flow-nexus: herdr stage=title category={label}")
+            );
+        }
     }
 
     #[test]

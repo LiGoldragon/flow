@@ -34,8 +34,10 @@ Library
   ; call), or Unknown for a request queued before Flow kept senders.
   SentBy.[ Sender Unknown ]
   QueuedRequest.{ SentBy Request }
+  ; A metaflow is Awake as its current flow or Asleep: a topic never dies,
+  ; it goes idle, its flows turned off.
   Metaflow.{ Address
-             State.[ Awake.FlowId Asleep Ended ]
+             State.[ Awake.FlowId Asleep ]
              Past.Vector<FlowId>
              Queue.Vector<QueuedRequest> }
   Lock.{ Sender Address Until.Integer }

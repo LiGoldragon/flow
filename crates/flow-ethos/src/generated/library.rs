@@ -113,7 +113,6 @@ pub struct QueuedRequest {
 pub enum State {
     Awake(FlowId),
     Asleep,
-    Ended,
 }
 #[rustfmt::skip]
 pub type Past = std::vec::Vec<FlowId>;

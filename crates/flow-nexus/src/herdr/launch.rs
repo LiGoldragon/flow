@@ -5221,7 +5221,9 @@ printf '%s\n' "$alias"
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).unwrap();
-        adapter.start_native_harness(&launch, &pane, Some("123456")).unwrap();
+        adapter
+            .start_native_harness(&launch, &pane, Some("123456"))
+            .unwrap();
         let binding = adapter
             .observe_native_binding(&launch, &pane, None)
             .unwrap();
@@ -5257,7 +5259,9 @@ printf '%s\n' "$alias"
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).unwrap();
-        adapter.start_native_harness(&launch, &pane, Some("123456")).unwrap();
+        adapter
+            .start_native_harness(&launch, &pane, Some("123456"))
+            .unwrap();
         adapter
             .observe_native_binding(&launch, &pane, None)
             .expect("bound once Herdr reports rest");
@@ -5285,7 +5289,9 @@ printf '%s\n' "$alias"
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).unwrap();
-        adapter.start_native_harness(&launch, &pane, Some("123456")).unwrap();
+        adapter
+            .start_native_harness(&launch, &pane, Some("123456"))
+            .unwrap();
         fs::write(root.path().join("agent-wait-refused"), "timeout").unwrap();
         let error = adapter
             .observe_native_binding(&launch, &pane, None)

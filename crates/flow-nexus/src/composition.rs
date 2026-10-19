@@ -594,8 +594,8 @@ impl ProfilesFreshSeat for FreshSeat {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        ComposesLaunch, CompositionError, FitsOneMessage, LaunchComposer,
-        OpensLaunchComposer, SplitsStartupMessage, ValidatesComposedPrompt,
+        ComposesLaunch, CompositionError, FitsOneMessage, LaunchComposer, OpensLaunchComposer,
+        SplitsStartupMessage, ValidatesComposedPrompt,
     };
     use crate::context::FixtureComposer;
     use signal_flow::{

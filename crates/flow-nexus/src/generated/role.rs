@@ -10,9 +10,21 @@ pub enum RoleRefusal {
     ManifestMismatch,
     ProvenanceMismatch,
     UnsupportedPolicy,
+    OversizedRole,
 }
 #[rustfmt::skip]
 pub type SubagentRoleNames = std::vec::Vec<String>;
+#[rustfmt::skip]
+pub type AgentFileName = String;
+#[rustfmt::skip]
+pub type AgentFileText = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct AgentFile {
+    pub agent_file_name: AgentFileName,
+    pub agent_file_text: AgentFileText,
+}
 #[rustfmt::skip]
 pub type SubagentType = String;
 #[rustfmt::skip]
@@ -102,7 +114,7 @@ pub trait VerifiesRole {
 pub trait ReadsVerifiedRole {
     fn role_name(&self) -> String;
     fn permits<N: Addressed>(&self, input: N) -> bool;
-    fn native_definition(&self) -> std::result::Result<serde_json::Value, RoleRefusal>;
+    fn agent_file(&self) -> std::result::Result<AgentFile, RoleRefusal>;
 }
 #[rustfmt::skip]
 pub trait ComposesSubagentRoles {
@@ -111,10 +123,10 @@ pub trait ComposesSubagentRoles {
         &self,
         input: N,
     ) -> std::result::Result<std::vec::Vec<flow_nexus::VerifiedRole>, RoleRefusal>;
-    fn agents_argument<N: Addressed>(
+    fn agent_files<N: Addressed>(
         &self,
         input: N,
-    ) -> std::result::Result<std::option::Option<String>, RoleRefusal>;
+    ) -> std::result::Result<std::vec::Vec<AgentFile>, RoleRefusal>;
 }
 #[rustfmt::skip]
 pub trait AuthorizesAgentCall {

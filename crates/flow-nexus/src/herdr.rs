@@ -137,10 +137,15 @@ pub struct HerdrCli {
     /// whatever Nexus the default path under the pane's runtime directory
     /// names.
     pub(crate) ordinary_socket: PathBuf,
-    /// The in-memory file of each Claude start's composed system prompt,
-    /// by launch request, held from the start until its session has bound.
-    pub(crate) held_system_prompts:
-        std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
+    /// What each Claude start holds, by launch request, from the start
+    /// until its session has bound: the in-memory file of its composed
+    /// system prompt and the tmpfs directory of its subagent roles.
+    pub(crate) held_starts: std::sync::Mutex<std::collections::HashMap<String, launch::HeldStart>>,
+    /// The directory each launch's role directory is made in: `flow-roles`
+    /// in the runtime directory whose socket directory holds this Nexus's
+    /// ordinary socket (`$XDG_RUNTIME_DIR/flow-roles` for the default
+    /// socket). None when the socket has no such runtime directory.
+    pub(crate) role_root: Option<PathBuf>,
     /// The subagent roles a Claude flow is offered at spawn, composed by
     /// Curriculum and kept for the flows their caller policy permits.
     pub(crate) subagent_roles: crate::role::SubagentRoles,
@@ -198,8 +203,9 @@ impl Default for HerdrCli {
                 .ok()
                 .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
                 .unwrap_or_else(|| PathBuf::from("flow-hook")),
+            role_root: Self::role_root_beside(&defaults.ordinary_socket_path()),
             ordinary_socket: defaults.ordinary_socket_path(),
-            held_system_prompts: Default::default(),
+            held_starts: Default::default(),
             subagent_roles: {
                 use crate::role::OpensSubagentRoles;
                 crate::role::SubagentRoles::from_environment()
@@ -341,14 +347,19 @@ impl ReadsPromptReply for PromptReply {
 
 pub trait ConfiguresHerdrCli {
     fn with_codex_endpoints(self, codex_endpoints: CodexEndpoints) -> Self;
-    /// The ordinary socket this Nexus serves, as its store configures it.
+    /// The ordinary socket this Nexus serves, as its store configures it,
+    /// and the role root in the same runtime directory.
     fn with_ordinary_socket(self, ordinary_socket: &std::path::Path) -> Self;
+    /// `flow-roles` in the runtime directory above the socket's directory.
+    fn role_root_beside(ordinary_socket: &std::path::Path) -> Option<PathBuf>;
     /// Re-roots the flows directory on the configured source root.
     fn with_source_root(self, source_root: &std::path::Path) -> Self;
     #[cfg(test)]
     fn at(executable: PathBuf, flows_root: PathBuf) -> Self;
     #[cfg(test)]
     fn with_subagent_roles(self, subagent_roles: crate::role::SubagentRoles) -> Self;
+    #[cfg(test)]
+    fn with_role_root(self, role_root: &std::path::Path) -> Self;
 }
 
 impl ConfiguresHerdrCli for HerdrCli {
@@ -359,7 +370,15 @@ impl ConfiguresHerdrCli for HerdrCli {
 
     fn with_ordinary_socket(mut self, ordinary_socket: &std::path::Path) -> Self {
         self.ordinary_socket = ordinary_socket.to_path_buf();
+        self.role_root = Self::role_root_beside(ordinary_socket);
         self
+    }
+
+    fn role_root_beside(ordinary_socket: &std::path::Path) -> Option<PathBuf> {
+        ordinary_socket
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map(|runtime| runtime.join("flow-roles"))
     }
 
     fn with_source_root(mut self, source_root: &std::path::Path) -> Self {
@@ -407,7 +426,10 @@ impl ConfiguresHerdrCli for HerdrCli {
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
-            held_system_prompts: Default::default(),
+            held_starts: Default::default(),
+            // A fixture is given a tmpfs role root by the test that needs
+            // one (`with_role_root`).
+            role_root: None,
             // A fixture flow is offered no subagent role unless a test
             // names some (`with_subagent_roles`).
             subagent_roles: crate::role::SubagentRoles {
@@ -422,6 +444,12 @@ impl ConfiguresHerdrCli for HerdrCli {
     #[cfg(test)]
     fn with_subagent_roles(mut self, subagent_roles: crate::role::SubagentRoles) -> Self {
         self.subagent_roles = subagent_roles;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_role_root(mut self, role_root: &std::path::Path) -> Self {
+        self.role_root = Some(role_root.to_path_buf());
         self
     }
 }

@@ -37,12 +37,21 @@ resume), and verifies the answer (`role::VerifiedRole`): the role and surface
 asked for, both payload SHA-256s, a manifest of unique modules in order whose
 renderings are exactly the description and the prompt, and one full revision
 per context repository across every role. The roles whose caller policy names
-the flow's Address exactly, case preserved, are given to the harness in one
-inline `--agents` JSON argument, each as `description`, `prompt`, `model`,
+the flow's Address exactly, case preserved, are given to the harness as agent
+files: each `<name>.md`, its frontmatter `name`, `description`, `model`,
 `effort`, `permissionMode` and, for an explicit list, `tools`, which an empty
-list gives as `[]` so the role has no tools and never inherits; a policy with
-no exact native counterpart (`RoleRefusal::UnsupportedPolicy`), or an
-unavailable Curriculum, refuses the spawn.
+list gives as `[]` so the role has no tools and never inherits, and its body
+the verified text. They are written into a fresh
+`<role root>/<launch request>/.claude/agents/` on tmpfs, every directory 0700,
+and Claude is given that launch directory with `--add-dir`; the role root is
+`flow-roles` in the runtime directory above the ordinary socket's directory
+(`$XDG_RUNTIME_DIR/flow-roles`). The directory lives exactly as long as the
+held system prompt and is removed where it is released; a Nexus removes any
+left under its role root when it opens. Nothing composed is persisted; roles
+live on tmpfs only for the launch. A role root not on tmpfs, a policy with no
+exact native counterpart (`RoleRefusal::UnsupportedPolicy`), an agent file
+past Claude's 1 MiB (`RoleRefusal::OversizedRole`), or an unavailable
+Curriculum refuses the spawn.
 The offer is not the guard: `flow-hook` also runs on every PreToolUse of the
 Agent tool and denies a call naming a selected role unless it comes from the
 flow's main thread, sets neither `model` nor `effort`, and the calling flow,

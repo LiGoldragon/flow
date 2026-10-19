@@ -11,14 +11,14 @@ use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::HERDR_REQUEST_LINE_LIMIT;
-use crate::composition::{FitsOneMessage, NamesRemoteControl, ValidatesComposedPrompt};
+use crate::composition::{NamesRemoteControl, ValidatesComposedPrompt};
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
     DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
     ReadsTypedUserText, RendersLeanStart, StartupReading, Textual,
 };
 use crate::herdr::reservation::ChoosesNativeSession;
-use crate::role::ComposesSubagentRoles;
+use crate::role::{AgentFile, ComposesSubagentRoles};
 use crate::title::{NativeTitle, ShowsNativeTitle, TitlesFlow};
 use sha2::{Digest, Sha256};
 use signal_flow::{
@@ -1670,27 +1670,30 @@ impl SpawnsNativeHarness for HerdrCli {
                 arguments.push(Self::CLAUDE_NAME_FLAG.into());
                 arguments.push(title.as_str().into());
             }
+            // The subagent roles this flow's Address is permitted, composed
+            // and verified now; a role that cannot be given whole refuses
+            // the spawn.
+            let role_files = self
+                .subagent_roles
+                .agent_files(&launch.launch_profile.address)
+                .map_err(|refusal| {
+                    format!("the flow's subagent roles were refused: {refusal:?}")
+                })?;
             // The composed system prompt is read from the in-memory file
             // this Nexus holds open until the session has bound; it never
             // travels in the typed command and never touches a disk.
             arguments.push("--system-prompt-file".into());
             arguments.push(self.hold_system_prompt(launch)?);
-            // The subagent roles this flow's Address is permitted, composed
-            // and verified now, as one inline JSON argument; nothing is
-            // written to disk, and a role that cannot be given whole
-            // refuses the spawn.
-            let agents = self
-                .subagent_roles
-                .agents_argument(&launch.launch_profile.address)
-                .map_err(|refusal| {
-                    format!("the flow's subagent roles were refused: {refusal:?}")
+            // The roles are agent files in the launch's own role directory
+            // on tmpfs, which Claude reads as `<dir>/.claude/agents` of an
+            // added directory; it is removed when the system prompt is
+            // released. Nothing composed is persisted.
+            if !role_files.is_empty() {
+                let directory = self.hold_roles(launch, &role_files).inspect_err(|_| {
+                    self.release_start(&launch.launch_profile.launch_request_id)
                 })?;
-            if let Some(agents) = agents {
-                if !HarnessKind::Claude.fits_one_argument(&agents) {
-                    return Err("the flow's subagent roles exceed one argument".into());
-                }
-                arguments.push("--agents".into());
-                arguments.push(agents);
+                arguments.push("--add-dir".into());
+                arguments.push(directory);
             }
             match &session {
                 ClaudeSession::Unchosen | ClaudeSession::Attached(_) => {}
@@ -1742,12 +1745,12 @@ impl SpawnsNativeHarness for HerdrCli {
             .chain(arguments[typed_from..].iter().cloned())
             .collect::<Vec<_>>();
         if let Some(cause) = typed.typed_command_refusal() {
-            self.release_system_prompt(&launch.launch_profile.launch_request_id);
+            self.release_start(&launch.launch_profile.launch_request_id);
             return Err(SpawnFailure::Refused(cause));
         }
         // No positional prompt: the first USER message is typed after.
         self.run_agent_start(&arguments)
-            .inspect_err(|_| self.release_system_prompt(&launch.launch_profile.launch_request_id))
+            .inspect_err(|_| self.release_start(&launch.launch_profile.launch_request_id))
     }
 }
 
@@ -1835,25 +1838,78 @@ impl ChecksTypedCommand for [String] {
     }
 }
 
+/// What a Claude start holds from the start until its session has bound:
+/// the in-memory file of its composed system prompt, and the role
+/// directory of its subagent roles when it is offered any. Releasing it
+/// closes the one and removes the other.
+#[derive(Debug)]
+pub(crate) struct HeldStart {
+    /// Held open, never read, so Claude can read it by its `/proc` path.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "held open for Claude to read by /proc path")
+    )]
+    system_prompt: File,
+    roles: Option<RoleDirectory>,
+}
+
+/// One launch's role directory on tmpfs, removed whole when it is dropped.
+#[derive(Debug)]
+pub(crate) struct RoleDirectory {
+    path: PathBuf,
+}
+
+impl Drop for RoleDirectory {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "flow-nexus: cannot remove the role directory {}: {error}",
+                self.path.display()
+            );
+        }
+    }
+}
+
 /// The composed system prompt of a Claude start, held by this Nexus in an
-/// in-memory file Claude reads through `/proc/<nexus>/fd/<n>`, from the
+/// in-memory file Claude reads through `/proc/<nexus>/fd/<n>`, and its
+/// subagent roles, held as agent files in a directory on tmpfs, from the
 /// start until the session has bound.
-pub(crate) trait HoldsSystemPrompt {
+pub(crate) trait HoldsStart {
+    /// The filesystem type tmpfs reports through statfs.
+    const TMPFS_MAGIC: u64 = 0x0102_1994;
     /// Writes the launch's composed system prompt into a new in-memory file
     /// held under the launch request, and answers the path Claude reads it
-    /// by. A file already held for the request is replaced.
+    /// by. What is already held for the request is released first.
     fn hold_system_prompt(&self, launch: &ComposedLaunch) -> Result<String, String>;
-    /// Closes the in-memory file held for the launch request, if any.
-    fn release_system_prompt(&self, launch_request_id: &str);
+    /// Writes each role as `<name>.md` into a fresh directory
+    /// `<role root>/<launch request>/.claude/agents/`, every directory mode
+    /// 0700 and every file 0600, holds it with the launch's system prompt,
+    /// and answers the directory Claude is given with `--add-dir`. A role
+    /// root not on tmpfs refuses, writing nothing.
+    fn hold_roles(&self, launch: &ComposedLaunch, roles: &[AgentFile]) -> Result<String, String>;
+    /// Closes the in-memory file held for the launch request and removes
+    /// its role directory, if any.
+    fn release_start(&self, launch_request_id: &str);
+    /// Removes every role directory left under the role root: run when the
+    /// Nexus starts, before it holds any.
+    fn sweep_roles(&self);
+    /// Whether the path's filesystem is tmpfs.
+    fn on_tmpfs(path: &Path) -> Result<bool, String>;
     /// The path a held system prompt is read by, for the request, while
     /// held.
     #[cfg(test)]
     fn held_system_prompt_path(&self, launch_request_id: &str) -> Option<String>;
+    /// The role directory held for the request, while held.
+    #[cfg(test)]
+    fn held_role_directory(&self, launch_request_id: &str) -> Option<PathBuf>;
 }
 
-impl HoldsSystemPrompt for HerdrCli {
+impl HoldsStart for HerdrCli {
     fn hold_system_prompt(&self, launch: &ComposedLaunch) -> Result<String, String> {
         use std::os::fd::AsRawFd;
+        self.release_start(&launch.launch_profile.launch_request_id);
         let descriptor =
             rustix::fs::memfd_create("flow-system-prompt", rustix::fs::MemfdFlags::CLOEXEC)
                 .map_err(|error| format!("cannot create the in-memory system prompt: {error}"))?;
@@ -1861,27 +1917,175 @@ impl HoldsSystemPrompt for HerdrCli {
         file.write_all(launch.system_prompt.system_prompt_text.as_bytes())
             .map_err(|error| format!("cannot write the in-memory system prompt: {error}"))?;
         let path = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd());
-        self.held_system_prompts
+        self.held_starts
             .lock()
-            .map_err(|_| "the held system prompts are unreadable".to_owned())?
-            .insert(launch.launch_profile.launch_request_id.clone(), file);
+            .map_err(|_| "the held starts are unreadable".to_owned())?
+            .insert(
+                launch.launch_profile.launch_request_id.clone(),
+                HeldStart {
+                    system_prompt: file,
+                    roles: None,
+                },
+            );
         Ok(path)
     }
 
-    fn release_system_prompt(&self, launch_request_id: &str) {
-        if let Ok(mut held) = self.held_system_prompts.lock() {
-            held.remove(launch_request_id);
+    fn hold_roles(&self, launch: &ComposedLaunch, roles: &[AgentFile]) -> Result<String, String> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        let request = &launch.launch_profile.launch_request_id;
+        let plain = |name: &str| {
+            !name.is_empty()
+                && !name.starts_with('.')
+                && !name.contains('/')
+                && !name.contains('\0')
+        };
+        if !plain(request) {
+            return Err(format!(
+                "the launch request {request:?} cannot name a directory"
+            ));
         }
+        let root = self
+            .role_root
+            .as_ref()
+            .ok_or("no runtime directory holds subagent roles")?;
+        let runtime = root
+            .parent()
+            .ok_or("the role root has no runtime directory")?;
+        if !Self::on_tmpfs(runtime)? {
+            return Err(format!(
+                "the role root {} is not on tmpfs; roles are never written to a disk",
+                root.display()
+            ));
+        }
+        let private = |path: &Path| {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("cannot make {} private: {error}", path.display()))
+        };
+        match fs::symlink_metadata(root) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "the role root {} is not a directory",
+                    root.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::DirBuilder::new()
+                .mode(0o700)
+                .create(root)
+                .map_err(|error| format!("cannot create the role root: {error}"))?,
+            Err(error) => return Err(format!("cannot read the role root: {error}")),
+        }
+        private(root)?;
+        let directory = root.join(request);
+        // A directory left by an earlier attempt that was never held.
+        drop(RoleDirectory {
+            path: directory.clone(),
+        });
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .map_err(|error| format!("cannot create the role directory: {error}"))?;
+        let held = RoleDirectory {
+            path: directory.clone(),
+        };
+        if !Self::on_tmpfs(&directory)? {
+            return Err(format!(
+                "the role directory {} is not on tmpfs",
+                directory.display()
+            ));
+        }
+        let claude = directory.join(".claude");
+        let agents = claude.join("agents");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&agents)
+            .map_err(|error| format!("cannot create the agents directory: {error}"))?;
+        for path in [&directory, &claude, &agents] {
+            private(path)?;
+        }
+        for role in roles {
+            if !plain(&role.agent_file_name) {
+                return Err(format!(
+                    "the role name {:?} cannot name a file",
+                    role.agent_file_name
+                ));
+            }
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(agents.join(format!("{}.md", role.agent_file_name)))
+                .and_then(|mut file| file.write_all(role.agent_file_text.as_bytes()))
+                .map_err(|error| {
+                    format!("cannot write the role {}: {error}", role.agent_file_name)
+                })?;
+        }
+        let answer = directory
+            .to_str()
+            .ok_or("the role directory is not valid UTF-8")?
+            .to_owned();
+        self.held_starts
+            .lock()
+            .map_err(|_| "the held starts are unreadable".to_owned())?
+            .get_mut(request)
+            .ok_or("no system prompt is held for the launch")?
+            .roles = Some(held);
+        Ok(answer)
+    }
+
+    fn release_start(&self, launch_request_id: &str) {
+        let released = self
+            .held_starts
+            .lock()
+            .ok()
+            .and_then(|mut held| held.remove(launch_request_id));
+        drop(released);
+    }
+
+    fn sweep_roles(&self) {
+        let Some(root) = &self.role_root else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            drop(RoleDirectory { path: entry.path() });
+        }
+    }
+
+    fn on_tmpfs(path: &Path) -> Result<bool, String> {
+        rustix::fs::statfs(path)
+            .map(|filesystem| filesystem.f_type as u64 == Self::TMPFS_MAGIC)
+            .map_err(|error| format!("cannot read the filesystem of {}: {error}", path.display()))
     }
 
     #[cfg(test)]
     fn held_system_prompt_path(&self, launch_request_id: &str) -> Option<String> {
         use std::os::fd::AsRawFd;
-        self.held_system_prompts
+        self.held_starts
             .lock()
             .ok()?
             .get(launch_request_id)
-            .map(|file| format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd()))
+            .map(|held| {
+                format!(
+                    "/proc/{}/fd/{}",
+                    std::process::id(),
+                    held.system_prompt.as_raw_fd()
+                )
+            })
+    }
+
+    #[cfg(test)]
+    fn held_role_directory(&self, launch_request_id: &str) -> Option<PathBuf> {
+        self.held_starts
+            .lock()
+            .ok()?
+            .get(launch_request_id)?
+            .roles
+            .as_ref()
+            .map(|roles| roles.path.clone())
     }
 }
 
@@ -1982,8 +2186,8 @@ impl WaitsForPaneRest for HerdrCli {
 
 impl ObservesNativeLaunchBinding for HerdrCli {
     /// Whatever it observes, the in-memory system prompt held for the
-    /// launch is closed after: the started harness has read it by the time
-    /// its session can bind.
+    /// launch is closed after and its role directory removed: the started
+    /// harness has read both by the time its session can bind.
     fn observe_native_binding(
         &self,
         launch: &ComposedLaunch,
@@ -1991,7 +2195,7 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         reserved: Option<&str>,
     ) -> Result<NativeLaunchBinding, String> {
         let observed = self.observe_bound_pane(launch, pane, reserved, None);
-        self.release_system_prompt(&launch.launch_profile.launch_request_id);
+        self.release_start(&launch.launch_profile.launch_request_id);
         observed
     }
 
@@ -2017,7 +2221,7 @@ impl ObservesNativeLaunchBinding for HerdrCli {
             return Err("an attached Codex harness needs its opened thread".into());
         }
         let observed = self.observe_bound_pane(launch, pane, None, Some(thread));
-        self.release_system_prompt(&launch.launch_profile.launch_request_id);
+        self.release_start(&launch.launch_profile.launch_request_id);
         observed
     }
 }
@@ -2625,7 +2829,7 @@ pub(crate) mod tests {
     use crate::herdr::launch::PreparesClaudePane;
     use crate::herdr::launch::ReadsLaunchText;
     use crate::herdr::launch::TitlesClaudeSession;
-    use crate::herdr::launch::{ChecksTypedCommand, HoldsSystemPrompt, SpawnFailure};
+    use crate::herdr::launch::{ChecksTypedCommand, HoldsStart, SpawnFailure};
     use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
     use crate::title::ShowsNativeTitle;
     use signal_flow::{
@@ -2731,7 +2935,7 @@ case "$*" in
   *"pane run"*) sh -c "$6" > '{marker_output}'; width=$(cat '{pane_width}' 2>/dev/null || printf 120); fold -w "$width" '{marker_output}' > '{visible_output}' ;;
   *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
   *"agent wait"*) [ -f '{wait_refused}' ] && exit 11; rm -f '{missing_agent_session}'; printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
-  *"agent start"*) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; if [ "$prev" = --name ]; then title=$a; [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; fi; prev=$a; done; printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
+  *"agent start"*) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; [ "$prev" = --add-dir ] && {{ cp -R "$a/.claude/agents" '{roles_read}'; stat -c '%a %n' "$a" "$a/.claude" "$a/.claude/agents" "$a"/.claude/agents/*.md > '{roles_modes}'; }}; if [ "$prev" = --name ]; then title=$a; [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; fi; prev=$a; done; printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
   *"agent get"*) if [ -f '{pending_record}' ]; then left=$(cat '{record_delay}'); if [ "$left" -le 0 ]; then cat '{pending_record}' >> '{claude_transcript}'; rm -f '{pending_record}'; else printf '%s' $((left - 1)) > '{record_delay}'; fi; fi; reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); if [ -f '{missing_agent_session}' ] || [ -f '{never_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness"; fi ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"pane rename w7:p1 "*) printf '%s' "$*" | sed 's/.*pane rename w7:p1 //' > '{label_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
@@ -2743,6 +2947,8 @@ esac
             calls = calls.display(),
             start_refused = root.path().join("agent-start-refused").display(),
             system_read = root.path().join("system-prompt-read").display(),
+            roles_read = root.path().join("roles-read").display(),
+            roles_modes = root.path().join("roles-modes").display(),
             reported_harness = reported_harness.display(),
             missing_agent_session = root.path().join("missing-agent-session").display(),
             never_agent_session = root.path().join("never-agent-session").display(),
@@ -3363,53 +3569,99 @@ printf '%s\n' 123456
         }
     }
 
+    /// A directory on tmpfs to hold a test's role root in.
+    fn tmpfs_runtime() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("flow-roles-test")
+            .tempdir_in("/dev/shm")
+            .expect("a tmpfs directory under /dev/shm")
+    }
+
+    /// The modes the fixture harness saw on the role directory, its
+    /// `.claude`, its `agents` and each file, in that order.
+    fn role_modes(root: &Path) -> Vec<String> {
+        fs::read_to_string(root.join("roles-modes"))
+            .expect("the harness saw a role directory")
+            .lines()
+            .map(|line| line.split(' ').next().unwrap().to_owned())
+            .collect()
+    }
+
     #[test]
-    fn a_permitted_claude_flow_starts_with_its_verified_roles_as_one_agents_argument() {
+    fn a_permitted_claude_flow_starts_with_its_verified_roles_as_files_in_a_private_tmpfs_directory()
+     {
         use crate::generated::curriculum::{CallerMetaflow, RoleCallers};
+        use std::os::unix::fs::PermissionsExt;
         let launch = launch(HarnessKind::Claude);
+        let request = launch.launch_profile.launch_request_id.clone();
         let agent_name = launch.launch_agent_name();
-        let start_call = |roles: crate::role::SubagentRoles| {
+        let runtime = tmpfs_runtime();
+        let role_root = runtime.path().join("flow-roles");
+        let start = |roles: crate::role::SubagentRoles| {
             let (root, adapter) = fixture_herdr(
                 "claude",
                 "12345678-1234-4abc-8def-123456789abc",
                 "1234567812344abc8def123456789abc",
                 &agent_name,
             );
-            let adapter = adapter.with_subagent_roles(roles);
+            let adapter = adapter
+                .with_subagent_roles(roles)
+                .with_role_root(&role_root);
             let pane = adapter.create_launch_pane(&launch).expect("created pane");
             let started = adapter.start_native_harness(&launch, &pane, None);
             let calls = fs::read_to_string(root.path().join("calls")).unwrap_or_default();
-            (
-                started,
-                calls
-                    .lines()
-                    .find(|line| line.contains("agent start"))
-                    .map(str::to_owned),
-            )
+            let call = calls
+                .lines()
+                .find(|line| line.contains("agent start"))
+                .map(str::to_owned);
+            (root, adapter, pane, started, call)
         };
         let permitted = RoleCallers::Only(vec![CallerMetaflow {
             first_string: "Field".into(),
             second_string: "flow".into(),
             third_string: "Secondary".into(),
         }]);
-        let (started, call) = start_call(relay_roles(permitted));
+        let (root, adapter, pane, started, call) = start(relay_roles(permitted));
         started.expect("started with its roles");
         let call = call.expect("agent start");
-        assert_eq!(call.matches(" --agents ").count(), 1);
-        assert!(call.contains(concat!(
-            r#" --agents {"comment-relay":{"description":"Relays.","effort":"medium","#,
-            r#""model":"sonnet","permissionMode":"bypassPermissions","prompt":"#
+        let directory = role_root.join(&request);
+        assert_eq!(
+            adapter.held_role_directory(&request),
+            Some(directory.clone()),
+            "the role directory is held with the system prompt"
+        );
+        assert_eq!(call.matches(" --add-dir ").count(), 1);
+        assert!(call.contains(&format!(" --add-dir {} ", directory.display())));
+        assert!(!call.contains("--agents"));
+        assert!(!call.contains("Relay body."));
+        let relay = fs::read_to_string(root.path().join("roles-read/comment-relay.md"))
+            .expect("the harness read the role's agent file");
+        assert!(relay.starts_with(concat!(
+            "---\nname: \"comment-relay\"\ndescription: \"Relays.\"\nmodel: \"sonnet\"\n",
+            "effort: medium\npermissionMode: bypassPermissions\ntools: [\"Read\"]\n---\n"
         )));
-        assert!(call.contains(r#""tools":["Read"]}}"#));
+        assert!(relay.contains("<!-- module: role-comment-relay -->\nRelay body.\n"));
+        assert_eq!(role_modes(root.path()), ["700", "700", "700", "600"]);
+        assert_eq!(
+            fs::metadata(&role_root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(<HerdrCli as HoldsStart>::on_tmpfs(&directory).unwrap());
+        adapter
+            .observe_native_binding(&launch, &pane, None)
+            .expect("bound");
+        assert!(!directory.exists(), "removed once the session has bound");
+        assert_eq!(adapter.held_role_directory(&request), None);
 
         let elsewhere = RoleCallers::Only(vec![CallerMetaflow {
             first_string: "Psyche".into(),
             second_string: "core".into(),
             third_string: "Tertiary".into(),
         }]);
-        let (started, call) = start_call(relay_roles(elsewhere));
+        let (_root, _adapter, _pane, started, call) = start(relay_roles(elsewhere));
         started.expect("started without roles");
-        assert!(!call.expect("agent start").contains("--agents"));
+        assert!(!call.expect("agent start").contains("--add-dir"));
+        assert!(!directory.exists());
 
         let mut unavailable = relay_roles(RoleCallers::Any);
         unavailable.composer = crate::role::RoleComposer::Curriculum(
@@ -3417,18 +3669,117 @@ printf '%s\n' 123456
                 "/nonexistent/curriculum.sock",
             ),
         );
-        let (started, call) = start_call(unavailable);
+        let (_root, adapter, _pane, started, call) = start(unavailable);
         assert!(
             String::from(started.unwrap_err())
                 .contains("subagent roles were refused: ComposerUnavailable")
         );
         assert_eq!(call, None);
+        assert_eq!(adapter.held_system_prompt_path(&request), None);
+        assert!(!directory.exists());
+    }
+
+    /// A refused start, by Flow before Herdr or by Herdr, removes the role
+    /// directory with the held system prompt.
+    #[test]
+    fn a_refused_claude_start_removes_its_role_directory() {
+        use crate::generated::curriculum::RoleCallers;
+        let runtime = tmpfs_runtime();
+        let role_root = runtime.path().join("flow-roles");
+        let mut too_long = launch(HarnessKind::Claude);
+        too_long.launch_profile.effort = "e".repeat(4096);
+        let refused_by_herdr = launch(HarnessKind::Claude);
+        for (launch, herdr_refuses, cause) in [
+            (
+                too_long,
+                false,
+                signal_flow::SpawnRefusalCause::CommandTooLong,
+            ),
+            (
+                refused_by_herdr,
+                true,
+                signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal {
+                    herdr_error_code_option: None,
+                    herdr_error_message: "refused".into(),
+                }),
+            ),
+        ] {
+            let agent_name = launch.launch_agent_name();
+            let (root, adapter) = fixture_herdr(
+                "claude",
+                "12345678-1234-4abc-8def-123456789abc",
+                "1234567812344abc8def123456789abc",
+                &agent_name,
+            );
+            let adapter = adapter
+                .with_subagent_roles(relay_roles(RoleCallers::Any))
+                .with_role_root(&role_root);
+            if herdr_refuses {
+                fs::write(root.path().join("agent-start-refused"), "refused\n").unwrap();
+            }
+            let pane = adapter.create_launch_pane(&launch).expect("created pane");
+            assert_eq!(
+                adapter.start_native_harness(&launch, &pane, None),
+                Err(SpawnFailure::Refused(cause))
+            );
+            let request = &launch.launch_profile.launch_request_id;
+            assert_eq!(adapter.held_role_directory(request), None);
+            assert_eq!(adapter.held_system_prompt_path(request), None);
+            assert!(!role_root.join(request).exists());
+        }
+    }
+
+    /// A role root not on tmpfs refuses the start before Herdr is called,
+    /// and nothing is written.
+    #[test]
+    fn a_role_root_not_on_tmpfs_refuses_the_start() {
+        use crate::generated::curriculum::RoleCallers;
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            "12345678-1234-4abc-8def-123456789abc",
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        // procfs: present wherever the tests run, and never tmpfs.
+        let adapter = adapter
+            .with_subagent_roles(relay_roles(RoleCallers::Any))
+            .with_role_root(Path::new("/proc/flow-roles"));
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let refusal = String::from(
+            adapter
+                .start_native_harness(&launch, &pane, None)
+                .unwrap_err(),
+        );
+        assert!(refusal.contains("is not on tmpfs"), "{refusal}");
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(!calls.contains("agent start"), "Herdr was not called");
+        assert_eq!(
+            adapter.held_system_prompt_path(&launch.launch_profile.launch_request_id),
+            None
+        );
+        assert!(!Path::new("/proc/flow-roles").exists());
+    }
+
+    /// Role directories an earlier Nexus left are removed when the Nexus
+    /// starts.
+    #[test]
+    fn role_directories_left_by_an_earlier_run_are_swept() {
+        let runtime = tmpfs_runtime();
+        let role_root = runtime.path().join("flow-roles");
+        fs::create_dir_all(role_root.join("left-request/.claude/agents")).unwrap();
+        fs::write(role_root.join("left-request/.claude/agents/book.md"), "x").unwrap();
+        fs::create_dir_all(role_root.join("other-request")).unwrap();
+        let adapter = HerdrCli::default().with_role_root(&role_root);
+        adapter.sweep_roles();
+        assert_eq!(fs::read_dir(&role_root).unwrap().count(), 0);
     }
 
     #[test]
     fn a_claude_start_carries_each_roles_exact_policy_and_an_empty_tool_list_as_none() {
         use crate::generated::curriculum::{Effort, Permission, RoleCallers, RoleTools};
-        let role = |model: &str, effort: Effort, tools: Vec<&str>, name: &str| {
+        let role = |model: &str, effort: Effort, tools: Vec<&str>, name: &str, body: String| {
             (
                 name.to_owned(),
                 crate::role::FixtureRole {
@@ -3440,13 +3791,15 @@ printf '%s\n' 123456
                             format!("role-{name}-description"),
                             format!("{name} description."),
                         ),
-                        (format!("role-{name}"), format!("{name} body.")),
+                        (format!("role-{name}"), body),
                     ],
                     role_tools: RoleTools::Explicit(tools.into_iter().map(str::to_owned).collect()),
                     role_callers: RoleCallers::Any,
                 },
             )
         };
+        // Each role larger than any one terminal line could carry.
+        let body = |name: &str| format!("{name} body: {}\n", "a line of role text. ".repeat(640));
         let roles = crate::role::SubagentRoles {
             composer: crate::role::RoleComposer::Fixture(crate::role::FixtureRoles {
                 roles: [
@@ -3455,8 +3808,15 @@ printf '%s\n' 123456
                         Effort::Medium,
                         vec!["Read", "Bash", "Agent", "Artifact"],
                         "book",
+                        body("book"),
                     ),
-                    role("opus", Effort::High, Vec::new(), "illustrator"),
+                    role(
+                        "opus",
+                        Effort::High,
+                        Vec::new(),
+                        "illustrator",
+                        body("illustrator"),
+                    ),
                 ]
                 .into(),
             }),
@@ -3464,13 +3824,16 @@ printf '%s\n' 123456
         };
         let launch = launch(HarnessKind::Claude);
         let agent_name = launch.launch_agent_name();
+        let runtime = tmpfs_runtime();
         let (root, adapter) = fixture_herdr(
             "claude",
             "12345678-1234-4abc-8def-123456789abc",
             "1234567812344abc8def123456789abc",
             &agent_name,
         );
-        let adapter = adapter.with_subagent_roles(roles);
+        let adapter = adapter
+            .with_subagent_roles(roles)
+            .with_role_root(&runtime.path().join("flow-roles"));
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
             .start_native_harness(&launch, &pane, None)
@@ -3480,25 +3843,30 @@ printf '%s\n' 123456
             .lines()
             .find(|line| line.contains("agent start"))
             .expect("agent start");
-        assert_eq!(call.matches(" --agents ").count(), 1);
-        let (_, after) = call.split_once(" --agents ").unwrap();
-        let agents: serde_json::Value = serde_json::Deserializer::from_str(after)
-            .into_iter::<serde_json::Value>()
-            .next()
-            .expect("one agents object")
-            .expect("valid agents JSON");
-        let book = agents["book"].as_object().unwrap();
-        assert_eq!(book["model"], "sonnet");
-        assert_eq!(book["effort"], "medium");
-        assert_eq!(
-            book["tools"],
-            serde_json::json!(["Read", "Bash", "Agent", "Artifact"])
+        let (_, typed) = call.split_once(" -- ").expect("typed arguments");
+        assert!(
+            "claude ".len() + typed.len() <= 4095,
+            "the start line stays within one terminal line: {}",
+            typed.len()
         );
-        let illustrator = agents["illustrator"].as_object().unwrap();
-        assert_eq!(illustrator["model"], "opus");
-        assert_eq!(illustrator["effort"], "high");
-        assert_eq!(illustrator.get("tools"), Some(&serde_json::json!([])));
-        assert_eq!(agents.as_object().unwrap().len(), 2);
+        let read = |name: &str| {
+            fs::read_to_string(root.path().join("roles-read").join(format!("{name}.md")))
+                .expect("the harness read the agent file")
+        };
+        let book = read("book");
+        let illustrator = read("illustrator");
+        assert!(book.len() > 12 * 1024 && illustrator.len() > 12 * 1024);
+        assert!(book.contains(&body("book")));
+        assert!(book.contains("\nmodel: \"sonnet\"\neffort: medium\n"));
+        assert!(book.contains("\ntools: [\"Read\",\"Bash\",\"Agent\",\"Artifact\"]\n"));
+        assert!(illustrator.contains("\nmodel: \"opus\"\neffort: high\n"));
+        assert!(illustrator.contains("\ntools: []\n---\n"));
+        assert_eq!(
+            fs::read_dir(root.path().join("roles-read"))
+                .unwrap()
+                .count(),
+            2
+        );
     }
 
     #[test]

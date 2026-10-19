@@ -1,25 +1,37 @@
 # Flow 0.35.12
 
-No wire change. Flow's own `role.ethos` refusal `RoleRefusal` names a policy
-the harness cannot carry exactly `UnsupportedPolicy`.
+No wire change. Flow's own `role.ethos` names a policy the harness cannot
+carry exactly `RoleRefusal.UnsupportedPolicy`, an agent file larger than
+Claude Code reads `RoleRefusal.OversizedRole`, and a role as Claude's agent
+file `AgentFile.{ AgentFileName AgentFileText }`.
 
 - **A Claude spawn consumes Curriculum `ComposeRole`.** At a start, a fresh
   wake and a resume, the Nexus asks Curriculum for each role
   `LaysOutDefaults::SUBAGENT_ROLES` names (`comment-relay`, `book`,
   `illustrator`) on the `ClaudeAgent` surface, verifies the answer's role,
   surface, payload SHA-256s, manifest and provenance, and gives the roles
-  whose caller policy permits the flow's Address to Claude as one inline
-  `--agents` JSON argument, with the role's model, effort and tools exactly
-  as declared.
-- **An empty tool list is no tools.** `Explicit.[]` is given as `"tools": []`,
+  whose caller policy permits the flow's Address to Claude with the role's
+  model, effort and tools exactly as declared.
+- **The roles reach Claude as agent files on tmpfs.** Each permitted role is
+  written as `<name>.md` (frontmatter `name`, `description`, `model`,
+  `effort`, `permissionMode`, `tools`, each value JSON; body the verified
+  text) into a fresh `<role root>/<launch request>/.claude/agents/`, every
+  directory 0700 and every file 0600, and Claude is given
+  `--add-dir <role root>/<launch request>`. The role root is `flow-roles` in
+  the runtime directory above the ordinary socket's directory
+  (`$XDG_RUNTIME_DIR/flow-roles` for the default socket). The directory is
+  removed wherever the held system prompt is released: a refused typed
+  command, a refused Herdr start, and after the bind is observed. A role root
+  not on tmpfs refuses the spawn, writing nothing, and a Nexus removes every
+  role directory left under its role root when it opens. The typed command
+  carries only the path, so a role of any size up to Claude's 1 MiB agent
+  file limit reaches the start.
+- **An empty tool list is no tools.** `Explicit.[]` is given as `tools: []`,
   which Claude Code 2.1.294 resolves to no tools; only `Inherit` leaves
   `tools` out.
 - **A policy with no exact native counterpart refuses the spawn** as
   `UnsupportedPolicy`: a Restricted permission, an empty or `inherit` model,
   an empty or repeated tool name, or an empty caller list.
-- **The roles count toward the typed command's 4095 bytes.** Claude Code
-  2.1.294 takes `--agents` from a file only with `--print`, so a start whose
-  roles take the command past the limit is refused before Herdr.
 
 # Flow 0.35.11
 
@@ -417,8 +429,9 @@ the first open.
   payload SHA-256s, every requested identity present at its placement, and
   each text exactly the rendering of its modules, each module's slice at its
   rendered SHA-256. A refusal answers `StartRejected.ContextRefused.<why>`.
-  Nothing composed is written to disk: the per-launch bundle copies and
-  their directory are gone, and so is the Prune operation.
+  Nothing composed is persisted: the per-launch bundle copies and their
+  directory are gone, and so is the Prune operation; a Claude flow's roles
+  live on tmpfs only for its launch.
 - **The system prompt travels as one argument.** Claude gets
   `--system-prompt <text>`; Codex gets `-c instructions=<text>`. A system
   prompt past 131071 bytes refuses the Start as `SystemTooLarge`.

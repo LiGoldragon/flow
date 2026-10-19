@@ -512,13 +512,16 @@ impl OpensRunningNexus for RunningNexus {
         // The socket this Nexus serves: a changed one takes effect only on
         // restart, so the store's value at open is the one being served.
         let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
+        let herdr = herdr::HerdrCli::default()
+            .with_source_root(&source_root)
+            .with_codex_endpoints(codex_endpoints.clone())
+            .with_ordinary_socket(&ordinary_socket);
+        // A role directory left by an earlier run is no launch's now.
+        herdr::launch::HoldsStart::sweep_roles(&herdr);
         Ok(Self {
             store,
-            codex_endpoints: codex_endpoints.clone(),
-            herdr: herdr::HerdrCli::default()
-                .with_source_root(&source_root)
-                .with_codex_endpoints(codex_endpoints)
-                .with_ordinary_socket(&ordinary_socket),
+            codex_endpoints,
+            herdr,
             // A launch's context is composed by the Curriculum Nexus.
             composer: LaunchComposer::with_context(context::ContextComposer::Curriculum(
                 CurriculumComposer::from_environment(),
@@ -4295,7 +4298,7 @@ mod tests {
             rejection,
             "a settled rejection is not launched again"
         );
-        // Nothing composed was written to disk for it.
+        // Nothing composed was persisted for it.
         assert!(!fixture.directory.path().join("launch-bundles").exists());
 
         // ReplaceRejected: the successor's launch is refused; the

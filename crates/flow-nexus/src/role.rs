@@ -12,13 +12,15 @@
 //! Curriculum's three context repositories at one full revision per
 //! repository.
 //!
-//! A starting or resumed Claude flow is given, in one inline `--agents`
-//! argument, the definitions of the roles whose caller policy names its
-//! Address exactly, case preserved. Each definition carries the role's
-//! text and policy in the fields Claude Code 2.1.294 reads for a flag
-//! agent (`description`, `prompt`, `model`, `effort`, `permissionMode`,
-//! `tools`); a policy field with no native counterpart refuses the launch
-//! rather than being dropped.
+//! A starting or resumed Claude flow is given the roles whose caller
+//! policy names its Address exactly, case preserved, each as one agent
+//! file: Markdown whose frontmatter carries the role's policy in the keys
+//! Claude Code 2.1.294 reads for an agent file (`name`, `description`,
+//! `model`, `effort`, `permissionMode`, `tools`) and whose body is the
+//! role's verified text. The launcher writes them under the launch's
+//! tmpfs role directory and passes that directory with `--add-dir`; a
+//! policy field with no native counterpart refuses the launch rather than
+//! being dropped.
 //!
 //! The offer is not the guard. `flow-hook` runs on every PreToolUse of
 //! the Agent tool and asks [`AuthorizesAgentCall::decide`]: a call naming
@@ -35,7 +37,7 @@ use crate::generated::curriculum::{
     StartupPlacement, Surface,
 };
 pub use crate::generated::role::{
-    Addressed, AgentCall, AgentCaller, AgentCalling, AgentDecision, AgentDenial,
+    Addressed, AgentCall, AgentCaller, AgentCalling, AgentDecision, AgentDenial, AgentFile,
     AuthorizesAgentCall, ComposesRole, ComposesSubagentRoles, OpensSubagentRoles,
     ReadsVerifiedRole, ResolvesAgentCaller, RoleComposing, RoleRefusal, RoleSelecting,
     SubagentRoleNames, VerifiesRole,
@@ -48,6 +50,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Curriculum's three context repositories, as its provenance names them.
 const CONTEXT_REPOSITORIES: [&str; 3] = ["psyche-context", "mind-context", "field-context"];
+
+/// The largest agent file Claude Code 2.1.294 reads; a larger one it
+/// skips.
+const AGENT_FILE_LIMIT: usize = 1_048_576;
 
 /// The composer a role is asked of: Curriculum, or, under test, roles
 /// held in memory.
@@ -258,14 +264,16 @@ impl ReadsVerifiedRole for VerifiedRole {
         }
     }
 
-    /// The role as a Claude Code flag agent. Model is passed as the role
-    /// names it; effort as Claude's own level; Unrestricted as
+    /// The role as a Claude Code agent file. Every frontmatter value is a
+    /// JSON scalar or array, which YAML reads as written. Model is passed
+    /// as the role names it; effort as Claude's own level; Unrestricted as
     /// `bypassPermissions`. An explicit tool list is always given as
     /// `tools`, an empty one as `[]`, which Claude Code 2.1.294 resolves
     /// to no tools; only an inherited list leaves `tools` out, which
     /// Claude reads as the parent's tools. Restricted, and a model of
-    /// `inherit`, have no exact native counterpart and refuse.
-    fn native_definition(&self) -> Result<serde_json::Value, RoleRefusal> {
+    /// `inherit`, have no exact native counterpart and refuse; so does a
+    /// file larger than Claude reads.
+    fn agent_file(&self) -> Result<AgentFile, RoleRefusal> {
         if self.model_id.eq_ignore_ascii_case("inherit") {
             return Err(RoleRefusal::UnsupportedPolicy);
         }
@@ -279,17 +287,25 @@ impl ReadsVerifiedRole for VerifiedRole {
             Permission::Unrestricted => "bypassPermissions",
             Permission::Restricted => return Err(RoleRefusal::UnsupportedPolicy),
         };
-        let mut definition = serde_json::json!({
-            "description": self.description_text,
-            "prompt": self.context_text,
-            "model": self.model_id,
-            "effort": effort,
-            "permissionMode": permission_mode,
-        });
+        let scalar = |text: &str| serde_json::Value::from(text).to_string();
+        let mut text = format!(
+            "---\nname: {}\ndescription: {}\nmodel: {}\neffort: {effort}\npermissionMode: {permission_mode}\n",
+            scalar(&self.role_name),
+            scalar(&self.description_text),
+            scalar(&self.model_id),
+        );
         if let RoleTools::Explicit(tools) = &self.role_tools {
-            definition["tools"] = serde_json::json!(tools);
+            text.push_str(&format!("tools: {}\n", serde_json::json!(tools)));
         }
-        Ok(definition)
+        text.push_str("---\n");
+        text.push_str(&self.context_text);
+        if text.len() > AGENT_FILE_LIMIT {
+            return Err(RoleRefusal::OversizedRole);
+        }
+        Ok(AgentFile {
+            agent_file_name: self.role_name.clone(),
+            agent_file_text: text,
+        })
     }
 }
 
@@ -334,18 +350,13 @@ impl ComposesSubagentRoles for SubagentRoles {
         Ok(permitted)
     }
 
-    /// The one inline `--agents` JSON object, role name to definition;
-    /// none when no role permits the Address.
-    fn agents_argument<N: Addressed>(&self, input: N) -> Result<Option<String>, RoleRefusal> {
-        let roles = self.permitted_roles(input)?;
-        if roles.is_empty() {
-            return Ok(None);
-        }
-        let mut agents = serde_json::Map::new();
-        for role in &roles {
-            agents.insert(role.role_name(), role.native_definition()?);
-        }
-        Ok(Some(serde_json::Value::Object(agents).to_string()))
+    /// The agent file of every role permitting the Address; none when no
+    /// role permits it.
+    fn agent_files<N: Addressed>(&self, input: N) -> Result<Vec<AgentFile>, RoleRefusal> {
+        self.permitted_roles(input)?
+            .iter()
+            .map(ReadsVerifiedRole::agent_file)
+            .collect()
     }
 }
 
@@ -468,9 +479,9 @@ impl ComposesRole for FixtureRoles {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentCall, AgentCaller, AgentDecision, AgentDenial, AuthorizesAgentCall, ComposesRole,
-        ComposesSubagentRoles, FixtureRole, FixtureRoles, ReadsVerifiedRole, RoleComposer,
-        RoleRefusal, SubagentRoles, VerifiedRole, VerifiesRole,
+        AgentCall, AgentCaller, AgentDecision, AgentDenial, AgentFile, AuthorizesAgentCall,
+        ComposesRole, ComposesSubagentRoles, FixtureRole, FixtureRoles, ReadsVerifiedRole,
+        RoleComposer, RoleRefusal, SubagentRoles, VerifiedRole, VerifiesRole,
     };
     use crate::context::{CurriculumComposer, OpensCurriculumComposer};
     use crate::generated::curriculum::{
@@ -540,14 +551,54 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_permitted_flow_is_offered_the_role_as_one_flag_agent() {
-        let argument = roles()
-            .agents_argument(address(Aspect::Psyche, "core", Layer::Tertiary))
+    /// An agent file's frontmatter, each value read as the JSON it is
+    /// written as (a bare word as itself), and its body.
+    fn frontmatter(file: &AgentFile) -> (serde_json::Map<String, serde_json::Value>, String) {
+        let text = file
+            .agent_file_text
+            .strip_prefix("---\n")
+            .expect("opens frontmatter");
+        let (head, body) = text.split_once("\n---\n").expect("closes frontmatter");
+        let fields = head
+            .lines()
+            .map(|line| {
+                let (key, value) = line.split_once(": ").expect("key: value");
+                (
+                    key.to_owned(),
+                    serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::from(value)),
+                )
+            })
+            .collect();
+        (fields, body.to_owned())
+    }
+
+    /// The one agent file offered to the Address, by role name.
+    fn offered(
+        roles: &SubagentRoles,
+        at: signal_flow::Address,
+    ) -> std::collections::BTreeMap<String, (serde_json::Map<String, serde_json::Value>, String)>
+    {
+        roles
+            .agent_files(at)
             .unwrap()
-            .expect("Psyche core Tertiary is offered comment-relay");
-        let agents: serde_json::Value = serde_json::from_str(&argument).unwrap();
-        let relay = &agents["comment-relay"];
+            .iter()
+            .map(|file| (file.agent_file_name.clone(), frontmatter(file)))
+            .collect()
+    }
+
+    #[test]
+    fn the_permitted_flow_is_offered_the_role_as_one_agent_file() {
+        let files = roles()
+            .agent_files(address(Aspect::Psyche, "core", Layer::Tertiary))
+            .unwrap();
+        assert_eq!(
+            files.len(),
+            1,
+            "Psyche core Tertiary is offered comment-relay"
+        );
+        assert_eq!(files[0].agent_file_name, "comment-relay");
+        let (relay, body) = frontmatter(&files[0]);
+        assert_eq!(relay["name"], "comment-relay");
         assert_eq!(relay["description"], "Relays artifact comments.");
         assert_eq!(relay["model"], "sonnet");
         assert_eq!(relay["effort"], "medium");
@@ -562,10 +613,49 @@ mod tests {
                 "ArtifactComments"
             ])
         );
-        let prompt = relay["prompt"].as_str().unwrap();
-        assert!(prompt.starts_with(crate::context::CONTEXT_OPENING));
-        assert!(prompt.contains("\n<!-- module: role-comment-relay -->\nRelay body.\n"));
-        assert_eq!(agents.as_object().unwrap().len(), 1);
+        assert!(body.starts_with(crate::context::CONTEXT_OPENING));
+        assert!(body.contains("\n<!-- module: role-comment-relay -->\nRelay body.\n"));
+    }
+
+    /// A description of several lines and quotes stays one JSON scalar on
+    /// its frontmatter line.
+    #[test]
+    fn a_description_with_newlines_and_quotes_is_one_frontmatter_scalar() {
+        let mut relay = comment_relay();
+        relay.modules[0].1 = "Relays \"artifact\" comments.\n---\nname: forged".into();
+        let roles = SubagentRoles {
+            composer: RoleComposer::Fixture(FixtureRoles {
+                roles: [("comment-relay".to_owned(), relay)].into(),
+            }),
+            names: vec!["comment-relay".into()],
+        };
+        let files = roles
+            .agent_files(address(Aspect::Psyche, "core", Layer::Tertiary))
+            .unwrap();
+        let (fields, _) = frontmatter(&files[0]);
+        assert_eq!(
+            fields["description"],
+            "Relays \"artifact\" comments.\n---\nname: forged"
+        );
+        assert_eq!(fields["name"], "comment-relay");
+        assert_eq!(fields.len(), 6);
+    }
+
+    /// A file larger than Claude Code reads whole refuses the offer.
+    #[test]
+    fn an_agent_file_larger_than_claude_reads_is_refused() {
+        let mut relay = comment_relay();
+        relay.modules[3].1 = "x".repeat(super::AGENT_FILE_LIMIT);
+        let roles = SubagentRoles {
+            composer: RoleComposer::Fixture(FixtureRoles {
+                roles: [("comment-relay".to_owned(), relay)].into(),
+            }),
+            names: vec!["comment-relay".into()],
+        };
+        assert_eq!(
+            roles.agent_files(address(Aspect::Psyche, "core", Layer::Tertiary)),
+            Err(RoleRefusal::OversizedRole)
+        );
     }
 
     #[test]
@@ -575,7 +665,7 @@ mod tests {
             address(Aspect::Psyche, "core", Layer::Secondary),
             address(Aspect::Mind, "core", Layer::Tertiary),
         ] {
-            assert_eq!(roles().agents_argument(other), Ok(None));
+            assert_eq!(roles().agent_files(other), Ok(Vec::new()));
         }
     }
 
@@ -588,7 +678,7 @@ mod tests {
             names: vec!["comment-relay".into()],
         };
         assert_eq!(
-            roles.agents_argument(address(Aspect::Psyche, "core", Layer::Tertiary)),
+            roles.agent_files(address(Aspect::Psyche, "core", Layer::Tertiary)),
             Err(RoleRefusal::ComposerUnavailable)
         );
     }
@@ -676,7 +766,7 @@ mod tests {
             names: vec!["comment-relay".into()],
         };
         assert_eq!(
-            roles.agents_argument(address(Aspect::Psyche, "core", Layer::Tertiary)),
+            roles.agent_files(address(Aspect::Psyche, "core", Layer::Tertiary)),
             Err(RoleRefusal::UnsupportedPolicy)
         );
         let fixture = FixtureRoles {
@@ -687,7 +777,7 @@ mod tests {
         assert_eq!(
             VerifiedRole::verified_role(selection(), inherit)
                 .unwrap()
-                .native_definition(),
+                .agent_file(),
             Err(RoleRefusal::UnsupportedPolicy)
         );
     }
@@ -745,12 +835,8 @@ mod tests {
             }),
             names: vec!["book".into()],
         };
-        let argument = roles
-            .agents_argument(address(Aspect::Mind, "anything", Layer::Quaternary))
-            .unwrap()
-            .expect("an Any-caller role is offered to every flow");
-        let agents: serde_json::Value = serde_json::from_str(&argument).unwrap();
-        let book = &agents["book"];
+        let offered = offered(&roles, address(Aspect::Mind, "anything", Layer::Quaternary));
+        let (book, _) = &offered["book"];
         assert_eq!(book["model"], "opus");
         assert_eq!(book["effort"], "xhigh");
         assert_eq!(
@@ -771,13 +857,16 @@ mod tests {
             }),
             names: vec!["illustrator".into()],
         };
-        let argument = roles
-            .agents_argument(address(Aspect::Psyche, "core", Layer::Tertiary))
-            .unwrap()
-            .expect("offered");
-        let agents: serde_json::Value = serde_json::from_str(&argument).unwrap();
-        let illustrator = agents["illustrator"].as_object().unwrap();
+        let offered_files = offered(&roles, address(Aspect::Psyche, "core", Layer::Tertiary));
+        let (illustrator, _) = &offered_files["illustrator"];
         assert_eq!(illustrator.get("tools"), Some(&serde_json::json!([])));
+        assert!(
+            roles
+                .agent_files(address(Aspect::Psyche, "core", Layer::Tertiary))
+                .unwrap()[0]
+                .agent_file_text
+                .contains("\ntools: []\n")
+        );
 
         let mut inherited = any_caller_role("sonnet", Effort::Medium, Vec::new());
         inherited.role_tools = RoleTools::Inherit;
@@ -787,12 +876,8 @@ mod tests {
             }),
             names: vec!["illustrator".into()],
         };
-        let argument = roles
-            .agents_argument(address(Aspect::Psyche, "core", Layer::Tertiary))
-            .unwrap()
-            .expect("offered");
-        let agents: serde_json::Value = serde_json::from_str(&argument).unwrap();
-        assert!(agents["illustrator"].get("tools").is_none());
+        let offered_files = offered(&roles, address(Aspect::Psyche, "core", Layer::Tertiary));
+        assert!(offered_files["illustrator"].0.get("tools").is_none());
     }
 
     #[test]

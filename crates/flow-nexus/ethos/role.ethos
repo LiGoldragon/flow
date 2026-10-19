@@ -13,11 +13,15 @@
 ; VerifiedRole is the guard on the text: its fields are private and its one
 ; constructor is VerifiesRole.verified_role, so no text but Curriculum's
 ; verified answer reaches a native agent definition.
+;
+; A permitted role reaches Claude as an agent file: Markdown whose
+; frontmatter carries the role's policy and whose body is its verified
+; text, written for one launch under the launch's tmpfs role directory and
+; removed when the launch's held system prompt is released.
 
 Library
 [ signal_flow:[ Address ]
-  flow_nexus:[ RoleSelection RoleComposition VerifiedRole ]
-  serde_json:JsonValue.Value ]
+  flow_nexus:[ RoleSelection RoleComposition VerifiedRole ] ]
 [ ; Why a role was not composed, verified, or rendered for its surface.
   RoleRefusal.[ ComposerUnavailable
                 ComposerRejected
@@ -28,9 +32,15 @@ Library
                 ; A policy Flow cannot give the harness exactly: a Restricted
                 ; permission, an empty or inherited model, an empty or
                 ; repeated tool name, or an empty caller list.
-                UnsupportedPolicy ]
+                UnsupportedPolicy
+                ; An agent file larger than Claude Code reads whole.
+                OversizedRole ]
   ; The roles a Claude flow is offered, by role name.
   SubagentRoleNames.Vector<String>
+  ; One role as Claude Code's agent file: its name, which is also its file
+  ; stem, and its whole Markdown text.
+  AgentFile.{ AgentFileName.String
+              AgentFileText.String }
   ; What one PreToolUse Agent call asks, as the hook reads it.
   AgentCall.{ SubagentType.String
               Nested.Boolean
@@ -61,9 +71,9 @@ Library
   VerifiesRole.[ verified_role:{ [ RoleSelecting RoleComposing ] [ Result<Self RoleRefusal> ] } ]
   ReadsVerifiedRole.[ role_name.[ String ]
                       permits.{ [ Addressed ] [ Boolean ] }
-                      native_definition.[ Result<JsonValue RoleRefusal> ] ]
+                      agent_file.[ Result<AgentFile RoleRefusal> ] ]
   ComposesSubagentRoles.[ governs.{ [ AgentCalling ] [ Boolean ] }
                           permitted_roles.{ [ Addressed ] [ Result<Vector<VerifiedRole> RoleRefusal> ] }
-                          agents_argument.{ [ Addressed ] [ Result<Option<String> RoleRefusal> ] } ]
+                          agent_files.{ [ Addressed ] [ Result<Vector<AgentFile> RoleRefusal> ] } ]
   AuthorizesAgentCall.[ decide.{ [ AgentCalling ResolvesAgentCaller ] [ AgentDecision ] } ] ]
 []

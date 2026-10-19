@@ -26,7 +26,7 @@ Option<NativeSessionId> Option<TranscriptPath> }`, `Event` appends
 and the meta wire adds `ReadQueueDeliveries.Address`. The store upgrades
 `flow-nexus-flow-events` from v1 to v2, each older `Stopped` read as
 `Stopped.{ None None }`; the unreleased queue-delivery request and attempt
-families move to v2 and v3. Claude seats launched from this release carry a
+families move to v2 and v3 (the attempts to v4 at 0.35.18). Claude seats launched from this release carry a
 UserPromptSubmit hook beside SessionStart, PostToolUse and Stop.
 
 - **A Claude seat drains on its own turn end.** `flow-hook` reports a Stop

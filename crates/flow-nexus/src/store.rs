@@ -5593,7 +5593,7 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v3",
+                "flow-nexus-queue-delivery-attempt-v4",
             ),
             _ => return None,
         };

@@ -125,7 +125,11 @@ impl From<&TitleRefusal> for NativeLaunchFailure {
             TitleRefusal::TranscriptUnreadable => Self::TranscriptUnreadable,
             TitleRefusal::ReadbackDiffers => Self::TitleReadbackDiffers,
             TitleRefusal::CodexNamingRefused => Self::CodexNamingRefused,
-            TitleRefusal::PaneLabelRefused => Self::PaneLabelRefused,
+            // The contract names one Herdr label refusal; the workspace
+            // label is a Herdr label the title sets beside the pane's.
+            TitleRefusal::PaneLabelRefused | TitleRefusal::WorkspaceLabelRefused => {
+                Self::PaneLabelRefused
+            }
         }
     }
 }

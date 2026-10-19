@@ -56,8 +56,7 @@ Address gives it back in that write: a metaflow still Awake as the flow
 returns to what the hold kept, keeping its queue; one the launch created is
 removed, or left Asleep when requests were queued meanwhile. A seat that holds its Address neither sleeps nor drains at a
 Stop. The taking follows Bind's rules: a metaflow Awake as a live flow, or
-bound to a live process, is refused, an Ended one is refused, and an absent
-or Asleep one, or one Awake as a flow no longer live, is taken, a displaced
+bound to a live process, is refused, and an absent or Asleep one, or one Awake as a flow no longer live, is taken, a displaced
 flow joining Past; a replacement takes over its predecessor's. Start refuses
 before launching an Address it could not take or another unsettled launch
 names. A resumed wake takes its Address through the same rule with
@@ -154,7 +153,11 @@ afterward) and `Uncertain` (typed, reaction unobserved). Each step is written
 to a `PaneLease` row; a row found when the store opens settles `Uncertain`
 and is never retried, and `Deliver` repeats answer the stored `Delivery`. A
 Pending row is promoted only by a Presented Deliver; no probe or marker is
-ever typed to promote it. Stop changes the durable lifecycle only after the
+ever typed to promote it. `Command.Compact` is an emergency measure: before
+the lease is taken it is refused `CompactionRefused` unless the flow's
+context at its last Stop (`flow_nexus_flow_context_sizes`) reached the
+Refresh threshold of its layer, the layer of the metaflow Awake as it, else
+of its launch. Stop changes the durable lifecycle only after the
 exact pane closes successfully, and closes under the lease. `List` reads the
 same store rows and sorts them by Flow ID.
 
@@ -303,8 +306,8 @@ Flow's runs and no unsettled launch opened is `ThreadUnowned`, a Stopped, Retire
 `FlowEnded`, and a flow whose metaflow is no longer Awake as it (Asleep, or
 moved on by a Refresh or a fresh wake) is `NotAwake`; none is recorded. The
 request is queued for the target, with that sender, under the rules a Lock and a Deliver follow
-(an absent target is `UnknownRecipient`, an Ended one `RecipientEnded`, one
-Message holds an unexpired lock on is `Held`), and the call is
+(an absent target is `UnknownRecipient`, one Message holds an unexpired lock
+on is `Held`), and the call is
 recorded with its outcome in the commit that queues it, in
 `flow_nexus_send_calls`, keyed by thread, turn and call id with the digest of
 its tool and arguments. A call whose key is recorded with the same digest is
@@ -378,7 +381,12 @@ letters, digits and hyphens; any other model is not composed. A seat runs
 the model configured for its Address's layer and aspect (`Models` holds one
 per Layer and Aspect): a Start or Replace naming another is refused
 `ModelRefused` before the Nexus writes, claims, composes or opens anything,
-and a fresh wake takes that model. No environment variable is laid over the stored values;
+and a fresh wake takes that model. Short term a Primary is not started
+without its Secondary: a Start of a Primary is refused `NoSecondary`, at the
+same point, unless a metaflow is recorded, Awake or Asleep, at the Secondary
+of its aspect and topic; a metaflow sleeps whenever its harness goes idle,
+so a recorded Secondary is one that has started. A metaflow is never ended:
+it is Awake or Asleep. No environment variable is laid over the stored values;
 `Configure` is their only way in. The adapter is outside the Signal wire boundary: the
 Codex app-server conversation is WebSocket/JSON-RPC through the configured
 control socket. `ConsumeReset` uses the same adapter but is reachable only

@@ -104,19 +104,16 @@ impl MutatesMetaflows for FlowStore {
             return Ok(Response::Refused(Refusal::Taken(address)));
         }
         let existing = self.stored_metaflow(&address)?;
-        if let Some(stored) = existing.as_ref() {
-            if stored.metaflow.state == MetaflowState::Ended {
-                return Ok(Response::Refused(Refusal::Ended(address)));
+        if let Some(stored) = existing.as_ref()
+            && let Some(previous) = self.bound_process(&address)?
+        {
+            if previous == *peer
+                && let MetaflowState::Awake(id) = &stored.metaflow.state
+            {
+                return Ok(Response::Bound(id.clone()));
             }
-            if let Some(previous) = self.bound_process(&address)? {
-                if previous == *peer
-                    && let MetaflowState::Awake(id) = &stored.metaflow.state
-                {
-                    return Ok(Response::Bound(id.clone()));
-                }
-                if FlowStore::process_is_live(&previous) {
-                    return Ok(Response::Refused(Refusal::Taken(address)));
-                }
+            if FlowStore::process_is_live(&previous) {
+                return Ok(Response::Refused(Refusal::Taken(address)));
             }
         }
         let state = self.state()?;
@@ -170,7 +167,6 @@ impl MutatesMetaflows for FlowStore {
         };
         match sender.metaflow.state {
             MetaflowState::Asleep => return Ok(Response::Refused(Refusal::Asleep)),
-            MetaflowState::Ended => return Ok(Response::Refused(Refusal::Ended(request.sender))),
             MetaflowState::Awake(_) => {}
         }
         let address = match request.recipient {
@@ -189,13 +185,10 @@ impl MutatesMetaflows for FlowStore {
                 }
             }
         };
-        let Some(recipient) = self.stored_metaflow(&address)? else {
+        if self.stored_metaflow(&address)?.is_none() {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
                 address,
             ))));
-        };
-        if recipient.metaflow.state == MetaflowState::Ended {
-            return Ok(Response::Refused(Refusal::Ended(address)));
         }
         if let Some(held) = self.stored_metaflow_lock(&address)?
             && held.lock.until > now
@@ -248,9 +241,6 @@ impl MutatesMetaflows for FlowStore {
                 request.lock.address,
             ))));
         };
-        if stored.metaflow.state == MetaflowState::Ended {
-            return Ok(Response::Refused(Refusal::Ended(request.lock.address)));
-        }
         // The request is queued with the Sender its Lock named, which the
         // bound Message peer asserted.
         stored.metaflow.queue.push(QueuedRequest {
@@ -356,8 +346,8 @@ pub(crate) struct TakenAddress {
 
 /// How a flow Flow launched takes the metaflow of its Address. The rules
 /// are Bind's: a metaflow Awake as a live flow, or bound to a live process,
-/// is refused (AddressAwake), an Ended one is refused (AddressEnded), and
-/// an absent, Asleep, or Awake-as-not-live one is taken, a displaced flow
+/// is refused (AddressAwake), and an absent, Asleep, or Awake-as-not-live
+/// one is taken, a displaced flow
 /// joining Past. A launch takes over the predecessor its profile names,
 /// live or not, and a flow already Awake there keeps it. A taken flow is
 /// never also Past: a resumed one leaves it.
@@ -380,6 +370,12 @@ pub(crate) trait TakesLaunchAddress {
     ) -> Result<Option<StartRejection>, StoreError>;
     /// Whether a flow is live: its row is Pending or Active.
     fn flow_is_live(&self, flow_id: &str) -> Result<bool, StoreError>;
+    /// Short term, a Primary is not started without its Secondary, and the
+    /// Secondary starts first: NoSecondary when the Address is a Primary
+    /// and no metaflow is recorded, Awake or Asleep, at the Secondary of
+    /// its aspect and topic. A metaflow sleeps whenever its harness goes
+    /// idle, so a recorded Secondary is one that has started.
+    fn secondary_refusal(&self, address: &Address) -> Result<Option<StartRejection>, StoreError>;
 }
 
 impl TakesLaunchAddress for FlowStore {
@@ -403,9 +399,6 @@ impl TakesLaunchAddress for FlowStore {
             },
         };
         match &metaflow.state {
-            MetaflowState::Ended => {
-                return Ok(AddressTaking::Refused(StartRejection::AddressEnded));
-            }
             MetaflowState::Awake(current) if current == flow_id => {}
             MetaflowState::Awake(current) => {
                 if Some(current.as_str()) != predecessor
@@ -442,7 +435,6 @@ impl TakesLaunchAddress for FlowStore {
         let predecessor = profile.flow_id_option.as_deref();
         let refused = match self.stored_metaflow(&profile.address)? {
             Some(stored) => match &stored.metaflow.state {
-                MetaflowState::Ended => Some(StartRejection::AddressEnded),
                 MetaflowState::Awake(current) => (Some(current.as_str()) != predecessor
                     && (self.flow_is_live(current)?
                         || self
@@ -475,6 +467,21 @@ impl TakesLaunchAddress for FlowStore {
             }
         }
         Ok(None)
+    }
+
+    fn secondary_refusal(&self, address: &Address) -> Result<Option<StartRejection>, StoreError> {
+        if address.layer != Layer::Primary {
+            return Ok(None);
+        }
+        let secondary = Address {
+            aspect: address.aspect.clone(),
+            topic: address.topic.clone(),
+            layer: Layer::Secondary,
+        };
+        Ok(self
+            .stored_metaflow(&secondary)?
+            .is_none()
+            .then_some(StartRejection::NoSecondary))
     }
 
     fn flow_is_live(&self, flow_id: &str) -> Result<bool, StoreError> {

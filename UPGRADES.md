@@ -1,3 +1,35 @@
+# Flow 0.35.22
+
+Pins signal-flow 23.0.0 (c7dcc074, contract digest 32765a41a9454b06) and
+meta-signal-flow 29.0.0 (573a2c59, contract digest 72678ba9f74bda5d): every
+ordinary- and meta-socket peer repins.
+
+- **A topic never dies; it goes idle.** flow-ethos `State` is
+  `[ Awake.FlowId Asleep ]`. `Query.End`, `Response.Ended`, `Current.Ended`,
+  `Refusal.Ended`, `Refusal.OffRoute`, `StartRejection.AddressEnded`,
+  `RefreshRejection.Ended` and the send tool's `RecipientEnded` are gone:
+  `End.{ Psyche flow Primary }` no longer reads.
+- **A Primary starts after its Secondary.** A Start whose Address is a
+  Primary is refused `StartRejected.NoSecondary`, before anything is
+  written, claimed, composed or opened, unless a metaflow is recorded, Awake
+  or Asleep, at the Secondary of its aspect and topic.
+- **Compaction is refused below the Refresh threshold.** `Command.Compact`
+  is refused, before anything reaches the pane, unless the flow's context at
+  its last Stop reached the Refresh threshold of its layer:
+  `CommandRejected.CompactionRefused.BelowThreshold.{ 120000 200000 }`,
+  `.Unmeasured`, `.NoThreshold`. A Codex flow records no context size, so
+  its Compact answers `Unmeasured`.
+
+The store changes, carried in one open by the Nexus: the metaflow family
+`flow-nexus-metaflow` v2 (and v1) to v3 and the Address-hold family
+`flow-nexus-address-hold` v2 (and v1) to v3, an Ended metaflow carried
+Asleep with its past and queue; the launch-outcome family
+`flow-nexus-launch-outcome` v5 (and v4, v3, v2) to v6; the send-call family
+`flow-nexus-send-call` v1 to v2. A kept launch outcome refused
+`AddressEnded`, or a kept send call refused `RecipientEnded`, refuses the
+open, naming its key: no current refusal says what it said. Such a row
+exists only where a metaflow was once Ended.
+
 # Flow 0.35.21
 
 No contract, store or deployment change.

@@ -1210,7 +1210,6 @@ impl RefreshesMetaflows for RunningNexus {
         };
         match metaflow.state {
             flow_ethos::State::Awake(_) => return rejected(RefreshRejection::Awake),
-            flow_ethos::State::Ended => return rejected(RefreshRejection::Ended),
             flow_ethos::State::Asleep => {}
         }
         let profiled = metaflow

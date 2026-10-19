@@ -241,8 +241,7 @@ impl Dispatches for RunningNexus {
             | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
-            | Query::Release(_)
-            | Query::End(_) => Response::Refused(signal_flow::Refusal::NotMessage),
+            | Query::Release(_) => Response::Refused(signal_flow::Refusal::NotMessage),
             Query::Metaflows => self.store.list_metaflows().map_or_else(
                 |error| Response::Refused(signal_flow::Refusal::Store(error.to_string())),
                 Response::Listed,
@@ -633,8 +632,7 @@ impl ServesConnection for Connection {
             | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
-            | Query::Release(_)
-            | Query::End(_)) => {
+            | Query::Release(_)) => {
                 // A queued request is durable: the recipient's wake is read
                 // from Flow's records after the answer, whether or not the
                 // answer reached the sender, off the dispatch gate.
@@ -1154,6 +1152,7 @@ mod tests {
     mod model;
     mod queue_drain;
     mod reservation;
+    mod secondary;
     mod send_tool;
     mod submission;
     mod waking;
@@ -4134,9 +4133,7 @@ mod tests {
         assert!(
             !matches!(
                 response,
-                Response::StartRejected(
-                    StartRejection::AddressAwake | StartRejection::AddressEnded
-                )
+                Response::StartRejected(StartRejection::AddressAwake)
             ),
             "the Address is free: {response:?}"
         );
@@ -4231,11 +4228,10 @@ mod tests {
     /// A launch names the Address of its seat: the write acknowledging the
     /// seat's witnessed binding records that metaflow Awake as the launched
     /// flow and holds it, confirmation keeps it in the write that makes the
-    /// flow Active, and a Start at an Address a live seat holds, or one
-    /// ended, is refused before anything launches.
+    /// flow Active, and a Start at an Address a live seat holds is refused
+    /// before anything launches.
     #[test]
     fn a_confirmed_launch_takes_its_address_and_a_held_address_refuses_the_next_start() {
-        use crate::store::ManagesMetaflowState as _;
         use crate::store::address_hold::HoldsLaunchAddress as _;
         use crate::store::metaflow::SleepsMetaflows as _;
         let fixture = NexusFixture::new();
@@ -4302,18 +4298,6 @@ mod tests {
             fixture.nexus.dispatch(Query::Start(second.request())),
             Response::StartRejected(StartRejection::AddressAwake),
             "the Address is Awake as a live flow"
-        );
-        assert_eq!(
-            fixture
-                .nexus
-                .store
-                .end_metaflow(address.clone(), 0)
-                .unwrap(),
-            Response::Ended
-        );
-        assert_eq!(
-            fixture.nexus.dispatch(Query::Start(second.request())),
-            Response::StartRejected(StartRejection::AddressEnded)
         );
         assert_eq!(
             fs::read_to_string(&calls).unwrap_or_default(),

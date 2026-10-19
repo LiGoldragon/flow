@@ -47,6 +47,13 @@ flow-meta 'Deliver.{ m-81b0e4:00f95a:0 00f95a HardAbrupt.{ m-81b0e4 Flow.e167d8 
 flow-meta 'Command.{ 00f95a Compact }'
 ```
 
+Compaction is an emergency measure: `Command.{ 00f95a Compact }` is refused,
+before anything reaches the pane, unless the flow's context at its last Stop
+reached the Refresh threshold configured for its layer
+(`CommandRejected.CompactionRefused.BelowThreshold.{ 120000 200000 }`,
+`.Unmeasured` with no context recorded, `.NoThreshold` with no threshold for
+its layer).
+
 Flow renders the Message itself, so the pane text always begins
 `HardAbrupt.`, `MiddleAbrupt.` or `Soft.`, then the letter's MessageId:
 
@@ -109,8 +116,11 @@ identified and sends through Message; confirmation keeps it, so the seat
 sleeps at a resting Stop and a queued request wakes it, and a launch refused,
 or a flow that ends, before confirmation gives the metaflow back as it found
 it; a Start whose Address a live seat holds, or another unsettled launch
-names, answers `StartRejected.AddressAwake`, and one at an ended Address
-`StartRejected.AddressEnded`. Profile producers should use the
+names, answers `StartRejected.AddressAwake`. A metaflow is Awake or Asleep:
+a topic never dies, it goes idle. A Primary starts after its Secondary: a
+Start of a Primary whose Secondary metaflow (the same aspect and topic) is
+not recorded, Awake or Asleep, answers `StartRejected.NoSecondary` before
+anything is written. Profile producers should use the
 generated `signal-flow` Datom types rather than assembling positional text.
 The old `flow start ...`, `flow restart ...`, and `flow resolve ...` argument
 forms are rejected.

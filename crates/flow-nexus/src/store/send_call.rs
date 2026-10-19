@@ -6,25 +6,31 @@
 //! and is answered from it, its request queued once. The rows are their own
 //! table, so a store written before them opens with the table added and
 //! holds none.
+//!
+//! A store before 0.35.22 keeps its calls as v1 rows, whose refusals could
+//! name an ended recipient; each is carried into the current shape, and a
+//! call refused for an ended recipient refuses the upgrade, the store left
+//! as it was: no metaflow is ended any more, and no current refusal says
+//! what it said.
 
 use super::{
-    FlowStore, ManagesMetaflowState, MetaflowState, NamesLiveFlow, ReadsFlowRows,
-    ReadsLaunchAttempt, StoreError,
+    FlowStore, ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, StoreError,
     metaflow::{SleepsMetaflows, TakesLaunchAddress},
     opened_thread::RecordsOpenedThreads,
 };
 use crate::generated::send_tool::{
     Queued_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,
 };
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, EngineRecord, FamilyName, QueryPlan, RecordKey, SchemaHash, TableDescriptor,
-    TableName,
+    Assertion, Decision, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan,
+    RecordKey, SchemaHash, TableDescriptor, TableName, UpgradeFrom,
 };
 use signal_flow::{Address, HarnessKind, QueuedRequest, Request, SentBy};
 
 pub(super) const SEND_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_send_calls");
 pub(super) const SEND_CALL_FAMILY: &str = "flow-nexus-send-call";
-pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v1";
+pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v2";
 
 /// The record key of a call: each part prefixed by its length, so no two
 /// keys of different parts read alike.
@@ -52,6 +58,95 @@ impl EngineRecord for SendCall {
     }
 }
 
+impl MemoryDefinition for SendCall {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(SEND_CALL_SCHEMA)
+    }
+}
+
+/// A call as Flow kept it before 0.35.22.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SendCallV1 {
+    tool_call_key: ToolCallKey,
+    content_sha256: String,
+    send_outcome: SendOutcomeV1,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum SendOutcomeV1 {
+    Queued(Queued_Data),
+    Refused(SendRefusalV1),
+}
+
+/// The send tool's refusal as 0.35.21 archived it, RecipientEnded between
+/// UnknownRecipient and Held.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum SendRefusalV1 {
+    UnknownTool,
+    Malformed,
+    ThreadUnowned,
+    FlowEnded,
+    NotAwake,
+    KeyReused,
+    UnknownRecipient(Target),
+    RecipientEnded(Target),
+    Held,
+    Store,
+}
+
+impl EngineRecord for SendCallV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.tool_call_key.record_key_text())
+    }
+}
+
+impl MemoryDefinition for SendCallV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-call-v1")
+    }
+}
+
+/// A kept call refused for an ended recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndedRecipientCall;
+
+impl UpgradeFrom<SendCallV1> for SendCall {
+    type Refusal = EndedRecipientCall;
+
+    fn upgrade_from(previous: SendCallV1) -> Decision<Self, Self::Refusal> {
+        let send_outcome = match previous.send_outcome {
+            SendOutcomeV1::Queued(queued) => SendOutcome::Queued(queued),
+            SendOutcomeV1::Refused(refusal) => SendOutcome::Refused(match refusal {
+                SendRefusalV1::UnknownTool => SendRefusal::UnknownTool,
+                SendRefusalV1::Malformed => SendRefusal::Malformed,
+                SendRefusalV1::ThreadUnowned => SendRefusal::ThreadUnowned,
+                SendRefusalV1::FlowEnded => SendRefusal::FlowEnded,
+                SendRefusalV1::NotAwake => SendRefusal::NotAwake,
+                SendRefusalV1::KeyReused => SendRefusal::KeyReused,
+                SendRefusalV1::UnknownRecipient(target) => SendRefusal::UnknownRecipient(target),
+                SendRefusalV1::RecipientEnded(_) => {
+                    return Decision::Refused(EndedRecipientCall);
+                }
+                SendRefusalV1::Held => SendRefusal::Held,
+                SendRefusalV1::Store => SendRefusal::Store,
+            }),
+        };
+        Decision::Ready(Self {
+            tool_call_key: previous.tool_call_key,
+            content_sha256: previous.content_sha256,
+            send_outcome,
+        })
+    }
+}
+
 pub(super) trait DescribesSendCallTable {
     fn descriptor() -> TableDescriptor<SendCall>;
 }
@@ -63,6 +158,7 @@ impl DescribesSendCallTable for SendCall {
             FamilyName::new(SEND_CALL_FAMILY),
             SchemaHash::for_label(SEND_CALL_SCHEMA),
         )
+        .with_predecessor::<SendCallV1>()
     }
 }
 
@@ -85,9 +181,8 @@ pub(crate) trait KeepsSendCalls {
     fn record_send_call(&self, call: SendCall) -> Result<(), StoreError>;
     /// Queues a call's request for its target under the rules a Lock and a
     /// Deliver follow, and records the call with its outcome in the same
-    /// commit: an absent target is UnknownRecipient, an Ended one
-    /// RecipientEnded, one Message holds an unexpired lock on is Held; a
-    /// refused call is recorded alone.
+    /// commit: an absent target is UnknownRecipient, one Message holds an
+    /// unexpired lock on is Held; a refused call is recorded alone.
     fn queue_send(
         &self,
         key: &ToolCallKey,
@@ -201,9 +296,6 @@ impl KeepsSendCalls for FlowStore {
         let Some(mut stored) = self.stored_metaflow(target)? else {
             return refused(SendRefusal::UnknownRecipient(target.clone()));
         };
-        if stored.metaflow.state == MetaflowState::Ended {
-            return refused(SendRefusal::RecipientEnded(target.clone()));
-        }
         // Message holds the target while it delivers; Lock refuses another
         // sender then, and so does the send tool.
         if self
@@ -228,5 +320,100 @@ impl KeepsSendCalls for FlowStore {
         self.engine.commit_atomic(commit)?;
         // This is durable enqueue, never a claim of native delivery or wake.
         Ok(outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KeepsSendCalls, SendCallV1, SendOutcomeV1, SendRefusalV1};
+    use crate::generated::send_tool::{SendCall, SendOutcome, SendRefusal, ToolCallKey};
+    use crate::store::{FlowStore, OpensFlowStore};
+    use sema_engine::{
+        Assertion, Engine, EngineOpen, FamilyName, SchemaHash, SchemaVersion, TableDescriptor,
+        TableName,
+    };
+
+    fn key(call_id: &str) -> ToolCallKey {
+        ToolCallKey {
+            thread_id: "thread-1".into(),
+            turn_id: "turn-1".into(),
+            call_id: call_id.into(),
+        }
+    }
+
+    fn seed_v1(path: &std::path::Path, calls: Vec<SendCallV1>) {
+        let mut engine =
+            Engine::open(EngineOpen::new(path, SchemaVersion::new(1))).expect("store opens");
+        let table = engine
+            .register_table(TableDescriptor::new(
+                TableName::new("flow_nexus_send_calls"),
+                FamilyName::new("flow-nexus-send-call"),
+                SchemaHash::for_label("flow-nexus-send-call-v1"),
+            ))
+            .expect("v1 send call family registers");
+        for call in calls {
+            engine
+                .assert(Assertion::new(table, call))
+                .expect("v1 call persists");
+        }
+    }
+
+    /// A 0.35.21 call opens in the current shape: Held and Store, after the
+    /// removed RecipientEnded, keep their meaning.
+    #[test]
+    fn v1_send_calls_upgrade_without_the_ended_recipient() {
+        let directory = tempfile::tempdir().expect("store directory");
+        let path = directory.path().join("flow.sema");
+        let v1 = |call_id: &str, refusal| SendCallV1 {
+            tool_call_key: key(call_id),
+            content_sha256: "digest".into(),
+            send_outcome: SendOutcomeV1::Refused(refusal),
+        };
+        seed_v1(
+            &path,
+            vec![
+                v1("held", SendRefusalV1::Held),
+                v1("store", SendRefusalV1::Store),
+            ],
+        );
+        let store = FlowStore::open(&path).expect("store opens");
+        for (call_id, refusal) in [("held", SendRefusal::Held), ("store", SendRefusal::Store)] {
+            assert_eq!(
+                store.send_call(&key(call_id)).unwrap(),
+                Some(SendCall {
+                    tool_call_key: key(call_id),
+                    content_sha256: "digest".into(),
+                    send_outcome: SendOutcome::Refused(refusal),
+                })
+            );
+        }
+    }
+
+    /// A kept call refused for an ended recipient refuses the open.
+    #[test]
+    fn a_v1_call_refused_for_an_ended_recipient_refuses_the_open() {
+        let directory = tempfile::tempdir().expect("store directory");
+        let path = directory.path().join("flow.sema");
+        seed_v1(
+            &path,
+            vec![SendCallV1 {
+                tool_call_key: key("ended"),
+                content_sha256: "digest".into(),
+                send_outcome: SendOutcomeV1::Refused(SendRefusalV1::RecipientEnded(
+                    signal_flow::Address {
+                        aspect: signal_flow::Aspect::Mind,
+                        topic: "flow".into(),
+                        layer: signal_flow::Layer::Secondary,
+                    },
+                )),
+            }],
+        );
+        let Err(error) = FlowStore::open(&path) else {
+            panic!("an ended recipient call opens")
+        };
+        assert!(
+            error.to_string().contains("ended recipient"),
+            "the refusal says why: {error}"
+        );
     }
 }

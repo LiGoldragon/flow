@@ -188,6 +188,19 @@ impl LaunchesFlows for RunningNexus {
             }
             Err(_) => return persistence(),
         }
+        // A Primary's Secondary starts first; without it the Start is
+        // refused before anything is written, composed or opened.
+        match self.store.secondary_refusal(&profile.address) {
+            Ok(None) => {}
+            Ok(Some(rejection)) => {
+                eprintln!(
+                    "flow-nexus: launch {launch_request_id} refused: no Secondary is recorded for {:?} {}",
+                    profile.address.aspect, profile.address.topic
+                );
+                return Response::StartRejected(rejection);
+            }
+            Err(_) => return persistence(),
+        }
         // A hold an ended flow still keeps on this Address is given back
         // first, so the refusal reads what Metaflows reports.
         match self.store.give_back_ended_holds(&profile.address) {
@@ -1221,9 +1234,6 @@ impl ResumesReplacement for RunningNexus {
             }
             Outcome::Failed(Failed_Data::AddressAwake) => {
                 Response::StartRejected(StartRejection::AddressAwake)
-            }
-            Outcome::Failed(Failed_Data::AddressEnded) => {
-                Response::StartRejected(StartRejection::AddressEnded)
             }
             _ => Response::StartRejected(StartRejection::LaunchPersistenceRefused),
         }

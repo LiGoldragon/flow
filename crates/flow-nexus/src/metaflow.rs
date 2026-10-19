@@ -150,14 +150,6 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Ok(response) => response.into(),
                 Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
             };
-        } else if let Query::End(address) = query {
-            match self.store.identify_process(peer.clone()) {
-                Ok(Response::Identified(caller)) if caller == address => {
-                    self.store.end_metaflow(address, now)
-                }
-                Ok(_) => return Response::Refused(Refusal::OffRoute).into(),
-                Err(error) => return Response::Refused(Refusal::Store(error.to_string())).into(),
-            }
         } else {
             match self.store.message_peer(peer) {
                 Ok(true) => {}

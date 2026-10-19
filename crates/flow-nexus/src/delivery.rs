@@ -18,6 +18,7 @@ use crate::RunningNexus;
 use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::pane::{Interruption, PaneAgent, Placement, Submission, WritesPane};
 use crate::performing::Performs;
+use crate::store::context::JudgesCompaction;
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::{ReadsFlowRows, RecordsReplacement};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
@@ -232,6 +233,17 @@ impl DeliversMessages for RunningNexus {
             Ok(target) => target,
             Err(refusal) => return Response::CommandRejected(refusal.into()),
         };
+        // Compaction is an emergency measure: below its layer's Refresh
+        // threshold it is refused before anything reaches the pane.
+        if request.harness_command == HarnessCommand::Compact {
+            match self.store.compaction_refusal(&target.node.flow_id) {
+                Ok(None) => {}
+                Ok(Some(refusal)) => {
+                    return Response::CommandRejected(CommandRejection::CompactionRefused(refusal));
+                }
+                Err(_) => return Response::CommandRejected(CommandRejection::NotDelivered),
+            }
+        }
         let _lease = self.pane_leases.hold(&target.route);
         let agent_state = match self.writable_state(&target) {
             Ok(agent_state) => agent_state,

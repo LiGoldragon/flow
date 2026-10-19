@@ -1505,7 +1505,7 @@ impl ReadsLiveness for FlowLifecycle {
 /// A launch takes its Address by Bind's rules: an Address Awake as a live
 /// flow is refused unless that flow is the predecessor the launch replaces;
 /// one Awake as a flow no longer live, or Asleep, is taken, a displaced
-/// flow joining Past; an Ended one is refused. A resumed flow leaves Past.
+/// flow joining Past. A resumed flow leaves Past.
 #[test]
 fn a_launch_takes_its_address_by_binds_rules() {
     use crate::store::metaflow::{AddressTaking, TakesLaunchAddress};
@@ -1566,10 +1566,6 @@ fn a_launch_takes_its_address_by_binds_rules() {
     assert_eq!(resumed.state, State::Awake("dddddd".into()));
     assert!(resumed.past.is_empty());
     assert!(resumed.queue.is_empty());
-
-    // Ended: refused.
-    store.seed_metaflow(metaflow(Layer::Tertiary, State::Ended, vec![], vec![]));
-    assert_eq!(taken(None, "eeeeee"), Err(StartRejection::AddressEnded));
 }
 
 /// A seat Flow launched sends through Message: Message names the sending
@@ -2658,16 +2654,6 @@ fn a_refresh_is_refused_typed_unless_the_metaflow_is_asleep_with_a_launch_of_rec
         Response::RefreshRejected(RefreshRejection::Awake)
     );
 
-    let ended = address(Layer::Quaternary);
-    fixture
-        .nexus
-        .store
-        .seed_metaflow(metaflow(Layer::Quaternary, State::Ended, vec![], vec![]));
-    assert_eq!(
-        refresh(&fixture, &ended),
-        Response::RefreshRejected(RefreshRejection::Ended)
-    );
-
     // Asleep, but no launch of record names its last flow, or it has no
     // last flow: a fresh wake has nothing to compose from.
     let unlaunched = address(Layer::Secondary);
@@ -2689,7 +2675,7 @@ fn a_refresh_is_refused_typed_unless_the_metaflow_is_asleep_with_a_launch_of_rec
         refresh(&fixture, &unlaunched),
         Response::RefreshRejected(RefreshRejection::NoLaunchProfile)
     );
-    for at in [&unknown, &ended, &unlaunched] {
+    for at in [&unknown, &unlaunched] {
         assert!(
             !fixture.nexus.store.fresh_wake_marked(at).unwrap(),
             "a refused Refresh marks nothing"

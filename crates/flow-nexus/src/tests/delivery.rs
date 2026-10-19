@@ -80,6 +80,40 @@ impl NexusFixture {
     fn operations(&self) -> String {
         fs::read_to_string(self.directory.path().join("herdr-operations.log")).unwrap_or_default()
     }
+
+    /// The fixture flow Awake as { Psyche flow Secondary }, its layer's
+    /// Refresh threshold `refresh` tokens.
+    fn at_secondary_refreshing_at(&self, refresh: i64) {
+        use crate::store::ManagesMetaflowState as _;
+        use crate::store::metaflow::SeedsMetaflow as _;
+        self.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            address: signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "flow".into(),
+                layer: signal_flow::Layer::Secondary,
+            },
+            state: flow_ethos::State::Awake("908786".into()),
+            past: vec![],
+            queue: vec![],
+        });
+        self.nexus
+            .store
+            .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
+                meta_signal_flow::ConfigureThreshold {
+                    layer: signal_flow::Layer::Secondary,
+                    handover: refresh / 2,
+                    refresh,
+                },
+            ]))
+            .expect("threshold configured");
+    }
+
+    fn command(&self, harness_command: HarnessCommand) -> MetaResponse {
+        self.nexus.dispatch_meta(MetaQuery::Command(CommandRequest {
+            flow_id: "908786".into(),
+            harness_command,
+        }))
+    }
 }
 
 #[test]
@@ -435,6 +469,15 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         PromptFixture::Prompted("w1:p3"),
     );
     fixture.register_with(FlowLifecycle::Active);
+    fixture.at_secondary_refreshing_at(200_000);
+    {
+        use crate::store::context::RecordsContextSize as _;
+        fixture
+            .nexus
+            .store
+            .record_context_size("908786", 230_000)
+            .expect("context size recorded");
+    }
     assert_eq!(
         fixture
             .nexus
@@ -483,6 +526,70 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         "nothing to interrupt, and no Escape into a resting agent"
     );
     assert!(!resting.operations().contains("send-keys"));
+}
+
+/// Compaction is an emergency measure: a Compact is refused, before any
+/// key reaches the pane, until the flow's context at its last Stop reaches
+/// the Refresh threshold of its layer; at the threshold it is placed.
+#[test]
+fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
+    use crate::store::context::RecordsContextSize as _;
+    use meta_signal_flow::{CompactionRefusal, ContextBelowThreshold};
+    let fixture = NexusFixture::new();
+    let log = fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    let refused =
+        |refusal| MetaResponse::CommandRejected(CommandRejection::CompactionRefused(refusal));
+
+    // No metaflow is Awake as the flow and no launch names its layer.
+    assert_eq!(
+        fixture.command(HarnessCommand::Compact),
+        refused(CompactionRefusal::NoThreshold)
+    );
+    fixture.at_secondary_refreshing_at(200_000);
+    assert_eq!(
+        fixture.command(HarnessCommand::Compact),
+        refused(CompactionRefusal::Unmeasured),
+        "no Stop has recorded the flow's context"
+    );
+    fixture
+        .nexus
+        .store
+        .record_context_size("908786", 199_999)
+        .expect("context size recorded");
+    assert_eq!(
+        fixture.command(HarnessCommand::Compact),
+        refused(CompactionRefusal::BelowThreshold(ContextBelowThreshold {
+            context_tokens: 199_999,
+            refresh_tokens: 200_000,
+        }))
+    );
+    assert!(prompts(&log).is_empty(), "nothing reached the pane");
+    assert!(!fixture.operations().contains("send-keys"));
+
+    fixture
+        .nexus
+        .store
+        .record_context_size("908786", 200_000)
+        .expect("context size recorded");
+    assert_eq!(
+        fixture.command(HarnessCommand::Compact),
+        MetaResponse::Commanded(CommandOutcome {
+            flow_id: "908786".into(),
+            harness_command: HarnessCommand::Compact,
+            command_grade: CommandGrade::Observed,
+        })
+    );
+    assert_eq!(
+        prompts(&log),
+        vec![
+            "--session messaging-build agent prompt w1:p3 /compact --wait --until working --until idle --until done --until blocked --timeout 10000"
+                .to_owned()
+        ]
+    );
 }
 
 #[test]

@@ -7,7 +7,9 @@
 //! The row lives in its own table, so a store written before context sizes
 //! were kept opens with the table added and its flows simply have none.
 
-use super::{FlowStore, StoreError};
+use super::metaflow::SleepsMetaflows;
+use super::{FlowStore, ManagesMetaflowState, ReadsLaunchAttempt, StoreError};
+use meta_signal_flow::{CompactionRefusal, ContextBelowThreshold};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, SchemaHash,
@@ -101,6 +103,48 @@ impl RecordsContextSize for FlowStore {
 
     fn context_size(&self, flow_id: &str) -> Result<Option<i64>, StoreError> {
         Ok(self.context_size_row(flow_id)?.map(|row| row.tokens))
+    }
+}
+
+/// Compaction is an emergency measure, refused while the context is below
+/// a threshold: a flow is compacted only when its context at its last Stop
+/// was at or above the Refresh threshold configured for its layer, the
+/// point past which the flow should already have been refreshed. Its layer
+/// is the one of the metaflow Awake as it, else the one its launch named.
+pub trait JudgesCompaction {
+    /// Why a Compact of this flow is refused; None when it may compact.
+    fn compaction_refusal(&self, flow_id: &str) -> Result<Option<CompactionRefusal>, StoreError>;
+}
+
+impl JudgesCompaction for FlowStore {
+    fn compaction_refusal(&self, flow_id: &str) -> Result<Option<CompactionRefusal>, StoreError> {
+        let layer = match self.metaflow_awake_as(flow_id)? {
+            Some(metaflow) => Some(metaflow.address.layer),
+            None => match self.launch_requests_bound_to(flow_id)?.pop() {
+                Some(launch_request_id) => self
+                    .launch_attempt(&launch_request_id)?
+                    .map(|attempt| attempt.launch_profile.address.layer),
+                None => None,
+            },
+        };
+        let threshold = match layer {
+            Some(layer) => self.configured_threshold(&layer)?,
+            None => None,
+        };
+        let Some(threshold) = threshold else {
+            return Ok(Some(CompactionRefusal::NoThreshold));
+        };
+        let Some(tokens) = self.context_size(flow_id)? else {
+            return Ok(Some(CompactionRefusal::Unmeasured));
+        };
+        Ok(
+            (tokens < threshold.refresh).then_some(CompactionRefusal::BelowThreshold(
+                ContextBelowThreshold {
+                    context_tokens: tokens,
+                    refresh_tokens: threshold.refresh,
+                },
+            )),
+        )
     }
 }
 

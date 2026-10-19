@@ -59,7 +59,6 @@ pub enum SendRefusal {
     NotAwake,
     KeyReused,
     UnknownRecipient(Target),
-    RecipientEnded(Target),
     Held,
     Store,
 }

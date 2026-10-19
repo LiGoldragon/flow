@@ -336,7 +336,7 @@ pub(crate) struct FlowRecord {
 
 /// The durable address-indexed Metaflow defined by `flow_ethos::Metaflow`.
 /// Its state and queue are separate from native Flow launch records: an
-/// address can remain asleep or ended after the process it named is gone.
+/// address remains asleep after the process it named is gone.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaflow {
     metaflow: Metaflow,
@@ -350,32 +350,73 @@ impl EngineRecord for StoredMetaflow {
 
 impl MemoryDefinition for StoredMetaflow {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
+        MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-metaflow-v2")
+        SchemaHash::for_label("flow-nexus-metaflow-v3")
+    }
+}
+
+/// A metaflow's state as Flow kept it before 0.35.22, when a metaflow
+/// could be ended. It is read only by the upgrades of the metaflows and of
+/// the Address holds that keep a metaflow as found.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StateBeforeIdle {
+    Awake(String),
+    Asleep,
+    Ended,
+}
+
+/// A topic never dies; it goes idle. An ended metaflow is carried Asleep,
+/// its past and its queue kept.
+impl From<StateBeforeIdle> for MetaflowState {
+    fn from(previous: StateBeforeIdle) -> Self {
+        match previous {
+            StateBeforeIdle::Awake(flow_id) => Self::Awake(flow_id),
+            StateBeforeIdle::Asleep | StateBeforeIdle::Ended => Self::Asleep,
+        }
+    }
+}
+
+/// A metaflow as Flow 0.35.7 to 0.35.21 kept it, its state possibly Ended.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MetaflowBeforeIdle {
+    address: Address,
+    state: StateBeforeIdle,
+    past: Vec<String>,
+    queue: Vec<flow_ethos::QueuedRequest>,
+}
+
+impl From<MetaflowBeforeIdle> for Metaflow {
+    fn from(previous: MetaflowBeforeIdle) -> Self {
+        Self {
+            address: previous.address,
+            state: previous.state.into(),
+            past: previous.past,
+            queue: previous.queue,
+        }
     }
 }
 
 /// A metaflow as Flow kept it before 0.35.7, its queue of bare requests
-/// with no sender. It is read only by the v1-to-v2 family upgrades of the
+/// with no sender. It is read only by the v1 family upgrades of the
 /// metaflows and of the Address holds that keep a metaflow as found.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MetaflowBeforeSenders {
     address: Address,
-    state: MetaflowState,
+    state: StateBeforeIdle,
     past: Vec<String>,
     queue: Vec<Request>,
 }
 
 /// Each request queued before Flow kept senders is carried with its sender
-/// Unknown; nothing else changes.
+/// Unknown, and an ended metaflow Asleep; nothing else changes.
 impl From<MetaflowBeforeSenders> for Metaflow {
     fn from(previous: MetaflowBeforeSenders) -> Self {
         Self {
             address: previous.address,
-            state: previous.state,
+            state: previous.state.into(),
             past: previous.past,
             queue: previous
                 .queue
@@ -414,6 +455,37 @@ impl UpgradeFrom<StoredMetaflowV1> for StoredMetaflow {
     type Refusal = std::convert::Infallible;
 
     fn upgrade_from(previous: StoredMetaflowV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            metaflow: previous.metaflow.into(),
+        })
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMetaflowV2 {
+    metaflow: MetaflowBeforeIdle,
+}
+
+impl EngineRecord for StoredMetaflowV2 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaflowV2 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-v2")
+    }
+}
+
+impl UpgradeFrom<StoredMetaflowV2> for StoredMetaflow {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredMetaflowV2) -> Decision<Self, Self::Refusal> {
         Decision::Ready(Self {
             metaflow: previous.metaflow.into(),
         })
@@ -1591,11 +1663,165 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(6)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v6")
+    }
+}
+
+/// An outcome as Flow 0.35.6 to 0.35.21 archived it, its rejections
+/// signal-flow 22's, when a Start could be refused for an ended Address.
+/// This shape is read by the v5-to-v6 family upgrade, and every older
+/// shape is carried through it.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcomeV5 {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcomeV5,
+}
+
+impl EngineRecord for StoredLaunchOutcomeV5 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchOutcomeV5 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-launch-outcome-v5")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LaunchOutcomeV5 {
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
+    StartRejected(StartRejectionV22),
+    ReplaceRejected(ReplaceRejectionV22),
+}
+
+/// A start rejection as signal-flow 22.0.0 archived it, AddressEnded
+/// between AddressAwake and ContextRefused.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum StartRejectionV22 {
+    CompositionRefused,
+    LaunchRequestConflict,
+    LaunchPersistenceRefused,
+    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
+    BindingRefused(signal_flow::BindingRefusal),
+    RegistrationRefused(signal_flow::RegistrationRefusal),
+    IntentPersistenceRefused,
+    OriginUnavailable,
+    AddressAwake,
+    AddressEnded,
+    ContextRefused(signal_flow::ContextRefusal),
+    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
+    ModelRefused(signal_flow::ModelRefusal),
+}
+
+/// A replace rejection as signal-flow 22.0.0 archived it.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ReplaceRejectionV22 {
+    PredecessorAbsent,
+    UnknownPredecessor,
+    PredecessorStopped,
+    LaunchRefused(StartRejectionV22),
+    ReapRefused(signal_flow::StopRejection),
+}
+
+/// A kept outcome that refused a Start for an ended Address. No metaflow
+/// is ended any more and no current rejection says what it said, so the
+/// upgrade refuses it rather than name another reason, and the store is
+/// left as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndedAddressOutcome;
+
+impl TryFrom<StartRejectionV22> for StartRejection {
+    type Error = EndedAddressOutcome;
+
+    fn try_from(rejection: StartRejectionV22) -> Result<Self, Self::Error> {
+        Ok(match rejection {
+            StartRejectionV22::CompositionRefused => Self::CompositionRefused,
+            StartRejectionV22::LaunchRequestConflict => Self::LaunchRequestConflict,
+            StartRejectionV22::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
+            StartRejectionV22::NativeLaunchRefused(refusal) => Self::NativeLaunchRefused(refusal),
+            StartRejectionV22::BindingRefused(refusal) => Self::BindingRefused(refusal),
+            StartRejectionV22::RegistrationRefused(refusal) => Self::RegistrationRefused(refusal),
+            StartRejectionV22::IntentPersistenceRefused => Self::IntentPersistenceRefused,
+            StartRejectionV22::OriginUnavailable => Self::OriginUnavailable,
+            StartRejectionV22::AddressAwake => Self::AddressAwake,
+            StartRejectionV22::AddressEnded => return Err(EndedAddressOutcome),
+            StartRejectionV22::ContextRefused(refusal) => Self::ContextRefused(refusal),
+            StartRejectionV22::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+            StartRejectionV22::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
+            StartRejectionV22::ModelRefused(refusal) => Self::ModelRefused(refusal),
+        })
+    }
+}
+
+impl TryFrom<ReplaceRejectionV22> for ReplaceRejection {
+    type Error = EndedAddressOutcome;
+
+    fn try_from(rejection: ReplaceRejectionV22) -> Result<Self, Self::Error> {
+        Ok(match rejection {
+            ReplaceRejectionV22::PredecessorAbsent => Self::PredecessorAbsent,
+            ReplaceRejectionV22::UnknownPredecessor => Self::UnknownPredecessor,
+            ReplaceRejectionV22::PredecessorStopped => Self::PredecessorStopped,
+            ReplaceRejectionV22::LaunchRefused(rejection) => {
+                Self::LaunchRefused(rejection.try_into()?)
+            }
+            ReplaceRejectionV22::ReapRefused(rejection) => Self::ReapRefused(rejection),
+        })
+    }
+}
+
+impl TryFrom<LaunchOutcomeV5> for LaunchOutcome {
+    type Error = EndedAddressOutcome;
+
+    fn try_from(outcome: LaunchOutcomeV5) -> Result<Self, Self::Error> {
+        Ok(match outcome {
+            LaunchOutcomeV5::Started(launched) => Self::Started(launched),
+            LaunchOutcomeV5::Replaced(replaced) => Self::Replaced(replaced),
+            LaunchOutcomeV5::StartRejected(rejection) => Self::StartRejected(rejection.try_into()?),
+            LaunchOutcomeV5::ReplaceRejected(rejection) => {
+                Self::ReplaceRejected(rejection.try_into()?)
+            }
+        })
+    }
+}
+
+/// Every older outcome is carried as a v5 one, then into the current shape.
+trait UpgradesThroughV5: Into<LaunchOutcomeV5> {
+    fn stored(
+        launch_request_id: String,
+        outcome: Self,
+    ) -> Decision<StoredLaunchOutcome, EndedAddressOutcome> {
+        match LaunchOutcome::try_from(outcome.into()) {
+            Ok(launch_outcome) => Decision::Ready(StoredLaunchOutcome {
+                launch_request_id,
+                launch_outcome,
+            }),
+            Err(refusal) => Decision::Refused(refusal),
+        }
+    }
+}
+
+impl UpgradesThroughV5 for LaunchOutcomeV5 {}
+impl UpgradesThroughV5 for LaunchOutcomeV4 {}
+impl UpgradesThroughV5 for LaunchOutcomeV3 {}
+impl UpgradesThroughV5 for LaunchOutcomeV2 {}
+
+impl UpgradeFrom<StoredLaunchOutcomeV5> for StoredLaunchOutcome {
+    type Refusal = EndedAddressOutcome;
+
+    fn upgrade_from(previous: StoredLaunchOutcomeV5) -> Decision<Self, Self::Refusal> {
+        LaunchOutcomeV5::stored(previous.launch_request_id, previous.launch_outcome)
     }
 }
 
@@ -1661,7 +1887,7 @@ enum ReplaceRejectionV18 {
     ReapRefused(signal_flow::StopRejection),
 }
 
-impl From<StartRejectionV18> for StartRejection {
+impl From<StartRejectionV18> for StartRejectionV22 {
     fn from(rejection: StartRejectionV18) -> Self {
         match rejection {
             StartRejectionV18::CompositionRefused => Self::CompositionRefused,
@@ -1689,7 +1915,7 @@ impl From<StartRejectionV18> for StartRejection {
     }
 }
 
-impl From<ReplaceRejectionV18> for ReplaceRejection {
+impl From<ReplaceRejectionV18> for ReplaceRejectionV22 {
     fn from(rejection: ReplaceRejectionV18) -> Self {
         match rejection {
             ReplaceRejectionV18::PredecessorAbsent => Self::PredecessorAbsent,
@@ -1701,7 +1927,7 @@ impl From<ReplaceRejectionV18> for ReplaceRejection {
     }
 }
 
-impl From<LaunchOutcomeV4> for LaunchOutcome {
+impl From<LaunchOutcomeV4> for LaunchOutcomeV5 {
     fn from(outcome: LaunchOutcomeV4) -> Self {
         match outcome {
             LaunchOutcomeV4::Started(launched) => Self::Started(launched),
@@ -1713,13 +1939,10 @@ impl From<LaunchOutcomeV4> for LaunchOutcome {
 }
 
 impl UpgradeFrom<StoredLaunchOutcomeV4> for StoredLaunchOutcome {
-    type Refusal = std::convert::Infallible;
+    type Refusal = EndedAddressOutcome;
 
     fn upgrade_from(previous: StoredLaunchOutcomeV4) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            launch_request_id: previous.launch_request_id,
-            launch_outcome: previous.launch_outcome.into(),
-        })
+        LaunchOutcomeV4::stored(previous.launch_request_id, previous.launch_outcome)
     }
 }
 
@@ -1784,7 +2007,7 @@ enum ReplaceRejectionV17 {
     ReapRefused(signal_flow::StopRejection),
 }
 
-impl From<StartRejectionV17> for StartRejection {
+impl From<StartRejectionV17> for StartRejectionV22 {
     fn from(rejection: StartRejectionV17) -> Self {
         StartRejectionV18::from(rejection).into()
     }
@@ -1809,7 +2032,7 @@ impl From<StartRejectionV17> for StartRejectionV18 {
     }
 }
 
-impl From<ReplaceRejectionV17> for ReplaceRejection {
+impl From<ReplaceRejectionV17> for ReplaceRejectionV22 {
     fn from(rejection: ReplaceRejectionV17) -> Self {
         match rejection {
             ReplaceRejectionV17::PredecessorAbsent => Self::PredecessorAbsent,
@@ -1821,7 +2044,7 @@ impl From<ReplaceRejectionV17> for ReplaceRejection {
     }
 }
 
-impl From<LaunchOutcomeV3> for LaunchOutcome {
+impl From<LaunchOutcomeV3> for LaunchOutcomeV5 {
     fn from(outcome: LaunchOutcomeV3) -> Self {
         match outcome {
             LaunchOutcomeV3::Started(launched) => Self::Started(launched),
@@ -1833,13 +2056,10 @@ impl From<LaunchOutcomeV3> for LaunchOutcome {
 }
 
 impl UpgradeFrom<StoredLaunchOutcomeV3> for StoredLaunchOutcome {
-    type Refusal = std::convert::Infallible;
+    type Refusal = EndedAddressOutcome;
 
     fn upgrade_from(previous: StoredLaunchOutcomeV3) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            launch_request_id: previous.launch_request_id,
-            launch_outcome: previous.launch_outcome.into(),
-        })
+        LaunchOutcomeV3::stored(previous.launch_request_id, previous.launch_outcome)
     }
 }
 
@@ -1899,7 +2119,7 @@ impl From<LaunchedRecordV2> for LaunchedRecord {
     }
 }
 
-impl From<LaunchOutcomeV2> for LaunchOutcome {
+impl From<LaunchOutcomeV2> for LaunchOutcomeV5 {
     fn from(outcome: LaunchOutcomeV2) -> Self {
         match outcome {
             LaunchOutcomeV2::Started(launched) => Self::Started(launched.into()),
@@ -1914,13 +2134,10 @@ impl From<LaunchOutcomeV2> for LaunchOutcome {
 }
 
 impl UpgradeFrom<StoredLaunchOutcomeV2> for StoredLaunchOutcome {
-    type Refusal = std::convert::Infallible;
+    type Refusal = EndedAddressOutcome;
 
     fn upgrade_from(previous: StoredLaunchOutcomeV2) -> Decision<Self, Self::Refusal> {
-        Decision::Ready(Self {
-            launch_request_id: previous.launch_request_id,
-            launch_outcome: previous.launch_outcome.into(),
-        })
+        LaunchOutcomeV2::stored(previous.launch_request_id, previous.launch_outcome)
     }
 }
 
@@ -2023,6 +2240,8 @@ pub enum StoreError {
     LaunchAttemptUpgrade(String),
     #[error("metaflow family upgrade failed: {0}")]
     MetaflowUpgrade(String),
+    #[error("send call family upgrade failed: {0}")]
+    SendCallUpgrade(String),
     #[error("the model family could not be upgraded: {0}")]
     ModelUpgrade(String),
     #[error("flow events upgrade failed: {0}")]
@@ -2071,7 +2290,8 @@ pub enum StoreError {
 /// 0.34 launch named instead.
 trait UpgradesFlowFamilies {
     /// A store before 0.35.7 keeps queues of bare requests; each is carried
-    /// with its sender Unknown.
+    /// with its sender Unknown. A store before 0.35.22 may keep an ended
+    /// metaflow; it is carried Asleep.
     fn upgraded_metaflows(
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
@@ -2087,6 +2307,12 @@ trait UpgradesFlowFamilies {
         &mut self,
         descriptor: TableDescriptor<address_hold::AddressHold>,
     ) -> Result<TableReference<address_hold::AddressHold>, StoreError>;
+    /// A store before 0.35.22 keeps send calls whose refusal could name an
+    /// ended recipient; such a call refuses the upgrade.
+    fn upgraded_send_calls(
+        &mut self,
+        descriptor: TableDescriptor<crate::generated::send_tool::SendCall>,
+    ) -> Result<TableReference<crate::generated::send_tool::SendCall>, StoreError>;
     fn upgraded_flows(
         &mut self,
         descriptor: TableDescriptor<FlowRecord>,
@@ -2210,10 +2436,26 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
     ) -> Result<TableReference<StoredMetaflow>, StoreError> {
-        match self.upgrade_table::<StoredMetaflowV1, StoredMetaflow>(descriptor) {
+        // A 0.35.7 to 0.35.21 store holds v2 rows and an older one v1 rows;
+        // the newest edge is tried first, and a store it does not admit is
+        // tried on the next. An admission refusal writes nothing.
+        let from_v1 = descriptor.clone();
+        match self.upgrade_table::<StoredMetaflowV2, StoredMetaflow>(descriptor) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission =>
+            {
+                match self.upgrade_table::<StoredMetaflowV1, StoredMetaflow>(from_v1) {
+                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                    UpgradeOutcome::Failed(failure) => {
+                        Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+                    }
+                }
+            }
             UpgradeOutcome::Failed(failure) => {
                 Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
             }
@@ -2224,14 +2466,48 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<address_hold::AddressHold>,
     ) -> Result<TableReference<address_hold::AddressHold>, StoreError> {
+        let from_v1 = descriptor.clone();
         match self
-            .upgrade_table::<address_hold::AddressHoldV1, address_hold::AddressHold>(descriptor)
+            .upgrade_table::<address_hold::AddressHoldV2, address_hold::AddressHold>(descriptor)
         {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission =>
+            {
+                match self.upgrade_table::<address_hold::AddressHoldV1, address_hold::AddressHold>(
+                    from_v1,
+                ) {
+                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                    UpgradeOutcome::Failed(failure) => {
+                        Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+                    }
+                }
+            }
             UpgradeOutcome::Failed(failure) => {
                 Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+            }
+        }
+    }
+
+    fn upgraded_send_calls(
+        &mut self,
+        descriptor: TableDescriptor<crate::generated::send_tool::SendCall>,
+    ) -> Result<TableReference<crate::generated::send_tool::SendCall>, StoreError> {
+        match self.upgrade_table::<send_call::SendCallV1, crate::generated::send_tool::SendCall>(
+            descriptor,
+        ) {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => Err(StoreError::SendCallUpgrade(format!(
+                "call {:?} was refused for an ended recipient, which no longer exists",
+                refusal.key()
+            ))),
+            UpgradeOutcome::Failed(failure) => {
+                Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
             }
         }
     }
@@ -2252,45 +2528,49 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredLaunchOutcome>,
     ) -> Result<TableReference<StoredLaunchOutcome>, StoreError> {
-        // A 0.35.3 to 0.35.5 store holds v4 rows, a 0.35.2 store v3 rows
-        // and a 0.34 store v2 rows; the newest edge is tried first, and a
-        // store it does not admit is tried on the next. An admission refusal
-        // writes nothing.
+        // A 0.35.6 to 0.35.21 store holds v5 rows, a 0.35.3 to 0.35.5 store
+        // v4 rows, a 0.35.2 store v3 rows and a 0.34 store v2 rows; the
+        // newest edge is tried first, and a store it does not admit is tried
+        // on the next. An admission refusal writes nothing. An outcome that
+        // refused a Start for an ended Address refuses the upgrade.
+        let failed = |failure| StoreError::LaunchOutcomeUpgrade(format!("{failure:?}"));
+        let refused = |key: &RecordKey| {
+            StoreError::LaunchOutcomeUpgrade(format!(
+                "launch {key:?} was refused for an ended Address, which no longer exists"
+            ))
+        };
+        let admission = |failure: &sema_engine::StorageFailure| {
+            failure.phase() == sema_engine::StoragePhase::Admission
+        };
+        let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
-        match self.upgrade_table::<StoredLaunchOutcomeV4, StoredLaunchOutcome>(descriptor) {
+        match self.upgrade_table::<StoredLaunchOutcomeV5, StoredLaunchOutcome>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
+            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
+            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
+        }
+        match self.upgrade_table::<StoredLaunchOutcomeV4, StoredLaunchOutcome>(from_v4) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
+            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
+            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
+        }
+        match self.upgrade_table::<StoredLaunchOutcomeV3, StoredLaunchOutcome>(from_v3) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
+            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
+            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
+        }
+        match self.upgrade_table::<StoredLaunchOutcomeV2, StoredLaunchOutcome>(from_v2) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-            UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
-            {
-                match self.upgrade_table::<StoredLaunchOutcomeV3, StoredLaunchOutcome>(from_v3) {
-                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                    UpgradeOutcome::Failed(failure)
-                        if failure.phase() == sema_engine::StoragePhase::Admission =>
-                    {
-                        match self
-                            .upgrade_table::<StoredLaunchOutcomeV2, StoredLaunchOutcome>(from_v2)
-                        {
-                            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
-                            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
-                            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
-                            UpgradeOutcome::Failed(failure) => {
-                                Err(StoreError::LaunchOutcomeUpgrade(format!("{failure:?}")))
-                            }
-                        }
-                    }
-                    UpgradeOutcome::Failed(failure) => {
-                        Err(StoreError::LaunchOutcomeUpgrade(format!("{failure:?}")))
-                    }
-                }
-            }
-            UpgradeOutcome::Failed(failure) => {
-                Err(StoreError::LaunchOutcomeUpgrade(format!("{failure:?}")))
-            }
+            UpgradeOutcome::Refused(refusal) => Err(refused(refusal.key())),
+            UpgradeOutcome::Failed(failure) => Err(failed(failure)),
         }
     }
 
@@ -2929,7 +3209,8 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-metaflow"),
             StoredMetaflow::schema_hash(),
         )
-        .with_predecessor::<StoredMetaflowV1>();
+        .with_predecessor::<StoredMetaflowV1>()
+        .with_predecessor::<StoredMetaflowV2>();
         let metaflow_processes_descriptor = TableDescriptor::<StoredMetaflowProcess>::new(
             METAFLOW_PROCESS_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-process"),
@@ -2973,7 +3254,8 @@ impl OpensFlowStore for FlowStore {
         )
         .with_predecessor::<StoredLaunchOutcomeV2>()
         .with_predecessor::<StoredLaunchOutcomeV3>()
-        .with_predecessor::<StoredLaunchOutcomeV4>();
+        .with_predecessor::<StoredLaunchOutcomeV4>()
+        .with_predecessor::<StoredLaunchOutcomeV5>();
         let replacements_descriptor = TableDescriptor::<Replacement>::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -3090,7 +3372,7 @@ impl OpensFlowStore for FlowStore {
         let address_holds = engine.upgraded_address_holds(address_holds_descriptor)?;
         let refreshes = engine.register_table(refreshes_descriptor)?;
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
-        let send_calls = engine.register_table(send_calls_descriptor)?;
+        let send_calls = engine.upgraded_send_calls(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
@@ -3161,7 +3443,8 @@ impl OpensFlowStore for FlowStore {
                 FamilyName::new("flow-nexus-metaflow"),
                 StoredMetaflow::schema_hash(),
             )
-            .with_predecessor::<StoredMetaflowV1>(),
+            .with_predecessor::<StoredMetaflowV1>()
+            .with_predecessor::<StoredMetaflowV2>(),
         )?;
         let metaflow_processes = engine.register_table(TableDescriptor::new(
             METAFLOW_PROCESS_TABLE_NAME,
@@ -3201,7 +3484,8 @@ impl OpensFlowStore for FlowStore {
             )
             .with_predecessor::<StoredLaunchOutcomeV2>()
             .with_predecessor::<StoredLaunchOutcomeV3>()
-            .with_predecessor::<StoredLaunchOutcomeV4>(),
+            .with_predecessor::<StoredLaunchOutcomeV4>()
+            .with_predecessor::<StoredLaunchOutcomeV5>(),
         )?;
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
@@ -3244,7 +3528,7 @@ impl OpensFlowStore for FlowStore {
             <opened_thread::OpenedLaunchThread as opened_thread::DescribesOpenedThreadTable>::descriptor(
             ),
         )?;
-        let send_calls = engine.register_table(
+        let send_calls = engine.upgraded_send_calls(
             <crate::generated::send_tool::SendCall as send_call::DescribesSendCallTable>::descriptor(),
         )?;
         let launch_cleanups = engine.register_table(
@@ -3391,11 +3675,6 @@ pub(crate) trait ManagesMetaflowState: Sized {
     fn current_metaflow(&self, address: &Address) -> Result<Response, StoreError>;
     fn list_metaflows(&self) -> Result<Vec<Metaflow>, StoreError>;
     fn identify_process(&self, process: Process) -> Result<Response, StoreError>;
-    fn end_metaflow(
-        &self,
-        address: Address,
-        now_epoch_seconds: i64,
-    ) -> Result<Response, StoreError>;
     fn release_metaflow_lock(
         &self,
         lock: Lock,
@@ -3512,7 +3791,6 @@ impl ManagesMetaflowState for FlowStore {
             Some(stored) => match stored.metaflow.state {
                 MetaflowState::Awake(flow_id) => signal_flow::Current_Data::Awake(flow_id),
                 MetaflowState::Asleep => signal_flow::Current_Data::Asleep,
-                MetaflowState::Ended => signal_flow::Current_Data::Ended,
             },
         };
         Ok(Response::Current(current))
@@ -3554,42 +3832,6 @@ impl ManagesMetaflowState for FlowStore {
         Ok(Response::Refused(signal_flow::Refusal::Unidentified(
             process,
         )))
-    }
-
-    fn end_metaflow(
-        &self,
-        address: Address,
-        now_epoch_seconds: i64,
-    ) -> Result<Response, StoreError> {
-        let Some(mut stored) = self.stored_metaflow(&address)? else {
-            return Ok(Response::Refused(signal_flow::Refusal::Unknown(
-                signal_flow::Unknown_Data::Address(address),
-            )));
-        };
-        if stored.metaflow.state == MetaflowState::Ended {
-            return Ok(Response::Refused(signal_flow::Refusal::Ended(address)));
-        }
-        let lock = self.stored_metaflow_lock(&address)?;
-        if let Some(lock) = lock.as_ref()
-            && lock.lock.until > now_epoch_seconds
-        {
-            return Ok(Response::Refused(signal_flow::Refusal::Held(
-                lock.lock.clone(),
-            )));
-        }
-        stored.metaflow.state = MetaflowState::Ended;
-        let mut commit = self
-            .engine
-            .begin_atomic_commit()
-            .mutate(self.metaflows, stored);
-        if lock.is_some() {
-            commit = commit.retract(
-                self.metaflow_locks,
-                RecordKey::new(FlowStore::address_record_key(&address)),
-            );
-        }
-        self.engine.commit_atomic(commit)?;
-        Ok(Response::Ended)
     }
 
     fn release_metaflow_lock(
@@ -3637,8 +3879,7 @@ impl AppliesFlowQuery for FlowStore {
             | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
-            | Query::Release(_)
-            | Query::End(_) => Ok(Response::Refused(signal_flow::Refusal::NotMessage)),
+            | Query::Release(_) => Ok(Response::Refused(signal_flow::Refusal::NotMessage)),
             Query::Current(address) => self.current_metaflow(&address),
             Query::Metaflows => self.list_metaflows().map(Response::Listed),
             Query::Replace(_) => Ok(Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
@@ -3687,8 +3928,7 @@ impl ReservesPendingStart for FlowStore {
             | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
-            | Query::Release(_)
-            | Query::End(_) => Ok(None),
+            | Query::Release(_) => Ok(None),
         }
     }
 }
@@ -5814,7 +6054,7 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-quarantined-launch-attempt",
                 "flow-nexus-quarantined-launch-attempt-v1",
             ),
-            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v2"),
+            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v3"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
                 "flow-nexus-metaflow-process-v1",
@@ -5916,12 +6156,19 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-launch-outcome",
                     StoredLaunchOutcomeV4::schema_hash(),
                 ),
+                (
+                    "flow-nexus-launch-outcome",
+                    StoredLaunchOutcomeV5::schema_hash(),
+                ),
             ],
             "flow_nexus_launch_attempts" => &[(
                 "flow-nexus-launch-attempt",
                 StoredLaunchAttemptV1::schema_hash(),
             )],
-            "flow_nexus_metaflows" => &[("flow-nexus-metaflow", StoredMetaflowV1::schema_hash())],
+            "flow_nexus_metaflows" => &[
+                ("flow-nexus-metaflow", StoredMetaflowV1::schema_hash()),
+                ("flow-nexus-metaflow", StoredMetaflowV2::schema_hash()),
+            ],
             "flow_nexus_meta_model_configuration" => &[(
                 "flow-nexus-meta-model-configuration",
                 StoredMetaModelConfigurationV1::schema_hash(),
@@ -5930,9 +6177,19 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-meta-leave-out-configuration",
                 StoredMetaLeaveOutConfigurationV1::schema_hash(),
             )],
-            "flow_nexus_address_holds" => &[(
-                address_hold::ADDRESS_HOLD_FAMILY,
-                <address_hold::AddressHoldV1 as MemoryDefinition>::schema_hash(),
+            "flow_nexus_address_holds" => &[
+                (
+                    address_hold::ADDRESS_HOLD_FAMILY,
+                    <address_hold::AddressHoldV1 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    address_hold::ADDRESS_HOLD_FAMILY,
+                    <address_hold::AddressHoldV2 as MemoryDefinition>::schema_hash(),
+                ),
+            ],
+            "flow_nexus_send_calls" => &[(
+                send_call::SEND_CALL_FAMILY,
+                <send_call::SendCallV1 as MemoryDefinition>::schema_hash(),
             )],
             "flow_nexus_flow_events" => &[(
                 events::FLOW_EVENT_FAMILY,
@@ -6495,6 +6752,7 @@ mod tests {
     use super::{FlowRecordV5, LaunchedRecordV2, OriginClueBeforeOrigin, ReplacedRecordV2};
     use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
     use super::{LaunchOutcomeV4, ReplaceRejectionV18, StartRejectionV18, StoredLaunchOutcomeV4};
+    use super::{LaunchOutcomeV5, ReplaceRejectionV22, StartRejectionV22, StoredLaunchOutcomeV5};
     use super::{LaunchedRecord, ReplacedRecord};
     use super::{LaysOutDefaults, SeedsConfiguration};
     use crate::store::RegistersBindings;
@@ -9042,7 +9300,7 @@ mod tests {
                     super::StoredMetaflowV1 {
                         metaflow: super::MetaflowBeforeSenders {
                             address: address.clone(),
-                            state: flow_ethos::State::Asleep,
+                            state: super::StateBeforeIdle::Asleep,
                             past: vec!["a1a1a1".into()],
                             queue: vec![
                                 Request::Order("first".into()),
@@ -9075,6 +9333,93 @@ mod tests {
                     request: Request::Notice("second".into()),
                 },
             ]
+        );
+    }
+
+    /// A topic never dies: a 0.35.21 store's ended metaflow opens Asleep,
+    /// its past and its queue kept, and an Awake one as it was.
+    #[test]
+    fn a_v2_ended_metaflow_upgrades_asleep() {
+        use super::ManagesMetaflowState;
+        use signal_flow::{Address, Layer, Request};
+        let fixture = StoreFixture::new();
+        drop(fixture.store());
+        let at = |layer| Address {
+            aspect: Aspect::Mind,
+            topic: "flow".into(),
+            layer,
+        };
+        let database = redb::Database::open(fixture.path()).expect("store opens directly");
+        let write = database.begin_write().expect("catalog transaction starts");
+        {
+            let mut catalog = write
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            catalog
+                .remove("flow_nexus_metaflows")
+                .expect("metaflow family removes");
+        }
+        write
+            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                "flow_nexus_metaflows",
+            ))
+            .expect("metaflow rows drop");
+        write.commit().expect("catalog commits");
+        drop(database);
+        let queued = vec![flow_ethos::QueuedRequest {
+            sent_by: flow_ethos::SentBy::Unknown,
+            request: Request::Order("kept".into()),
+        }];
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("v2 store opens");
+            let metaflows = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_metaflows"),
+                    FamilyName::new("flow-nexus-metaflow"),
+                    SchemaHash::for_label("flow-nexus-metaflow-v2"),
+                ))
+                .expect("v2 metaflow family registers");
+            for (layer, state) in [
+                (Layer::Tertiary, super::StateBeforeIdle::Ended),
+                (
+                    Layer::Secondary,
+                    super::StateBeforeIdle::Awake("b2b2b2".into()),
+                ),
+            ] {
+                engine
+                    .assert(Assertion::new(
+                        metaflows,
+                        super::StoredMetaflowV2 {
+                            metaflow: super::MetaflowBeforeIdle {
+                                address: at(layer),
+                                state,
+                                past: vec!["a1a1a1".into()],
+                                queue: queued.clone(),
+                            },
+                        },
+                    ))
+                    .expect("v2 row persists");
+            }
+        }
+
+        let store = fixture.store();
+        let metaflows = store.list_metaflows().unwrap();
+        let carried = |layer: Layer| {
+            let address = at(layer);
+            metaflows
+                .iter()
+                .find(|metaflow| metaflow.address == address)
+                .cloned()
+                .expect("the metaflow is carried")
+        };
+        let idle = carried(Layer::Tertiary);
+        assert_eq!(idle.state, flow_ethos::State::Asleep);
+        assert_eq!(idle.past, vec!["a1a1a1".to_owned()]);
+        assert_eq!(idle.queue, queued);
+        assert_eq!(
+            carried(Layer::Secondary).state,
+            flow_ethos::State::Awake("b2b2b2".into())
         );
     }
 
@@ -9279,6 +9624,122 @@ mod tests {
                     .expect("outcome reads after reopening"),
                 Some(outcome.clone()),
                 "the outcome for {request} reads unchanged after reopening"
+            );
+        }
+    }
+
+    /// Registers a launch outcome family at its v5 shape, as 0.35.6 to
+    /// 0.35.21 kept it, holding these rows.
+    fn seed_v5_launch_outcomes(fixture: &StoreFixture, rows: Vec<StoredLaunchOutcomeV5>) {
+        let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+            .expect("outcome store opens");
+        let outcomes = engine
+            .register_table(TableDescriptor::new(
+                TableName::new("flow_nexus_launch_outcomes"),
+                FamilyName::new("flow-nexus-launch-outcome"),
+                SchemaHash::for_label("flow-nexus-launch-outcome-v5"),
+            ))
+            .expect("v5 outcome family registers");
+        for row in rows {
+            engine
+                .assert(Assertion::new(outcomes, row))
+                .expect("v5 outcome persists");
+        }
+    }
+
+    /// A 0.35.21 store's outcomes, each rejection in signal-flow 22's shape
+    /// with AddressEnded among them, open as the current outcomes: every
+    /// rejection after AddressEnded keeps its meaning though its archived
+    /// discriminant moves.
+    #[test]
+    fn v5_launch_outcomes_upgrade_without_the_ended_address() {
+        let fixture = StoreFixture::new();
+        let started = LaunchedRecord {
+            flow_id: "started-flow".into(),
+            session_id: "started-session".into(),
+            origin: Origin::Unbound,
+        };
+        seed_v5_launch_outcomes(
+            &fixture,
+            vec![
+                StoredLaunchOutcomeV5 {
+                    launch_request_id: "v5-started".into(),
+                    launch_outcome: LaunchOutcomeV5::Started(started.clone()),
+                },
+                StoredLaunchOutcomeV5 {
+                    launch_request_id: "v5-awake".into(),
+                    launch_outcome: LaunchOutcomeV5::StartRejected(StartRejectionV22::AddressAwake),
+                },
+                StoredLaunchOutcomeV5 {
+                    launch_request_id: "v5-context".into(),
+                    launch_outcome: LaunchOutcomeV5::StartRejected(
+                        StartRejectionV22::ContextRefused(
+                            signal_flow::ContextRefusal::ModuleMissing,
+                        ),
+                    ),
+                },
+                StoredLaunchOutcomeV5 {
+                    launch_request_id: "v5-model".into(),
+                    launch_outcome: LaunchOutcomeV5::ReplaceRejected(
+                        ReplaceRejectionV22::LaunchRefused(StartRejectionV22::ModelRefused(
+                            signal_flow::ModelRefusal::Differs("claude-opus-5-5".into()),
+                        )),
+                    ),
+                },
+            ],
+        );
+        let store = fixture.store();
+        for (request, outcome) in [
+            ("v5-started", LaunchOutcome::Started(started)),
+            (
+                "v5-awake",
+                LaunchOutcome::StartRejected(StartRejection::AddressAwake),
+            ),
+            (
+                "v5-context",
+                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
+                    signal_flow::ContextRefusal::ModuleMissing,
+                )),
+            ),
+            (
+                "v5-model",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::ModelRefused(signal_flow::ModelRefusal::Differs(
+                        "claude-opus-5-5".into(),
+                    )),
+                )),
+            ),
+        ] {
+            assert_eq!(
+                store
+                    .launch_outcome(request)
+                    .expect("upgraded outcome reads"),
+                Some(outcome),
+                "the v5 outcome for {request} survives the family upgrade"
+            );
+        }
+    }
+
+    /// A kept outcome that refused a Start for an ended Address names a
+    /// state no metaflow has any more: the open refuses it rather than give
+    /// it another reason, and a later open finds it kept and refuses again.
+    #[test]
+    fn a_v5_outcome_refused_for_an_ended_address_refuses_the_open() {
+        let fixture = StoreFixture::new();
+        seed_v5_launch_outcomes(
+            &fixture,
+            vec![StoredLaunchOutcomeV5 {
+                launch_request_id: "v5-ended".into(),
+                launch_outcome: LaunchOutcomeV5::StartRejected(StartRejectionV22::AddressEnded),
+            }],
+        );
+        for open in ["first", "second"] {
+            let Err(error) = <FlowStore as OpensFlowStore>::open(&fixture.path()) else {
+                panic!("an ended Address outcome opens at the {open} open")
+            };
+            assert!(
+                error.to_string().contains("v5-ended"),
+                "the {open} refusal names the kept outcome: {error}"
             );
         }
     }

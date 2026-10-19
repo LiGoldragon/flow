@@ -16,7 +16,7 @@ use signal_flow::{
 use std::fs;
 
 /// Declares the Models family whole: one model per layer and aspect.
-fn configure(fixture: &NexusFixture, models: &[(Layer, Aspect, &str)]) {
+pub(super) fn configure(fixture: &NexusFixture, models: &[(Layer, Aspect, &str)]) {
     fixture
         .nexus
         .store
@@ -34,7 +34,12 @@ fn configure(fixture: &NexusFixture, models: &[(Layer, Aspect, &str)]) {
 }
 
 /// A fresh launch of one seat, naming one model.
-fn seat(aspect: Aspect, layer: Layer, model: &str, launch_request_id: &str) -> LaunchProfile {
+pub(super) fn seat(
+    aspect: Aspect,
+    layer: Layer,
+    model: &str,
+    launch_request_id: &str,
+) -> LaunchProfile {
     LaunchProfile {
         launch_request_id: launch_request_id.into(),
         address: Address {
@@ -54,14 +59,14 @@ fn seat(aspect: Aspect, layer: Layer, model: &str, launch_request_id: &str) -> L
 /// FlowId claim, the flows Flow holds, and the store's commit marker, which
 /// moves with any write.
 #[derive(Debug, PartialEq)]
-struct Untouched {
+pub(super) struct Untouched {
     herdr_calls: String,
     flow_id_calls: String,
     flows: Vec<signal_flow::FlowNode>,
     marker: sema_engine::DatabaseMarker,
 }
 
-fn untouched(fixture: &NexusFixture) -> Untouched {
+pub(super) fn untouched(fixture: &NexusFixture) -> Untouched {
     let read =
         |name: &str| fs::read_to_string(fixture.directory.path().join(name)).unwrap_or_default();
     Untouched {

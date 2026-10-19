@@ -31,7 +31,7 @@ use signal_flow::{Address, LaunchProfile, Metaflow, StartRejection};
 
 pub(super) const ADDRESS_HOLD_TABLE_NAME: TableName = TableName::new("flow_nexus_address_holds");
 pub(super) const ADDRESS_HOLD_FAMILY: &str = "flow-nexus-address-hold";
-pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v2";
+pub(super) const ADDRESS_HOLD_SCHEMA: &str = "flow-nexus-address-hold-v3";
 
 /// The Address a launched flow holds, and the metaflow it found there.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -49,7 +49,7 @@ impl EngineRecord for AddressHold {
 
 impl MemoryDefinition for AddressHold {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
+        MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -57,8 +57,46 @@ impl MemoryDefinition for AddressHold {
     }
 }
 
+/// An Address hold as Flow 0.35.7 to 0.35.21 kept it, the metaflow it
+/// found possibly Ended. It is read only by the v2-to-v3 upgrade, which
+/// carries an ended metaflow Asleep.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AddressHoldV2 {
+    flow_id: String,
+    address: Address,
+    found: Option<super::MetaflowBeforeIdle>,
+}
+
+impl EngineRecord for AddressHoldV2 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+
+impl MemoryDefinition for AddressHoldV2 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-address-hold-v2")
+    }
+}
+
+impl UpgradeFrom<AddressHoldV2> for AddressHold {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: AddressHoldV2) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            flow_id: previous.flow_id,
+            address: previous.address,
+            found: previous.found.map(Metaflow::from),
+        })
+    }
+}
+
 /// An Address hold as Flow kept it before 0.35.7, the metaflow it found
-/// holding bare requests. It is read only by the v1-to-v2 upgrade.
+/// holding bare requests. It is read only by the v1-to-v3 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AddressHoldV1 {
     flow_id: String,
@@ -106,6 +144,7 @@ impl DescribesAddressHoldTable for AddressHold {
             SchemaHash::for_label(ADDRESS_HOLD_SCHEMA),
         )
         .with_predecessor::<AddressHoldV1>()
+        .with_predecessor::<AddressHoldV2>()
     }
 }
 

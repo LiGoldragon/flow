@@ -275,9 +275,6 @@ impl Performs for RunningNexus {
                 Ok(Response::StartRejected(StartRejection::AddressAwake)) => {
                     Outcome::Failed(Failed_Data::AddressAwake)
                 }
-                Ok(Response::StartRejected(StartRejection::AddressEnded)) => {
-                    Outcome::Failed(Failed_Data::AddressEnded)
-                }
                 Ok(_) => Outcome::Failed(Failed_Data::Unstarted),
                 Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
             },

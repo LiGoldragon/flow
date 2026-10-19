@@ -626,13 +626,13 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
     );
 }
 
-/// The resumable Claude seat's metaflow, Asleep with nothing queued.
+/// The launched Claude seat's metaflow, Asleep with nothing queued.
 fn asleep_target() -> Address {
     address("flow", Layer::Secondary)
 }
 
 trait SeatsAsleepTargets {
-    /// The metaflow at `at`, Asleep, its last flow the resumable abc123.
+    /// The metaflow at `at`, Asleep, its last flow the launched abc123.
     fn asleep_at(&self, at: Address);
     fn stored_at(&self, at: &Address) -> Metaflow;
 }
@@ -656,10 +656,12 @@ impl SeatsAsleepTargets for NexusFixture {
     }
 }
 
-/// The Order a woken seat was handed, with its sender, counted in what was
-/// typed into its pane.
-fn typed_orders(fixture: &NexusFixture, body: &str) -> usize {
-    super::waking::typed_prompts(fixture)
+/// The Order a woken seat was handed, with its sender, counted in the user
+/// turns of its fresh session.
+fn handed_orders(fixture: &NexusFixture, world: &super::waking::FreshWorld, body: &str) -> usize {
+    use super::waking::ReadsFreshWorld;
+    world
+        .user_turns(fixture)
         .concat()
         .matches(&format!(
             "{{ Sender.{{ Mind alpha Tertiary }} Order.{body} }}"
@@ -673,8 +675,10 @@ fn typed_orders(fixture: &NexusFixture, body: &str) -> usize {
 /// from its record, queues nothing more and wakes nothing more.
 #[test]
 fn an_asleep_target_wakes_once_though_the_answer_fails_and_the_call_is_replayed() {
+    use super::waking::{ReadsFreshWorld, WakesFreshClaude};
     let mut fixture = NexusFixture::new();
-    super::waking::resumable(&fixture);
+    super::waking::slept_claude(&fixture);
+    let world = fixture.fresh_claude_world();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.asleep_at(asleep_target());
     let call = send_request(15, THREAD_A, "call-w", &asleep_target(), "Order", "wake-me");
@@ -707,24 +711,28 @@ fn an_asleep_target_wakes_once_though_the_answer_fails_and_the_call_is_replayed(
         "the replay is answered from the record, its sender kept"
     );
     let woken = fixture.stored_at(&asleep_target());
-    assert_eq!(woken.state, State::Awake("abc123".into()));
-    assert!(woken.queue.is_empty());
-    assert_eq!(
-        super::waking::herdr_calls(&fixture)
-            .matches("agent start")
-            .count(),
-        1,
-        "woken once"
+    assert!(
+        matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123"),
+        "{woken:?}; Herdr calls: {}",
+        world.calls()
     );
-    assert_eq!(typed_orders(&fixture, "wake-me"), 1, "handed over once");
+    assert!(woken.queue.is_empty());
+    assert_eq!(world.claude_starts(), 1, "woken once: {}", world.calls());
+    assert_eq!(
+        handed_orders(&fixture, &world, "wake-me"),
+        1,
+        "handed over once"
+    );
 }
 
 /// A call the last Nexus queued and recorded for an Asleep metaflow, then
 /// died before answering or waking, wakes the target when it is replayed.
 #[test]
 fn a_replayed_call_wakes_the_asleep_target_its_first_handling_did_not() {
+    use super::waking::{ReadsFreshWorld, WakesFreshClaude};
     let mut fixture = NexusFixture::new();
-    super::waking::resumable(&fixture);
+    super::waking::slept_claude(&fixture);
+    let world = fixture.fresh_claude_world();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.asleep_at(asleep_target());
     let request = send_request(
@@ -756,23 +764,40 @@ fn a_replayed_call_wakes_the_asleep_target_its_first_handling_did_not() {
         queued_text(sender_a(), asleep_target())
     );
     let woken = fixture.stored_at(&asleep_target());
-    assert_eq!(woken.state, State::Awake("abc123".into()));
-    assert!(woken.queue.is_empty());
-    assert_eq!(
-        super::waking::herdr_calls(&fixture)
-            .matches("agent start")
-            .count(),
-        1
+    assert!(
+        matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123"),
+        "{woken:?}; Herdr calls: {}",
+        world.calls()
     );
-    assert_eq!(typed_orders(&fixture, "replayed"), 1);
+    assert!(woken.queue.is_empty());
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert_eq!(handed_orders(&fixture, &world, "replayed"), 1);
 }
 
-/// An Order for an Asleep Primary, and a Result or a Notice for an Asleep
-/// Secondary, are queued and wake nothing.
+/// A Result or a Notice for an Asleep Secondary is queued and wakes
+/// nothing; an Order for an Asleep Primary wakes it fresh, as an Order
+/// wakes every layer.
 #[test]
-fn a_send_to_an_asleep_primary_or_of_a_result_or_notice_wakes_nothing() {
+fn a_send_of_a_result_or_notice_wakes_nothing_and_an_order_wakes_a_primary() {
+    use super::waking::{ReadsFreshWorld, WakesFreshClaude};
+    use crate::store::ManagesMetaflowState;
     let mut fixture = NexusFixture::new();
-    super::waking::resumable(&fixture);
+    super::waking::slept_claude(&fixture);
+    let world = fixture.fresh_claude_world();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Models(
+            [Layer::Primary, Layer::Secondary]
+                .into_iter()
+                .map(|layer| meta_signal_flow::ConfigureModel {
+                    layer,
+                    aspect: Aspect::Mind,
+                    native: "claude-fixture".into(),
+                })
+                .collect(),
+        ))
+        .expect("models configured");
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     let primary = address("flow", Layer::Primary);
     fixture.asleep_at(primary.clone());
@@ -793,13 +818,18 @@ fn a_send_to_an_asleep_primary_or_of_a_result_or_notice_wakes_nothing() {
     for id in [17, 18, 19] {
         assert_eq!(answer_to(&written, id).expect("answered")["success"], true);
     }
-    let held = fixture.stored_at(&primary);
-    assert_eq!(held.state, State::Asleep);
-    assert_eq!(held.queue, vec![sent(sender_a(), "wait")]);
+    let woken = fixture.stored_at(&primary);
+    assert!(
+        matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123"),
+        "{woken:?}; Herdr calls: {}",
+        world.calls()
+    );
+    assert!(woken.queue.is_empty());
+    assert_eq!(handed_orders(&fixture, &world, "wait"), 1);
     let held = fixture.stored_at(&asleep_target());
     assert_eq!(held.state, State::Asleep);
     assert_eq!(held.queue.len(), 2);
-    assert!(!super::waking::herdr_calls(&fixture).contains("agent start"));
+    assert_eq!(world.claude_starts(), 1, "only the Primary woke");
 }
 
 #[test]
@@ -915,7 +945,7 @@ fn a_malformed_call_is_refused_and_recorded() {
 /// `FLOW_SEND_TOOL_WITNESS_SOCKET` (its control socket), serving
 /// `gpt-6-luna`. Flow's own adapter opens the thread, declaring the send
 /// tool, with a first turn asking the model to call it once. The target is
-/// Asleep, its last flow a resumable Claude seat in the fixture Herdr. A
+/// Asleep, its last flow a launched Claude seat, woken in the fresh world. A
 /// first connection subscribes and receives the call; the Nexus handles
 /// it, queueing and recording it, and the connection is closed before it
 /// answers or wakes anything, as a Nexus dying there would leave it. The
@@ -970,7 +1000,8 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         .map(|(thread, _)| thread)
         .expect("the thread opens declaring the send tool");
     eprintln!("witness thread {thread}");
-    super::waking::resumable(&fixture);
+    super::waking::slept_claude(&fixture);
+    let world = super::waking::WakesFreshClaude::fresh_claude_world(&mut fixture);
     fixture.codex_seat("a1a1a1", &thread, "w1:p5", "gpt-6-luna", sender_a());
     fixture.asleep_at(asleep_target());
 
@@ -1027,13 +1058,11 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     });
     let woken = fixture.stored_at(&asleep_target());
     eprintln!("witness target {:?} queue {:?}", woken.state, woken.queue);
-    let starts = super::waking::herdr_calls(&fixture)
-        .matches("agent start")
-        .count();
+    let starts = super::waking::ReadsFreshWorld::claude_starts(&world);
     eprintln!("witness herdr agent starts {starts}");
-    let handed = typed_orders(&fixture, "witness-order");
-    eprintln!("witness typed orders {handed}");
-    assert_eq!(woken.state, State::Awake("abc123".into()));
+    let handed = handed_orders(&fixture, &world, "witness-order");
+    eprintln!("witness handed orders {handed}");
+    assert!(matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123"));
     assert!(woken.queue.is_empty());
     assert_eq!(starts, 1);
     assert_eq!(handed, 1);
@@ -1128,7 +1157,8 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
             })
             .unwrap()
     );
-    super::waking::resumable(&fixture);
+    super::waking::slept_claude(&fixture);
+    let world = super::waking::WakesFreshClaude::fresh_claude_world(&mut fixture);
     fixture.asleep_at(asleep_target());
 
     let gate = fixture
@@ -1189,9 +1219,9 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     fixture.nexus.wake_deferred();
     let woken = fixture.stored_at(&asleep_target());
     eprintln!("witness target {:?} queue {:?}", woken.state, woken.queue);
-    assert_eq!(woken.state, State::Awake("abc123".into()));
+    assert!(matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123"));
     assert!(woken.queue.is_empty());
-    let handed = super::waking::typed_prompts(&fixture)
+    let handed = super::waking::ReadsFreshWorld::user_turns(&world, &fixture)
         .concat()
         .matches("{ Sender.{ Field flow Secondary } Order.first-turn-witness }")
         .count();

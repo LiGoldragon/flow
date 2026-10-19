@@ -17,8 +17,6 @@
 ; journal or lifecycle entry; Record.Harness appends the harness event a
 ; Report carried to the events Flow's Memory holds for that flow, and a
 ; flow Flow does not hold fails UnknownFlow and is never adopted.
-; Record.Context writes the tokens a flow's native session carried into
-; its last turn, read from its transcript when its hook reports Stopped.
 ; Register binds a flow's row and role. Confirm makes a Pending launch
 ; Active and records the Address its launch profile names Awake as it, in
 ; one write, and answers Started; an Address Awake as a live flow fails
@@ -45,13 +43,12 @@
 ;
 ; Sleep, Wake and Drain move a metaflow between Awake and Asleep so a seat
 ; that is not running keeps no harness. Sleep closes the pane of the flow a
-; metaflow is awake as and records it Asleep (Record.Asleep), keeping the
-; flow's native session so a later wake can resume it. Wake reads the whole
-; queue of an Asleep metaflow, oldest first, and starts a seat that carries
-; it in its first prompt: the last flow resumed when its session is under
-; its layer's refresh threshold, else a fresh launch composed from the
-; configured layer Model and the module identities the seat's last launch
-; named. Record.Awoken then names the
+; metaflow is awake as, of any layer and either harness, and records the
+; flow Stopped and the metaflow Asleep; the flow's row and native transcript
+; stay. Wake reads the whole queue of an Asleep metaflow, oldest first, and
+; starts a fresh flow that carries it in its first prompt, composed from the
+; configured layer Model and the module identities the metaflow's last
+; launch named. Record.Awoken then names the
 ; started flow and the count of queued requests it was handed, which leave
 ; the queue in that same write, so a wake that dies first loses nothing.
 ; Drain first reconciles a hand-over still outstanding from the seat's
@@ -59,13 +56,6 @@
 ; its Codex app-server, or typed into its Claude pane. A request leaves the
 ; queue only on its exact native receipt. Drain answers what it settled or
 ; handed over. Wake runs off the dispatch gate and takes it per step.
-;
-; Record.Refresh marks one Asleep metaflow so its next wake starts a fresh
-; launch composed from the modules and leave-outs its last launch named,
-; whatever its context size; the mark is a row of its own, keyed by the
-; Address, and Record.Awoken retracts it in the write that records the wake.
-; A mark already held is left as it is. It fails NotAsleep for a metaflow
-; that is not Asleep.
 ;
 ; LaunchOutcome and Replacement are the store's own types, imported from
 ; the Nexus crate until the Memory root is compiled.
@@ -88,10 +78,8 @@ Operation
            Withdrawn.LaunchRequestId
            Settled.{ LaunchRequestId LaunchOutcome }
            Harness.{ FlowId Event }
-           Context.{ FlowId Tokens.Integer }
            Asleep.{ Address FlowId }
-           Awoken.{ Address FlowId Delivered.Integer }
-           Refresh.Address ]
+           Awoken.{ Address FlowId Delivered.Integer } ]
   Register.{ FlowNode Caller }
   Confirm.FlowId
   Open.ComposedLaunch

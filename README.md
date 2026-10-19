@@ -105,8 +105,9 @@ refused); the power from the Address layer; the harness from the model,
 Codex when a configured Codex endpoint serves it and Claude otherwise. Once the seat's native binding is witnessed and its flow
 registered, before its first prompt, the launch records that Address's
 metaflow Awake as the launched flow, so the seat's first tool call is
-identified and sends through Message; confirmation keeps it, so the seat
-sleeps at a resting Stop and a queued request wakes it, and a launch refused,
+identified and sends through Message; confirmation keeps it, so the seat,
+of any layer and either harness, sleeps when its turn ends with nothing
+queued and a queued request wakes a fresh flow for it, and a launch refused,
 or a flow that ends, before confirmation gives the metaflow back as it found
 it; a Start whose Address a live seat holds, or another unsettled launch
 names, answers `StartRejected.AddressAwake`, and one at an ended Address

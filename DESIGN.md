@@ -60,7 +60,7 @@ bound to a live process, is refused, an Ended one is refused, and an absent
 or Asleep one, or one Awake as a flow no longer live, is taken, a displaced
 flow joining Past; a replacement takes over its predecessor's. Start refuses
 before launching an Address it could not take or another unsettled launch
-names. A resumed wake takes its Address through the same rule with
+names. A wake's fresh flow takes its Address through the same rule with
 `Record.Awoken`. `Identify` names a process in a launched flow's pane, found
 from the Herdr marks as ResolveCaller finds it, as the Address that flow is
 Awake at, so a launched seat sends through Message; a process bound by Bind,
@@ -301,7 +301,7 @@ while the Codex launch that opened the thread is unsettled and no other flow
 or launch holds its Address, that launch's Address. A thread no flow of
 Flow's runs and no unsettled launch opened is `ThreadUnowned`, a Stopped, Retired or Exited flow is
 `FlowEnded`, and a flow whose metaflow is no longer Awake as it (Asleep, or
-moved on by a Refresh or a fresh wake) is `NotAwake`; none is recorded. The
+moved on by a wake's fresh flow) is `NotAwake`; none is recorded. The
 request is queued for the target, with that sender, under the rules a Lock and a Deliver follow
 (an absent target is `UnknownRecipient`, an Ended one `RecipientEnded`, one
 Message holds an unexpired lock on is `Held`), and the call is
@@ -314,9 +314,8 @@ datom, `Queued.{ Sender Target }` or `Refused.SendRefusal`, with `success`
 true only when queued.
 
 Whether a target wakes is read from Flow's records, never carried with the
-answer. A metaflow is due a wake when it is Asleep, its layer is not Primary,
-and it holds an Order, a Question or the living's words, or its last flow is
-still live. After every commit that queues a request, from a send-tool call
+answer. A metaflow of any layer is due a wake when it is Asleep and holds an
+Order, a Question or the living's words. After every commit that queues a request, from a send-tool call
 or a Deliver, and after a replayed call is answered from its record, the
 target is held against a second wake, read again under the dispatch gate,
 and woken when due; this runs whether or not the answer reached the caller.
@@ -334,11 +333,12 @@ thread is in a turn, holds work Flow typed whose turn has not begun, or
 rests; a thread with no such evidence never rests. A turn's completion is
 counted once by its id, an idle status does not end a named turn or typed
 work, and the resumed status covers a completion that came while no
-responder was subscribed. When a confirmed seat's thread comes to rest with
-work queued, or work is queued for a seat whose thread rests, the seat is
-settled as a Stop settles a Claude seat: under the dispatch gate the oldest
-request is typed into its resting pane, sender first, and the thread then
-holds that typed work until a turn that began after it completes. A seat
+responder was subscribed. When a confirmed seat's thread comes to rest, or
+work is queued for a seat whose thread rests, the seat is settled as a Stop
+settles a Claude seat: under the dispatch gate the oldest queued request is
+handed to its thread, sender first, and the thread then holds that work
+until a turn that began after it completes; with nothing queued the seat
+sleeps. A seat
 whose thread is in a turn is never drained, whatever its screen shows, and
 work queued meanwhile waits for the completion. A seat that only holds its
 Address is settled at its confirmation when its thread rests. The state is

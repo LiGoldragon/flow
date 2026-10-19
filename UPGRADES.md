@@ -1,3 +1,28 @@
+# Flow 0.35.22
+
+Pins meta-signal-flow 29.0.0 (fbd4459e): `Refresh`, `Refreshed`,
+`RefreshRejected` and `RefreshRejection` are gone, so every meta-socket peer
+repins. signal-flow stays at 22.0.0.
+
+The store drops two tables when it opens, rows and registrations, in one
+write before the engine opens it: `flow_nexus_flow_context_sizes`
+(`flow-nexus-flow-context-size` v1) and `flow_nexus_metaflow_refreshes`
+(`flow-nexus-metaflow-refresh` v1). A 0.35.21 store opens; once opened by
+0.35.22 it no longer holds them.
+
+- **Every idle metaflow sleeps.** When a flow's turn ends with nothing
+  queued, its metaflow sleeps whatever its layer and harness: a Primary as
+  a Secondary, a Codex seat as a Claude seat. A Claude seat's turn end is
+  its `Stopped` report; a Codex seat's is its app-server thread coming to
+  rest. Sleep closes the pane, records the flow Stopped and the metaflow
+  Asleep; the flow's row and native transcript stay.
+- **Every wake is fresh.** An Order, a Question or the living's words queued
+  for an Asleep metaflow of any layer start a new flow, composed from the
+  configured layer model and the modules the metaflow's last launch named,
+  on a new native session (Claude) or thread (Codex), its first prompt
+  carrying the whole queue oldest first. A sleeping session is never
+  resumed; a Result or a Notice still waits for a wake.
+
 # Flow 0.35.21
 
 No contract, store or deployment change.

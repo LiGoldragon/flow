@@ -61,36 +61,18 @@ pub trait StartsNativeHerdrHarness {
     ) -> Result<(), SpawnFailure>;
 }
 
-/// Starts a Claude flow's harness again, in a new pane, as the native
-/// session it already had: `--resume <session>` where a launch passes
-/// `--session-id`. Claude Code 2.1.294's own help says resuming reuses the
-/// original session ID unless `--fork-session` is given, so the resumed
-/// harness writes the same transcript and the flow keeps its FlowId, which
-/// is exported as FLOW_ID exactly as at launch. Codex is not resumed here.
-pub trait ResumesNativeHerdrHarness {
-    fn resume_native_harness(
-        &self,
-        launch: &ComposedLaunch,
-        pane: &HerdrPaneBinding,
-        flow_id: &str,
-        native_session_id: &str,
-    ) -> Result<(), SpawnFailure>;
-}
-
 /// How a harness is told its native session at spawn.
 enum ClaudeSession {
     /// The harness chooses its own session.
     Unchosen,
     /// The session Flow chose for a reserved Claude launch: `--session-id`.
     Chosen(String),
-    /// The session a sleeping Claude flow had: `--resume`.
-    Resumed(String),
     /// The Codex thread Flow opened through the app-server, which the TUI
     /// attaches to: `resume <thread>`.
     Attached(String),
 }
 
-/// The one Herdr `agent start` both a launch and a resume run.
+/// The one Herdr `agent start` every launch runs.
 trait SpawnsNativeHarness {
     fn spawn_native_harness(
         &self,
@@ -1776,29 +1758,6 @@ impl StartsNativeHerdrHarness for HerdrCli {
     }
 }
 
-impl ResumesNativeHerdrHarness for HerdrCli {
-    fn resume_native_harness(
-        &self,
-        launch: &ComposedLaunch,
-        pane: &HerdrPaneBinding,
-        flow_id: &str,
-        native_session_id: &str,
-    ) -> Result<(), SpawnFailure> {
-        if launch.harness_kind != HarnessKind::Claude {
-            return Err("only a Claude harness is resumed in a pane".into());
-        }
-        if native_session_id.is_empty() {
-            return Err("a resumed harness needs its native session".into());
-        }
-        self.spawn_native_harness(
-            launch,
-            pane,
-            Some(flow_id),
-            ClaudeSession::Resumed(native_session_id.to_owned()),
-        )
-    }
-}
-
 impl SpawnsNativeHarness for HerdrCli {
     fn spawn_native_harness(
         &self,
@@ -1907,10 +1866,6 @@ impl SpawnsNativeHarness for HerdrCli {
                 ClaudeSession::Unchosen | ClaudeSession::Attached(_) => {}
                 ClaudeSession::Chosen(session) => {
                     arguments.push("--session-id".into());
-                    arguments.push(session.clone());
-                }
-                ClaudeSession::Resumed(session) => {
-                    arguments.push("--resume".into());
                     arguments.push(session.clone());
                 }
             }

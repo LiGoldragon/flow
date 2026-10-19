@@ -11,8 +11,8 @@ use crate::codex::{
 use crate::composition::{ComposesLaunch, CompositionError, HarnessedProfile};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
-    Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
-    Record_Data_Settled_Data, Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
+    Record_Data_Awoken_Data, Record_Data_Harness_Data, Record_Data_Settled_Data, Register_Data,
+    Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::generated::starter::DerivesHarness;
 use crate::herdr::OperatesHerdrPane;
@@ -600,18 +600,6 @@ impl PerformsInParts for RunningNexus {
                         .recorded(),
                     Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
                 }
-            }
-            Record_Data::Refresh(address) => {
-                use crate::store::refresh::MarksFreshWakes;
-                match self.store.mark_fresh_wake(&address) {
-                    Ok(true) => Outcome::Recorded,
-                    Ok(false) => Outcome::Failed(Failed_Data::NotAsleep),
-                    Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
-                }
-            }
-            Record_Data::Context(Record_Data_Context_Data { flow_id, tokens }) => {
-                use crate::store::context::RecordsContextSize;
-                self.store.record_context_size(&flow_id, tokens).recorded()
             }
             Record_Data::Harness(Record_Data_Harness_Data { flow_id, event }) => {
                 use crate::store::events::{EventRecording, RecordsHarnessEvents};

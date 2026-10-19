@@ -90,7 +90,6 @@ use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, FlowStore, NamesLiveFlow, OpensFlowStore,
     ReadsFlowRows, RecordsLaunchOutcome, RegistersExistingFlow, RegistersFlowIdentity,
 };
-use waking::RefreshesMetaflows;
 use waking::SettlesStopsAtConfirmation;
 use waking::SleepsAndWakesSeats;
 
@@ -475,7 +474,6 @@ impl Dispatches for RunningNexus {
                     meta_signal_flow::MetaRefusal::PeerUnknown,
                 ),
             },
-            meta_signal_flow::Query::Refresh(address) => self.refresh(address),
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
                 if !self.herdr.validate_registration(&flow_node) {
                     return meta_signal_flow::Response::FlowRegistrationRejected(

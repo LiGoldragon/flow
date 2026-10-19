@@ -424,32 +424,6 @@ pub trait ReadsHerdrPanes {
     /// Flow recorded for the flow, Herdr recognizing a Codex agent in it,
     /// runs the flow's opened thread unless it reports another session.
     fn holds_native_session(&self, herdr_session_name: &str, node: &FlowNode) -> Option<bool>;
-    /// What a fresh snapshot says of whether the pane Flow recorded for
-    /// this flow runs the flow's own native session now, under its FlowId
-    /// claim.
-    fn own_session(&self, node: &FlowNode) -> OwnSession;
-}
-
-/// What a fresh Herdr snapshot says of whether the pane Flow recorded for a
-/// flow runs the flow's own native session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnSession {
-    /// The recorded pane shows the flow's harness running its session: its
-    /// agent reports the session, or, for Codex, reports none.
-    Runs,
-    /// Flow holds no pane for the flow, or no native session.
-    NoRecordedPane,
-    /// The flow's FlowId claim is not held.
-    Unclaimed,
-    /// Herdr could not be read.
-    HerdrUnreadable,
-    /// The snapshot shows no agent of the flow's harness at the recorded
-    /// pane and terminal: the pane is gone.
-    PaneGone,
-    /// The recorded pane's agent reports another native session.
-    OtherSession,
-    /// The recorded pane's Claude agent reports no native session.
-    SessionUnreported,
 }
 
 impl ReadsHerdrPanes for HerdrCli {
@@ -645,44 +619,6 @@ impl ReadsHerdrPanes for HerdrCli {
                 }
             }
         }))
-    }
-
-    fn own_session(&self, node: &FlowNode) -> OwnSession {
-        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-            return OwnSession::NoRecordedPane;
-        };
-        if node.session_id.is_empty() {
-            return OwnSession::NoRecordedPane;
-        }
-        if !self.identity_is_claimed(node) {
-            return OwnSession::Unclaimed;
-        }
-        let Some(agents) = self
-            .snapshot(route)
-            .as_ref()
-            .and_then(|snapshot| snapshot.pointer("/result/snapshot/agents"))
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-        else {
-            return OwnSession::HerdrUnreadable;
-        };
-        let Some(agent) = agents
-            .iter()
-            .find(|agent| agent.matches_binding(route, &node.harness_kind))
-        else {
-            return OwnSession::PaneGone;
-        };
-        match agent
-            .pointer("/agent_session/value")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some(session) if session == node.session_id => OwnSession::Runs,
-            Some(_) => OwnSession::OtherSession,
-            // A remote-resumed Codex TUI reports none: its claimed thread and
-            // recognized pane are the proof.
-            None if node.harness_kind == HarnessKind::Codex => OwnSession::Runs,
-            None => OwnSession::SessionUnreported,
-        }
     }
 
     fn session_snapshot(&self, herdr_session_name: &str) -> Option<serde_json::Value> {

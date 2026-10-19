@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.21";
+            version = "0.35.22";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -198,15 +198,17 @@
           flow-0-34-launch-attempt-carried = context.exactTest "flow-nexus"
             "store::tests::a_0_34_launch_attempt_row_is_carried_with_what_it_named_kept";
           flow-codex-thread-opened-lean-before-attach = context.exactTest "flow-nexus"
-            "codex::tests::a_codex_thread_is_opened_lean_and_given_its_first_turn_before_attach";
+            "codex::tests::a_codex_thread_is_opened_lean_and_named_with_no_turn_before_attach";
+          flow-codex-opened-name-readback-refused = context.exactTest "flow-nexus"
+            "codex::tests::an_opened_thread_whose_name_reads_back_otherwise_is_archived";
           flow-codex-loaded-instructions-get-no-turn = context.exactTest "flow-nexus"
             "codex::tests::a_codex_thread_that_loaded_left_out_instructions_gets_no_turn";
           flow-codex-exclusions-reapplied-after-attach = context.exactTest "flow-nexus"
             "codex::tests::after_attach_the_exclusions_are_applied_again_and_read_back";
           flow-codex-attached-readback-refused = context.exactTest "flow-nexus"
             "codex::tests::an_attached_thread_whose_readback_differs_is_refused";
-          flow-codex-first-turn-before-attach-observed = context.exactTest "flow-nexus"
-            "herdr::launch::tests::a_codex_first_turn_given_before_the_tui_attached_is_observed";
+          flow-codex-first-turn-read-from-thread-start = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_codex_first_turn_is_read_from_the_thread_start";
           flow-codex-left-out-block-refused = context.exactTest "flow-nexus"
             "herdr::launch::tests::a_codex_request_carrying_a_left_out_block_is_refused";
           flow-codex-tui-attaches-to-opened-thread = context.exactTest "flow-nexus"
@@ -481,10 +483,12 @@
             "tests::waking::a_nexus_start_wakes_a_seat_whose_wake_did_not_finish";
           flow-v1-metaflow-queue-upgrades-sender-unknown = context.exactTest "flow-nexus"
             "store::tests::a_v1_metaflow_queue_upgrades_with_its_senders_unknown";
-          flow-first-turn-send-served-before-idle = context.exactTest "flow-nexus"
-            "tests::waking::a_first_turn_that_calls_send_before_idle_is_served_and_the_launch_completes";
-          flow-refused-launch-keeps-first-turn-call = context.exactTest "flow-nexus"
-            "tests::waking::a_launch_refused_after_its_first_turn_called_send_archives_its_thread_and_keeps_the_call";
+          flow-first-turn-send-served = context.exactTest "flow-nexus"
+            "tests::waking::a_first_turn_that_calls_send_is_served_and_the_launch_completes";
+          flow-codex-long-first-turn-refuses-nothing = context.exactTest "flow-nexus"
+            "tests::waking::a_codex_first_turn_starts_after_the_tui_attached_and_a_long_turn_refuses_nothing";
+          flow-refused-codex-start-archives-idle-thread = context.exactTest "flow-nexus"
+            "tests::waking::a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn";
           flow-interrupted-launch-reconciled-at-restart = context.exactTest "flow-nexus"
             "tests::waking::a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_settled_at_restart";
           flow-launch-address-held-elsewhere-sends-nothing = context.exactTest "flow-nexus"

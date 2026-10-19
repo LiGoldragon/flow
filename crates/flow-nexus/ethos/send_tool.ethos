@@ -5,10 +5,10 @@
 ; handled, a replayed one included: the thread's flow must be live and its
 ; metaflow Awake as it, or, while the launch that opened the thread is
 ; unsettled and no other flow or launch holds its Address, the sender is
-; that launching metaflow. The thread is recorded as its launch's before
-; the first turn is started, and the connection that started it, subscribed
-; to its calls, answers them, so a first turn's call is served while the
-; launch still waits for its seat to come to rest. The request is queued for the target under the
+; that launching metaflow. The thread is recorded as its launch's when it
+; is opened, and the connection that opened it, subscribed to its calls,
+; answers them while the launch holds the gate, so a first turn's call made
+; while the launch submits it is served. The request is queued for the target under the
 ; rules a Lock and a Deliver from Message follow, and the call and its
 ; outcome are recorded in the commit that queues it, keyed by the thread,
 ; the turn and the call, so a replayed call is answered from the record and

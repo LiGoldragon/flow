@@ -9,14 +9,14 @@
 //! first answer wins is how the app-server behaves, not a guarantee: any
 //! process of the same user that subscribes to the thread can answer first.
 //!
-//! A launch's first turn may call the tool before the launch's flow exists:
-//! a Codex launch records the thread it opened as its own before starting
-//! the first turn, and keeps the connection that opened the thread, which
-//! is subscribed to its server requests from `thread/start` on; while
-//! it waits (holding the dispatch gate) for Herdr to show its seat at rest,
-//! answers that connection's calls as the gate's holder. Herdr's start
-//! returns only once the seat is at rest, which a turn waiting on a call
-//! never is, so a launch that did not answer would wait on itself.
+//! A launch's first turn may call the tool before the launch's flow is
+//! Awake: a Codex launch records the thread it opened as its own when it
+//! opens it, and keeps the connection that opened the thread, which is
+//! subscribed to its server requests from `thread/start` on. The first turn
+//! is started at Submit, once the TUI attached to the idle thread and the
+//! pane bound; while Submit runs, the launch, holding the dispatch gate,
+//! answers that connection's calls as the gate's holder. A call made after
+//! the launch gave the gate back is the Nexus's responders'.
 //!
 //! A call is handled under the dispatch gate. Its sender is read from
 //! Flow's records each time, a replayed call included: the one live flow
@@ -501,11 +501,10 @@ impl RespondsToSendCalls for RunningNexus {
 
 /// The responder of the thread a running Codex launch opened: the
 /// connection that opened it, subscribed to its server requests from
-/// `thread/start`, before its first turn was started, so a first turn that
-/// calls the tool is served while the launch waits for its seat to come to
-/// rest. The launch holds the dispatch gate throughout, so the launch, as
-/// the gate's holder, reads and answers this connection's calls while it
-/// waits (`ServesLaunchCalls::serving_launch_calls`).
+/// `thread/start`, so a first turn that calls the tool while the launch
+/// submits it is served. The launch holds the dispatch gate throughout, so
+/// the launch, as the gate's holder, reads and answers this connection's
+/// calls while it waits (`ServesLaunchCalls::serving_launch_calls`).
 pub(crate) type LaunchResponder = ThreadConnection;
 
 /// The responder of the launch running now, and the targets its calls

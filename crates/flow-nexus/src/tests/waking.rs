@@ -2791,15 +2791,20 @@ case "$*" in
       printf '{{"type":"custom-title","customTitle":"%s","sessionId":"%s"}}\n' "$(cat "$S/title")" "$(cat "$S/session")" >> '{claude_root}/'"$(cat "$S/session")"'.jsonl'
     fi
     # As Herdr 0.8.2 does, a Codex start returns only once the agent is idle:
-    # with START_WAITS, once its first turn has ended (TURN_DONE), else it
+    # with START_WAITS, while a turn runs (TURN_STARTED, the test having seen
+    # a turn/start reach the app-server, and no TURN_DONE) it waits, and
     # times out as Herdr does. START_REFUSED then refuses the start.
     if [ "$harness" = codex ] && [ -f "$S/start-waits" ]; then
-      i=0; while [ ! -f "$S/turn-done" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
-      if [ ! -f "$S/turn-done" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"timeout","message":"timed out waiting for agent startup"}}}}'; exit 1; fi
+      sleep 0.3
+      i=0; while [ -f "$S/turn-started" ] && [ ! -f "$S/turn-done" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+      if [ -f "$S/turn-started" ] && [ ! -f "$S/turn-done" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"timeout","message":"timed out waiting for agent startup"}}}}'; exit 1; fi
     fi
     if [ "$harness" = codex ] && [ -f "$S/start-refused" ]; then printf '%s\n' '{{"id":"cli:agent:start","error":{{"code":"agent_start_failed","message":"refused after the first turn"}}}}'; exit 1; fi
     printf '{{"result":{{"agent":{{"name":"%s"}}}}}}\n' "$5" ;;
-  *"agent wait"*) printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
+  *"agent wait"*)
+    # A pane whose turn runs is not at rest.
+    if [ -f "$S/turn-started" ] && [ ! -f "$S/turn-done" ]; then printf '%s\n' '{{"id":"cli:agent:wait","error":{{"code":"timeout","message":"timed out"}}}}'; exit 1; fi
+    printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
   *"agent get"*) printf '{{"result":{{"agent":%s}}}}\n' "$(agent)" ;;
   *"api snapshot"*) a=; [ -f "$S/harness" ] && a=$(agent); printf '{{"id":"cli:api:snapshot","result":{{"snapshot":{{"agents":[%s],"protocol":20,"version":"0.8.2"}},"type":"session_snapshot"}}}}\n' "$a" ;;
   *"pane rename "*) printf '%s' "$6" > "$S/label"; printf '%s\n' '{{"result":{{}}}}' ;;
@@ -2860,15 +2865,19 @@ esac
         });
         self.list_herdr_sessions(&[("fixture-session", socket)]);
 
-        // The Codex app-server: the send-tool probe, the opening, the naming
-        // and the settings readback a fresh launch makes, in that order, each
-        // its own proxy; with START_REFUSED, the account of the thread whose
+        // The Codex app-server: the send-tool probe, the opening (which
+        // names the thread), the Title's naming and the settings readback
+        // with the first turn a fresh launch makes, in that order, each its
+        // own proxy; with START_REFUSED, the account of the thread whose
         // start was refused in place of the naming. Each connection's client
-        // frames are kept (record-N). The opening connection is subscribed
-        // to the thread it started: with FIRST_CALL it sends that server
-        // request once the first turn has started, as the app-server sends a
+        // frames are kept (record-N), and its start is logged among the
+        // Herdr calls. The opening connection is subscribed to the thread it
+        // started: with FIRST_CALL it sends that server request once the
+        // first turn has started (TURN_STARTED), as the app-server sends a
         // first turn's tool call to every connection subscribed to its
-        // thread, and stays open.
+        // thread, and stays open; the first turn's own connection then
+        // answers the turn/start only once the call was answered
+        // (TURN_DONE), so the launch submitting it serves the call.
         let invocations = state.join("codex-invocations");
         let opened = |id: u64| {
             websocket_frame(
@@ -2884,25 +2893,30 @@ esac
             ),
         ]
         .concat();
+        let named = |id: u64| {
+            websocket_frame(
+                &serde_json::json!({"id":id,"result":{"thread":{"id":FRESH_THREAD,"name":codex_title}}})
+                    .to_string(),
+            )
+        };
         let opening = [
             initialized.clone(),
             opened(2),
-            websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-fresh"}}}"#),
+            websocket_frame(r#"{"id":3,"result":{}}"#),
+            named(4),
         ]
         .concat();
         let naming = [
             initialized.clone(),
             websocket_frame(r#"{"id":2,"result":{}}"#),
-            websocket_frame(
-                &serde_json::json!({"id":3,"result":{"thread":{"id":FRESH_THREAD,"name":codex_title}}})
-                    .to_string(),
-            ),
+            named(3),
         ]
         .concat();
         let readback = [initialized.clone(), opened(2)].concat();
+        let turn = websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-fresh"}}}"#);
         let account = [
             initialized,
-            websocket_frame(r#"{"id":2,"result":{"data":[{"status":"completed"}]}}"#),
+            websocket_frame(r#"{"id":2,"result":{"data":[]}}"#),
             websocket_frame(r#"{"id":3,"result":{}}"#),
         ]
         .concat();
@@ -2911,7 +2925,7 @@ esac
             path: app_server.clone(),
         }
         .install(&format!(
-            "#!/bin/sh\nS='{state}'\nn=$(cat '{counter}' 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > '{counter}'\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$n\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{opening}'; [ -f \"$S/first-call\" ] && printf '%b' \"$(cat \"$S/first-call\")\"; exec sleep 30 ;;\n  3) if [ -f \"$S/start-refused\" ]; then printf '%b' '{account}'; else printf '%b' '{naming}'; fi ;;\n  4) printf '%b' '{readback}' ;;\n  *) exit 1 ;;\nesac\nexec sleep 5\n",
+            "#!/bin/sh\nS='{state}'\nn=$(cat '{counter}' 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > '{counter}'\nprintf 'app-server connection %s\\n' \"$n\" >> \"$S/calls\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$S/record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\ncase \"$n\" in\n  1) printf '%b' '{probe}' ;;\n  2) printf '%b' '{opening}'; if [ -f \"$S/first-call\" ]; then i=0; while [ ! -f \"$S/turn-started\" ] && [ \"$i\" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done; printf '%b' \"$(cat \"$S/first-call\")\"; fi; exec sleep 30 ;;\n  3) if [ -f \"$S/start-refused\" ]; then printf '%b' '{account}'; else printf '%b' '{naming}'; fi ;;\n  4) printf '%b' '{readback}'; if [ -f \"$S/first-call\" ]; then i=0; while [ ! -f \"$S/turn-done\" ] && [ \"$i\" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done; fi; printf '%b' '{turn}' ;;\n  *) exit 1 ;;\nesac\nexec sleep 5\n",
             state = state.display(),
             counter = invocations.display(),
         ));
@@ -3365,9 +3379,9 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
 }
 
 /// The first-turn send of a fresh Codex launch, against the fresh world: a
-/// Codex seat at SENDER whose first turn calls the send tool before it is
-/// ever idle, and the Refresh'd sleeping Claude seat abc123 the call
-/// orders.
+/// Codex seat at SENDER whose first turn calls the send tool while the
+/// launch submits it, and the Refresh'd sleeping Claude seat abc123 the
+/// call orders.
 struct FirstTurnSend {
     world: FreshWorld,
     sender: LaunchProfile,
@@ -3388,9 +3402,9 @@ fn first_call_key() -> crate::generated::send_tool::ToolCallKey {
 
 trait SetsUpFirstTurnSend {
     /// The fresh world with the sender's first turn calling `send` towards
-    /// `recipient`, Herdr's start returning only once that turn ended, the
-    /// rollout and the FlowId claims a fresh Codex and a fresh Claude launch
-    /// read.
+    /// `recipient`, Herdr's start and wait refusing a seat whose turn runs,
+    /// the rollout and the FlowId claims a fresh Codex and a fresh Claude
+    /// launch read.
     fn first_turn_send(&mut self, recipient: Address) -> FirstTurnSend;
 }
 
@@ -3467,7 +3481,8 @@ impl SetsUpFirstTurnSend for NexusFixture {
             .clone();
         let title = sender.native_title(FRESH_CODEX_FLOW).unwrap();
         let world = self.fresh_world(title.as_str());
-        // Herdr 0.8.2: `agent start` returns once the agent is idle.
+        // Herdr 0.8.2: `agent start` returns once the agent is idle, and
+        // times out while a turn runs.
         fs::write(world.state.join("start-waits"), "").unwrap();
         let call = serde_json::json!({
             "id": FIRST_CALL_REQUEST,
@@ -3539,6 +3554,35 @@ printf '%s\n' "$alias"
     }
 }
 
+/// Stands for the app-server's view of the first turn: once any connection
+/// has carried a `turn/start`, TURN_STARTED is written, which the fake Herdr
+/// reads as a turn running and the opening connection as the moment to
+/// send FIRST_CALL. Returns the connection that carried it.
+fn turn_started_when_requested(
+    state: std::path::PathBuf,
+) -> std::thread::JoinHandle<Option<std::path::PathBuf>> {
+    use super::send_tool::ReadsClientFrames;
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            let started = (1..=6)
+                .map(|n| state.join(format!("record-{n}")))
+                .find(|record| {
+                    record.client_messages().iter().any(|message| {
+                        message.get("method").and_then(serde_json::Value::as_str)
+                            == Some("turn/start")
+                    })
+                });
+            if let Some(record) = started {
+                fs::write(state.join("turn-started"), "").unwrap();
+                return Some(record);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        None
+    })
+}
+
 /// Stands for the model's first turn: once the answer to the tool call is
 /// written on the launch responder's connection, the one that opened the
 /// thread (record-2), the turn ends
@@ -3568,14 +3612,70 @@ fn first_turn_ends_when_answered(
     })
 }
 
-/// A fresh Codex launch whose first turn calls `send` before the seat is
-/// ever idle, while Herdr's start waits for idle as Herdr 0.8.2 does: the
-/// launch's own responder, subscribed before the first turn, answers the
-/// call during the start; the request is queued once, sent from the
-/// launching metaflow; the launch completes; and the Refresh'd sleeping
-/// recipient wakes fresh once.
+/// The order of a fresh Codex launch as the app-server and Herdr saw it:
+/// the connection that opened the thread is logged before the Codex
+/// `agent start`, and the connection that carried the first `turn/start`
+/// after it; the opening connection named the thread and started no turn.
+trait ShowsCodexLaunchOrder {
+    fn shows_thread_start_then_agent_start_then_turn_start(
+        &self,
+        turn_record: Option<std::path::PathBuf>,
+    );
+}
+
+impl ShowsCodexLaunchOrder for FirstTurnSend {
+    fn shows_thread_start_then_agent_start_then_turn_start(
+        &self,
+        turn_record: Option<std::path::PathBuf>,
+    ) {
+        use super::send_tool::ReadsClientFrames;
+        let state = &self.world.state;
+        assert_eq!(turn_record, Some(state.join("record-4")));
+        let calls = fs::read_to_string(state.join("calls")).unwrap_or_default();
+        let line_of = |needle: &str| {
+            calls
+                .lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} not among the calls: {calls}"))
+        };
+        let opening = line_of("app-server connection 2");
+        let attach = line_of(&format!("resume {FRESH_THREAD}"));
+        let turn = line_of("app-server connection 4");
+        assert!(opening < attach && attach < turn, "{calls}");
+        let methods = |record: &str| {
+            state
+                .join(record)
+                .client_messages()
+                .iter()
+                .filter_map(|message| message.get("method")?.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            methods("record-2"),
+            [
+                "initialize",
+                "initialized",
+                "thread/start",
+                "thread/name/set",
+                "thread/read"
+            ]
+        );
+        assert_eq!(
+            methods("record-4"),
+            ["initialize", "initialized", "thread/resume", "turn/start"]
+        );
+    }
+}
+
+/// A fresh Codex launch whose first turn calls `send` while the launch
+/// submits it, with Herdr's start waiting for an idle seat as Herdr 0.8.2
+/// does: the thread is opened, named and idle when the TUI attaches, the
+/// first turn starts only after; the launch's own responder, subscribed
+/// since `thread/start`, answers the call while Submit runs; the request is
+/// queued once, sent from the launching metaflow; the launch completes; and
+/// the Refresh'd sleeping recipient wakes fresh once.
 #[test]
-fn a_first_turn_that_calls_send_before_idle_is_served_and_the_launch_completes() {
+fn a_first_turn_that_calls_send_is_served_and_the_launch_completes() {
     use super::send_tool::ReadsClientFrames;
     use crate::DispatchesSerially;
     use crate::store::refresh::MarksFreshWakes;
@@ -3594,6 +3694,7 @@ fn a_first_turn_that_calls_send_before_idle_is_served_and_the_launch_completes()
         refresh(&fixture, &recipient),
         meta_signal_flow::Response::Refreshed(recipient.clone())
     );
+    let started = turn_started_when_requested(setup.world.state.clone());
     let turn = first_turn_ends_when_answered(setup.world.state.clone());
 
     let response = fixture.nexus.dispatch_serially(
@@ -3603,35 +3704,24 @@ fn a_first_turn_that_calls_send_before_idle_is_served_and_the_launch_completes()
 
     let answer = turn.join().unwrap();
     let calls = fs::read_to_string(setup.world.state.join("calls")).unwrap_or_default();
-    let signal_flow::Response::Started(started) = &response else {
+    let signal_flow::Response::Started(started_flow) = &response else {
         panic!("the launch completes: {response:?}; Herdr calls: {calls}");
     };
-    assert_eq!(started.flow_id, FRESH_CODEX_FLOW);
-    // On the connection that opened the thread: the thread started, then
-    // the first turn, then the answer to its call, during Herdr's start;
-    // the thread was recorded as the launch's before the first turn.
-    let methods = setup
+    assert_eq!(started_flow.flow_id, FRESH_CODEX_FLOW);
+    setup.shows_thread_start_then_agent_start_then_turn_start(started.join().unwrap());
+    // On the connection that opened the thread: the answer to the first
+    // turn's call, after the opening and the naming.
+    let answered = setup
         .world
         .state
         .join("record-2")
         .client_messages()
         .iter()
-        .map(|message| match message.get("method") {
-            Some(method) => method.as_str().unwrap_or_default().to_owned(),
-            None => format!("answer {}", message["id"]),
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        methods,
-        [
-            "initialize",
-            "initialized",
-            "thread/start",
-            "turn/start",
-            &format!("answer {FIRST_CALL_REQUEST}")
-        ],
-        "{methods:?}"
-    );
+        .any(|message| {
+            message.get("id") == Some(&serde_json::json!(FIRST_CALL_REQUEST))
+                && message.get("method").is_none()
+        });
+    assert!(answered, "the opening connection answers the call");
     {
         use crate::store::opened_thread::RecordsOpenedThreads;
         assert_eq!(
@@ -3693,12 +3783,45 @@ fn a_first_turn_that_calls_send_before_idle_is_served_and_the_launch_completes()
     assert!(transcript.contains(FIRST_CALL_BODY), "{transcript}");
 }
 
-/// The same first-turn call, but Herdr refuses the start once the turn has
-/// ended: the launch is refused, the thread it opened is accounted for and
-/// archived, and the call it answered stays recorded with its request
-/// queued once from the launching metaflow.
+/// A first turn that runs far longer than Herdr's start waits refuses
+/// nothing: Herdr's start, waiting for an idle seat as Herdr 0.8.2 does,
+/// meets the opened thread before any turn, and the bind before it too;
+/// the turn starts after both and never ends here, and the launch is
+/// Started all the same.
 #[test]
-fn a_launch_refused_after_its_first_turn_called_send_archives_its_thread_and_keeps_the_call() {
+fn a_codex_first_turn_starts_after_the_tui_attached_and_a_long_turn_refuses_nothing() {
+    use crate::DispatchesSerially;
+    let mut fixture = NexusFixture::new();
+    resumable(&fixture);
+    let recipient = address(Layer::Secondary);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Layer::Secondary, State::Asleep, vec![], vec![]));
+    let setup = fixture.first_turn_send(recipient);
+    // The turn calls nothing and never ends.
+    fs::remove_file(setup.world.state.join("first-call")).unwrap();
+    let started = turn_started_when_requested(setup.world.state.clone());
+
+    let response = fixture.nexus.dispatch_serially(
+        signal_flow::Query::Start(setup.sender.clone()),
+        Origin::Unbound,
+    );
+
+    let calls = fs::read_to_string(setup.world.state.join("calls")).unwrap_or_default();
+    let signal_flow::Response::Started(started_flow) = &response else {
+        panic!("the launch completes: {response:?}; Herdr calls: {calls}");
+    };
+    assert_eq!(started_flow.flow_id, FRESH_CODEX_FLOW);
+    setup.shows_thread_start_then_agent_start_then_turn_start(started.join().unwrap());
+    assert!(!setup.world.state.join("turn-done").exists());
+}
+
+/// Herdr refuses the start: the launch is refused, and the thread it
+/// opened, named and idle, is accounted for and archived; no turn was
+/// ever started on it, and nothing was queued from it.
+#[test]
+fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
     use super::send_tool::ReadsClientFrames;
     use crate::DispatchesSerially;
     use crate::store::send_call::KeepsSendCalls;
@@ -3710,25 +3833,25 @@ fn a_launch_refused_after_its_first_turn_called_send_archives_its_thread_and_kee
         .seed_metaflow(metaflow(Layer::Primary, State::Asleep, vec![], vec![]));
     let setup = fixture.first_turn_send(recipient.clone());
     fs::write(setup.world.state.join("start-refused"), "").unwrap();
-    let turn = first_turn_ends_when_answered(setup.world.state.clone());
+    fs::remove_file(setup.world.state.join("first-call")).unwrap();
 
     let response = fixture.nexus.dispatch_serially(
         signal_flow::Query::Start(setup.sender.clone()),
         Origin::Unbound,
     );
 
-    assert!(turn.join().unwrap().is_some(), "the call is answered");
     let signal_flow::Response::StartRejected(signal_flow::StartRejection::HarnessSpawnRefused(
         refusal,
     )) = &response
     else {
         panic!("the start is refused: {response:?}");
     };
+    // The thread had no turn to read: the account names none.
     assert_eq!(
         refusal.opened_thread_option,
         Some(signal_flow::OpenedThread {
             native_session_id: FRESH_THREAD.into(),
-            first_turn: signal_flow::FirstTurn::Answered,
+            first_turn: signal_flow::FirstTurn::Unread,
             thread_archive: signal_flow::ThreadArchive::Archived,
         })
     );
@@ -3739,28 +3862,24 @@ fn a_launch_refused_after_its_first_turn_called_send_archives_its_thread_and_kee
         }),
         "{account:?}"
     );
-    let recorded = fixture
-        .nexus
-        .store
-        .send_call(&first_call_key())
-        .unwrap()
-        .expect("the call stays recorded");
+    for n in 1..=4 {
+        let record = setup
+            .world
+            .state
+            .join(format!("record-{n}"))
+            .client_messages();
+        assert!(
+            !record
+                .iter()
+                .any(|message| message["method"] == "turn/start"),
+            "record-{n}: {record:?}"
+        );
+    }
     assert_eq!(
-        recorded.send_outcome,
-        crate::generated::send_tool::SendOutcome::Queued(
-            crate::generated::send_tool::Queued_Data {
-                sender: setup.sender.address.clone(),
-                target: recipient.clone(),
-            }
-        )
+        fixture.nexus.store.send_call(&first_call_key()).unwrap(),
+        None
     );
-    assert_eq!(
-        stored(&fixture, Layer::Primary).queue,
-        vec![QueuedRequest {
-            sent_by: SentBy::Sender(setup.sender.address.clone()),
-            request: Request::Order(FIRST_CALL_BODY.into()),
-        }]
-    );
+    assert!(stored(&fixture, Layer::Primary).queue.is_empty());
     // After the refusal the thread is no launch's: a call now is refused.
     assert_eq!(
         fixture.nexus.store.thread_sender(FRESH_THREAD).unwrap(),

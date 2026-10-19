@@ -25,11 +25,11 @@
 ; AddressAwake, an Ended one AddressEnded, and the launch stays Pending. Open makes the launch pane; Spawn starts
 ; the native harness in it. A Codex Spawn first opens the thread through
 ; the app-server with the system prompt as its base instructions and the
-; launch's exclusions in its config, reads them back, and submits the first
-; part of the first USER message as the thread's first turn; only then
-; does the TUI attach to that thread, and Spawned names it; the thread is
-; recorded for the launch request first, so a launch recovered after its
-; start binds to it. A start Herdr
+; launch's exclusions in its config and reads them back; the thread is
+; recorded for the launch request, so a launch recovered after its start
+; binds to it, its FlowId is claimed, and it is named with its title and
+; the name read back, which stores the thread so a TUI can resume it. The
+; TUI then attaches to the idle thread, and Spawned names it. A start Herdr
 ; refuses, or one Flow refuses before calling Herdr, fails SpawnRefused with
 ; its cause and, for Codex, the thread it had opened, archived. Open, a
 ; Codex thread's opening, a Spawn Flow did not attempt, Bind and Title fail
@@ -38,8 +38,8 @@
 ; requires the thread Spawn opened; Title names the claimed flow; Submit
 ; types the next part of the first USER message once (the last part
 ; carries the brief), and for Codex first applies the exclusions to the
-; attached thread again and reads them back, a first part being already in
-; the thread; Close closes a flow's pane. Release gives back what
+; attached thread again and reads them back, then starts the part as a
+; turn, the first part being the thread's first turn; Close closes a flow's pane. Release gives back what
 ; Reserve took for a launch then refused: the held flow and its FlowId
 ; claim, answered Released.
 ;

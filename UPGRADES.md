@@ -1,3 +1,20 @@
+# Flow 0.35.22
+
+No contract, store or deployment change.
+
+- **A Codex TUI attaches to an idle thread; the first turn starts after.**
+  Herdr 0.8.2's `agent start` returns only once a Codex pane is at rest,
+  which it is not while a turn runs, so a first turn longer than the start's
+  30 s refused the spawn and archived the thread mid-turn. Spawn now opens
+  the thread through the app-server, records it, claims its Flow ID and
+  names it with its title (read back), then attaches the TUI with
+  `resume <thread>`; Submit starts the first part as the thread's first
+  turn after the exclusions are applied again and read back, as it does
+  every later part. The naming is what stores the thread: codex
+  0.161.0-alpha.2 refuses `thread/resume` of a thread with nothing written
+  ("no rollout found"), and accepts it once the thread is named. A Codex
+  start Herdr refuses archives a thread that had no turn.
+
 # Flow 0.35.21
 
 No contract, store or deployment change.

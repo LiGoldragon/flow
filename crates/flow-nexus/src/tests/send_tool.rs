@@ -2001,6 +2001,7 @@ fn a_completion_on_another_thread_drains_nothing() {
 fn codex_resolved_absent(
     first_event: crate::codex_turns::TurnEvent,
 ) -> (NexusFixture, FakeAppServer, QueuedRequest) {
+    use crate::Dispatches;
     use crate::DispatchesSerially;
     use crate::codex_turns::TracksCodexTurns;
     use meta_signal_flow::{QueueDeliveryResolution, QueueResolutionOutcome};

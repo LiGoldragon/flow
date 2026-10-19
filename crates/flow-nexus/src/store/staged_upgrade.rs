@@ -130,6 +130,11 @@ impl StagesUpgrade for StagedUpgrade {
                 Err(error) => return Err(failed("cannot lock", &error)),
             }
             Self::sweep(store, &failed)?;
+            // Released by name, not by closing: a descriptor a concurrent
+            // fork still holds would keep the lock until its exec.
+            exclusion
+                .unlock()
+                .map_err(|error| failed("cannot unlock", &error))?;
         }
         match redb::ReadOnlyDatabase::open(store) {
             Ok(reader) => {
@@ -230,7 +235,9 @@ impl Drop for StagedUpgrade {
         if !self.keeps_copy {
             let _ = std::fs::remove_file(&self.copy);
         }
-        self.exclusion.take();
+        if let Some(exclusion) = self.exclusion.take() {
+            let _ = exclusion.unlock();
+        }
     }
 }
 

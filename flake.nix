@@ -353,8 +353,26 @@
             "tests::waking::a_stop_that_leaves_its_seat_names_why";
           flow-hook-closed-before-the-rest-wait = context.exactTest "flow-nexus"
             "tests::waking::the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends";
-          flow-stop-before-confirmation-settled = context.exactTest "flow-nexus"
-            "tests::waking::a_stop_before_confirmation_is_settled_when_the_launch_is_confirmed";
+          flow-codex-stop-before-confirmation-fabricates-nothing = context.exactTest "flow-nexus"
+            "tests::waking::a_codex_stop_before_confirmation_does_not_fabricate_completion";
+          flow-claude-end-turn-with-sidechain-drains = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop";
+          flow-claude-two-requests-drain-on-receipts = context.exactTest "flow-nexus"
+            "tests::queue_drain::two_queued_claude_requests_drain_in_order_once_each_on_their_receipts";
+          flow-claude-notification-settles-nothing = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_task_notification_that_takes_the_turn_first_settles_nothing";
+          flow-claude-crash-reconciled-at-start = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_typing";
+          flow-claude-turn-end-before-confirmation = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it";
+          flow-codex-crash-found-in-history = context.exactTest "flow-nexus"
+            "tests::send_tool::a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history";
+          flow-codex-absent-handed-over-once = context.exactTest "flow-nexus"
+            "tests::send_tool::a_codex_turn_absent_from_an_idle_thread_is_handed_over_again_once";
+          flow-codex-undecidable-never-resent = context.exactTest "flow-nexus"
+            "tests::send_tool::an_undecidable_codex_turn_stays_uncertain_and_is_never_resent";
+          flow-v1-stop-upgrades-unknown-identity = context.exactTest "flow-nexus"
+            "store::tests::a_v1_stop_upgrades_to_a_stop_of_unknown_identity";
           flow-stop-sleeps-the-metaflow = context.exactTest "flow-nexus"
             "tests::waking::the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_and_resumable";
           flow-retired-seat-wakes-fresh = context.exactTest "flow-nexus"

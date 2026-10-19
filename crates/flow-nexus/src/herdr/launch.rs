@@ -262,10 +262,15 @@ pub enum TitleRefusal {
     CodexNamingRefused,
     #[error("Herdr pane label readback differs from the title")]
     PaneLabelRefused,
+    #[error("Herdr workspace label readback differs from the title")]
+    WorkspaceLabelRefused,
 }
 
-/// After the Flow ID is claimed, sets the canonical native title and the
-/// Herdr pane label, and reads both back before any prompt is authorized.
+/// After the Flow ID is claimed, sets the canonical native title, then gives
+/// the title to every Herdr surface the living sees: the pane label, the
+/// pane's displayed agent, and the workspace label. Each is read back before
+/// any prompt is authorized. The Herdr agent name stays the internal
+/// transport key in the binding and is shown nowhere.
 pub trait TitlesNativeFlow {
     fn title_native_flow(
         &self,
@@ -1301,6 +1306,8 @@ impl ReadsTranscriptRow for serde_json::Value {
 
 pub(crate) trait TitlesClaudeSession {
     const TITLE_READBACK_ATTEMPTS: usize = 40;
+    /// The source under which Flow reports a pane's displayed agent to Herdr.
+    const DISPLAY_SOURCE: &'static str = "flow";
     #[cfg(not(test))]
     const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(250);
     #[cfg(test)]
@@ -1329,8 +1336,15 @@ pub(crate) trait TitlesClaudeSession {
         binding: &NativeLaunchBinding,
         title: &NativeTitle,
     ) -> Result<(), TitleRefusal>;
-    /// Labels the launch pane with the title and reads the label back.
+    /// Labels the launch pane with the title, shows the title as the pane's
+    /// agent in place of the internal Herdr agent name, and reads both back.
     fn label_herdr_pane(&self, pane: &HerdrPaneBinding, title: &NativeTitle) -> Result<(), String>;
+    /// Labels the launch workspace with the title and reads the label back.
+    fn label_herdr_workspace(
+        &self,
+        pane: &HerdrPaneBinding,
+        title: &NativeTitle,
+    ) -> Result<(), String>;
 }
 
 impl TitlesClaudeSession for HerdrCli {
@@ -1430,6 +1444,20 @@ impl TitlesClaudeSession for HerdrCli {
             pane.herdr_pane_id.clone(),
             title.as_str().into(),
         ])?;
+        // Herdr shows a pane's agent by its reported display agent, else by
+        // its agent name; Flow reports the title, unexpiring and unguarded,
+        // so the name never reaches the living.
+        self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "pane".into(),
+            "report-metadata".into(),
+            pane.herdr_pane_id.clone(),
+            "--source".into(),
+            Self::DISPLAY_SOURCE.into(),
+            "--display-agent".into(),
+            title.as_str().into(),
+        ])?;
         let response = self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -1445,8 +1473,44 @@ impl TitlesClaudeSession for HerdrCli {
             || read.get("terminal_id").and_then(serde_json::Value::as_str)
                 != Some(pane.herdr_terminal_id.as_str())
             || read.get("label").and_then(serde_json::Value::as_str) != Some(title.as_str())
+            || read
+                .get("display_agent")
+                .and_then(serde_json::Value::as_str)
+                != Some(title.as_str())
         {
             return Err("Herdr pane label readback differs from the title".into());
+        }
+        Ok(())
+    }
+
+    fn label_herdr_workspace(
+        &self,
+        pane: &HerdrPaneBinding,
+        title: &NativeTitle,
+    ) -> Result<(), String> {
+        self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "workspace".into(),
+            "rename".into(),
+            pane.herdr_workspace_id.clone(),
+            title.as_str().into(),
+        ])?;
+        let response = self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "workspace".into(),
+            "get".into(),
+            pane.herdr_workspace_id.clone(),
+        ])?;
+        let read = response
+            .pointer("/result/workspace")
+            .ok_or_else(|| "Herdr workspace get returned no workspace".to_owned())?;
+        if read.get("workspace_id").and_then(serde_json::Value::as_str)
+            != Some(pane.herdr_workspace_id.as_str())
+            || read.get("label").and_then(serde_json::Value::as_str) != Some(title.as_str())
+        {
+            return Err("Herdr workspace label readback differs from the title".into());
         }
         Ok(())
     }
@@ -1479,6 +1543,8 @@ impl TitlesNativeFlow for HerdrCli {
         }
         self.label_herdr_pane(&binding.herdr_pane_binding, &title)
             .map_err(|_| TitleRefusal::PaneLabelRefused)?;
+        self.label_herdr_workspace(&binding.herdr_pane_binding, &title)
+            .map_err(|_| TitleRefusal::WorkspaceLabelRefused)?;
         Ok(title)
     }
 }
@@ -1496,8 +1562,8 @@ impl CreatesHerdrLaunchPane for HerdrCli {
                 .to_str()
                 .ok_or_else(|| "configured workspace root is not UTF-8".to_owned())?
                 .into(),
-            "--label".into(),
-            agent_name.clone(),
+            // No label: the agent name is internal, and the workspace is
+            // labelled with the title once the Flow ID is claimed.
             "--env".into(),
             format!(
                 "FLOW_LAUNCH_REQUEST_ID={}",
@@ -2707,7 +2773,10 @@ case "$*" in
   *"agent get"*) if [ -f '{pending_record}' ]; then left=$(cat '{record_delay}'); if [ "$left" -le 0 ]; then cat '{pending_record}' >> '{claude_transcript}'; rm -f '{pending_record}'; else printf '%s' $((left - 1)) > '{record_delay}'; fi; fi; reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); if [ -f '{missing_agent_session}' ] || [ -f '{never_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness"; fi ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"pane rename w7:p1 "*) printf '%s' "$*" | sed 's/.*pane rename w7:p1 //' > '{label_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
-  *"pane get w7:p1"*) label=$(cat '{label_file}' 2>/dev/null); printf '{{"result":{{"pane":{{"pane_id":"w7:p1","terminal_id":"term-native","label":"%s"}}}}}}\n' "$label" ;;
+  *"pane report-metadata w7:p1 "*) [ -f '{display_refused}' ] && exit 14; printf '%s' "$*" | sed 's/.*--display-agent //' > '{display_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
+  *"pane get w7:p1"*) label=$(cat '{label_file}' 2>/dev/null); display=$(cat '{display_file}' 2>/dev/null); printf '{{"result":{{"pane":{{"pane_id":"w7:p1","terminal_id":"term-native","label":"%s","display_agent":"%s"}}}}}}\n' "$label" "$display" ;;
+  *"workspace rename w7 "*) [ -f '{workspace_refused}' ] && exit 12; printf '%s' "$*" | sed 's/.*workspace rename w7 //' > '{workspace_label}'; printf '%s\n' '{{"result":{{}}}}' ;;
+  *"workspace get w7"*) label=$(cat '{workspace_label}' 2>/dev/null); printf '{{"result":{{"workspace":{{"workspace_id":"w7","label":"%s"}}}}}}\n' "$label" ;;
   "session list --json") printf '%s\n' '{{"sessions":[{{"name":"flowlaunch42","socket_path":"{herdr_socket}"}}]}}' ;;
   *) exit 8 ;;
 esac
@@ -2727,6 +2796,10 @@ esac
             record_delay = root.path().join("title-record-delay").display(),
             pending_record = root.path().join("title-record-pending").display(),
             label_file = root.path().join("pane-label").display(),
+            display_file = root.path().join("pane-display-agent").display(),
+            display_refused = root.path().join("display-agent-refused").display(),
+            workspace_label = root.path().join("workspace-label").display(),
+            workspace_refused = root.path().join("workspace-rename-refused").display(),
             herdr_socket = root.path().join("herdr.sock").display(),
             claude_transcript = root
                 .path()
@@ -2773,16 +2846,17 @@ esac
             ("claude", _) => "uuid-version=uuid-v4\n",
             _ => "",
         };
-        let claim_marker = format!(
-            "version=1\nharness={harness}\nidentity={claimed_identity}\nalias=123456\n{uuid_version}"
-        );
+        // The claimed alias is 123456 unless the root's `flow-id-alias`
+        // names another.
         let flow_id_script = format!(
             r##"#!/bin/sh
 printf '%s|%s\n' "$*" "$CODEX_SESSION_ID" >> '{flow_id_calls}'
-printf '%s' '{claim_marker}' > '{flows}/.123456.flow-id'
-printf '%s\n' 123456
+alias=$(cat '{alias_file}' 2>/dev/null || printf 123456)
+printf 'version=1\nharness={harness}\nidentity={claimed_identity}\nalias=%s\n{uuid_version}' "$alias" > '{flows}/.'"$alias"'.flow-id'
+printf '%s\n' "$alias"
 "##,
             flow_id_calls = flow_id_calls.display(),
+            alias_file = root.path().join("flow-id-alias").display(),
             flows = flows.display(),
         );
         FixtureExecutable {
@@ -4966,5 +5040,200 @@ printf '%s\n' 123456
         );
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(!calls.contains("/rename"));
+    }
+
+    /// A launch of `kind` claimed as `alias`: started, bound and titled
+    /// through the fixture Herdr. Its root, its internal agent name and the
+    /// title it was given.
+    fn titled_launch(kind: HarnessKind, alias: &str) -> (tempfile::TempDir, String, String) {
+        use crate::herdr::reservation::{ChoosesNativeSession, ReservesFlowIdentity};
+        use crate::title::TitlesFlow;
+        let mut launch = launch(kind.clone());
+        let agent_name = launch.launch_agent_name();
+        let title = match kind {
+            HarnessKind::Claude => {
+                let session = HerdrCli::default()
+                    .with_ordinary_socket(Path::new("/fixture/run/flow-next/flow/flow.sock"))
+                    .reserved_native_session_id(&launch)
+                    .expect("a Claude launch chooses its session");
+                let (root, adapter) =
+                    fixture_herdr("claude", &session, &session.replace('-', ""), &agent_name);
+                fs::write(root.path().join("flow-id-alias"), alias).unwrap();
+                assert_eq!(
+                    adapter.reserve_flow_identity(&launch).unwrap().as_deref(),
+                    Some(alias)
+                );
+                let pane = adapter.create_launch_pane(&launch).expect("created pane");
+                adapter
+                    .start_native_harness(&launch, &pane, Some(alias))
+                    .expect("started");
+                let binding = adapter
+                    .observe_native_binding(&launch, &pane, Some(alias))
+                    .expect("bound");
+                let title = adapter
+                    .title_native_flow(&launch, &binding)
+                    .expect("titled");
+                return (root, agent_name, title.as_str().to_owned());
+            }
+            HarnessKind::Codex => {
+                launch.launch_profile.model_name = "gpt-6-astra".into();
+                launch.launch_profile.native_title(alias).unwrap()
+            }
+        };
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let (root, mut adapter) = fixture_herdr(
+            "codex",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        fs::write(root.path().join("flow-id-alias"), alias).unwrap();
+        let frame = |json: &str| {
+            let mut bytes = vec![0x81, json.len() as u8];
+            bytes.extend_from_slice(json.as_bytes());
+            bytes
+                .iter()
+                .map(|byte| format!("\\{:03o}", byte))
+                .collect::<String>()
+        };
+        let frames = [
+            frame(r#"{"id":1,"result":{}}"#),
+            frame(r#"{"id":2,"result":{}}"#),
+            frame(&format!(
+                r#"{{"id":3,"result":{{"thread":{{"id":"{native_session}","name":"{}"}}}}}}"#,
+                title.as_str()
+            )),
+        ]
+        .join("");
+        let proxy = root.path().join("codex-proxy");
+        FixtureExecutable {
+            path: proxy.clone(),
+        }
+        .install(&format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nprintf '%b' '{frames}'\nsleep 2\n"
+            ));
+        adapter.codex_endpoints.stable.client_path = proxy;
+        adapter
+            .codex_endpoints
+            .stable
+            .model_names
+            .insert("gpt-6-astra".into());
+        adapter
+            .codex_endpoints
+            .next
+            .model_names
+            .remove("gpt-6-astra");
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, None)
+            .expect("bound");
+        let titled = adapter
+            .title_native_flow(&launch, &binding)
+            .expect("titled");
+        assert_eq!(titled, title);
+        (root, agent_name, title.as_str().to_owned())
+    }
+
+    /// What the living sees of a launch in Herdr: the workspace label, the
+    /// pane label and the pane's displayed agent.
+    fn visible_labels(root: &tempfile::TempDir) -> [String; 3] {
+        ["workspace-label", "pane-label", "pane-display-agent"].map(|file| {
+            fs::read_to_string(root.path().join(file))
+                .unwrap_or_default()
+                .trim_end()
+                .to_owned()
+        })
+    }
+
+    #[test]
+    fn both_harnesses_label_the_workspace_with_the_title_and_never_the_agent_name() {
+        for kind in [HarnessKind::Claude, HarnessKind::Codex] {
+            let (root, agent_name, title) = titled_launch(kind.clone(), "aa034f");
+            assert_eq!(title, "{ Field flow Secondary aa034f }", "{kind:?}");
+            for label in visible_labels(&root) {
+                assert_eq!(label, title, "{kind:?}");
+                assert!(!label.contains(&agent_name), "{kind:?}");
+            }
+            let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+            let create = calls
+                .lines()
+                .find(|line| line.contains("workspace create"))
+                .expect("workspace create");
+            // The workspace is created unlabelled: no hash label is ever shown.
+            assert!(!create.contains("--label"), "{create}");
+            assert!(!create.contains(&agent_name), "{create}");
+            // The agent name reaches Herdr only as the internal start key;
+            // every labelling call carries the title.
+            for line in calls
+                .lines()
+                .filter(|line| line.contains(" rename ") || line.contains("report-metadata"))
+            {
+                assert!(line.ends_with(&title), "{line}");
+                assert!(!line.contains(&agent_name), "{line}");
+            }
+            let order = |needle: &str| {
+                calls
+                    .lines()
+                    .position(|line| line.contains(needle))
+                    .unwrap_or_else(|| panic!("{needle}: {calls}"))
+            };
+            assert!(order("workspace rename w7 ") < order("workspace get w7"));
+            assert!(order("pane report-metadata w7:p1 ") < order("pane get w7:p1"));
+        }
+    }
+
+    #[test]
+    fn two_flows_of_one_seat_get_distinct_workspace_labels() {
+        for kind in [HarnessKind::Claude, HarnessKind::Codex] {
+            let (first_root, first_agent, first) = titled_launch(kind.clone(), "123456");
+            let (second_root, _, second) = titled_launch(kind.clone(), "abcdef");
+            assert_eq!(first, "{ Field flow Secondary 123456 }");
+            assert_eq!(second, "{ Field flow Secondary abcdef }");
+            let first_labels = visible_labels(&first_root);
+            let second_labels = visible_labels(&second_root);
+            for (one, other) in first_labels.iter().zip(second_labels.iter()) {
+                assert_ne!(one, other, "{kind:?}");
+            }
+            assert_eq!(first_labels[0], first);
+            assert_eq!(second_labels[0], second);
+            // One seat, one internal agent name: only the title tells them apart.
+            assert!(!first_labels.concat().contains(&first_agent));
+        }
+    }
+
+    #[test]
+    fn a_refused_workspace_label_refuses_the_title() {
+        let launch = launch(HarnessKind::Claude);
+        let (root, adapter, _, pane) = reserved_claude(&launch);
+        fs::write(root.path().join("workspace-rename-refused"), "refused").unwrap();
+        adapter
+            .start_native_harness(&launch, &pane, Some("123456"))
+            .unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, Some("123456"))
+            .unwrap();
+        assert_eq!(
+            adapter.title_native_flow(&launch, &binding).unwrap_err(),
+            TitleRefusal::WorkspaceLabelRefused
+        );
+    }
+
+    #[test]
+    fn a_displayed_agent_that_is_not_the_title_refuses_the_pane_label() {
+        let launch = launch(HarnessKind::Claude);
+        let (root, adapter, _, pane) = reserved_claude(&launch);
+        fs::write(root.path().join("display-agent-refused"), "refused").unwrap();
+        adapter
+            .start_native_harness(&launch, &pane, Some("123456"))
+            .unwrap();
+        let binding = adapter
+            .observe_native_binding(&launch, &pane, Some("123456"))
+            .unwrap();
+        assert_eq!(
+            adapter.title_native_flow(&launch, &binding).unwrap_err(),
+            TitleRefusal::PaneLabelRefused
+        );
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        assert!(!calls.contains("workspace rename"), "{calls}");
     }
 }

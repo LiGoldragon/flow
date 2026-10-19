@@ -323,6 +323,14 @@
             "tests::configuring::a_launch_after_a_replaced_declaration_takes_the_new_defaults";
           flow-claude-named-at-launch = context.exactTest "flow-nexus"
             "herdr::launch::tests::claude_is_named_at_launch_and_its_title_read_back";
+          flow-workspace-titled-both-harnesses = context.exactTest "flow-nexus"
+            "herdr::launch::tests::both_harnesses_label_the_workspace_with_the_title_and_never_the_agent_name";
+          flow-workspace-titles-distinct-per-flow = context.exactTest "flow-nexus"
+            "herdr::launch::tests::two_flows_of_one_seat_get_distinct_workspace_labels";
+          flow-workspace-label-refusal-refuses-title = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_refused_workspace_label_refuses_the_title";
+          flow-displayed-agent-refusal-refuses-label = context.exactTest "flow-nexus"
+            "herdr::launch::tests::a_displayed_agent_that_is_not_the_title_refuses_the_pane_label";
           flow-first-turn-sends-before-any-answer = context.exactTest "flow-nexus"
             "tests::waking::a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer";
           flow-unconfirmed-launch-gives-back-its-address = context.exactTest "flow-nexus"

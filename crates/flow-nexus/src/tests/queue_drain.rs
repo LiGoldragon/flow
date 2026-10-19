@@ -560,8 +560,9 @@ fn an_uncertain_hand_over_resolved_delivered_leaves_the_queue_with_its_record() 
         })
     );
     assert_eq!(queue(&fixture), vec![second]);
-    let [QueueDeliveryStanding::Resolved(record)] = standings(&fixture).as_slice() else {
-        panic!("the resolution is read: {:?}", standings(&fixture))
+    let read = standings(&fixture);
+    let [QueueDeliveryStanding::Resolved(record)] = read.as_slice() else {
+        panic!("the resolution is read: {read:?}")
     };
     assert_eq!(
         record.queue_resolution_outcome,

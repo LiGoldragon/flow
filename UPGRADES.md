@@ -1,3 +1,41 @@
+# Flow 0.35.13
+
+Pins signal-flow 21.0.0 (dc7a0eee) and meta-signal-flow 25.0.0 (c85d7c3b);
+both contract digests change, so every ordinary- and meta-socket peer
+repins. The model family moves to v2. This branch follows 0.35.12
+(da2038-model-identity); other branches that also call themselves 0.35.13
+are separate.
+
+- **A model is configured per layer and aspect.** `Configure.Models` holds
+  one entry per Layer and Aspect: `{ Secondary Psyche claude-opus-5-5 }`,
+  `{ Secondary Mind gpt-6-sol }`. A declaration naming one layer and aspect
+  twice is `ConfigureRejected.DuplicateEntry`.
+- **A Start naming another model is refused.** A Start, or the successor of
+  a Replace, whose model is not the one configured for its Address's layer
+  and aspect, compared name for name, is
+  `StartRejected.ModelRefused.Differs.<configured>`, or
+  `StartRejected.ModelRefused.Unconfigured` when that layer and aspect has
+  none (`ReplaceRejected.LaunchRefused.ModelRefused...` for a Replace). It is
+  refused before the Nexus writes the store, claims a FlowId, composes, or
+  calls Herdr; a Replace is refused before its replacement is recorded. A
+  launch request already reserved resumes as it was.
+- **A fresh wake takes its seat's model.** A fresh wake launches on the
+  model configured for the metaflow's layer and aspect, and with none it
+  opens nothing and leaves the metaflow Asleep with its work queued.
+- **Store.** The model family moves from v1 (one row per Layer) to v2 (one
+  row per Layer and Aspect) when the store opens, by the Nexus or the
+  configuration-only listener. Every v1 row was a Claude model, and only
+  Psyche runs on Claude, so each is carried whole as that layer's Psyche
+  model and re-keyed under its Layer and Aspect in one commit; a crash
+  between the upgrade and the re-key is finished at the next open. No Mind
+  or Field row is made: until one is declared, every Mind and Field Start
+  is `ModelRefused.Unconfigured` and a Mind or Field fresh wake opens
+  nothing.
+- **Deploying.** Before the new Nexus serves Mind or Field, declare the
+  Models family whole, every aspect's model for every layer, for example
+  `Configure.Models.[ { Secondary Psyche claude-opus-5-5 } { Secondary Mind gpt-6-sol } { Secondary Field gpt-6-sol } ]`;
+  an entry left out is removed.
+
 # Flow 0.35.12
 
 No wire change and no store change: signal-flow 20.0.0 and meta-signal-flow

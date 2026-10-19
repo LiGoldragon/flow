@@ -38,6 +38,7 @@ use sema_engine::{
     SchemaVersion, TableDescriptor, TableName, TableReference, TableRegistration, UpgradeFrom,
     UpgradeOutcome,
 };
+use signal_flow::ModelRefusal;
 use signal_flow::{
     Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute,
@@ -390,14 +391,93 @@ impl EngineRecord for StoredMetaNexusConfiguration {
     }
 }
 
+/// The model one layer and aspect runs, keyed by both.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaModelConfiguration {
+pub(crate) struct StoredMetaModelConfiguration {
     model: ConfigureModel,
 }
 
 impl EngineRecord for StoredMetaModelConfiguration {
     fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::model_record_key(
+            &self.model.layer,
+            &self.model.aspect,
+        ))
+    }
+}
+
+impl MemoryDefinition for StoredMetaModelConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-model-configuration-v2")
+    }
+}
+
+/// A layer's model as Flow kept it before 0.35.13, keyed by its Layer
+/// alone and naming no aspect. It is read only by the v1-to-v2 upgrade of
+/// the model family.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelBeforeAspect {
+    layer: Layer,
+    native: String,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMetaModelConfigurationV1 {
+    model: ModelBeforeAspect,
+}
+
+impl EngineRecord for StoredMetaModelConfigurationV1 {
+    fn record_key(&self) -> RecordKey {
         RecordKey::new(FlowStore::layer_key(&self.model.layer))
+    }
+}
+
+impl MemoryDefinition for StoredMetaModelConfigurationV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-model-configuration-v1")
+    }
+}
+
+/// A layer's one model was the Psyche seat's: before 0.35.13 every
+/// configured model was a Claude model and only Psyche runs on Claude. Each
+/// is carried whole as that layer's Psyche model; Mind and Field have no
+/// model until one is declared for them.
+impl UpgradeFrom<StoredMetaModelConfigurationV1> for StoredMetaModelConfiguration {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredMetaModelConfigurationV1) -> Decision<Self, Self::Refusal> {
+        let ModelBeforeAspect { layer, native } = previous.model;
+        Decision::Ready(Self {
+            model: ConfigureModel {
+                layer,
+                aspect: Aspect::Psyche,
+                native,
+            },
+        })
+    }
+}
+
+/// The model family's descriptor, from v1 on.
+pub(crate) trait DescribesModelTable {
+    fn descriptor() -> TableDescriptor<StoredMetaModelConfiguration>;
+}
+
+impl DescribesModelTable for StoredMetaModelConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaModelConfiguration> {
+        TableDescriptor::new(
+            META_MODEL_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-meta-model-configuration"),
+            StoredMetaModelConfiguration::schema_hash(),
+        )
+        .with_predecessor::<StoredMetaModelConfigurationV1>()
     }
 }
 
@@ -421,6 +501,53 @@ struct StoredMetaLeaveOutConfiguration {
 impl EngineRecord for StoredMetaLeaveOutConfiguration {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(FlowStore::address_record_key(&self.leave_out.address))
+    }
+}
+
+/// The model a seat runs is the one configured for its Address's layer and
+/// aspect, named exactly; nothing else is launched.
+pub(crate) trait NamesConfiguredModel {
+    /// The model configured for the Address's layer and aspect, if any.
+    fn configured_model(&self, address: &Address) -> Result<Option<String>, StoreError>;
+    /// Why a launch profile's model may not launch: none is configured for
+    /// its Address's layer and aspect, or the configured one is another
+    /// name. None when the profile names the configured model.
+    fn model_refusal(&self, profile: &LaunchProfile) -> Result<Option<ModelRefusal>, StoreError>;
+}
+
+impl NamesConfiguredModel for FlowStore {
+    fn configured_model(&self, address: &Address) -> Result<Option<String>, StoreError> {
+        let key = RecordKey::new(FlowStore::model_record_key(&address.layer, &address.aspect));
+        Ok(self
+            .engine
+            .match_records(QueryPlan::key(self.meta_configuration_tables.models, key))?
+            .records()
+            .first()
+            .map(|stored| stored.model.native.clone()))
+    }
+
+    fn model_refusal(&self, profile: &LaunchProfile) -> Result<Option<ModelRefusal>, StoreError> {
+        Ok(match self.configured_model(&profile.address)? {
+            None => Some(ModelRefusal::Unconfigured),
+            Some(configured) if configured == profile.model_name => None,
+            Some(configured) => Some(ModelRefusal::Differs(configured)),
+        })
+    }
+}
+
+/// The store's commit marker, which every write moves: a test's witness
+/// that nothing was written.
+#[cfg(test)]
+pub(crate) trait MarksCommits {
+    fn commit_marker(&self) -> sema_engine::DatabaseMarker;
+}
+
+#[cfg(test)]
+impl MarksCommits for FlowStore {
+    fn commit_marker(&self) -> sema_engine::DatabaseMarker {
+        self.engine
+            .current_database_marker()
+            .expect("commit marker reads")
     }
 }
 
@@ -1729,6 +1856,8 @@ pub enum StoreError {
     LaunchAttemptUpgrade(String),
     #[error("metaflow family upgrade failed: {0}")]
     MetaflowUpgrade(String),
+    #[error("the model family could not be upgraded: {0}")]
+    ModelUpgrade(String),
     #[error("retired tables could not be dropped: {0}")]
     RetiredTableDrop(String),
     #[error("flow nexus state record is absent or duplicated")]
@@ -1765,6 +1894,12 @@ trait UpgradesFlowFamilies {
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
     ) -> Result<TableReference<StoredMetaflow>, StoreError>;
+    /// A store before 0.35.13 keeps one model per Layer; each is carried as
+    /// that layer's Psyche model and re-keyed by its Layer and Aspect.
+    fn upgraded_models(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaModelConfiguration>,
+    ) -> Result<TableReference<StoredMetaModelConfiguration>, StoreError>;
     /// The metaflow an Address hold found is carried the same way.
     fn upgraded_address_holds(
         &mut self,
@@ -1794,6 +1929,45 @@ trait UpgradesFlowFamilies {
 }
 
 impl UpgradesFlowFamilies for Engine {
+    fn upgraded_models(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaModelConfiguration>,
+    ) -> Result<TableReference<StoredMetaModelConfiguration>, StoreError> {
+        let table = match self
+            .upgrade_table::<StoredMetaModelConfigurationV1, StoredMetaModelConfiguration>(
+                descriptor,
+            ) {
+            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+            UpgradeOutcome::AlreadyCurrent(table) => table,
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::ModelUpgrade(format!("{failure:?}")));
+            }
+        };
+        // The upgrade carries each row under the key it was stored by. A
+        // row still under its Layer alone moves to its Layer and Aspect in
+        // one commit; a crash between the two leaves it to be moved at the
+        // next open.
+        let mut commit = self.begin_atomic_commit();
+        let mut moved = false;
+        for row in self.match_records(QueryPlan::all(table))?.records() {
+            let layer_key = RecordKey::new(FlowStore::layer_key(&row.model.layer));
+            if self
+                .match_records(QueryPlan::key(table, layer_key.clone()))?
+                .records()
+                .is_empty()
+            {
+                continue;
+            }
+            commit = commit.retract(table, layer_key).assert(table, row.clone());
+            moved = true;
+        }
+        if moved {
+            self.commit_atomic(commit)?;
+        }
+        Ok(table)
+    }
+
     fn upgraded_metaflows(
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
@@ -1947,11 +2121,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 FamilyName::new("flow-nexus-meta-nexus-configuration"),
                 SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
             ))?,
-            models: engine.register_table(TableDescriptor::new(
-                META_MODEL_CONFIGURATION_TABLE_NAME,
-                FamilyName::new("flow-nexus-meta-model-configuration"),
-                SchemaHash::for_label("flow-nexus-meta-model-configuration-v1"),
-            ))?,
+            models: engine.upgraded_models(StoredMetaModelConfiguration::descriptor())?,
             thresholds: engine.register_table(TableDescriptor::new(
                 META_THRESHOLD_CONFIGURATION_TABLE_NAME,
                 FamilyName::new("flow-nexus-meta-threshold-configuration"),
@@ -2049,11 +2219,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             FamilyName::new("flow-nexus-meta-nexus-configuration"),
             SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
         );
-        let meta_models_descriptor = TableDescriptor::new(
-            META_MODEL_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-meta-model-configuration"),
-            SchemaHash::for_label("flow-nexus-meta-model-configuration-v1"),
-        );
+        let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = TableDescriptor::new(
             META_THRESHOLD_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-meta-threshold-configuration"),
@@ -2087,7 +2253,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
             nexus: engine.register_table(meta_nexus_descriptor)?,
-            models: engine.register_table(meta_models_descriptor)?,
+            models: engine.upgraded_models(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
             leave_outs: engine.register_table(meta_leave_outs_descriptor)?,
         };
@@ -2567,11 +2733,7 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-meta-nexus-configuration"),
             SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
         );
-        let meta_models_descriptor = TableDescriptor::<StoredMetaModelConfiguration>::new(
-            META_MODEL_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-meta-model-configuration"),
-            SchemaHash::for_label("flow-nexus-meta-model-configuration-v1"),
-        );
+        let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = TableDescriptor::<StoredMetaThresholdConfiguration>::new(
             META_THRESHOLD_CONFIGURATION_TABLE_NAME,
             FamilyName::new("flow-nexus-meta-threshold-configuration"),
@@ -5218,6 +5380,16 @@ pub(crate) trait ReadsFlowMemory {
         }
     }
 
+    /// A configured model's key: its layer and aspect.
+    fn model_record_key(layer: &Layer, aspect: &Aspect) -> String {
+        let aspect = match aspect {
+            Aspect::Psyche => "Psyche",
+            Aspect::Mind => "Mind",
+            Aspect::Field => "Field",
+        };
+        format!("{}:{aspect}", FlowStore::layer_key(layer))
+    }
+
     fn address_record_key(address: &Address) -> String {
         let aspect = match &address.aspect {
             Aspect::Psyche => "Psyche",
@@ -5332,10 +5504,12 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-meta-nexus-configuration",
                 "flow-nexus-meta-nexus-configuration-v1",
             ),
-            "flow_nexus_meta_model_configuration" => (
-                "flow-nexus-meta-model-configuration",
-                "flow-nexus-meta-model-configuration-v1",
-            ),
+            "flow_nexus_meta_model_configuration" => {
+                return Some((
+                    "flow-nexus-meta-model-configuration",
+                    StoredMetaModelConfiguration::schema_hash(),
+                ));
+            }
             "flow_nexus_meta_threshold_configuration" => (
                 "flow-nexus-meta-threshold-configuration",
                 "flow-nexus-meta-threshold-configuration-v1",
@@ -5398,6 +5572,10 @@ pub(crate) trait ReadsFlowMemory {
                 StoredLaunchAttemptV1::schema_hash(),
             )],
             "flow_nexus_metaflows" => &[("flow-nexus-metaflow", StoredMetaflowV1::schema_hash())],
+            "flow_nexus_meta_model_configuration" => &[(
+                "flow-nexus-meta-model-configuration",
+                StoredMetaModelConfigurationV1::schema_hash(),
+            )],
             "flow_nexus_address_holds" => &[(
                 address_hold::ADDRESS_HOLD_FAMILY,
                 <address_hold::AddressHoldV1 as MemoryDefinition>::schema_hash(),
@@ -5707,7 +5885,7 @@ pub(crate) trait ReadsFlowMemory {
             .iter()
             .map(|stored| stored.model.clone())
             .collect::<Vec<_>>();
-        models.sort_by_key(|model| FlowStore::layer_key(&model.layer));
+        models.sort_by_key(|model| FlowStore::model_record_key(&model.layer, &model.aspect));
         let mut thresholds = thresholds_rows
             .records()
             .iter()
@@ -5997,6 +6175,48 @@ mod tests {
 
         fn path(&self) -> std::path::PathBuf {
             self.directory.path().join("flow.sema")
+        }
+
+        /// Replaces the store's model family with its v1 shape, one model
+        /// per Layer under that Layer alone, as 0.35.12 and earlier kept it.
+        fn seed_v1_models(&self, schema: u32, models: &[(signal_flow::Layer, &str)]) {
+            let database = redb::Database::open(self.path()).expect("store opens directly");
+            let write = database.begin_write().expect("catalog transaction starts");
+            {
+                let mut catalog = write
+                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .expect("catalog opens");
+                catalog
+                    .remove("flow_nexus_meta_model_configuration")
+                    .expect("model family removes");
+            }
+            let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                "flow_nexus_meta_model_configuration",
+            ));
+            write.commit().expect("catalog commits");
+            drop(database);
+            let mut engine = Engine::open(EngineOpen::new(self.path(), SchemaVersion::new(schema)))
+                .expect("v1 store opens");
+            let table = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_meta_model_configuration"),
+                    FamilyName::new("flow-nexus-meta-model-configuration"),
+                    SchemaHash::for_label("flow-nexus-meta-model-configuration-v1"),
+                ))
+                .expect("v1 model family registers");
+            for (layer, native) in models {
+                engine
+                    .assert(Assertion::new(
+                        table,
+                        super::StoredMetaModelConfigurationV1 {
+                            model: super::ModelBeforeAspect {
+                                layer: layer.clone(),
+                                native: (*native).into(),
+                            },
+                        },
+                    ))
+                    .expect("v1 model row persists");
+            }
         }
 
         /// Outcome rows of the 0.34 shape, under the family label given.
@@ -8759,6 +8979,119 @@ mod tests {
                 .records()
                 .to_vec(),
             vec![row]
+        );
+    }
+
+    /// The models the production store held at 0.35.11, one per Layer.
+    fn production_models() -> Vec<(signal_flow::Layer, &'static str)> {
+        use signal_flow::Layer;
+        vec![
+            (Layer::Primary, "claude-fable-5-1"),
+            (Layer::Quaternary, "claude-haiku-5-5"),
+            (Layer::Secondary, "claude-opus-5-5"),
+            (Layer::Tertiary, "claude-sonnet-5-5"),
+        ]
+    }
+
+    /// A store before 0.35.13 keeps one model per Layer, every one a
+    /// Claude model. Opening carries each whole as that layer's Psyche
+    /// model, keyed by its Layer and Aspect: declaring the same rows again
+    /// changes nothing, Mind and Field have no model, and a second open
+    /// reads the same rows.
+    #[test]
+    fn production_models_upgrade_each_as_its_layers_psyche_model() {
+        use super::{ManagesMetaflowState, NamesConfiguredModel};
+        use signal_flow::Address;
+        let fixture = StoreFixture::new();
+        drop(fixture.store());
+        let models = production_models();
+        fixture.seed_v1_models(1, &models);
+        let expected = models
+            .iter()
+            .map(|(layer, native)| meta_signal_flow::ConfigureModel {
+                layer: layer.clone(),
+                aspect: Aspect::Psyche,
+                native: (*native).into(),
+            })
+            .collect::<Vec<_>>();
+        for reopening in 0..2 {
+            let store = fixture.store();
+            for (layer, native) in &models {
+                for aspect in [Aspect::Psyche, Aspect::Mind, Aspect::Field] {
+                    let address = Address {
+                        aspect: aspect.clone(),
+                        topic: "flow".into(),
+                        layer: layer.clone(),
+                    };
+                    assert_eq!(
+                        store.configured_model(&address).expect("model reads"),
+                        (aspect == Aspect::Psyche).then(|| (*native).to_owned()),
+                        "{aspect:?} {layer:?} (open {reopening})"
+                    );
+                }
+            }
+            assert_eq!(
+                store
+                    .configure_change(meta_signal_flow::ConfigurationChange::Models(
+                        expected.clone()
+                    ))
+                    .expect("declaration commits"),
+                meta_signal_flow::ConfigureOutcome::Unchanged,
+                "every carried row, and no other, is under its Layer and Aspect (open {reopening})"
+            );
+        }
+    }
+
+    /// The configuration-only open, which the deployment runs before the
+    /// Nexus, carries a v1 model family the same way.
+    #[test]
+    fn the_configuration_only_open_upgrades_v1_models() {
+        let fixture = StoreFixture::new();
+        let defaults = super::DefaultConfiguration {
+            home: fixture.directory.path().join("home"),
+            runtime_directory: fixture.directory.path().join("runtime"),
+        };
+        let settings = defaults.configuration();
+        let config = ConfigurationOnlyStore::open(&fixture.path()).expect("fresh Memory opens");
+        config
+            .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+                meta_signal_flow::ConfigureNexus {
+                    source_root: settings.source_root,
+                    stable_codex: settings.stable_codex,
+                    next_codex: settings.next_codex,
+                    harness_profiles: settings.harness_profile_vector,
+                    meta_aspects: settings.meta_aspects,
+                    message_nexus_path: settings.message_nexus_path,
+                    message_nexus_binary: "/fixture/message-nexus".into(),
+                    lease: 60,
+                },
+            ))
+            .expect("Nexus configured");
+        drop(config);
+        let models = production_models();
+        fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &models);
+        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
+        let carried = configuration
+            .configuration_snapshot()
+            .expect("snapshot reads")
+            .expect("store configured")
+            .models;
+        assert_eq!(
+            carried,
+            models
+                .iter()
+                .map(|(layer, native)| meta_signal_flow::ConfigureModel {
+                    layer: layer.clone(),
+                    aspect: Aspect::Psyche,
+                    native: (*native).into(),
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            configuration
+                .configure_change(meta_signal_flow::ConfigurationChange::Models(carried))
+                .expect("declaration commits"),
+            meta_signal_flow::ConfigureOutcome::Unchanged
         );
     }
 }

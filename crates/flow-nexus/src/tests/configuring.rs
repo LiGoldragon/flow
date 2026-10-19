@@ -70,6 +70,7 @@ impl ConfiguredStore {
             ConfigurationChange::Nexus(Self::nexus(&defaults, &[TERRA, SOL, LUNA], 30)),
             ConfigurationChange::Models(vec![ConfigureModel {
                 layer: Layer::Primary,
+                aspect: Aspect::Mind,
                 native: "gpt-6-astra".into(),
             }]),
             ConfigurationChange::Thresholds(vec![ConfigureThreshold {
@@ -283,6 +284,7 @@ fn a_refused_declaration_changes_nothing() {
     // One key named twice is not a family.
     let model = |native: &str| ConfigureModel {
         layer: Layer::Secondary,
+        aspect: Aspect::Psyche,
         native: native.into(),
     };
     assert_eq!(
@@ -306,14 +308,22 @@ fn each_family_is_its_last_declaration() {
     let nexus = fixture.open();
     let nexus_before = snapshot(&nexus).nexus;
 
-    // In the order the snapshot reads them, by layer name.
+    // In the order the snapshot reads them, by layer then aspect name; one
+    // layer holds a model for each aspect.
     let models = vec![
         ConfigureModel {
             layer: Layer::Quaternary,
+            aspect: Aspect::Psyche,
             native: "claude-haiku-5-5".into(),
         },
         ConfigureModel {
             layer: Layer::Secondary,
+            aspect: Aspect::Mind,
+            native: SOL.into(),
+        },
+        ConfigureModel {
+            layer: Layer::Secondary,
+            aspect: Aspect::Psyche,
             native: "claude-opus-5-5".into(),
         },
     ];

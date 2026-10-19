@@ -76,6 +76,7 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
     let _ = fs::remove_file(&fixture.snapshot_program);
     let mut launch = fixture.staged_launch("reserved-request", None);
     launch.profile.model_name = "claude-fixture".into();
+    fixture.configure_model_of(&launch.profile);
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),
         Response::StartRejected(StartRejection::NativeLaunchRefused(
@@ -136,6 +137,7 @@ fn a_claude_launch_whose_flow_id_cannot_be_claimed_is_refused_before_any_pane() 
     // No flow-id helper: the claim at Reserve fails.
     let mut launch = fixture.staged_launch("unclaimed-request", None);
     launch.profile.model_name = "claude-fixture".into();
+    fixture.configure_model_of(&launch.profile);
     let log = fixture.herdr_logging_every_call();
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),
@@ -193,6 +195,7 @@ esac
     ));
     let mut launch = fixture.staged_launch("herdr-refused-request", None);
     launch.profile.model_name = "claude-fixture".into();
+    fixture.configure_model_of(&launch.profile);
     let expected = StartRejection::HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal {
         spawn_refusal_cause: signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal {
             herdr_error_code_option: Some("invalid_agent_argument".into()),

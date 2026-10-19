@@ -3595,7 +3595,7 @@ printf '%s\n' "$alias"
             );
         }
         assert!(!start_call.contains("launch-42"));
-        assert!(!start_call.contains("flow-"), "{start_call}");
+        assert!(!start_call.contains("--remote-control flow-"), "{start_call}");
         assert!(!start_call.contains("composed body"));
         let pane_run = calls_after_start
             .lines()

@@ -444,8 +444,9 @@ pub(crate) trait PreparesClaudePane {
     /// source names one. Flag settings are such a source: naming the mode the
     /// launch already runs in suppresses the offer without touching any
     /// settings file. They also carry the harness hook: `flow-hook` on
-    /// SessionStart, every PostToolUse and Stop, so each harness event
-    /// reaches Flow as a Report.
+    /// SessionStart, every PostToolUse, UserPromptSubmit and Stop, so each
+    /// harness event reaches Flow as a Report: a Stop is the flow's turn
+    /// end, and a submitted prompt the receipt of a queued request.
     /// A launch that leaves out the attribution reminder sets the
     /// attribution lines empty here.
     fn claude_flag_settings(&self, lean: &LeanStart) -> String;
@@ -484,6 +485,7 @@ impl PreparesClaudePane for HerdrCli {
             "hooks": {
                 "SessionStart": hook,
                 "PostToolUse": every_tool,
+                "UserPromptSubmit": hook,
                 "Stop": hook,
             }
         });
@@ -3465,7 +3467,8 @@ printf '%s\n' 123456
                 r#"{"hooks":{"#,
                 r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
                 r#""SessionStart":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
-                r#""Stop":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
+                r#""Stop":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
+                r#""UserPromptSubmit":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
                 r#""permissions":{"defaultMode":"bypassPermissions"}}"#
             ),
         )));

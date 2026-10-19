@@ -218,11 +218,6 @@ impl Dispatches for RunningNexus {
             }
             // A dispatch without a connection has no peer to read.
             Query::ResolveCaller(claim) => self.resolve_caller(None, claim),
-            // Flow holds no turn-end queue yet, so nothing is enqueued and
-            // the request is refused rather than acknowledged.
-            Query::QueueTurnEnd(_) => {
-                Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
-            }
             Query::Report(report) => self.report(report),
             Query::Current(address) => {
                 self.store
@@ -456,6 +451,9 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::Command(request) => self.command(request),
             meta_signal_flow::Query::ResolvePeer(identity) => self.resolve_peer(&identity),
             meta_signal_flow::Query::ReadEvents(flow_id) => self.read_events(flow_id),
+            meta_signal_flow::Query::ReadQueueDeliveries(address) => {
+                self.read_queue_deliveries(address)
+            }
             meta_signal_flow::Query::Refresh(address) => self.refresh(address),
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
                 if !self.herdr.validate_registration(&flow_node) {
@@ -1114,6 +1112,7 @@ mod tests {
     mod send_tool;
     mod submission;
     mod waking;
+    mod queue_drain;
 
     use super::{Dispatches, ReconcilesListedFlows, RunningNexus};
     use crate::caller::{
@@ -1196,6 +1195,9 @@ mod tests {
     enum PromptFixture<'a> {
         /// The text is typed and the reply is `agent_prompted` for this pane.
         Prompted(&'a str),
+        /// As Prompted, but a Claude seat's transcript records nothing yet:
+        /// its receipt comes later, from its hook or its transcript.
+        PromptedUnrecorded(&'a str),
         /// This error code is answered before any text is typed.
         RefusedBeforeInput(&'a str),
         /// The text is typed, then this error code is answered.
@@ -1210,7 +1212,9 @@ mod tests {
             claude_receipt: Option<(&std::path::Path, &str)>,
         ) -> String {
             let mut typing = format!("printf '%s' \"$6\" >> '{}'", typed.display());
-            if let Some((transcript, session)) = claude_receipt {
+            if let Some((transcript, session)) = claude_receipt
+                && !matches!(self, Self::PromptedUnrecorded(_))
+            {
                 typing.push_str(&format!(
                     "; escaped=$(printf '%s' \"$6\" | sed ':a;N;$!ba;s/\\\\/\\\\\\\\/g;s/\"/\\\\\"/g;s/\\n/\\\\n/g'); printf '{{\"type\":\"user\",\"sessionId\":\"{session}\",\"uuid\":\"fixture-receipt\",\"message\":{{\"content\":\"%s\"}}}}\\n' \"$escaped\" >> '{}'",
                     transcript.display()
@@ -1222,7 +1226,7 @@ mod tests {
                 )
             };
             match self {
-                Self::Prompted(pane) => {
+                Self::Prompted(pane) | Self::PromptedUnrecorded(pane) => {
                     // Herdr answers with the prompted pane's own AgentInfo,
                     // which the roster already holds; a pane the roster does
                     // not know is answered with its id alone, as a reply
@@ -3150,30 +3154,19 @@ mod tests {
             report("908786", Event::ToolUsed("Bash".into())),
             Response::Reported
         );
-        assert_eq!(report("908786", Event::Stopped), Response::Reported);
+        let stop = Event::Stopped(signal_flow::NativeStop {
+            native_session_id_option: Some("other-session".into()),
+            transcript_path_option: None,
+        });
+        assert_eq!(report("908786", stop.clone()), Response::Reported);
         assert_eq!(
             fixture
                 .nexus
                 .dispatch_meta(meta_signal_flow::Query::ReadEvents("908786".into())),
             meta_signal_flow::Response::EventsRead(meta_signal_flow::EventsRead_Data {
                 flow_id: "908786".into(),
-                event_vector: vec![
-                    Event::Started,
-                    Event::ToolUsed("Bash".into()),
-                    Event::Stopped
-                ],
+                event_vector: vec![Event::Started, Event::ToolUsed("Bash".into()), stop],
             })
-        );
-        // Stop's turn-end wakeup stays refused: Flow holds no turn-end queue.
-        assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::QueueTurnEnd(signal_flow::TurnEndRequest {
-                    session_id: "s".into(),
-                    turn_id: "t".into(),
-                    transcript_path_option: None,
-                })),
-            Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
         );
     }
 
@@ -4867,20 +4860,6 @@ mod tests {
         // Herdr reused the pane ID for a new terminal: the binding is gone.
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-new")]);
         assert_eq!(fixture.nexus.resolve_caller(pane("pane-1"), None), unknown);
-    }
-
-    #[test]
-    fn a_turn_end_is_refused_while_flow_holds_no_queue() {
-        let fixture = NexusFixture::new();
-        let request = signal_flow::TurnEndRequest {
-            session_id: "session-1".into(),
-            turn_id: "turn-2".into(),
-            transcript_path_option: None,
-        };
-        assert_eq!(
-            fixture.nexus.dispatch(Query::QueueTurnEnd(request)),
-            Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
-        );
     }
 
     #[test]

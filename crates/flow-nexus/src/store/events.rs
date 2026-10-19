@@ -10,17 +10,24 @@
 //! starts and so before it is registered: Reserve writes the flow's empty
 //! events row, and that row is what lets the harness's first `Started`
 //! land.
+//!
+//! A Stop recorded before Flow 0.35.17 carried no native identity: it is
+//! upgraded to `Stopped.{ None None }`, which is kept as it was seen and
+//! never taken for the flow's own turn end.
 
 use super::{FlowStore, ReadsFlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, Retraction,
-    SchemaHash, TableDescriptor, TableName, TableReference,
+    Assertion, Decision, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryUpgrades,
+    MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash, TableDescriptor, TableName,
+    TableReference, UpgradeFrom, UpgradeOutcome,
 };
-use signal_flow::Event;
+use signal_flow::{Event, NativeStop};
 use std::sync::Mutex;
 
 pub(super) const FLOW_EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_flow_events");
+pub(super) const FLOW_EVENT_FAMILY: &str = "flow-nexus-flow-events";
+pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v2";
 
 /// One flow's harness events, oldest first.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -32,6 +39,88 @@ pub struct FlowEvents {
 impl EngineRecord for FlowEvents {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.flow_id.clone())
+    }
+}
+
+impl MemoryDefinition for FlowEvents {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(FLOW_EVENT_SCHEMA)
+    }
+}
+
+/// A harness event as signal-flow 20.0.0 archived it: a Stop without the
+/// native identity its hook was given.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub enum EventBeforeIdentity {
+    Started,
+    ToolUsed(String),
+    Stopped,
+}
+
+/// One flow's events as Flow kept them before 0.35.17. It is read only by
+/// the v1-to-v2 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FlowEventsV1 {
+    pub flow_id: String,
+    pub event_vector: Vec<EventBeforeIdentity>,
+}
+
+impl EngineRecord for FlowEventsV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+
+impl MemoryDefinition for FlowEventsV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-flow-events-v1")
+    }
+}
+
+impl From<EventBeforeIdentity> for Event {
+    fn from(event: EventBeforeIdentity) -> Self {
+        match event {
+            EventBeforeIdentity::Started => Event::Started,
+            EventBeforeIdentity::ToolUsed(tool) => Event::ToolUsed(tool),
+            EventBeforeIdentity::Stopped => Event::Stopped(NativeStop {
+                native_session_id_option: None,
+                transcript_path_option: None,
+            }),
+        }
+    }
+}
+
+impl UpgradeFrom<FlowEventsV1> for FlowEvents {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: FlowEventsV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            flow_id: previous.flow_id,
+            event_vector: previous.event_vector.into_iter().map(Event::from).collect(),
+        })
+    }
+}
+
+pub(super) trait DescribesEventTable {
+    fn descriptor() -> TableDescriptor<FlowEvents>;
+}
+
+impl DescribesEventTable for FlowEvents {
+    fn descriptor() -> TableDescriptor<FlowEvents> {
+        TableDescriptor::new(
+            FLOW_EVENT_TABLE_NAME,
+            FamilyName::new(FLOW_EVENT_FAMILY),
+            SchemaHash::for_label(FLOW_EVENT_SCHEMA),
+        )
+        .with_predecessor::<FlowEventsV1>()
     }
 }
 
@@ -49,12 +138,18 @@ pub trait RegistersEventTables: Sized {
 
 impl RegistersEventTables for EventTables {
     fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError> {
+        let events = match engine.upgrade_table::<FlowEventsV1, FlowEvents>(
+            <FlowEvents as DescribesEventTable>::descriptor(),
+        ) {
+            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+            UpgradeOutcome::AlreadyCurrent(table) => table,
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::EventUpgrade(format!("{failure:?}")));
+            }
+        };
         Ok(Self {
-            events: engine.register_table(TableDescriptor::new(
-                FLOW_EVENT_TABLE_NAME,
-                FamilyName::new("flow-nexus-flow-events"),
-                SchemaHash::for_label("flow-nexus-flow-events-v1"),
-            ))?,
+            events,
             append_gate: Mutex::new(()),
         })
     }
@@ -209,6 +304,13 @@ mod tests {
         }
     }
 
+    fn stop() -> Event {
+        Event::Stopped(signal_flow::NativeStop {
+            native_session_id_option: Some("c0ffee00-0000-4000-8000-000000000001".into()),
+            transcript_path_option: Some("/t/c0ffee00.jsonl".into()),
+        })
+    }
+
     /// The events are the flow's Memory: kept in report order, kept across
     /// a reopen of the store, and never made for a flow Flow does not hold.
     #[test]
@@ -222,11 +324,7 @@ mod tests {
                 crate::store::FlowRegistration::Registered(_)
             ));
             assert_eq!(store.events("5a4d0b").unwrap(), Some(vec![]));
-            for event in [
-                Event::Started,
-                Event::ToolUsed("Bash".into()),
-                Event::Stopped,
-            ] {
+            for event in [Event::Started, Event::ToolUsed("Bash".into()), stop()] {
                 assert_eq!(
                     store.record_event("5a4d0b", event).unwrap(),
                     EventRecording::Recorded
@@ -240,11 +338,7 @@ mod tests {
         let store = FlowStore::open(&path).unwrap();
         assert_eq!(
             store.events("5a4d0b").unwrap(),
-            Some(vec![
-                Event::Started,
-                Event::ToolUsed("Bash".into()),
-                Event::Stopped
-            ])
+            Some(vec![Event::Started, Event::ToolUsed("Bash".into()), stop()])
         );
         assert_eq!(store.events("0a0a0a").unwrap(), None);
     }

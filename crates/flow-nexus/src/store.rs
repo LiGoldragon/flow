@@ -1834,6 +1834,8 @@ pub enum StoreError {
     LaunchAttemptUpgrade(String),
     #[error("metaflow family upgrade failed: {0}")]
     MetaflowUpgrade(String),
+    #[error("flow events upgrade failed: {0}")]
+    EventUpgrade(String),
     #[error("retired tables could not be dropped: {0}")]
     RetiredTableDrop(String),
     #[error("flow nexus state record is absent or duplicated")]
@@ -2743,11 +2745,7 @@ impl OpensFlowStore for FlowStore {
             SchemaHash::for_label("flow-nexus-meta-threshold-configuration-v1"),
         );
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
-        let events_descriptor = TableDescriptor::<events::FlowEvents>::new(
-            events::FLOW_EVENT_TABLE_NAME,
-            FamilyName::new("flow-nexus-flow-events"),
-            SchemaHash::for_label("flow-nexus-flow-events-v1"),
-        );
+        let events_descriptor = <events::FlowEvents as events::DescribesEventTable>::descriptor();
         let context_sizes_descriptor =
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
         let address_holds_descriptor =
@@ -3066,8 +3064,9 @@ impl OpensFlowStore for FlowStore {
         }
         // Native queue delivery is not atomic with this store. A durable
         // native receipt is enough to finish the local settlement after a
-        // restart; an attempt without one becomes Uncertain and is never
-        // submitted again automatically.
+        // restart; an attempt without one becomes Uncertain, is never
+        // submitted again automatically, and is reconciled from native
+        // history once the Nexus runs (`ReconcilesQueueDelivery`).
         for attempt in store.recover_outstanding_deliveries()? {
             match attempt.phase {
                 QueueDeliveryPhase::ReceiptRecorded(_) => {
@@ -3075,11 +3074,13 @@ impl OpensFlowStore for FlowStore {
                         return Err(StoreError::StateInvariant);
                     }
                 }
-                QueueDeliveryPhase::Uncertain => eprintln!(
-                    "flow-nexus: queued delivery {} is uncertain; native reconciliation is required",
+                QueueDeliveryPhase::Uncertain(_) => eprintln!(
+                    "flow-nexus: queued delivery {} is uncertain; it is reconciled from native history",
                     attempt.attempt_id
                 ),
-                QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Settled(_) => {
+                QueueDeliveryPhase::Prepared
+                | QueueDeliveryPhase::Settled(_)
+                | QueueDeliveryPhase::Absent(_) => {
                     return Err(StoreError::StateInvariant);
                 }
             }
@@ -3375,9 +3376,6 @@ impl AppliesFlowQuery for FlowStore {
             Query::LaunchStatus(_) | Query::Observe(_) => Ok(Response::LaunchStatusRejected(
                 signal_flow::LaunchStatusRejection::PersistenceRefused,
             )),
-            Query::QueueTurnEnd(_) => Ok(Response::TurnEndRejected(
-                signal_flow::TurnEndRejection::QueueRefused,
-            )),
             Query::Report(report) => {
                 use events::{EventRecording, RecordsHarnessEvents};
                 match self.record_event(&report.flow_id, report.event)? {
@@ -3408,7 +3406,6 @@ impl ReservesPendingStart for FlowStore {
             | Query::LaunchStatus(_)
             | Query::Observe(_)
             | Query::ResolveCaller(_)
-            | Query::QueueTurnEnd(_)
             | Query::Report(_)
             | Query::Bind(_)
             | Query::Identify(_)
@@ -5563,7 +5560,7 @@ pub(crate) trait ReadsFlowMemory {
                     StoredMetaLeaveOutConfiguration::schema_hash(),
                 ));
             }
-            "flow_nexus_flow_events" => ("flow-nexus-flow-events", "flow-nexus-flow-events-v1"),
+            "flow_nexus_flow_events" => (events::FLOW_EVENT_FAMILY, events::FLOW_EVENT_SCHEMA),
             "flow_nexus_flow_context_sizes" => (
                 context::FLOW_CONTEXT_SIZE_FAMILY,
                 context::FLOW_CONTEXT_SIZE_SCHEMA,
@@ -5591,11 +5588,11 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_requests" => (
                 "flow-nexus-queue-delivery-request",
-                "flow-nexus-queue-delivery-request-v1",
+                "flow-nexus-queue-delivery-request-v2",
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v2",
+                "flow-nexus-queue-delivery-attempt-v3",
             ),
             _ => return None,
         };
@@ -5640,6 +5637,10 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_address_holds" => &[(
                 address_hold::ADDRESS_HOLD_FAMILY,
                 <address_hold::AddressHoldV1 as MemoryDefinition>::schema_hash(),
+            )],
+            "flow_nexus_flow_events" => &[(
+                events::FLOW_EVENT_FAMILY,
+                <events::FlowEventsV1 as MemoryDefinition>::schema_hash(),
             )],
             _ => &[],
         };
@@ -8522,6 +8523,71 @@ mod tests {
         assert_eq!(
             store.register_flow(conflicting_route).unwrap(),
             super::FlowRegistration::ConflictingBinding
+        );
+    }
+
+    /// A store before 0.35.17 keeps Stops without their native identity:
+    /// opening carries every flow's events in order, each such Stop as
+    /// `Stopped.{ None None }`, which is never taken for the flow's own.
+    #[test]
+    fn a_v1_stop_upgrades_to_a_stop_of_unknown_identity() {
+        use super::events::{EventBeforeIdentity, FlowEventsV1, RecordsHarnessEvents};
+        use signal_flow::{Event, NativeStop};
+        let fixture = StoreFixture::new();
+        drop(fixture.store());
+        let database = redb::Database::open(fixture.path()).expect("store opens directly");
+        let write = database.begin_write().expect("catalog transaction starts");
+        {
+            let mut catalog = write
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            catalog
+                .remove("flow_nexus_flow_events")
+                .expect("events family removes");
+        }
+        write
+            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                "flow_nexus_flow_events",
+            ))
+            .expect("event rows drop");
+        write.commit().expect("catalog commits");
+        drop(database);
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("v1 store opens");
+            let events = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_flow_events"),
+                    FamilyName::new("flow-nexus-flow-events"),
+                    SchemaHash::for_label("flow-nexus-flow-events-v1"),
+                ))
+                .expect("v1 events family registers");
+            engine
+                .assert(Assertion::new(
+                    events,
+                    FlowEventsV1 {
+                        flow_id: "a1a1a1".into(),
+                        event_vector: vec![
+                            EventBeforeIdentity::Started,
+                            EventBeforeIdentity::ToolUsed("Bash".into()),
+                            EventBeforeIdentity::Stopped,
+                        ],
+                    },
+                ))
+                .expect("v1 row persists");
+        }
+
+        let store = fixture.store();
+        assert_eq!(
+            store.events("a1a1a1").unwrap(),
+            Some(vec![
+                Event::Started,
+                Event::ToolUsed("Bash".into()),
+                Event::Stopped(NativeStop {
+                    native_session_id_option: None,
+                    transcript_path_option: None,
+                }),
+            ])
         );
     }
 

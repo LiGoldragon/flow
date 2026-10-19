@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use flow_native::ReadsClaudePaste;
 use serde_json::Value;
 use signal_flow::{EndpointSelection, FlowNode, HarnessKind, RouteReadiness};
 
@@ -131,11 +132,31 @@ pub struct ClaudeTranscriptCursor {
     pub offset: u64,
 }
 
-/// The native user row which proves that Claude accepted one queued input.
+/// The native row which proves that Claude took one queued input: a main
+/// user row whose text it is, or the `queued_command` attachment by which
+/// Claude Code folded it into a running turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeQueuedReceipt {
     pub turn_id: String,
     pub row: String,
+}
+
+/// What the transcript after a cursor shows of one queued input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeQueuedHistory {
+    /// Exactly one main row took the text.
+    Received(ClaudeQueuedReceipt),
+    /// Claude Code holds the text in its input queue (an `enqueue` row) and
+    /// no row has taken it yet.
+    Pending,
+    /// The whole tail after the cursor was read and nothing names the text.
+    Unseen,
+    /// More than one main row took the text.
+    Ambiguous,
+    /// The file is missing or unreadable, or its tail ends in a partial row.
+    Unreadable,
+    /// The file at the path is another file, or shorter than the cursor.
+    Replaced,
 }
 
 /// Reads main-turn readiness and exact queued-input receipts from Claude's
@@ -146,15 +167,15 @@ pub trait ReadsClaudeTurns {
     fn main_turn_ended(&self, session_id: &str) -> bool;
     /// The exact file and byte boundary before native submission.
     fn claude_cursor(&self) -> Option<ClaudeTranscriptCursor>;
-    /// Exactly one matching main-thread user row after `cursor` is a receipt.
-    /// None includes absence, ambiguity, replacement, truncation and malformed
-    /// tails; callers keep the attempt uncertain and never infer acceptance.
-    fn queued_receipt_after(
+    /// What the transcript after `cursor` shows of `text` in `session_id`'s
+    /// main thread. Only `Received` is a receipt; every other answer keeps
+    /// the attempt from being taken as accepted or as absent.
+    fn queued_history_after(
         &self,
         session_id: &str,
         cursor: &ClaudeTranscriptCursor,
         text: &str,
-    ) -> Option<ClaudeQueuedReceipt>;
+    ) -> ClaudeQueuedHistory;
 }
 
 impl ReadsClaudeTurns for Path {
@@ -190,72 +211,82 @@ impl ReadsClaudeTurns for Path {
         })
     }
 
-    fn queued_receipt_after(
+    fn queued_history_after(
         &self,
         session_id: &str,
         cursor: &ClaudeTranscriptCursor,
         text: &str,
-    ) -> Option<ClaudeQueuedReceipt> {
-        let mut file = fs::File::open(self).ok()?;
-        let metadata = file.metadata().ok()?;
+    ) -> ClaudeQueuedHistory {
+        let Ok(mut file) = fs::File::open(self) else {
+            return ClaudeQueuedHistory::Unreadable;
+        };
+        let Ok(metadata) = file.metadata() else {
+            return ClaudeQueuedHistory::Unreadable;
+        };
         if metadata.dev() != cursor.device
             || metadata.ino() != cursor.inode
             || metadata.len() < cursor.offset
         {
-            return None;
+            return ClaudeQueuedHistory::Replaced;
         }
-        file.seek(SeekFrom::Start(cursor.offset)).ok()?;
         let mut tail = String::new();
-        file.read_to_string(&mut tail).ok()?;
+        if file.seek(SeekFrom::Start(cursor.offset)).is_err()
+            || file.read_to_string(&mut tail).is_err()
+        {
+            return ClaudeQueuedHistory::Unreadable;
+        }
         // A partial native row cannot prove absence or acceptance.
         if !tail.is_empty() && !tail.ends_with('\n') {
-            return None;
+            return ClaudeQueuedHistory::Unreadable;
         }
-        let mut receipts = tail.lines().filter_map(|line| {
-            let row: Value = serde_json::from_str(line).ok()?;
-            if row.get("type").and_then(Value::as_str) != Some("user")
-                || row.get("sessionId").and_then(Value::as_str) != Some(session_id)
+        let mut receipts = Vec::new();
+        let mut enqueued = false;
+        for line in tail.lines() {
+            let Ok(row) = serde_json::from_str::<Value>(line) else {
+                return ClaudeQueuedHistory::Unreadable;
+            };
+            if row.get("sessionId").and_then(Value::as_str) != Some(session_id)
                 || row.get("isSidechain").and_then(Value::as_bool) == Some(true)
-                || row.get("isMeta").and_then(Value::as_bool) == Some(true)
-                || row
-                    .pointer("/message/content")
-                    .and_then(Value::as_str)
-                    .and_then(str::unwrapped_claude_paste)
-                    .unwrap_or_else(|| {
-                        row.pointer("/message/content")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                    })
-                    != text
             {
-                return None;
+                continue;
             }
-            Some(ClaudeQueuedReceipt {
-                turn_id: row.get("uuid")?.as_str()?.to_owned(),
-                row: line.to_owned(),
-            })
-        });
-        let receipt = receipts.next()?;
-        receipts.next().is_none().then_some(receipt)
-    }
-}
-
-/// Claude Code's native record for text inserted by a paste.  The identifier
-/// is deliberately not interpreted; matching opening and closing ids and the
-/// exact body are required.
-trait ReadsClaudePaste {
-    fn unwrapped_claude_paste(&self) -> Option<&str>;
-}
-
-impl ReadsClaudePaste for str {
-    fn unwrapped_claude_paste(&self) -> Option<&str> {
-        let rest = self.strip_prefix("\n\n<pasted_content id=\"")?;
-        let (identifier, body) = rest.split_once("\">\n")?;
-        if identifier.is_empty() || identifier.contains(['\n', '"']) {
-            return None;
+            let taken = match row.get("type").and_then(Value::as_str) {
+                Some("user") if row.get("isMeta").and_then(Value::as_bool) != Some(true) => {
+                    row.pointer("/message/content").and_then(Value::as_str)
+                }
+                Some("attachment")
+                    if row.pointer("/attachment/type").and_then(Value::as_str)
+                        == Some("queued_command") =>
+                {
+                    row.pointer("/attachment/prompt").and_then(Value::as_str)
+                }
+                Some("queue-operation")
+                    if row.get("operation").and_then(Value::as_str) == Some("enqueue")
+                        && row
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .is_some_and(|content| content.submitted_claude_text() == text) =>
+                {
+                    enqueued = true;
+                    None
+                }
+                _ => None,
+            };
+            if taken.is_some_and(|taken| taken.submitted_claude_text() == text)
+                && let Some(turn_id) = row.get("uuid").and_then(Value::as_str)
+            {
+                receipts.push(ClaudeQueuedReceipt {
+                    turn_id: turn_id.to_owned(),
+                    row: line.to_owned(),
+                });
+            }
         }
-        let suffix = format!("\n</pasted_content id=\"{identifier}\">\n");
-        body.strip_suffix(&suffix)
+        match receipts.len() {
+            0 if enqueued => ClaudeQueuedHistory::Pending,
+            0 => ClaudeQueuedHistory::Unseen,
+            1 => ClaudeQueuedHistory::Received(receipts.remove(0)),
+            _ => ClaudeQueuedHistory::Ambiguous,
+        }
     }
 }
 
@@ -376,7 +407,10 @@ impl NormalizesState for str {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaudeDaemon, MeasuresClaudeContext, ProjectsClaudeReadiness, ReadsClaudeTurns};
+    use super::{
+        ClaudeDaemon, ClaudeQueuedHistory, MeasuresClaudeContext, ProjectsClaudeReadiness,
+        ReadsClaudeTurns,
+    };
     use signal_flow::{
         Available_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
         Origin, RouteReadiness,
@@ -449,7 +483,11 @@ mod tests {
                 .as_bytes(),
             )
             .unwrap();
-        let receipt = transcript.queued_receipt_after("s", &cursor, text).unwrap();
+        let ClaudeQueuedHistory::Received(receipt) =
+            transcript.queued_history_after("s", &cursor, text)
+        else {
+            panic!("one exact main row took the text")
+        };
         assert_eq!(receipt.turn_id, "accepted");
 
         append
@@ -461,7 +499,106 @@ mod tests {
                 .as_bytes(),
             )
             .unwrap();
-        assert_eq!(transcript.queued_receipt_after("s", &cursor, text), None);
+        assert_eq!(
+            transcript.queued_history_after("s", &cursor, text),
+            ClaudeQueuedHistory::Ambiguous
+        );
+    }
+
+    /// Input typed while a main turn runs goes through Claude Code's queue:
+    /// an `enqueue` row holds it until a `queued_command` attachment folds
+    /// it into the running turn (Claude Code 2.1.294 transcripts). A task
+    /// notification that took the turn first is not the queued request.
+    #[test]
+    fn queued_input_is_pending_until_a_queued_command_takes_it() {
+        let directory = tempdir().unwrap();
+        let transcript = directory.path().join("queued.jsonl");
+        fs::write(&transcript, "").unwrap();
+        let cursor = transcript.claude_cursor().unwrap();
+        let text = "{ Sender.{ Psyche core Secondary } Order.do }";
+        let queued = format!("<pasted_content id=\"00df\">\n{text}\n</pasted_content id=\"00df\">");
+        let mut append = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        append
+            .write_all(
+                [
+                    row(
+                        serde_json::json!({"type":"user","sessionId":"s","uuid":"notice",
+                        "origin":{"kind":"task-notification"},
+                        "message":{"content":"<task-notification>done</task-notification>"}}),
+                    ),
+                    row(
+                        serde_json::json!({"type":"queue-operation","operation":"enqueue",
+                        "sessionId":"s","content":queued}),
+                    ),
+                ]
+                .concat()
+                .as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            transcript.queued_history_after("s", &cursor, text),
+            ClaudeQueuedHistory::Pending
+        );
+        append
+            .write_all(
+                [
+                    row(
+                        serde_json::json!({"type":"queue-operation","operation":"remove",
+                        "sessionId":"s","content":queued}),
+                    ),
+                    row(
+                        serde_json::json!({"type":"attachment","sessionId":"s","uuid":"folded",
+                        "attachment":{"type":"queued_command","prompt":queued}}),
+                    ),
+                ]
+                .concat()
+                .as_bytes(),
+            )
+            .unwrap();
+        let ClaudeQueuedHistory::Received(receipt) =
+            transcript.queued_history_after("s", &cursor, text)
+        else {
+            panic!("the queued_command attachment is the receipt")
+        };
+        assert_eq!(receipt.turn_id, "folded");
+    }
+
+    #[test]
+    fn an_unseen_text_a_partial_tail_and_a_replaced_file_are_told_apart() {
+        let directory = tempdir().unwrap();
+        let transcript = directory.path().join("tail.jsonl");
+        fs::write(&transcript, "").unwrap();
+        let cursor = transcript.claude_cursor().unwrap();
+        fs::write(
+            &transcript,
+            row(serde_json::json!({"type":"user","sessionId":"s","uuid":"u",
+                "message":{"content":"something else"}})),
+        )
+        .unwrap();
+        assert_eq!(
+            transcript.queued_history_after("s", &cursor, "mine"),
+            ClaudeQueuedHistory::Unseen
+        );
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap()
+            .write_all(b"{\"type\":\"user\"")
+            .unwrap();
+        assert_eq!(
+            transcript.queued_history_after("s", &cursor, "mine"),
+            ClaudeQueuedHistory::Unreadable
+        );
+        let replacement = directory.path().join("replacement.jsonl");
+        fs::write(&replacement, "").unwrap();
+        fs::rename(&replacement, &transcript).unwrap();
+        assert_eq!(
+            transcript.queued_history_after("s", &cursor, "mine"),
+            ClaudeQueuedHistory::Replaced
+        );
     }
 
     #[test]

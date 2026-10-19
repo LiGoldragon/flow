@@ -11,6 +11,7 @@ default = ["datom"]
 datom = []
 [dependencies]
 flow-defaults = { path = "../flow-defaults" }
+flow-native = { path = "../flow-native" }
 flow-ethos.workspace = true
 base64 = "0.22"
 # The Nexus renders one typed value as text, the Message it types into a

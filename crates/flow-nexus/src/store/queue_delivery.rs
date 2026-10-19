@@ -1,11 +1,16 @@
 //! Durable accounting around handing one queued request to a native seat.
 //!
-//! Preparing is committed before native I/O.  A prepared attempt is never
-//! implicitly reusable after recovery: recovery marks it uncertain.  Only an
-//! exactly correlated native receipt makes an attempt settleable, and
-//! settlement removes the still-oldest queue entry in the same commit.
+//! Preparing is committed before native I/O, with the native history anchor
+//! (Claude's transcript cursor, Codex's newest turn) the hand-over is later
+//! reconciled against.  A prepared attempt is never implicitly reusable after
+//! recovery: recovery marks it uncertain.  Only an exactly correlated native
+//! receipt makes an attempt settleable, and settlement removes the
+//! still-oldest queue entry in the same commit.  Only native history that
+//! proves the request never reached the seat ends an attempt Absent, with
+//! that proof recorded, and only then may the request be handed over again.
 
 use super::*;
+use meta_signal_flow::{AbsenceProof, Undecided};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use signal_flow::{Address, HarnessKind, QueuedRequest};
 
@@ -30,6 +35,9 @@ impl EngineRecord for DeliveryCounter {
 enum RequestState {
     Queued,
     Settled,
+    /// Its attempt was proved never to have reached the seat; the request
+    /// is still queued and a later attempt carries it.
+    Unsent,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -63,14 +71,47 @@ pub struct NativeTranscriptCursor {
     pub offset: u64,
 }
 
+/// Where native history stood before the hand-over, so what came after it
+/// can be read for this attempt and nothing earlier.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub enum NativeHistoryAnchor {
+    /// The Claude transcript file and its length before the text was typed.
+    ClaudeTranscript(NativeTranscriptCursor),
+    /// The Codex thread's newest turn before `turn/start`; None when the
+    /// thread had no turn.
+    CodexTurns(Option<String>),
+}
+
+/// Why an attempt was ended without reaching the seat: the kind of proof,
+/// and the native observation that gave it.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AbsenceRecord {
+    pub proof: AbsenceProof,
+    pub observation: String,
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub enum QueueDeliveryPhase {
     Prepared,
-    /// Recovery found a prepared attempt with no durable native receipt.
-    /// It may have reached the native seat and must not be sent again.
-    Uncertain,
+    /// Native input may have reached the seat and no exact receipt is
+    /// held. It is never sent again; the reason names why the last
+    /// reconciliation could not decide, None before one ran.
+    Uncertain(Option<Undecided>),
     ReceiptRecorded(NativeDeliveryReceipt),
     Settled(NativeDeliveryReceipt),
+    /// Native history proved the request never reached the seat.
+    Absent(AbsenceRecord),
+}
+
+pub trait EndsQueueDeliveryPhase {
+    /// Settled and Absent attempts hold no request back.
+    fn is_finished(&self) -> bool;
+}
+
+impl EndsQueueDeliveryPhase for QueueDeliveryPhase {
+    fn is_finished(&self) -> bool {
+        matches!(self, Self::Settled(_) | Self::Absent(_))
+    }
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -81,7 +122,7 @@ pub struct QueueDeliveryAttempt {
     pub flow_id: String,
     pub thread_id: String,
     pub harness_kind: HarnessKind,
-    pub transcript_cursor: Option<NativeTranscriptCursor>,
+    pub history_anchor: NativeHistoryAnchor,
     pub address: Address,
     pub queued: QueuedRequest,
     pub phase: QueueDeliveryPhase,
@@ -133,12 +174,12 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
             TableDescriptor::new(
                 DELIVERY_REQUEST_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-request"),
-                SchemaHash::for_label("flow-nexus-queue-delivery-request-v1"),
+                SchemaHash::for_label("flow-nexus-queue-delivery-request-v2"),
             ),
             TableDescriptor::new(
                 DELIVERY_ATTEMPT_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-attempt"),
-                SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v2"),
+                SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v3"),
             ),
         )
     }
@@ -166,7 +207,7 @@ pub trait AccountsQueueDelivery {
         flow_id: &str,
         thread_id: &str,
         harness_kind: HarnessKind,
-        transcript_cursor: Option<NativeTranscriptCursor>,
+        history_anchor: NativeHistoryAnchor,
     ) -> Result<PrepareQueueDelivery, StoreError>;
 
     /// Records the exact native response only when all correlation fields
@@ -185,6 +226,37 @@ pub trait AccountsQueueDelivery {
     /// The request stays queued and this attempt can only be reconciled,
     /// never submitted again by assumption.
     fn mark_delivery_uncertain(&self, attempt_id: &str) -> Result<bool, StoreError>;
+
+    /// A reconciliation read native history and could not decide: the
+    /// attempt stays Uncertain, naming why.
+    fn mark_delivery_undecided(
+        &self,
+        attempt_id: &str,
+        undecided: Undecided,
+    ) -> Result<bool, StoreError>;
+
+    /// Native history proved the request never reached the seat: the
+    /// attempt ends Absent with its proof, its request row is Unsent, and
+    /// the request, still queued, may be prepared again.
+    fn mark_delivery_absent(
+        &self,
+        attempt_id: &str,
+        absence: AbsenceRecord,
+    ) -> Result<bool, StoreError>;
+
+    /// The address's one attempt that still holds its oldest request back,
+    /// if any.
+    fn outstanding_delivery(
+        &self,
+        address: &Address,
+    ) -> Result<Option<QueueDeliveryAttempt>, StoreError>;
+
+    /// Every attempt of the address that did not settle, Absent ones
+    /// included, oldest first.
+    fn unsettled_deliveries(
+        &self,
+        address: &Address,
+    ) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
 
     /// On process recovery, makes every receipt-less prepared attempt
     /// explicitly uncertain.  Receipt-recorded attempts remain settleable.
@@ -217,9 +289,10 @@ impl ReadsQueueDelivery for FlowStore {
         &self,
         address: &Address,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError> {
-        let mut matching = self.delivery_attempts()?.into_iter().filter(|attempt| {
-            &attempt.address == address && !matches!(&attempt.phase, QueueDeliveryPhase::Settled(_))
-        });
+        let mut matching = self
+            .delivery_attempts()?
+            .into_iter()
+            .filter(|attempt| &attempt.address == address && !attempt.phase.is_finished());
         let found = matching.next();
         if matching.next().is_some() {
             return Err(StoreError::StateInvariant);
@@ -235,7 +308,7 @@ impl AccountsQueueDelivery for FlowStore {
         flow_id: &str,
         thread_id: &str,
         harness_kind: HarnessKind,
-        transcript_cursor: Option<NativeTranscriptCursor>,
+        history_anchor: NativeHistoryAnchor,
     ) -> Result<PrepareQueueDelivery, StoreError> {
         if let Some(attempt) = self.outstanding_for(address)? {
             return Ok(PrepareQueueDelivery::Outstanding(attempt));
@@ -304,7 +377,7 @@ impl AccountsQueueDelivery for FlowStore {
             flow_id: flow_id.to_owned(),
             thread_id: thread_id.to_owned(),
             harness_kind,
-            transcript_cursor,
+            history_anchor,
             address: address.clone(),
             queued,
             phase: QueueDeliveryPhase::Prepared,
@@ -339,7 +412,7 @@ impl AccountsQueueDelivery for FlowStore {
             return Ok(false);
         }
         match &attempt.phase {
-            QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain => {
+            QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {
                 attempt.phase = QueueDeliveryPhase::ReceiptRecorded(receipt);
                 self.engine.mutate_keyed(KeyedMutation::new(
                     self.queue_delivery.attempts,
@@ -350,6 +423,7 @@ impl AccountsQueueDelivery for FlowStore {
             }
             QueueDeliveryPhase::ReceiptRecorded(recorded)
             | QueueDeliveryPhase::Settled(recorded) => Ok(recorded == &receipt),
+            QueueDeliveryPhase::Absent(_) => Err(StoreError::StateInvariant),
         }
     }
 
@@ -407,7 +481,7 @@ impl AccountsQueueDelivery for FlowStore {
         };
         match attempt.phase {
             QueueDeliveryPhase::Prepared => {
-                attempt.phase = QueueDeliveryPhase::Uncertain;
+                attempt.phase = QueueDeliveryPhase::Uncertain(None);
                 self.engine.mutate_keyed(KeyedMutation::new(
                     self.queue_delivery.attempts,
                     RecordKey::new(attempt_id),
@@ -415,9 +489,104 @@ impl AccountsQueueDelivery for FlowStore {
                 ))?;
                 Ok(true)
             }
-            QueueDeliveryPhase::Uncertain => Ok(true),
-            QueueDeliveryPhase::ReceiptRecorded(_) | QueueDeliveryPhase::Settled(_) => Ok(false),
+            QueueDeliveryPhase::Uncertain(_) => Ok(true),
+            QueueDeliveryPhase::ReceiptRecorded(_)
+            | QueueDeliveryPhase::Settled(_)
+            | QueueDeliveryPhase::Absent(_) => Ok(false),
         }
+    }
+
+    fn mark_delivery_undecided(
+        &self,
+        attempt_id: &str,
+        undecided: Undecided,
+    ) -> Result<bool, StoreError> {
+        let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
+            return Ok(false);
+        };
+        let marked = QueueDeliveryPhase::Uncertain(Some(undecided));
+        if attempt.phase == marked {
+            return Ok(true);
+        }
+        if !matches!(
+            attempt.phase,
+            QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
+        ) {
+            return Ok(false);
+        }
+        attempt.phase = marked;
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.queue_delivery.attempts,
+            RecordKey::new(attempt_id),
+            attempt,
+        ))?;
+        Ok(true)
+    }
+
+    fn mark_delivery_absent(
+        &self,
+        attempt_id: &str,
+        absence: AbsenceRecord,
+    ) -> Result<bool, StoreError> {
+        let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
+            return Ok(false);
+        };
+        match &attempt.phase {
+            QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {}
+            QueueDeliveryPhase::Absent(recorded) => return Ok(recorded == &absence),
+            QueueDeliveryPhase::ReceiptRecorded(_) | QueueDeliveryPhase::Settled(_) => {
+                return Ok(false);
+            }
+        }
+        let requests = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.queue_delivery.requests,
+                RecordKey::new(attempt.request_id.clone()),
+            ))?
+            .records()
+            .to_vec();
+        let [request] = requests.as_slice() else {
+            return Err(StoreError::StateInvariant);
+        };
+        if request.state != RequestState::Queued {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut request = request.clone();
+        request.state = RequestState::Unsent;
+        attempt.phase = QueueDeliveryPhase::Absent(absence);
+        self.engine.commit_atomic(
+            self.engine
+                .begin_atomic_commit()
+                .mutate(self.queue_delivery.requests, request)
+                .mutate(self.queue_delivery.attempts, attempt),
+        )?;
+        Ok(true)
+    }
+
+    fn outstanding_delivery(
+        &self,
+        address: &Address,
+    ) -> Result<Option<QueueDeliveryAttempt>, StoreError> {
+        self.outstanding_for(address)
+    }
+
+    fn unsettled_deliveries(
+        &self,
+        address: &Address,
+    ) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
+        let mut unsettled = self
+            .delivery_attempts()?
+            .into_iter()
+            .filter(|attempt| {
+                &attempt.address == address
+                    && !matches!(attempt.phase, QueueDeliveryPhase::Settled(_))
+            })
+            .collect::<Vec<_>>();
+        // Attempt ids are fixed-width hex of one counter: their order is
+        // the order they were prepared in.
+        unsettled.sort_by(|left, right| left.attempt_id.cmp(&right.attempt_id));
+        Ok(unsettled)
     }
 
     fn recover_outstanding_deliveries(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
@@ -425,7 +594,7 @@ impl AccountsQueueDelivery for FlowStore {
         for mut attempt in self.delivery_attempts()? {
             match attempt.phase.clone() {
                 QueueDeliveryPhase::Prepared => {
-                    attempt.phase = QueueDeliveryPhase::Uncertain;
+                    attempt.phase = QueueDeliveryPhase::Uncertain(None);
                     self.engine.mutate_keyed(KeyedMutation::new(
                         self.queue_delivery.attempts,
                         RecordKey::new(attempt.attempt_id.clone()),
@@ -433,10 +602,10 @@ impl AccountsQueueDelivery for FlowStore {
                     ))?;
                     outstanding.push(attempt);
                 }
-                QueueDeliveryPhase::Uncertain | QueueDeliveryPhase::ReceiptRecorded(_) => {
+                QueueDeliveryPhase::Uncertain(_) | QueueDeliveryPhase::ReceiptRecorded(_) => {
                     outstanding.push(attempt);
                 }
-                QueueDeliveryPhase::Settled(_) => {}
+                QueueDeliveryPhase::Settled(_) | QueueDeliveryPhase::Absent(_) => {}
             }
         }
         Ok(outstanding)
@@ -553,7 +722,7 @@ mod tests {
                 "flow-delivery",
                 "thread-7",
                 HarnessKind::Claude,
-                Some(NativeTranscriptCursor {
+                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
                     device: 1,
                     inode: 2,
                     offset: 3,
@@ -572,7 +741,7 @@ mod tests {
         let recovered = reopened.recover_outstanding_deliveries().unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].attempt_id, prepared.attempt_id);
-        assert_eq!(recovered[0].phase, QueueDeliveryPhase::Uncertain);
+        assert_eq!(recovered[0].phase, QueueDeliveryPhase::Uncertain(None));
         assert_eq!(
             reopened
                 .prepare_oldest_delivery(
@@ -580,7 +749,7 @@ mod tests {
                     "flow-delivery",
                     "thread-7",
                     HarnessKind::Claude,
-                    Some(NativeTranscriptCursor {
+                    NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
                         device: 1,
                         inode: 2,
                         offset: 3,
@@ -609,7 +778,7 @@ mod tests {
                 "flow-delivery",
                 "thread-7",
                 HarnessKind::Claude,
-                Some(NativeTranscriptCursor {
+                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
                     device: 4,
                     inode: 5,
                     offset: 6,
@@ -627,7 +796,7 @@ mod tests {
             panic!("one uncertain attempt survives")
         };
         assert_eq!(uncertain.attempt_id, prepared.attempt_id);
-        assert_eq!(uncertain.phase, QueueDeliveryPhase::Uncertain);
+        assert_eq!(uncertain.phase, QueueDeliveryPhase::Uncertain(None));
         assert!(
             reopened
                 .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
@@ -648,7 +817,7 @@ mod tests {
                 "flow-delivery",
                 "thread-7",
                 HarnessKind::Claude,
-                Some(NativeTranscriptCursor {
+                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
                     device: 4,
                     inode: 5,
                     offset: 7,
@@ -671,7 +840,7 @@ mod tests {
                 "flow-delivery",
                 "thread-7",
                 HarnessKind::Codex,
-                None,
+                NativeHistoryAnchor::CodexTurns(None),
             )
             .unwrap()
         else {
@@ -733,6 +902,105 @@ mod tests {
     }
 
     #[test]
+    fn proven_absence_authorises_a_new_attempt_and_undecided_stays_uncertain() {
+        let (fixture, store) = Fixture::new();
+        let PrepareQueueDelivery::Prepared(first) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(Some("turn-1".into())),
+            )
+            .unwrap()
+        else {
+            panic!("oldest request prepared")
+        };
+        assert!(store.mark_delivery_uncertain(&first.attempt_id).unwrap());
+        assert!(
+            store
+                .mark_delivery_undecided(&first.attempt_id, Undecided::SeatNotResting)
+                .unwrap()
+        );
+        drop(store);
+        let store = fixture.reopen();
+        let [recovered] = store
+            .recover_outstanding_deliveries()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            recovered.phase,
+            QueueDeliveryPhase::Uncertain(Some(Undecided::SeatNotResting))
+        );
+        // Undecided is never permission to send again.
+        assert!(matches!(
+            store
+                .prepare_oldest_delivery(
+                    &address(),
+                    "flow-delivery",
+                    "thread-7",
+                    HarnessKind::Codex,
+                    NativeHistoryAnchor::CodexTurns(Some("turn-1".into())),
+                )
+                .unwrap(),
+            PrepareQueueDelivery::Outstanding(_)
+        ));
+        let absence = AbsenceRecord {
+            proof: AbsenceProof::HistoryAbsent,
+            observation: "idle; no turn after turn-1 carries the request".into(),
+        };
+        assert!(
+            store
+                .mark_delivery_absent(&first.attempt_id, absence.clone())
+                .unwrap()
+        );
+        assert!(
+            store
+                .mark_delivery_absent(&first.attempt_id, absence.clone())
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_delivery_receipt(&first.attempt_id, receipt(&first))
+                .is_ok_and(|recorded| recorded)
+        );
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("first"), queued("second")]
+        );
+        let PrepareQueueDelivery::Prepared(second) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(Some("turn-1".into())),
+            )
+            .unwrap()
+        else {
+            panic!("a proven absence authorises a new attempt")
+        };
+        assert_ne!(second.attempt_id, first.attempt_id);
+        assert_ne!(second.native_request_id, first.native_request_id);
+        assert_eq!(second.queued, queued("first"));
+        let unsettled = store.unsettled_deliveries(&address()).unwrap();
+        assert_eq!(
+            unsettled
+                .iter()
+                .map(|attempt| (attempt.attempt_id.clone(), attempt.phase.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    first.attempt_id.clone(),
+                    QueueDeliveryPhase::Absent(absence)
+                ),
+                (second.attempt_id.clone(), QueueDeliveryPhase::Prepared),
+            ]
+        );
+    }
+
+    #[test]
     fn settlement_refuses_changed_oldest_and_preserves_sender_and_order() {
         let (_fixture, store) = Fixture::new();
         let PrepareQueueDelivery::Prepared(prepared) = store
@@ -741,7 +1009,7 @@ mod tests {
                 "flow-delivery",
                 "thread-7",
                 HarnessKind::Codex,
-                None,
+                NativeHistoryAnchor::CodexTurns(None),
             )
             .unwrap()
         else {

@@ -54,9 +54,11 @@
 ; named. Record.Awoken then names the
 ; started flow and the count of queued requests it was handed, which leave
 ; the queue in that same write, so a wake that dies first loses nothing.
-; Drain types the oldest queued request into the Awake flow's pane and
-; removes it once typed, answering what it typed. Wake runs off the
-; dispatch gate and takes it per step.
+; Drain first reconciles a hand-over still outstanding from the seat's
+; native history, then hands the oldest request to the Awake flow: through
+; its Codex app-server, or typed into its Claude pane. A request leaves the
+; queue only on its exact native receipt. Drain answers what it settled or
+; handed over. Wake runs off the dispatch gate and takes it per step.
 ;
 ; Record.Refresh marks one Asleep metaflow so its next wake starts a fresh
 ; launch composed from the modules and leave-outs its last launch named,

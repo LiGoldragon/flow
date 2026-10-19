@@ -1,3 +1,43 @@
+# Flow 0.35.17
+
+signal-flow 21.0.0 (5af38281) and meta-signal-flow 26.0.0 (0e5a9829): every
+ordinary-wire and meta-wire peer repins. `Event.Stopped` carries `NativeStop.{
+Option<NativeSessionId> Option<TranscriptPath> }`, `Event` appends
+`PromptSubmitted.NativePrompt`, `QueueTurnEnd` and its responses are removed,
+and the meta wire adds `ReadQueueDeliveries.Address`. The store upgrades
+`flow-nexus-flow-events` from v1 to v2, each older `Stopped` read as
+`Stopped.{ None None }`; the unreleased queue-delivery request and attempt
+families move to v2 and v3. Claude seats launched from this release carry a
+UserPromptSubmit hook beside SessionStart, PostToolUse and Stop.
+
+- **A Claude seat drains on its own turn end.** `flow-hook` reports a Stop
+  with the `session_id` and `transcript_path` Claude Code gave it, and Flow
+  acts on it only when they are the flow's registered session and that
+  session's transcript. The transcript's main `end_turn` confirms it, so a
+  seat whose main turn ended while background agents run (Herdr: Working) is
+  handed its oldest request. It still sleeps only when Herdr shows it Idle or
+  Done. A Stop of another session is recorded and acts on nothing.
+- **A typed request settles on its exact receipt.** `flow-hook` reports
+  UserPromptSubmit as the SHA-256 of the prompt Claude Code took, its paste
+  wrapper taken off, with the session and prompt id. A hand-over settles when
+  that digest is exactly its request in the flow's own session, or when the
+  transcript after the stored cursor holds the one main user row or
+  `queued_command` attachment that took it. A task notification is no
+  receipt. The next request is handed over at the next turn end.
+- **A Codex seat drains on its app-server's rest, not Herdr's.** Before
+  `turn/start` Flow records the thread's newest turn as the attempt's anchor.
+- **An Uncertain hand-over is reconciled, never resent.** At each turn end
+  and at the Nexus's start Flow reads native history after the anchor. If the
+  exact request is found it settles. If history proves it absent, the attempt
+  ends Absent with that proof, and a new attempt is authorised. That proof is
+  an idle Codex thread with no turn after the anchor carrying it, or a pane
+  hand-over Herdr refused before input. Otherwise the attempt stays Uncertain
+  and names why. Claude absence after typing is never proven.
+  `ReadQueueDeliveries` lists every unsettled attempt with its standing.
+- **A Claude turn end recorded before confirmation is honoured.** At
+  confirmation the flow's last own Stop or prompt is read, or its transcript's
+  main `end_turn`, as a Codex thread's rest already is.
+
 # Flow 0.35.16
 
 No protocol change. The store adds durable queue-delivery request and attempt families.

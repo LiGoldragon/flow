@@ -1,3 +1,33 @@
+# Flow 0.35.22
+
+Pins signal-flow 23.0.0 (ce1f761d, contract digest c08899110362ba2d) and
+meta-signal-flow 29.0.0 (dc165fdf). Every ordinary-socket peer and every
+meta-socket peer that reads events repins. The events table upgrades from
+its 0.35.11 shape (v1) to v3 in one open; the v2 shape of 0.35.19 to
+0.35.21 was never deployed and is not read.
+
+- **A Claude flow cannot end a turn that owes the living a book.** The hook
+  labels each submitted prompt with its origin (`#psyche` and `#psyches`
+  Psyche, `#msg` Message, Flow's queued-work opening Queued,
+  `<task-notification>` Notification, anything else Typed) and reports an
+  Artifact tool use that answered a `url` as `Published`. A Stop of the
+  flow's own session whose newest prompt that owes a book has no
+  `Published` after it is recorded as `StopHeld` and answered
+  `TurnHeld.«Make the book for the living's words before ending: ...»`;
+  the hook writes `{"decision":"block","reason":...}` and the turn goes
+  on. Typed and Psyche prompts owe a book; Message and Notification do not;
+  a Queued hand-over does when the request it hands over is Psyche or
+  Psyches, and so does the last startup part of a fresh wake whose queued
+  work holds one. No Stop is held while a startup part before the last is
+  answered. A held Stop is no turn end: it drains no queue, sleeps no seat
+  and sends no startup part.
+- **Flow unreachable blocks the Stop.** When the `flow` CLI cannot reach the
+  Nexus or reads no answer, the hook blocks with "Flow unreachable: make the
+  book, then end".
+- **Every Claude seat carries `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=1000`.**
+  Claude Code 2.1.294 otherwise ends a turn after 8 consecutive blocks.
+- Codex seats are unchanged: they run no Flow hook.
+
 # Flow 0.35.21
 
 No contract, store or deployment change.

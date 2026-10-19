@@ -429,6 +429,12 @@ pub(crate) trait PreparesClaudePane {
     /// `/rename` is propagated to every process on that job directory.
     /// `FLOW_ID` is among them: the harness hook reports under the FLOW_ID
     /// in its environment, and a new flow must never report as another.
+    /// Claude Code 2.1.294 ends a turn its Stop hook blocked more than
+    /// `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` times in a row (default 8). Flow's
+    /// hook blocks a Stop while the flow owes the living a book, so every
+    /// Claude seat Flow starts or resumes carries a cap high enough that
+    /// the harness never ends such a turn on its own.
+    const CLAUDE_STOP_HOOK_BLOCK_CAP: &'static str = "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=1000";
     const CLAUDE_INHERITED_ENVIRONMENT: [&'static str; 5] = [
         Self::CLAUDE_CHILD_SESSION_ENVIRONMENT,
         "CLAUDE_JOB_DIR",
@@ -970,7 +976,8 @@ impl CapturesTranscripts for HerdrCli {
 /// The shell line typed into a Claude launch pane before the harness: it
 /// removes the inherited Claude identity, exports `FLOW_SOCKET` as the
 /// ordinary socket of the Nexus launching the flow, and, for a launch
-/// Reserve gave a FlowId, exports that FlowId as FLOW_ID. The harness Herdr
+/// Reserve gave a FlowId, exports that FlowId as FLOW_ID, then exports the
+/// Stop hook's block cap. The harness Herdr
 /// starts at that prompt, and every hook it runs, carries both, so
 /// `flow-hook`'s `flow` reports to this Nexus whatever runtime directory
 /// the pane's shell has. The FlowId is a claim alias, lowercase hex, so it
@@ -1001,9 +1008,10 @@ impl PreparesClaudeEnvironment for str {
             .map(|variable| format!(" && export {}", variable.shell_quoted()))
             .collect::<String>();
         format!(
-            "unset {} && export FLOW_SOCKET={}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+            "unset {} && export FLOW_SOCKET={}{flow_id} && export {}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
             HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
             socket.to_string_lossy().shell_quoted(),
+            HerdrCli::CLAUDE_STOP_HOOK_BLOCK_CAP,
             marker_suffix
         )
     }
@@ -3406,6 +3414,31 @@ printf '%s\n' "$alias"
         );
     }
 
+    /// Every Claude seat's harness, and so its Stop hook, runs with a block
+    /// cap of 1000: a Stop blocked while a book is owed is never ended by
+    /// Claude Code's default cap of 8, whatever cap the pane's shell had.
+    #[test]
+    fn claude_environment_preparation_raises_the_stop_hook_block_cap() {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "{}; sh -c 'printf %s \"$CLAUDE_CODE_STOP_HOOK_BLOCK_CAP\"'",
+                ("test-marker").claude_environment_preparation(
+                    Some("5a4d0b"),
+                    Path::new("/run/flow.sock"),
+                    &["CLAUDE_CODE_DISABLE_CLAUDE_MDS=1".to_owned()]
+                ),
+            ))
+            .env("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", "8")
+            .output()
+            .expect("shell environment witness");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("UTF-8"),
+            "FLOW_CLAUDE_ENV_READY_test-marker\n1000"
+        );
+    }
+
     /// The launching Nexus's ordinary socket reaches the harness's
     /// environment as FLOW_SOCKET, replacing one the pane's shell
     /// inherited, as one word however the path is spelled.
@@ -3456,7 +3489,7 @@ printf '%s\n' "$alias"
             .find(|line| line.contains("pane run"))
             .expect("pane prepared");
         assert!(prepared.contains(
-            " FLOW_ID && export FLOW_SOCKET='/fixture/run/flow-next/flow/flow.sock' && export FLOW_ID=123456 && printf "
+            " FLOW_ID && export FLOW_SOCKET='/fixture/run/flow-next/flow/flow.sock' && export FLOW_ID=123456 && export CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=1000 && printf "
         ));
         let start = calls
             .lines()

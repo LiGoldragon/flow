@@ -284,6 +284,9 @@ pub trait AccountsQueueDelivery {
         &self,
         attempt_id: &str,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError>;
+
+    /// Every hand-over Flow made to this flow, settled or not.
+    fn deliveries_to(&self, flow_id: &str) -> Result<Vec<QueueDeliveryAttempt>, StoreError>;
 }
 
 trait ReadsQueueDelivery {
@@ -713,6 +716,14 @@ impl AccountsQueueDelivery for FlowStore {
             [attempt] => Ok(Some(attempt.clone())),
             _ => Err(StoreError::StateInvariant),
         }
+    }
+
+    fn deliveries_to(&self, flow_id: &str) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
+        Ok(self
+            .delivery_attempts()?
+            .into_iter()
+            .filter(|attempt| attempt.flow_id == flow_id)
+            .collect())
     }
 }
 

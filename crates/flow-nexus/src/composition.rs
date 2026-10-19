@@ -527,7 +527,7 @@ impl ComposesLaunch for LaunchComposer {
 /// Message is; a control character other than LF and TAB is a key to a
 /// harness, not a word, and is typed as U+FFFD.
 pub trait RendersQueuedWork {
-    const QUEUED_WORK_OPENING: &'static str = "Work queued for this metaflow while no flow of it was running, oldest first, each with who sent it:";
+    const QUEUED_WORK_OPENING: &'static str = flow_native::QUEUED_WORK_OPENING;
     fn prompt_text(&self) -> String;
 }
 

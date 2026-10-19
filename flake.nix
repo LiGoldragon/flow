@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.21";
+            version = "0.35.22";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -379,6 +379,22 @@
             "tests::queue_drain::a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_typing";
           flow-claude-turn-end-before-confirmation = context.exactTest "flow-nexus"
             "tests::queue_drain::a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it";
+          flow-book-typed-words-hold-the-stop = context.exactTest "flow-nexus"
+            "tests::books::typed_words_hold_the_stop_until_a_book_is_published";
+          flow-book-psyche-holds-the-stop = context.exactTest "flow-nexus"
+            "tests::books::psyche_holds_the_stop";
+          flow-book-message-or-notice-not-held = context.exactTest "flow-nexus"
+            "tests::books::a_message_or_a_notice_does_not_hold_the_stop";
+          flow-book-queued-psyche-holds-the-stop = context.exactTest "flow-nexus"
+            "tests::books::a_queued_hand_over_of_psyche_holds_the_stop";
+          flow-book-held-stop-does-not-drain = context.exactTest "flow-nexus"
+            "tests::books::a_held_stop_does_not_drain_the_queue";
+          flow-book-hook-blocks-a-held-stop = context.exactTest "flow"
+            "a_stop_flow_holds_is_blocked_with_its_reason";
+          flow-book-hook-blocks-when-unreachable = context.exactTest "flow"
+            "a_stop_with_flow_unreachable_is_blocked";
+          flow-book-claude-block-cap-raised = context.exactTest "flow-nexus"
+            "herdr::launch::tests::claude_environment_preparation_raises_the_stop_hook_block_cap";
           flow-queue-resolved-delivered-leaves-the-queue = context.exactTest "flow-nexus"
             "tests::queue_drain::an_uncertain_hand_over_resolved_delivered_leaves_the_queue_with_its_record";
           flow-queue-resolved-absent-one-new-attempt = context.exactTest "flow-nexus"

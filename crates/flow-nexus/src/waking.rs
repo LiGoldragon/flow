@@ -91,7 +91,8 @@ use meta_signal_flow::{AbsenceProof, Undecided};
 use signal_flow::{
     Address, AgentState, ContextRefusal, Event, FlowId, FlowLifecycle, FlowNode, HarnessKind,
     HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow,
-    NativePrompt, NativeStop, Origin, PowerLevel, QueuedRequest, Request, Response,
+    NativePrompt, NativeStop, Origin, PowerLevel, PromptDeliveryResult, PromptOrigin, Publication,
+    QueuedRequest, Request, Response,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -656,8 +657,35 @@ pub(crate) trait CorrelatesNativeEvents {
     /// A prompt the flow's own Claude session took.
     fn correlated_prompt(&self, flow_id: &str, prompt: &NativePrompt) -> bool;
     /// Of the flow's own Stops and submitted prompts, the last recorded is
-    /// a Stop: a turn end landed with no prompt taken after it.
+    /// a Stop: a turn end landed with no prompt taken after it. A held Stop
+    /// is no turn end.
     fn turn_end_recorded(&self, flow_id: &str) -> bool;
+    /// A book the flow's own Claude session published.
+    fn correlated_publication(&self, flow_id: &str, publication: &Publication) -> bool;
+    /// What the flow owes the living at its own Stop: the newest of its
+    /// own prompts that owes a book, described, when no book it published
+    /// follows it. None while a startup part before the last is answered,
+    /// and when nothing is owed.
+    fn unpresented(&self, flow_id: &str) -> Option<String>;
+    /// Whether one of the flow's own prompts owes the living a book, and
+    /// what it is: Typed and Psyche do, Message and Notification do not,
+    /// and Queued does when a request it handed over is the living's
+    /// psyche. The last part of a fresh wake owes one only when the queued
+    /// work it carries holds the living's psyche. What cannot be read owes
+    /// a book.
+    fn owed_by(&self, flow_id: &str, prompt: &NativePrompt) -> Option<&'static str>;
+    /// The startup of the flow's newest launch, when Flow recorded its
+    /// delivery intent.
+    fn startup(&self, flow_id: &str) -> Option<Startup>;
+}
+
+/// The startup of a flow's newest launch, as its delivery intent records
+/// it: every part's SHA-256 in order, how many were submitted, and the
+/// brief the last carries.
+pub(crate) struct Startup {
+    part_hashes: Vec<String>,
+    parts_submitted: i64,
+    brief: String,
 }
 
 impl CorrelatesNativeEvents for RunningNexus {
@@ -708,9 +736,123 @@ impl CorrelatesNativeEvents for RunningNexus {
                 Event::PromptSubmitted(prompt) => {
                     self.correlated_prompt(flow_id, prompt).then_some(false)
                 }
-                Event::Started | Event::ToolUsed(_) => None,
+                Event::StopHeld(stop) => self.correlated_stop(flow_id, stop).then_some(false),
+                Event::Started | Event::ToolUsed(_) | Event::Published(_) => None,
             })
             .unwrap_or(false)
+    }
+
+    fn correlated_publication(&self, flow_id: &str, publication: &Publication) -> bool {
+        matches!(
+            self.store.flow_node(flow_id),
+            Ok(Some(node)) if node.harness_kind == HarnessKind::Claude
+                && !node.session_id.is_empty()
+                && publication.native_session_id_option.as_deref() == Some(node.session_id.as_str())
+        )
+    }
+
+    fn unpresented(&self, flow_id: &str) -> Option<String> {
+        if self
+            .startup(flow_id)
+            .is_some_and(|startup| startup.parts_submitted < startup.part_hashes.len() as i64)
+        {
+            return None;
+        }
+        let events = match self.store.events(flow_id) {
+            Ok(Some(events)) => events,
+            _ => return Some("the living's words, which Flow could not read".to_owned()),
+        };
+        let mut published = false;
+        for event in events.iter().rev() {
+            match event {
+                Event::Published(publication)
+                    if self.correlated_publication(flow_id, publication) =>
+                {
+                    published = true;
+                }
+                Event::PromptSubmitted(prompt) if self.correlated_prompt(flow_id, prompt) => {
+                    if let Some(owed) = self.owed_by(flow_id, prompt) {
+                        return (!published).then(|| owed.to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn owed_by(&self, flow_id: &str, prompt: &NativePrompt) -> Option<&'static str> {
+        let holds_psyche = |requests: &[QueuedRequest]| {
+            requests
+                .iter()
+                .any(|queued| matches!(queued.request, Request::Psyche(_) | Request::Psyches(_)))
+        };
+        match prompt.prompt_origin {
+            PromptOrigin::Message | PromptOrigin::Notification => None,
+            PromptOrigin::Psyche => Some("the living's words relayed to you as psyche"),
+            PromptOrigin::Typed => match self.startup(flow_id) {
+                Some(startup)
+                    if startup.part_hashes.last() == Some(&prompt.prompt_sha256)
+                        && startup.brief.starts_with(flow_native::QUEUED_WORK_OPENING) =>
+                {
+                    match startup
+                        .brief
+                        .lines()
+                        .skip(1)
+                        .map(|line| {
+                            use datom_codec::{Actualizing, Budget, Potential};
+                            let mut budget = Budget {
+                                remaining: 1 << 20,
+                                reader: protos::ReaderBudget { remaining: 1 << 20 },
+                                depth: 0,
+                                maximum_depth: 1_024,
+                            };
+                            Potential::<QueuedRequest>::from(line.to_owned()).actualize(&mut budget)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(requests) if !holds_psyche(&requests) => None,
+                        _ => Some("the living's psyche in the queued work you woke to"),
+                    }
+                }
+                _ => Some("the living's words typed to you"),
+            },
+            PromptOrigin::Queued => {
+                let handed = self.store.deliveries_to(flow_id).ok().and_then(|attempts| {
+                    attempts.into_iter().find(|attempt| {
+                        [attempt.queued.clone()].prompt_text().prompt_sha256()
+                            == prompt.prompt_sha256
+                    })
+                });
+                match handed {
+                    Some(attempt) if !holds_psyche(std::slice::from_ref(&attempt.queued)) => None,
+                    _ => Some("the living's psyche in the queued work handed to you"),
+                }
+            }
+        }
+    }
+
+    fn startup(&self, flow_id: &str) -> Option<Startup> {
+        let launch_request_id = self.store.launch_requests_bound_to(flow_id).ok()?.pop()?;
+        let attempt = self.store.launch_attempt(&launch_request_id).ok()??;
+        let (part_hashes, parts_submitted) = match attempt.prompt_delivery_result_option {
+            Some(PromptDeliveryResult::Ambiguous(intent)) => {
+                (intent.prompt_sha256_vector, intent.parts_submitted)
+            }
+            Some(PromptDeliveryResult::Observed(receipt)) => {
+                let parts = receipt.prompt_sha256_vector.len() as i64;
+                (receipt.prompt_sha256_vector, parts)
+            }
+            None => {
+                let intent = attempt.prompt_delivery_intent_option?;
+                (intent.prompt_sha256_vector, intent.parts_submitted)
+            }
+        };
+        Some(Startup {
+            part_hashes,
+            parts_submitted,
+            brief: attempt.launch_profile.instruction_prompt,
+        })
     }
 }
 

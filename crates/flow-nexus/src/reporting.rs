@@ -11,6 +11,13 @@
 //! digest is exactly the request a hand-over typed is that request's
 //! receipt, and settles it (`after_report`). An event naming another session
 //! is kept and acts on nothing.
+//!
+//! Every flow answers the living's words with a book. A Stop of the flow's
+//! own session whose newest prompt that owes a book (`unpresented`) has no
+//! `Published` after it is recorded as `StopHeld` and answered `TurnHeld`
+//! with what is owed: the hook blocks the Stop with that reason, and the
+//! turn goes on. A held Stop is no turn end: it drains nothing, sleeps
+//! nothing and sends no startup part.
 
 use crate::RunningNexus;
 use crate::generated::operation::{
@@ -31,6 +38,9 @@ use meta_signal_flow::{
 use signal_flow::{Address, Event, FlowId, Report_Data, Response};
 
 pub trait RecordsReports {
+    /// Records the event and answers it: `TurnHeld` with what is owed for
+    /// the flow's own Stop while it owes the living a book, else
+    /// `Reported`.
     fn report(&self, report: Report_Data) -> Response;
     /// What a recorded report sets going once it is answered: a `Stopped`
     /// flow's context size is written, and its resting seat is handed its
@@ -54,13 +64,27 @@ pub trait RecordsReports {
 impl RecordsReports for RunningNexus {
     fn report(&self, report: Report_Data) -> Response {
         let Report_Data { flow_id, event } = report;
+        let (event, owed) = match event {
+            Event::Stopped(stop) if self.correlated_stop(&flow_id, &stop) => {
+                match self.unpresented(&flow_id) {
+                    Some(owed) => (Event::StopHeld(stop), Some(owed)),
+                    None => (Event::Stopped(stop), None),
+                }
+            }
+            event => (event, None),
+        };
         match self.perform(Operation::Record(Record_Data::Harness(
             Record_Data_Harness_Data {
                 flow_id: flow_id.clone(),
                 event,
             },
         ))) {
-            Outcome::Recorded => Response::Reported,
+            Outcome::Recorded => match owed {
+                Some(owed) => Response::TurnHeld(format!(
+                    "Make the book for the living's words before ending: {owed}"
+                )),
+                None => Response::Reported,
+            },
             Outcome::Failed(Failed_Data::UnknownFlow) => Response::Refused(
                 signal_flow::Refusal::Unknown(signal_flow::Unknown_Data::FlowId(flow_id)),
             ),
@@ -96,7 +120,7 @@ impl RecordsReports for RunningNexus {
                     self.settle_submitted_prompt(flow_id, prompt);
                 }
             }
-            Event::Started | Event::ToolUsed(_) => {}
+            Event::Started | Event::ToolUsed(_) | Event::StopHeld(_) | Event::Published(_) => {}
         }
     }
 

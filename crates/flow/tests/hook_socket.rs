@@ -72,3 +72,77 @@ fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
     );
     assert!(!runtime.join("flow/flow.sock").exists());
 }
+
+/// A fixture Nexus that answers one Report with `reply`.
+fn answering(reply: signal_flow::Response) -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = tempfile::tempdir().expect("temporary root");
+    let socket = root.path().join("flow.sock");
+    let listener = UnixListener::bind(&socket).expect("fixture Nexus binds");
+    std::thread::spawn(move || {
+        let (mut peer, _) = listener.accept().expect("the hook's client connects");
+        let mut length = [0; 4];
+        peer.read_exact(&mut length).expect("query length");
+        let mut query = vec![0; u32::from_be_bytes(length) as usize];
+        peer.read_exact(&mut query).expect("query");
+        let reply = rkyv::to_bytes::<rkyv::rancor::Error>(&reply).expect("reply encodes");
+        peer.write_all(&(reply.len() as u32).to_be_bytes())
+            .and_then(|_| peer.write_all(&reply))
+            .expect("reply written");
+    });
+    (root, socket)
+}
+
+/// Runs the hook on one Stop against `socket`, returning its stdout.
+fn stop_against(socket: &std::path::Path) -> String {
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_flow-hook"))
+        .env_clear()
+        .env("FLOW_ID", "5a4d0b")
+        .env("FLOW_SOCKET", socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("flow-hook runs");
+    hook.stdin
+        .take()
+        .expect("hook stdin")
+        .write_all(br#"{"hook_event_name":"Stop","session_id":"s","transcript_path":"/t/s.jsonl","stop_hook_active":false}"#)
+        .expect("event written");
+    let output = hook.wait_with_output().expect("flow-hook ends");
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).expect("stdout is text")
+}
+
+/// Flow holds the Stop: the hook writes Claude Code's block decision with
+/// Flow's reason, and exits 0.
+#[test]
+fn a_stop_flow_holds_is_blocked_with_its_reason() {
+    let reason = "Make the book for the living's words before ending: the words the living typed";
+    let (_root, socket) = answering(signal_flow::Response::TurnHeld(reason.into()));
+    let decision: serde_json::Value =
+        serde_json::from_str(stop_against(&socket).trim()).expect("one JSON decision");
+    assert_eq!(
+        decision,
+        serde_json::json!({"decision": "block", "reason": reason})
+    );
+}
+
+/// Flow answers the Stop as reported: nothing on stdout, the turn ends.
+#[test]
+fn a_reported_stop_ends_the_turn() {
+    let (_root, socket) = answering(signal_flow::Response::Reported);
+    assert_eq!(stop_against(&socket), "");
+}
+
+/// No Nexus listens: the hook blocks the Stop as unreachable.
+#[test]
+fn a_stop_with_flow_unreachable_is_blocked() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let decision: serde_json::Value =
+        serde_json::from_str(stop_against(&root.path().join("absent.sock")).trim())
+            .expect("one JSON decision");
+    assert_eq!(
+        decision,
+        serde_json::json!({"decision": "block", "reason": "Flow unreachable: make the book, then end"})
+    );
+}

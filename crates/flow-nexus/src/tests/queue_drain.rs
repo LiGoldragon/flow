@@ -26,8 +26,8 @@ use meta_signal_flow::{
     ResolverIdentity, Response as MetaResponse, Undecided,
 };
 use signal_flow::{
-    Address, Aspect, Event, Layer, Metaflow, NativePrompt, NativeStop, QueuedRequest, Report_Data,
-    Request, Response, SentBy,
+    Address, Aspect, Event, Layer, Metaflow, NativePrompt, NativeStop, PromptOrigin, QueuedRequest,
+    Report_Data, Request, Response, SentBy,
 };
 
 fn from_core(body: &str) -> QueuedRequest {
@@ -76,11 +76,20 @@ fn foreign_stop() -> Event {
     })
 }
 
+/// A prompt as the hook reports it: its digest, and the origin its text
+/// shows.
 fn submitted(session: &str, prompt_id: &str, text: &str) -> Event {
     Event::PromptSubmitted(NativePrompt {
         native_session_id_option: Some(session.into()),
         prompt_id_option: Some(prompt_id.into()),
         prompt_sha256: text.prompt_sha256(),
+        prompt_origin: if text.starts_with(flow_native::QUEUED_WORK_OPENING) {
+            PromptOrigin::Queued
+        } else if text.starts_with("<task-notification>") {
+            PromptOrigin::Notification
+        } else {
+            PromptOrigin::Typed
+        },
     })
 }
 

@@ -5,6 +5,10 @@
 
 use sha2::{Digest, Sha256};
 
+/// The opening line of the text Flow types when it hands a flow the work
+/// queued for its metaflow: a prompt that begins with it is that hand-over.
+pub const QUEUED_WORK_OPENING: &str = "Work queued for this metaflow while no flow of it was running, oldest first, each with who sent it:";
+
 /// Claude Code's record of text that reached its composer as one paste.
 ///
 /// Claude Code 2.1.294 writes it in one of two exact shapes (witnessed in

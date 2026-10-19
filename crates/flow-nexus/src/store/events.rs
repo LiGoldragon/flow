@@ -13,7 +13,11 @@
 //!
 //! A Stop recorded before Flow 0.35.19 carried no native identity: it is
 //! upgraded to `Stopped.{ None None }`, which is kept as it was seen and
-//! never taken for the flow's own turn end.
+//! never taken for the flow's own turn end. The table's current shape
+//! (v3, Flow 0.35.22) is signal-flow 23.0.0's `Event`, whose submitted
+//! prompt carries its origin; a v1 store holds no submitted prompt, so its
+//! upgrade invents none. The v2 shape of Flow 0.35.19 to 0.35.21 was never
+//! deployed and is not read.
 
 use super::{FlowStore, ReadsFlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -27,7 +31,7 @@ use std::sync::Mutex;
 
 pub(super) const FLOW_EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_flow_events");
 pub(super) const FLOW_EVENT_FAMILY: &str = "flow-nexus-flow-events";
-pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v2";
+pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v3";
 
 /// One flow's harness events, oldest first.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -44,7 +48,7 @@ impl EngineRecord for FlowEvents {
 
 impl MemoryDefinition for FlowEvents {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
+        MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -62,7 +66,7 @@ pub enum EventBeforeIdentity {
 }
 
 /// One flow's events as Flow kept them before 0.35.19. It is read only by
-/// the v1-to-v2 upgrade.
+/// the v1-to-v3 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FlowEventsV1 {
     pub flow_id: String,

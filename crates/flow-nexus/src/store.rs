@@ -2056,6 +2056,8 @@ pub enum StoreError {
     },
     #[error("the leave-out family could not be upgraded: {0}")]
     LeaveOutUpgradeFailed(String),
+    #[error("store {path} is held by another open; its lock cannot be acquired")]
+    StoreHeld { path: String },
     #[error("the store upgrade could not be staged: {0}")]
     StagedUpgrade(String),
     #[error("store {path} is not a recognized Flow Memory v2 store: {reason}")]
@@ -6037,6 +6039,9 @@ pub(crate) trait ReadsFlowMemory {
             Err(redb::DatabaseError::RepairAborted) => {
                 FlowStore::recognize_repaired_copy(path, &reject)
             }
+            Err(redb::DatabaseError::DatabaseAlreadyOpen) => Err(StoreError::StoreHeld {
+                path: path.display().to_string(),
+            }),
             Err(error) => Err(reject(error.to_string())),
         }
     }
@@ -9985,6 +9990,50 @@ mod tests {
             Some((*native).to_owned())
         );
         drop(store);
+        assert_eq!(fixture.staged_copies(), Vec::<String>::new());
+    }
+
+    /// A crash-left copy goes at the next open, one that upgrades nothing
+    /// included.
+    #[test]
+    fn a_crash_left_copy_is_removed_by_an_open_that_upgrades_nothing() {
+        use super::ConfiguresOnlyStore;
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let leave = |fixture: &StoreFixture| {
+            std::fs::write(fixture.directory.path().join(".flow.sema.upgrade-1-2"), b"x")
+                .expect("copy planted");
+            assert_eq!(fixture.staged_copies().len(), 1);
+        };
+        leave(&fixture);
+        drop(super::ConfigurationOnlyStore::open(&fixture.path()).expect("configuration open"));
+        assert_eq!(fixture.staged_copies(), Vec::<String>::new());
+        leave(&fixture);
+        drop(fixture.configured_store());
+        assert_eq!(fixture.staged_copies(), Vec::<String>::new());
+    }
+
+    /// A copy a live staging open holds is not removed, and the open that
+    /// meets it is refused as the store held.
+    #[test]
+    fn a_copy_held_by_a_live_staging_open_stays_and_contention_is_a_lock_refusal() {
+        use super::staged_upgrade::{StagedUpgrade, StagesUpgrade};
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        fixture.as_0_35_11();
+        let staged = StagedUpgrade::begin(&fixture.path(), super::UpgradeScope::Running)
+            .expect("staging starts")
+            .expect("a 0.35.11 store has families to upgrade");
+        assert_eq!(fixture.staged_copies().len(), 1);
+        let refused = StagedUpgrade::begin(&fixture.path(), super::UpgradeScope::Running);
+        assert!(
+            matches!(refused, Err(super::StoreError::StoreHeld { .. })),
+            "contention is a lock refusal"
+        );
+        assert_eq!(fixture.staged_copies().len(), 1, "the held copy stays");
+        drop(staged);
         assert_eq!(fixture.staged_copies(), Vec::<String>::new());
     }
 

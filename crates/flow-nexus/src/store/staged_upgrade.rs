@@ -81,6 +81,15 @@ pub(crate) trait StagesUpgrade: Sized {
 
     fn copy(&self) -> &Path;
 
+    /// Removes the copies a crash left beside `store`. The caller holds the
+    /// store's whole-file lock, so no live staging open owns one.
+    fn sweep(
+        store: &Path,
+        failed: &dyn Fn(&str, &dyn std::fmt::Display) -> StoreError,
+    ) -> Result<(), StoreError>;
+
+    fn copy_prefix(store: &Path) -> Result<String, StoreError>;
+
     /// Replaces the store with the upgraded copy in one rename.
     fn land(self) -> Result<(), StoreError>;
 }
@@ -107,6 +116,21 @@ impl StagesUpgrade for StagedUpgrade {
         if !store.exists() {
             return Ok(None);
         }
+        let held = || StoreError::StoreHeld {
+            path: store.display().to_string(),
+        };
+        // Every open clears the copies a crash left, whether or not it
+        // upgrades; the lock is released again before the store is read,
+        // since a read opens the store under the same whole-file lock.
+        {
+            let exclusion = File::open(store).map_err(|error| failed("cannot open", &error))?;
+            match exclusion.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => return Err(held()),
+                Err(error) => return Err(failed("cannot lock", &error)),
+            }
+            Self::sweep(store, &failed)?;
+        }
         match redb::ReadOnlyDatabase::open(store) {
             Ok(reader) => {
                 if !FlowStore::upgrade_pending(&reader, scope)? {
@@ -116,28 +140,18 @@ impl StagesUpgrade for StagedUpgrade {
             // A store left uncleanly cannot be read without repair; its copy
             // is repaired by the open that upgrades it.
             Err(redb::DatabaseError::RepairAborted) => {}
+            Err(redb::DatabaseError::DatabaseAlreadyOpen) => return Err(held()),
             Err(error) => return Err(failed("cannot read", &error)),
         }
         let exclusion = File::open(store).map_err(|error| failed("cannot open", &error))?;
-        exclusion
-            .try_lock()
-            .map_err(|error| failed("cannot lock", &error))?;
-        let name = store
-            .file_name()
-            .ok_or(StoreError::InvalidStorePath)?
-            .to_string_lossy()
-            .into_owned();
-        let directory = store.parent().ok_or(StoreError::InvalidStorePath)?;
-        // A copy a crash left behind is no store; the lock held here means
-        // no other open is staging one.
-        let prefix = format!(".{name}.upgrade-");
-        for entry in std::fs::read_dir(directory).map_err(|error| failed("cannot list", &error))? {
-            let entry = entry.map_err(|error| failed("cannot list", &error))?;
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                std::fs::remove_file(entry.path())
-                    .map_err(|error| failed("cannot remove a stale copy of", &error))?;
-            }
+        match exclusion.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(held()),
+            Err(error) => return Err(failed("cannot lock", &error)),
         }
+        Self::sweep(store, &failed)?;
+        let prefix = Self::copy_prefix(store)?;
+        let directory = store.parent().ok_or(StoreError::InvalidStorePath)?;
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
@@ -155,6 +169,27 @@ impl StagesUpgrade for StagedUpgrade {
 
     fn copy(&self) -> &Path {
         &self.copy
+    }
+
+    fn sweep(
+        store: &Path,
+        failed: &dyn Fn(&str, &dyn std::fmt::Display) -> StoreError,
+    ) -> Result<(), StoreError> {
+        let prefix = Self::copy_prefix(store)?;
+        let directory = store.parent().ok_or(StoreError::InvalidStorePath)?;
+        for entry in std::fs::read_dir(directory).map_err(|error| failed("cannot list", &error))? {
+            let entry = entry.map_err(|error| failed("cannot list", &error))?;
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                std::fs::remove_file(entry.path())
+                    .map_err(|error| failed("cannot remove a stale copy of", &error))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_prefix(store: &Path) -> Result<String, StoreError> {
+        let name = store.file_name().ok_or(StoreError::InvalidStorePath)?;
+        Ok(format!(".{}.upgrade-", name.to_string_lossy()))
     }
 
     fn land(mut self) -> Result<(), StoreError> {

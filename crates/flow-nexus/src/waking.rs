@@ -776,6 +776,14 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 return Reconciled::Settled(attempt.queued.clone(), SeatAfter::InItsTurn);
             }
             QueueDeliveryPhase::Absent(_) => return Reconciled::Absent,
+            QueueDeliveryPhase::Resolved(record) => {
+                return match record.queue_resolution_outcome {
+                    meta_signal_flow::QueueResolutionOutcome::Delivered => {
+                        Reconciled::Settled(attempt.queued.clone(), SeatAfter::InItsTurn)
+                    }
+                    meta_signal_flow::QueueResolutionOutcome::Absent => Reconciled::Absent,
+                };
+            }
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {}
         }
         let text = [attempt.queued.clone()].prompt_text();

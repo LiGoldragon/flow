@@ -10,7 +10,10 @@
 //! that proof recorded, and only then may the request be handed over again.
 
 use super::*;
-use meta_signal_flow::{AbsenceProof, Undecided};
+use meta_signal_flow::{
+    AbsenceProof, QueueResolutionOutcome, QueueResolutionRecord, ResolveQueueDeliveryRejected_Data,
+    Undecided,
+};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use signal_flow::{Address, HarnessKind, QueuedRequest};
 
@@ -101,16 +104,19 @@ pub enum QueueDeliveryPhase {
     Settled(NativeDeliveryReceipt),
     /// Native history proved the request never reached the seat.
     Absent(AbsenceRecord),
+    /// The owner resolved an Uncertain attempt: who, why and when are
+    /// recorded with the outcome.
+    Resolved(QueueResolutionRecord),
 }
 
 pub trait EndsQueueDeliveryPhase {
-    /// Settled and Absent attempts hold no request back.
+    /// Settled, Absent and Resolved attempts hold no request back.
     fn is_finished(&self) -> bool;
 }
 
 impl EndsQueueDeliveryPhase for QueueDeliveryPhase {
     fn is_finished(&self) -> bool {
-        matches!(self, Self::Settled(_) | Self::Absent(_))
+        matches!(self, Self::Settled(_) | Self::Absent(_) | Self::Resolved(_))
     }
 }
 
@@ -179,7 +185,7 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
             TableDescriptor::new(
                 DELIVERY_ATTEMPT_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-attempt"),
-                SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v3"),
+                SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v4"),
             ),
         )
     }
@@ -243,6 +249,18 @@ pub trait AccountsQueueDelivery {
         attempt_id: &str,
         absence: AbsenceRecord,
     ) -> Result<bool, StoreError>;
+
+    /// The owner's resolution of one Uncertain attempt. Delivered removes
+    /// the still-oldest request from the queue, Absent leaves it queued for
+    /// a new attempt; either way the attempt ends Resolved with `record`,
+    /// in the same commit. Refused, with nothing written, when the attempt
+    /// is unknown, is not Uncertain, is no longer the address's oldest
+    /// request, or the reason is empty.
+    fn resolve_uncertain_delivery(
+        &self,
+        attempt_id: &str,
+        record: QueueResolutionRecord,
+    ) -> Result<Result<QueueDeliveryAttempt, ResolveQueueDeliveryRejected_Data>, StoreError>;
 
     /// The address's one attempt that still holds its oldest request back,
     /// if any.
@@ -423,7 +441,9 @@ impl AccountsQueueDelivery for FlowStore {
             }
             QueueDeliveryPhase::ReceiptRecorded(recorded)
             | QueueDeliveryPhase::Settled(recorded) => Ok(recorded == &receipt),
-            QueueDeliveryPhase::Absent(_) => Err(StoreError::StateInvariant),
+            QueueDeliveryPhase::Absent(_) | QueueDeliveryPhase::Resolved(_) => {
+                Err(StoreError::StateInvariant)
+            }
         }
     }
 
@@ -492,7 +512,8 @@ impl AccountsQueueDelivery for FlowStore {
             QueueDeliveryPhase::Uncertain(_) => Ok(true),
             QueueDeliveryPhase::ReceiptRecorded(_)
             | QueueDeliveryPhase::Settled(_)
-            | QueueDeliveryPhase::Absent(_) => Ok(false),
+            | QueueDeliveryPhase::Absent(_)
+            | QueueDeliveryPhase::Resolved(_) => Ok(false),
         }
     }
 
@@ -534,7 +555,9 @@ impl AccountsQueueDelivery for FlowStore {
         match &attempt.phase {
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {}
             QueueDeliveryPhase::Absent(recorded) => return Ok(recorded == &absence),
-            QueueDeliveryPhase::ReceiptRecorded(_) | QueueDeliveryPhase::Settled(_) => {
+            QueueDeliveryPhase::ReceiptRecorded(_)
+            | QueueDeliveryPhase::Settled(_)
+            | QueueDeliveryPhase::Resolved(_) => {
                 return Ok(false);
             }
         }
@@ -562,6 +585,66 @@ impl AccountsQueueDelivery for FlowStore {
                 .mutate(self.queue_delivery.attempts, attempt),
         )?;
         Ok(true)
+    }
+
+    fn resolve_uncertain_delivery(
+        &self,
+        attempt_id: &str,
+        record: QueueResolutionRecord,
+    ) -> Result<Result<QueueDeliveryAttempt, ResolveQueueDeliveryRejected_Data>, StoreError> {
+        use ResolveQueueDeliveryRejected_Data as Rejected;
+        let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
+            return Ok(Err(Rejected::UnknownAttempt));
+        };
+        if !matches!(attempt.phase, QueueDeliveryPhase::Uncertain(_)) {
+            return Ok(Err(Rejected::NotUncertain));
+        }
+        if record.queue_resolution_reason.trim().is_empty() {
+            return Ok(Err(Rejected::EmptyReason));
+        }
+        let Some(mut metaflow) = self.stored_metaflow(&attempt.address)? else {
+            return Ok(Err(Rejected::NotOldest));
+        };
+        if metaflow.metaflow.queue.first() != Some(&attempt.queued) {
+            return Ok(Err(Rejected::NotOldest));
+        }
+        let requests = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.queue_delivery.requests,
+                RecordKey::new(attempt.request_id.clone()),
+            ))?
+            .records()
+            .to_vec();
+        let [request] = requests.as_slice() else {
+            return Err(StoreError::StateInvariant);
+        };
+        if request.address != attempt.address
+            || request.queued != attempt.queued
+            || request.state != RequestState::Queued
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut request = request.clone();
+        let commit = self.engine.begin_atomic_commit();
+        let commit = match record.queue_resolution_outcome {
+            QueueResolutionOutcome::Delivered => {
+                request.state = RequestState::Settled;
+                metaflow.metaflow.queue.remove(0);
+                commit.mutate(self.metaflows, metaflow)
+            }
+            QueueResolutionOutcome::Absent => {
+                request.state = RequestState::Unsent;
+                commit
+            }
+        };
+        attempt.phase = QueueDeliveryPhase::Resolved(record);
+        self.engine.commit_atomic(
+            commit
+                .mutate(self.queue_delivery.requests, request)
+                .mutate(self.queue_delivery.attempts, attempt.clone()),
+        )?;
+        Ok(Ok(attempt))
     }
 
     fn outstanding_delivery(
@@ -605,7 +688,9 @@ impl AccountsQueueDelivery for FlowStore {
                 QueueDeliveryPhase::Uncertain(_) | QueueDeliveryPhase::ReceiptRecorded(_) => {
                     outstanding.push(attempt);
                 }
-                QueueDeliveryPhase::Settled(_) | QueueDeliveryPhase::Absent(_) => {}
+                QueueDeliveryPhase::Settled(_)
+                | QueueDeliveryPhase::Absent(_)
+                | QueueDeliveryPhase::Resolved(_) => {}
             }
         }
         Ok(outstanding)
@@ -1034,6 +1119,280 @@ mod tests {
         assert_eq!(
             store.metaflow(&address()).unwrap().unwrap().queue,
             vec![queued("second"), queued("first")]
+        );
+    }
+
+    fn resolution(outcome: QueueResolutionOutcome, reason: &str) -> QueueResolutionRecord {
+        QueueResolutionRecord {
+            queue_resolution_outcome: outcome,
+            resolver_identity: meta_signal_flow::ResolverIdentity {
+                process_identity: meta_signal_flow::ProcessIdentity {
+                    process_id: 4242,
+                    process_user_id: 1001,
+                    process_start_token: "777".into(),
+                },
+                flow_id_option: Some("aa034f".into()),
+            },
+            queue_resolution_reason: reason.into(),
+            unix_seconds: 1_790_000_123,
+        }
+    }
+
+    fn prepare_claude(store: &FlowStore) -> QueueDeliveryAttempt {
+        let PrepareQueueDelivery::Prepared(attempt) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Claude,
+                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                    device: 1,
+                    inode: 2,
+                    offset: 3,
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("oldest request prepared")
+        };
+        assert!(store.mark_delivery_uncertain(&attempt.attempt_id).unwrap());
+        assert!(
+            store
+                .mark_delivery_undecided(&attempt.attempt_id, Undecided::AbsenceUnprovable)
+                .unwrap()
+        );
+        attempt
+    }
+
+    #[test]
+    fn resolved_delivered_leaves_the_queue_with_its_record_and_survives_restart() {
+        let (fixture, store) = Fixture::new();
+        let attempt = prepare_claude(&store);
+        let record = resolution(QueueResolutionOutcome::Delivered, "seen in the pane");
+        let resolved = store
+            .resolve_uncertain_delivery(&attempt.attempt_id, record.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.phase, QueueDeliveryPhase::Resolved(record.clone()));
+        drop(store);
+
+        let store = fixture.reopen();
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("second")]
+        );
+        assert_eq!(
+            store
+                .queue_delivery_attempt(&attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            QueueDeliveryPhase::Resolved(record.clone())
+        );
+        assert!(store.outstanding_delivery(&address()).unwrap().is_none());
+        assert_eq!(
+            store
+                .unsettled_deliveries(&address())
+                .unwrap()
+                .into_iter()
+                .map(|attempt| attempt.phase)
+                .collect::<Vec<_>>(),
+            vec![QueueDeliveryPhase::Resolved(record)]
+        );
+        // The next request gets its own attempt.
+        let PrepareQueueDelivery::Prepared(next) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Claude,
+                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                    device: 1,
+                    inode: 2,
+                    offset: 4,
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("the next request is prepared")
+        };
+        assert_eq!(next.queued, queued("second"));
+    }
+
+    #[test]
+    fn resolved_absent_keeps_the_request_and_authorises_exactly_one_new_attempt() {
+        let (fixture, store) = Fixture::new();
+        let attempt = prepare_claude(&store);
+        let record = resolution(QueueResolutionOutcome::Absent, "composer was empty");
+        store
+            .resolve_uncertain_delivery(&attempt.attempt_id, record.clone())
+            .unwrap()
+            .unwrap();
+        drop(store);
+
+        let store = fixture.reopen();
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("first"), queued("second")]
+        );
+        assert!(store.outstanding_delivery(&address()).unwrap().is_none());
+        let anchor = NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+            device: 1,
+            inode: 2,
+            offset: 9,
+        });
+        let PrepareQueueDelivery::Prepared(next) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Claude,
+                anchor.clone(),
+            )
+            .unwrap()
+        else {
+            panic!("a resolution to Absent authorises a new attempt")
+        };
+        assert_ne!(next.attempt_id, attempt.attempt_id);
+        assert_eq!(next.queued, queued("first"));
+        assert!(matches!(
+            store
+                .prepare_oldest_delivery(
+                    &address(),
+                    "flow-delivery",
+                    "thread-7",
+                    HarnessKind::Claude,
+                    anchor,
+                )
+                .unwrap(),
+            PrepareQueueDelivery::Outstanding(_)
+        ));
+        assert_eq!(
+            store
+                .queue_delivery_attempt(&attempt.attempt_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            QueueDeliveryPhase::Resolved(record)
+        );
+    }
+
+    #[test]
+    fn a_resolution_is_refused_for_what_is_not_the_oldest_uncertain_attempt() {
+        use ResolveQueueDeliveryRejected_Data as Rejected;
+        let (_fixture, store) = Fixture::new();
+        let delivered = resolution(QueueResolutionOutcome::Delivered, "seen");
+        assert_eq!(
+            store
+                .resolve_uncertain_delivery("queue-attempt-unknown", delivered.clone())
+                .unwrap(),
+            Err(Rejected::UnknownAttempt)
+        );
+
+        // Prepared is not Uncertain.
+        let PrepareQueueDelivery::Prepared(prepared) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Claude,
+                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                    device: 1,
+                    inode: 2,
+                    offset: 3,
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("oldest request prepared")
+        };
+        assert_eq!(
+            store
+                .resolve_uncertain_delivery(&prepared.attempt_id, delivered.clone())
+                .unwrap(),
+            Err(Rejected::NotUncertain)
+        );
+
+        // ReceiptRecorded is not Uncertain.
+        assert!(
+            store
+                .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .resolve_uncertain_delivery(&prepared.attempt_id, delivered.clone())
+                .unwrap(),
+            Err(Rejected::NotUncertain)
+        );
+        assert!(
+            store
+                .settle_recorded_delivery(&prepared.attempt_id)
+                .unwrap()
+        );
+        // Settled is not Uncertain.
+        assert_eq!(
+            store
+                .resolve_uncertain_delivery(&prepared.attempt_id, delivered.clone())
+                .unwrap(),
+            Err(Rejected::NotUncertain)
+        );
+
+        // An empty reason is refused and nothing is written.
+        let second = prepare_claude(&store);
+        assert_eq!(
+            store
+                .resolve_uncertain_delivery(
+                    &second.attempt_id,
+                    resolution(QueueResolutionOutcome::Delivered, "  ")
+                )
+                .unwrap(),
+            Err(Rejected::EmptyReason)
+        );
+        assert_eq!(
+            store
+                .queue_delivery_attempt(&second.attempt_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            QueueDeliveryPhase::Uncertain(Some(Undecided::AbsenceUnprovable))
+        );
+
+        // An attempt that is no longer the oldest is refused, the queue
+        // untouched.
+        store.seed_metaflow(Metaflow {
+            address: address(),
+            state: State::Awake("flow-delivery".into()),
+            past: vec![],
+            queue: vec![queued("other"), queued("second")],
+        });
+        assert_eq!(
+            store
+                .resolve_uncertain_delivery(&second.attempt_id, delivered.clone())
+                .unwrap(),
+            Err(Rejected::NotOldest)
+        );
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("other"), queued("second")]
+        );
+
+        // Resolved is not Uncertain: a resolution is made once.
+        store.seed_metaflow(Metaflow {
+            address: address(),
+            state: State::Awake("flow-delivery".into()),
+            past: vec![],
+            queue: vec![queued("second")],
+        });
+        store
+            .resolve_uncertain_delivery(&second.attempt_id, delivered.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .resolve_uncertain_delivery(&second.attempt_id, delivered)
+                .unwrap(),
+            Err(Rejected::NotUncertain)
         );
     }
 }

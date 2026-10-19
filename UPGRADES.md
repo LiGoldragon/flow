@@ -1,3 +1,22 @@
+# Flow 0.35.18
+
+meta-signal-flow 27.0.0 (980d689): every meta-wire peer repins. The meta wire
+adds `ResolveQueueDelivery.{ QueueAttemptId [ Delivered Absent ]
+QueueResolutionReason }`, answered `QueueDeliveryResolved.{ Address
+QueueDeliveryResolution }` or `ResolveQueueDeliveryRejected.[ UnknownAttempt
+NotUncertain NotOldest EmptyReason StoreRefused ]`, and
+`ReadQueueDeliveries` lists a resolved attempt as `Resolved.{ outcome
+resolver reason time }`. The queue-delivery attempt family moves to v4.
+
+- **The owner resolves a stuck hand-over.** A Claude hand-over whose absence
+  cannot be proven stays Uncertain and blocks its address's queue. The owner
+  names it by its attempt id: `Delivered` settles it and the request leaves
+  the queue; `Absent` authorises a new attempt, which the next turn end hands
+  over. Flow records the outcome, the requesting meta peer (its process and,
+  when it runs in one, its flow), the reason and the time in the commit that
+  settles or authorises. Only an Uncertain attempt that is still the
+  address's oldest request resolves; a resolution is never automatic.
+
 # Flow 0.35.17
 
 signal-flow 21.0.0 (5af38281) and meta-signal-flow 26.0.0 (0e5a9829): every

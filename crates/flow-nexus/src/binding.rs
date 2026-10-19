@@ -51,6 +51,26 @@ impl ChecksProcessIdentity for ProcessIdentity {
     }
 }
 
+/// A process named by its identity, read from `/proc`.
+pub trait ReadsProcessIdentity: Sized {
+    /// The identity of the running process, None when it cannot be read.
+    fn of(process_id: u32) -> Option<Self>;
+}
+
+impl ReadsProcessIdentity for ProcessIdentity {
+    fn of(process_id: u32) -> Option<Self> {
+        let process_root = PathBuf::from(format!("/proc/{process_id}"));
+        let metadata = fs::metadata(&process_root).ok()?;
+        let stat = fs::read_to_string(process_root.join("stat")).ok()?;
+        let (_, fields) = stat.rsplit_once(") ")?;
+        Some(Self {
+            process_id: i64::from(process_id),
+            process_user_id: i64::from(metadata.uid()),
+            process_start_token: fields.split_whitespace().nth(19)?.into(),
+        })
+    }
+}
+
 /// The Herdr container a MetaBindExisting names.
 pub trait ChecksFlowContainer {
     fn is_well_formed(&self) -> bool;

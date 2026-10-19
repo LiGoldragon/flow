@@ -63,7 +63,7 @@ use generated::operation::{Operation, Outcome, Record_Data};
 use generated::starter::DerivesOrigin;
 use launching::{LaunchesFlows, ObservesLaunch};
 use observe_agent::ObservesAgent;
-use peer::{AdmitsMetaPeer, ResolvesPeer};
+use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
 use send_tool::ServesLaunchCalls;
@@ -125,7 +125,17 @@ pub trait Dispatches {
     }
     /// A query from `origin`, the calling process as the Nexus derived it.
     fn dispatch_from(&self, query: Query, origin: Origin) -> Response;
-    fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response;
+    /// A meta query with no peer behind it: one that records who asked is
+    /// refused as PeerUnknown.
+    fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
+        self.dispatch_meta_from(query, None)
+    }
+    /// A meta query from `resolver`, the meta peer as the Nexus read it.
+    fn dispatch_meta_from(
+        &self,
+        query: meta_signal_flow::Query,
+        resolver: Option<meta_signal_flow::ResolverIdentity>,
+    ) -> meta_signal_flow::Response;
 }
 
 impl Dispatches for RunningNexus {
@@ -239,7 +249,11 @@ impl Dispatches for RunningNexus {
         }
     }
 
-    fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
+    fn dispatch_meta_from(
+        &self,
+        query: meta_signal_flow::Query,
+        resolver: Option<meta_signal_flow::ResolverIdentity>,
+    ) -> meta_signal_flow::Response {
         match query {
             meta_signal_flow::Query::Configuration => match self.store.configuration_snapshot() {
                 Ok(Some(snapshot)) => meta_signal_flow::Response::Configuration(snapshot),
@@ -454,6 +468,12 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::ReadQueueDeliveries(address) => {
                 self.read_queue_deliveries(address)
             }
+            meta_signal_flow::Query::ResolveQueueDelivery(resolution) => match resolver {
+                Some(resolver) => self.resolve_queue_delivery(resolution, resolver),
+                None => meta_signal_flow::Response::MetaRefused(
+                    meta_signal_flow::MetaRefusal::PeerUnknown,
+                ),
+            },
             meta_signal_flow::Query::Refresh(address) => self.refresh(address),
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
                 if !self.herdr.validate_registration(&flow_node) {
@@ -641,9 +661,13 @@ impl ServesConnection for Connection {
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
         let query = self.peer.read_meta_query()?;
         // The peer is read from the kernel; nothing in the query names it.
-        let response = match nexus.meta_refusal(self.peer.peer_process()) {
+        let peer = self.peer.peer_process();
+        let response = match nexus.meta_refusal(peer) {
             Some(refusal) => meta_signal_flow::Response::MetaRefused(refusal),
-            None => nexus.dispatch_meta_serially(query),
+            None => {
+                let resolver = nexus.meta_resolver(peer);
+                nexus.dispatch_meta_serially(query, resolver)
+            }
         };
         self.peer.write_meta_response(&response)?;
         drop(self);
@@ -978,7 +1002,11 @@ trait DispatchesSerially {
     /// Store transitions are read-modify-write; one dispatch runs at a time
     /// across both sockets while frames are read concurrently.
     fn dispatch_serially(&self, query: Query, origin: Origin) -> Response;
-    fn dispatch_meta_serially(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response;
+    fn dispatch_meta_serially(
+        &self,
+        query: meta_signal_flow::Query,
+        resolver: Option<meta_signal_flow::ResolverIdentity>,
+    ) -> meta_signal_flow::Response;
 }
 
 impl DispatchesSerially for RunningNexus {
@@ -1009,12 +1037,16 @@ impl DispatchesSerially for RunningNexus {
         }
     }
 
-    fn dispatch_meta_serially(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
+    fn dispatch_meta_serially(
+        &self,
+        query: meta_signal_flow::Query,
+        resolver: Option<meta_signal_flow::ResolverIdentity>,
+    ) -> meta_signal_flow::Response {
         let _turn = self
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.dispatch_meta(query)
+        self.dispatch_meta_from(query, resolver)
     }
 }
 

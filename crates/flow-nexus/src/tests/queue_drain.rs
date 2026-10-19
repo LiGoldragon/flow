@@ -20,7 +20,11 @@ use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::waking::{ReconcilesQueueDelivery, SettlesStopsAtConfirmation};
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
-use meta_signal_flow::{QueueDeliveryStanding, Undecided};
+use meta_signal_flow::{
+    ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueDeliveryResolved_Data,
+    QueueDeliveryStanding, QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data,
+    ResolverIdentity, Response as MetaResponse, Undecided,
+};
 use signal_flow::{
     Address, Aspect, Event, Layer, Metaflow, NativePrompt, NativeStop, QueuedRequest, Report_Data,
     Request, Response, SentBy,
@@ -464,4 +468,200 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     fixture.nexus.settle_stops_at_confirmation();
     assert_eq!(typed_count(&fixture, "first-request-body"), 0);
     assert_eq!(queue(&fixture), vec![first]);
+}
+
+fn resolver() -> ResolverIdentity {
+    ResolverIdentity {
+        process_identity: ProcessIdentity {
+            process_id: 4242,
+            process_user_id: 1001,
+            process_start_token: "777".into(),
+        },
+        flow_id_option: Some("aa034f".into()),
+    }
+}
+
+/// The attempt id of the seat's one unsettled hand-over.
+fn attempt_id(fixture: &NexusFixture) -> String {
+    match fixture
+        .nexus
+        .dispatch_meta(MetaQuery::ReadQueueDeliveries(address(Layer::Secondary)))
+    {
+        MetaResponse::QueueDeliveriesRead(read) => {
+            let [delivery] = read.queue_delivery_vector.as_slice() else {
+                panic!("one unsettled hand-over: {read:?}")
+            };
+            delivery.queue_attempt_id.clone()
+        }
+        other => panic!("not read: {other:?}"),
+    }
+}
+
+fn resolve(
+    fixture: &NexusFixture,
+    attempt: &str,
+    outcome: QueueResolutionOutcome,
+    reason: &str,
+) -> MetaResponse {
+    fixture.nexus.dispatch_meta_from(
+        MetaQuery::ResolveQueueDelivery(QueueDeliveryResolution {
+            queue_attempt_id: attempt.into(),
+            queue_resolution_outcome: outcome,
+            queue_resolution_reason: reason.into(),
+        }),
+        Some(resolver()),
+    )
+}
+
+/// A Claude hand-over typed and never seen again, its Stop reconciled to
+/// Uncertain(AbsenceUnprovable). Returns the attempt id.
+fn stuck_hand_over(fixture: &NexusFixture, queue: Vec<QueuedRequest>) -> String {
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    seat(fixture, queue);
+    append_main_rows(fixture, &[end_turn("before")]);
+    report(fixture, claude_stop(fixture));
+    report(fixture, claude_stop(fixture));
+    assert_eq!(
+        standings(fixture),
+        vec![QueueDeliveryStanding::Uncertain(Some(
+            Undecided::AbsenceUnprovable
+        ))]
+    );
+    attempt_id(fixture)
+}
+
+/// The owner resolves a stuck hand-over as Delivered: the request leaves the
+/// queue, the next is handed over at the next turn end, and the record names
+/// the peer, the reason and the time.
+#[test]
+fn an_uncertain_hand_over_resolved_delivered_leaves_the_queue_with_its_record() {
+    let fixture = NexusFixture::new();
+    let first = from_core("first-request-body");
+    let second = from_core("second-request-body");
+    let attempt = stuck_hand_over(&fixture, vec![first.clone(), second.clone()]);
+
+    assert_eq!(
+        resolve(
+            &fixture,
+            &attempt,
+            QueueResolutionOutcome::Delivered,
+            "the pane shows it taken"
+        ),
+        MetaResponse::QueueDeliveryResolved(QueueDeliveryResolved_Data {
+            address: address(Layer::Secondary),
+            queue_delivery_resolution: QueueDeliveryResolution {
+                queue_attempt_id: attempt.clone(),
+                queue_resolution_outcome: QueueResolutionOutcome::Delivered,
+                queue_resolution_reason: "the pane shows it taken".into(),
+            },
+        })
+    );
+    assert_eq!(queue(&fixture), vec![second]);
+    let [QueueDeliveryStanding::Resolved(record)] = standings(&fixture).as_slice() else {
+        panic!("the resolution is read: {:?}", standings(&fixture))
+    };
+    assert_eq!(
+        record.queue_resolution_outcome,
+        QueueResolutionOutcome::Delivered
+    );
+    assert_eq!(record.resolver_identity, resolver());
+    assert_eq!(record.queue_resolution_reason, "the pane shows it taken");
+    assert!(record.unix_seconds > 1_700_000_000);
+
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(
+        typed_count(&fixture, "first-request-body"),
+        1,
+        "never again"
+    );
+    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
+}
+
+/// Resolved Absent keeps the request queued and the next turn end hands it
+/// over in exactly one new attempt, which is itself reconciled and not
+/// typed twice.
+#[test]
+fn an_uncertain_hand_over_resolved_absent_is_followed_by_exactly_one_new_attempt() {
+    let fixture = NexusFixture::new();
+    let first = from_core("first-request-body");
+    let second = from_core("second-request-body");
+    let attempt = stuck_hand_over(&fixture, vec![first.clone(), second.clone()]);
+    assert_eq!(typed_count(&fixture, "first-request-body"), 1);
+
+    assert!(matches!(
+        resolve(
+            &fixture,
+            &attempt,
+            QueueResolutionOutcome::Absent,
+            "composer was empty"
+        ),
+        MetaResponse::QueueDeliveryResolved(_)
+    ));
+    assert_eq!(queue(&fixture), vec![first.clone(), second]);
+    assert_eq!(
+        typed_count(&fixture, "first-request-body"),
+        1,
+        "never automatic"
+    );
+
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(typed_count(&fixture, "first-request-body"), 2);
+    assert_eq!(typed_count(&fixture, "second-request-body"), 0);
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(
+        typed_count(&fixture, "first-request-body"),
+        2,
+        "exactly one"
+    );
+    let standings = standings(&fixture);
+    let [
+        QueueDeliveryStanding::Resolved(record),
+        QueueDeliveryStanding::Uncertain(_),
+    ] = standings.as_slice()
+    else {
+        panic!("one resolved attempt and one new attempt: {standings:?}")
+    };
+    assert_eq!(
+        record.queue_resolution_outcome,
+        QueueResolutionOutcome::Absent
+    );
+}
+
+#[test]
+fn a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attempt() {
+    let fixture = NexusFixture::new();
+    let first = from_core("first-request-body");
+    let attempt = stuck_hand_over(&fixture, vec![first.clone()]);
+
+    assert_eq!(
+        resolve(
+            &fixture,
+            "queue-attempt-nothing",
+            QueueResolutionOutcome::Delivered,
+            "x"
+        ),
+        MetaResponse::ResolveQueueDeliveryRejected(
+            ResolveQueueDeliveryRejected_Data::UnknownAttempt
+        )
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::ResolveQueueDelivery(QueueDeliveryResolution {
+                queue_attempt_id: attempt.clone(),
+                queue_resolution_outcome: QueueResolutionOutcome::Delivered,
+                queue_resolution_reason: "x".into(),
+            })),
+        MetaResponse::MetaRefused(meta_signal_flow::MetaRefusal::PeerUnknown)
+    );
+    assert_eq!(queue(&fixture), vec![first]);
+
+    resolve(&fixture, &attempt, QueueResolutionOutcome::Delivered, "x");
+    assert_eq!(
+        resolve(&fixture, &attempt, QueueResolutionOutcome::Absent, "again"),
+        MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotUncertain)
+    );
 }

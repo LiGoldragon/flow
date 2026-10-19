@@ -23,8 +23,10 @@ use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
 use crate::waking::{CorrelatesNativeEvents, ReconcilesQueueDelivery, SleepsAndWakesSeats};
 use meta_signal_flow::{
-    EventsRead_Data, QueueDeliveriesRead_Data, QueueDelivery, QueueDeliveryStanding,
-    ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data,
+    EventsRead_Data, QueueDeliveriesRead_Data, QueueDelivery, QueueDeliveryResolution,
+    QueueDeliveryResolved_Data, QueueDeliveryStanding, QueueResolutionRecord,
+    ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data, ResolveQueueDeliveryRejected_Data,
+    ResolverIdentity,
 };
 use signal_flow::{Address, Event, FlowId, Report_Data, Response};
 
@@ -37,6 +39,13 @@ pub trait RecordsReports {
     /// hook has its answer, so the harness never waits on it.
     fn after_report(&self, flow_id: &FlowId, event: &Event);
     fn read_events(&self, flow_id: FlowId) -> meta_signal_flow::Response;
+    /// The owner's resolution of one Uncertain hand-over, recorded with the
+    /// requesting peer, the reason and the time. Never run by Flow itself.
+    fn resolve_queue_delivery(
+        &self,
+        resolution: QueueDeliveryResolution,
+        resolver: ResolverIdentity,
+    ) -> meta_signal_flow::Response;
     /// Every hand-over of the metaflow's queue that did not settle, with
     /// its standing: what an Uncertain one waits on is readable here.
     fn read_queue_deliveries(&self, address: Address) -> meta_signal_flow::Response;
@@ -106,6 +115,45 @@ impl RecordsReports for RunningNexus {
         }
     }
 
+    fn resolve_queue_delivery(
+        &self,
+        resolution: QueueDeliveryResolution,
+        resolver: ResolverIdentity,
+    ) -> meta_signal_flow::Response {
+        let rejected =
+            |rejection| meta_signal_flow::Response::ResolveQueueDeliveryRejected(rejection);
+        let Some(unix_seconds) = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        else {
+            return rejected(ResolveQueueDeliveryRejected_Data::StoreRefused);
+        };
+        let record = QueueResolutionRecord {
+            queue_resolution_outcome: resolution.queue_resolution_outcome.clone(),
+            resolver_identity: resolver,
+            queue_resolution_reason: resolution.queue_resolution_reason.clone(),
+            unix_seconds,
+        };
+        match self
+            .store
+            .resolve_uncertain_delivery(&resolution.queue_attempt_id, record)
+        {
+            Ok(Ok(attempt)) => {
+                eprintln!(
+                    "flow-nexus: queued delivery {} resolved {:?} by the owner",
+                    attempt.attempt_id, resolution.queue_resolution_outcome
+                );
+                meta_signal_flow::Response::QueueDeliveryResolved(QueueDeliveryResolved_Data {
+                    address: attempt.address,
+                    queue_delivery_resolution: resolution,
+                })
+            }
+            Ok(Err(refusal)) => rejected(refusal),
+            Err(_) => rejected(ResolveQueueDeliveryRejected_Data::StoreRefused),
+        }
+    }
+
     fn read_queue_deliveries(&self, address: Address) -> meta_signal_flow::Response {
         let rejected =
             |rejection| meta_signal_flow::Response::ReadQueueDeliveriesRejected(rejection);
@@ -131,6 +179,7 @@ impl RecordsReports for RunningNexus {
                     QueueDeliveryPhase::Absent(absence) => {
                         QueueDeliveryStanding::Absent(absence.proof)
                     }
+                    QueueDeliveryPhase::Resolved(record) => QueueDeliveryStanding::Resolved(record),
                     QueueDeliveryPhase::Settled(_) => return None,
                 };
                 Some(QueueDelivery {

@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.17";
+            version = "0.35.18";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -365,6 +365,18 @@
             "tests::queue_drain::a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_typing";
           flow-claude-turn-end-before-confirmation = context.exactTest "flow-nexus"
             "tests::queue_drain::a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it";
+          flow-queue-resolved-delivered-leaves-the-queue = context.exactTest "flow-nexus"
+            "tests::queue_drain::an_uncertain_hand_over_resolved_delivered_leaves_the_queue_with_its_record";
+          flow-queue-resolved-absent-one-new-attempt = context.exactTest "flow-nexus"
+            "tests::queue_drain::an_uncertain_hand_over_resolved_absent_is_followed_by_exactly_one_new_attempt";
+          flow-queue-resolution-refused-at-the-nexus = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attempt";
+          flow-queue-resolved-delivered-survives-restart = context.exactTest "flow-nexus"
+            "store::queue_delivery::tests::resolved_delivered_leaves_the_queue_with_its_record_and_survives_restart";
+          flow-queue-resolved-absent-survives-restart = context.exactTest "flow-nexus"
+            "store::queue_delivery::tests::resolved_absent_keeps_the_request_and_authorises_exactly_one_new_attempt";
+          flow-queue-resolution-store-refusals = context.exactTest "flow-nexus"
+            "store::queue_delivery::tests::a_resolution_is_refused_for_what_is_not_the_oldest_uncertain_attempt";
           flow-codex-crash-found-in-history = context.exactTest "flow-nexus"
             "tests::send_tool::a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history";
           flow-codex-absent-handed-over-once = context.exactTest "flow-nexus"

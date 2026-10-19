@@ -3080,7 +3080,8 @@ impl OpensFlowStore for FlowStore {
                 ),
                 QueueDeliveryPhase::Prepared
                 | QueueDeliveryPhase::Settled(_)
-                | QueueDeliveryPhase::Absent(_) => {
+                | QueueDeliveryPhase::Absent(_)
+                | QueueDeliveryPhase::Resolved(_) => {
                     return Err(StoreError::StateInvariant);
                 }
             }

@@ -199,7 +199,11 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
         &fixture,
         submitted(CLAUDE_SESSION, "prompt-first", &typed_text(&first)),
     );
-    assert_eq!(queue(&fixture), vec![second.clone()], "settled on its receipt");
+    assert_eq!(
+        queue(&fixture),
+        vec![second.clone()],
+        "settled on its receipt"
+    );
     report(
         &fixture,
         submitted(CLAUDE_SESSION, "prompt-first", &typed_text(&first)),
@@ -294,7 +298,11 @@ fn a_task_notification_that_takes_the_turn_first_settles_nothing() {
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![second], "the first settled; the second typed");
+    assert_eq!(
+        queue(&fixture),
+        vec![second],
+        "the first settled; the second typed"
+    );
 }
 
 /// The Nexus stopped between typing a request and recording its receipt.
@@ -319,10 +327,10 @@ fn a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_t
         &fixture,
         &[
             serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-first",
-                "message":{"content":format!(
-                    "\n\n<pasted_content id=\"04ee\">\n{}\n</pasted_content id=\"04ee\">\n",
-                    typed_text(&first)
-                )}}),
+            "message":{"content":format!(
+                "\n\n<pasted_content id=\"04ee\">\n{}\n</pasted_content id=\"04ee\">\n",
+                typed_text(&first)
+            )}}),
             end_turn("first-answered"),
         ],
     );
@@ -338,7 +346,11 @@ fn a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_t
         1
     );
     fixture.nexus.recover_deliveries();
-    assert_eq!(typed_count(&fixture, "first-request-body"), 1, "never again");
+    assert_eq!(
+        typed_count(&fixture, "first-request-body"),
+        1,
+        "never again"
+    );
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     assert_eq!(queue(&fixture), vec![second]);
 }
@@ -433,8 +445,10 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     });
     append_main_rows(
         &fixture,
-        &[serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u1",
-            "message":{"content":"still working"}})],
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u1",
+            "message":{"content":"still working"}}),
+        ],
     );
     assert_eq!(
         fixture.nexus.report(Report_Data {

@@ -2123,7 +2123,9 @@ mod tests {
     /// stops at the anchor: only a turn after it can be the queued one.
     #[test]
     fn a_queued_turn_is_read_from_history_after_its_anchor_page_by_page() {
-        let _serial = FAKE_PROXY_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _serial = FAKE_PROXY_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let turn = |id: &str, status: &str, text: &str| {
             serde_json::json!({"id": id, "status": status, "items": [{
                 "type": "userMessage", "id": "m", "clientId": null,
@@ -2183,10 +2185,12 @@ mod tests {
 
     #[test]
     fn a_turn_carries_only_its_exact_single_text_user_message() {
-        let turn = |content: serde_json::Value| serde_json::json!({"items": [
-            {"type": "agentMessage", "text": "the text"},
-            {"type": "userMessage", "content": content}
-        ]});
+        let turn = |content: serde_json::Value| {
+            serde_json::json!({"items": [
+                {"type": "agentMessage", "text": "the text"},
+                {"type": "userMessage", "content": content}
+            ]})
+        };
         assert!(
             turn(serde_json::json!([{"type": "text", "text": "the text"}]))
                 .carries_user_text("the text")

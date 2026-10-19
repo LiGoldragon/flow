@@ -1108,11 +1108,11 @@ mod tests {
     mod configuring;
     mod delivery;
     mod launching_nexus;
+    mod queue_drain;
     mod reservation;
     mod send_tool;
     mod submission;
     mod waking;
-    mod queue_drain;
 
     use super::{Dispatches, ReconcilesListedFlows, RunningNexus};
     use crate::caller::{

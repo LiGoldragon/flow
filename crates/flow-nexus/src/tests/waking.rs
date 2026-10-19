@@ -41,7 +41,12 @@ pub(super) fn address(layer: Layer) -> Address {
     }
 }
 
-pub(super) fn metaflow(layer: Layer, state: State, past: Vec<&str>, queue: Vec<Request>) -> Metaflow {
+pub(super) fn metaflow(
+    layer: Layer,
+    state: State,
+    past: Vec<&str>,
+    queue: Vec<Request>,
+) -> Metaflow {
     Metaflow {
         address: address(layer),
         state,

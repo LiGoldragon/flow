@@ -254,7 +254,13 @@ impl RunsFakeAppServer for FakeAppServer {
         }
     }
 
-    fn serve_turn_history(&self, run: u64, thread: &str, idle: bool, turns: Vec<serde_json::Value>) {
+    fn serve_turn_history(
+        &self,
+        run: u64,
+        thread: &str,
+        idle: bool,
+        turns: Vec<serde_json::Value>,
+    ) {
         let status = if idle { "idle" } else { "active" };
         let frames = [
             frame(&serde_json::json!({ "id": 1, "result": {} })),
@@ -1793,7 +1799,12 @@ fn crashed_before_receipt(fixture: &NexusFixture) -> QueuedRequest {
         panic!("prepared: {prepared:?}")
     };
     assert_eq!(
-        fixture.nexus.store.recover_outstanding_deliveries().unwrap().len(),
+        fixture
+            .nexus
+            .store
+            .recover_outstanding_deliveries()
+            .unwrap()
+            .len(),
         1
     );
     attempt.queued
@@ -1840,7 +1851,11 @@ fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
                 "completed",
                 Some(&[first.clone()].prompt_text()),
             ),
-            history_turn("turn-before", "completed", Some(&[first.clone()].prompt_text())),
+            history_turn(
+                "turn-before",
+                "completed",
+                Some(&[first.clone()].prompt_text()),
+            ),
         ],
     );
 
@@ -1921,7 +1936,9 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     fixture.nexus.recover_deliveries();
     assert_eq!(
         codex_standings(&fixture),
-        vec![QueueDeliveryStanding::Uncertain(Some(Undecided::SeatNotResting))]
+        vec![QueueDeliveryStanding::Uncertain(Some(
+            Undecided::SeatNotResting
+        ))]
     );
 
     fake.serve_turn_history(
@@ -1936,7 +1953,9 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     );
     assert_eq!(
         codex_standings(&fixture),
-        vec![QueueDeliveryStanding::Uncertain(Some(Undecided::HistoryReplaced))]
+        vec![QueueDeliveryStanding::Uncertain(Some(
+            Undecided::HistoryReplaced
+        ))]
     );
 
     // Run 3 has no answer: the app-server is unreadable.
@@ -1946,7 +1965,9 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     ));
     assert_eq!(
         codex_standings(&fixture),
-        vec![QueueDeliveryStanding::Uncertain(Some(Undecided::HistoryUnreadable))]
+        vec![QueueDeliveryStanding::Uncertain(Some(
+            Undecided::HistoryUnreadable
+        ))]
     );
     assert!(fake.queued_turn_texts().is_empty(), "never resent");
     assert_eq!(fixture.seat_queue(), vec![first]);

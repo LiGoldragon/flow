@@ -713,8 +713,10 @@ fn a_working_claude_seat_resolved_absent_waits_for_its_turn_end() {
     let attempt = stuck_hand_over(&fixture, vec![first.clone()]);
     append_main_rows(
         &fixture,
-        &[serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u9",
-        "message":{"content":"still working"}})],
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u9",
+        "message":{"content":"still working"}}),
+        ],
     );
 
     resolve_served(&fixture, &attempt, QueueResolutionOutcome::Absent);

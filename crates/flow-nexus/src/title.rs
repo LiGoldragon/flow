@@ -1,8 +1,10 @@
 //! The canonical native title of a started Flow.
 //!
 //! A title is the Datom struct of the seat's Address and the Flow ID claimed
-//! from its native session, `{ <Aspect> <topic> <Layer> <FlowId> }`, the topic
-//! always lowercase and always shown: `{ Field flow Quaternary 2712d3 }`. It is the seat's own datom, so the
+//! from its native session, `{ <Aspect> <Topic> <Layer> <FlowId> }`, the topic
+//! exactly as the metaflow's Address holds it and always shown:
+//! `{ Field flow Quaternary 2712d3 }`, `{ Field flowNexus Primary 2712d3 }`.
+//! It is the seat's own datom, so the
 //! model a seat runs never enters it, and no model identifier can refuse it.
 
 use datom_codec::Datomizable;
@@ -57,7 +59,7 @@ impl TitlesFlow for LaunchProfile {
         }
         let seat = TitledSeat {
             aspect: self.address.aspect.display_spelling(),
-            topic: self.address.topic.to_lowercase(),
+            topic: self.address.topic.clone(),
             layer: self.address.layer.display_spelling(),
             flow_id: flow_id.into(),
         };
@@ -124,6 +126,18 @@ mod tests {
             low.native_title("00f95a").unwrap().as_str(),
             "{ Mind flow Secondary 00f95a }"
         );
+    }
+
+    #[test]
+    fn the_topic_is_shown_exactly_as_the_address_holds_it() {
+        for topic in ["flowNexus", "PrimaryCommitting", "Flow"] {
+            let mut launch = profile(Aspect::Mind, Layer::Primary, "haiku");
+            launch.address.topic = topic.into();
+            assert_eq!(
+                launch.native_title("2712d3").unwrap().as_str(),
+                format!("{{ Mind {topic} Primary 2712d3 }}")
+            );
+        }
     }
 
     #[test]

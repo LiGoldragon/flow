@@ -1,3 +1,18 @@
+# Flow 0.35.21
+
+No contract, store or deployment change.
+
+- **A title shows its topic exactly.** A title is
+  `{ <Aspect> <Topic> <Layer> <FlowId> }` with the topic as the metaflow's
+  Address holds it; the lowercase coercion is gone, so `flowNexus` and
+  `PrimaryCommitting` are shown as written.
+- **A Claude seat is titled before its agent runs.** Spawn knows the Claude
+  Flow ID, so it sets the pane label, the pane's displayed agent and the
+  workspace label to the title before the harness starts; Herdr never shows
+  the internal `claude-<hex>` agent name. Herdr 0.8.2 accepts `--label` at
+  `workspace create` and `pane report-metadata --display-agent` on a pane
+  with no agent. A Codex seat is titled once its thread is named, as before.
+
 # Flow 0.35.20
 
 No contract, store or deployment change.

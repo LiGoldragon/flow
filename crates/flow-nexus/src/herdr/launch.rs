@@ -1455,6 +1455,13 @@ pub(crate) trait TitlesClaudeSession {
     /// Labels the launch pane with the title, shows the title as the pane's
     /// agent in place of the internal Herdr agent name, and reads both back.
     fn label_herdr_pane(&self, pane: &HerdrPaneBinding, title: &NativeTitle) -> Result<(), String>;
+    /// Names the launch workspace and the pane's displayed agent with the
+    /// title before any agent runs in the pane. Nothing is read back.
+    fn show_title_before_agent(
+        &self,
+        pane: &HerdrPaneBinding,
+        title: &NativeTitle,
+    ) -> Result<(), String>;
     /// Labels the launch workspace with the title and reads the label back.
     fn label_herdr_workspace(
         &self,
@@ -1596,6 +1603,33 @@ impl TitlesClaudeSession for HerdrCli {
         {
             return Err("Herdr pane label readback differs from the title".into());
         }
+        Ok(())
+    }
+
+    fn show_title_before_agent(
+        &self,
+        pane: &HerdrPaneBinding,
+        title: &NativeTitle,
+    ) -> Result<(), String> {
+        self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "workspace".into(),
+            "rename".into(),
+            pane.herdr_workspace_id.clone(),
+            title.as_str().into(),
+        ])?;
+        self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "pane".into(),
+            "report-metadata".into(),
+            pane.herdr_pane_id.clone(),
+            "--source".into(),
+            Self::DISPLAY_SOURCE.into(),
+            "--display-agent".into(),
+            title.as_str().into(),
+        ])?;
         Ok(())
     }
 
@@ -1792,6 +1826,16 @@ impl SpawnsNativeHarness for HerdrCli {
             }
             (HarnessKind::Codex, _) => None,
         };
+        // The title is known, so the living sees it on the workspace and as
+        // the pane's displayed agent before any agent runs in the pane;
+        // Herdr never shows the internal agent name. The title step reads
+        // every label back and refuses on a difference, so a Herdr refusal
+        // here is logged, not final.
+        if let Some(title) = &claude_title
+            && let Err(error) = self.show_title_before_agent(pane, title)
+        {
+            eprintln!("flow-nexus: title not shown before the agent ran: {error}");
+        }
         if launch.harness_kind == HarnessKind::Claude {
             self.prepare_claude_pane_environment(launch, pane, reserved)?;
         }
@@ -5577,6 +5621,21 @@ printf '%s\n' "$alias"
     }
 
     #[test]
+    fn a_claude_seat_is_titled_on_workspace_and_pane_agent_before_its_agent_starts() {
+        let (root, _, title) = titled_launch(HarnessKind::Claude, "aa034f");
+        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
+        let order = |needle: &str| {
+            calls
+                .lines()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle}: {calls}"))
+        };
+        let start = order("agent start");
+        assert!(order("workspace rename w7 ") < start, "{title}: {calls}");
+        assert!(order("pane report-metadata w7:p1 ") < start, "{calls}");
+    }
+
+    #[test]
     fn two_flows_of_one_seat_get_distinct_workspace_labels() {
         for kind in [HarnessKind::Claude, HarnessKind::Codex] {
             let (first_root, first_agent, first) = titled_launch(kind.clone(), "123456");
@@ -5628,6 +5687,9 @@ printf '%s\n' "$alias"
             TitleRefusal::PaneLabelRefused
         );
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
-        assert!(!calls.contains("workspace rename"), "{calls}");
+        // Only the early naming at spawn; the refused title step never
+        // reached the workspace label.
+        assert_eq!(calls.matches("workspace rename").count(), 1, "{calls}");
+        assert!(!calls.contains("workspace get"), "{calls}");
     }
 }

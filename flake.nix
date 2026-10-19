@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.20";
+            version = "0.35.21";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {

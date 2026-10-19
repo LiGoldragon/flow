@@ -1570,7 +1570,8 @@ impl TitlesClaudeSession for HerdrCli {
         // Herdr shows a pane's agent by its reported display agent, else by
         // its agent name; Flow reports the title, unexpiring and unguarded,
         // so the name never reaches the living.
-        self.run_json(&[
+        // Herdr answers report-metadata with no output: run it for its status.
+        self.run_status(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
             "pane".into(),
@@ -1619,7 +1620,8 @@ impl TitlesClaudeSession for HerdrCli {
             pane.herdr_workspace_id.clone(),
             title.as_str().into(),
         ])?;
-        self.run_json(&[
+        // Herdr answers report-metadata with no output: run it for its status.
+        self.run_status(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
             "pane".into(),

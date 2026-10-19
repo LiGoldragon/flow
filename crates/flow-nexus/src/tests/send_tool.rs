@@ -940,6 +940,42 @@ fn a_malformed_call_is_refused_and_recorded() {
     );
 }
 
+/// Starts a witness launch's first turn, its one part, on the connection
+/// that opened its thread, as Submit starts it once the TUI attached.
+fn start_first_turn(
+    connection: &mut crate::codex::ThreadConnection,
+    launch: &signal_flow::ComposedLaunch,
+    thread: &str,
+) {
+    use crate::codex::ExchangesOnSubscription;
+    let crate::codex::ThreadConnection {
+        subscription,
+        inbox,
+        ..
+    } = connection;
+    if subscription
+        .exchange(
+            inbox,
+            5,
+            "turn/start",
+            serde_json::json!({
+                "threadId": thread,
+                "effort": launch.launch_profile.effort,
+                "model": launch.launch_profile.model_name,
+                "input": [{
+                    "type": "text",
+                    "text": launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text,
+                    "text_elements": []
+                }],
+                "turnTrigger": "flow-nexus"
+            }),
+        )
+        .is_err()
+    {
+        panic!("the first turn starts");
+    }
+}
+
 /// The integration witness, against a real scratch Codex app-server named
 /// by `FLOW_SEND_TOOL_WITNESS_CODEX` (the codex client) and
 /// `FLOW_SEND_TOOL_WITNESS_SOCKET` (its control socket), serving
@@ -995,10 +1031,13 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     }];
     launch.target_receipt_request.prompt_sha256 = digest;
 
-    let thread = adapter
-        .open_thread_with_first_turn(&launch, &mut |_| Ok(()))
-        .map(|(thread, _)| thread)
+    let (thread, mut connection) = adapter
+        .open_thread(&launch, &mut |_| {
+            Ok("{ Mind flow Secondary witness }".into())
+        })
         .expect("the thread opens declaring the send tool");
+    start_first_turn(&mut connection, &launch, &thread);
+    drop(connection);
     eprintln!("witness thread {thread}");
     super::waking::ended_claude(&fixture);
     let world = super::waking::WakesFreshClaude::fresh_claude_world(&mut fixture);
@@ -1167,8 +1206,8 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let nexus = &fixture.nexus;
-    let (thread, connection) = adapter
-        .open_thread_with_first_turn(&launch, &mut |thread| {
+    let (thread, mut connection) = adapter
+        .open_thread(&launch, &mut |thread| {
             assert!(
                 nexus
                     .store
@@ -1176,9 +1215,10 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
                     .unwrap()
             );
             eprintln!("witness thread {thread} recorded before its first turn");
-            Ok(())
+            Ok("{ Field flow Secondary witness }".into())
         })
-        .expect("the thread opens and its first turn starts");
+        .expect("the thread opens and is named");
+    start_first_turn(&mut connection, &launch, &thread);
     nexus.hold_launch_responder(connection);
     let rollout_shows_turn_complete = || {
         let deadline = Instant::now() + Duration::from_secs(180);
@@ -1306,17 +1346,18 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
     );
     fixture.asleep_at(asleep_target());
     let nexus = &fixture.nexus;
-    let (thread, _connection) = adapter
-        .open_thread_with_first_turn(&launch, &mut |thread| {
+    let (thread, mut connection) = adapter
+        .open_thread(&launch, &mut |thread| {
             assert!(
                 nexus
                     .store
                     .record_opened_thread(&profile.launch_request_id, thread)
                     .unwrap()
             );
-            Ok(())
+            Ok("{ Field flow Secondary witness }".into())
         })
-        .expect("the thread opens and its first turn starts");
+        .expect("the thread opens and is named");
+    start_first_turn(&mut connection, &launch, &thread);
     let deadline = Instant::now() + Duration::from_secs(180);
     let pending = loop {
         assert!(Instant::now() < deadline, "no send call appeared");

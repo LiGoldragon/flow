@@ -288,23 +288,29 @@ impl Performs for RunningNexus {
                 flow_id_option,
                 ..
             }) => {
-                // Codex: the thread is opened lean and given its first turn
-                // through the app-server before the TUI attaches to it.
+                // Codex: the thread is opened lean through the app-server
+                // and named with its title, then the TUI attaches to it while
+                // it is idle; its first turn is started at Submit, once the
+                // pane is bound.
                 let opened = match composed_launch.harness_kind {
                     HarnessKind::Codex => match self
                         .codex_endpoints
                         .adapter_for(&composed_launch.launch_profile.model_name)
                         .and_then(|adapter| {
-                            adapter.open_thread_with_first_turn(&composed_launch, &mut |thread| {
-                                // Before the first turn, which may call the
-                                // send tool: the thread is recorded as this
-                                // launch's, durably (a remote-resumed TUI
-                                // never reports it to Herdr, so a launch
-                                // recovered after this start binds to it,
-                                // and a call is sent from this launch's
-                                // Address). The connection that opened it
-                                // is subscribed to its calls from then on.
+                            adapter.open_thread(&composed_launch, &mut |thread| {
+                                // Before anything runs on it: the thread is
+                                // recorded as this launch's, durably (a
+                                // remote-resumed TUI never reports it to
+                                // Herdr, so a launch recovered after this
+                                // start binds to it, and a call is sent from
+                                // this launch's Address), and its FlowId is
+                                // claimed, which names its title.
+                                use crate::herdr::launch::ClaimsNativeIdentity;
                                 use crate::store::opened_thread::RecordsOpenedThreads;
+                                use crate::title::{ShowsNativeTitle, TitlesFlow};
+                                let refused = |detail: String| {
+                                    crate::codex::CodexAdapterUnavailable::Protocol(detail)
+                                };
                                 if !self
                                     .store
                                     .record_opened_thread(
@@ -313,17 +319,23 @@ impl Performs for RunningNexus {
                                     )
                                     .unwrap_or(false)
                                 {
-                                    return Err(crate::codex::CodexAdapterUnavailable::Protocol(
-                                        format!(
-                                            "opened thread {thread} not recorded as the launch's"
-                                        ),
-                                    ));
+                                    return Err(refused(format!(
+                                        "opened thread {thread} not recorded as the launch's"
+                                    )));
                                 }
-                                Ok(())
+                                let flow_id = self
+                                    .herdr
+                                    .claim_flow_identity(&HarnessKind::Codex, thread)
+                                    .map_err(refused)?;
+                                composed_launch
+                                    .launch_profile
+                                    .native_title(&flow_id)
+                                    .map(|title| title.as_str().to_owned())
+                                    .map_err(|refusal| refused(refusal.to_string()))
                             })
                         }) {
-                        // That connection answers the first turn's calls
-                        // while the launch waits.
+                        // That connection answers the thread's calls while
+                        // the launch holds the gate.
                         Ok((thread, connection)) => {
                             self.hold_launch_responder(connection);
                             Some(thread)
@@ -347,17 +359,14 @@ impl Performs for RunningNexus {
                     },
                     HarnessKind::Claude => None,
                 };
+                // Herdr's start returns once the TUI is at rest; the thread
+                // it attaches to has no turn yet.
                 let started = match &opened {
-                    // Herdr's start returns once the TUI is at rest, which a
-                    // first turn waiting on the send tool never is until its
-                    // call is answered: the launch answers it meanwhile.
-                    Some(thread) => self.serving_launch_calls(|| {
-                        self.herdr.attach_codex_harness(
-                            &composed_launch,
-                            &herdr_pane_binding,
-                            thread,
-                        )
-                    }),
+                    Some(thread) => self.herdr.attach_codex_harness(
+                        &composed_launch,
+                        &herdr_pane_binding,
+                        thread,
+                    ),
                     None => self.herdr.start_native_harness(
                         &composed_launch,
                         &herdr_pane_binding,
@@ -409,14 +418,11 @@ impl Performs for RunningNexus {
                 native_session_id_option,
             }) => {
                 let observed = match native_session_id_option {
-                    // The bind waits for rest too; a call meanwhile is answered.
-                    Some(thread) => self.serving_launch_calls(|| {
-                        self.herdr.observe_attached_codex_binding(
-                            &composed_launch,
-                            &herdr_pane_binding,
-                            &thread,
-                        )
-                    }),
+                    Some(thread) => self.herdr.observe_attached_codex_binding(
+                        &composed_launch,
+                        &herdr_pane_binding,
+                        &thread,
+                    ),
                     None => self.herdr.observe_native_binding(
                         &composed_launch,
                         &herdr_pane_binding,
@@ -443,15 +449,21 @@ impl Performs for RunningNexus {
                 prompt_delivery_intent,
             }) => {
                 let submission = match composed_launch.harness_kind {
-                    HarnessKind::Codex => self
-                        .codex_endpoints
-                        .adapter_for(&composed_launch.launch_profile.model_name)
-                        .map_err(|_| Failed_Data::CodexRefused)
-                        .and_then(|adapter| {
-                            adapter
-                                .submit_bound_codex_part(&composed_launch, &prompt_delivery_intent)
-                                .map_err(|_| Failed_Data::CodexRefused)
-                        }),
+                    // The part's turn may call the send tool at once: the
+                    // launch, holding the gate, answers it meanwhile.
+                    HarnessKind::Codex => self.serving_launch_calls(|| {
+                        self.codex_endpoints
+                            .adapter_for(&composed_launch.launch_profile.model_name)
+                            .map_err(|_| Failed_Data::CodexRefused)
+                            .and_then(|adapter| {
+                                adapter
+                                    .submit_bound_codex_part(
+                                        &composed_launch,
+                                        &prompt_delivery_intent,
+                                    )
+                                    .map_err(|_| Failed_Data::CodexRefused)
+                            })
+                    }),
                     HarnessKind::Claude => self
                         .herdr
                         .submit_startup_part(&composed_launch, &prompt_delivery_intent)

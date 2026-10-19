@@ -52,7 +52,8 @@ pub trait StartsNativeHerdrHarness {
         reserved: Option<&str>,
     ) -> Result<(), SpawnFailure>;
     /// Starts the Codex TUI attached to the thread Flow already opened and
-    /// gave its first turn: `resume <thread>` after the launch's switches.
+    /// named, idle with no turn yet: `resume <thread>` after the launch's
+    /// switches.
     fn attach_codex_harness(
         &self,
         launch: &ComposedLaunch,
@@ -1897,7 +1898,7 @@ impl SpawnsNativeHarness for HerdrCli {
         // The launch's leave-outs, as its harness's own switches.
         arguments.extend(launch.lean_start().arguments());
         // The subcommand follows every switch: the TUI resumes the thread
-        // Flow opened, which already holds the first turn.
+        // Flow opened and named, idle until Submit gives it its first turn.
         if let (HarnessKind::Codex, ClaudeSession::Attached(thread)) =
             (&launch.harness_kind, &session)
         {
@@ -2161,14 +2162,14 @@ impl ObservesNativeLaunchBinding for HerdrCli {
         observed
     }
 
-    /// The Codex thread is the one Flow opened through the app-server and
-    /// gave its first turn: the pane binds to it once Herdr recognizes the
+    /// The Codex thread is the one Flow opened and named through the
+    /// app-server: the pane binds to it once Herdr recognizes the
     /// pane's Codex agent, exact and interactively ready. Herdr reports no
     /// agent session for a TUI that remote-resumed a thread, and the
     /// app-server names no signal that a client is attached to a thread
     /// (`thread/loaded/list` names the threads loaded in memory, which the
-    /// opening already loaded); the launch receipt then reads that thread's
-    /// first turn and answer. A session Herdr does report must be that
+    /// opening already loaded); the launch receipt then reads the first turn
+    /// Submit gives that thread, and its answer. A session Herdr does report must be that
     /// thread.
     fn observe_attached_codex_binding(
         &self,
@@ -2355,8 +2356,8 @@ impl AcceptsLaunchRegistration for HerdrCli {
             &binding.native_session_id,
             &binding.harness_kind,
         )?;
-        // A Codex thread already holds the first turn Flow gave it before
-        // its TUI attached, so its receipt is read from the thread's start.
+        // A Codex thread's rollout exists from its naming at open, before
+        // its TUI attached; its receipt is read from the thread's start.
         let native_transcript_boundary = match self
             .capture_transcript_boundary(binding, &launch.launch_profile.model_name)
             .map_err(RegistrationRefusal::TranscriptBoundary)?
@@ -3819,11 +3820,12 @@ printf '%s\n' "$alias"
         assert!(!root.path().join("calls").exists());
     }
 
-    /// The TUI attaches to a thread that already holds the first turn Flow
-    /// gave it: the receipt is read from the thread's start, so that turn
-    /// and its answer are observed though both precede the registration.
+    /// The thread's rollout exists from its naming, before the TUI
+    /// attached: the receipt is read from the thread's start, so the first
+    /// turn Submit gives it after the registration and its answer are
+    /// observed.
     #[test]
-    fn a_codex_first_turn_given_before_the_tui_attached_is_observed() {
+    fn a_codex_first_turn_is_read_from_the_thread_start() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Codex);
         let agent_name = launch.launch_agent_name();
@@ -3844,12 +3846,18 @@ printf '%s\n' "$alias"
         let input = serde_json::json!({"type":"event_msg","payload":{
             "thread_id":native_session,"turn_id":"turn-first",
             "item":{"type":"UserMessage","content":[{"type":"text","text":launch.first_prompt_payload.first_prompt_body}]}}});
-        fs::write(&transcript, format!("{meta}\n{context}\n{input}\n")).expect("first turn");
+        fs::write(&transcript, format!("{meta}\n")).expect("named thread");
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         let NativeTranscriptBoundary::Existing(cursor) = &intent.native_transcript_boundary else {
             panic!("the thread's transcript exists");
         };
         assert_eq!(cursor.transcript_byte_offset, 0);
+        use std::io::Write;
+        let mut append = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .expect("append transcript");
+        write!(append, "{context}\n{input}\n").expect("the first turn");
         // The part alone is not the receipt: the flow has not answered.
         assert_eq!(
             adapter.observe_native_target_receipt(&intent).unwrap(),
@@ -3857,11 +3865,6 @@ printf '%s\n' "$alias"
         );
         let answer = serde_json::json!({"type":"response_item","payload":{
             "type":"message","role":"assistant","content":[{"type":"output_text","text":"Beginning."}]}});
-        use std::io::Write;
-        let mut append = fs::OpenOptions::new()
-            .append(true)
-            .open(&transcript)
-            .expect("append transcript");
         writeln!(append, "{answer}").expect("append the first answer");
         let StartupProgress::Received(NativeTargetReceipt { native_turn_id, .. }) = adapter
             .observe_native_target_receipt(&intent)
@@ -4439,8 +4442,7 @@ printf '%s\n' "$alias"
     }
 
     /// A Claude cursor sits past the transcript's end when the first part
-    /// is typed (a Codex thread is read from its start, its first turn
-    /// already in it), and the transcript behind it must stay as it was.
+    /// is typed (a Codex thread is read from its start), and the transcript behind it must stay as it was.
     #[test]
     fn persisted_cursor_rejects_truncation_prefix_change_and_replacement() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";

@@ -1,3 +1,25 @@
+# Flow 0.35.24
+
+The contracts are unchanged from 0.35.22: signal-flow 23.0.0 (c7dcc074) and
+meta-signal-flow 29.0.0 (2b03b506). No store change.
+
+- **A Codex TUI attaches to an idle thread; the first turn starts after.**
+  Herdr 0.8.2's `agent start` returns only once a Codex pane is at rest,
+  which it is not while a turn runs, so a first turn longer than the start's
+  30 s refused the spawn and archived the thread mid-turn. Spawn now opens
+  the thread through the app-server, records it, claims its Flow ID and
+  names it with its title (read back), then attaches the TUI with
+  `resume <thread>`; Submit starts the first part as the thread's first
+  turn after the exclusions are applied again and read back, as it does
+  every later part. The naming is what stores the thread: codex
+  0.161.0-alpha.2 refuses `thread/resume` of a thread with nothing written
+  ("no rollout found"), and accepts it once the thread is named. A Codex
+  start Herdr refuses archives a thread that had no turn.
+- **A pane label is set when Herdr answers it with no output.** Herdr
+  0.8.2 answers `pane report-metadata` with an empty reply; the Nexus
+  reads its exit status instead of parsing JSON, so a Start no longer ends
+  `NativeLaunchRefused.{ Naming PaneLabelRefused }`.
+
 # Flow 0.35.23
 
 The contracts are unchanged: signal-flow 23.0.0 (c7dcc074) and

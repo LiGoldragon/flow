@@ -180,9 +180,9 @@ pub trait ConsumesResetCredit {
 /// Submits the part of the first USER message the durable intent last
 /// counted as submitted, as one native turn of one text item, after
 /// applying the launch's base instructions and exclusions to the attached
-/// thread again and reading them back. The first part is already the
-/// thread's first turn, given when the thread was opened, so for it nothing
-/// more is sent; a later part follows the turn the transcript showed
+/// thread again and reading them back. The first part is the thread's
+/// first turn, started only once the TUI attached to the idle thread and
+/// the pane bound; a later part follows the turn the transcript showed
 /// completed. Durable one-shot gating belongs to the caller; this never
 /// creates or replaces the Herdr-attached thread.
 pub trait SubmitsBoundCodexPart {
@@ -293,26 +293,30 @@ impl CarriesUserText for serde_json::Value {
 
 /// Opens a launch's Codex thread through the app-server before any TUI
 /// attaches to it: the thread starts with the composed system prompt as its
-/// base instructions and the launch's exclusions in its config, what the
-/// app-server answers is read back against them, and the first part of the
-/// first USER message (the whole message when it fits one Codex turn) is
-/// submitted as the thread's first turn. The answer is the thread's id and
-/// the connection that opened it.
+/// base instructions and the launch's exclusions in its config, and what the
+/// app-server answers is read back against them. The answer is the thread's
+/// id and the connection that opened it.
 ///
-/// The connection that starts a thread is subscribed to its server
-/// requests from `thread/start` on; a `thread/resume` of a thread with no
-/// turn yet is refused (codex 0.161.0-alpha.2: "no rollout found"). So the
-/// opening connection is kept open and answered as the thread's responder
-/// until the launch ends: a first turn may call the send tool before the
-/// launch's flow exists. Between the opening and the first turn,
-/// `before_first_turn` is given the thread, for what must hold before a
-/// call can be made (the thread recorded as this launch's). When it
-/// refuses, no turn is started and the thread is archived.
+/// `title_for` is given the thread once it exists, for what must hold before
+/// anything runs on it (the thread recorded as this launch's, its FlowId
+/// claimed), and answers the thread's title. The thread is named with that
+/// title and the name read back before the TUI attaches: a thread has no
+/// stored rollout until something is written to it, and the TUI's
+/// `resume <thread>` of a thread with none is refused (codex 0.161.0-alpha.2:
+/// "no rollout found"); the name is that write. When `title_for` or the
+/// naming refuses, the thread is archived.
+///
+/// No turn is started here. Herdr's `agent start` returns only once a Codex
+/// pane is at rest, which it is not while a turn runs, so the first turn is
+/// started after the TUI attached and the pane bound
+/// (`SubmitsBoundCodexPart`). The connection that opened the thread stays
+/// subscribed to its server requests and is kept as the launch's responder
+/// until the launch ends.
 pub(crate) trait OpensCodexThread {
-    fn open_thread_with_first_turn(
+    fn open_thread(
         &self,
         launch: &ComposedLaunch,
-        before_first_turn: &mut dyn FnMut(&str) -> Result<(), CodexAdapterUnavailable>,
+        title_for: &mut dyn FnMut(&str) -> Result<String, CodexAdapterUnavailable>,
     ) -> Result<(String, ThreadConnection), CodexAdapterUnavailable>;
 }
 
@@ -811,6 +815,13 @@ trait OpensBoundCodexSession {
         method: &str,
         response: &serde_json::Value,
     ) -> Result<(), CodexAdapterUnavailable>;
+    /// Reads back what `thread/read` answered after `thread/name/set`: the
+    /// thread is the one named, and its name is the title set.
+    fn read_back_name(
+        thread_id: &str,
+        name: &str,
+        read: &serde_json::Value,
+    ) -> Result<(), CodexAdapterUnavailable>;
     /// Applies the launch's base instructions, exclusions and flow
     /// environment again once Herdr's TUI has attached to the thread, since
     /// a TUI resume replaces the thread's settings, and reads them back.
@@ -912,6 +923,22 @@ impl OpensBoundCodexSession for CodexAdapter {
         config
     }
 
+    fn read_back_name(
+        thread_id: &str,
+        name: &str,
+        read: &serde_json::Value,
+    ) -> Result<(), CodexAdapterUnavailable> {
+        let thread = read.get("thread").unwrap_or(read);
+        if thread.get("id").and_then(serde_json::Value::as_str) != Some(thread_id)
+            || thread.get("name").and_then(serde_json::Value::as_str) != Some(name)
+        {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "Codex thread name readback differs from the set title".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn read_back_thread(
         launch: &ComposedLaunch,
         thread_id: &str,
@@ -995,21 +1022,19 @@ impl OpensBoundCodexSession for CodexAdapter {
 }
 
 impl OpensCodexThread for CodexAdapter {
-    fn open_thread_with_first_turn(
+    fn open_thread(
         &self,
         launch: &ComposedLaunch,
-        before_first_turn: &mut dyn FnMut(&str) -> Result<(), CodexAdapterUnavailable>,
+        title_for: &mut dyn FnMut(&str) -> Result<String, CodexAdapterUnavailable>,
     ) -> Result<(String, ThreadConnection), CodexAdapterUnavailable> {
-        let first = launch.first_prompt_payload.prompt_part_vector.first();
-        let Some(first) = first.filter(|_| {
-            launch.has_canonical_first_prompt()
-                && launch.harness_kind == HarnessKind::Codex
-                && self.model == launch.launch_profile.model_name
-        }) else {
+        if !(launch.has_canonical_first_prompt()
+            && launch.harness_kind == HarnessKind::Codex
+            && self.model == launch.launch_profile.model_name)
+        {
             return Err(CodexAdapterUnavailable::Protocol(
                 "the composed launch is no Codex launch this endpoint serves".into(),
             ));
-        };
+        }
         // The send tool is declared behind the experimental API, which is
         // opened only once the app-server is shown to gate the tool on it.
         self.probe_send_tool()?;
@@ -1067,29 +1092,27 @@ impl OpensCodexThread for CodexAdapter {
                 .exchange(inbox, id, method, params)
                 .map_err(<CodexAdapterUnavailable as EndsSubscription>::ended)
         };
-        if let Err(refusal) = before_first_turn(&thread) {
-            let _ = ask(
+        let named = title_for(&thread).and_then(|title| {
+            ask(
                 3,
+                "thread/name/set",
+                serde_json::json!({ "threadId": thread, "name": title }),
+            )?;
+            let read = ask(
+                4,
+                "thread/read",
+                serde_json::json!({ "threadId": thread, "includeTurns": false }),
+            )?;
+            Self::read_back_name(&thread, &title, &read)
+        });
+        if let Err(refusal) = named {
+            let _ = ask(
+                5,
                 "thread/archive",
                 serde_json::json!({ "threadId": thread }),
             );
             return Err(refusal);
         }
-        ask(
-            3,
-            "turn/start",
-            serde_json::json!({
-                "threadId": thread,
-                "effort": launch.launch_profile.effort,
-                "model": launch.launch_profile.model_name,
-                "input": [{
-                    "type": "text",
-                    "text": first.prompt_part_text,
-                    "text_elements": []
-                }],
-                "turnTrigger": "flow-nexus"
-            }),
-        )?;
         Ok((thread, connection))
     }
 }
@@ -1145,12 +1168,10 @@ impl SubmitsBoundCodexPart for CodexAdapter {
             // The attached TUI replaced the thread's settings: they are
             // applied again and read back before anything more is sent.
             self.configure_bound_thread(&mut session, 2, launch, intent)?;
-            // The first part is the thread's first turn, given before the
-            // TUI attached. A later part follows the turn the transcript
-            // showed completed.
-            if intent.parts_submitted > 1 {
-                session.request(3, "turn/start", params, self.timeout)?;
-            }
+            // The first part is the thread's first turn, started on the idle
+            // thread the TUI attached to; a later part follows the turn the
+            // transcript showed completed.
+            session.request(3, "turn/start", params, self.timeout)?;
             Ok(PromptDeliveryResult::Ambiguous(intent.clone()))
         })();
         session.stop_proxy();
@@ -1471,15 +1492,7 @@ impl NamesBoundCodexThread for CodexAdapter {
                 serde_json::json!({ "threadId": native_session_id, "includeTurns": false }),
                 self.timeout,
             )?;
-            let thread = read.get("thread").unwrap_or(&read);
-            if thread.get("id").and_then(serde_json::Value::as_str) != Some(native_session_id)
-                || thread.get("name").and_then(serde_json::Value::as_str) != Some(name)
-            {
-                return Err(CodexAdapterUnavailable::Protocol(
-                    "Codex thread name readback differs from the set title".into(),
-                ));
-            }
-            Ok(())
+            Self::read_back_name(native_session_id, name, &read)
         })();
         session.stop_proxy();
         result
@@ -1734,9 +1747,9 @@ impl SubscribesThread for CodexAdapter {
     }
 }
 
-/// Accounts for a thread Flow opened before its harness start was refused:
-/// what its first turn had come to, read once, and its archiving through
-/// the app-server. The account is given whatever the app-server answers.
+/// Accounts for a thread Flow opened for a launch that ends refused: what
+/// its first turn had come to, read once (a thread whose harness start was
+/// refused has none), and its archiving through the app-server. The account is given whatever the app-server answers.
 pub trait AccountsOpenedThread {
     fn account_opened_thread(&self, thread: &str) -> signal_flow::OpenedThread;
 }
@@ -2381,12 +2394,16 @@ mod tests {
         }
     }
 
+    /// The title a test's opened thread is named with.
+    const OPENED_TITLE: &str = "{ Field Flow Tertiary 123456 }";
+
     /// The thread is opened lean through the app-server, its readback
-    /// checked, and the first turn given before any TUI attaches: the
-    /// requests are initialize, thread/start with the system prompt and the
-    /// exclusions, then turn/start with the whole first part.
+    /// checked, and it is named with its title and the name read back, with
+    /// no turn: the requests are initialize, thread/start with the system
+    /// prompt and the exclusions, thread/name/set and thread/read, and
+    /// never turn/start, so the TUI attaches to an idle thread.
     #[test]
-    fn a_codex_thread_is_opened_lean_and_given_its_first_turn_before_attach() {
+    fn a_codex_thread_is_opened_lean_and_named_with_no_turn_before_attach() {
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let launch = lean_codex_launch();
         let fake = FakeProxy;
@@ -2395,24 +2412,39 @@ mod tests {
             fake.websocket_frame(
                 r#"{"id":2,"result":{"thread":{"id":"thread-lean"},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":[]}}"#,
             ),
-            fake.websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#),
+            fake.websocket_frame(r#"{"id":3,"result":{}}"#),
+            fake.websocket_frame(
+                &serde_json::json!({"id":4,"result":{"thread":{"id":"thread-lean","name":OPENED_TITLE}}})
+                    .to_string(),
+            ),
         ];
         let (_directory, executable, record) = RecordingFakeProxy.install_probed(&frames);
+        let mut given = Vec::new();
         assert_eq!(
             lean_adapter_at(executable, &launch)
-                .open_thread_with_first_turn(&launch, &mut |_| Ok(()))
+                .open_thread(&launch, &mut |thread| {
+                    given.push(thread.to_owned());
+                    Ok(OPENED_TITLE.into())
+                })
                 .map(|(thread, _)| thread)
                 .unwrap(),
             "thread-lean"
         );
-        let requests = record.requests(4);
+        assert_eq!(given, ["thread-lean"]);
+        let requests = record.requests(5);
         let methods = requests
             .iter()
             .map(|request| request["method"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(
             methods,
-            ["initialize", "initialized", "thread/start", "turn/start"]
+            [
+                "initialize",
+                "initialized",
+                "thread/start",
+                "thread/name/set",
+                "thread/read"
+            ]
         );
         let start = &requests[2]["params"];
         assert_eq!(
@@ -2445,13 +2477,55 @@ mod tests {
             requests[0]["params"]["capabilities"]["experimentalApi"],
             true
         );
-        let turn = &requests[3]["params"];
-        assert_eq!(turn["threadId"], "thread-lean");
+        let named = &requests[3]["params"];
+        assert_eq!(named["threadId"], "thread-lean");
+        assert_eq!(named["name"], OPENED_TITLE);
+        assert_eq!(requests[4]["params"]["threadId"], "thread-lean");
+    }
+
+    /// A name read back other than the title set refuses the opening, and
+    /// the thread is archived; no turn is started.
+    #[test]
+    fn an_opened_thread_whose_name_reads_back_otherwise_is_archived() {
+        let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
+        let launch = lean_codex_launch();
+        let fake = FakeProxy;
+        let frames = [
+            fake.websocket_frame(r#"{"id":1,"result":{}}"#),
+            fake.websocket_frame(
+                r#"{"id":2,"result":{"thread":{"id":"thread-lean"},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":[]}}"#,
+            ),
+            fake.websocket_frame(r#"{"id":3,"result":{}}"#),
+            fake.websocket_frame(
+                r#"{"id":4,"result":{"thread":{"id":"thread-lean","name":"another"}}}"#,
+            ),
+            fake.websocket_frame(r#"{"id":5,"result":{}}"#),
+        ];
+        let (_directory, executable, record) = RecordingFakeProxy.install_probed(&frames);
+        assert!(matches!(
+            lean_adapter_at(executable, &launch)
+                .open_thread(&launch, &mut |_| Ok(OPENED_TITLE.into()))
+                .map(|(thread, _)| thread),
+            Err(CodexAdapterUnavailable::Protocol(detail))
+                if detail.contains("name readback differs")
+        ));
+        let requests = record.requests(6);
+        let methods = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(
-            turn["input"][0]["text"],
-            launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text
+            methods,
+            [
+                "initialize",
+                "initialized",
+                "thread/start",
+                "thread/name/set",
+                "thread/read",
+                "thread/archive"
+            ]
         );
-        assert_eq!(turn["input"].as_array().unwrap().len(), 1);
+        assert_eq!(requests[5]["params"]["threadId"], "thread-lean");
     }
 
     /// An app-server that does not refuse the send tool without the
@@ -2481,7 +2555,7 @@ mod tests {
             let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
             assert!(matches!(
                 lean_adapter_at(executable, &launch)
-                    .open_thread_with_first_turn(&launch, &mut |_| Ok(()))
+                    .open_thread(&launch, &mut |_| Ok(OPENED_TITLE.into()))
                     .map(|(thread, _)| thread),
                 Err(CodexAdapterUnavailable::SendToolUnsupported(_))
             ));
@@ -2516,8 +2590,8 @@ mod tests {
 
     /// The whole Codex start against a fake app-server and a fake Herdr that
     /// reports no agent session for the remote-resumed TUI, as Herdr does:
-    /// Flow opens the thread and gives its first turn, the TUI attaches to
-    /// it, and the pane binds to the thread Flow opened once Herdr
+    /// Flow opens the thread and names it, the TUI attaches to it, and the
+    /// pane binds to the thread Flow opened once Herdr
     /// recognizes the pane's Codex agent.
     #[test]
     fn a_remote_resumed_tui_binds_to_the_thread_the_app_server_opened() {
@@ -2535,7 +2609,11 @@ mod tests {
             fake.websocket_frame(&format!(
                 r#"{{"id":2,"result":{{"thread":{{"id":"{thread}"}},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":[]}}}}"#
             )),
-            fake.websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#),
+            fake.websocket_frame(r#"{"id":3,"result":{}}"#),
+            fake.websocket_frame(
+                &serde_json::json!({"id":4,"result":{"thread":{"id":thread,"name":OPENED_TITLE}}})
+                    .to_string(),
+            ),
         ];
         let (_proxy, executable, record) = RecordingFakeProxy.install_probed(&frames);
         let mut codex_endpoints = endpoints();
@@ -2546,18 +2624,24 @@ mod tests {
         let opened = codex_endpoints
             .adapter_for(&launch.launch_profile.model_name)
             .unwrap()
-            .open_thread_with_first_turn(&launch, &mut |_| Ok(()))
+            .open_thread(&launch, &mut |_| Ok(OPENED_TITLE.into()))
             .map(|(thread, _)| thread)
             .expect("the app-server opens the thread");
         assert_eq!(opened, thread);
         let methods = record
-            .requests(4)
+            .requests(5)
             .iter()
             .map(|request| request["method"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
         assert_eq!(
             methods,
-            ["initialize", "initialized", "thread/start", "turn/start"]
+            [
+                "initialize",
+                "initialized",
+                "thread/start",
+                "thread/name/set",
+                "thread/read"
+            ]
         );
 
         let (root, herdr) = crate::herdr::launch::tests::fixture_herdr(
@@ -2623,7 +2707,7 @@ mod tests {
     }
 
     /// A thread whose readback shows project instructions loaded, though
-    /// the launch left them out, is refused and given no turn.
+    /// the launch left them out, is refused, neither named nor given a turn.
     #[test]
     fn a_codex_thread_that_loaded_left_out_instructions_gets_no_turn() {
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
@@ -2638,17 +2722,16 @@ mod tests {
         ];
         let (_directory, executable, record) = RecordingFakeProxy.install_probed(&frames);
         assert!(matches!(
-            lean_adapter_at(executable, &launch).open_thread_with_first_turn(&launch, &mut |_| Ok(()))
+            lean_adapter_at(executable, &launch)
+                .open_thread(&launch, &mut |_| Ok(OPENED_TITLE.into()))
                 .map(|(thread, _)| thread),
             Err(CodexAdapterUnavailable::Protocol(detail))
                 if detail.contains("loaded project instructions the launch left out")
         ));
         let requests = record.requests(3);
-        assert!(
-            !requests
-                .iter()
-                .any(|request| request["method"] == "turn/start")
-        );
+        assert!(!requests.iter().any(|request| {
+            request["method"] == "turn/start" || request["method"] == "thread/name/set"
+        }));
     }
 
     fn attached_intent(launch: &ComposedLaunch, parts_submitted: i64) -> PromptDeliveryIntent {
@@ -2670,8 +2753,8 @@ mod tests {
     }
 
     /// Once the TUI has attached, the base instructions, exclusions and
-    /// flow environment are applied to the thread again and read back; the
-    /// first part is already the thread's first turn, so nothing else goes.
+    /// flow environment are applied to the thread again and read back; only
+    /// then is the first part started as the thread's first turn.
     #[test]
     fn after_attach_the_exclusions_are_applied_again_and_read_back() {
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
@@ -2683,6 +2766,7 @@ mod tests {
             fake.websocket_frame(
                 r#"{"id":2,"result":{"thread":{"id":"thread-lean"},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":[]}}"#,
             ),
+            fake.websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#),
         ];
         let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
         assert_eq!(
@@ -2691,12 +2775,22 @@ mod tests {
                 .unwrap(),
             PromptDeliveryResult::Ambiguous(intent.clone())
         );
-        let requests = record.requests(3);
+        let requests = record.requests(4);
         let methods = requests
             .iter()
             .map(|request| request["method"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(methods, ["initialize", "initialized", "thread/resume"]);
+        assert_eq!(
+            methods,
+            ["initialize", "initialized", "thread/resume", "turn/start"]
+        );
+        let turn = &requests[3]["params"];
+        assert_eq!(turn["threadId"], "thread-lean");
+        assert_eq!(
+            turn["input"][0]["text"],
+            launch.first_prompt_payload.prompt_part_vector[0].prompt_part_text
+        );
+        assert_eq!(turn["input"].as_array().unwrap().len(), 1);
         let resume = &requests[2]["params"];
         assert_eq!(resume["threadId"], "thread-lean");
         assert_eq!(

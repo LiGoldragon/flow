@@ -311,8 +311,9 @@ impl LaunchesFlows for RunningNexus {
             flow_id_option: reserved,
             native_session_id_option: None,
         };
-        // A Codex Spawn names the thread it opened, its first turn already
-        // in it, before the TUI attached; Bind requires that thread.
+        // A Codex Spawn names the thread it opened, idle and titled, that
+        // the TUI attached to; Bind requires that thread, and Submit gives
+        // it its first turn.
         let opened = match self.perform(Operation::Spawn(pane_launch.clone())) {
             Outcome::Spawned(opened) => opened,
             Outcome::Failed(Failed_Data::SpawnRefused(refusal)) => {
@@ -714,9 +715,8 @@ impl LaunchesFlows for RunningNexus {
 }
 
 /// A Codex launch an earlier Nexus left between opening its thread and
-/// acknowledging its seat is never finished: nothing replays it, and its
-/// registration waits on a seat at rest that a first turn pending on a send
-/// call never reaches. At the Nexus's start, before any socket or responder
+/// acknowledging its seat is never finished: nothing replays it. At the
+/// Nexus's start, before any socket or responder
 /// is served, each such launch (unsettled, Codex, its thread recorded, its
 /// phase NativeLaunchIntentRecorded or NativeBound) is reconciled.
 ///

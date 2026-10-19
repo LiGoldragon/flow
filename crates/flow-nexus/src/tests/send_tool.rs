@@ -2021,7 +2021,7 @@ fn codex_resolved_absent(
         other => panic!("not read: {other:?}"),
     };
     fixture.nexus.codex_turns.observe(SEAT_THREAD, first_event);
-    fake.accept_queued_turns(SEAT_THREAD, 2..=3);
+    fake.accept_queued_turns(SEAT_THREAD, 1..=2);
     let response = fixture.nexus.dispatch_meta_serially(
         meta_signal_flow::Query::ResolveQueueDelivery(QueueDeliveryResolution {
             queue_attempt_id: attempt,

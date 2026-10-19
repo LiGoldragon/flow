@@ -212,8 +212,11 @@ impl VerifiesRole for VerifiedRole {
                 RoleCallers::Any => true,
                 RoleCallers::Only(callers) => !callers.is_empty(),
             };
-        if !manifest || !policy {
+        if !manifest {
             return Err(RoleRefusal::ManifestMismatch);
+        }
+        if !policy {
+            return Err(RoleRefusal::UnsupportedPolicy);
         }
         if rows[0].rendered_sha256 != composition.description_payload_sha256
             || composition
@@ -257,13 +260,14 @@ impl ReadsVerifiedRole for VerifiedRole {
 
     /// The role as a Claude Code flag agent. Model is passed as the role
     /// names it; effort as Claude's own level; Unrestricted as
-    /// `bypassPermissions`; an explicit tool list as `tools`, and an
-    /// inherited one by leaving `tools` out, which Claude reads as
-    /// inheriting the parent's tools. Restricted, and a model of
+    /// `bypassPermissions`. An explicit tool list is always given as
+    /// `tools`, an empty one as `[]`, which Claude Code 2.1.294 resolves
+    /// to no tools; only an inherited list leaves `tools` out, which
+    /// Claude reads as the parent's tools. Restricted, and a model of
     /// `inherit`, have no exact native counterpart and refuse.
     fn native_definition(&self) -> Result<serde_json::Value, RoleRefusal> {
         if self.model_id.eq_ignore_ascii_case("inherit") {
-            return Err(RoleRefusal::UnmappableField);
+            return Err(RoleRefusal::UnsupportedPolicy);
         }
         let effort = match self.effort {
             Effort::Low => "low",
@@ -273,7 +277,7 @@ impl ReadsVerifiedRole for VerifiedRole {
         };
         let permission_mode = match self.permission {
             Permission::Unrestricted => "bypassPermissions",
-            Permission::Restricted => return Err(RoleRefusal::UnmappableField),
+            Permission::Restricted => return Err(RoleRefusal::UnsupportedPolicy),
         };
         let mut definition = serde_json::json!({
             "description": self.description_text,
@@ -611,6 +615,27 @@ mod tests {
             Err(RoleRefusal::PayloadMismatch)
         );
 
+        let mut described = composed.clone();
+        described.description_text.push('x');
+        assert_eq!(
+            VerifiedRole::verified_role(selection(), described),
+            Err(RoleRefusal::PayloadMismatch)
+        );
+
+        let mut claimed = composed.clone();
+        claimed.description_payload_sha256 = "0".repeat(64);
+        assert_eq!(
+            VerifiedRole::verified_role(selection(), claimed),
+            Err(RoleRefusal::PayloadMismatch)
+        );
+
+        let mut surfaced = composed.clone();
+        surfaced.surface = Surface::CodexAgent;
+        assert_eq!(
+            VerifiedRole::verified_role(selection(), surfaced),
+            Err(RoleRefusal::RoleMismatch)
+        );
+
         let mut slice = composed.clone();
         slice.context_provenance_vector[2].rendered_sha256 = "0".repeat(64);
         assert_eq!(
@@ -652,7 +677,7 @@ mod tests {
         };
         assert_eq!(
             roles.agents_argument(address(Aspect::Psyche, "core", Layer::Tertiary)),
-            Err(RoleRefusal::UnmappableField)
+            Err(RoleRefusal::UnsupportedPolicy)
         );
         let fixture = FixtureRoles {
             roles: [("comment-relay".to_owned(), comment_relay())].into(),
@@ -663,8 +688,111 @@ mod tests {
             VerifiedRole::verified_role(selection(), inherit)
                 .unwrap()
                 .native_definition(),
-            Err(RoleRefusal::UnmappableField)
+            Err(RoleRefusal::UnsupportedPolicy)
         );
+    }
+
+    #[test]
+    fn a_policy_the_harness_cannot_carry_exactly_is_refused_as_unsupported() {
+        let fixture = FixtureRoles {
+            roles: [("comment-relay".to_owned(), comment_relay())].into(),
+        };
+        let composed = fixture.compose_role(selection()).unwrap();
+        let mut repeated = composed.clone();
+        repeated.role_tools = RoleTools::Explicit(vec!["Read".into(), "Read".into()]);
+        let mut unnamed = composed.clone();
+        unnamed.role_tools = RoleTools::Explicit(vec!["".into()]);
+        let mut modelless = composed.clone();
+        modelless.model_id = String::new();
+        let mut callerless = composed;
+        callerless.role_callers = RoleCallers::Only(Vec::new());
+        for unsupported in [repeated, unnamed, modelless, callerless] {
+            assert_eq!(
+                VerifiedRole::verified_role(selection(), unsupported),
+                Err(RoleRefusal::UnsupportedPolicy)
+            );
+        }
+    }
+
+    fn any_caller_role(model_id: &str, effort: Effort, tools: Vec<&str>) -> FixtureRole {
+        FixtureRole {
+            model_id: model_id.into(),
+            effort,
+            permission: Permission::Unrestricted,
+            modules: vec![
+                ("role-description".into(), "Role description.".into()),
+                ("spirit-core".into(), "Spirit body.".into()),
+                ("role-body".into(), "Role body.".into()),
+            ],
+            role_tools: RoleTools::Explicit(tools.into_iter().map(str::to_owned).collect()),
+            role_callers: RoleCallers::Any,
+        }
+    }
+
+    #[test]
+    fn a_verified_role_keeps_its_exact_tools_model_and_effort() {
+        let roles = SubagentRoles {
+            composer: RoleComposer::Fixture(FixtureRoles {
+                roles: [(
+                    "book".to_owned(),
+                    any_caller_role(
+                        "opus",
+                        Effort::Xhigh,
+                        vec!["Read", "Bash", "Agent", "Artifact"],
+                    ),
+                )]
+                .into(),
+            }),
+            names: vec!["book".into()],
+        };
+        let argument = roles
+            .agents_argument(address(Aspect::Mind, "anything", Layer::Quaternary))
+            .unwrap()
+            .expect("an Any-caller role is offered to every flow");
+        let agents: serde_json::Value = serde_json::from_str(&argument).unwrap();
+        let book = &agents["book"];
+        assert_eq!(book["model"], "opus");
+        assert_eq!(book["effort"], "xhigh");
+        assert_eq!(
+            book["tools"],
+            serde_json::json!(["Read", "Bash", "Agent", "Artifact"])
+        );
+    }
+
+    #[test]
+    fn an_empty_tool_list_is_given_as_no_tools_never_left_to_inherit() {
+        let roles = SubagentRoles {
+            composer: RoleComposer::Fixture(FixtureRoles {
+                roles: [(
+                    "illustrator".to_owned(),
+                    any_caller_role("sonnet", Effort::Medium, Vec::new()),
+                )]
+                .into(),
+            }),
+            names: vec!["illustrator".into()],
+        };
+        let argument = roles
+            .agents_argument(address(Aspect::Psyche, "core", Layer::Tertiary))
+            .unwrap()
+            .expect("offered");
+        let agents: serde_json::Value = serde_json::from_str(&argument).unwrap();
+        let illustrator = agents["illustrator"].as_object().unwrap();
+        assert_eq!(illustrator.get("tools"), Some(&serde_json::json!([])));
+
+        let mut inherited = any_caller_role("sonnet", Effort::Medium, Vec::new());
+        inherited.role_tools = RoleTools::Inherit;
+        let roles = SubagentRoles {
+            composer: RoleComposer::Fixture(FixtureRoles {
+                roles: [("illustrator".to_owned(), inherited)].into(),
+            }),
+            names: vec!["illustrator".into()],
+        };
+        let argument = roles
+            .agents_argument(address(Aspect::Psyche, "core", Layer::Tertiary))
+            .unwrap()
+            .expect("offered");
+        let agents: serde_json::Value = serde_json::from_str(&argument).unwrap();
+        assert!(agents["illustrator"].get("tools").is_none());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::HERDR_REQUEST_LINE_LIMIT;
-use crate::composition::{NamesRemoteControl, ValidatesComposedPrompt};
+use crate::composition::{FitsOneMessage, NamesRemoteControl, ValidatesComposedPrompt};
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
     DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
@@ -3419,11 +3419,86 @@ printf '%s\n' 123456
         );
         let (started, call) = start_call(unavailable);
         assert!(
-            started
-                .unwrap_err()
+            String::from(started.unwrap_err())
                 .contains("subagent roles were refused: ComposerUnavailable")
         );
         assert_eq!(call, None);
+    }
+
+    #[test]
+    fn a_claude_start_carries_each_roles_exact_policy_and_an_empty_tool_list_as_none() {
+        use crate::generated::curriculum::{Effort, Permission, RoleCallers, RoleTools};
+        let role = |model: &str, effort: Effort, tools: Vec<&str>, name: &str| {
+            (
+                name.to_owned(),
+                crate::role::FixtureRole {
+                    model_id: model.into(),
+                    effort,
+                    permission: Permission::Unrestricted,
+                    modules: vec![
+                        (
+                            format!("role-{name}-description"),
+                            format!("{name} description."),
+                        ),
+                        (format!("role-{name}"), format!("{name} body.")),
+                    ],
+                    role_tools: RoleTools::Explicit(tools.into_iter().map(str::to_owned).collect()),
+                    role_callers: RoleCallers::Any,
+                },
+            )
+        };
+        let roles = crate::role::SubagentRoles {
+            composer: crate::role::RoleComposer::Fixture(crate::role::FixtureRoles {
+                roles: [
+                    role(
+                        "sonnet",
+                        Effort::Medium,
+                        vec!["Read", "Bash", "Agent", "Artifact"],
+                        "book",
+                    ),
+                    role("opus", Effort::High, Vec::new(), "illustrator"),
+                ]
+                .into(),
+            }),
+            names: vec!["book".into(), "illustrator".into()],
+        };
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            "12345678-1234-4abc-8def-123456789abc",
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let adapter = adapter.with_subagent_roles(roles);
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        adapter
+            .start_native_harness(&launch, &pane, None)
+            .expect("started with its roles");
+        let calls = fs::read_to_string(root.path().join("calls")).expect("launch calls");
+        let call = calls
+            .lines()
+            .find(|line| line.contains("agent start"))
+            .expect("agent start");
+        assert_eq!(call.matches(" --agents ").count(), 1);
+        let (_, after) = call.split_once(" --agents ").unwrap();
+        let agents: serde_json::Value = serde_json::Deserializer::from_str(after)
+            .into_iter::<serde_json::Value>()
+            .next()
+            .expect("one agents object")
+            .expect("valid agents JSON");
+        let book = agents["book"].as_object().unwrap();
+        assert_eq!(book["model"], "sonnet");
+        assert_eq!(book["effort"], "medium");
+        assert_eq!(
+            book["tools"],
+            serde_json::json!(["Read", "Bash", "Agent", "Artifact"])
+        );
+        let illustrator = agents["illustrator"].as_object().unwrap();
+        assert_eq!(illustrator["model"], "opus");
+        assert_eq!(illustrator["effort"], "high");
+        assert_eq!(illustrator.get("tools"), Some(&serde_json::json!([])));
+        assert_eq!(agents.as_object().unwrap().len(), 2);
     }
 
     #[test]

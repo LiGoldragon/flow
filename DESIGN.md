@@ -39,8 +39,10 @@ renderings are exactly the description and the prompt, and one full revision
 per context repository across every role. The roles whose caller policy names
 the flow's Address exactly, case preserved, are given to the harness in one
 inline `--agents` JSON argument, each as `description`, `prompt`, `model`,
-`effort`, `permissionMode` and, for an explicit list, `tools`; a policy field
-with no native counterpart, or an unavailable Curriculum, refuses the spawn.
+`effort`, `permissionMode` and, for an explicit list, `tools`, which an empty
+list gives as `[]` so the role has no tools and never inherits; a policy with
+no exact native counterpart (`RoleRefusal::UnsupportedPolicy`), or an
+unavailable Curriculum, refuses the spawn.
 The offer is not the guard: `flow-hook` also runs on every PreToolUse of the
 Agent tool and denies a call naming a selected role unless it comes from the
 flow's main thread, sets neither `model` nor `effort`, and the calling flow,

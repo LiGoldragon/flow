@@ -107,7 +107,7 @@ pub trait LaysOutDefaults {
     /// The subagent roles a Claude flow is offered, by Curriculum role
     /// name; each is composed by Curriculum and offered only to the flows
     /// its caller policy permits.
-    const SUBAGENT_ROLES: [&str; 1] = ["comment-relay"];
+    const SUBAGENT_ROLES: [&str; 3] = ["comment-relay", "book", "illustrator"];
 
     fn home(&self) -> &Path;
     fn runtime_directory(&self) -> &Path;

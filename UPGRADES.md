@@ -1,3 +1,26 @@
+# Flow 0.35.12
+
+No wire change. Flow's own `role.ethos` refusal `RoleRefusal` names a policy
+the harness cannot carry exactly `UnsupportedPolicy`.
+
+- **A Claude spawn consumes Curriculum `ComposeRole`.** At a start, a fresh
+  wake and a resume, the Nexus asks Curriculum for each role
+  `LaysOutDefaults::SUBAGENT_ROLES` names (`comment-relay`, `book`,
+  `illustrator`) on the `ClaudeAgent` surface, verifies the answer's role,
+  surface, payload SHA-256s, manifest and provenance, and gives the roles
+  whose caller policy permits the flow's Address to Claude as one inline
+  `--agents` JSON argument, with the role's model, effort and tools exactly
+  as declared.
+- **An empty tool list is no tools.** `Explicit.[]` is given as `"tools": []`,
+  which Claude Code 2.1.294 resolves to no tools; only `Inherit` leaves
+  `tools` out.
+- **A policy with no exact native counterpart refuses the spawn** as
+  `UnsupportedPolicy`: a Restricted permission, an empty or `inherit` model,
+  an empty or repeated tool name, or an empty caller list.
+- **The roles count toward the typed command's 4095 bytes.** Claude Code
+  2.1.294 takes `--agents` from a file only with `--print`, so a start whose
+  roles take the command past the limit is refused before Herdr.
+
 # Flow 0.35.11
 
 No wire change. The store adds one table, `flow_nexus_launch_cleanups`; a

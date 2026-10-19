@@ -9,7 +9,7 @@ pub enum RoleRefusal {
     PayloadMismatch,
     ManifestMismatch,
     ProvenanceMismatch,
-    UnmappableField,
+    UnsupportedPolicy,
 }
 #[rustfmt::skip]
 pub type SubagentRoleNames = std::vec::Vec<String>;

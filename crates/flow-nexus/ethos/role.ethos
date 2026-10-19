@@ -25,7 +25,10 @@ Library
                 PayloadMismatch
                 ManifestMismatch
                 ProvenanceMismatch
-                UnmappableField ]
+                ; A policy Flow cannot give the harness exactly: a Restricted
+                ; permission, an empty or inherited model, an empty or
+                ; repeated tool name, or an empty caller list.
+                UnsupportedPolicy ]
   ; The roles a Claude flow is offered, by role name.
   SubagentRoleNames.Vector<String>
   ; What one PreToolUse Agent call asks, as the hook reads it.

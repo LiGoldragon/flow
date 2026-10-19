@@ -215,10 +215,11 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flow"
-version = "0.35.13"
+version = "0.35.18"
 dependencies = [
  "datom-codec",
  "flow-defaults",
+ "flow-native",
  "protos",
  "rkyv",
  "serde_json",
@@ -228,11 +229,11 @@ dependencies = [
 
 [[package]]
 name = "flow-defaults"
-version = "0.35.13"
+version = "0.35.18"
 
 [[package]]
 name = "flow-ethos"
-version = "0.35.13"
+version = "0.35.18"
 dependencies = [
  "datom-codec",
  "ethos-zero 17.0.0",
@@ -242,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "flow-meta"
-version = "0.35.13"
+version = "0.35.18"
 dependencies = [
  "datom-codec",
  "flow-defaults",
@@ -254,14 +255,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "flow-native"
+version = "0.35.18"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "flow-nexus"
-version = "0.35.13"
+version = "0.35.18"
 dependencies = [
  "base64",
  "datom-codec",
  "ethos-zero 17.0.0",
  "flow-defaults",
  "flow-ethos",
+ "flow-native",
  "libc",
  "meta-signal-flow",
  "notify",
@@ -432,8 +441,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "25.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=6fac14ea5f3f8bb9e659f90439771ef1fcb99985#6fac14ea5f3f8bb9e659f90439771ef1fcb99985"
+version = "27.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=980d68901de17cce4517e99c4cd77d2030c02c58#980d68901de17cce4517e99c4cd77d2030c02c58"
 dependencies = [
  "datom-codec",
  "ethos-zero 17.0.0",
@@ -770,7 +779,7 @@ dependencies = [
 [[package]]
 name = "signal-flow"
 version = "21.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=f50640f7e3c69d661b7fe2902a5c785a2c598255#f50640f7e3c69d661b7fe2902a5c785a2c598255"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=5af382811bb8224de672f8ea95937d44e15dae3c#5af382811bb8224de672f8ea95937d44e15dae3c"
 dependencies = [
  "datom-codec",
  "ethos-zero 17.0.0",

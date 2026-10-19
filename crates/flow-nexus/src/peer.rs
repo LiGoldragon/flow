@@ -12,12 +12,12 @@
 //! mistakes, not an adversary (F4).
 
 use crate::RunningNexus;
-use crate::binding::ChecksProcessIdentity;
+use crate::binding::{ChecksProcessIdentity, ReadsProcessIdentity};
 use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ReadsProcess, ResolvesCaller};
 use crate::store::ManagesMetaflowState;
 use crate::store::ReadsFlowRoles;
 use crate::store::delivery::RecordsDeliveries;
-use meta_signal_flow::{MetaRefusal, ProcessIdentity, Response};
+use meta_signal_flow::{MetaRefusal, ProcessIdentity, ResolverIdentity, Response};
 use signal_flow::CallerResolutionRejection;
 use std::fs;
 
@@ -89,6 +89,28 @@ impl AdmitsMetaPeer for RunningNexus {
         } else {
             Some(MetaRefusal::PeerNotAuthorized(caller))
         }
+    }
+}
+
+/// Who the admitted meta peer is, for the records that name who asked.
+pub trait NamesMetaPeer {
+    /// The peer's process, and the flow it runs in when it runs in one; None
+    /// when the process cannot be read.
+    fn meta_resolver(&self, peer: Option<CallerProcess>) -> Option<ResolverIdentity>;
+}
+
+impl NamesMetaPeer for RunningNexus {
+    fn meta_resolver(&self, peer: Option<CallerProcess>) -> Option<ResolverIdentity> {
+        let peer = peer?;
+        let process_identity = ProcessIdentity::of(peer.process_id)?;
+        let flow_id_option = match self.resolve_caller(peer.caller_pane(&self.herdr), None) {
+            signal_flow::Response::CallerResolved(caller) => Some(caller.flow_id),
+            _ => None,
+        };
+        Some(ResolverIdentity {
+            process_identity,
+            flow_id_option,
+        })
     }
 }
 

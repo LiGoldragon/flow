@@ -24,6 +24,7 @@ pub mod binding;
 pub mod caller;
 pub mod claude;
 pub mod codex;
+pub mod codex_turns;
 pub mod composition;
 pub mod context;
 pub mod delivery;
@@ -62,7 +63,7 @@ use generated::operation::{Operation, Outcome, Record_Data};
 use generated::starter::DerivesOrigin;
 use launching::{LaunchesFlows, ObservesLaunch};
 use observe_agent::ObservesAgent;
-use peer::{AdmitsMetaPeer, ResolvesPeer};
+use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
 use send_tool::ServesLaunchCalls;
@@ -112,6 +113,9 @@ pub struct RunningNexus {
     /// The send-tool responder of the Codex launch running now; see
     /// `send_tool::ServesLaunchCalls`.
     pub launch_calls: send_tool::LaunchCalls,
+    /// Whether each Codex thread is in a turn, as its app-server's events
+    /// show it; see `codex_turns`.
+    pub codex_turns: codex_turns::CodexTurns,
 }
 
 pub trait Dispatches {
@@ -121,7 +125,17 @@ pub trait Dispatches {
     }
     /// A query from `origin`, the calling process as the Nexus derived it.
     fn dispatch_from(&self, query: Query, origin: Origin) -> Response;
-    fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response;
+    /// A meta query with no peer behind it: one that records who asked is
+    /// refused as PeerUnknown.
+    fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
+        self.dispatch_meta_from(query, None)
+    }
+    /// A meta query from `resolver`, the meta peer as the Nexus read it.
+    fn dispatch_meta_from(
+        &self,
+        query: meta_signal_flow::Query,
+        resolver: Option<meta_signal_flow::ResolverIdentity>,
+    ) -> meta_signal_flow::Response;
 }
 
 impl Dispatches for RunningNexus {
@@ -214,11 +228,6 @@ impl Dispatches for RunningNexus {
             }
             // A dispatch without a connection has no peer to read.
             Query::ResolveCaller(claim) => self.resolve_caller(None, claim),
-            // Flow holds no turn-end queue yet, so nothing is enqueued and
-            // the request is refused rather than acknowledged.
-            Query::QueueTurnEnd(_) => {
-                Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
-            }
             Query::Report(report) => self.report(report),
             Query::Current(address) => {
                 self.store
@@ -241,7 +250,11 @@ impl Dispatches for RunningNexus {
         }
     }
 
-    fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
+    fn dispatch_meta_from(
+        &self,
+        query: meta_signal_flow::Query,
+        resolver: Option<meta_signal_flow::ResolverIdentity>,
+    ) -> meta_signal_flow::Response {
         match query {
             meta_signal_flow::Query::Configuration => match self.store.configuration_snapshot() {
                 Ok(Some(snapshot)) => meta_signal_flow::Response::Configuration(snapshot),
@@ -264,6 +277,11 @@ impl Dispatches for RunningNexus {
                     Err(store::StoreError::CodexModelsOverlap) => {
                         meta_signal_flow::Response::ConfigureRejected(
                             meta_signal_flow::ConfigureRejection::CodexModelsOverlap,
+                        )
+                    }
+                    Err(store::StoreError::LeaveOutNotForHarness) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::LeaveOutNotForHarness,
                         )
                     }
                     Err(error) => meta_signal_flow::Response::Refused(
@@ -448,6 +466,15 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::Command(request) => self.command(request),
             meta_signal_flow::Query::ResolvePeer(identity) => self.resolve_peer(&identity),
             meta_signal_flow::Query::ReadEvents(flow_id) => self.read_events(flow_id),
+            meta_signal_flow::Query::ReadQueueDeliveries(address) => {
+                self.read_queue_deliveries(address)
+            }
+            meta_signal_flow::Query::ResolveQueueDelivery(resolution) => match resolver {
+                Some(resolver) => self.resolve_queue_delivery(resolution, resolver),
+                None => meta_signal_flow::Response::MetaRefused(
+                    meta_signal_flow::MetaRefusal::PeerUnknown,
+                ),
+            },
             meta_signal_flow::Query::Refresh(address) => self.refresh(address),
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
                 if !self.herdr.validate_registration(&flow_node) {
@@ -528,6 +555,7 @@ impl OpensRunningNexus for RunningNexus {
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
             stopping: Stopping::default(),
             launch_calls: send_tool::LaunchCalls::default(),
+            codex_turns: codex_turns::CodexTurns::default(),
         })
     }
 }
@@ -635,9 +663,13 @@ impl ServesConnection for Connection {
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
         let query = self.peer.read_meta_query()?;
         // The peer is read from the kernel; nothing in the query names it.
-        let response = match nexus.meta_refusal(self.peer.peer_process()) {
+        let peer = self.peer.peer_process();
+        let response = match nexus.meta_refusal(peer) {
             Some(refusal) => meta_signal_flow::Response::MetaRefused(refusal),
-            None => nexus.dispatch_meta_serially(query),
+            None => {
+                let resolver = nexus.meta_resolver(peer);
+                nexus.dispatch_meta_serially(query, resolver)
+            }
         };
         self.peer.write_meta_response(&response)?;
         drop(self);
@@ -972,7 +1004,11 @@ trait DispatchesSerially {
     /// Store transitions are read-modify-write; one dispatch runs at a time
     /// across both sockets while frames are read concurrently.
     fn dispatch_serially(&self, query: Query, origin: Origin) -> Response;
-    fn dispatch_meta_serially(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response;
+    fn dispatch_meta_serially(
+        &self,
+        query: meta_signal_flow::Query,
+        resolver: Option<meta_signal_flow::ResolverIdentity>,
+    ) -> meta_signal_flow::Response;
 }
 
 impl DispatchesSerially for RunningNexus {
@@ -1003,12 +1039,25 @@ impl DispatchesSerially for RunningNexus {
         }
     }
 
-    fn dispatch_meta_serially(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.dispatch_meta(query)
+    fn dispatch_meta_serially(
+        &self,
+        query: meta_signal_flow::Query,
+        resolver: Option<meta_signal_flow::ResolverIdentity>,
+    ) -> meta_signal_flow::Response {
+        let response = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.dispatch_meta_from(query, resolver)
+        };
+        // A resolution that committed leaves the oldest request queued (Absent)
+        // or the next one oldest (Delivered): a seat already resting gets no
+        // turn end, so it is handed that request now, the gate given back.
+        if let meta_signal_flow::Response::QueueDeliveryResolved(resolved) = &response {
+            self.drain_after_resolution(&resolved.address);
+        }
+        response
     }
 }
 
@@ -1103,6 +1152,7 @@ mod tests {
     mod delivery;
     mod launching_nexus;
     mod model;
+    mod queue_drain;
     mod reservation;
     mod send_tool;
     mod submission;
@@ -1189,6 +1239,9 @@ mod tests {
     enum PromptFixture<'a> {
         /// The text is typed and the reply is `agent_prompted` for this pane.
         Prompted(&'a str),
+        /// As Prompted, but a Claude seat's transcript records nothing yet:
+        /// its receipt comes later, from its hook or its transcript.
+        PromptedUnrecorded(&'a str),
         /// This error code is answered before any text is typed.
         RefusedBeforeInput(&'a str),
         /// The text is typed, then this error code is answered.
@@ -1196,15 +1249,28 @@ mod tests {
     }
 
     impl PromptFixture<'_> {
-        fn shell(&self, typed: &std::path::Path, agents: &[serde_json::Value]) -> String {
-            let typing = format!("printf '%s' \"$6\" >> '{}'", typed.display());
+        fn shell(
+            &self,
+            typed: &std::path::Path,
+            agents: &[serde_json::Value],
+            claude_receipt: Option<(&std::path::Path, &str)>,
+        ) -> String {
+            let mut typing = format!("printf '%s' \"$6\" >> '{}'", typed.display());
+            if let Some((transcript, session)) = claude_receipt
+                && !matches!(self, Self::PromptedUnrecorded(_))
+            {
+                typing.push_str(&format!(
+                    "; escaped=$(printf '%s' \"$6\" | sed ':a;N;$!ba;s/\\\\/\\\\\\\\/g;s/\"/\\\\\"/g;s/\\n/\\\\n/g'); printf '{{\"type\":\"user\",\"sessionId\":\"{session}\",\"uuid\":\"fixture-receipt\",\"message\":{{\"content\":\"%s\"}}}}\\n' \"$escaped\" >> '{}'",
+                    transcript.display()
+                ));
+            }
             let error = |code: &str| {
                 format!(
                     "printf '%s\\n' '{{\"id\":\"cli:agent:prompt\",\"error\":{{\"code\":\"{code}\",\"message\":\"fixture\"}}}}' >&2; exit 1"
                 )
             };
             match self {
-                Self::Prompted(pane) => {
+                Self::Prompted(pane) | Self::PromptedUnrecorded(pane) => {
                     // Herdr answers with the prompted pane's own AgentInfo,
                     // which the roster already holds; a pane the roster does
                     // not know is answered with its id alone, as a reply
@@ -1610,6 +1676,7 @@ mod tests {
                 stopped_at_confirmation: crate::waking::StoppedAtConfirmation::default(),
                 stopping: crate::Stopping::default(),
                 launch_calls: crate::send_tool::LaunchCalls::default(),
+                codex_turns: crate::codex_turns::CodexTurns::default(),
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");
@@ -1737,12 +1804,26 @@ mod tests {
             });
             let log = self.directory.path().join("herdr-operations.log");
             let typed = self.directory.path().join("pane-typed.txt");
+            let claude_session = agents.iter().find_map(|agent| {
+                let session = agent.pointer("/agent_session/value")?.as_str()?;
+                (agent.pointer("/agent_session/agent")?.as_str()? == "claude").then_some(session)
+            });
+            let claude_transcript = claude_session.map(|session| {
+                self.directory
+                    .path()
+                    .join("native-transcripts/claude/-home-li-primary")
+                    .join(format!("{session}.jsonl"))
+            });
             let body = format!(
                 "#!/bin/sh\n{}\ncase \"$3 $4\" in\n  \"api snapshot\") printf '%s\\n' '{}' ;;\n  \"agent prompt\") printf '%s\\n' \"$*\" >> '{}'; {} ;;\n  \"pane close\"|\"pane send-keys\"|\"agent wait\") printf '%s\\n' \"$*\" >> '{}' ;;\n  \"agent read\") printf '%s\\n' '❯ ' '› ' ;;\n  *) exit 64 ;;\nesac\n",
                 self.session_listing(),
                 snapshot,
                 log.display(),
-                prompt.shell(&typed, &agents),
+                prompt.shell(
+                    &typed,
+                    &agents,
+                    claude_transcript.as_deref().zip(claude_session),
+                ),
                 log.display(),
             );
             FixtureExecutable {
@@ -3117,30 +3198,19 @@ mod tests {
             report("908786", Event::ToolUsed("Bash".into())),
             Response::Reported
         );
-        assert_eq!(report("908786", Event::Stopped), Response::Reported);
+        let stop = Event::Stopped(signal_flow::NativeStop {
+            native_session_id_option: Some("other-session".into()),
+            transcript_path_option: None,
+        });
+        assert_eq!(report("908786", stop.clone()), Response::Reported);
         assert_eq!(
             fixture
                 .nexus
                 .dispatch_meta(meta_signal_flow::Query::ReadEvents("908786".into())),
             meta_signal_flow::Response::EventsRead(meta_signal_flow::EventsRead_Data {
                 flow_id: "908786".into(),
-                event_vector: vec![
-                    Event::Started,
-                    Event::ToolUsed("Bash".into()),
-                    Event::Stopped
-                ],
+                event_vector: vec![Event::Started, Event::ToolUsed("Bash".into()), stop],
             })
-        );
-        // Stop's turn-end wakeup stays refused: Flow holds no turn-end queue.
-        assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::QueueTurnEnd(signal_flow::TurnEndRequest {
-                    session_id: "s".into(),
-                    turn_id: "t".into(),
-                    transcript_path_option: None,
-                })),
-            Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
         );
     }
 
@@ -4854,20 +4924,6 @@ mod tests {
         // Herdr reused the pane ID for a new terminal: the binding is gone.
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-new")]);
         assert_eq!(fixture.nexus.resolve_caller(pane("pane-1"), None), unknown);
-    }
-
-    #[test]
-    fn a_turn_end_is_refused_while_flow_holds_no_queue() {
-        let fixture = NexusFixture::new();
-        let request = signal_flow::TurnEndRequest {
-            session_id: "session-1".into(),
-            turn_id: "turn-2".into(),
-            transcript_path_option: None,
-        };
-        assert_eq!(
-            fixture.nexus.dispatch(Query::QueueTurnEnd(request)),
-            Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
-        );
     }
 
     #[test]

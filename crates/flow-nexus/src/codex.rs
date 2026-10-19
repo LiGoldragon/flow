@@ -193,6 +193,104 @@ pub trait SubmitsBoundCodexPart {
     ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable>;
 }
 
+/// The app-server receipt for one queued request submitted as a new turn.
+/// The JSON-RPC id is chosen by the durable delivery attempt; the returned
+/// turn id is the native fact that the app-server accepted that attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedTurnReceipt {
+    pub native_request_id: u64,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub native_receipt: String,
+}
+
+/// Submits queued work to an existing Codex thread through the supported
+/// app-server protocol. This never types into the attached terminal pane.
+pub trait SubmitsQueuedCodexTurn {
+    fn submit_queued_turn(
+        &self,
+        thread_id: &str,
+        attempt_id: &str,
+        native_request_id: u64,
+        text: &str,
+    ) -> Result<QueuedTurnReceipt, CodexAdapterUnavailable>;
+}
+
+/// What a Codex thread's own history shows of one queued turn, read after
+/// the newest turn the thread had before `turn/start`.
+///
+/// Codex 0.158.0-alpha.9's app-server returns a turn as `{ id, items,
+/// itemsView, status, error, startedAt, completedAt, durationMs }`: neither
+/// the `turnTrigger` a `turn/start` names nor its JSON-RPC id is kept in
+/// thread history (witnessed in `app-server-protocol` v2 `Turn` and
+/// `turn_input.rs`, where the trigger only reaches turn metadata). What
+/// history does keep is the turn's `userMessage` item, so the provable
+/// receipt is the one turn after the anchor whose user input is exactly the
+/// queued text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexTurnHistory {
+    /// Exactly one turn after the anchor carries the text; `resting` when
+    /// that turn is completed and the thread idle.
+    Received {
+        turn_id: String,
+        turn: String,
+        resting: bool,
+    },
+    /// Every turn after the anchor was read and none carries the text;
+    /// `resting` is whether `thread/read` answered the thread idle.
+    Unseen { resting: bool, observation: String },
+    /// The anchor turn is not in the thread's history.
+    AnchorMissing,
+    /// More than one turn after the anchor carries the text.
+    Ambiguous,
+}
+
+/// Reads a thread's turns from its app-server, for the anchor a queued
+/// turn is prepared with and for its reconciliation.
+pub trait ReadsCodexTurnHistory {
+    /// How many turns one `thread/turns/list` page asks for.
+    const HISTORY_PAGE: u64 = 16;
+    /// How many pages a reconciliation reads before it calls the anchor
+    /// missing.
+    const HISTORY_PAGES: u64 = 16;
+    /// The thread's newest turn, None when it has none.
+    fn newest_turn(&self, thread_id: &str) -> Result<Option<String>, CodexAdapterUnavailable>;
+    /// What the thread's history after `anchor` shows of `text`.
+    fn queued_turn_after(
+        &self,
+        thread_id: &str,
+        anchor: Option<&str>,
+        text: &str,
+    ) -> Result<CodexTurnHistory, CodexAdapterUnavailable>;
+}
+
+/// Whether one app-server turn's user input is exactly a text.
+pub trait CarriesUserText {
+    fn carries_user_text(&self, text: &str) -> bool;
+}
+
+impl CarriesUserText for serde_json::Value {
+    fn carries_user_text(&self, text: &str) -> bool {
+        self.get("items")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("type").and_then(serde_json::Value::as_str) == Some("userMessage")
+                        && item
+                            .get("content")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|content| {
+                                matches!(content.as_slice(), [only]
+                                    if only.get("type").and_then(serde_json::Value::as_str)
+                                        == Some("text")
+                                        && only.get("text").and_then(serde_json::Value::as_str)
+                                            == Some(text))
+                            })
+                })
+            })
+    }
+}
+
 /// Opens a launch's Codex thread through the app-server before any TUI
 /// attaches to it: the thread starts with the composed system prompt as its
 /// base instructions and the launch's exclusions in its config, what the
@@ -958,6 +1056,17 @@ impl OpensCodexThread for CodexAdapter {
             })?
             .to_owned();
         Self::read_back_thread(launch, &thread, "thread/start", &started)?;
+        connection.subscription.thread = Some(thread.clone());
+        let ThreadConnection {
+            subscription,
+            inbox,
+            ..
+        } = &mut connection;
+        let mut ask = |id: u64, method: &str, params: serde_json::Value| {
+            subscription
+                .exchange(inbox, id, method, params)
+                .map_err(<CodexAdapterUnavailable as EndsSubscription>::ended)
+        };
         if let Err(refusal) = before_first_turn(&thread) {
             let _ = ask(
                 3,
@@ -1043,6 +1152,207 @@ impl SubmitsBoundCodexPart for CodexAdapter {
                 session.request(3, "turn/start", params, self.timeout)?;
             }
             Ok(PromptDeliveryResult::Ambiguous(intent.clone()))
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+
+impl SubmitsQueuedCodexTurn for CodexAdapter {
+    fn submit_queued_turn(
+        &self,
+        thread_id: &str,
+        attempt_id: &str,
+        native_request_id: u64,
+        text: &str,
+    ) -> Result<QueuedTurnReceipt, CodexAdapterUnavailable> {
+        if thread_id.is_empty() || attempt_id.is_empty() || native_request_id < 3 {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "queued turn identity is incomplete".into(),
+            ));
+        }
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            let resumed = session.request(
+                2,
+                "thread/resume",
+                serde_json::json!({ "threadId": thread_id }),
+                self.timeout,
+            )?;
+            if resumed
+                .pointer("/thread/id")
+                .and_then(serde_json::Value::as_str)
+                != Some(thread_id)
+            {
+                return Err(CodexAdapterUnavailable::Protocol(
+                    "thread/resume returned another thread".into(),
+                ));
+            }
+            let accepted = session.request(
+                native_request_id,
+                "turn/start",
+                serde_json::json!({
+                    "threadId": thread_id,
+                    "input": [{
+                        "type": "text",
+                        "text": text,
+                        "text_elements": []
+                    }],
+                    "turnTrigger": format!("flow-nexus:{attempt_id}")
+                }),
+                self.timeout,
+            )?;
+            let turn_id = accepted
+                .pointer("/turn/id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|turn| !turn.is_empty())
+                .ok_or_else(|| {
+                    CodexAdapterUnavailable::Protocol("turn/start returned no turn id".into())
+                })?
+                .to_owned();
+            Ok(QueuedTurnReceipt {
+                native_request_id,
+                thread_id: thread_id.to_owned(),
+                turn_id,
+                native_receipt: accepted.to_string(),
+            })
+        })();
+        session.stop_proxy();
+        result
+    }
+}
+
+impl ReadsCodexTurnHistory for CodexAdapter {
+    fn newest_turn(&self, thread_id: &str) -> Result<Option<String>, CodexAdapterUnavailable> {
+        let mut session = self.initialize_bound_session()?;
+        let result = session
+            .request(
+                2,
+                "thread/turns/list",
+                serde_json::json!({
+                    "threadId": thread_id,
+                    "limit": 1,
+                    "sortDirection": "desc",
+                    "itemsView": "notLoaded"
+                }),
+                self.timeout,
+            )
+            .and_then(|listed| {
+                let turns = listed
+                    .get("data")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| {
+                        CodexAdapterUnavailable::Protocol("thread/turns/list has no data".into())
+                    })?;
+                match turns.first() {
+                    None => Ok(None),
+                    Some(turn) => turn
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|turn| !turn.is_empty())
+                        .map(|turn| Some(turn.to_owned()))
+                        .ok_or_else(|| {
+                            CodexAdapterUnavailable::Protocol("a listed turn has no id".into())
+                        }),
+                }
+            });
+        session.stop_proxy();
+        result
+    }
+
+    fn queued_turn_after(
+        &self,
+        thread_id: &str,
+        anchor: Option<&str>,
+        text: &str,
+    ) -> Result<CodexTurnHistory, CodexAdapterUnavailable> {
+        let mut session = self.initialize_bound_session()?;
+        let result = (|| {
+            let read = session.request(
+                2,
+                "thread/read",
+                serde_json::json!({ "threadId": thread_id, "includeTurns": false }),
+                self.timeout,
+            )?;
+            if read
+                .pointer("/thread/id")
+                .and_then(serde_json::Value::as_str)
+                != Some(thread_id)
+            {
+                return Err(CodexAdapterUnavailable::Protocol(
+                    "thread/read returned another thread".into(),
+                ));
+            }
+            let status = read.pointer("/thread/status").cloned().unwrap_or_default();
+            let resting = crate::codex_turns::ReadsThreadStatus::thread_status(&status)
+                == Some(crate::codex_turns::ThreadStatus::Idle);
+            let mut matched = Vec::new();
+            let mut anchor_seen = anchor.is_none();
+            let mut read_turns = 0_u64;
+            let mut cursor: Option<String> = None;
+            'pages: for page in 0..Self::HISTORY_PAGES {
+                let mut params = serde_json::json!({
+                    "threadId": thread_id,
+                    "limit": Self::HISTORY_PAGE,
+                    "sortDirection": "desc",
+                    "itemsView": "full"
+                });
+                if let Some(cursor) = &cursor {
+                    params["cursor"] = serde_json::Value::String(cursor.clone());
+                }
+                let listed =
+                    session.request(3 + page, "thread/turns/list", params, self.timeout)?;
+                let turns = listed
+                    .get("data")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| {
+                        CodexAdapterUnavailable::Protocol("thread/turns/list has no data".into())
+                    })?;
+                for turn in turns {
+                    let turn_id = turn
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|turn| !turn.is_empty())
+                        .ok_or_else(|| {
+                            CodexAdapterUnavailable::Protocol("a listed turn has no id".into())
+                        })?;
+                    if Some(turn_id) == anchor {
+                        anchor_seen = true;
+                        break 'pages;
+                    }
+                    read_turns += 1;
+                    if turn.carries_user_text(text) {
+                        let completed = turn.get("status").and_then(serde_json::Value::as_str)
+                            == Some("completed");
+                        matched.push((turn_id.to_owned(), turn.to_string(), completed));
+                    }
+                }
+                match listed.get("nextCursor").and_then(serde_json::Value::as_str) {
+                    Some(next) if !next.is_empty() => cursor = Some(next.to_owned()),
+                    _ => break,
+                }
+            }
+            if !anchor_seen {
+                return Ok(CodexTurnHistory::AnchorMissing);
+            }
+            Ok(match matched.len() {
+                0 => CodexTurnHistory::Unseen {
+                    resting,
+                    observation: format!(
+                        "thread/read {status}; {read_turns} turn(s) after {} carry no such user message",
+                        anchor.unwrap_or("the thread's start")
+                    ),
+                },
+                1 => {
+                    let (turn_id, turn, completed) = matched.remove(0);
+                    CodexTurnHistory::Received {
+                        turn_id,
+                        turn,
+                        resting: resting && completed,
+                    }
+                }
+                _ => CodexTurnHistory::Ambiguous,
+            })
         })();
         session.stop_proxy();
         result
@@ -1194,12 +1504,16 @@ pub(crate) enum SubscriptionEnd {
 /// experimental API once the app-server was shown to gate the send tool on
 /// it, then `thread/resume`d, which subscribes it to the thread's server
 /// requests, a call left pending replayed to it. It starts no turn and
-/// carries no model content. `early` holds the server requests that arrived
-/// before the resume was answered.
+/// carries no model content. `early` holds the server requests and
+/// notifications that arrived while a request of its own was answered.
+/// `thread` is the one thread it is subscribed to, once known; `resumed`
+/// is the thread status the app-server answered its `thread/resume` with.
 pub(crate) struct ThreadSubscription {
     pub(crate) proxy: ProxyChild,
     pub(crate) generation: u64,
     pub(crate) early: Vec<serde_json::Value>,
+    pub(crate) thread: Option<String>,
+    pub(crate) resumed: Option<serde_json::Value>,
     timeout: Duration,
 }
 
@@ -1229,8 +1543,8 @@ pub(crate) trait ExchangesOnSubscription {
         inbox: &Receiver<ResponderSignal>,
         deadline: Option<Instant>,
     ) -> Result<ProxyEvent, SubscriptionEnd>;
-    /// One request and its answer; a server request met meanwhile is kept
-    /// in `early`, a notification dropped.
+    /// One request and its answer; a server request or a notification met
+    /// meanwhile is kept in `early`, in the order it came.
     fn exchange(
         &mut self,
         inbox: &Receiver<ResponderSignal>,
@@ -1303,9 +1617,7 @@ impl ExchangesOnSubscription for ThreadSubscription {
                 ProxyEvent::Upgraded | ProxyEvent::Ping(_) => continue,
             };
             if message.get("method").is_some() {
-                if message.get("id").is_some() {
-                    self.early.push(message);
-                }
+                self.early.push(message);
                 continue;
             }
             if message.get("id") != Some(&serde_json::json!(id)) {
@@ -1356,6 +1668,8 @@ impl SubscribesThread for CodexAdapter {
             proxy,
             generation,
             early: Vec::new(),
+            thread: None,
+            resumed: None,
             timeout: self.timeout,
         };
         let connected = (|| {
@@ -1407,7 +1721,11 @@ impl SubscribesThread for CodexAdapter {
             "thread/resume",
             serde_json::json!({ "threadId": thread, "excludeTurns": true }),
         ) {
-            Ok(_) => Ok(subscription),
+            Ok(response) => {
+                subscription.thread = Some(thread.to_owned());
+                subscription.resumed = response.pointer("/thread/status").cloned();
+                Ok(subscription)
+            }
             Err(end) => {
                 subscription.close();
                 Err(end)
@@ -1821,6 +2139,97 @@ mod tests {
             ),
         };
         (launch, intent)
+    }
+
+    /// A reconciliation reads the thread's status, then its turns newest
+    /// first, page by page through the cursor the app-server gives, and
+    /// stops at the anchor: only a turn after it can be the queued one.
+    #[test]
+    fn a_queued_turn_is_read_from_history_after_its_anchor_page_by_page() {
+        let _serial = FAKE_PROXY_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let turn = |id: &str, status: &str, text: &str| {
+            serde_json::json!({"id": id, "status": status, "items": [{
+                "type": "userMessage", "id": "m", "clientId": null,
+                "content": [{"type": "text", "text": text, "text_elements": []}]
+            }]})
+        };
+        let frames = [
+            FakeProxy.websocket_frame(r#"{"id":1,"result":{}}"#),
+            FakeProxy.websocket_frame(
+                r#"{"id":2,"result":{"thread":{"id":"thread-q","status":{"type":"idle"}}}}"#,
+            ),
+            FakeProxy.websocket_frame(
+                &serde_json::json!({"id":3,"result":{"data":[
+                    turn("turn-3", "completed", "later work")
+                ],"nextCursor":"page-2"}})
+                .to_string(),
+            ),
+            FakeProxy.websocket_frame(
+                &serde_json::json!({"id":4,"result":{"data":[
+                    turn("turn-2", "completed", "the queued text"),
+                    turn("turn-1", "completed", "the queued text")
+                ],"nextCursor":"page-3"}})
+                .to_string(),
+            ),
+        ];
+        let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
+        let history = adapter_at(executable)
+            .queued_turn_after("thread-q", Some("turn-1"), "the queued text")
+            .unwrap();
+        let CodexTurnHistory::Received {
+            turn_id, resting, ..
+        } = history
+        else {
+            panic!("one turn after the anchor carries it: {history:?}")
+        };
+        assert_eq!(turn_id, "turn-2");
+        assert!(resting);
+        let requests = record.requests(5);
+        let methods = requests
+            .iter()
+            .filter_map(|request| request["method"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "initialized",
+                "thread/read",
+                "thread/turns/list",
+                "thread/turns/list"
+            ]
+        );
+        assert_eq!(requests[3]["params"]["sortDirection"], "desc");
+        assert_eq!(requests[3]["params"]["itemsView"], "full");
+        assert_eq!(requests[4]["params"]["cursor"], "page-2");
+    }
+
+    #[test]
+    fn a_turn_carries_only_its_exact_single_text_user_message() {
+        let turn = |content: serde_json::Value| {
+            serde_json::json!({"items": [
+                {"type": "agentMessage", "text": "the text"},
+                {"type": "userMessage", "content": content}
+            ]})
+        };
+        assert!(
+            turn(serde_json::json!([{"type": "text", "text": "the text"}]))
+                .carries_user_text("the text")
+        );
+        assert!(
+            !turn(serde_json::json!([{"type": "text", "text": "the text\n"}]))
+                .carries_user_text("the text")
+        );
+        assert!(
+            !turn(serde_json::json!([
+                {"type": "text", "text": "the text"},
+                {"type": "localImage", "path": "/a.png"}
+            ]))
+            .carries_user_text("the text")
+        );
+        assert!(!serde_json::json!({"items": []}).carries_user_text("the text"));
     }
 
     #[test]

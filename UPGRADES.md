@@ -23,6 +23,117 @@ written before opens with it added and holding none.
   script that execs it:
   `flow-meta 'Configure.SendServers.[ { /nix/store/…-codex/bin/codex /nix/store/…/bin/<send-server> } ]'`.
 
+# Flow 0.35.18
+
+meta-signal-flow 27.0.0 (980d689): every meta-wire peer repins. The meta wire
+adds `ResolveQueueDelivery.{ QueueAttemptId [ Delivered Absent ]
+QueueResolutionReason }`, answered `QueueDeliveryResolved.{ Address
+QueueDeliveryResolution }` or `ResolveQueueDeliveryRejected.[ UnknownAttempt
+NotUncertain NotOldest EmptyReason StoreRefused ]`, and
+`ReadQueueDeliveries` lists a resolved attempt as `Resolved.{ outcome
+resolver reason time }`. The queue-delivery attempt family moves to v4.
+
+- **The owner resolves a stuck hand-over.** A Claude hand-over whose absence
+  cannot be proven stays Uncertain and blocks its address's queue. The owner
+  names it by its attempt id: `Delivered` settles it and the request leaves
+  the queue; `Absent` authorises a new attempt, which the next turn end hands
+  over. Flow records the outcome, the requesting meta peer (its process and,
+  when it runs in one, its flow), the reason and the time in the commit that
+  settles or authorises. Only an Uncertain attempt that is still the
+  address's oldest request resolves; a resolution is never automatic.
+
+# Flow 0.35.17
+
+signal-flow 21.0.0 (5af38281) and meta-signal-flow 26.0.0 (0e5a9829): every
+ordinary-wire and meta-wire peer repins. `Event.Stopped` carries `NativeStop.{
+Option<NativeSessionId> Option<TranscriptPath> }`, `Event` appends
+`PromptSubmitted.NativePrompt`, `QueueTurnEnd` and its responses are removed,
+and the meta wire adds `ReadQueueDeliveries.Address`. The store upgrades
+`flow-nexus-flow-events` from v1 to v2, each older `Stopped` read as
+`Stopped.{ None None }`; the unreleased queue-delivery request and attempt
+families move to v2 and v3 (the attempts to v4 at 0.35.18). Claude seats launched from this release carry a
+UserPromptSubmit hook beside SessionStart, PostToolUse and Stop.
+
+- **A Claude seat drains on its own turn end.** `flow-hook` reports a Stop
+  with the `session_id` and `transcript_path` Claude Code gave it, and Flow
+  acts on it only when they are the flow's registered session and that
+  session's transcript. The transcript's main `end_turn` confirms it, so a
+  seat whose main turn ended while background agents run (Herdr: Working) is
+  handed its oldest request. It still sleeps only when Herdr shows it Idle or
+  Done. A Stop of another session is recorded and acts on nothing.
+- **A typed request settles on its exact receipt.** `flow-hook` reports
+  UserPromptSubmit as the SHA-256 of the prompt Claude Code took, its paste
+  wrapper taken off, with the session and prompt id. A hand-over settles when
+  that digest is exactly its request in the flow's own session, or when the
+  transcript after the stored cursor holds the one main user row or
+  `queued_command` attachment that took it. A task notification is no
+  receipt. The next request is handed over at the next turn end.
+- **A Codex seat drains on its app-server's rest, not Herdr's.** Before
+  `turn/start` Flow records the thread's newest turn as the attempt's anchor.
+- **An Uncertain hand-over is reconciled, never resent.** At each turn end
+  and at the Nexus's start Flow reads native history after the anchor. If the
+  exact request is found it settles. If history proves it absent, the attempt
+  ends Absent with that proof, and a new attempt is authorised. That proof is
+  an idle Codex thread with no turn after the anchor carrying it, or a pane
+  hand-over Herdr refused before input. Otherwise the attempt stays Uncertain
+  and names why. Claude absence after typing is never proven.
+  `ReadQueueDeliveries` lists every unsettled attempt with its standing.
+- **A Claude turn end recorded before confirmation is honoured.** At
+  confirmation the flow's last own Stop or prompt is read, or its transcript's
+  main `end_turn`, as a Codex thread's rest already is.
+
+# Flow 0.35.16
+
+No protocol change. The store adds durable queue-delivery request and attempt families.
+
+- **A resting Codex thread receives queued work through its app-server.** Flow records distinct request, attempt, and JSON-RPC identities before `turn/start`. The exact app-server response is recorded before the queued request is removed. A restart settles a receipt-recorded attempt without another native submission; a receipt-less attempt becomes Uncertain and blocks automatic redelivery until reconciled. The native call and local store are explicitly not one atomic transaction.
+- **Turn completion remains the drain trigger.** Duplicate or unrelated events do not repeat delivery, completion during registration is retained until confirmation, and queued sender and order are preserved. Flow never falls back to a pane prompt for this Codex drain.
+
+# Flow 0.35.15
+
+No wire change and no store change.
+
+- **A Claude launch receipt rebuilds the native paste element.** Claude Code records a pasted part with its native wrapper and exact newline framing. A recorded user turn matches only the exact part bytes or the exact rebuilt element under the turn’s identifier. A different identifier, newline count, or escaping is refused.
+
+# Flow 0.35.14
+
+No wire change and no store change.
+
+- **An Awake Codex seat’s queue drains on its app-server’s turn completion.** Each connection Flow keeps on a Codex thread reads the thread’s `turn/started`, `turn/completed` and `thread/status/changed`, and a responder’s `thread/resume` answers the thread’s status. When a confirmed seat’s thread rests with work queued, or work is queued for a seat whose thread rests, the oldest request is typed as a Stop would type it, and the next waits for a turn that begins after it. A completion read twice types once; one that arrives while the launch is unconfirmed is settled at confirmation. A seat its app-server shows in a turn is kept (`KeptAtStop::InTurn`) whatever Herdr’s screen shows.
+- A Bind that leaves a seat Awake asks the same question a queued request does, so a resting Codex seat drains what waits for it.
+
+# Flow 0.35.13
+
+meta-signal-flow 25.0.0 (5bb519c5): a leave-out default names its harness,
+`ConfigureLeaveOut.{ Address HarnessKind LeaveOuts }`, and `Configure`
+refuses `ConfigureRejected.LeaveOutNotForHarness`. The meta contract digest
+changes, so every meta-wire peer repins with it. The leave-out family
+`flow-nexus-meta-leave-out-configuration` moves from v1 to v2.
+
+- **A Start takes the default of its own harness.** A Start naming no
+  leave-outs takes its metaflow's default for the harness its model derives,
+  and none when that harness has no default for its Address. A Codex Start
+  of a metaflow with only a Claude default is no longer refused
+  `LeaveOutRefused.NotForHarness`. A Start naming its own leave-outs is
+  checked against its harness as before, at composition, before any launch
+  is reserved or any pane opened.
+- **A declared default belongs to its harness.** `Configure.LeaveOuts`
+  holds one entry per Address and harness. An entry naming a leave-out of
+  another harness than its own is refused `LeaveOutNotForHarness` and the
+  whole declaration writes nothing. `recommended_plugins` stays outside the
+  leave-out vocabulary.
+- **Each stored default is carried under its harness.** Opening a store,
+  the full Nexus or the configuration-only listener, carries each v1
+  default, kept under its Address alone, whole under the harness every one
+  of its leave-outs belongs to, and re-keys it by its Address and that
+  harness. A default whose leave-outs belong to both harnesses, or that
+  names none, refuses the open with
+  `the leave-out default of <Aspect:len:topic:Layer> cannot be carried under
+  one harness`, and the store keeps its v1 family unchanged.
+
+A declarer of `Configure.LeaveOuts` names each entry's harness:
+`Configure.LeaveOuts.[ { { Psyche flow Secondary } Claude [ SkillTool WorkflowTool ] } { { Mind core Primary } Codex [ CodexAgentsMd ] } ]`.
+
 # Flow 0.35.11
 
 No wire change. The store adds one table, `flow_nexus_launch_cleanups`; a

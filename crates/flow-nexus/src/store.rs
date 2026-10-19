@@ -13,6 +13,7 @@ pub mod events;
 pub(crate) mod launch_cleanup;
 pub(crate) mod metaflow;
 pub(crate) mod opened_thread;
+pub(crate) mod queue_delivery;
 pub(crate) mod refresh;
 pub(crate) mod send_call;
 pub(crate) mod send_server;
@@ -21,6 +22,8 @@ use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
+use queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
+use queue_delivery::{DeclaresQueueDeliveryTables, QueueDeliveryTables};
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
@@ -494,13 +497,47 @@ impl EngineRecord for StoredMetaThresholdConfiguration {
     }
 }
 
-/// One metaflow's default leave-outs, keyed by its Address.
+/// One metaflow's default leave-outs on one harness, keyed by its Address
+/// and that harness.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaLeaveOutConfiguration {
+pub(crate) struct StoredMetaLeaveOutConfiguration {
     leave_out: ConfigureLeaveOut,
 }
 
 impl EngineRecord for StoredMetaLeaveOutConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::leave_out_record_key(
+            &self.leave_out.address,
+            &self.leave_out.harness_kind,
+        ))
+    }
+}
+
+impl MemoryDefinition for StoredMetaLeaveOutConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v2")
+    }
+}
+
+/// A metaflow's default leave-outs as Flow kept them before 0.35.13, keyed
+/// by its Address alone and naming no harness. It is read only by the
+/// v1-to-v2 upgrade of the leave-out family.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LeaveOutDefaultBeforeHarness {
+    address: Address,
+    leave_outs: Vec<LeaveOut>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMetaLeaveOutConfigurationV1 {
+    leave_out: LeaveOutDefaultBeforeHarness,
+}
+
+impl EngineRecord for StoredMetaLeaveOutConfigurationV1 {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(FlowStore::address_record_key(&self.leave_out.address))
     }
@@ -537,6 +574,57 @@ impl NamesConfiguredModel for FlowStore {
     }
 }
 
+impl MemoryDefinition for StoredMetaLeaveOutConfigurationV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1")
+    }
+}
+
+/// Why a v1 leave-out default names no one harness to carry it under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaveOutUpgradeRefusal {
+    /// Its leave-outs belong to more than one harness.
+    MixedHarnesses,
+    /// It names no leave-out, so no harness is derived.
+    NoHarness,
+}
+
+/// A v1 default is carried whole under the one harness every leave-out it
+/// names belongs to; a default naming leave-outs of both harnesses, or
+/// none, is refused, and the upgrade with it.
+impl UpgradeFrom<StoredMetaLeaveOutConfigurationV1> for StoredMetaLeaveOutConfiguration {
+    type Refusal = LeaveOutUpgradeRefusal;
+
+    fn upgrade_from(previous: StoredMetaLeaveOutConfigurationV1) -> Decision<Self, Self::Refusal> {
+        use crate::lean::BelongsToHarness;
+        let LeaveOutDefaultBeforeHarness {
+            address,
+            leave_outs,
+        } = previous.leave_out;
+        let Some(first) = leave_outs.first() else {
+            return Decision::Refused(LeaveOutUpgradeRefusal::NoHarness);
+        };
+        let harness_kind = first.harness();
+        if leave_outs
+            .iter()
+            .any(|leave_out| leave_out.harness() != harness_kind)
+        {
+            return Decision::Refused(LeaveOutUpgradeRefusal::MixedHarnesses);
+        }
+        Decision::Ready(Self {
+            leave_out: ConfigureLeaveOut {
+                address,
+                harness_kind,
+                leave_outs,
+            },
+        })
+    }
+}
+
 /// The store's commit marker, which every write moves: a test's witness
 /// that nothing was written.
 #[cfg(test)]
@@ -550,6 +638,22 @@ impl MarksCommits for FlowStore {
         self.engine
             .current_database_marker()
             .expect("commit marker reads")
+    }
+}
+
+/// The leave-out family's descriptor, from v1 on.
+pub(crate) trait DescribesLeaveOutTable {
+    fn descriptor() -> TableDescriptor<StoredMetaLeaveOutConfiguration>;
+}
+
+impl DescribesLeaveOutTable for StoredMetaLeaveOutConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaLeaveOutConfiguration> {
+        TableDescriptor::new(
+            META_LEAVE_OUT_CONFIGURATION_TABLE_NAME,
+            FamilyName::new("flow-nexus-meta-leave-out-configuration"),
+            StoredMetaLeaveOutConfiguration::schema_hash(),
+        )
+        .with_predecessor::<StoredMetaLeaveOutConfigurationV1>()
     }
 }
 
@@ -1860,6 +1964,8 @@ pub enum StoreError {
     MetaflowUpgrade(String),
     #[error("the model family could not be upgraded: {0}")]
     ModelUpgrade(String),
+    #[error("flow events upgrade failed: {0}")]
+    EventUpgrade(String),
     #[error("retired tables could not be dropped: {0}")]
     RetiredTableDrop(String),
     #[error("flow nexus state record is absent or duplicated")]
@@ -1880,6 +1986,15 @@ pub enum StoreError {
     NotConfigured,
     #[error("a Codex model names both the stable and the next endpoint")]
     CodexModelsOverlap,
+    #[error("a leave-out default names a leave-out of another harness than its own")]
+    LeaveOutNotForHarness,
+    #[error("the leave-out default of {entry} cannot be carried under one harness: {reason:?}")]
+    LeaveOutUpgrade {
+        entry: String,
+        reason: LeaveOutUpgradeRefusal,
+    },
+    #[error("the leave-out family could not be upgraded: {0}")]
+    LeaveOutUpgradeFailed(String),
     #[error("store {path} is not a recognized Flow Memory v2 store: {reason}")]
     UnrecognizedMemory { path: String, reason: String },
 }
@@ -1928,6 +2043,15 @@ trait UpgradesFlowFamilies {
         ),
         StoreError,
     >;
+    /// A store before 0.35.13 keeps each metaflow's default leave-outs
+    /// under its Address alone; each is carried under the harness its
+    /// leave-outs belong to, and re-keyed by its Address and that harness.
+    /// A default whose leave-outs mix harnesses, or name none, refuses the
+    /// upgrade by its entry and leaves the store as it was.
+    fn upgraded_leave_out_defaults(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaLeaveOutConfiguration>,
+    ) -> Result<TableReference<StoredMetaLeaveOutConfiguration>, StoreError>;
 }
 
 impl UpgradesFlowFamilies for Engine {
@@ -1962,6 +2086,52 @@ impl UpgradesFlowFamilies for Engine {
                 continue;
             }
             commit = commit.retract(table, layer_key).assert(table, row.clone());
+            moved = true;
+        }
+        if moved {
+            self.commit_atomic(commit)?;
+        }
+        Ok(table)
+    }
+
+    fn upgraded_leave_out_defaults(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaLeaveOutConfiguration>,
+    ) -> Result<TableReference<StoredMetaLeaveOutConfiguration>, StoreError> {
+        let table = match self
+            .upgrade_table::<StoredMetaLeaveOutConfigurationV1, StoredMetaLeaveOutConfiguration>(
+                descriptor,
+            ) {
+            UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+            UpgradeOutcome::AlreadyCurrent(table) => table,
+            UpgradeOutcome::Refused(refusal) => {
+                return Err(StoreError::LeaveOutUpgrade {
+                    entry: refusal.key().to_owned_string(),
+                    reason: refusal.reason().clone(),
+                });
+            }
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::LeaveOutUpgradeFailed(format!("{failure:?}")));
+            }
+        };
+        // The upgrade carries each row under the key it was stored by. A
+        // row still under its Address alone moves to its Address and
+        // harness in one commit; a crash between the two leaves it to be
+        // moved at the next open.
+        let mut commit = self.begin_atomic_commit();
+        let mut moved = false;
+        for row in self.match_records(QueryPlan::all(table))?.records() {
+            let address_key = RecordKey::new(FlowStore::address_record_key(&row.leave_out.address));
+            if self
+                .match_records(QueryPlan::key(table, address_key.clone()))?
+                .records()
+                .is_empty()
+            {
+                continue;
+            }
+            commit = commit
+                .retract(table, address_key)
+                .assert(table, row.clone());
             moved = true;
         }
         if moved {
@@ -2130,11 +2300,8 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 FamilyName::new("flow-nexus-meta-threshold-configuration"),
                 SchemaHash::for_label("flow-nexus-meta-threshold-configuration-v1"),
             ))?,
-            leave_outs: engine.register_table(TableDescriptor::new(
-                META_LEAVE_OUT_CONFIGURATION_TABLE_NAME,
-                FamilyName::new("flow-nexus-meta-leave-out-configuration"),
-                SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
-            ))?,
+            leave_outs: engine
+                .upgraded_leave_out_defaults(StoredMetaLeaveOutConfiguration::descriptor())?,
             send_servers: engine.register_table(
                 <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor(),
             )?,
@@ -2167,6 +2334,7 @@ pub struct FlowStore {
     opened_threads: TableReference<opened_thread::OpenedLaunchThread>,
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
     launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
+    queue_delivery: QueueDeliveryTables,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
@@ -2174,8 +2342,9 @@ pub struct FlowStore {
 }
 
 /// The one-request configuration listener's view of the same Sema store.
-/// It registers only the three rows Configure owns and never seeds the rest
-/// of Flow state, settles launches/deliveries, or upgrades stored families.
+/// It registers only the rows Configure owns and never seeds the rest of
+/// Flow state or settles launches/deliveries; of the stored families it
+/// upgrades only the leave-out defaults it serves.
 /// Keeping this Engine alive holds redb's exclusive writer lock while that
 /// listener owns the meta socket.
 pub struct ConfigurationOnlyStore {
@@ -2197,8 +2366,8 @@ pub trait ConfiguresOnlyStore: Sized {
 
 impl ConfiguresOnlyStore for ConfigurationOnlyStore {
     /// Opens the same versioned store as normal startup without invoking its
-    /// seeding, settlement, adoption, or family-upgrade path; a store that
-    /// still holds a retired table drops it first.
+    /// seeding, settlement or adoption path, upgrading only the leave-out
+    /// defaults; a store that still holds a retired table drops it first.
     fn open(path: &Path) -> Result<Self, StoreError> {
         let recognized = FlowStore::recognize_flow_memory(path)?;
         let state_descriptor = TableDescriptor::<FlowStoreState>::new(
@@ -2232,11 +2401,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             FamilyName::new("flow-nexus-meta-threshold-configuration"),
             SchemaHash::for_label("flow-nexus-meta-threshold-configuration-v1"),
         );
-        let meta_leave_outs_descriptor = TableDescriptor::new(
-            META_LEAVE_OUT_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-meta-leave-out-configuration"),
-            SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
-        );
+        let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         if recognized {
             FlowStore::drop_retired_tables(path)?;
@@ -2264,7 +2429,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             nexus: engine.register_table(meta_nexus_descriptor)?,
             models: engine.upgraded_models(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
-            leave_outs: engine.register_table(meta_leave_outs_descriptor)?,
+            leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
         };
         if !recognized {
@@ -2749,16 +2914,8 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-meta-threshold-configuration"),
             SchemaHash::for_label("flow-nexus-meta-threshold-configuration-v1"),
         );
-        let meta_leave_outs_descriptor = TableDescriptor::<StoredMetaLeaveOutConfiguration>::new(
-            META_LEAVE_OUT_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-meta-leave-out-configuration"),
-            SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
-        );
-        let events_descriptor = TableDescriptor::<events::FlowEvents>::new(
-            events::FLOW_EVENT_TABLE_NAME,
-            FamilyName::new("flow-nexus-flow-events"),
-            SchemaHash::for_label("flow-nexus-flow-events-v1"),
-        );
+        let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
+        let events_descriptor = <events::FlowEvents as events::DescribesEventTable>::descriptor();
         let context_sizes_descriptor =
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
         let address_holds_descriptor =
@@ -2771,6 +2928,7 @@ impl OpensFlowStore for FlowStore {
         let send_calls_descriptor = <crate::generated::send_tool::SendCall as send_call::DescribesSendCallTable>::descriptor();
         let launch_cleanups_descriptor =
             <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor();
+        let queue_delivery_descriptors = QueueDeliveryTables::descriptors();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -2801,7 +2959,10 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&refreshes_descriptor)
                 .with_family(&opened_threads_descriptor)
                 .with_family(&send_calls_descriptor)
-                .with_family(&launch_cleanups_descriptor),
+                .with_family(&launch_cleanups_descriptor)
+                .with_family(&queue_delivery_descriptors.0)
+                .with_family(&queue_delivery_descriptors.1)
+                .with_family(&queue_delivery_descriptors.2),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -2829,6 +2990,8 @@ impl OpensFlowStore for FlowStore {
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
         let send_calls = engine.register_table(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
+        let queue_delivery =
+            QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
         let store = Self {
             engine,
             flows,
@@ -2854,6 +3017,7 @@ impl OpensFlowStore for FlowStore {
             opened_threads,
             send_calls,
             launch_cleanups,
+            queue_delivery,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -2984,6 +3148,8 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups = engine.register_table(
             <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor(),
         )?;
+        let queue_delivery =
+            QueueDeliveryTables::register(&mut engine, QueueDeliveryTables::descriptors())?;
         let store = Self {
             engine,
             flows,
@@ -3009,6 +3175,7 @@ impl OpensFlowStore for FlowStore {
             opened_threads,
             send_calls,
             launch_cleanups,
+            queue_delivery,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -3066,6 +3233,30 @@ impl OpensFlowStore for FlowStore {
                 delivery.delivery_id, delivery.flow_id
             );
         }
+        // Native queue delivery is not atomic with this store. A durable
+        // native receipt is enough to finish the local settlement after a
+        // restart; an attempt without one becomes Uncertain, is never
+        // submitted again automatically, and is reconciled from native
+        // history once the Nexus runs (`ReconcilesQueueDelivery`).
+        for attempt in store.recover_outstanding_deliveries()? {
+            match attempt.phase {
+                QueueDeliveryPhase::ReceiptRecorded(_) => {
+                    if !store.settle_recorded_delivery(&attempt.attempt_id)? {
+                        return Err(StoreError::StateInvariant);
+                    }
+                }
+                QueueDeliveryPhase::Uncertain(_) => eprintln!(
+                    "flow-nexus: queued delivery {} is uncertain; it is reconciled from native history",
+                    attempt.attempt_id
+                ),
+                QueueDeliveryPhase::Prepared
+                | QueueDeliveryPhase::Settled(_)
+                | QueueDeliveryPhase::Absent(_)
+                | QueueDeliveryPhase::Resolved(_) => {
+                    return Err(StoreError::StateInvariant);
+                }
+            }
+        }
         Ok(store)
     }
 }
@@ -3078,9 +3269,13 @@ pub(crate) trait ManagesMetaflowState: Sized {
     /// The threshold configured for one layer, if any.
     fn configured_threshold(&self, layer: &Layer)
     -> Result<Option<ConfigureThreshold>, StoreError>;
-    /// The leave-outs a metaflow's Start takes when it names none; empty
-    /// when none are configured.
-    fn default_leave_outs(&self, address: &Address) -> Result<Vec<LeaveOut>, StoreError>;
+    /// The leave-outs a metaflow's Start on one harness takes when it names
+    /// none; empty when none are configured for that harness.
+    fn default_leave_outs(
+        &self,
+        address: &Address,
+        harness_kind: &HarnessKind,
+    ) -> Result<Vec<LeaveOut>, StoreError>;
     fn stored_metaflow(&self, address: &Address) -> Result<Option<StoredMetaflow>, StoreError>;
     fn stored_metaflow_process(
         &self,
@@ -3133,10 +3328,14 @@ impl ManagesMetaflowState for FlowStore {
         }
     }
 
-    fn default_leave_outs(&self, address: &Address) -> Result<Vec<LeaveOut>, StoreError> {
+    fn default_leave_outs(
+        &self,
+        address: &Address,
+        harness_kind: &HarnessKind,
+    ) -> Result<Vec<LeaveOut>, StoreError> {
         let rows = self.engine.match_records(QueryPlan::key(
             self.meta_configuration_tables.leave_outs,
-            RecordKey::new(FlowStore::address_record_key(address)),
+            RecordKey::new(FlowStore::leave_out_record_key(address, harness_kind)),
         ))?;
         match rows.records() {
             [] => Ok(Vec::new()),
@@ -3350,9 +3549,6 @@ impl AppliesFlowQuery for FlowStore {
             Query::LaunchStatus(_) | Query::Observe(_) => Ok(Response::LaunchStatusRejected(
                 signal_flow::LaunchStatusRejection::PersistenceRefused,
             )),
-            Query::QueueTurnEnd(_) => Ok(Response::TurnEndRejected(
-                signal_flow::TurnEndRejection::QueueRefused,
-            )),
             Query::Report(report) => {
                 use events::{EventRecording, RecordsHarnessEvents};
                 match self.record_event(&report.flow_id, report.event)? {
@@ -3383,7 +3579,6 @@ impl ReservesPendingStart for FlowStore {
             | Query::LaunchStatus(_)
             | Query::Observe(_)
             | Query::ResolveCaller(_)
-            | Query::QueueTurnEnd(_)
             | Query::Report(_)
             | Query::Bind(_)
             | Query::Identify(_)
@@ -5412,6 +5607,15 @@ pub(crate) trait ReadsFlowMemory {
         format!("{}:{aspect}", FlowStore::layer_key(layer))
     }
 
+    /// A leave-out default's key: its Address's key, then its harness.
+    fn leave_out_record_key(address: &Address, harness_kind: &HarnessKind) -> String {
+        let harness = match harness_kind {
+            HarnessKind::Claude => "Claude",
+            HarnessKind::Codex => "Codex",
+        };
+        format!("{}:{harness}", FlowStore::address_record_key(address))
+    }
+
     fn address_record_key(address: &Address) -> String {
         let aspect = match &address.aspect {
             Aspect::Psyche => "Psyche",
@@ -5536,15 +5740,17 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-meta-threshold-configuration",
                 "flow-nexus-meta-threshold-configuration-v1",
             ),
-            "flow_nexus_meta_leave_out_configuration" => (
-                "flow-nexus-meta-leave-out-configuration",
-                "flow-nexus-meta-leave-out-configuration-v1",
-            ),
+            "flow_nexus_meta_leave_out_configuration" => {
+                return Some((
+                    "flow-nexus-meta-leave-out-configuration",
+                    StoredMetaLeaveOutConfiguration::schema_hash(),
+                ));
+            }
             "flow_nexus_meta_send_server_configuration" => (
                 send_server::META_SEND_SERVER_CONFIGURATION_FAMILY,
                 send_server::META_SEND_SERVER_CONFIGURATION_SCHEMA,
             ),
-            "flow_nexus_flow_events" => ("flow-nexus-flow-events", "flow-nexus-flow-events-v1"),
+            "flow_nexus_flow_events" => (events::FLOW_EVENT_FAMILY, events::FLOW_EVENT_SCHEMA),
             "flow_nexus_flow_context_sizes" => (
                 context::FLOW_CONTEXT_SIZE_FAMILY,
                 context::FLOW_CONTEXT_SIZE_SCHEMA,
@@ -5565,6 +5771,18 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_launch_cleanups" => (
                 launch_cleanup::LAUNCH_CLEANUP_FAMILY,
                 launch_cleanup::LAUNCH_CLEANUP_SCHEMA,
+            ),
+            "flow_nexus_queue_delivery_counter" => (
+                "flow-nexus-queue-delivery-counter",
+                "flow-nexus-queue-delivery-counter-v1",
+            ),
+            "flow_nexus_queue_delivery_requests" => (
+                "flow-nexus-queue-delivery-request",
+                "flow-nexus-queue-delivery-request-v2",
+            ),
+            "flow_nexus_queue_delivery_attempts" => (
+                "flow-nexus-queue-delivery-attempt",
+                "flow-nexus-queue-delivery-attempt-v4",
             ),
             _ => return None,
         };
@@ -5606,9 +5824,17 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-meta-model-configuration",
                 StoredMetaModelConfigurationV1::schema_hash(),
             )],
+            "flow_nexus_meta_leave_out_configuration" => &[(
+                "flow-nexus-meta-leave-out-configuration",
+                StoredMetaLeaveOutConfigurationV1::schema_hash(),
+            )],
             "flow_nexus_address_holds" => &[(
                 address_hold::ADDRESS_HOLD_FAMILY,
                 <address_hold::AddressHoldV1 as MemoryDefinition>::schema_hash(),
+            )],
+            "flow_nexus_flow_events" => &[(
+                events::FLOW_EVENT_FAMILY,
+                <events::FlowEventsV1 as MemoryDefinition>::schema_hash(),
             )],
             _ => &[],
         };
@@ -5714,6 +5940,9 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_send_calls",
             "flow_nexus_launch_cleanups",
             "flow_nexus_meta_send_server_configuration",
+            "flow_nexus_queue_delivery_counter",
+            "flow_nexus_queue_delivery_requests",
+            "flow_nexus_queue_delivery_attempts",
         ];
         // A store before 0.35.0 may still hold a table 0.35.0 drops.
         let retired = |name: &String| RETIRED_TABLES.iter().any(|(table, _, _)| table == name);
@@ -5728,6 +5957,9 @@ pub(crate) trait ReadsFlowMemory {
                 CONFIGURATION_ONLY.contains(&name.as_str())
                     || name == "flow_nexus_meta_leave_out_configuration"
                     || name == "flow_nexus_meta_send_server_configuration"
+                    || name == "flow_nexus_queue_delivery_counter"
+                    || name == "flow_nexus_queue_delivery_requests"
+                    || name == "flow_nexus_queue_delivery_attempts"
                     || retired(name)
             });
         configuration_only || running
@@ -5933,8 +6165,9 @@ pub(crate) trait ReadsFlowMemory {
             .iter()
             .map(|stored| stored.leave_out.clone())
             .collect::<Vec<_>>();
-        default_leave_outs
-            .sort_by_key(|leave_out| FlowStore::address_record_key(&leave_out.address));
+        default_leave_outs.sort_by_key(|leave_out| {
+            FlowStore::leave_out_record_key(&leave_out.address, &leave_out.harness_kind)
+        });
         let mut send_servers = send_server_rows
             .records()
             .iter()
@@ -6062,14 +6295,25 @@ pub(crate) trait ReadsFlowMemory {
                     .map(|threshold| StoredMetaThresholdConfiguration { threshold })
                     .collect(),
             ),
-            ConfigurationChange::LeaveOuts(leave_outs) => FlowStore::replace_configuration_family(
-                engine,
-                tables.leave_outs,
-                leave_outs
-                    .into_iter()
-                    .map(|leave_out| StoredMetaLeaveOutConfiguration { leave_out })
-                    .collect(),
-            ),
+            ConfigurationChange::LeaveOuts(leave_outs) => {
+                use crate::lean::BelongsToHarness;
+                if leave_outs.iter().any(|entry| {
+                    entry
+                        .leave_outs
+                        .iter()
+                        .any(|leave_out| leave_out.harness() != entry.harness_kind)
+                }) {
+                    return Err(StoreError::LeaveOutNotForHarness);
+                }
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.leave_outs,
+                    leave_outs
+                        .into_iter()
+                        .map(|leave_out| StoredMetaLeaveOutConfiguration { leave_out })
+                        .collect(),
+                )
+            }
             ConfigurationChange::SendServers(send_servers) => {
                 FlowStore::replace_configuration_family(
                     engine,
@@ -6276,6 +6520,83 @@ mod tests {
                         },
                     ))
                     .expect("v1 model row persists");
+            }
+        }
+
+        /// A configured current-version store, as a deployment holds one.
+        fn configured(&self) {
+            let defaults = super::DefaultConfiguration {
+                home: self.directory.path().join("home"),
+                runtime_directory: self.directory.path().join("runtime"),
+            };
+            let config = ConfigurationOnlyStore::open(&self.path()).expect("fresh Memory opens");
+            let settings = defaults.configuration();
+            config
+                .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+                    meta_signal_flow::ConfigureNexus {
+                        source_root: settings.source_root,
+                        stable_codex: settings.stable_codex,
+                        next_codex: settings.next_codex,
+                        harness_profiles: settings.harness_profile_vector,
+                        meta_aspects: settings.meta_aspects,
+                        message_nexus_path: settings.message_nexus_path,
+                        message_nexus_binary: "/fixture/message-nexus".into(),
+                        lease: 60,
+                    },
+                ))
+                .expect("configuration commits");
+        }
+
+        fn configured_store(&self) -> FlowStore {
+            FlowStore::open_configured(&self.path()).expect("configured store opens")
+        }
+
+        /// Replaces the store's leave-out family with its v1 shape, holding
+        /// each default given under its Address alone, as 0.35.0 to 0.35.12
+        /// kept it.
+        fn seed_v1_leave_outs(
+            &self,
+            defaults: &[(signal_flow::Address, Vec<signal_flow::LeaveOut>)],
+        ) {
+            let database = redb::Database::open(self.path()).expect("store opens directly");
+            let write = database.begin_write().expect("catalog transaction starts");
+            {
+                let mut catalog = write
+                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .expect("catalog opens");
+                catalog
+                    .remove("flow_nexus_meta_leave_out_configuration")
+                    .expect("leave-out family removes");
+            }
+            let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                "flow_nexus_meta_leave_out_configuration",
+            ));
+            write.commit().expect("catalog commits");
+            drop(database);
+            let mut engine = Engine::open(EngineOpen::new(
+                self.path(),
+                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+            ))
+            .expect("v1 store opens");
+            let table = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_meta_leave_out_configuration"),
+                    FamilyName::new("flow-nexus-meta-leave-out-configuration"),
+                    SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
+                ))
+                .expect("v1 leave-out family registers");
+            for (address, leave_outs) in defaults {
+                engine
+                    .assert(Assertion::new(
+                        table,
+                        super::StoredMetaLeaveOutConfigurationV1 {
+                            leave_out: super::LeaveOutDefaultBeforeHarness {
+                                address: address.clone(),
+                                leave_outs: leave_outs.clone(),
+                            },
+                        },
+                    ))
+                    .expect("v1 leave-out row persists");
             }
         }
 
@@ -8470,6 +8791,71 @@ mod tests {
         );
     }
 
+    /// A store before 0.35.17 keeps Stops without their native identity:
+    /// opening carries every flow's events in order, each such Stop as
+    /// `Stopped.{ None None }`, which is never taken for the flow's own.
+    #[test]
+    fn a_v1_stop_upgrades_to_a_stop_of_unknown_identity() {
+        use super::events::{EventBeforeIdentity, FlowEventsV1, RecordsHarnessEvents};
+        use signal_flow::{Event, NativeStop};
+        let fixture = StoreFixture::new();
+        drop(fixture.store());
+        let database = redb::Database::open(fixture.path()).expect("store opens directly");
+        let write = database.begin_write().expect("catalog transaction starts");
+        {
+            let mut catalog = write
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            catalog
+                .remove("flow_nexus_flow_events")
+                .expect("events family removes");
+        }
+        write
+            .delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                "flow_nexus_flow_events",
+            ))
+            .expect("event rows drop");
+        write.commit().expect("catalog commits");
+        drop(database);
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("v1 store opens");
+            let events = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_flow_events"),
+                    FamilyName::new("flow-nexus-flow-events"),
+                    SchemaHash::for_label("flow-nexus-flow-events-v1"),
+                ))
+                .expect("v1 events family registers");
+            engine
+                .assert(Assertion::new(
+                    events,
+                    FlowEventsV1 {
+                        flow_id: "a1a1a1".into(),
+                        event_vector: vec![
+                            EventBeforeIdentity::Started,
+                            EventBeforeIdentity::ToolUsed("Bash".into()),
+                            EventBeforeIdentity::Stopped,
+                        ],
+                    },
+                ))
+                .expect("v1 row persists");
+        }
+
+        let store = fixture.store();
+        assert_eq!(
+            store.events("a1a1a1").unwrap(),
+            Some(vec![
+                Event::Started,
+                Event::ToolUsed("Bash".into()),
+                Event::Stopped(NativeStop {
+                    native_session_id_option: None,
+                    transcript_path_option: None,
+                }),
+            ])
+        );
+    }
+
     /// A flow row of 0.34 named the clue its caller gave as its origin; the
     /// open upgrades it to the origin it was: the calling flow, or Unbound
     /// for the Nexus's own wake. Nothing else of the row changes.
@@ -9161,5 +9547,242 @@ mod tests {
                 .expect("declaration commits"),
             meta_signal_flow::ConfigureOutcome::Unchanged
         );
+    }
+
+    /// The leave-out defaults the production store held at 0.35.11, each
+    /// under its Address alone: every Claude metaflow's twelve, every Codex
+    /// metaflow's six.
+    fn production_leave_out_defaults() -> Vec<(signal_flow::Address, Vec<signal_flow::LeaveOut>)> {
+        use signal_flow::{Address, Layer, LeaveOut};
+        let claude = vec![
+            LeaveOut::ClaudeAiConnectors,
+            LeaveOut::ExplorePlanAgents,
+            LeaveOut::WorkflowTool,
+            LeaveOut::SkillTool,
+            LeaveOut::BundledSkills,
+            LeaveOut::ScheduleWakeupTool,
+            LeaveOut::ReportFindingsTool,
+            LeaveOut::ListAgentsTool,
+            LeaveOut::CronTools,
+            LeaveOut::DeferredTools,
+            LeaveOut::ClaudeMd,
+            LeaveOut::GitInstructions,
+        ];
+        let codex = vec![
+            LeaveOut::CodexAgentsMd,
+            LeaveOut::CodexSkillListing,
+            LeaveOut::CodexCollaborationMode,
+            LeaveOut::CodexEnvironmentContext,
+            LeaveOut::CodexPermissions,
+            LeaveOut::CodexDeveloperInstructions,
+        ];
+        [
+            (Aspect::Field, "illustrator", Layer::Tertiary, &claude),
+            (Aspect::Field, "core", Layer::Primary, &codex),
+            (Aspect::Field, "publisher", Layer::Quaternary, &claude),
+            (Aspect::Mind, "prototyping", Layer::Primary, &codex),
+            (Aspect::Mind, "prototyping", Layer::Secondary, &codex),
+            (Aspect::Mind, "core", Layer::Primary, &codex),
+            (Aspect::Mind, "core", Layer::Secondary, &codex),
+            (Aspect::Psyche, "communication", Layer::Primary, &claude),
+            (Aspect::Psyche, "communication", Layer::Secondary, &claude),
+            (Aspect::Psyche, "core", Layer::Primary, &claude),
+            (Aspect::Psyche, "core", Layer::Secondary, &claude),
+            (Aspect::Psyche, "core", Layer::Tertiary, &claude),
+            (Aspect::Psyche, "flow", Layer::Primary, &claude),
+            (Aspect::Psyche, "flow", Layer::Secondary, &claude),
+            (Aspect::Psyche, "ethos", Layer::Primary, &claude),
+            (Aspect::Psyche, "ethos", Layer::Secondary, &claude),
+            (Aspect::Psyche, "nexus", Layer::Secondary, &claude),
+            (Aspect::Psyche, "spirit", Layer::Primary, &claude),
+            (Aspect::Psyche, "spirit", Layer::Secondary, &claude),
+            (Aspect::Psyche, "chronos", Layer::Primary, &claude),
+            (Aspect::Psyche, "chronos", Layer::Secondary, &claude),
+        ]
+        .into_iter()
+        .map(|(aspect, topic, layer, leave_outs)| {
+            (
+                Address {
+                    aspect,
+                    topic: topic.into(),
+                    layer,
+                },
+                leave_outs.clone(),
+            )
+        })
+        .collect()
+    }
+
+    /// A store before 0.35.13 keeps each metaflow's default leave-outs under
+    /// its Address alone. Opening carries every one of them whole under the
+    /// harness its leave-outs belong to, keyed by its Address and that
+    /// harness; the other harness of that Address has none, and a second
+    /// open changes nothing.
+    #[test]
+    fn production_leave_out_defaults_upgrade_each_under_its_harness() {
+        use super::ManagesMetaflowState;
+        use crate::lean::BelongsToHarness;
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        let defaults = production_leave_out_defaults();
+        fixture.seed_v1_leave_outs(&defaults);
+        let expected = defaults
+            .iter()
+            .map(
+                |(address, leave_outs)| meta_signal_flow::ConfigureLeaveOut {
+                    address: address.clone(),
+                    harness_kind: leave_outs[0].harness(),
+                    leave_outs: leave_outs.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected
+                .iter()
+                .filter(|entry| entry.harness_kind == HarnessKind::Codex)
+                .count(),
+            5
+        );
+        for reopening in 0..2 {
+            let store = fixture.configured_store();
+            let snapshot = store
+                .configuration_snapshot()
+                .expect("snapshot reads")
+                .expect("store configured");
+            assert_eq!(snapshot.default_leave_outs.len(), defaults.len());
+            for entry in &expected {
+                assert!(
+                    snapshot.default_leave_outs.contains(entry),
+                    "{entry:?} is carried (open {reopening})"
+                );
+                assert_eq!(
+                    store
+                        .default_leave_outs(&entry.address, &entry.harness_kind)
+                        .expect("default reads"),
+                    entry.leave_outs
+                );
+                let other = match entry.harness_kind {
+                    HarnessKind::Claude => HarnessKind::Codex,
+                    HarnessKind::Codex => HarnessKind::Claude,
+                };
+                assert!(
+                    store
+                        .default_leave_outs(&entry.address, &other)
+                        .expect("default reads")
+                        .is_empty()
+                );
+            }
+        }
+        // The configuration-only open reads the same family.
+        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
+        let mut carried = configuration
+            .configuration_snapshot()
+            .expect("snapshot reads")
+            .expect("store configured")
+            .default_leave_outs;
+        let mut expected = expected;
+        let order = |entry: &meta_signal_flow::ConfigureLeaveOut| {
+            format!("{:?}", (&entry.address, &entry.harness_kind))
+        };
+        carried.sort_by_key(order);
+        expected.sort_by_key(order);
+        assert_eq!(carried, expected);
+    }
+
+    /// The configuration-only open, which the deployment runs before the
+    /// Nexus, carries a v1 family the same way.
+    #[test]
+    fn the_configuration_only_open_upgrades_v1_leave_out_defaults() {
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        let defaults = production_leave_out_defaults();
+        fixture.seed_v1_leave_outs(&defaults);
+        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
+        let carried = configuration
+            .configuration_snapshot()
+            .expect("snapshot reads")
+            .expect("store configured")
+            .default_leave_outs;
+        assert_eq!(carried.len(), defaults.len());
+        for (address, leave_outs) in &defaults {
+            assert!(
+                carried
+                    .iter()
+                    .any(|entry| entry.address == *address && entry.leave_outs == *leave_outs)
+            );
+        }
+        drop(configuration);
+        use super::ManagesMetaflowState;
+        let store = fixture.configured_store();
+        let (address, leave_outs) = &defaults[1];
+        assert_eq!(
+            store
+                .default_leave_outs(address, &HarnessKind::Codex)
+                .expect("default reads"),
+            *leave_outs
+        );
+    }
+
+    /// A v1 default whose leave-outs belong to both harnesses, or that names
+    /// none, has no one harness to be carried under: the open refuses,
+    /// naming that entry, and the store keeps its v1 family as it was.
+    #[test]
+    fn a_v1_leave_out_default_mixing_harnesses_refuses_the_upgrade_by_its_entry() {
+        use signal_flow::{Address, Layer, LeaveOut};
+        for (leave_outs, reason) in [
+            (
+                vec![LeaveOut::ClaudeMd, LeaveOut::CodexAgentsMd],
+                super::LeaveOutUpgradeRefusal::MixedHarnesses,
+            ),
+            (Vec::new(), super::LeaveOutUpgradeRefusal::NoHarness),
+        ] {
+            let fixture = StoreFixture::new();
+            fixture.configured();
+            let mixed = Address {
+                aspect: Aspect::Psyche,
+                topic: "flow".into(),
+                layer: Layer::Secondary,
+            };
+            let mut defaults = production_leave_out_defaults();
+            defaults.retain(|(address, _)| *address != mixed);
+            defaults.push((mixed.clone(), leave_outs));
+            fixture.seed_v1_leave_outs(&defaults);
+            let refusal = |error: super::StoreError| match error {
+                super::StoreError::LeaveOutUpgrade { entry, reason } => (entry, reason),
+                other => panic!("not a leave-out refusal: {other}"),
+            };
+            let expected = (FlowStore::address_record_key(&mixed), reason);
+            match FlowStore::open_configured(&fixture.path()) {
+                Ok(_) => panic!("the open must refuse"),
+                Err(error) => assert_eq!(refusal(error), expected),
+            }
+            match ConfigurationOnlyStore::open(&fixture.path()) {
+                Ok(_) => panic!("the configuration-only open must refuse"),
+                Err(error) => assert_eq!(refusal(error), expected),
+            }
+            // Nothing was carried: the v1 rows still read as v1.
+            let mut engine = Engine::open(EngineOpen::new(
+                fixture.path(),
+                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+            ))
+            .expect("store still opens as before");
+            let table = engine
+                .register_table(
+                    TableDescriptor::<super::StoredMetaLeaveOutConfigurationV1>::new(
+                        TableName::new("flow_nexus_meta_leave_out_configuration"),
+                        FamilyName::new("flow-nexus-meta-leave-out-configuration"),
+                        SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
+                    ),
+                )
+                .expect("v1 family stands");
+            assert_eq!(
+                engine
+                    .match_records(QueryPlan::all(table))
+                    .expect("v1 rows read")
+                    .records()
+                    .len(),
+                defaults.len()
+            );
+        }
     }
 }

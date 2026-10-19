@@ -7,7 +7,7 @@
 //! typed through Herdr's socket API, one JSON request line, never as a
 //! process argument.
 
-use super::{DecodesFlowClaim, FlowClaim, HerdrCli};
+use super::{DecodesFlowClaim, FlowClaim, HerdrCli, claude_paste};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::HERDR_REQUEST_LINE_LIMIT;
@@ -449,8 +449,9 @@ pub(crate) trait PreparesClaudePane {
     /// source names one. Flag settings are such a source: naming the mode the
     /// launch already runs in suppresses the offer without touching any
     /// settings file. They also carry the harness hook: `flow-hook` on
-    /// SessionStart, every PostToolUse and Stop, so each harness event
-    /// reaches Flow as a Report.
+    /// SessionStart, every PostToolUse, UserPromptSubmit and Stop, so each
+    /// harness event reaches Flow as a Report: a Stop is the flow's turn
+    /// end, and a submitted prompt the receipt of a queued request.
     /// A launch that leaves out the attribution reminder sets the
     /// attribution lines empty here.
     fn claude_flag_settings(&self, lean: &LeanStart) -> String;
@@ -489,6 +490,7 @@ impl PreparesClaudePane for HerdrCli {
             "hooks": {
                 "SessionStart": hook,
                 "PostToolUse": every_tool,
+                "UserPromptSubmit": hook,
                 "Stop": hook,
             }
         });
@@ -1229,16 +1231,36 @@ impl HashesPrefix for File {
 
 pub(crate) trait ReadsLaunchText {
     fn decimal_identity(&self, label: &str) -> Result<u64, String>;
-    /// The SHA-256 of the exact text, as a part's hash names it. Claude may
-    /// store the exact text inside its native pasted-content wrapper, which
-    /// is normalized separately.
+    /// The SHA-256 of the exact text, as a part's hash names it.
     fn text_sha256(&self) -> String;
-    /// Returns the exact text inside Claude Code's native paste element, in
-    /// the one form Claude Code 2.1.294 records: two newlines, the opening
-    /// tag with one `id` attribute, a newline, the text, a newline, the
-    /// closing tag repeating the same `id`, and a final newline. The text is
-    /// recorded unescaped. Any other form is not a paste element.
-    fn claude_pasted_content(&self) -> Option<&str>;
+    /// Claude Code 2.1.294 records a pasted part as one element (`sOe`):
+    /// two newlines, `<pasted_content id="ID">` and a newline, the part
+    /// under its native paste escape, a newline only when the escaped part
+    /// does not already end in one, `</pasted_content id="ID">`, and a
+    /// final newline. ID is four lowercase hexadecimal digits.
+    ///
+    /// Returns the part this row carries when the row is that element for
+    /// a part whose SHA-256 is `part_sha256`: the element rebuilt from the
+    /// part under the row's ID equals the row byte for byte. The part is
+    /// sought among the texts the row can have been built from: the body
+    /// as it stands and without its final newline, and at each escaped
+    /// tag the `<` the escape replaced or a `<\` the part already held.
+    /// A part whose tag opened with another character the escape replaces,
+    /// or a row with more than eight escaped tags, is not found.
+    fn claude_pasted_part(&self, part_sha256: &str) -> Option<String>;
+    /// The element Claude Code records for this part pasted under
+    /// `identifier`.
+    fn claude_paste_element(&self, identifier: &str) -> String;
+    /// This text under Claude Code's paste escape (`qfe`): each opening
+    /// character that begins a `pasted_content` tag, as the escape reads
+    /// one, becomes `<\`.
+    fn claude_paste_escaped(&self) -> String;
+    /// Whether this text, read right after an opening character, begins a
+    /// `pasted_content` tag as Claude Code's paste escape reads one.
+    fn claude_paste_tag_follows(&self) -> bool;
+    /// The text after this text's first character, when that character is
+    /// in `class`, a set of inclusive code point ranges in ascending order.
+    fn after_first_in(&self, class: &[(u32, u32)]) -> Option<&str>;
 }
 
 impl ReadsLaunchText for str {
@@ -1257,15 +1279,109 @@ impl ReadsLaunchText for str {
         format!("{:x}", Sha256::digest(self.as_bytes()))
     }
 
-    fn claude_pasted_content(&self) -> Option<&str> {
-        let rest = self.strip_prefix("\n\n<pasted_content id=\"")?;
-        let (identifier, rest) = rest.split_once("\">\n")?;
-        if identifier.is_empty()
-            || identifier.contains(|c: char| c == '"' || c == '<' || c == '>' || c.is_whitespace())
+    fn claude_pasted_part(&self, part_sha256: &str) -> Option<String> {
+        let row = self;
+        let rest = row.strip_prefix("\n\n<pasted_content id=\"")?;
+        let identifier = rest.get(..4)?;
+        if !identifier
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
         {
             return None;
         }
-        rest.strip_suffix(&format!("\n</pasted_content id=\"{identifier}\">\n"))
+        let body = rest[4..]
+            .strip_prefix("\">\n")?
+            .strip_suffix(&format!("</pasted_content id=\"{identifier}\">\n"))?;
+        [Some(body), body.strip_suffix('\n')]
+            .into_iter()
+            .flatten()
+            .flat_map(|escaped| {
+                let tags = escaped
+                    .match_indices("<\\")
+                    .map(|(at, _)| at)
+                    .filter(|at| escaped[at + 2..].claude_paste_tag_follows())
+                    .collect::<Vec<_>>();
+                let choices = if tags.len() > 8 {
+                    0
+                } else {
+                    1_u32 << tags.len()
+                };
+                (0..choices).map(move |choice| {
+                    let mut part = String::with_capacity(escaped.len());
+                    let mut from = 0;
+                    for (bit, at) in tags.iter().enumerate() {
+                        if choice & (1 << bit) != 0 {
+                            part.push_str(&escaped[from..=*at]);
+                            from = at + 2;
+                        }
+                    }
+                    part.push_str(&escaped[from..]);
+                    part
+                })
+            })
+            .find(|part| {
+                part.text_sha256() == *part_sha256 && part.claude_paste_element(identifier) == *row
+            })
+    }
+
+    fn claude_paste_element(&self, identifier: &str) -> String {
+        let escaped = self.claude_paste_escaped();
+        let newline = if escaped.ends_with('\n') { "" } else { "\n" };
+        format!(
+            "\n\n<pasted_content id=\"{identifier}\">\n{escaped}{newline}</pasted_content id=\"{identifier}\">\n"
+        )
+    }
+
+    fn claude_paste_escaped(&self) -> String {
+        let text = self;
+        let mut escaped = String::with_capacity(text.len());
+        for (at, character) in text.char_indices() {
+            let opens_tag = text[at..]
+                .after_first_in(claude_paste::OPENING)
+                .is_some_and(|after| !after.starts_with('\\') && after.claude_paste_tag_follows());
+            if opens_tag {
+                escaped.push_str("<\\");
+            } else {
+                escaped.push(character);
+            }
+        }
+        escaped
+    }
+
+    fn claude_paste_tag_follows(&self) -> bool {
+        let mut text = self;
+        while let Some(after) = text.after_first_in(claude_paste::FILLER) {
+            text = after;
+        }
+        for (index, letter) in claude_paste::TAG_NAME.iter().enumerate() {
+            if index > 0 {
+                while let Some(after) = text.after_first_in(claude_paste::GAP) {
+                    text = after;
+                }
+            }
+            match text.after_first_in(letter) {
+                Some(after) => text = after,
+                None => return false,
+            }
+        }
+        text.is_empty() || text.after_first_in(claude_paste::TAIL).is_some()
+    }
+
+    fn after_first_in(&self, class: &[(u32, u32)]) -> Option<&str> {
+        let mut characters = self.chars();
+        let first = u32::from(characters.next()?);
+        class
+            .binary_search_by(|&(low, high)| {
+                if high < first {
+                    std::cmp::Ordering::Less
+                } else if low > first {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .ok()?;
+        Some(characters.as_str())
     }
 }
 
@@ -2425,7 +2541,11 @@ impl ReadsStartupRecord for StartupReading {
                     && !every_part
                     && let Some(text) = row.claude_typed_text()
                 {
-                    let original = text.claude_pasted_content().unwrap_or(&text).to_owned();
+                    let original = usize::try_from(self.seen_parts)
+                        .ok()
+                        .and_then(|seen| intent.prompt_sha256_vector.get(seen))
+                        .and_then(|part_sha256| text.claude_pasted_part(part_sha256))
+                        .unwrap_or(text);
                     self.read_part(&original, intent)?;
                     return Ok(None);
                 }
@@ -3421,7 +3541,8 @@ printf '%s\n' "$alias"
                 r#"{"hooks":{"#,
                 r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
                 r#""SessionStart":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
-                r#""Stop":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
+                r#""Stop":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
+                r#""UserPromptSubmit":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
                 r#""permissions":{"defaultMode":"bypassPermissions"}}"#
             ),
         )));
@@ -4388,23 +4509,58 @@ printf '%s\n' "$alias"
         assert_eq!(receipt.prompt_sha256_vector, [PROMPT_HASH]);
     }
 
-    /// The one paste element Claude Code 2.1.294 records is read; every
-    /// other form is the text itself, which no part's hash then names.
+    /// Claude Code 2.1.294's paste escape, as its own expression
+    /// `lI(["pasted_content"])` replaced with `<\` gives it.
     #[test]
-    fn only_the_exact_native_paste_element_is_unwrapped() {
+    fn the_paste_escape_is_claude_codes() {
+        let cases = [
+            (
+                "quote <pasted_content id=\"04ee\"> here",
+                "quote <\\pasted_content id=\"04ee\"> here",
+            ),
+            (
+                "</pasted_content id=\"04ee\">",
+                "<\\/pasted_content id=\"04ee\">",
+            ),
+            ("<\\pasted_content", "<\\pasted_content"),
+            ("<Pasted-Content", "<\\Pasted-Content"),
+            ("< pasted_content", "<\\ pasted_content"),
+            ("\u{ff1c}pasted_content", "<\\pasted_content"),
+            ("<pasted_contents", "<pasted_contents"),
+            ("<pasted_content_", "<pasted_content_"),
+            ("<pas\u{200b}ted_content", "<\\pas\u{200b}ted_content"),
+            ("<pasted", "<pasted"),
+            ("<<pasted_content>", "<<\\pasted_content>"),
+            ("<\u{ff50}asted_content", "<\\\u{ff50}asted_content"),
+            ("a < b", "a < b"),
+        ];
+        for (text, escaped) in cases {
+            assert_eq!(text.claude_paste_escaped(), escaped, "{text:?}");
+        }
+    }
+
+    /// Only the element rebuilt from the part, byte for byte, is read.
+    #[test]
+    fn only_a_paste_element_rebuilt_exactly_from_the_part_is_read() {
         let part = "Address.{ A }\nOrder: STARTUP_READY";
+        let hash = digest(part);
         let element = |opening: &str, closing: &str| {
             format!(
                 "\n\n<pasted_content id=\"{opening}\">\n{part}\n</pasted_content id=\"{closing}\">\n"
             )
         };
-        assert_eq!(element("04ee", "04ee").claude_pasted_content(), Some(part));
+        assert_eq!(part.claude_paste_element("04ee"), element("04ee", "04ee"));
+        assert_eq!(
+            element("04ee", "04ee").claude_pasted_part(&hash),
+            Some(part.to_owned())
+        );
         let refused = [
             format!("x{}", element("04ee", "04ee")),
             format!("{}x", element("04ee", "04ee")),
             format!("{} ", element("04ee", "04ee")),
             element("04ee", "04ef"),
             element("", ""),
+            element("04EE", "04EE"),
             format!("{}{}", element("04ee", "04ee"), element("05ff", "05ff")),
             format!("<pasted_content id=\"04ee\">\n{part}\n</pasted_content>"),
             format!("\n\n<pasted_content id=\"04ee\">\n{part}\n</pasted_content>\n"),
@@ -4414,10 +4570,168 @@ printf '%s\n' "$alias"
             ),
         ];
         for text in &refused {
-            // Two elements unwrap to a text that is not the part.
-            assert_ne!(text.claude_pasted_content(), Some(part), "{text:?}");
+            assert_eq!(text.claude_pasted_part(&hash), None, "{text:?}");
         }
-        assert_eq!(part.claude_pasted_content(), None);
+        assert_eq!(part.claude_pasted_part(&hash), None);
+    }
+
+    /// The element Claude Code 2.1.294 records for a part whose escaped
+    /// text is `escaped`, pasted under `identifier`.
+    fn pasted(identifier: &str, escaped: &str) -> String {
+        let newline = if escaped.ends_with('\n') { "" } else { "\n" };
+        format!(
+            "\n\n<pasted_content id=\"{identifier}\">\n{escaped}{newline}</pasted_content id=\"{identifier}\">\n"
+        )
+    }
+
+    /// Reads `rows` as the Claude user texts of a launch whose parts are
+    /// `parts`, each row answered; true when the answer after the last row
+    /// is the flow's first answer.
+    fn claude_rows_read(parts: &[&str], rows: &[String]) -> Result<bool, NativeLaunchFailure> {
+        use crate::generated::starter::{ReadsStartupRecord, StartupReading};
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let (_root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &launch.launch_agent_name(),
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let mut intent = registered_intent(&adapter, &launch, pane, native_session);
+        intent.prompt_sha256_vector = parts.iter().copied().map(digest).collect();
+        intent.parts_submitted = i64::try_from(parts.len()).unwrap();
+        let mut reading = StartupReading {
+            seen_parts: 0,
+            last_part_answered: false,
+            native_turn_option: None,
+            part_turn_option: None,
+        };
+        let mut received = false;
+        for (index, row) in rows.iter().enumerate() {
+            let user = serde_json::json!({"type":"user","sessionId":native_session,
+                "message":{"role":"user","content":row}});
+            reading.read_record(&user, &intent)?;
+            let answer = serde_json::json!({"type":"assistant","sessionId":native_session,
+                "uuid":format!("turn-{index}"),"effort":"high","message":{
+                "model":"model-current","content":[{"type":"text","text":"Waiting."}]}});
+            received = reading.read_record(&answer, &intent)?.is_some();
+        }
+        Ok(received)
+    }
+
+    #[test]
+    fn a_claude_paste_of_a_part_ending_in_a_newline_is_observed() {
+        assert_eq!(
+            claude_rows_read(&["X\n"], &[pasted("04ee", "X\n")]),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn a_claude_paste_holding_one_newline_more_than_the_part_differs() {
+        assert_eq!(
+            claude_rows_read(&["X\n"], &[pasted("04ee", "X\n")]),
+            Ok(true)
+        );
+        let row = "\n\n<pasted_content id=\"04ee\">\nX\n\n</pasted_content id=\"04ee\">\n";
+        assert_eq!(
+            claude_rows_read(&["X"], &[row.to_owned()]),
+            Err(NativeLaunchFailure::PartDiffers)
+        );
+    }
+
+    #[test]
+    fn a_claude_paste_holding_one_newline_fewer_than_the_part_differs() {
+        assert_eq!(
+            claude_rows_read(&["X\n\n"], &[pasted("04ee", "X\n\n")]),
+            Ok(true)
+        );
+        let row = "\n\n<pasted_content id=\"04ee\">\nX\n</pasted_content id=\"04ee\">\n";
+        assert_eq!(
+            claude_rows_read(&["X\n\n"], &[row.to_owned()]),
+            Err(NativeLaunchFailure::PartDiffers)
+        );
+    }
+
+    #[test]
+    fn a_claude_paste_id_other_than_four_lowercase_hex_digits_differs() {
+        assert_eq!(
+            claude_rows_read(&["X\n"], &[pasted("04ee", "X\n")]),
+            Ok(true)
+        );
+        for identifier in ["04eG", "04ee5", "04EE", "04e", ""] {
+            assert_eq!(
+                claude_rows_read(&["X"], &[pasted(identifier, "X")]),
+                Err(NativeLaunchFailure::PartDiffers),
+                "{identifier:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_intermediate_claude_part_ending_in_a_newline_is_observed() {
+        let parts = ["first module\n", "second module\n\n", "the brief"];
+        let rows = [
+            pasted("0a1b", parts[0]),
+            pasted("c2d3", parts[1]),
+            pasted("e4f5", parts[2]),
+        ];
+        assert_eq!(claude_rows_read(&parts, &rows), Ok(true));
+    }
+
+    #[test]
+    fn a_claude_part_quoting_a_paste_tag_is_read_under_the_native_escape() {
+        let part = "see <pasted_content id=\"04ee\">\nand </pasted_content id=\"04ee\">\n";
+        let escaped = "see <\\pasted_content id=\"04ee\">\nand <\\/pasted_content id=\"04ee\">\n";
+        assert_eq!(
+            claude_rows_read(&[part], &[pasted("04ee", escaped)]),
+            Ok(true)
+        );
+        // A tag the part already escaped is left as it stands.
+        let quoted = "keep <\\pasted_content and <pasted_content\n";
+        let quoted_escaped = "keep <\\pasted_content and <\\pasted_content\n";
+        assert_eq!(
+            claude_rows_read(&[quoted], &[pasted("04ee", quoted_escaped)]),
+            Ok(true)
+        );
+        let wrong = [
+            pasted("04ee", part),
+            pasted(
+                "04ee",
+                "see <\\pasted_content id=\"04ee\">\nand </pasted_content id=\"04ee\">\n",
+            ),
+            pasted("04ee", &escaped.replace("<\\", "<\\\\")),
+        ];
+        for row in wrong {
+            assert_eq!(
+                claude_rows_read(&[part], std::slice::from_ref(&row)),
+                Err(NativeLaunchFailure::PartDiffers),
+                "{row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_parts_reordered_or_missing_differ() {
+        let parts = ["A\n", "B\n", "C\n"];
+        let row = |index: usize| pasted("04ee", parts[index]);
+        assert_eq!(
+            claude_rows_read(&parts, &[row(0), row(1), row(2)]),
+            Ok(true)
+        );
+        assert_eq!(
+            claude_rows_read(&parts, &[row(1), row(0), row(2)]),
+            Err(NativeLaunchFailure::PartDiffers)
+        );
+        assert_eq!(
+            claude_rows_read(&parts, &[row(0), row(2)]),
+            Err(NativeLaunchFailure::PartDiffers)
+        );
+        assert_eq!(
+            claude_rows_read(&parts, &[row(0), row(0), row(1), row(2)]),
+            Err(NativeLaunchFailure::PartDiffers)
+        );
     }
 
     /// A paste element holding other bytes than the part is not the part.

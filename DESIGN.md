@@ -324,6 +324,27 @@ At its start the Nexus wakes every metaflow due a wake, so a Nexus that died
 between the commit and the wake leaves none owed. A wake already running for
 the metaflow absorbs the request: it drains what arrives during it.
 
+A Codex seat runs no hook and reports no Stop; its turn ends are its
+app-server's. Every connection Flow keeps on a Codex thread (the launch's
+opening connection, then the Nexus's responder) reads that thread's
+`turn/started`, `turn/completed` and `thread/status/changed`, and the
+`thread/resume` that subscribes a responder answers the thread's status as
+the app-server holds it then. From these alone Flow holds whether the
+thread is in a turn, holds work Flow typed whose turn has not begun, or
+rests; a thread with no such evidence never rests. A turn's completion is
+counted once by its id, an idle status does not end a named turn or typed
+work, and the resumed status covers a completion that came while no
+responder was subscribed. When a confirmed seat's thread comes to rest with
+work queued, or work is queued for a seat whose thread rests, the seat is
+settled as a Stop settles a Claude seat: under the dispatch gate the oldest
+request is typed into its resting pane, sender first, and the thread then
+holds that typed work until a turn that began after it completes. A seat
+whose thread is in a turn is never drained, whatever its screen shows, and
+work queued meanwhile waits for the completion. A seat that only holds its
+Address is settled at its confirmation when its thread rests. The state is
+memory only; a Nexus that starts again reads each live thread's status from
+its responder's resume.
+
 Every queued request carries who sent it, `QueuedRequest.{ SentBy Request }`:
 the Sender a Deliver's Lock named (which the bound Message peer asserts) or
 the metaflow a send-tool call is attributed to. A request queued before Flow

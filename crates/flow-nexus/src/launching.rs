@@ -1097,14 +1097,31 @@ impl SettlesStartupProgress for RunningNexus {
     }
 
     fn stops_reported<N: Textual>(&self, input: N) -> i64 {
+        let flow_id = input.text();
+        // A Stop that names another native session than the flow's own (a
+        // harness the seat started, under the same FLOW_ID) is not its Stop.
+        let session = self
+            .store
+            .flow_node(&flow_id)
+            .ok()
+            .flatten()
+            .map(|node| node.session_id)
+            .unwrap_or_default();
         self.store
-            .events(&input.text())
+            .events(&flow_id)
             .ok()
             .flatten()
             .map(|events| {
                 events
                     .iter()
-                    .filter(|event| **event == Event::Stopped)
+                    .filter(|event| {
+                        matches!(event, Event::Stopped(stop)
+                            if session.is_empty()
+                                || stop
+                                    .native_session_id_option
+                                    .as_deref()
+                                    .is_none_or(|stopped| stopped == session))
+                    })
                     .count()
             })
             .unwrap_or_default() as i64

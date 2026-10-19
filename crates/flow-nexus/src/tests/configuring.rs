@@ -352,10 +352,12 @@ fn each_family_is_its_last_declaration() {
     let first = vec![
         ConfigureLeaveOut {
             address: quaternary_field(),
+            harness_kind: HarnessKind::Claude,
             leave_outs: vec![signal_flow::LeaveOut::SkillTool],
         },
         ConfigureLeaveOut {
             address: ConfiguredStore::message(),
+            harness_kind: HarnessKind::Claude,
             leave_outs: vec![signal_flow::LeaveOut::ClaudeMd],
         },
     ];
@@ -365,6 +367,7 @@ fn each_family_is_its_last_declaration() {
     );
     let second = vec![ConfigureLeaveOut {
         address: quaternary_field(),
+        harness_kind: HarnessKind::Claude,
         leave_outs: vec![
             signal_flow::LeaveOut::SkillTool,
             signal_flow::LeaveOut::WorkflowTool,
@@ -378,7 +381,7 @@ fn each_family_is_its_last_declaration() {
     assert!(
         nexus
             .store
-            .default_leave_outs(&ConfiguredStore::message())
+            .default_leave_outs(&ConfiguredStore::message(), &HarnessKind::Claude)
             .unwrap()
             .is_empty()
     );
@@ -440,6 +443,7 @@ fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
             nexus,
             ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
                 address: quaternary_field(),
+                harness_kind: HarnessKind::Claude,
                 leave_outs,
             }]),
         )
@@ -510,6 +514,123 @@ fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
     assert_eq!(nexus.codex_endpoints.harness_for(SOL), HarnessKind::Codex);
     assert!(nexus.codex_endpoints.launches_exactly(SOL));
     assert!(!nexus.codex_endpoints.launches_exactly("gpt-6-unlisted"));
+}
+
+/// An entry naming a leave-out of another harness than its own is refused
+/// whole: the declaration writes nothing, and the committed family stands.
+#[test]
+fn a_leave_out_default_naming_another_harness_is_refused_and_writes_nothing() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let committed = vec![ConfigureLeaveOut {
+        address: quaternary_field(),
+        harness_kind: HarnessKind::Claude,
+        leave_outs: vec![signal_flow::LeaveOut::ClaudeMd],
+    }];
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::LeaveOuts(committed.clone())),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let before = snapshot(&nexus);
+    let rows = other_rows(&nexus);
+    for crossed in [
+        ConfigureLeaveOut {
+            address: ConfiguredStore::message(),
+            harness_kind: HarnessKind::Codex,
+            leave_outs: vec![
+                signal_flow::LeaveOut::CodexAgentsMd,
+                signal_flow::LeaveOut::ClaudeMd,
+            ],
+        },
+        ConfigureLeaveOut {
+            address: ConfiguredStore::message(),
+            harness_kind: HarnessKind::Claude,
+            leave_outs: vec![signal_flow::LeaveOut::CodexSkillListing],
+        },
+    ] {
+        let declaration = vec![
+            ConfigureLeaveOut {
+                address: quaternary_field(),
+                harness_kind: HarnessKind::Codex,
+                leave_outs: vec![signal_flow::LeaveOut::CodexAgentsMd],
+            },
+            crossed,
+        ];
+        assert_eq!(
+            configure(&nexus, ConfigurationChange::LeaveOuts(declaration)),
+            MetaResponse::ConfigureRejected(ConfigureRejection::LeaveOutNotForHarness)
+        );
+        assert_eq!(snapshot(&nexus), before);
+        assert_eq!(other_rows(&nexus), rows);
+    }
+    // The configuration-only listener refuses the same entry the same way.
+    drop(nexus);
+    let configuration =
+        ConfigurationOnlyStore::open(std::path::Path::new(&fixture.start.store_path))
+            .expect("stopped store reopens");
+    assert!(matches!(
+        configuration.configure_change(ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
+            address: quaternary_field(),
+            harness_kind: HarnessKind::Codex,
+            leave_outs: vec![signal_flow::LeaveOut::SkillTool],
+        }])),
+        Err(crate::store::StoreError::LeaveOutNotForHarness)
+    ));
+    assert_eq!(
+        configuration
+            .configuration_snapshot()
+            .expect("reads")
+            .expect("configured")
+            .default_leave_outs,
+        committed
+    );
+}
+
+/// A Start naming no leave-outs takes its metaflow's default for the
+/// harness it starts on: a Codex Start whose metaflow has only a Claude
+/// default takes none, and a Claude Start of the same metaflow takes that
+/// default.
+#[test]
+fn a_codex_start_naming_none_takes_no_claude_default() {
+    let fixture = ConfiguredStore::new();
+    let mut nexus = fixture.open();
+    nexus.composer = crate::composition::tests::fixture_composer();
+    assert_eq!(
+        configure(
+            &nexus,
+            ConfigurationChange::LeaveOuts(vec![ConfigureLeaveOut {
+                address: quaternary_field(),
+                harness_kind: HarnessKind::Claude,
+                leave_outs: vec![
+                    signal_flow::LeaveOut::WorkflowTool,
+                    signal_flow::LeaveOut::ClaudeMd,
+                ],
+            }]),
+        ),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let mut profile = crate::composition::tests::fixture_profile();
+    profile.address = quaternary_field();
+    profile.leave_outs_option = None;
+    profile.model_name = SOL.into();
+    match nexus.perform(Operation::Compose(profile.clone())) {
+        Outcome::Composed(launch) => {
+            assert_eq!(launch.harness_kind, HarnessKind::Codex);
+            assert!(launch.leave_outs.is_empty(), "{:?}", launch.leave_outs);
+        }
+        outcome => panic!("Codex launch not composed: {outcome:?}"),
+    }
+    profile.model_name = "claude-haiku-5-5".into();
+    match nexus.perform(Operation::Compose(profile)) {
+        Outcome::Composed(launch) => assert_eq!(
+            launch.leave_outs,
+            [
+                signal_flow::LeaveOut::WorkflowTool,
+                signal_flow::LeaveOut::ClaudeMd
+            ]
+        ),
+        outcome => panic!("Claude launch not composed: {outcome:?}"),
+    }
 }
 
 #[test]

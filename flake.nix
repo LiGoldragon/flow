@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.13";
+            version = "0.35.18";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -249,6 +249,18 @@
             "herdr::launch::tests::a_claude_start_carries_its_leave_outs_as_flags_environment_and_settings";
           flow-start-leave-outs-replace-the-default = context.exactTest "flow-nexus"
             "composition::tests::a_start_naming_leave_outs_replaces_its_metaflow_default";
+          flow-leave-out-default-for-another-harness-refused = context.exactTest "flow-nexus"
+            "tests::configuring::a_leave_out_default_naming_another_harness_is_refused_and_writes_nothing";
+          flow-codex-start-takes-no-claude-default = context.exactTest "flow-nexus"
+            "tests::configuring::a_codex_start_naming_none_takes_no_claude_default";
+          flow-codex-start-claude-leave-out-refused-before-reserve = context.exactTest "flow-nexus"
+            "tests::reservation::a_codex_start_naming_a_claude_leave_out_is_refused_before_reserve_or_open";
+          flow-leave-out-defaults-upgrade-under-their-harness = context.exactTest "flow-nexus"
+            "store::tests::production_leave_out_defaults_upgrade_each_under_its_harness";
+          flow-configuration-only-upgrades-leave-out-defaults = context.exactTest "flow-nexus"
+            "store::tests::the_configuration_only_open_upgrades_v1_leave_out_defaults";
+          flow-mixed-leave-out-default-refuses-upgrade = context.exactTest "flow-nexus"
+            "store::tests::a_v1_leave_out_default_mixing_harnesses_refuses_the_upgrade_by_its_entry";
           flow-codex-frame-sixty-four-bit-length = context.exactTest "flow-nexus"
             "codex::tests::an_outbound_frame_past_sixty_five_kilobytes_takes_the_sixty_four_bit_length";
           flow-gone-pane-lists-exited = context.exactTest "flow-nexus"
@@ -351,8 +363,38 @@
             "tests::waking::a_stop_that_leaves_its_seat_names_why";
           flow-hook-closed-before-the-rest-wait = context.exactTest "flow-nexus"
             "tests::waking::the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends";
-          flow-stop-before-confirmation-settled = context.exactTest "flow-nexus"
-            "tests::waking::a_stop_before_confirmation_is_settled_when_the_launch_is_confirmed";
+          flow-codex-stop-before-confirmation-fabricates-nothing = context.exactTest "flow-nexus"
+            "tests::waking::a_codex_stop_before_confirmation_does_not_fabricate_completion";
+          flow-claude-end-turn-with-sidechain-drains = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop";
+          flow-claude-two-requests-drain-on-receipts = context.exactTest "flow-nexus"
+            "tests::queue_drain::two_queued_claude_requests_drain_in_order_once_each_on_their_receipts";
+          flow-claude-notification-settles-nothing = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_task_notification_that_takes_the_turn_first_settles_nothing";
+          flow-claude-crash-reconciled-at-start = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_typing";
+          flow-claude-turn-end-before-confirmation = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it";
+          flow-queue-resolved-delivered-leaves-the-queue = context.exactTest "flow-nexus"
+            "tests::queue_drain::an_uncertain_hand_over_resolved_delivered_leaves_the_queue_with_its_record";
+          flow-queue-resolved-absent-one-new-attempt = context.exactTest "flow-nexus"
+            "tests::queue_drain::an_uncertain_hand_over_resolved_absent_is_followed_by_exactly_one_new_attempt";
+          flow-queue-resolution-refused-at-the-nexus = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attempt";
+          flow-queue-resolved-delivered-survives-restart = context.exactTest "flow-nexus"
+            "store::queue_delivery::tests::resolved_delivered_leaves_the_queue_with_its_record_and_survives_restart";
+          flow-queue-resolved-absent-survives-restart = context.exactTest "flow-nexus"
+            "store::queue_delivery::tests::resolved_absent_keeps_the_request_and_authorises_exactly_one_new_attempt";
+          flow-queue-resolution-store-refusals = context.exactTest "flow-nexus"
+            "store::queue_delivery::tests::a_resolution_is_refused_for_what_is_not_the_oldest_uncertain_attempt";
+          flow-codex-crash-found-in-history = context.exactTest "flow-nexus"
+            "tests::send_tool::a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history";
+          flow-codex-absent-handed-over-once = context.exactTest "flow-nexus"
+            "tests::send_tool::a_codex_turn_absent_from_an_idle_thread_is_handed_over_again_once";
+          flow-codex-undecidable-never-resent = context.exactTest "flow-nexus"
+            "tests::send_tool::an_undecidable_codex_turn_stays_uncertain_and_is_never_resent";
+          flow-v1-stop-upgrades-unknown-identity = context.exactTest "flow-nexus"
+            "store::tests::a_v1_stop_upgrades_to_a_stop_of_unknown_identity";
           flow-stop-sleeps-the-metaflow = context.exactTest "flow-nexus"
             "tests::waking::the_stop_of_a_confirmed_seat_leaves_its_metaflow_asleep_and_resumable";
           flow-retired-seat-wakes-fresh = context.exactTest "flow-nexus"

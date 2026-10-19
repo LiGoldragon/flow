@@ -1,22 +1,33 @@
 //! `flow-hook`: the Claude Code command hook Flow writes into every Claude
-//! flow it launches. Claude Code runs it on SessionStart, PostToolUse and
-//! Stop with the event as JSON on stdin; it turns the event into one
-//! `Report.{ FlowId Event }` datom and hands it to the `flow` CLI beside it,
-//! which is the only thing here that speaks Signal.
+//! flow it launches. Claude Code runs it on SessionStart, PostToolUse,
+//! UserPromptSubmit and Stop with the event as JSON on stdin; it turns the
+//! event into one `Report.{ FlowId Event }` datom and hands it to the `flow`
+//! CLI beside it, which is the only thing here that speaks Signal.
 //!
-//!   SessionStart -> Report.{ «FLOW_ID» Started }
-//!   PostToolUse  -> Report.{ «FLOW_ID» ToolUsed.«tool_name» }
-//!   Stop         -> Report.{ «FLOW_ID» Stopped }
+//!   SessionStart     -> Report.{ «FLOW_ID» Started }
+//!   PostToolUse      -> Report.{ «FLOW_ID» ToolUsed.«tool_name» }
+//!   UserPromptSubmit -> Report.{ «FLOW_ID» PromptSubmitted.{ Some.«session_id» Some.«prompt_id» SHA256 } }
+//!   Stop             -> Report.{ «FLOW_ID» Stopped.{ Some.«session_id» Some.«transcript_path» } }
+//!
+//! A Stop and a submitted prompt carry the native identity Claude Code gave
+//! the hook, so the Nexus acts on them only when they are the flow's own
+//! registered session; a field the input does not carry is `None`. A
+//! submitted prompt travels as the SHA-256 of the text Claude Code took
+//! (its paste wrapper taken off), never as the text: one argument holds at
+//! most 128 KiB on Linux, and the digest is an exact match of the whole
+//! prompt.
 //!
 //! The FlowId is the `FLOW_ID` the flow claimed, read from the harness's
 //! environment, never derived from the harness's session id (ruling 12 of
 //! flow f1c841). With no FLOW_ID, or on any other event, it reports
 //! nothing.
 //!
-//! It never blocks the harness: whatever happens it exits 0, and it writes
-//! one tab-separated line on stderr (event, datom, the CLI's exit code, the
-//! CLI's whole output) for whoever reads it.
+//! It never blocks the harness: whatever happens it exits 0, writes nothing
+//! on stdout (which UserPromptSubmit would add to the model's context), and
+//! writes one tab-separated line on stderr (event, datom, the CLI's exit
+//! code, the CLI's whole output) for whoever reads it.
 
+use flow_native::{DigestsPrompt, ReadsClaudePaste};
 use std::{
     env,
     io::Read,
@@ -52,6 +63,12 @@ trait QuotesDatomString {
     fn quoted(&self) -> String;
 }
 
+trait ReadsHookField {
+    /// The input's string field as a datom Option: `Some.«value»`, or
+    /// `None` when the input does not carry it.
+    fn optional(&self, field: &str) -> String;
+}
+
 trait ReportsThroughCli {
     fn run(&self) -> String;
 }
@@ -72,6 +89,15 @@ impl ReadsHookInput for HarnessHook {
 impl QuotesDatomString for str {
     fn quoted(&self) -> String {
         format!("«{}»", self.replace('»', "\\»"))
+    }
+}
+
+impl ReadsHookField for HarnessHook {
+    fn optional(&self, field: &str) -> String {
+        match self.input.get(field).and_then(serde_json::Value::as_str) {
+            Some(value) => format!("Some.{}", value.quoted()),
+            None => "None".to_owned(),
+        }
     }
 }
 
@@ -98,7 +124,22 @@ impl ChoosesHookCall for HarnessHook {
                 Some(tool_name) => format!("ToolUsed.{}", tool_name.quoted()),
                 None => return HookCall::Nothing("PostToolUse without a tool_name"),
             },
-            "Stop" => "Stopped".to_owned(),
+            "UserPromptSubmit" => {
+                match self.input.get("prompt").and_then(serde_json::Value::as_str) {
+                    Some(prompt) => format!(
+                        "PromptSubmitted.{{ {} {} {} }}",
+                        self.optional("session_id"),
+                        self.optional("prompt_id"),
+                        prompt.submitted_claude_text().prompt_sha256()
+                    ),
+                    None => return HookCall::Nothing("UserPromptSubmit without a prompt"),
+                }
+            }
+            "Stop" => format!(
+                "Stopped.{{ {} {} }}",
+                self.optional("session_id"),
+                self.optional("transcript_path")
+            ),
             _ => return HookCall::Nothing("no Report for this event"),
         };
         HookCall::Report(format!("Report.{{ {} {event} }}", flow_id.quoted()))
@@ -174,12 +215,55 @@ mod tests {
         );
         assert_eq!(
             hook(
-                serde_json::json!({"hook_event_name": "Stop", "prompt_id": "p"}),
+                serde_json::json!({"hook_event_name": "Stop", "prompt_id": "p",
+                    "session_id": "s", "transcript_path": "/t/s.jsonl"}),
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Stopped }".into())
+            HookCall::Report("Report.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» } }".into())
         );
+        assert_eq!(
+            hook(
+                serde_json::json!({"hook_event_name": "Stop"}),
+                Some("5a4d0b")
+            )
+            .call(),
+            HookCall::Report("Report.{ «5a4d0b» Stopped.{ None None } }".into())
+        );
+    }
+
+    /// A submitted prompt is reported as the digest of the text Claude Code
+    /// took: the exact body of its paste wrapper, never the wrapper.
+    #[test]
+    fn a_submitted_prompt_is_reported_as_the_digest_of_its_text() {
+        use flow_native::DigestsPrompt;
+        let body = "#msg [\"psyche core Secondary\" \"go\"]";
+        let digest = body.prompt_sha256();
+        for prompt in [
+            body.to_owned(),
+            format!("\n\n<pasted_content id=\"04ee\">\n{body}\n</pasted_content id=\"04ee\">\n"),
+            format!("<pasted_content id=\"00df\">\n{body}\n</pasted_content id=\"00df\">"),
+        ] {
+            assert_eq!(
+                hook(
+                    serde_json::json!({"hook_event_name": "UserPromptSubmit",
+                        "session_id": "s", "prompt_id": "p", "prompt": prompt}),
+                    Some("5a4d0b")
+                )
+                .call(),
+                HookCall::Report(format!(
+                    "Report.{{ «5a4d0b» PromptSubmitted.{{ Some.«s» Some.«p» {digest} }} }}"
+                ))
+            );
+        }
+        assert!(matches!(
+            hook(
+                serde_json::json!({"hook_event_name": "UserPromptSubmit", "session_id": "s"}),
+                Some("5a4d0b")
+            )
+            .call(),
+            HookCall::Nothing(_)
+        ));
     }
 
     #[test]
@@ -199,6 +283,52 @@ mod tests {
     }
 
     /// The hook's datom is one the Flow CLI reads as the Report it means.
+    #[test]
+    fn the_correlated_datoms_read_as_signal_flow_reports() {
+        use datom_codec::{Actualizing, Budget, Potential};
+        use protos::ReaderBudget;
+        let read = |input: serde_json::Value| {
+            let HookCall::Report(datom) = hook(input, Some("5a4d0b")).call() else {
+                panic!("the event is reported")
+            };
+            let mut budget = Budget {
+                remaining: 4096,
+                reader: ReaderBudget { remaining: 4096 },
+                depth: 0,
+                maximum_depth: 1024,
+            };
+            Potential::<signal_flow::Query>::from(datom)
+                .actualize(&mut budget)
+                .unwrap()
+        };
+        assert_eq!(
+            read(
+                serde_json::json!({"hook_event_name": "Stop", "session_id": "s",
+                "transcript_path": "/t/a »b».jsonl"})
+            ),
+            signal_flow::Query::Report(signal_flow::Report_Data {
+                flow_id: "5a4d0b".into(),
+                event: signal_flow::Event::Stopped(signal_flow::NativeStop {
+                    native_session_id_option: Some("s".into()),
+                    transcript_path_option: Some("/t/a »b».jsonl".into()),
+                }),
+            })
+        );
+        assert_eq!(
+            read(serde_json::json!({"hook_event_name": "UserPromptSubmit",
+                "session_id": "s", "prompt": "abc"})),
+            signal_flow::Query::Report(signal_flow::Report_Data {
+                flow_id: "5a4d0b".into(),
+                event: signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
+                    native_session_id_option: Some("s".into()),
+                    prompt_id_option: None,
+                    prompt_sha256:
+                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+                }),
+            })
+        );
+    }
+
     #[test]
     fn the_hook_datom_reads_as_a_signal_flow_report() {
         use datom_codec::{Actualizing, Budget, Potential};

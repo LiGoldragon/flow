@@ -5,7 +5,7 @@
 //! the send-tool probe, so connection `n` of a responder is run `2n` of its
 //! script, and run `2n - 1` is the probe.
 
-use super::NexusFixture;
+use super::{ControlsHerdrSnapshot, NexusFixture};
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
@@ -15,7 +15,9 @@ use crate::generated::send_tool::{
 use crate::send_tool::{RespondsToSendCalls, SendTool, ServesSendTool};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
-use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
+use crate::store::{
+    AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersExistingFlow, RegistersFlowIdentity,
+};
 use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
 use signal_flow::{
@@ -146,6 +148,13 @@ trait RunsFakeAppServer {
         wanted: impl Fn(&serde_json::Value) -> bool,
     ) -> Vec<serde_json::Value>;
     fn runs(&self) -> u64;
+    /// Adds app-server sessions that resume `thread` and authentically
+    /// acknowledge any durable queued-turn JSON-RPC id in the test range.
+    fn accept_queued_turns(&self, thread: &str, runs: std::ops::RangeInclusive<u64>);
+    /// Run `run` answers a reconciliation: `thread/read` with the thread
+    /// idle or active, then one page of `turns`, newest first.
+    fn serve_turn_history(&self, run: u64, thread: &str, idle: bool, turns: Vec<serde_json::Value>);
+    fn queued_turn_texts(&self) -> Vec<String>;
 }
 
 impl RunsFakeAppServer for FakeAppServer {
@@ -183,7 +192,7 @@ impl RunsFakeAppServer for FakeAppServer {
             path: executable.clone(),
         }
         .install(&format!(
-            "#!/bin/sh\nd='{root}'\nn=$(cat \"$d/count\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$d/count\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$d/record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\n[ -f \"$d/frames-$n\" ] || exit 1\nprintf '%b' \"$(cat \"$d/frames-$n\")\"\nif [ -f \"$d/deaf-$n\" ]; then sleep 1; kill $! 2>/dev/null; exec 0<&- 3<&-; printf '%b' \"$(cat \"$d/calls-$n\")\"; exit 0; fi\n[ -f \"$d/calls-$n\" ] && printf '%b' \"$(cat \"$d/calls-$n\")\"\n[ -f \"$d/close-$n\" ] && exit 0\nsleep 30\n",
+            "#!/bin/sh\nd='{root}'\nn=$(cat \"$d/count\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$d/count\"\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nexec 3<&0; cat <&3 > \"$d/record-$n\" &\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\n[ -f \"$d/frames-$n\" ] || exit 1\nprintf '%b' \"$(cat \"$d/frames-$n\")\"\nif [ -f \"$d/deaf-$n\" ]; then sleep 1; kill $! 2>/dev/null; exec 0<&- 3<&-; printf '%b' \"$(cat \"$d/calls-$n\")\"; exit 0; fi\n[ -f \"$d/calls-$n\" ] && printf '%b' \"$(cat \"$d/calls-$n\")\"\n[ -f \"$d/close-$n\" ] && {{ kill $! 2>/dev/null; exit 0; }}\nsleep 30\n",
             root = root.display(),
         ));
         FakeAppServer {
@@ -213,6 +222,77 @@ impl RunsFakeAppServer for FakeAppServer {
             .ok()
             .and_then(|count| count.parse().ok())
             .unwrap_or(0)
+    }
+
+    fn accept_queued_turns(&self, thread: &str, runs: std::ops::RangeInclusive<u64>) {
+        let initialized = frame(&serde_json::json!({ "id": 1, "result": {} }));
+        // One answer serves every request a queued turn's connections make
+        // as id 2: the anchor's `thread/turns/list` (a thread with no turn
+        // yet), and the `thread/resume` before `turn/start`.
+        let resumed = frame(&serde_json::json!({
+            "id": 2,
+            "result": {
+                "thread": { "id": thread, "status": { "type": "idle" } },
+                "data": [],
+                "nextCursor": null
+            }
+        }));
+        let receipts = (3..=64)
+            .map(|id| {
+                frame(&serde_json::json!({
+                    "id": id,
+                    "result": { "turn": { "id": format!("queued-turn-{id}") } }
+                }))
+            })
+            .collect::<String>();
+        for run in runs {
+            std::fs::write(
+                self.directory.path().join(format!("frames-{run}")),
+                format!("{initialized}{resumed}{receipts}"),
+            )
+            .unwrap();
+        }
+    }
+
+    fn serve_turn_history(
+        &self,
+        run: u64,
+        thread: &str,
+        idle: bool,
+        turns: Vec<serde_json::Value>,
+    ) {
+        let status = if idle { "idle" } else { "active" };
+        let frames = [
+            frame(&serde_json::json!({ "id": 1, "result": {} })),
+            frame(&serde_json::json!({
+                "id": 2,
+                "result": { "thread": { "id": thread, "status": { "type": status } } }
+            })),
+            frame(&serde_json::json!({
+                "id": 3,
+                "result": { "data": turns, "nextCursor": null }
+            })),
+        ]
+        .concat();
+        std::fs::write(self.directory.path().join(format!("frames-{run}")), frames).unwrap();
+    }
+
+    fn queued_turn_texts(&self) -> Vec<String> {
+        (1..=self.runs())
+            .flat_map(|run| {
+                self.directory
+                    .path()
+                    .join(format!("record-{run}"))
+                    .client_messages()
+            })
+            .filter(|message| message["method"] == "turn/start")
+            .filter_map(|message| {
+                message
+                    .pointer("/params/input/0/text")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect()
     }
 }
 
@@ -783,7 +863,15 @@ fn a_pending_call_is_answered_after_start_and_reconnect() {
         server.join().expect("the send tool stops with the Nexus");
         answer
     })
-    .expect("the pending call answered on the second connection");
+    .unwrap_or_else(|| {
+        panic!(
+            "the pending call was not answered; runs={}, run2={:?}, run3={:?}, run4={:?}",
+            fake.runs(),
+            fake.directory.path().join("record-2").client_messages(),
+            fake.directory.path().join("record-3").client_messages(),
+            fake.directory.path().join("record-4").client_messages(),
+        )
+    });
     assert_eq!(
         answer["contentItems"][0]["text"],
         queued_text(sender_a(), target())
@@ -1318,4 +1406,659 @@ fn a_queued_request_is_rendered_with_its_sender() {
         queue.prompt_text(),
         "Work queued for this metaflow while no flow of it was running, oldest first, each with who sent it:\n{ Sender.{ Mind alpha Tertiary } Order.«Carry on.» }\n{ Unknown Notice.kept }"
     );
+}
+
+/// The fixture's Codex seat 908786: its thread, and the Address its
+/// metaflow is Awake at.
+const SEAT_THREAD: &str = "01a0b22c-e24f-7452-9940-64490878680f";
+
+fn seat_at() -> Address {
+    address("flow", Layer::Secondary)
+}
+
+/// Who sends the seat its work: the core Secondary of Psyche.
+fn core() -> Address {
+    Address {
+        aspect: Aspect::Psyche,
+        topic: "core".into(),
+        layer: Layer::Secondary,
+    }
+}
+
+fn from_core(request: Request) -> QueuedRequest {
+    QueuedRequest {
+        sent_by: SentBy::Sender(core()),
+        request,
+    }
+}
+
+/// The app-server's notification of a turn of `thread` starting or
+/// completing.
+fn turn_notice(method: &str, thread: &str, turn: &str) -> serde_json::Value {
+    let status = if method == "turn/completed" {
+        "completed"
+    } else {
+        "inProgress"
+    };
+    serde_json::json!({
+        "method": method,
+        "params": {
+            "threadId": thread,
+            "turn": { "id": turn, "items": [], "status": status, "error": null }
+        }
+    })
+}
+
+/// A call the seat's thread makes to the Awake gamma target: once it is
+/// answered, every frame sent before it has been read.
+fn fence(request_id: u64) -> serde_json::Value {
+    tool_call_request(
+        request_id,
+        SEAT_THREAD,
+        &format!("fence-{request_id}"),
+        "fence",
+    )
+}
+
+trait SeatsAwakeCodexSeat {
+    /// The fixture's Codex seat 908786, Active, resting in pane w1:p3 as
+    /// Herdr's screen shows it, its metaflow Awake as it at `seat_at`
+    /// holding `queue`; gamma Awake as a flow Flow does not hold.
+    fn awake_codex_seat(&self, queue: Vec<QueuedRequest>);
+    fn seat_queue(&self) -> Vec<QueuedRequest>;
+    /// How many times `request`, with its sender, was typed into the pane.
+    fn typed_count(&self, request: &QueuedRequest) -> usize;
+}
+
+impl SeatsAwakeCodexSeat for NexusFixture {
+    fn awake_codex_seat(&self, queue: Vec<QueuedRequest>) {
+        use super::PromptFixture;
+        self.accept_pane_operations(vec![self.settled_agent()], PromptFixture::Prompted("w1:p3"));
+        let mut node = self.node();
+        node.flow_lifecycle = signal_flow::FlowLifecycle::Pending;
+        assert!(matches!(
+            self.nexus.store.register_existing_flow(
+                node,
+                Caller {
+                    flow_id: "908786".into(),
+                    aspect: Aspect::Mind,
+                    power_level: PowerLevel::Medium,
+                    model_name: "gpt-sol".into(),
+                },
+            ),
+            Ok(crate::store::FlowRegistration::Registered(_))
+        ));
+        self.nexus.store.seed_metaflow(Metaflow {
+            address: seat_at(),
+            state: State::Awake("908786".into()),
+            past: vec![],
+            queue,
+        });
+        self.awake_target();
+    }
+
+    fn seat_queue(&self) -> Vec<QueuedRequest> {
+        self.nexus
+            .store
+            .metaflow(&seat_at())
+            .expect("seat readable")
+            .expect("seat held")
+            .queue
+    }
+
+    fn typed_count(&self, request: &QueuedRequest) -> usize {
+        usize::from(!self.seat_queue().contains(request))
+    }
+}
+
+/// Runs a responder on the seat's thread whose one connection sends
+/// `notices` and then the fence, and stops it once the fence is answered.
+fn seat_responding(
+    fixture: &mut NexusFixture,
+    notices: Vec<serde_json::Value>,
+    fence_id: u64,
+) -> FakeAppServer {
+    let mut requests = notices;
+    requests.push(fence(fence_id));
+    let fake = FakeAppServer::install(vec![FakeConnection {
+        requests,
+        closes: false,
+        deaf: false,
+    }]);
+    fake.accept_queued_turns(SEAT_THREAD, 3..=12);
+    let adapter = fixture.adapter("gpt-sol", &fake);
+    let answered = responding(fixture, SEAT_THREAD, &adapter, || {
+        answer_to(&fake.written_on(2, |m| m["id"] == fence_id), fence_id)
+    });
+    assert!(answered.is_some(), "the fence was answered");
+    fake
+}
+
+/// The seat's first turn completes with two requests queued: the first is
+/// typed in, with its sender, and the second waits for the turn that first
+/// one starts; when that turn completes, the second is typed. Each once, in
+/// order.
+#[test]
+fn a_codex_first_turn_completion_drains_two_queued_requests_once_in_order_with_senders() {
+    let mut fixture = NexusFixture::new();
+    let psyche = from_core(Request::Psyche(flow_ethos::Said {
+        context: "The living".into(),
+        verbatim: "Make it so.".into(),
+    }));
+    let brief = from_core(Request::Order("Your brief.".into()));
+    fixture.awake_codex_seat(vec![psyche.clone(), brief.clone()]);
+
+    let fake = seat_responding(
+        &mut fixture,
+        vec![
+            turn_notice("turn/started", SEAT_THREAD, "turn-first"),
+            turn_notice("turn/completed", SEAT_THREAD, "turn-first"),
+            turn_notice("turn/started", SEAT_THREAD, "turn-psyche"),
+            turn_notice("turn/completed", SEAT_THREAD, "turn-psyche"),
+        ],
+        40,
+    );
+
+    assert_eq!(fixture.typed_count(&psyche), 1, "the psyche typed once");
+    assert_eq!(fixture.typed_count(&brief), 1, "the brief typed once");
+    let typed = fake.queued_turn_texts().join("\n");
+    assert!(
+        typed.find("Make it so.") < typed.find("Your brief."),
+        "oldest first: {typed}"
+    );
+    assert!(typed.contains("Sender.{ Psyche core Secondary }"));
+    assert_eq!(fixture.seat_queue(), vec![]);
+}
+
+/// A completion read twice types nothing twice: the repeat finds the seat
+/// holding the work the first typed, whose turn has not begun.
+#[test]
+fn a_duplicated_turn_completed_delivers_nothing_twice() {
+    let mut fixture = NexusFixture::new();
+    let first = from_core(Request::Order("First.".into()));
+    let second = from_core(Request::Order("Second.".into()));
+    fixture.awake_codex_seat(vec![first.clone(), second.clone()]);
+
+    seat_responding(
+        &mut fixture,
+        vec![
+            turn_notice("turn/completed", SEAT_THREAD, "turn-first"),
+            turn_notice("turn/completed", SEAT_THREAD, "turn-first"),
+            serde_json::json!({
+                "method": "thread/status/changed",
+                "params": { "threadId": SEAT_THREAD, "status": { "type": "idle" } }
+            }),
+        ],
+        41,
+    );
+
+    assert_eq!(fixture.typed_count(&first), 1);
+    assert_eq!(fixture.typed_count(&second), 0, "the second waits");
+    assert_eq!(fixture.seat_queue(), vec![second]);
+}
+
+/// Work queued while the seat is in a turn (here by a send call its own
+/// thread makes to it) is held, not typed mid-turn; the turn's completion,
+/// read on a later connection, hands it over once.
+#[test]
+fn work_queued_while_a_codex_turn_runs_is_held_until_its_completion() {
+    let mut fixture = NexusFixture::new();
+    fixture.awake_codex_seat(vec![]);
+    let to_self = send_request(42, SEAT_THREAD, "call-self", &seat_at(), "Order", "later");
+
+    seat_responding(
+        &mut fixture,
+        vec![
+            turn_notice("turn/started", SEAT_THREAD, "turn-running"),
+            to_self,
+        ],
+        43,
+    );
+    let queued = QueuedRequest {
+        sent_by: SentBy::Sender(seat_at()),
+        request: Request::Order("later".into()),
+    };
+    assert_eq!(fixture.seat_queue(), vec![queued.clone()], "held queued");
+    assert_eq!(fixture.typed_count(&queued), 0, "nothing typed mid-turn");
+
+    seat_responding(
+        &mut fixture,
+        vec![turn_notice("turn/completed", SEAT_THREAD, "turn-running")],
+        44,
+    );
+    assert_eq!(fixture.typed_count(&queued), 1, "typed once the turn ended");
+    assert_eq!(fixture.seat_queue(), vec![]);
+}
+
+/// A seat its app-server shows in a turn is not drained, though Herdr's
+/// screen shows it idle and a Stop is reported: a psyche and then a brief
+/// stay queued.
+#[test]
+fn a_working_codex_seat_is_not_drained() {
+    let mut fixture = NexusFixture::new();
+    let psyche = from_core(Request::Psyche(flow_ethos::Said {
+        context: "The living".into(),
+        verbatim: "Words.".into(),
+    }));
+    let brief = from_core(Request::Order("Brief.".into()));
+    fixture.awake_codex_seat(vec![psyche.clone(), brief.clone()]);
+
+    seat_responding(
+        &mut fixture,
+        vec![turn_notice("turn/started", SEAT_THREAD, "turn-working")],
+        45,
+    );
+    use crate::waking::SleepsAndWakesSeats;
+    let at_stop = fixture.nexus.settle_stopped("908786");
+    fixture.nexus.wake_due(seat_at());
+
+    assert!(
+        !matches!(at_stop, crate::waking::AtStop::Drained(_)),
+        "{at_stop:?}"
+    );
+    assert_eq!(fixture.typed_count(&psyche), 0);
+    assert_eq!(fixture.seat_queue(), vec![psyche, brief]);
+}
+
+/// A first turn that completes while the launch is not yet confirmed (its
+/// registration or Bind still running) finds the seat only holding its
+/// Address and keeps its work; the confirmation hands that work over.
+#[test]
+fn a_codex_completion_during_registration_is_kept_and_drained_after_confirmation() {
+    use crate::launching::PromotesAmbiguousLaunches;
+    use crate::store::address_hold::HoldsLaunchAddress;
+    use crate::store::metaflow::SeedsMetaflow;
+
+    let fixture: &'static mut NexusFixture = Box::leak(Box::new(NexusFixture::new()));
+    let typed = fixture.directory.path().join("pane-typed.txt");
+    let resting = serde_json::json!({
+        "agent":"codex", "agent_status":"idle", "interactive_ready":true,
+        "name":"fixture-agent", "pane_id":"w1:p1", "revision":1,
+        "terminal_id":"fixture-terminal", "workspace_id":"fixture-workspace"
+    });
+    let agent = serde_json::json!({"result":{"agent":{
+        "name":"fixture-agent", "agent":"codex", "workspace_id":"fixture-workspace",
+        "pane_id":"w1:p1", "terminal_id":"fixture-terminal",
+        "agent_session":{"source":"herdr:codex","agent":"codex","kind":"id",
+                         "value":super::STAGED_SESSION}
+    }}});
+    let snapshot = serde_json::json!({
+        "id":"cli:api:snapshot",
+        "result":{"snapshot":{"agents":[resting.clone()],"protocol":20,"version":"0.8.2"},
+        "type":"session_snapshot"}
+    });
+    let prompted = serde_json::json!({
+        "id":"cli:agent:prompt", "result":{ "type":"agent_prompted", "agent":resting }
+    });
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&format!(
+        "#!/bin/sh\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{agent}' ;;\n  *\" api snapshot\") printf '%s\\n' '{snapshot}' ;;\n  *\" agent wait \"*) ;;\n  *\" agent prompt \"*) printf '%s' \"$6\" >> '{typed}'; printf '%s\\n' '{prompted}' ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
+        typed = typed.display(),
+    ));
+    let mut launch = fixture.staged_launch("codex-completed-early", None);
+    let at = launch.profile.address.clone();
+    launch.stage_to_ambiguity(&fixture.nexus);
+    let mut held = fixture.nexus.store.metaflow(&at).unwrap().unwrap();
+    assert_eq!(held.state, State::Awake("908786".into()));
+    let queued = from_core(Request::Order("queued before confirmation".into()));
+    held.queue.push(queued.clone());
+    fixture.nexus.store.seed_metaflow(held);
+    fixture.awake_target();
+
+    // The first turn completes on the thread while the launch is held.
+    let fake = FakeAppServer::install(vec![FakeConnection {
+        requests: vec![
+            turn_notice("turn/started", super::STAGED_SESSION, "turn-first"),
+            turn_notice("turn/completed", super::STAGED_SESSION, "turn-first"),
+            tool_call_request(46, super::STAGED_SESSION, "fence-46", "fence"),
+        ],
+        closes: false,
+        deaf: false,
+    }]);
+    fake.accept_queued_turns(super::STAGED_SESSION, 3..=12);
+    let adapter = fixture.adapter("gpt-sol", &fake);
+    let fixture: &'static NexusFixture = fixture;
+    let answered = responding(fixture, super::STAGED_SESSION, &adapter, || {
+        answer_to(&fake.written_on(2, |m| m["id"] == 46), 46)
+    });
+    assert!(answered.is_some(), "the fence was answered");
+    assert!(
+        fs_text(&typed).is_empty(),
+        "nothing is typed into an unconfirmed seat"
+    );
+    assert_eq!(
+        fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue,
+        vec![queued.clone()],
+        "the work is kept"
+    );
+
+    launch.write_receipt();
+    std::thread::spawn(move || fixture.nexus.promote_ambiguous_launches());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !fixture
+        .nexus
+        .store
+        .metaflow(&at)
+        .unwrap()
+        .unwrap()
+        .queue
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the confirmation never drained the completed seat"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let delivered = fake.queued_turn_texts().join("\n");
+    assert_eq!(delivered.matches("queued before confirmation").count(), 1);
+    assert!(delivered.contains("Sender.{ Psyche core Secondary }"));
+    assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
+}
+
+fn fs_text(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// A turn of the seat's thread as `thread/turns/list` answers it with
+/// `itemsView: full`; `text` is its user message, when it has one.
+fn history_turn(id: &str, status: &str, text: Option<&str>) -> serde_json::Value {
+    let items = text
+        .map(|text| {
+            vec![serde_json::json!({
+                "type": "userMessage", "id": format!("{id}-user"), "clientId": null,
+                "content": [{ "type": "text", "text": text, "text_elements": [] }]
+            })]
+        })
+        .unwrap_or_default();
+    serde_json::json!({ "id": id, "items": items, "itemsView": "full", "status": status,
+        "error": null, "startedAt": 1, "completedAt": null, "durationMs": null })
+}
+
+/// The seat's oldest request was prepared with its thread's newest turn as
+/// anchor, and the Nexus stopped before `turn/start` answered. The store's
+/// recovery makes it Uncertain.
+fn crashed_before_receipt(fixture: &NexusFixture) -> QueuedRequest {
+    use crate::store::queue_delivery::{
+        AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
+    };
+    let prepared = fixture
+        .nexus
+        .store
+        .prepare_oldest_delivery(
+            &seat_at(),
+            "908786",
+            SEAT_THREAD,
+            signal_flow::HarnessKind::Codex,
+            NativeHistoryAnchor::CodexTurns(Some("turn-before".into())),
+        )
+        .unwrap();
+    let PrepareQueueDelivery::Prepared(attempt) = prepared else {
+        panic!("prepared: {prepared:?}")
+    };
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .recover_outstanding_deliveries()
+            .unwrap()
+            .len(),
+        1
+    );
+    attempt.queued
+}
+
+fn codex_standings(fixture: &NexusFixture) -> Vec<meta_signal_flow::QueueDeliveryStanding> {
+    use crate::Dispatches;
+    match fixture
+        .nexus
+        .dispatch_meta(meta_signal_flow::Query::ReadQueueDeliveries(seat_at()))
+    {
+        meta_signal_flow::Response::QueueDeliveriesRead(read) => read
+            .queue_delivery_vector
+            .into_iter()
+            .map(|delivery| delivery.queue_delivery_standing)
+            .collect(),
+        other => panic!("not read: {other:?}"),
+    }
+}
+
+/// The app-server took the turn before the crash: its history shows the
+/// one turn after the anchor whose user message is exactly the request.
+/// The restart settles it from that history and starts no second turn.
+#[test]
+fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
+    use crate::composition::RendersQueuedWork;
+    use crate::waking::ReconcilesQueueDelivery;
+    let mut fixture = NexusFixture::new();
+    let first = from_core(Request::Order("First.".into()));
+    let second = from_core(Request::Order("Second.".into()));
+    fixture.awake_codex_seat(vec![first.clone(), second.clone()]);
+    let fake = FakeAppServer::install(vec![]);
+    fixture.adapter("gpt-sol", &fake);
+    let queued = crashed_before_receipt(&fixture);
+    assert_eq!(queued, first);
+    fake.serve_turn_history(
+        1,
+        SEAT_THREAD,
+        true,
+        vec![
+            history_turn("turn-other", "completed", Some("someone else")),
+            history_turn(
+                "turn-queued",
+                "completed",
+                Some(&[first.clone()].prompt_text()),
+            ),
+            history_turn(
+                "turn-before",
+                "completed",
+                Some(&[first.clone()].prompt_text()),
+            ),
+        ],
+    );
+
+    fixture.nexus.recover_deliveries();
+    assert_eq!(fixture.seat_queue(), vec![second]);
+    assert!(fake.queued_turn_texts().is_empty(), "no second turn/start");
+    assert_eq!(codex_standings(&fixture), vec![]);
+    let reads = fake.written_on(1, |m| m["method"] == "thread/turns/list");
+    assert!(
+        reads
+            .iter()
+            .any(|m| m["method"] == "thread/turns/list" && m["params"]["itemsView"] == "full"),
+        "{reads:?}"
+    );
+}
+
+/// The app-server never saw the turn: the thread is idle and no turn after
+/// the anchor carries the request. It is proved absent, and a new attempt
+/// hands it over once.
+#[test]
+fn a_codex_turn_absent_from_an_idle_thread_is_handed_over_again_once() {
+    use crate::generated::operation::{Operation, Outcome};
+    use crate::performing::Performs;
+    use crate::waking::ReconcilesQueueDelivery;
+    let mut fixture = NexusFixture::new();
+    let first = from_core(Request::Order("First.".into()));
+    fixture.awake_codex_seat(vec![first.clone()]);
+    let fake = FakeAppServer::install(vec![]);
+    fixture.adapter("gpt-sol", &fake);
+    crashed_before_receipt(&fixture);
+    fake.serve_turn_history(
+        1,
+        SEAT_THREAD,
+        true,
+        vec![history_turn("turn-before", "completed", None)],
+    );
+
+    fixture.nexus.recover_deliveries();
+    assert_eq!(
+        codex_standings(&fixture),
+        vec![meta_signal_flow::QueueDeliveryStanding::Absent(
+            meta_signal_flow::AbsenceProof::HistoryAbsent
+        )]
+    );
+    assert_eq!(fixture.seat_queue(), vec![first.clone()], "still queued");
+
+    fake.accept_queued_turns(SEAT_THREAD, 2..=3);
+    assert_eq!(
+        fixture.nexus.perform(Operation::Drain(seat_at())),
+        Outcome::Drained(vec![first])
+    );
+    assert_eq!(fake.queued_turn_texts().len(), 1, "handed over once");
+    assert_eq!(fixture.seat_queue(), vec![]);
+}
+
+/// History that cannot decide keeps the request Uncertain, names why, and
+/// starts no turn: a thread still active, a history without the anchor,
+/// and an app-server that cannot be read.
+#[test]
+fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
+    use crate::generated::operation::{Operation, Outcome};
+    use crate::performing::Performs;
+    use crate::waking::ReconcilesQueueDelivery;
+    use meta_signal_flow::{QueueDeliveryStanding, Undecided};
+    let mut fixture = NexusFixture::new();
+    let first = from_core(Request::Order("First.".into()));
+    fixture.awake_codex_seat(vec![first.clone()]);
+    let fake = FakeAppServer::install(vec![]);
+    fixture.adapter("gpt-sol", &fake);
+    crashed_before_receipt(&fixture);
+
+    fake.serve_turn_history(
+        1,
+        SEAT_THREAD,
+        false,
+        vec![history_turn("turn-before", "completed", None)],
+    );
+    fixture.nexus.recover_deliveries();
+    assert_eq!(
+        codex_standings(&fixture),
+        vec![QueueDeliveryStanding::Uncertain(Some(
+            Undecided::SeatNotResting
+        ))]
+    );
+
+    fake.serve_turn_history(
+        2,
+        SEAT_THREAD,
+        true,
+        vec![history_turn("turn-unrelated", "completed", None)],
+    );
+    assert_eq!(
+        fixture.nexus.perform(Operation::Drain(seat_at())),
+        Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
+    );
+    assert_eq!(
+        codex_standings(&fixture),
+        vec![QueueDeliveryStanding::Uncertain(Some(
+            Undecided::HistoryReplaced
+        ))]
+    );
+
+    // Run 3 has no answer: the app-server is unreadable.
+    assert!(!matches!(
+        fixture.nexus.perform(Operation::Drain(seat_at())),
+        Outcome::Drained(_)
+    ));
+    assert_eq!(
+        codex_standings(&fixture),
+        vec![QueueDeliveryStanding::Uncertain(Some(
+            Undecided::HistoryUnreadable
+        ))]
+    );
+    assert!(fake.queued_turn_texts().is_empty(), "never resent");
+    assert_eq!(fixture.seat_queue(), vec![first]);
+}
+
+/// A turn completion on another thread is not the seat's: nothing drains.
+#[test]
+fn a_completion_on_another_thread_drains_nothing() {
+    let mut fixture = NexusFixture::new();
+    let first = from_core(Request::Order("First.".into()));
+    fixture.awake_codex_seat(vec![first.clone()]);
+    seat_responding(
+        &mut fixture,
+        vec![
+            turn_notice("turn/started", THREAD_B, "turn-elsewhere"),
+            turn_notice("turn/completed", THREAD_B, "turn-elsewhere"),
+            serde_json::json!({
+                "method": "thread/status/changed",
+                "params": { "threadId": THREAD_B, "status": { "type": "idle" } }
+            }),
+        ],
+        47,
+    );
+    assert_eq!(fixture.typed_count(&first), 0);
+    assert_eq!(fixture.seat_queue(), vec![first]);
+}
+
+/// An Uncertain Codex hand-over, resolved Absent as the meta socket serves
+/// it; `first_event` is the thread's last turn event. Returns the fake
+/// app-server and the fixture.
+fn codex_resolved_absent(
+    first_event: crate::codex_turns::TurnEvent,
+) -> (NexusFixture, FakeAppServer, QueuedRequest) {
+    use crate::Dispatches;
+    use crate::DispatchesSerially;
+    use crate::codex_turns::TracksCodexTurns;
+    use meta_signal_flow::{QueueDeliveryResolution, QueueResolutionOutcome};
+    let mut fixture = NexusFixture::new();
+    let first = from_core(Request::Order("First.".into()));
+    fixture.awake_codex_seat(vec![first.clone()]);
+    let fake = FakeAppServer::install(vec![]);
+    fixture.adapter("gpt-sol", &fake);
+    crashed_before_receipt(&fixture);
+    let attempt = match fixture
+        .nexus
+        .dispatch_meta(meta_signal_flow::Query::ReadQueueDeliveries(seat_at()))
+    {
+        meta_signal_flow::Response::QueueDeliveriesRead(read) => {
+            read.queue_delivery_vector[0].queue_attempt_id.clone()
+        }
+        other => panic!("not read: {other:?}"),
+    };
+    fixture.nexus.codex_turns.observe(SEAT_THREAD, first_event);
+    fake.accept_queued_turns(SEAT_THREAD, 1..=2);
+    let response = fixture.nexus.dispatch_meta_serially(
+        meta_signal_flow::Query::ResolveQueueDelivery(QueueDeliveryResolution {
+            queue_attempt_id: attempt,
+            queue_resolution_outcome: QueueResolutionOutcome::Absent,
+            queue_resolution_reason: "the owner looked".into(),
+        }),
+        Some(crate::tests::queue_drain::resolver()),
+    );
+    assert!(matches!(
+        response,
+        meta_signal_flow::Response::QueueDeliveryResolved(_)
+    ));
+    (fixture, fake, first)
+}
+
+/// A Codex seat its app-server shows resting is handed the request at the
+/// resolution, exactly once.
+#[test]
+fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_once() {
+    use crate::codex_turns::{ThreadStatus, TurnEvent};
+    use crate::waking::SleepsAndWakesSeats;
+    let (fixture, fake, _) = codex_resolved_absent(TurnEvent::Status(ThreadStatus::Idle));
+    assert_eq!(fake.queued_turn_texts().len(), 1, "handed over at once");
+    fixture.nexus.drain_after_resolution(&seat_at());
+    assert_eq!(fake.queued_turn_texts().len(), 1, "never twice");
+    assert_eq!(
+        fixture.seat_queue(),
+        vec![],
+        "settled on the turn/start receipt"
+    );
+}
+
+/// A Codex seat in a turn waits for its completion.
+#[test]
+fn a_working_codex_seat_resolved_absent_waits_for_its_turn_end() {
+    use crate::codex_turns::TurnEvent;
+    let (fixture, fake, first) = codex_resolved_absent(TurnEvent::Started("turn-running".into()));
+    assert!(fake.queued_turn_texts().is_empty(), "a turn runs");
+    assert_eq!(fixture.seat_queue(), vec![first]);
 }

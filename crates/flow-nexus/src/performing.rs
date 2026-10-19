@@ -227,38 +227,38 @@ impl Performs for RunningNexus {
                 );
                 Outcome::Failed(Failed_Data::CompositionRefused)
             }
-            Operation::Compose(profile) => match self.composer.compose(
-                HarnessedProfile {
-                    harness_kind: self.codex_endpoints.harness_for(&profile.model_name),
-                    launch_profile: profile.clone(),
-                },
-                self.store
-                    .default_leave_outs(&profile.address)
-                    .unwrap_or_default(),
-            ) {
-                Ok(launch) => Outcome::Composed(launch),
-                Err(CompositionError::LeaveOut(refusal)) => {
-                    eprintln!(
-                        "flow-nexus: launch {} leave-outs refused: {refusal:?}",
-                        profile.launch_request_id
-                    );
-                    Outcome::Failed(Failed_Data::LeaveOutRefused(refusal))
+            Operation::Compose(profile) => {
+                // A Start naming no leave-outs takes its metaflow's default
+                // for the harness it starts on, and none when that harness
+                // has no default.
+                let harness_kind = self.codex_endpoints.harness_for(&profile.model_name);
+                let default = self
+                    .store
+                    .default_leave_outs(&profile.address, &harness_kind)
+                    .unwrap_or_default();
+                let request = profile.launch_request_id.clone();
+                match self.composer.compose(
+                    HarnessedProfile {
+                        harness_kind,
+                        launch_profile: profile,
+                    },
+                    default,
+                ) {
+                    Ok(launch) => Outcome::Composed(launch),
+                    Err(CompositionError::LeaveOut(refusal)) => {
+                        eprintln!("flow-nexus: launch {request} leave-outs refused: {refusal:?}");
+                        Outcome::Failed(Failed_Data::LeaveOutRefused(refusal))
+                    }
+                    Err(CompositionError::Context(refusal)) => {
+                        eprintln!("flow-nexus: launch {request} context refused: {refusal:?}");
+                        Outcome::Failed(Failed_Data::ContextRefused(refusal))
+                    }
+                    Err(error) => {
+                        eprintln!("flow-nexus: launch {request} not composed: {error}");
+                        Outcome::Failed(Failed_Data::CompositionRefused)
+                    }
                 }
-                Err(CompositionError::Context(refusal)) => {
-                    eprintln!(
-                        "flow-nexus: launch {} context refused: {refusal:?}",
-                        profile.launch_request_id
-                    );
-                    Outcome::Failed(Failed_Data::ContextRefused(refusal))
-                }
-                Err(error) => {
-                    eprintln!(
-                        "flow-nexus: launch {} not composed: {error}",
-                        profile.launch_request_id
-                    );
-                    Outcome::Failed(Failed_Data::CompositionRefused)
-                }
-            },
+            }
             Operation::Reserve(reserve) => self.reserve(reserve),
             Operation::Record(record) => self.record(record),
             Operation::Register(Register_Data { flow_node, caller }) => {

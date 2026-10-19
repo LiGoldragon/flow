@@ -50,7 +50,7 @@ fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
     hook.stdin
         .take()
         .expect("hook stdin")
-        .write_all(br#"{"hook_event_name":"Stop","session_id":"s"}"#)
+        .write_all(br#"{"hook_event_name":"Stop","session_id":"s","transcript_path":"/t/s.jsonl"}"#)
         .expect("event written");
     let output = hook.wait_with_output().expect("flow-hook ends");
     assert!(output.status.success(), "{output:?}");
@@ -60,12 +60,15 @@ fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
             .expect("the hook reached the launching Nexus"),
         signal_flow::Query::Report(signal_flow::Report_Data {
             flow_id: "5a4d0b".into(),
-            event: signal_flow::Event::Stopped,
+            event: signal_flow::Event::Stopped(signal_flow::NativeStop {
+                native_session_id_option: Some("s".into()),
+                transcript_path_option: Some("/t/s.jsonl".into()),
+            }),
         })
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "Stop\tReport.{ «5a4d0b» Stopped }\t0\tReported\n"
+        "Stop\tReport.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» } }\t0\tReported\n"
     );
     assert!(!runtime.join("flow/flow.sock").exists());
 }

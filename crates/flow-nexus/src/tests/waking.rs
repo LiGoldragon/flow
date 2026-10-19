@@ -33,7 +33,7 @@ use signal_flow::{
 };
 use std::fs;
 
-fn address(layer: Layer) -> Address {
+pub(super) fn address(layer: Layer) -> Address {
     Address {
         aspect: Aspect::Mind,
         topic: "flow".into(),
@@ -41,7 +41,12 @@ fn address(layer: Layer) -> Address {
     }
 }
 
-fn metaflow(layer: Layer, state: State, past: Vec<&str>, queue: Vec<Request>) -> Metaflow {
+pub(super) fn metaflow(
+    layer: Layer,
+    state: State,
+    past: Vec<&str>,
+    queue: Vec<Request>,
+) -> Metaflow {
     Metaflow {
         address: address(layer),
         state,
@@ -75,7 +80,7 @@ impl Unsent for Vec<Request> {
     }
 }
 
-fn stored(fixture: &NexusFixture, layer: Layer) -> Metaflow {
+pub(super) fn stored(fixture: &NexusFixture, layer: Layer) -> Metaflow {
     fixture
         .nexus
         .store
@@ -92,10 +97,10 @@ fn closes(fixture: &NexusFixture) -> bool {
 
 /// A Claude seat `c1a0de` resting in pane w1:p3 of the fixture Herdr, its
 /// claim written, its native transcript showing a context of `tokens`.
-const CLAUDE_SEAT: &str = "c1a0de";
-const CLAUDE_SESSION: &str = "c1a0de00-0000-4000-8000-000000000001";
+pub(super) const CLAUDE_SEAT: &str = "c1a0de";
+pub(super) const CLAUDE_SESSION: &str = "c1a0de00-0000-4000-8000-000000000001";
 
-fn claude_agent(fixture: &NexusFixture) -> serde_json::Value {
+pub(super) fn claude_agent(fixture: &NexusFixture) -> serde_json::Value {
     let mut agent = fixture.settled_agent();
     agent["agent"] = serde_json::Value::String("claude".into());
     agent["agent_session"] = serde_json::json!({
@@ -114,7 +119,7 @@ fn quiet_agent(fixture: &NexusFixture) -> serde_json::Value {
     agent
 }
 
-fn claude_seat(fixture: &NexusFixture, tokens: i64) {
+pub(super) fn claude_seat(fixture: &NexusFixture, tokens: i64) {
     let mut node = fixture.node();
     node.flow_id = CLAUDE_SEAT.into();
     node.session_id = CLAUDE_SESSION.into();
@@ -156,6 +161,24 @@ fn claude_seat(fixture: &NexusFixture, tokens: i64) {
     .unwrap();
 }
 
+/// The seat's own Claude transcript.
+pub(super) fn claude_transcript(fixture: &NexusFixture) -> std::path::PathBuf {
+    fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary")
+        .join(format!("{CLAUDE_SESSION}.jsonl"))
+}
+
+/// The Stop the seat's own hook reports: its registered session and that
+/// session's transcript.
+pub(super) fn claude_stop(fixture: &NexusFixture) -> signal_flow::Event {
+    signal_flow::Event::Stopped(signal_flow::NativeStop {
+        native_session_id_option: Some(CLAUDE_SESSION.into()),
+        transcript_path_option: Some(claude_transcript(fixture).to_string_lossy().into_owned()),
+    })
+}
+
 fn refresh_at(fixture: &NexusFixture, layer: Layer, refresh: i64) {
     fixture
         .nexus
@@ -187,7 +210,7 @@ fn a_resting_claude_flow_that_stopped_writes_its_context_and_sleeps_keeping_its_
 
     fixture
         .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &signal_flow::Event::Stopped);
+        .after_report(&CLAUDE_SEAT.to_owned(), &claude_stop(&fixture));
 
     assert_eq!(
         fixture.nexus.store.context_size(CLAUDE_SEAT).unwrap(),
@@ -277,23 +300,62 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
     assert!(!typed.contains("second"), "one request per Stop");
 }
 
+/// A Claude agent Herdr shows Working, as its screen reads while its main
+/// turn runs or while background agents run after it ended.
+pub(super) fn working_claude_agent(fixture: &NexusFixture) -> serde_json::Value {
+    let mut agent = fixture.current_agent();
+    agent["agent"] = serde_json::Value::String("claude".into());
+    agent["agent_session"] = serde_json::json!({
+        "source":"herdr:claude","agent":"claude","kind":"id","value":CLAUDE_SESSION
+    });
+    agent
+}
+
+/// Appends rows of the seat's own main thread to its transcript.
+pub(super) fn append_main_rows(fixture: &NexusFixture, rows: &[serde_json::Value]) {
+    use std::io::Write;
+    let mut transcript = fs::OpenOptions::new()
+        .append(true)
+        .open(claude_transcript(fixture))
+        .unwrap();
+    for row in rows {
+        writeln!(transcript, "{row}").unwrap();
+    }
+}
+
+pub(super) fn end_turn(uuid: &str) -> serde_json::Value {
+    serde_json::json!({"type":"assistant","sessionId":CLAUDE_SESSION,"uuid":uuid,
+        "message":{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}})
+}
+
 #[test]
 fn a_flow_that_stopped_while_working_or_awaited_does_not_sleep() {
     // Herdr still shows the seat Working.
     let working = NexusFixture::new();
     working.accept_pane_operations(
-        vec![working.current_agent()],
+        vec![working_claude_agent(&working)],
         PromptFixture::Prompted("w1:p3"),
     );
-    working.register_with(FlowLifecycle::Active);
+    claude_seat(&working, 40_000);
     working.nexus.store.seed_metaflow(metaflow(
         Layer::Secondary,
-        State::Awake("908786".into()),
+        State::Awake(CLAUDE_SEAT.into()),
         vec![],
         vec![],
     ));
     assert!(matches!(
-        working.nexus.settle_stopped("908786"),
+        working.nexus.settle_stopped(CLAUDE_SEAT),
+        AtStop::Kept(KeptAtStop::NotResting(PaneAgent::Present {
+            agent_state: signal_flow::AgentState::Working,
+            ..
+        }))
+    ));
+    // Its main turn ended while background agents still run: Herdr still
+    // shows Working, and a seat with nothing queued is not closed under
+    // them.
+    append_main_rows(&working, &[end_turn("main-ended")]);
+    assert!(matches!(
+        working.nexus.settle_stopped(CLAUDE_SEAT),
         AtStop::Kept(KeptAtStop::NotResting(PaneAgent::Present {
             agent_state: signal_flow::AgentState::Working,
             ..
@@ -301,7 +363,7 @@ fn a_flow_that_stopped_while_working_or_awaited_does_not_sleep() {
     ));
     assert_eq!(
         stored(&working, Layer::Secondary).state,
-        State::Awake("908786".into())
+        State::Awake(CLAUDE_SEAT.into())
     );
     assert!(!closes(&working));
 
@@ -687,6 +749,11 @@ fn resumable_ended_by(
     let busy = fixture.directory.path().join("composer-busy-reads");
     let calls = fixture.directory.path().join("herdr-calls.log");
     let typed = fixture.directory.path().join("pane-typed.txt");
+    let transcript = fixture
+        .directory
+        .path()
+        .join("native-transcripts/claude/-home-li-primary")
+        .join(format!("{session}.jsonl"));
     let marker = fixture.directory.path().join("marker-output");
     let script = r#"#!/bin/sh
 SESSIONS
@@ -702,7 +769,7 @@ case "$*" in
   *"agent read"*) left=$(cat 'BUSY' 2>/dev/null || printf 0); if [ "$left" -gt 0 ]; then printf '%s' $((left - 1)) > 'BUSY'; printf '%s\n' '❯ /rename kept' ; else printf '%s\n' '❯ ' ; fi ;;
   *"pane close"*) printf '%s\n' '{"result":{}}' ;;
   *"agent prompt /rename "*|*"agent prompt "*" /rename "*) printf '%s\n' '{"result":{"accepted":true}}' ;;
-  *"agent prompt"*) printf '%s\n--\n' "$6" >> 'TYPED'; printf '%s\n' '{"id":"cli:agent:prompt","result":{"type":"agent_prompted","agent":AGENT}}' ;;
+  *"agent prompt"*) printf '%s\n--\n' "$6" >> 'TYPED'; escaped=$(printf '%s' "$6" | sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g'); printf '{"type":"user","sessionId":"RECEIPTSESSION","uuid":"fixture-%s","message":{"content":"%s"}}\n' "$(wc -l < 'TRANSCRIPT')" "$escaped" >> 'TRANSCRIPT'; printf '%s\n' '{"id":"cli:agent:prompt","result":{"type":"agent_prompted","agent":AGENT}}' ;;
   *) exit 64 ;;
 esac
 "#
@@ -728,6 +795,8 @@ esac
     )
     .replace("MARKER", &marker.display().to_string())
     .replace("TYPED", &typed.display().to_string())
+    .replace("TRANSCRIPT", &transcript.display().to_string())
+    .replace("RECEIPTSESSION", &session)
     .replace("RECORD", &agent_record)
     .replace("SESSIONED", &sessioned)
     .replace("LIVE", &live.display().to_string())
@@ -743,6 +812,20 @@ esac
         path: transcripts.join("flow-id"),
     }
     .install("#!/bin/sh\nprintf '%s\\n' abc123\n");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(
+        transcript,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "sessionId": session,
+                "uuid": "fixture-end-turn",
+                "message": { "stop_reason": "end_turn" }
+            })
+        ),
+    )
+    .unwrap();
     Resumable { profile, session }
 }
 
@@ -2228,7 +2311,7 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     hook.write_query(&signal_flow::Query::Report(signal_flow::Report_Data {
         flow_id: CLAUDE_SEAT.into(),
-        event: signal_flow::Event::Stopped,
+        event: claude_stop(fixture),
     }))
     .unwrap();
     assert_eq!(
@@ -2255,10 +2338,11 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
     );
 }
 
-/// A Stop that lands before its launch is confirmed finds the seat holding
-/// only its Address and leaves it; the confirmation settles it.
+/// A fabricated Codex Stop before confirmation never stands in for an
+/// app-server completion. Confirmation releases the Address hold, but the
+/// queued request waits for an authentic native turn event.
 #[test]
-fn a_stop_before_confirmation_is_settled_when_the_launch_is_confirmed() {
+fn a_codex_stop_before_confirmation_does_not_fabricate_completion() {
     use crate::launching::PromotesAmbiguousLaunches;
     use crate::store::address_hold::HoldsLaunchAddress;
     use std::time::{Duration, Instant};
@@ -2318,7 +2402,10 @@ fn a_stop_before_confirmation_is_settled_when_the_launch_is_confirmed() {
     assert_eq!(
         fixture.nexus.report(signal_flow::Report_Data {
             flow_id: "908786".into(),
-            event: signal_flow::Event::Stopped,
+            event: signal_flow::Event::Stopped(signal_flow::NativeStop {
+                native_session_id_option: None,
+                transcript_path_option: None,
+            }),
         }),
         signal_flow::Response::Reported
     );
@@ -2331,27 +2418,25 @@ fn a_stop_before_confirmation_is_settled_when_the_launch_is_confirmed() {
     launch.write_receipt();
     std::thread::spawn(move || fixture.nexus.promote_ambiguous_launches());
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !fixture
+    while fixture
         .nexus
         .store
-        .metaflow(&at)
+        .address_hold("908786")
         .unwrap()
-        .unwrap()
-        .queue
-        .is_empty()
+        .is_some()
     {
         assert!(
             Instant::now() < deadline,
-            "the confirmation never settled the Stop: {}",
+            "the confirmation never released its hold: {}",
             fs::read_to_string(&log).unwrap_or_default()
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        fs::read_to_string(&typed)
-            .unwrap_or_default()
-            .contains("queued before confirmation")
+    assert_eq!(
+        fixture.nexus.store.metaflow(&at).unwrap().unwrap().queue,
+        vec![Request::Notice("queued before confirmation".into()).unsent()]
     );
+    assert!(fs::read_to_string(&typed).unwrap_or_default().is_empty());
     assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
 }
 

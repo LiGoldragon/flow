@@ -10002,8 +10002,11 @@ mod tests {
         fixture.configured();
         drop(fixture.configured_store());
         let leave = |fixture: &StoreFixture| {
-            std::fs::write(fixture.directory.path().join(".flow.sema.upgrade-1-2"), b"x")
-                .expect("copy planted");
+            std::fs::write(
+                fixture.directory.path().join(".flow.sema.upgrade-1-2"),
+                b"x",
+            )
+            .expect("copy planted");
             assert_eq!(fixture.staged_copies().len(), 1);
         };
         leave(&fixture);

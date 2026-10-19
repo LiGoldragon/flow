@@ -29,7 +29,7 @@ use crate::store::{
     RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 use crate::title::TitleRefused;
-use crate::waking::PerformsSleepAndWake;
+use crate::waking::PerformsWakeAndDrain;
 use signal_flow::{
     HarnessKind, LaunchAttemptReservation, NativeLaunchFailure, NativeLaunchRefusal,
     NativeLaunchStage, Response, StartRejection,
@@ -467,7 +467,6 @@ impl Performs for RunningNexus {
                 true => Outcome::Closed,
                 false => Outcome::Failed(Failed_Data::HerdrRefused),
             },
-            Operation::Sleep(sleep) => self.sleep(sleep),
             Operation::Wake(address) => self.wake(address),
             Operation::Drain(address) => self.drain(address),
         }

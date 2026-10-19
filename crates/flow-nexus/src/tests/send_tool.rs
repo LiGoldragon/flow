@@ -677,7 +677,7 @@ fn handed_orders(fixture: &NexusFixture, world: &super::waking::FreshWorld, body
 fn an_asleep_target_wakes_once_though_the_answer_fails_and_the_call_is_replayed() {
     use super::waking::{ReadsFreshWorld, WakesFreshClaude};
     let mut fixture = NexusFixture::new();
-    super::waking::slept_claude(&fixture);
+    super::waking::ended_claude(&fixture);
     let world = fixture.fresh_claude_world();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.asleep_at(asleep_target());
@@ -731,7 +731,7 @@ fn an_asleep_target_wakes_once_though_the_answer_fails_and_the_call_is_replayed(
 fn a_replayed_call_wakes_the_asleep_target_its_first_handling_did_not() {
     use super::waking::{ReadsFreshWorld, WakesFreshClaude};
     let mut fixture = NexusFixture::new();
-    super::waking::slept_claude(&fixture);
+    super::waking::ended_claude(&fixture);
     let world = fixture.fresh_claude_world();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.asleep_at(asleep_target());
@@ -782,7 +782,7 @@ fn a_send_of_a_result_or_notice_wakes_nothing_and_an_order_wakes_a_primary() {
     use super::waking::{ReadsFreshWorld, WakesFreshClaude};
     use crate::store::ManagesMetaflowState;
     let mut fixture = NexusFixture::new();
-    super::waking::slept_claude(&fixture);
+    super::waking::ended_claude(&fixture);
     let world = fixture.fresh_claude_world();
     fixture
         .nexus
@@ -1000,7 +1000,7 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         .map(|(thread, _)| thread)
         .expect("the thread opens declaring the send tool");
     eprintln!("witness thread {thread}");
-    super::waking::slept_claude(&fixture);
+    super::waking::ended_claude(&fixture);
     let world = super::waking::WakesFreshClaude::fresh_claude_world(&mut fixture);
     fixture.codex_seat("a1a1a1", &thread, "w1:p5", "gpt-6-luna", sender_a());
     fixture.asleep_at(asleep_target());
@@ -1157,7 +1157,7 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
             })
             .unwrap()
     );
-    super::waking::slept_claude(&fixture);
+    super::waking::ended_claude(&fixture);
     let world = super::waking::WakesFreshClaude::fresh_claude_world(&mut fixture);
     fixture.asleep_at(asleep_target());
 
@@ -2075,13 +2075,53 @@ fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_on
     use crate::waking::SleepsAndWakesSeats;
     let (fixture, fake, _) = codex_resolved_absent(TurnEvent::Status(ThreadStatus::Idle));
     assert_eq!(fake.queued_turn_texts().len(), 1, "handed over at once");
-    fixture.nexus.drain_after_resolution(&seat_at());
+    fixture.nexus.drain_awake(&seat_at());
     assert_eq!(fake.queued_turn_texts().len(), 1, "never twice");
     assert_eq!(
         fixture.seat_queue(),
         vec![],
         "settled on the turn/start receipt"
     );
+}
+
+/// An idle Awake Codex seat keeps its pane: an Order queued for it is
+/// handed to its live thread at once, exactly once, and it stays Awake as
+/// the same flow.
+#[test]
+fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
+    use crate::codex_turns::{ThreadStatus, TracksCodexTurns, TurnEvent};
+    use crate::waking::SleepsAndWakesSeats;
+    let mut fixture = NexusFixture::new();
+    fixture.awake_codex_seat(vec![]);
+    let fake = FakeAppServer::install(vec![]);
+    fixture.adapter("gpt-sol", &fake);
+    fake.accept_queued_turns(SEAT_THREAD, 1..=2);
+    fixture
+        .nexus
+        .codex_turns
+        .observe(SEAT_THREAD, TurnEvent::Status(ThreadStatus::Idle));
+    fixture.nexus.wake_due(seat_at());
+    assert!(
+        fake.queued_turn_texts().is_empty(),
+        "nothing to hand while idle"
+    );
+
+    let order = from_core(Request::Order("Read the new ruling.".into()));
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: seat_at(),
+        state: State::Awake("908786".into()),
+        past: vec![],
+        queue: vec![order],
+    });
+    fixture.nexus.wake_due(seat_at());
+    fixture.nexus.wake_due(seat_at());
+
+    let texts = fake.queued_turn_texts();
+    assert_eq!(texts.len(), 1, "handed over once: {texts:?}");
+    assert!(texts[0].contains("Read the new ruling."), "{texts:?}");
+    assert_eq!(fixture.seat_queue(), vec![], "settled on its receipt");
+    let seat = fixture.nexus.store.metaflow(&seat_at()).unwrap().unwrap();
+    assert_eq!(seat.state, State::Awake("908786".into()));
 }
 
 /// A Codex seat in a turn waits for its completion.

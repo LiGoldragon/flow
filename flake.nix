@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.22";
+            version = "0.35.23";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -362,7 +362,7 @@
           flow-contradicting-receipt-rejects-the-launch = context.exactTest "flow-nexus"
             "tests::a_receipt_that_contradicts_the_launch_rejects_it";
           flow-stop-waits-for-the-seat-to-rest = context.exactTest "flow-nexus"
-            "tests::waking::a_seat_herdr_shows_working_at_its_stop_sleeps_once_herdr_shows_it_done";
+            "tests::waking::a_seat_herdr_shows_working_at_its_stop_is_idle_once_herdr_shows_it_done";
           flow-stop-names-why-a-seat-is-kept = context.exactTest "flow-nexus"
             "tests::waking::a_stop_that_leaves_its_seat_names_why";
           flow-hook-closed-before-the-rest-wait = context.exactTest "flow-nexus"
@@ -449,12 +449,18 @@
             "tests::waking::a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it";
           flow-sleeping-claude-wakes-to-new-session = context.exactTest "flow-nexus"
             "tests::waking::a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it";
-          flow-codex-seat-sleeps-at-rest = context.exactTest "flow-nexus"
-            "tests::waking::a_resting_codex_seat_with_nothing_queued_sleeps";
-          flow-primary-sleeps-at-rest = context.exactTest "flow-nexus"
-            "tests::waking::a_resting_primary_with_nothing_queued_sleeps";
+          flow-idle-codex-keeps-its-pane = context.exactTest "flow-nexus"
+            "tests::waking::an_idle_codex_flow_keeps_its_pane_and_stays_awake";
+          flow-idle-claude-keeps-its-pane = context.exactTest "flow-nexus"
+            "tests::waking::an_idle_claude_flow_keeps_its_pane_and_stays_awake";
+          flow-idle-claude-request-into-its-pane = context.exactTest "flow-nexus"
+            "tests::waking::a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane";
+          flow-idle-codex-request-into-its-pane = context.exactTest "flow-nexus"
+            "tests::send_tool::a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane";
+          flow-gone-pane-asleep-wakes-fresh = context.exactTest "flow-nexus"
+            "tests::waking::a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh";
           flow-order-wakes-primary-fresh = context.exactTest "flow-nexus"
-            "tests::waking::an_order_wakes_a_sleeping_primary_fresh";
+            "tests::waking::an_order_wakes_an_asleep_primary_fresh";
           flow-wake-fresh-with-queue-oldest-first = context.exactTest "flow-nexus"
             "tests::waking::a_queued_order_wakes_a_fresh_claude_flow_with_the_whole_queue_then_what_arrived";
           flow-send-tool-threads-attributed = context.exactTest "flow-nexus"

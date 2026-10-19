@@ -100,13 +100,6 @@ pub struct Submit_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Sleep_Data {
-    pub address: signal_flow::Address,
-    pub flow_node: signal_flow::FlowNode,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Operation {
     Compose(signal_flow::LaunchProfile),
     Reserve(Reserve_Data),
@@ -120,7 +113,6 @@ pub enum Operation {
     Submit(Submit_Data),
     Close(signal_flow::FlowNode),
     Release(signal_flow::FlowId),
-    Sleep(Sleep_Data),
     Wake(signal_flow::Address),
     Drain(signal_flow::Address),
 }
@@ -168,7 +160,6 @@ pub enum Outcome {
     Submitted(signal_flow::PromptDeliveryResult),
     Closed,
     Released,
-    Slept,
     Woken(signal_flow::FlowId),
     Drained(std::vec::Vec<signal_flow::QueuedRequest>),
     Failed(Failed_Data),

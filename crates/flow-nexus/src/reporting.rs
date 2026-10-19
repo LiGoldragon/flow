@@ -6,8 +6,7 @@
 //! `ReadEvents`. A `Stopped` event, once answered, lets a launch waiting on
 //! it send its next part; when it names the flow's registered session and
 //! that session's transcript, it is the flow's turn end: it writes the
-//! flow's context size, and may drain its queue or put its metaflow to
-//! sleep. A `PromptSubmitted` event in the flow's registered session whose
+//! flow's context size, and may drain its queue. A `PromptSubmitted` event in the flow's registered session whose
 //! digest is exactly the request a hand-over typed is that request's
 //! receipt, and settles it (`after_report`). An event naming another session
 //! is kept and acts on nothing.

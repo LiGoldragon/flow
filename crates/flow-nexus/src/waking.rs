@@ -1,29 +1,34 @@
-//! Sleep and wake: a seat that is not running keeps no harness.
+//! Wake and drain: a metaflow's seat stays in its pane while it runs, and a
+//! seat whose pane is gone wakes fresh.
 //!
-//! A metaflow is Awake as one flow. When that flow's turn ends, Flow reads
-//! whether its seat rests. A Claude seat reports `Stopped` naming its own
-//! native session and transcript; one whose transcript records its main
-//! turn's `end_turn` is ready for work whatever Herdr's screen shows;
-//! otherwise Herdr is given a bounded wait to show the seat Idle or Done,
-//! since a harness's Stop hook can run while its screen still shows it
-//! working. A Codex seat reports no Stop: it rests when its app-server's
-//! thread rests. Then, with work queued, the oldest request is handed over
-//! (`Operation::Drain`), and the seat stays awake until its turn ends again
-//! with nothing queued; with nothing queued, every metaflow sleeps, of any
-//! layer and either harness: Flow closes its pane and records the flow
-//! Stopped and the metaflow Asleep (`Operation::Sleep`). The flow's row and
-//! its native transcript stay. A request later queued for the Asleep
-//! metaflow wakes it (`Operation::Wake`): a fresh flow is launched from the
-//! configured layer Model and the module identities the metaflow's last
-//! launch named, composed again as any Start is, with the whole queue,
-//! oldest first, as its brief. The requests leave the queue only in the
-//! write that records the started flow Awake, so a Nexus that dies mid-wake
-//! loses none: at its next start it wakes every Asleep metaflow still
-//! holding work. Requests that arrive while the wake runs are handed to the
-//! woken flow once it is up, oldest first.
+//! A metaflow is Awake as one flow for as long as that flow's pane runs,
+//! busy or idle; no pane is closed because its flow went idle. When that
+//! flow's turn ends, Flow reads whether its seat rests. A Claude seat
+//! reports `Stopped` naming its own native session and transcript; one
+//! whose transcript records its main turn's `end_turn` is ready for work
+//! whatever Herdr's screen shows; otherwise Herdr is given a bounded wait to
+//! show the seat Idle or Done, since a harness's Stop hook can run while its
+//! screen still shows it working. A Codex seat reports no Stop: it rests
+//! when its app-server's thread rests. Then, with work queued, the oldest
+//! request is handed over (`Operation::Drain`); with nothing queued, the
+//! seat stays Awake in its pane. Work queued later for an Awake seat known
+//! resting, by the same evidence, is handed over at once.
 //!
-//! Each choice of when to sleep and which requests wake is one function of
-//! [`WakePolicy`], so a ruling changes one place.
+//! A metaflow is Asleep once its flow has ended: its pane closed by the
+//! living, its harness crashed, or the flow replaced. Work queued for an
+//! Awake seat whose pane Herdr shows gone records that flow Exited, which
+//! puts its metaflow Asleep. A request queued for an Asleep metaflow wakes
+//! it (`Operation::Wake`): a fresh flow is launched from the configured
+//! layer Model and the module identities the metaflow's last launch named,
+//! composed again as any Start is, with the whole queue, oldest first, as
+//! its brief. The requests leave the queue only in the write that records
+//! the started flow Awake, so a Nexus that dies mid-wake loses none: at its
+//! next start it wakes every Asleep metaflow still holding work. Requests
+//! that arrive while the wake runs are handed to the woken flow once it is
+//! up, oldest first.
+//!
+//! Each choice of when a seat rests and which requests wake is one function
+//! of [`WakePolicy`], so a ruling changes one place.
 //!
 //! Whether a metaflow is due a wake is read from Flow's records alone
 //! ([`SleepsAndWakesSeats::wake_is_due`]): it is Asleep and holds work that
@@ -37,7 +42,7 @@
 //! gate for each store step and releases it while the fresh launch settles,
 //! as Start does. While it runs, the metaflow is held in
 //! [`WakingMetaflows`], so a second request starts no second wake and a
-//! turn end does not put the waking seat to sleep.
+//! turn end does not drain the waking seat.
 
 use crate::AwaitsLaunchSettlement;
 use crate::RunningNexus;
@@ -54,11 +59,11 @@ use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
-    Record_Data_Context_Data, Sleep_Data,
+    Record_Data_Context_Data,
 };
 use crate::generated::starter::ProfilesFreshSeat;
 use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
-use crate::herdr::{LocatesNativeTranscripts, ReadsHerdrPanes, ReadsHerdrRoster};
+use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster};
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
@@ -84,14 +89,14 @@ use signal_flow::{
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-/// The choices of sleep and wake, each in one place.
+/// The choices of rest and wake, each in one place.
 pub trait WakePolicy {
     /// Effort a fresh seat is launched at: every seat runs at medium.
     const WAKE_EFFORT: &'static str = "medium";
 
-    /// A flow that reported Stopped sleeps at once when Herdr shows it
-    /// resting: Idle or Done. Working, Blocked or unreadable keeps it awake.
-    fn sleeps_at(agent_state: &AgentState) -> bool {
+    /// A Claude seat that reported Stopped rests when Herdr shows it Idle
+    /// or Done. Working, Blocked or unreadable is not resting.
+    fn rests_at(agent_state: &AgentState) -> bool {
         matches!(agent_state, AgentState::Idle | AgentState::Done)
     }
 
@@ -304,8 +309,8 @@ pub use crate::generated::starter::FreshContext;
 /// What a flow's Stop did to its seat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtStop {
-    /// The seat rested with nothing queued: it sleeps.
-    Slept,
+    /// The seat rested with nothing queued: it stays Awake in its pane.
+    Idle,
     /// The seat rested with work queued: the oldest request was typed in.
     Drained(QueuedRequest),
     /// The seat stays as it is, for the reason named.
@@ -313,7 +318,7 @@ pub enum AtStop {
 }
 
 /// Why a Stop left its seat as it was. Every early exit of `settle_stopped`
-/// names one, and the Nexus logs it, so a seat that does not sleep says why.
+/// names one, and the Nexus logs it, so a seat left as it was says why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeptAtStop {
     /// The store could not be read.
@@ -335,10 +340,6 @@ pub enum KeptAtStop {
     ThreadNotResting,
     /// Work is queued and the Drain did not type it.
     DrainRefused(Box<Outcome>),
-    /// A lock is held for the metaflow, or the locks could not be read.
-    LockHeld,
-    /// The Sleep did not complete.
-    SleepRefused(Box<Outcome>),
 }
 
 /// Why work was not typed into a live flow's pane. Each is logged by name;
@@ -399,22 +400,24 @@ impl AnswersWakeRefusal for WakeRefusal {
 /// going.
 pub trait SleepsAndWakesSeats {
     /// After a flow's turn ended (a Claude `Stopped` report, a Codex
-    /// thread's rest): hands the oldest queued request to its resting seat,
-    /// or puts the metaflow Awake as it to sleep when nothing waits for it.
+    /// thread's rest): hands the oldest queued request to its resting seat;
+    /// with nothing queued the seat stays Awake in its pane.
     fn settle_stopped(&self, flow_id: &str) -> AtStop;
     /// After a request was queued for `address`, or a queued one was
     /// answered again: holds the metaflow, and when Flow's records show it
     /// due a wake, wakes it and drains what arrived meanwhile. Nothing when
     /// a wake already runs or none is due, so asking twice wakes once.
     fn wake_due(&self, address: Address);
-    /// After the owner's resolution of a hand-over committed: when the
-    /// metaflow's Awake seat still has queued work and is known resting by
-    /// the evidence the drain at a turn end uses (a Claude transcript whose
-    /// main turn ended with no later prompt; a Codex thread the app-server
-    /// reports resting), runs that same drain now. A seat not known resting
-    /// waits for its turn end. Takes the dispatch gate, so the caller holds
-    /// none.
-    fn drain_after_resolution(&self, address: &Address);
+    /// After work was queued for `address`, or the owner's resolution of a
+    /// hand-over committed: when the metaflow's Awake seat has queued work,
+    /// records its flow Exited if Herdr shows its pane gone, which puts the
+    /// metaflow Asleep for a fresh wake; otherwise, when the seat is known
+    /// resting by the evidence the drain at a turn end uses (a Claude
+    /// transcript whose main turn ended with no later prompt; a Codex thread
+    /// the app-server reports resting), runs that same drain now. A seat not
+    /// known resting waits for its turn end. Takes the dispatch gate, so
+    /// the caller holds none.
+    fn drain_awake(&self, address: &Address);
     /// Whether Flow's records show the metaflow due a wake: Asleep and
     /// holding work that wakes it.
     fn wake_is_due(&self, metaflow: &Metaflow) -> bool;
@@ -429,10 +432,9 @@ pub trait SleepsAndWakesSeats {
     fn recover_wakes(&self);
 }
 
-/// The bodies of the Sleep, Wake and Drain operations; `perform` delegates
-/// to them.
-pub trait PerformsSleepAndWake {
-    fn sleep(&self, sleep: Sleep_Data) -> Outcome;
+/// The bodies of the Wake and Drain operations; `perform` delegates to
+/// them.
+pub trait PerformsWakeAndDrain {
     /// Performed off the dispatch gate; see the module documentation.
     fn wake(&self, address: Address) -> Outcome;
     /// Performed under the dispatch gate.
@@ -460,9 +462,8 @@ trait WakesInParts {
     /// Refuses a wake while a pane already runs this flow's native session:
     /// SessionLive when one does, HerdrUnreadable when Herdr is unreadable.
     fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal>;
-    fn now() -> i64;
     /// The body of `settle_stopped`: waits, boundedly and off the dispatch
-    /// gate, for Herdr to show the seat resting, then drains or sleeps it.
+    /// gate, for Herdr to show the seat resting, then drains it.
     fn settle_rested(&self, flow_id: &str) -> AtStop;
 }
 
@@ -906,7 +907,7 @@ impl SleepsAndWakesSeats for RunningNexus {
         at_stop
     }
 
-    fn drain_after_resolution(&self, address: &Address) {
+    fn drain_awake(&self, address: &Address) {
         let resting = {
             let _turn = self
                 .dispatch_gate
@@ -918,16 +919,29 @@ impl SleepsAndWakesSeats for RunningNexus {
             let flow_ethos::State::Awake(flow_id) = metaflow.state else {
                 return;
             };
-            let known_resting = !metaflow.queue.is_empty()
-                && !self.waking.is_waking(address)
-                && matches!(self.store.address_hold(&flow_id), Ok(None))
-                && match self.store.flow_node(&flow_id) {
-                    Ok(Some(node)) => match node.harness_kind {
-                        HarnessKind::Codex => self.codex_resting(&flow_id),
-                        HarnessKind::Claude => self.claude_main_turn_ended(&node),
-                    },
-                    _ => false,
-                };
+            if metaflow.queue.is_empty()
+                || self.waking.is_waking(address)
+                || !matches!(self.store.address_hold(&flow_id), Ok(None))
+            {
+                return;
+            }
+            let Ok(Some(node)) = self.store.flow_node(&flow_id) else {
+                return;
+            };
+            // A seat whose pane is gone has ended: its flow is recorded
+            // Exited, which puts the metaflow Asleep, and the wake that
+            // follows starts a fresh flow.
+            if matches!(
+                self.herdr.pane_presence(&node),
+                PanePresence::Absent | PanePresence::Bare
+            ) {
+                let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id.clone())));
+                return;
+            }
+            let known_resting = match node.harness_kind {
+                HarnessKind::Codex => self.codex_resting(&flow_id),
+                HarnessKind::Claude => self.claude_main_turn_ended(&node),
+            };
             known_resting.then_some(flow_id)
         };
         if let Some(flow_id) = resting {
@@ -936,23 +950,10 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_due(&self, address: Address) {
-        // Work queued for an Awake Codex seat whose thread rests is handed
-        // to it now, as its turn's end would; one in a turn waits for the
-        // turn's completion.
-        let resting = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let queued = matches!(
-                self.store.metaflow(&address),
-                Ok(Some(metaflow)) if !metaflow.queue.is_empty()
-            );
-            queued.then(|| self.resting_codex_seat(&address)).flatten()
-        };
-        if let Some(flow_id) = resting {
-            self.settle_stopped(&flow_id);
-        }
+        // Work queued for an Awake seat known resting is handed to it now,
+        // as its turn's end would; one in a turn waits for the turn's end.
+        // An Awake seat whose pane is gone is put Asleep, to wake below.
+        self.drain_awake(&address);
         let Some(lease) = self.waking.hold(&address) else {
             return;
         };
@@ -1048,38 +1049,7 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 }
 
-impl PerformsSleepAndWake for RunningNexus {
-    fn sleep(&self, sleep: Sleep_Data) -> Outcome {
-        let Sleep_Data { address, flow_node } = sleep;
-        let flow_id = flow_node.flow_id.clone();
-        let HerdrRouteSelection::Available(route) = &flow_node.herdr_route_selection else {
-            return Outcome::Failed(Failed_Data::HerdrRefused);
-        };
-        // No write is left half-typed into a pane as it closes.
-        let closed = {
-            let _lease = self.pane_leases.hold(route);
-            self.perform(Operation::Close(flow_node.clone()))
-        };
-        if closed != Outcome::Closed {
-            return closed;
-        }
-        // The flow's Stop records its metaflow Asleep in the same write.
-        if self.perform(Operation::Record(Record_Data::Stopped(flow_id.clone())))
-            != Outcome::Recorded
-        {
-            return Outcome::Failed(Failed_Data::StoreRefused);
-        }
-        match self.store.metaflow(&address) {
-            Ok(Some(metaflow))
-                if metaflow.state == flow_ethos::State::Asleep
-                    && metaflow.past.last() == Some(&flow_id) =>
-            {
-                Outcome::Slept
-            }
-            _ => Outcome::Failed(Failed_Data::NotAwake),
-        }
-    }
-
+impl PerformsWakeAndDrain for RunningNexus {
     fn wake(&self, address: Address) -> Outcome {
         match self.waken(&address) {
             Ok(flow_id) => Outcome::Woken(flow_id),
@@ -1490,7 +1460,7 @@ impl WakesInParts for RunningNexus {
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
         // A seat whose launch is not yet confirmed only holds its Address:
-        // it neither sleeps nor drains until confirmation keeps it.
+        // it is not drained until confirmation keeps it.
         match self.store.address_hold(flow_id) {
             Ok(None) => {}
             Ok(Some(_)) => return AtStop::Kept(KeptAtStop::Unconfirmed),
@@ -1505,7 +1475,7 @@ impl WakesInParts for RunningNexus {
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        let pane_agent = match node.harness_kind {
+        match node.harness_kind {
             // A Codex seat is handed work through its app-server, so only
             // the app-server's thread status says it rests, whatever its
             // screen shows.
@@ -1516,13 +1486,12 @@ impl WakesInParts for RunningNexus {
                 if !self.codex_resting(flow_id) {
                     return AtStop::Kept(KeptAtStop::ThreadNotResting);
                 }
-                None
             }
             HarnessKind::Claude => {
                 let pane_agent = self.herdr.pane_agent(&node);
                 let native_resting = matches!(
                     &pane_agent,
-                    PaneAgent::Present { agent_state, .. } if Self::sleeps_at(agent_state)
+                    PaneAgent::Present { agent_state, .. } if Self::rests_at(agent_state)
                 );
                 let claude_main_ready = self.claude_main_turn_ended(&node)
                     && matches!(
@@ -1534,9 +1503,8 @@ impl WakesInParts for RunningNexus {
                 if !native_resting && !claude_main_ready {
                     return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
                 }
-                (!native_resting).then_some(pane_agent)
             }
-        };
+        }
         if !metaflow.queue.is_empty() {
             return match self.perform(Operation::Drain(address)) {
                 Outcome::Drained(mut typed) if !typed.is_empty() => {
@@ -1545,28 +1513,7 @@ impl WakesInParts for RunningNexus {
                 outcome => AtStop::Kept(KeptAtStop::DrainRefused(Box::new(outcome))),
             };
         }
-        // A seat sleeps only when its screen rests too: a main turn that
-        // ended while background agents run is not closed under them.
-        if let Some(pane_agent) = pane_agent {
-            return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
-        }
-        if self.store.lock_held(&address, Self::now()).unwrap_or(true) {
-            return AtStop::Kept(KeptAtStop::LockHeld);
-        }
-        match self.perform(Operation::Sleep(Sleep_Data {
-            address,
-            flow_node: node,
-        })) {
-            Outcome::Slept => AtStop::Slept,
-            outcome => AtStop::Kept(KeptAtStop::SleepRefused(Box::new(outcome))),
-        }
-    }
-
-    fn now() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-            .unwrap_or(0)
+        // With nothing queued the seat stays Awake in its pane.
+        AtStop::Idle
     }
 }

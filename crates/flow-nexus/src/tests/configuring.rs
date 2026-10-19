@@ -6,7 +6,7 @@
 
 use crate::generated::operation::{Operation, Outcome};
 use crate::performing::Performs;
-use crate::store::metaflow::{MutatesMetaflows, SleepsMetaflows};
+use crate::store::metaflow::MutatesMetaflows;
 use crate::store::{
     ConfigurationOnlyStore, ConfiguresOnlyStore, DefaultConfiguration, FlowStore,
     ManagesMetaflowState, OpensFlowStore, ReadsFlowRows, RegistersFlowIdentity, SeedsConfiguration,
@@ -184,7 +184,7 @@ struct OtherRows {
     flow: Option<FlowNode>,
     metaflows: Vec<signal_flow::Metaflow>,
     message_bound: bool,
-    message_lock_held: bool,
+    message_locked: bool,
 }
 
 fn other_rows(nexus: &RunningNexus) -> OtherRows {
@@ -198,10 +198,11 @@ fn other_rows(nexus: &RunningNexus) -> OtherRows {
         flow: nexus.store.flow_node("da1e3f").expect("flow reads"),
         metaflows: nexus.store.list_metaflows().expect("metaflows read"),
         message_bound: nexus.store.message_peer(&peer).expect("binding reads"),
-        message_lock_held: nexus
+        message_locked: nexus
             .store
-            .lock_held(&ConfiguredStore::message(), 110)
-            .expect("lock reads"),
+            .stored_metaflow_lock(&ConfiguredStore::message())
+            .expect("lock reads")
+            .is_some(),
     }
 }
 
@@ -236,7 +237,7 @@ fn configure_nexus_replaces_only_the_nexus_value_and_keeps_every_other_row() {
     let before = other_rows(&nexus);
     assert_eq!(before.models.len(), 1);
     assert_eq!(before.thresholds.len(), 1);
-    assert!(before.flow.is_some() && before.message_bound && before.message_lock_held);
+    assert!(before.flow.is_some() && before.message_bound && before.message_locked);
     assert_eq!(before.metaflows.len(), 1);
 
     let replaced = ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 45);

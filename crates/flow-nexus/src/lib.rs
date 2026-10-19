@@ -1051,7 +1051,7 @@ impl DispatchesSerially for RunningNexus {
         // or the next one oldest (Delivered): a seat already resting gets no
         // turn end, so it is handed that request now, the gate given back.
         if let meta_signal_flow::Response::QueueDeliveryResolved(resolved) = &response {
-            self.drain_after_resolution(&resolved.address);
+            self.drain_awake(&resolved.address);
         }
         response
     }

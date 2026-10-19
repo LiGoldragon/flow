@@ -133,7 +133,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
         };
         let result = if let Query::Bind(binding) = query {
             // A peer running in a flow Flow launched binds its Address
-            // Awake as that flow, so the flow's own Stop can put it to sleep.
+            // Awake as that flow, so the flow's own Stop drains its queue.
             let launched = u32::try_from(peer.pid)
                 .ok()
                 .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))

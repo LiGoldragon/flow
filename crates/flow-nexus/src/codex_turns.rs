@@ -18,8 +18,8 @@
 //! A thread's rest settles its flow as a `Stopped` report settles a Claude
 //! flow (`SleepsAndWakesSeats::settle_stopped`): the oldest queued request
 //! is handed to its thread, which is then `Delivered`, so the next request
-//! waits for a turn that ends after it; with nothing queued the seat
-//! sleeps. Settlement takes
+//! waits for a turn that ends after it; with nothing queued the seat stays
+//! Awake in its pane. Settlement takes
 //! the dispatch gate and reads the thread's turn under it, so a completion
 //! seen twice, or by two connections, types once.
 //!
@@ -231,7 +231,7 @@ impl TracksCodexTurns for CodexTurns {
 pub trait SettlesRestingCodexSeats {
     /// Off the dispatch gate, from a responder: applies the events under
     /// the gate, then settles the Codex flow on the thread once if they
-    /// left it resting.
+    /// left it resting with work queued.
     fn codex_events(&self, thread: &str, events: Vec<TurnEvent>);
     /// Under the dispatch gate, as a launch holding it reads its own
     /// connection: applies the events, and notes the flow on the thread to
@@ -246,8 +246,8 @@ pub trait SettlesRestingCodexSeats {
     /// turn, or holding work Flow typed that has not begun.
     fn codex_in_turn(&self, flow_id: &str) -> bool;
     /// The Codex flow a metaflow is Awake as, when its launch is confirmed,
-    /// no wake holds it and its thread rests: the flow whose settlement
-    /// hands the oldest queued request over, or puts it to sleep.
+    /// no wake holds it, work is queued for it and its thread rests: the
+    /// flow whose settlement hands the oldest queued request over.
     fn resting_codex_seat(&self, address: &Address) -> Option<FlowId>;
 }
 
@@ -327,7 +327,8 @@ impl SettlesRestingCodexSeats for RunningNexus {
         let flow_ethos::State::Awake(flow_id) = metaflow.state else {
             return None;
         };
-        (!self.waking.is_waking(address)
+        (!metaflow.queue.is_empty()
+            && !self.waking.is_waking(address)
             && matches!(self.store.address_hold(&flow_id), Ok(None))
             && self.codex_resting(&flow_id))
         .then_some(flow_id)

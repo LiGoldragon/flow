@@ -44,14 +44,13 @@
 ; Reserve took for a launch then refused: the held flow and its FlowId
 ; claim, answered Released.
 ;
-; Sleep, Wake and Drain move a metaflow between Awake and Asleep so a seat
-; that is not running keeps no harness. Sleep closes the pane of the flow a
-; metaflow is awake as, of any layer and either harness, and records the
-; flow Stopped and the metaflow Asleep; the flow's row and native transcript
-; stay. Wake reads the whole queue of an Asleep metaflow, oldest first, and
-; starts a fresh flow that carries it in its first prompt, composed from the
-; configured layer Model and the module identities the metaflow's last
-; launch named. Record.Awoken then names the
+; Wake and Drain carry work to a metaflow's seat. A metaflow stays Awake
+; as its flow while that flow's pane runs, idle or not, and is Asleep once
+; that pane is gone: closed by the living, crashed, or replaced. Wake reads
+; the whole queue of an Asleep metaflow, oldest first, and starts a fresh
+; flow that carries it in its first prompt, composed from the configured
+; layer Model and the module identities the metaflow's last launch named.
+; Record.Awoken then names the
 ; started flow and the count of queued requests it was handed, which leave
 ; the queue in that same write, so a wake that dies first loses nothing.
 ; Drain first reconciles a hand-over still outstanding from the seat's
@@ -93,7 +92,6 @@ Operation
   Submit.{ ComposedLaunch PromptDeliveryIntent }
   Close.FlowNode
   Release.FlowId
-  Sleep.{ Address FlowNode }
   Wake.Address
   Drain.Address ]
 [ Composed.ComposedLaunch
@@ -108,7 +106,6 @@ Operation
   Submitted.PromptDeliveryResult
   Closed
   Released
-  Slept
   Woken.FlowId
   Drained.Vector<QueuedRequest>
   Failed.[ CompositionRefused

@@ -54,7 +54,7 @@ drops the hold in one write, the Address staying taken. A launch settled as
 refused, or a flow recorded Stopped, Retired or Exited, while it holds its
 Address gives it back in that write: a metaflow still Awake as the flow
 returns to what the hold kept, keeping its queue; one the launch created is
-removed, or left Asleep when requests were queued meanwhile. A seat that holds its Address neither sleeps nor drains at a
+removed, or left Asleep when requests were queued meanwhile. A seat that holds its Address is not drained at a
 Stop. The taking follows Bind's rules: a metaflow Awake as a live flow, or
 bound to a live process, is refused, and an absent or Asleep one, or one Awake as a flow no longer live, is taken, a displaced
 flow joining Past; a replacement takes over its predecessor's. Start refuses
@@ -316,10 +316,18 @@ answered from its record and queued nothing more; with another digest it is
 datom, `Queued.{ Sender Target }` or `Refused.SendRefusal`, with `success`
 true only when queued.
 
+A metaflow stays Awake as its flow while that flow's pane runs, busy or
+idle: no pane is closed because its flow went idle. It is Asleep only once
+its flow has ended, its pane closed by the living, crashed, or replaced.
 Whether a target wakes is read from Flow's records, never carried with the
 answer. A metaflow of any layer is due a wake when it is Asleep and holds an
 Order, a Question or the living's words. After every commit that queues a request, from a send-tool call
 or a Deliver, and after a replayed call is answered from its record, the
+target's Awake seat is read first: a seat whose pane Herdr shows gone has
+its flow recorded Exited, which puts the metaflow Asleep, and a seat known
+resting (a Claude transcript whose main turn ended with no later prompt, a
+Codex thread its app-server shows resting) is handed the oldest request in
+its live pane at once. Then the
 target is held against a second wake, read again under the dispatch gate,
 and woken when due; this runs whether or not the answer reached the caller.
 At its start the Nexus wakes every metaflow due a wake, so a Nexus that died
@@ -341,7 +349,7 @@ work is queued for a seat whose thread rests, the seat is settled as a Stop
 settles a Claude seat: under the dispatch gate the oldest queued request is
 handed to its thread, sender first, and the thread then holds that work
 until a turn that began after it completes; with nothing queued the seat
-sleeps. A seat
+stays Awake in its pane. A seat
 whose thread is in a turn is never drained, whatever its screen shows, and
 work queued meanwhile waits for the completion. A seat that only holds its
 Address is settled at its confirmation when its thread rests. The state is
@@ -384,8 +392,7 @@ per Layer and Aspect): a Start or Replace naming another is refused
 and a fresh wake takes that model. Short term a Primary is not started
 without its Secondary: a Start of a Primary is refused `NoSecondary`, at the
 same point, unless a metaflow is recorded, Awake or Asleep, at the Secondary
-of its aspect and topic; a metaflow sleeps whenever its harness goes idle,
-so a recorded Secondary is one that has started. A metaflow is never ended:
+of its aspect and topic, so a recorded Secondary is one that has started. A metaflow is never ended:
 it is Awake or Asleep. No environment variable is laid over the stored values;
 `Configure` is their only way in. The adapter is outside the Signal wire boundary: the
 Codex app-server conversation is WebSocket/JSON-RPC through the configured

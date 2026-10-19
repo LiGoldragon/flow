@@ -113,12 +113,14 @@ Codex when a configured Codex endpoint serves it and Claude otherwise. Once the 
 registered, before its first prompt, the launch records that Address's
 metaflow Awake as the launched flow, so the seat's first tool call is
 identified and sends through Message; confirmation keeps it, so the seat,
-of any layer and either harness, sleeps when its turn ends with nothing
-queued and a queued request wakes a fresh flow for it, and a launch refused,
+of any layer and either harness, stays Awake in its pane when its turn ends
+with nothing queued, and work queued for it is handed into that pane; once
+its pane is gone (closed by the living, crashed, or replaced) the metaflow is
+Asleep and a queued request wakes a fresh flow for it, and a launch refused,
 or a flow that ends, before confirmation gives the metaflow back as it found
 it; a Start whose Address a live seat holds, or another unsettled launch
 names, answers `StartRejected.AddressAwake`. A metaflow is Awake or Asleep:
-a topic never dies, it goes idle. A Primary starts after its Secondary: a
+a topic never dies. A Primary starts after its Secondary: a
 Start of a Primary whose Secondary metaflow (the same aspect and topic) is
 not recorded, Awake or Asleep, answers `StartRejected.NoSecondary` before
 anything is written. Profile producers should use the
@@ -285,7 +287,7 @@ thread once Herdr recognizes the pane's Codex agent, exact and interactively
 ready; a session Herdr does report must be the thread. Spawn records that
 thread for the launch request before the TUI attaches, so a launch recovered
 after its start binds to it the same way. A wake is refused while a pane runs
-the sleeping flow's session: a pane whose agent reports it, or, for Codex,
+the ended flow's session: a pane whose agent reports it, or, for Codex,
 the pane Flow recorded for the flow with Herdr recognizing a Codex agent in
 it and no other session reported. The launch receipt
 then reads that thread's first turn and answer. A launch refused once its

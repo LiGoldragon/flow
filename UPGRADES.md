@@ -1,3 +1,21 @@
+# Flow 0.35.23
+
+The contracts are unchanged: signal-flow 23.0.0 (c7dcc074) and
+meta-signal-flow 29.0.0 (2b03b506).
+
+- **An idle flow keeps its pane.** A flow whose turn ends with nothing
+  queued stays in its pane and its metaflow stays Awake, whatever its layer
+  and harness. Work queued for an Awake seat known resting (a Claude
+  transcript whose main turn ended, a Codex thread its app-server shows
+  resting) is handed into its live pane at once; a seat in a turn takes it
+  at that turn's end.
+- **A metaflow is Asleep only once its pane is gone.** Work queued for an
+  Awake seat whose pane Herdr shows gone (closed by the living, crashed,
+  or replaced) records its flow Exited, which puts the metaflow Asleep, and
+  the work wakes a fresh flow as before. No wake resumes a session.
+- The Nexus's internal `Operation.Sleep` and `Outcome.Slept` are gone; no
+  store family changes.
+
 # Flow 0.35.22
 
 Pins signal-flow 23.0.0 (c7dcc074, contract digest 32765a41a9454b06) and

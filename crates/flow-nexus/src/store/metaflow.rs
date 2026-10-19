@@ -10,7 +10,7 @@ pub(crate) trait MutatesMetaflows {
     fn message_peer(&self, peer: &Process) -> Result<bool, StoreError>;
     /// Binds the peer to its Address. `launched` is the FlowId of the
     /// launched flow the peer runs in, when Flow can name it; the metaflow
-    /// is then Awake as that flow, so its Stop can put it to sleep.
+    /// is then Awake as that flow, so its Stop drains its queue.
     fn bind_metaflow(
         &self,
         binding: Bind_Data,
@@ -49,9 +49,6 @@ pub(crate) trait SleepsMetaflows {
     fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Metaflow>, StoreError>;
     /// The metaflow at this Address, if any.
     fn metaflow(&self, address: &Address) -> Result<Option<Metaflow>, StoreError>;
-    /// Whether a sender holds an unexpired lock on this recipient: it is
-    /// about to deliver.
-    fn lock_held(&self, address: &Address, now: i64) -> Result<bool, StoreError>;
 }
 
 impl MutatesMetaflows for FlowStore {
@@ -320,12 +317,6 @@ impl SleepsMetaflows for FlowStore {
     fn metaflow(&self, address: &Address) -> Result<Option<Metaflow>, StoreError> {
         Ok(self.stored_metaflow(address)?.map(|stored| stored.metaflow))
     }
-
-    fn lock_held(&self, address: &Address, now: i64) -> Result<bool, StoreError> {
-        Ok(self
-            .stored_metaflow_lock(address)?
-            .is_some_and(|held| held.lock.until > now))
-    }
 }
 
 /// What a launch may do to the metaflow of the Address it names.
@@ -371,8 +362,8 @@ pub(crate) trait TakesLaunchAddress {
     /// Short term, a Primary is not started without its Secondary, and the
     /// Secondary starts first: NoSecondary when the Address is a Primary
     /// and no metaflow is recorded, Awake or Asleep, at the Secondary of
-    /// its aspect and topic. A metaflow sleeps whenever its harness goes
-    /// idle, so a recorded Secondary is one that has started.
+    /// its aspect and topic, so a recorded Secondary is one that has
+    /// started.
     fn secondary_refusal(&self, address: &Address) -> Result<Option<StartRejection>, StoreError>;
 }
 

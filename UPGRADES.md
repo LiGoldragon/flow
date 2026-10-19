@@ -1,9 +1,84 @@
-# Flow 0.35.13
+# Flow 0.35.19
 
-signal-flow 21.0.0 (contract digest 28e4f853ba798c44) and meta-signal-flow
-25.0.0 (81907c3b3f56108a): every ordinary- and meta-socket peer repins. The
-store adds one table, `flow_nexus_meta_send_server_configuration`; a store
-written before opens with it added and holding none.
+Pins signal-flow 22.0.0 (e6ccbddb, contract digest 5aa2992669c14992) and
+meta-signal-flow 28.0.0 (efccfb5c, contract digest 809506754cfaf73d): every
+ordinary- and meta-socket peer repins. Claude seats launched from this
+release carry a UserPromptSubmit hook beside SessionStart, PostToolUse and
+Stop.
+
+The store changes, all carried in one open of a 0.35.11 store, by the Nexus
+or the configuration-only listener, in this order: the model family
+`flow-nexus-meta-model-configuration` v1 to v2, the leave-out family
+`flow-nexus-meta-leave-out-configuration` v1 to v2, then the events family
+`flow-nexus-flow-events` v1 to v2, each older `Stopped` read as
+`Stopped.{ None None }`. The tables `flow_nexus_meta_send_server_configuration`
+and the queue-delivery counter (v1), request (v2) and attempt (v4) families
+are added holding none. A leave-out default that cannot be carried refuses
+the open and keeps the leave-out family at v1; the model family, carried
+before it in the same open, stays carried.
+
+- **A Herdr workspace is labelled with its flow's title.** A started flow's
+  workspace is created unlabelled and, once its Flow ID is claimed, takes the
+  title `{ <Aspect> <topic> <Layer> <FlowId> }` beside the pane label; the
+  pane's displayed agent is reported as the title, so Herdr never shows the
+  internal agent name. Each surface is read back before any prompt. A
+  workspace label Herdr refuses is
+  `StartRejected.NativeLaunchRefused.{ Naming WorkspaceLabelRefused }`.
+- **A launch names an exact native model.** A launch's receipt compares the
+  model the native transcript records with the model the launch named,
+  string for string, and Claude Code resolves an alias (`haiku`) to a full
+  name (`claude-haiku-5-5`) without exposing the resolution. A Start,
+  Replace or fresh wake whose model is not exact on its harness is now
+  refused at composition, `StartRejected.CompositionRefused`, before any pane
+  is opened or prompt typed: a Codex model is exact when a configured
+  endpoint lists it; a Claude model is exact when it is `claude-` then
+  lowercase letters, digits and hyphens. A fresh wake from such a layer Model
+  leaves the metaflow Asleep with its work queued.
+- **A model is configured per layer and aspect.** `Configure.Models` holds
+  one entry per Layer and Aspect: `{ Secondary Psyche claude-opus-5-5 }`,
+  `{ Secondary Mind gpt-6-sol }`. A declaration naming one layer and aspect
+  twice is `ConfigureRejected.DuplicateEntry`.
+- **A Start naming another model is refused.** A Start, or the successor of
+  a Replace, whose model is not the one configured for its Address's layer
+  and aspect, compared name for name, is
+  `StartRejected.ModelRefused.Differs.<configured>`, or
+  `StartRejected.ModelRefused.Unconfigured` when that layer and aspect has
+  none (`ReplaceRejected.LaunchRefused.ModelRefused...` for a Replace). It is
+  refused before the Nexus writes the store, claims a FlowId, composes, or
+  calls Herdr; a Replace is refused before its replacement is recorded. A
+  launch request already reserved resumes as it was.
+- **A fresh wake takes its seat's model.** A fresh wake launches on the
+  model configured for the metaflow's layer and aspect, and with none it
+  opens nothing and leaves the metaflow Asleep with its work queued.
+- **Store.** The model family moves from v1 (one row per Layer) to v2 (one
+  row per Layer and Aspect) when the store opens, by the Nexus or the
+  configuration-only listener. Every v1 row was a Claude model, and only
+  Psyche runs on Claude, so each is carried whole as that layer's Psyche
+  model and re-keyed under its Layer and Aspect in one commit; a crash
+  between the upgrade and the re-key is finished at the next open. No Mind
+  or Field row is made: until one is declared, every Mind and Field Start
+  is `ModelRefused.Unconfigured` and a Mind or Field fresh wake opens
+  nothing.
+- **A Start takes the default of its own harness.** A Start naming no
+  leave-outs takes its metaflow's default for the harness its model derives,
+  and none when that harness has no default for its Address. A Codex Start
+  of a metaflow with only a Claude default is no longer refused
+  `LeaveOutRefused.NotForHarness`. A Start naming its own leave-outs is
+  checked against its harness as before, at composition, before any launch
+  is reserved or any pane opened.
+- **A declared default belongs to its harness.** `Configure.LeaveOuts`
+  holds one entry per Address and harness. An entry naming a leave-out of
+  another harness than its own is refused `LeaveOutNotForHarness` and the
+  whole declaration writes nothing. `recommended_plugins` stays outside the
+  leave-out vocabulary.
+- **Each stored default is carried under its harness.** Opening a store,
+  the full Nexus or the configuration-only listener, carries each v1
+  default, kept under its Address alone, whole under the harness every one
+  of its leave-outs belongs to, and re-keys it by its Address and that
+  harness. A default whose leave-outs belong to both harnesses, or that
+  names none, refuses the open with
+  `the leave-out default of <Aspect:len:topic:Layer> cannot be carried under
+  one harness`, and the store keeps its v1 family unchanged.
 
 - **A Codex thread's send server identifies the flow it serves.** On a shared
   app-server a Codex tool command runs as the app-server's child, in no pane,
@@ -22,38 +97,11 @@ written before opens with it added and holding none.
   executable the kernel reports for the running process, never a wrapper
   script that execs it:
   `flow-meta 'Configure.SendServers.[ { /nix/store/…-codex/bin/codex /nix/store/…/bin/<send-server> } ]'`.
-
-# Flow 0.35.18
-
-meta-signal-flow 27.0.0 (980d689): every meta-wire peer repins. The meta wire
-adds `ResolveQueueDelivery.{ QueueAttemptId [ Delivered Absent ]
-QueueResolutionReason }`, answered `QueueDeliveryResolved.{ Address
-QueueDeliveryResolution }` or `ResolveQueueDeliveryRejected.[ UnknownAttempt
-NotUncertain NotOldest EmptyReason StoreRefused ]`, and
-`ReadQueueDeliveries` lists a resolved attempt as `Resolved.{ outcome
-resolver reason time }`. The queue-delivery attempt family moves to v4.
-
-- **The owner resolves a stuck hand-over.** A Claude hand-over whose absence
-  cannot be proven stays Uncertain and blocks its address's queue. The owner
-  names it by its attempt id: `Delivered` settles it and the request leaves
-  the queue; `Absent` authorises a new attempt, which the next turn end hands
-  over. Flow records the outcome, the requesting meta peer (its process and,
-  when it runs in one, its flow), the reason and the time in the commit that
-  settles or authorises. Only an Uncertain attempt that is still the
-  address's oldest request resolves; a resolution is never automatic.
-
-# Flow 0.35.17
-
-signal-flow 21.0.0 (5af38281) and meta-signal-flow 26.0.0 (0e5a9829): every
-ordinary-wire and meta-wire peer repins. `Event.Stopped` carries `NativeStop.{
-Option<NativeSessionId> Option<TranscriptPath> }`, `Event` appends
-`PromptSubmitted.NativePrompt`, `QueueTurnEnd` and its responses are removed,
-and the meta wire adds `ReadQueueDeliveries.Address`. The store upgrades
-`flow-nexus-flow-events` from v1 to v2, each older `Stopped` read as
-`Stopped.{ None None }`; the unreleased queue-delivery request and attempt
-families move to v2 and v3 (the attempts to v4 at 0.35.18). Claude seats launched from this release carry a
-UserPromptSubmit hook beside SessionStart, PostToolUse and Stop.
-
+- **An Awake Codex seat’s queue drains on its app-server’s turn completion.** Each connection Flow keeps on a Codex thread reads the thread’s `turn/started`, `turn/completed` and `thread/status/changed`, and a responder’s `thread/resume` answers the thread’s status. When a confirmed seat’s thread rests with work queued, or work is queued for a seat whose thread rests, the oldest request is typed as a Stop would type it, and the next waits for a turn that begins after it. A completion read twice types once; one that arrives while the launch is unconfirmed is settled at confirmation. A seat its app-server shows in a turn is kept (`KeptAtStop::InTurn`) whatever Herdr’s screen shows.
+- A Bind that leaves a seat Awake asks the same question a queued request does, so a resting Codex seat drains what waits for it.
+- **A Claude launch receipt rebuilds the native paste element.** Claude Code records a pasted part with its native wrapper and exact newline framing. A recorded user turn matches only the exact part bytes or the exact rebuilt element under the turn’s identifier. A different identifier, newline count, or escaping is refused.
+- **A resting Codex thread receives queued work through its app-server.** Flow records distinct request, attempt, and JSON-RPC identities before `turn/start`. The exact app-server response is recorded before the queued request is removed. A restart settles a receipt-recorded attempt without another native submission; a receipt-less attempt becomes Uncertain and blocks automatic redelivery until reconciled. The native call and local store are explicitly not one atomic transaction.
+- **Turn completion remains the drain trigger.** Duplicate or unrelated events do not repeat delivery, completion during registration is retained until confirmation, and queued sender and order are preserved. Flow never falls back to a pane prompt for this Codex drain.
 - **A Claude seat drains on its own turn end.** `flow-hook` reports a Stop
   with the `session_id` and `transcript_path` Claude Code gave it, and Flow
   acts on it only when they are the flow's registered session and that
@@ -81,58 +129,23 @@ UserPromptSubmit hook beside SessionStart, PostToolUse and Stop.
 - **A Claude turn end recorded before confirmation is honoured.** At
   confirmation the flow's last own Stop or prompt is read, or its transcript's
   main `end_turn`, as a Codex thread's rest already is.
-
-# Flow 0.35.16
-
-No protocol change. The store adds durable queue-delivery request and attempt families.
-
-- **A resting Codex thread receives queued work through its app-server.** Flow records distinct request, attempt, and JSON-RPC identities before `turn/start`. The exact app-server response is recorded before the queued request is removed. A restart settles a receipt-recorded attempt without another native submission; a receipt-less attempt becomes Uncertain and blocks automatic redelivery until reconciled. The native call and local store are explicitly not one atomic transaction.
-- **Turn completion remains the drain trigger.** Duplicate or unrelated events do not repeat delivery, completion during registration is retained until confirmation, and queued sender and order are preserved. Flow never falls back to a pane prompt for this Codex drain.
-
-# Flow 0.35.15
-
-No wire change and no store change.
-
-- **A Claude launch receipt rebuilds the native paste element.** Claude Code records a pasted part with its native wrapper and exact newline framing. A recorded user turn matches only the exact part bytes or the exact rebuilt element under the turn’s identifier. A different identifier, newline count, or escaping is refused.
-
-# Flow 0.35.14
-
-No wire change and no store change.
-
-- **An Awake Codex seat’s queue drains on its app-server’s turn completion.** Each connection Flow keeps on a Codex thread reads the thread’s `turn/started`, `turn/completed` and `thread/status/changed`, and a responder’s `thread/resume` answers the thread’s status. When a confirmed seat’s thread rests with work queued, or work is queued for a seat whose thread rests, the oldest request is typed as a Stop would type it, and the next waits for a turn that begins after it. A completion read twice types once; one that arrives while the launch is unconfirmed is settled at confirmation. A seat its app-server shows in a turn is kept (`KeptAtStop::InTurn`) whatever Herdr’s screen shows.
-- A Bind that leaves a seat Awake asks the same question a queued request does, so a resting Codex seat drains what waits for it.
-
-# Flow 0.35.13
-
-meta-signal-flow 25.0.0 (5bb519c5): a leave-out default names its harness,
-`ConfigureLeaveOut.{ Address HarnessKind LeaveOuts }`, and `Configure`
-refuses `ConfigureRejected.LeaveOutNotForHarness`. The meta contract digest
-changes, so every meta-wire peer repins with it. The leave-out family
-`flow-nexus-meta-leave-out-configuration` moves from v1 to v2.
-
-- **A Start takes the default of its own harness.** A Start naming no
-  leave-outs takes its metaflow's default for the harness its model derives,
-  and none when that harness has no default for its Address. A Codex Start
-  of a metaflow with only a Claude default is no longer refused
-  `LeaveOutRefused.NotForHarness`. A Start naming its own leave-outs is
-  checked against its harness as before, at composition, before any launch
-  is reserved or any pane opened.
-- **A declared default belongs to its harness.** `Configure.LeaveOuts`
-  holds one entry per Address and harness. An entry naming a leave-out of
-  another harness than its own is refused `LeaveOutNotForHarness` and the
-  whole declaration writes nothing. `recommended_plugins` stays outside the
-  leave-out vocabulary.
-- **Each stored default is carried under its harness.** Opening a store,
-  the full Nexus or the configuration-only listener, carries each v1
-  default, kept under its Address alone, whole under the harness every one
-  of its leave-outs belongs to, and re-keys it by its Address and that
-  harness. A default whose leave-outs belong to both harnesses, or that
-  names none, refuses the open with
-  `the leave-out default of <Aspect:len:topic:Layer> cannot be carried under
-  one harness`, and the store keeps its v1 family unchanged.
-
-A declarer of `Configure.LeaveOuts` names each entry's harness:
-`Configure.LeaveOuts.[ { { Psyche flow Secondary } Claude [ SkillTool WorkflowTool ] } { { Mind core Primary } Codex [ CodexAgentsMd ] } ]`.
+- **The owner resolves a stuck hand-over.** A Claude hand-over whose absence
+  cannot be proven stays Uncertain and blocks its address's queue. The owner
+  names it by its attempt id: `Delivered` settles it and the request leaves
+  the queue; `Absent` authorises a new attempt, which the next turn end hands
+  over. Flow records the outcome, the requesting meta peer (its process and,
+  when it runs in one, its flow), the reason and the time in the commit that
+  settles or authorises. Only an Uncertain attempt that is still the
+  address's oldest request resolves; a resolution is never automatic.
+- **Deploying.** Declare the Models family whole, every aspect's model for
+  every layer by its full native name, before the new Nexus serves Mind or
+  Field:
+  `Configure.Models.[ { Secondary Psyche claude-opus-5-5 } { Secondary Mind gpt-6-sol } { Secondary Field gpt-6-sol } ]`;
+  an entry left out is removed. A declarer of `Configure.LeaveOuts` names
+  each entry's harness:
+  `Configure.LeaveOuts.[ { { Psyche flow Secondary } Claude [ SkillTool WorkflowTool ] } { { Mind core Primary } Codex [ CodexAgentsMd ] } ]`.
+  Configure the trusted send-server pairs before Message asks
+  `IdentifyThread`.
 
 # Flow 0.35.11
 
@@ -163,64 +176,6 @@ store written before opens with it added and holding none.
   thread; a pane with no agent is closed too. A pane running another
   session, one nothing proves, or a Flow with no recorded session is left
   open, and a refused launch's pane so left stays recorded.
-
-# Flow 0.35.13
-
-Pins signal-flow 21.0.0 (dc7a0eee) and meta-signal-flow 25.0.0 (c85d7c3b);
-both contract digests change, so every ordinary- and meta-socket peer
-repins. The model family moves to v2. This branch follows 0.35.12
-(da2038-model-identity); other branches that also call themselves 0.35.13
-are separate.
-
-- **A model is configured per layer and aspect.** `Configure.Models` holds
-  one entry per Layer and Aspect: `{ Secondary Psyche claude-opus-5-5 }`,
-  `{ Secondary Mind gpt-6-sol }`. A declaration naming one layer and aspect
-  twice is `ConfigureRejected.DuplicateEntry`.
-- **A Start naming another model is refused.** A Start, or the successor of
-  a Replace, whose model is not the one configured for its Address's layer
-  and aspect, compared name for name, is
-  `StartRejected.ModelRefused.Differs.<configured>`, or
-  `StartRejected.ModelRefused.Unconfigured` when that layer and aspect has
-  none (`ReplaceRejected.LaunchRefused.ModelRefused...` for a Replace). It is
-  refused before the Nexus writes the store, claims a FlowId, composes, or
-  calls Herdr; a Replace is refused before its replacement is recorded. A
-  launch request already reserved resumes as it was.
-- **A fresh wake takes its seat's model.** A fresh wake launches on the
-  model configured for the metaflow's layer and aspect, and with none it
-  opens nothing and leaves the metaflow Asleep with its work queued.
-- **Store.** The model family moves from v1 (one row per Layer) to v2 (one
-  row per Layer and Aspect) when the store opens, by the Nexus or the
-  configuration-only listener. Every v1 row was a Claude model, and only
-  Psyche runs on Claude, so each is carried whole as that layer's Psyche
-  model and re-keyed under its Layer and Aspect in one commit; a crash
-  between the upgrade and the re-key is finished at the next open. No Mind
-  or Field row is made: until one is declared, every Mind and Field Start
-  is `ModelRefused.Unconfigured` and a Mind or Field fresh wake opens
-  nothing.
-- **Deploying.** Before the new Nexus serves Mind or Field, declare the
-  Models family whole, every aspect's model for every layer, for example
-  `Configure.Models.[ { Secondary Psyche claude-opus-5-5 } { Secondary Mind gpt-6-sol } { Secondary Field gpt-6-sol } ]`;
-  an entry left out is removed.
-
-# Flow 0.35.12
-
-No wire change and no store change: signal-flow 20.0.0 and meta-signal-flow
-24.0.1 stay pinned; no table or family changes. Version 0.35.11 is the
-separate restart-reconciliation branch.
-
-- **A launch names an exact native model.** A launch's receipt compares the
-  model the native transcript records with the model the launch named,
-  string for string, and Claude Code resolves an alias (`haiku`) to a full
-  name (`claude-haiku-5-5`) without exposing the resolution. A Start,
-  Replace or fresh wake whose model is not exact on its harness is now
-  refused at composition, `StartRejected.CompositionRefused`, before any pane
-  is opened or prompt typed: a Codex model is exact when a configured
-  endpoint lists it; a Claude model is exact when it is `claude-` then
-  lowercase letters, digits and hyphens. A fresh wake from such a layer Model
-  leaves the metaflow Asleep with its work queued.
-- **Deploying.** Redeclare every Claude layer Model by its full name, for
-  example `Configure.Models.[ { Quaternary claude-haiku-5-5 } ]`. The
-  effort comparison is unchanged.
 
 # Flow 0.35.10
 

@@ -421,7 +421,7 @@ impl MemoryDefinition for StoredMetaModelConfiguration {
     }
 }
 
-/// A layer's model as Flow kept it before 0.35.13, keyed by its Layer
+/// A layer's model as Flow kept it before 0.35.19, keyed by its Layer
 /// alone and naming no aspect. It is read only by the v1-to-v2 upgrade of
 /// the model family.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -451,7 +451,7 @@ impl MemoryDefinition for StoredMetaModelConfigurationV1 {
     }
 }
 
-/// A layer's one model was the Psyche seat's: before 0.35.13 every
+/// A layer's one model was the Psyche seat's: before 0.35.19 every
 /// configured model was a Claude model and only Psyche runs on Claude. Each
 /// is carried whole as that layer's Psyche model; Mind and Field have no
 /// model until one is declared for them.
@@ -523,7 +523,7 @@ impl MemoryDefinition for StoredMetaLeaveOutConfiguration {
     }
 }
 
-/// A metaflow's default leave-outs as Flow kept them before 0.35.13, keyed
+/// A metaflow's default leave-outs as Flow kept them before 0.35.19, keyed
 /// by its Address alone and naming no harness. It is read only by the
 /// v1-to-v2 upgrade of the leave-out family.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -2011,7 +2011,7 @@ trait UpgradesFlowFamilies {
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
     ) -> Result<TableReference<StoredMetaflow>, StoreError>;
-    /// A store before 0.35.13 keeps one model per Layer; each is carried as
+    /// A store before 0.35.19 keeps one model per Layer; each is carried as
     /// that layer's Psyche model and re-keyed by its Layer and Aspect.
     fn upgraded_models(
         &mut self,
@@ -2043,7 +2043,7 @@ trait UpgradesFlowFamilies {
         ),
         StoreError,
     >;
-    /// A store before 0.35.13 keeps each metaflow's default leave-outs
+    /// A store before 0.35.19 keeps each metaflow's default leave-outs
     /// under its Address alone; each is carried under the harness its
     /// leave-outs belong to, and re-keyed by its Address and that harness.
     /// A default whose leave-outs mix harnesses, or name none, refuses the
@@ -5930,7 +5930,8 @@ pub(crate) trait ReadsFlowMemory {
         // its fresh-wake marks from 0.35.2 on, the Codex thread each
         // launch opened from 0.35.6 on, the send tool's calls from 0.35.7
         // on, the cleanup of each interrupted launch from 0.35.11 on, and
-        // its trusted send servers from 0.35.13 on.
+        // its trusted send servers and queued-delivery accounting from
+        // 0.35.19 on.
         const ADDED_LATER: &[&str] = &[
             "flow_nexus_flow_context_sizes",
             "flow_nexus_address_holds",
@@ -6482,7 +6483,7 @@ mod tests {
         }
 
         /// Replaces the store's model family with its v1 shape, one model
-        /// per Layer under that Layer alone, as 0.35.12 and earlier kept it.
+        /// per Layer under that Layer alone, as 0.35.11 and earlier kept it.
         fn seed_v1_models(&self, schema: u32, models: &[(signal_flow::Layer, &str)]) {
             let database = redb::Database::open(self.path()).expect("store opens directly");
             let write = database.begin_write().expect("catalog transaction starts");
@@ -6552,7 +6553,7 @@ mod tests {
         }
 
         /// Replaces the store's leave-out family with its v1 shape, holding
-        /// each default given under its Address alone, as 0.35.0 to 0.35.12
+        /// each default given under its Address alone, as 0.35.0 to 0.35.11
         /// kept it.
         fn seed_v1_leave_outs(
             &self,
@@ -6597,6 +6598,49 @@ mod tests {
                         },
                     ))
                     .expect("v1 leave-out row persists");
+            }
+        }
+
+        /// Replaces the store's events family with its v1 shape, each flow's
+        /// events as 0.35.11 and earlier kept them.
+        fn seed_v1_events(&self, flows: &[(&str, Vec<super::events::EventBeforeIdentity>)]) {
+            let database = redb::Database::open(self.path()).expect("store opens directly");
+            let write = database.begin_write().expect("catalog transaction starts");
+            {
+                let mut catalog = write
+                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .expect("catalog opens");
+                catalog
+                    .remove("flow_nexus_flow_events")
+                    .expect("events family removes");
+            }
+            let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                "flow_nexus_flow_events",
+            ));
+            write.commit().expect("catalog commits");
+            drop(database);
+            let mut engine = Engine::open(EngineOpen::new(
+                self.path(),
+                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+            ))
+            .expect("v1 store opens");
+            let table = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_flow_events"),
+                    FamilyName::new("flow-nexus-flow-events"),
+                    SchemaHash::for_label("flow-nexus-flow-events-v1"),
+                ))
+                .expect("v1 events family registers");
+            for (flow_id, event_vector) in flows {
+                engine
+                    .assert(Assertion::new(
+                        table,
+                        super::events::FlowEventsV1 {
+                            flow_id: (*flow_id).into(),
+                            event_vector: event_vector.clone(),
+                        },
+                    ))
+                    .expect("v1 event row persists");
             }
         }
 
@@ -8791,7 +8835,7 @@ mod tests {
         );
     }
 
-    /// A store before 0.35.17 keeps Stops without their native identity:
+    /// A store before 0.35.19 keeps Stops without their native identity:
     /// opening carries every flow's events in order, each such Stop as
     /// `Stopped.{ None None }`, which is never taken for the flow's own.
     #[test]
@@ -9447,7 +9491,7 @@ mod tests {
         ]
     }
 
-    /// A store before 0.35.13 keeps one model per Layer, every one a
+    /// A store before 0.35.19 keeps one model per Layer, every one a
     /// Claude model. Opening carries each whole as that layer's Psyche
     /// model, keyed by its Layer and Aspect: declaring the same rows again
     /// changes nothing, Mind and Field have no model, and a second open
@@ -9613,7 +9657,7 @@ mod tests {
         .collect()
     }
 
-    /// A store before 0.35.13 keeps each metaflow's default leave-outs under
+    /// A store before 0.35.19 keeps each metaflow's default leave-outs under
     /// its Address alone. Opening carries every one of them whole under the
     /// harness its leave-outs belong to, keyed by its Address and that
     /// harness; the other harness of that Address has none, and a second
@@ -9783,6 +9827,194 @@ mod tests {
                     .len(),
                 defaults.len()
             );
+        }
+    }
+
+    /// A 0.35.11 store holds the model, leave-out and events families at
+    /// v1. One open carries all three, models first, then leave-outs, then
+    /// events; a second open carries nothing again.
+    #[test]
+    fn a_0_35_11_store_upgrades_models_leave_outs_and_events_in_one_open() {
+        use super::ManagesMetaflowState;
+        use super::NamesConfiguredModel;
+        use super::events::{EventBeforeIdentity, RecordsHarnessEvents};
+        use crate::lean::BelongsToHarness;
+        use signal_flow::{Address, Event, NativeStop};
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let models = production_models();
+        let defaults = production_leave_out_defaults();
+        let events = vec![(
+            "a1a1a1",
+            vec![
+                EventBeforeIdentity::Started,
+                EventBeforeIdentity::ToolUsed("Bash".into()),
+                EventBeforeIdentity::Stopped,
+            ],
+        )];
+        fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &models);
+        fixture.seed_v1_leave_outs(&defaults);
+        fixture.seed_v1_events(&events);
+        let before = fixture.path().rows_by_table();
+        for reopening in 0..2 {
+            let store = fixture.configured_store();
+            for (layer, native) in &models {
+                let address = Address {
+                    aspect: Aspect::Psyche,
+                    topic: "flow".into(),
+                    layer: layer.clone(),
+                };
+                assert_eq!(
+                    store.configured_model(&address).expect("model reads"),
+                    Some((*native).to_owned()),
+                    "{layer:?} (open {reopening})"
+                );
+            }
+            for (address, leave_outs) in &defaults {
+                assert_eq!(
+                    store
+                        .default_leave_outs(address, &leave_outs[0].harness())
+                        .expect("default reads"),
+                    *leave_outs,
+                    "{address:?} (open {reopening})"
+                );
+            }
+            assert_eq!(
+                store.events("a1a1a1").expect("events read"),
+                Some(vec![
+                    Event::Started,
+                    Event::ToolUsed("Bash".into()),
+                    Event::Stopped(NativeStop {
+                        native_session_id_option: None,
+                        transcript_path_option: None,
+                    }),
+                ]),
+                "open {reopening}"
+            );
+            drop(store);
+            assert_eq!(fixture.path().rows_by_table(), before, "open {reopening}");
+        }
+        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
+        let snapshot = configuration
+            .configuration_snapshot()
+            .expect("snapshot reads")
+            .expect("store configured");
+        assert_eq!(snapshot.models.len(), models.len());
+        assert_eq!(snapshot.default_leave_outs.len(), defaults.len());
+    }
+
+    /// The store the deployment holds, copied: one open by this Flow carries
+    /// every family it keeps at an older version, every table keeps its rows
+    /// and every added table is empty, every row reads in its current shape,
+    /// and a second open changes nothing. The store is no fixture this
+    /// repository holds, so the test runs only when asked for by name with
+    /// `--ignored` and the variable set.
+    #[test]
+    #[ignore = "needs FLOW_0_35_11_STORE naming a copy of a store Flow 0.35.11 wrote"]
+    fn the_deployed_0_35_11_store_opens_and_every_family_upgrades_in_one_open() {
+        use super::events::RecordsHarnessEvents;
+        use super::{ManagesMetaflowState, ReadsFlowRows};
+        let source = std::env::var_os("FLOW_0_35_11_STORE")
+            .map(std::path::PathBuf::from)
+            .expect("FLOW_0_35_11_STORE names the 0.35.11 store to copy");
+        for configuration_first in [false, true] {
+            let directory = tempfile::tempdir().expect("copy directory");
+            let path = directory.path().join("flow.sema");
+            std::fs::copy(&source, &path).expect("0.35.11 store copied");
+            let mut permissions = std::fs::metadata(&path)
+                .expect("copy metadata")
+                .permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&path, permissions).expect("copy writable");
+            // A copy of a store its Nexus holds open reads as one left
+            // uncleanly; redb repairs it on its first writable open, as the
+            // Nexus's own open would, before anything is counted.
+            drop(redb::Database::open(&path).expect("the copy opens and repairs"));
+            let before = path.rows_by_table();
+            eprintln!("configuration-only open first: {configuration_first}");
+            eprintln!("rows before: {before:?}");
+            if configuration_first {
+                let configuration =
+                    ConfigurationOnlyStore::open(&path).expect("the configuration-only open");
+                let snapshot = configuration
+                    .configuration_snapshot()
+                    .expect("snapshot reads")
+                    .expect("store configured");
+                eprintln!(
+                    "models after the configuration-only open: {:?}",
+                    snapshot.models
+                );
+            }
+            let store = FlowStore::open_configured(&path).expect("the 0.35.11 store opens");
+            let set_aside = store
+                .opening_settlements
+                .iter()
+                .filter(|settlement| {
+                    !matches!(settlement, super::LaunchAttemptSettlement::Unsettled { .. })
+                })
+                .count() as u64;
+            eprintln!("launch-attempt rows set aside: {set_aside}");
+            let snapshot = store
+                .configuration_snapshot()
+                .expect("snapshot reads")
+                .expect("store configured");
+            eprintln!("models: {:?}", snapshot.models);
+            eprintln!("leave-out defaults: {}", snapshot.default_leave_outs.len());
+            for entry in &snapshot.default_leave_outs {
+                eprintln!(
+                    "  {:?} {:?} {}",
+                    entry.address,
+                    entry.harness_kind,
+                    entry.leave_outs.len()
+                );
+            }
+            assert!(
+                snapshot
+                    .models
+                    .iter()
+                    .all(|model| model.aspect == Aspect::Psyche),
+                "every carried model is a Psyche model"
+            );
+            assert!(snapshot.send_servers.is_empty());
+            let flows = store.flow_nodes().expect("flow nodes read");
+            let mut stops = 0usize;
+            for flow in &flows {
+                if let Some(events) = store.events(&flow.flow_id).expect("events read") {
+                    stops += events
+                        .iter()
+                        .filter(|event| matches!(event, signal_flow::Event::Stopped(_)))
+                        .count();
+                }
+            }
+            eprintln!("flows: {}, their Stops read: {stops}", flows.len());
+            assert_eq!(
+                store.list_metaflows().expect("metaflows list").len() as u64,
+                before["flow_nexus_metaflows"]
+            );
+            assert!(store.ambiguous_launch_attempts().is_ok());
+            drop(store);
+            let after = path.rows_by_table();
+            eprintln!("rows after: {after:?}");
+            for (table, rows) in &before {
+                let expected = match table.as_str() {
+                    "flow_nexus_launch_attempts" => rows - set_aside,
+                    "flow_nexus_quarantined_launch_attempts" => rows + set_aside,
+                    _ => *rows,
+                };
+                assert_eq!(after.get(table), Some(&expected), "rows of {table}");
+            }
+            for (table, rows) in &after {
+                if !before.contains_key(table) {
+                    eprintln!("added {table}");
+                    assert_eq!(*rows, 0, "{table} is added empty");
+                }
+            }
+            let reopened = FlowStore::open_configured(&path).expect("the upgraded store reopens");
+            assert_eq!(reopened.opening_settlements, Vec::new());
+            drop(reopened);
+            assert_eq!(path.rows_by_table(), after);
         }
     }
 }

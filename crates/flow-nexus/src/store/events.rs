@@ -11,7 +11,7 @@
 //! events row, and that row is what lets the harness's first `Started`
 //! land.
 //!
-//! A Stop recorded before Flow 0.35.17 carried no native identity: it is
+//! A Stop recorded before Flow 0.35.19 carried no native identity: it is
 //! upgraded to `Stopped.{ None None }`, which is kept as it was seen and
 //! never taken for the flow's own turn end.
 
@@ -61,7 +61,7 @@ pub enum EventBeforeIdentity {
     Stopped,
 }
 
-/// One flow's events as Flow kept them before 0.35.17. It is read only by
+/// One flow's events as Flow kept them before 0.35.19. It is read only by
 /// the v1-to-v2 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FlowEventsV1 {

@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.18";
+            version = "0.35.19";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -257,6 +257,10 @@
             "tests::reservation::a_codex_start_naming_a_claude_leave_out_is_refused_before_reserve_or_open";
           flow-leave-out-defaults-upgrade-under-their-harness = context.exactTest "flow-nexus"
             "store::tests::production_leave_out_defaults_upgrade_each_under_its_harness";
+          flow-0-35-11-store-upgrades-in-one-open = context.exactTest "flow-nexus"
+            "store::tests::a_0_35_11_store_upgrades_models_leave_outs_and_events_in_one_open";
+          flow-production-models-upgrade-as-psyche = context.exactTest "flow-nexus"
+            "store::tests::production_models_upgrade_each_as_its_layers_psyche_model";
           flow-configuration-only-upgrades-leave-out-defaults = context.exactTest "flow-nexus"
             "store::tests::the_configuration_only_open_upgrades_v1_leave_out_defaults";
           flow-mixed-leave-out-default-refuses-upgrade = context.exactTest "flow-nexus"

@@ -229,6 +229,7 @@ impl Dispatches for RunningNexus {
             }
             Query::Bind(_)
             | Query::Identify(_)
+            | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
             | Query::Release(_)
@@ -601,6 +602,7 @@ impl ServesConnection for Connection {
             ),
             query @ (Query::Bind(_)
             | Query::Identify(_)
+            | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
             | Query::Release(_)

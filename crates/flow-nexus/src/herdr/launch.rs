@@ -3595,7 +3595,10 @@ printf '%s\n' "$alias"
             );
         }
         assert!(!start_call.contains("launch-42"));
-        assert!(!start_call.contains("--remote-control flow-"), "{start_call}");
+        assert!(
+            !start_call.contains("--remote-control flow-"),
+            "{start_call}"
+        );
         assert!(!start_call.contains("composed body"));
         let pane_run = calls_after_start
             .lines()
@@ -3646,9 +3649,10 @@ printf '%s\n' "$alias"
         let intent = adapter
             .accept_registration(&launch, &binding, &acknowledgement)
             .expect("registered intent");
+        // The session named at start has already recorded its title.
         assert!(matches!(
             &intent.native_transcript_boundary,
-            NativeTranscriptBoundary::Absent(_)
+            NativeTranscriptBoundary::Existing(_)
         ));
         assert_eq!(intent.prompt_sha256_vector, [PROMPT_HASH]);
         assert_eq!(intent.parts_submitted, 1);

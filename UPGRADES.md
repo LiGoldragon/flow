@@ -13,9 +13,12 @@ or the configuration-only listener, in this order: the model family
 `flow-nexus-flow-events` v1 to v2, each older `Stopped` read as
 `Stopped.{ None None }`. The tables `flow_nexus_meta_send_server_configuration`
 and the queue-delivery counter (v1), request (v2) and attempt (v4) families
-are added holding none. A leave-out default that cannot be carried refuses
-the open and keeps the leave-out family at v1; the model family, carried
-before it in the same open, stays carried.
+are added holding none; Sema registers each and redb creates its table at
+the first row written to it. The whole open lands at once: it runs on a copy
+beside the store, which replaces the store by one rename only once every
+family is carried. A leave-out default that cannot be carried, any other
+failure, or a crash before the rename leaves the 0.35.11 store byte for
+byte as it was, every family at v1, so 0.35.11 still opens it.
 
 - **A Herdr workspace is labelled with its flow's title.** A started flow's
   workspace is created unlabelled and, once its Flow ID is claimed, takes the
@@ -78,7 +81,7 @@ before it in the same open, stays carried.
   harness. A default whose leave-outs belong to both harnesses, or that
   names none, refuses the open with
   `the leave-out default of <Aspect:len:topic:Layer> cannot be carried under
-  one harness`, and the store keeps its v1 family unchanged.
+  one harness`, and the store is left unchanged.
 
 - **A Codex thread's send server identifies the flow it serves.** On a shared
   app-server a Codex tool command runs as the app-server's child, in no pane,

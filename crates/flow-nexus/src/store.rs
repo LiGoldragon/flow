@@ -17,6 +17,7 @@ pub(crate) mod queue_delivery;
 pub(crate) mod refresh;
 pub(crate) mod send_call;
 pub(crate) mod send_server;
+mod staged_upgrade;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -24,6 +25,7 @@ use flow_ethos::State as MetaflowState;
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
 use queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
 use queue_delivery::{DeclaresQueueDeliveryTables, QueueDeliveryTables};
+use staged_upgrade::{StagedUpgrade, StagesUpgrade, UpgradeScope};
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
@@ -95,6 +97,65 @@ const RETIRED_TABLES: &[(&str, &str, &str)] = &[
         "flow-nexus-start-bundle",
         "flow-nexus-start-bundle-v1",
     ),
+];
+/// The tables a configuration-only store holds, all of them.
+const CONFIGURATION_ONLY_TABLES: &[&str] = &[
+    "flow_nexus_state",
+    "flow_nexus_configuration",
+    "flow_nexus_runtime_configuration",
+    "flow_nexus_delivery_configuration",
+    "flow_nexus_meta_nexus_configuration",
+    "flow_nexus_meta_model_configuration",
+    "flow_nexus_meta_threshold_configuration",
+];
+/// The tables every running store holds.
+const RUNNING_TABLES: &[&str] = &[
+    "flow_nexus_flows",
+    "flow_nexus_state",
+    "flow_nexus_metaflows",
+    "flow_nexus_metaflow_processes",
+    "flow_nexus_metaflow_locks",
+    "flow_nexus_configuration",
+    "flow_nexus_runtime_configuration",
+    "flow_nexus_herdr_routes",
+    "flow_nexus_launch_attempts",
+    "flow_nexus_launch_panes",
+    "flow_nexus_launch_outcomes",
+    "flow_nexus_replacements",
+    "flow_nexus_roles",
+    "flow_nexus_quarantined_launch_attempts",
+    "flow_nexus_deliveries",
+    "flow_nexus_pane_leases",
+    "flow_nexus_delivery_configuration",
+    "flow_nexus_meta_nexus_configuration",
+    "flow_nexus_meta_model_configuration",
+    "flow_nexus_meta_threshold_configuration",
+    "flow_nexus_flow_events",
+];
+// A running store keeps each flow's context size from 0.28.0 on, and
+// each launch's Address hold from 0.32.0 on; a running store written
+// before either opens, and its first full open adds the table, as
+// the first full open of a configuration-only store adds the running
+// tables.
+// A store keeps its metaflows' default leave-outs from 0.35.0 on,
+// its fresh-wake marks from 0.35.2 on, the Codex thread each
+// launch opened from 0.35.6 on, the send tool's calls from 0.35.7
+// on, the cleanup of each interrupted launch from 0.35.11 on, and
+// its trusted send servers and queued-delivery accounting from
+// 0.35.19 on.
+/// The tables a running store holds once this Flow has opened it.
+const ADDED_LATER_TABLES: &[&str] = &[
+    "flow_nexus_flow_context_sizes",
+    "flow_nexus_address_holds",
+    "flow_nexus_meta_leave_out_configuration",
+    "flow_nexus_metaflow_refreshes",
+    "flow_nexus_launch_opened_threads",
+    "flow_nexus_send_calls",
+    "flow_nexus_launch_cleanups",
+    "flow_nexus_meta_send_server_configuration",
+    "flow_nexus_queue_delivery_counter",
+    "flow_nexus_queue_delivery_requests",
+    "flow_nexus_queue_delivery_attempts",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -1995,6 +2056,8 @@ pub enum StoreError {
     },
     #[error("the leave-out family could not be upgraded: {0}")]
     LeaveOutUpgradeFailed(String),
+    #[error("the store upgrade could not be staged: {0}")]
+    StagedUpgrade(String),
     #[error("store {path} is not a recognized Flow Memory v2 store: {reason}")]
     UnrecognizedMemory { path: String, reason: String },
 }
@@ -2047,7 +2110,8 @@ trait UpgradesFlowFamilies {
     /// under its Address alone; each is carried under the harness its
     /// leave-outs belong to, and re-keyed by its Address and that harness.
     /// A default whose leave-outs mix harnesses, or name none, refuses the
-    /// upgrade by its entry and leaves the store as it was.
+    /// upgrade by its entry; the open is staged, so the store stays as it
+    /// was, every family with it.
     fn upgraded_leave_out_defaults(
         &mut self,
         descriptor: TableDescriptor<StoredMetaLeaveOutConfiguration>,
@@ -2072,8 +2136,8 @@ impl UpgradesFlowFamilies for Engine {
         };
         // The upgrade carries each row under the key it was stored by. A
         // row still under its Layer alone moves to its Layer and Aspect in
-        // one commit; a crash between the two leaves it to be moved at the
-        // next open.
+        // one commit. The open runs on a staged copy, so the store never
+        // holds the upgrade without the move.
         let mut commit = self.begin_atomic_commit();
         let mut moved = false;
         for row in self.match_records(QueryPlan::all(table))?.records() {
@@ -2116,8 +2180,8 @@ impl UpgradesFlowFamilies for Engine {
         };
         // The upgrade carries each row under the key it was stored by. A
         // row still under its Address alone moves to its Address and
-        // harness in one commit; a crash between the two leaves it to be
-        // moved at the next open.
+        // harness in one commit. The open runs on a staged copy, so the
+        // store never holds the upgrade without the move.
         let mut commit = self.begin_atomic_commit();
         let mut moved = false;
         for row in self.match_records(QueryPlan::all(table))?.records() {
@@ -2357,6 +2421,8 @@ pub struct ConfigurationOnlyStore {
 
 pub trait ConfiguresOnlyStore: Sized {
     fn open(path: &Path) -> Result<Self, StoreError>;
+    /// The open itself, on the store at `path` and in its place.
+    fn open_in_place(path: &Path) -> Result<Self, StoreError>;
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
@@ -2366,9 +2432,20 @@ pub trait ConfiguresOnlyStore: Sized {
 
 impl ConfiguresOnlyStore for ConfigurationOnlyStore {
     /// Opens the same versioned store as normal startup without invoking its
-    /// seeding, settlement or adoption path, upgrading only the leave-out
-    /// defaults; a store that still holds a retired table drops it first.
+    /// seeding, settlement or adoption path, upgrading only the families it
+    /// serves; a store that still holds a retired table drops it first. An
+    /// open that changes the store runs on a staged copy that replaces the
+    /// store only once the whole open has succeeded.
     fn open(path: &Path) -> Result<Self, StoreError> {
+        if FlowStore::recognize_flow_memory(path)? {
+            StagedUpgrade::run(path, UpgradeScope::ConfigurationOnly, |copy| {
+                Self::open_in_place(copy).map(drop)
+            })?;
+        }
+        Self::open_in_place(path)
+    }
+
+    fn open_in_place(path: &Path) -> Result<Self, StoreError> {
         let recognized = FlowStore::recognize_flow_memory(path)?;
         let state_descriptor = TableDescriptor::<FlowStoreState>::new(
             FLOW_STATE_TABLE_NAME,
@@ -2574,6 +2651,11 @@ pub trait OpensFlowStore {
     /// It drops the retired tables and upgrades the flows and launch
     /// outcomes from their 0.34 predecessor.
     fn open_configured(path: &Path) -> Result<Self, StoreError>
+    where
+        Self: Sized;
+
+    /// The configured open itself, on the store at `path` and in its place.
+    fn open_configured_in_place(path: &Path) -> Result<Self, StoreError>
     where
         Self: Sized;
 
@@ -2800,12 +2882,30 @@ trait WritesFlowStore {
 }
 
 impl OpensFlowStore for FlowStore {
+    /// An open that changes the store runs on a staged copy that replaces
+    /// the store only once the whole open has succeeded; what that open
+    /// set aside is reported by the store returned.
     fn open_configured(path: &Path) -> Result<Self, StoreError> {
         if !FlowStore::recognize_flow_memory(path)? {
             return Err(StoreError::NotConfigured);
         }
+        let staged = StagedUpgrade::run(path, UpgradeScope::Running, |copy| {
+            Self::open_configured_in_place(copy)
+                .map(|mut store| std::mem::take(&mut store.opening_settlements))
+        })?;
+        let mut store = Self::open_configured_in_place(path)?;
+        if let Some(settlements) = staged {
+            store.opening_settlements = settlements;
+        }
+        Ok(store)
+    }
 
-        let configuration_only = ConfigurationOnlyStore::open(path)?;
+    fn open_configured_in_place(path: &Path) -> Result<Self, StoreError> {
+        if !FlowStore::recognize_flow_memory(path)? {
+            return Err(StoreError::NotConfigured);
+        }
+
+        let configuration_only = ConfigurationOnlyStore::open_in_place(path)?;
         if configuration_only.configuration_snapshot()?.is_none() {
             return Err(StoreError::NotConfigured);
         }
@@ -5889,73 +5989,19 @@ pub(crate) trait ReadsFlowMemory {
     }
 
     fn has_expected_flow_catalog(actual: &std::collections::BTreeSet<String>) -> bool {
-        const CONFIGURATION_ONLY: &[&str] = &[
-            "flow_nexus_state",
-            "flow_nexus_configuration",
-            "flow_nexus_runtime_configuration",
-            "flow_nexus_delivery_configuration",
-            "flow_nexus_meta_nexus_configuration",
-            "flow_nexus_meta_model_configuration",
-            "flow_nexus_meta_threshold_configuration",
-        ];
-        const RUNNING: &[&str] = &[
-            "flow_nexus_flows",
-            "flow_nexus_state",
-            "flow_nexus_metaflows",
-            "flow_nexus_metaflow_processes",
-            "flow_nexus_metaflow_locks",
-            "flow_nexus_configuration",
-            "flow_nexus_runtime_configuration",
-            "flow_nexus_herdr_routes",
-            "flow_nexus_launch_attempts",
-            "flow_nexus_launch_panes",
-            "flow_nexus_launch_outcomes",
-            "flow_nexus_replacements",
-            "flow_nexus_roles",
-            "flow_nexus_quarantined_launch_attempts",
-            "flow_nexus_deliveries",
-            "flow_nexus_pane_leases",
-            "flow_nexus_delivery_configuration",
-            "flow_nexus_meta_nexus_configuration",
-            "flow_nexus_meta_model_configuration",
-            "flow_nexus_meta_threshold_configuration",
-            "flow_nexus_flow_events",
-        ];
-        // A running store keeps each flow's context size from 0.28.0 on, and
-        // each launch's Address hold from 0.32.0 on; a running store written
-        // before either opens, and its first full open adds the table, as
-        // the first full open of a configuration-only store adds the running
-        // tables.
-        // A store keeps its metaflows' default leave-outs from 0.35.0 on,
-        // its fresh-wake marks from 0.35.2 on, the Codex thread each
-        // launch opened from 0.35.6 on, the send tool's calls from 0.35.7
-        // on, the cleanup of each interrupted launch from 0.35.11 on, and
-        // its trusted send servers and queued-delivery accounting from
-        // 0.35.19 on.
-        const ADDED_LATER: &[&str] = &[
-            "flow_nexus_flow_context_sizes",
-            "flow_nexus_address_holds",
-            "flow_nexus_meta_leave_out_configuration",
-            "flow_nexus_metaflow_refreshes",
-            "flow_nexus_launch_opened_threads",
-            "flow_nexus_send_calls",
-            "flow_nexus_launch_cleanups",
-            "flow_nexus_meta_send_server_configuration",
-            "flow_nexus_queue_delivery_counter",
-            "flow_nexus_queue_delivery_requests",
-            "flow_nexus_queue_delivery_attempts",
-        ];
         // A store before 0.35.0 may still hold a table 0.35.0 drops.
         let retired = |name: &String| RETIRED_TABLES.iter().any(|(table, _, _)| table == name);
-        let running = RUNNING.iter().all(|name| actual.contains(*name))
+        let running = RUNNING_TABLES.iter().all(|name| actual.contains(*name))
             && actual.iter().all(|name| {
-                RUNNING.contains(&name.as_str())
-                    || ADDED_LATER.contains(&name.as_str())
+                RUNNING_TABLES.contains(&name.as_str())
+                    || ADDED_LATER_TABLES.contains(&name.as_str())
                     || retired(name)
             });
-        let configuration_only = CONFIGURATION_ONLY.iter().all(|name| actual.contains(*name))
+        let configuration_only = CONFIGURATION_ONLY_TABLES
+            .iter()
+            .all(|name| actual.contains(*name))
             && actual.iter().all(|name| {
-                CONFIGURATION_ONLY.contains(&name.as_str())
+                CONFIGURATION_ONLY_TABLES.contains(&name.as_str())
                     || name == "flow_nexus_meta_leave_out_configuration"
                     || name == "flow_nexus_meta_send_server_configuration"
                     || name == "flow_nexus_queue_delivery_counter"
@@ -6546,6 +6592,48 @@ mod tests {
                     },
                 ))
                 .expect("configuration commits");
+        }
+
+        /// The tables 0.35.19 adds to a running store.
+        const ADDED_IN_0_35_19: &'static [&'static str] = &[
+            "flow_nexus_meta_send_server_configuration",
+            "flow_nexus_queue_delivery_counter",
+            "flow_nexus_queue_delivery_requests",
+            "flow_nexus_queue_delivery_attempts",
+        ];
+
+        /// Removes the tables 0.35.19 adds, empty in the store, so the
+        /// catalog is the one 0.35.11 wrote.
+        fn as_0_35_11(&self) {
+            let database = redb::Database::open(self.path()).expect("store opens directly");
+            let write = database.begin_write().expect("catalog transaction starts");
+            {
+                let mut catalog = write
+                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .expect("catalog opens");
+                for table in Self::ADDED_IN_0_35_19 {
+                    catalog.remove(*table).expect("added family removes");
+                }
+            }
+            for table in Self::ADDED_IN_0_35_19 {
+                let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(table));
+            }
+            write.commit().expect("catalog commits");
+        }
+
+        /// The staged copies beside the store.
+        fn staged_copies(&self) -> Vec<String> {
+            std::fs::read_dir(self.directory.path())
+                .expect("store directory lists")
+                .map(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .filter(|name| name.starts_with(".flow.sema.upgrade-"))
+                .collect()
         }
 
         fn configured_store(&self) -> FlowStore {
@@ -9767,9 +9855,11 @@ mod tests {
         );
     }
 
-    /// A v1 default whose leave-outs belong to both harnesses, or that names
-    /// none, has no one harness to be carried under: the open refuses,
-    /// naming that entry, and the store keeps its v1 family as it was.
+    /// A 0.35.11 store whose v1 default has leave-outs of both harnesses,
+    /// or none, has no one harness to carry it under: each open refuses,
+    /// naming that entry, and the store stays the 0.35.11 store it was, byte
+    /// for byte — the models upgraded before the leave-outs are not kept
+    /// either.
     #[test]
     fn a_v1_leave_out_default_mixing_harnesses_refuses_the_upgrade_by_its_entry() {
         use signal_flow::{Address, Layer, LeaveOut};
@@ -9782,6 +9872,7 @@ mod tests {
         ] {
             let fixture = StoreFixture::new();
             fixture.configured();
+            drop(fixture.configured_store());
             let mixed = Address {
                 aspect: Aspect::Psyche,
                 topic: "flow".into(),
@@ -9790,19 +9881,35 @@ mod tests {
             let mut defaults = production_leave_out_defaults();
             defaults.retain(|(address, _)| *address != mixed);
             defaults.push((mixed.clone(), leave_outs));
+            fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &production_models());
             fixture.seed_v1_leave_outs(&defaults);
+            fixture.seed_v1_events(&[("a1a1a1", Vec::new())]);
+            fixture.as_0_35_11();
+            let bytes = std::fs::read(fixture.path()).expect("0.35.11 store reads");
+            let rows = fixture.path().rows_by_table();
             let refusal = |error: super::StoreError| match error {
                 super::StoreError::LeaveOutUpgrade { entry, reason } => (entry, reason),
                 other => panic!("not a leave-out refusal: {other}"),
             };
             let expected = (FlowStore::address_record_key(&mixed), reason);
-            match FlowStore::open_configured(&fixture.path()) {
-                Ok(_) => panic!("the open must refuse"),
-                Err(error) => assert_eq!(refusal(error), expected),
-            }
-            match ConfigurationOnlyStore::open(&fixture.path()) {
-                Ok(_) => panic!("the configuration-only open must refuse"),
-                Err(error) => assert_eq!(refusal(error), expected),
+            for configuration_only in [false, true] {
+                let refused = if configuration_only {
+                    ConfigurationOnlyStore::open(&fixture.path()).map(drop)
+                } else {
+                    FlowStore::open_configured(&fixture.path()).map(drop)
+                };
+                match refused {
+                    Ok(()) => {
+                        panic!("the open must refuse (configuration only: {configuration_only})")
+                    }
+                    Err(error) => assert_eq!(refusal(error), expected),
+                }
+                assert!(
+                    std::fs::read(fixture.path()).expect("store reads") == bytes,
+                    "the store is the 0.35.11 store it was (configuration only: {configuration_only})"
+                );
+                assert_eq!(fixture.path().rows_by_table(), rows);
+                assert_eq!(fixture.staged_copies(), Vec::<String>::new());
             }
             // Nothing was carried: the v1 rows still read as v1.
             let mut engine = Engine::open(EngineOpen::new(
@@ -9828,6 +9935,57 @@ mod tests {
                 defaults.len()
             );
         }
+    }
+
+    /// A crash between two family upgrades of one open leaves the store
+    /// the 0.35.11 store it was; the next open upgrades it whole and clears
+    /// the copy the crash left.
+    #[test]
+    fn a_crash_between_family_upgrades_leaves_the_0_35_11_store() {
+        use super::staged_upgrade::{InterruptsStagedUpgrade, StagedUpgrade, StagesUpgrade};
+        use super::{DescribesModelTable, NamesConfiguredModel, UpgradesFlowFamilies};
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let models = production_models();
+        fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &models);
+        fixture.seed_v1_leave_outs(&production_leave_out_defaults());
+        fixture.seed_v1_events(&[("a1a1a1", Vec::new())]);
+        fixture.as_0_35_11();
+        let bytes = std::fs::read(fixture.path()).expect("0.35.11 store reads");
+        let staged = StagedUpgrade::begin(&fixture.path(), super::UpgradeScope::Running)
+            .expect("staging starts")
+            .expect("a 0.35.11 store has families to upgrade");
+        {
+            let mut engine = Engine::open(EngineOpen::new(
+                staged.copy(),
+                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+            ))
+            .expect("the copy opens");
+            engine
+                .upgraded_models(super::StoredMetaModelConfiguration::descriptor())
+                .expect("the models upgrade on the copy");
+        }
+        staged.crash();
+        assert!(
+            std::fs::read(fixture.path()).expect("store reads") == bytes,
+            "the store is the 0.35.11 store it was"
+        );
+        assert_eq!(fixture.staged_copies().len(), 1, "the crash left its copy");
+        let store = fixture.configured_store();
+        let (layer, native) = &models[0];
+        assert_eq!(
+            store
+                .configured_model(&signal_flow::Address {
+                    aspect: Aspect::Psyche,
+                    topic: "flow".into(),
+                    layer: layer.clone(),
+                })
+                .expect("model reads"),
+            Some((*native).to_owned())
+        );
+        drop(store);
+        assert_eq!(fixture.staged_copies(), Vec::<String>::new());
     }
 
     /// A 0.35.11 store holds the model, leave-out and events families at
@@ -9856,7 +10014,11 @@ mod tests {
         fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &models);
         fixture.seed_v1_leave_outs(&defaults);
         fixture.seed_v1_events(&events);
-        let before = fixture.path().rows_by_table();
+        fixture.as_0_35_11();
+        let mut before = fixture.path().rows_by_table();
+        for added in StoreFixture::ADDED_IN_0_35_19 {
+            assert_eq!(before.insert((*added).to_owned(), 0), None);
+        }
         for reopening in 0..2 {
             let store = fixture.configured_store();
             for (layer, native) in &models {
@@ -9894,6 +10056,7 @@ mod tests {
             );
             drop(store);
             assert_eq!(fixture.path().rows_by_table(), before, "open {reopening}");
+            assert_eq!(fixture.staged_copies(), Vec::<String>::new());
         }
         let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
         let snapshot = configuration

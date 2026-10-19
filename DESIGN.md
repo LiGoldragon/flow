@@ -342,7 +342,15 @@ Fresh stores persist default sockets, source root, and Codex endpoints. Meta
 `Configure` declares one configuration family whole (`Nexus`, `Models`,
 `Thresholds`, `LeaveOuts`), replaces the committed family in one commit, and
 answers `Configured.Replaced` or `Configured.Unchanged`; rebinding live
-sockets and adapters is deferred to a Nexus restart. No environment variable is laid over the stored values;
+sockets and adapters is deferred to a Nexus restart. A launch's receipt compares
+the model its native transcript records with the model it named, string for
+string, so a launch names only an exact native model: a Codex model a
+configured endpoint lists, or a Claude full name, `claude-` then lowercase
+letters, digits and hyphens; any other model is not composed. A seat runs
+the model configured for its Address's layer and aspect (`Models` holds one
+per Layer and Aspect): a Start or Replace naming another is refused
+`ModelRefused` before the Nexus writes, claims, composes or opens anything,
+and a fresh wake takes that model. No environment variable is laid over the stored values;
 `Configure` is their only way in. The adapter is outside the Signal wire boundary: the
 Codex app-server conversation is WebSocket/JSON-RPC through the configured
 control socket. `ConsumeReset` uses the same adapter but is reachable only

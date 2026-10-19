@@ -4218,6 +4218,60 @@ printf '%s\n' "$alias"
         );
     }
 
+    /// The receipt compares the model the transcript records with the model
+    /// the launch named, string for string: the same model at the same
+    /// effort is received; another model at the same effort, or the same
+    /// model at another effort, is refused.
+    #[test]
+    fn a_claude_receipt_is_received_only_for_the_exact_model_and_effort() {
+        let native_session = "12345678-1234-4abc-8def-123456789abc";
+        let launch = launch(HarnessKind::Claude);
+        let agent_name = launch.launch_agent_name();
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            native_session,
+            "1234567812344abc8def123456789abc",
+            &agent_name,
+        );
+        let pane = adapter.create_launch_pane(&launch).expect("created pane");
+        let intent = registered_intent(&adapter, &launch, pane, native_session);
+        let transcript = root
+            .path()
+            .join("native-transcripts/claude")
+            .join(format!("{native_session}.jsonl"));
+        let first_input = serde_json::json!({"type":"user","sessionId":native_session,
+            "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_body}});
+        let receipt = |model: &str, effort: &str| {
+            serde_json::json!({"type":"assistant","sessionId":native_session,
+                "session_id":native_session,"uuid":"turn-claude",
+                "effort":effort,"perTurnEffort":effort,
+                "message":{"model":model,
+                "content":[{"type":"text","text":"Beginning the brief."}]}})
+        };
+        let observed = |model: &str, effort: &str| {
+            fs::write(
+                &transcript,
+                format!("{first_input}\n{}\n", receipt(model, effort)),
+            )
+            .expect("receipt written");
+            adapter.observe_native_target_receipt(&intent)
+        };
+        assert_eq!(intent.model_name, ModelName::from("model-current"));
+        assert!(matches!(
+            observed("model-current", "high"),
+            Ok(StartupProgress::Received(_))
+        ));
+        for (model, effort) in [("model-other", "high"), ("model-current", "low")] {
+            assert!(
+                observed(model, effort).unwrap_err()
+                    == super::TranscriptRefusal::Contradicted(
+                        NativeLaunchFailure::ModelOrEffortDiffers
+                    ),
+                "{model} {effort}"
+            );
+        }
+    }
+
     #[test]
     fn registered_harness_change_with_same_native_id_is_rejected() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";

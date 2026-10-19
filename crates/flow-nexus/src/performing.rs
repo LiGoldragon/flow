@@ -216,6 +216,17 @@ impl<E> AnswersRecord for Result<(), E> {
 impl Performs for RunningNexus {
     fn perform(&self, operation: Operation) -> Outcome {
         match operation {
+            // A model that is not exact on its harness is never launched: its
+            // receipt could not match the model the transcript records.
+            Operation::Compose(profile)
+                if !self.codex_endpoints.launches_exactly(&profile.model_name) =>
+            {
+                eprintln!(
+                    "flow-nexus: launch {} not composed: model {} is not an exact native model",
+                    profile.launch_request_id, profile.model_name
+                );
+                Outcome::Failed(Failed_Data::CompositionRefused)
+            }
             Operation::Compose(profile) => match self.composer.compose(
                 HarnessedProfile {
                     harness_kind: self.codex_endpoints.harness_for(&profile.model_name),

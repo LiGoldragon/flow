@@ -64,6 +64,7 @@ use crate::herdr::{
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
+use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::RecordsContextSize;
 use crate::store::events::RecordsHarnessEvents;
@@ -1052,16 +1053,11 @@ impl WakesInParts for RunningNexus {
         text: &str,
     ) -> Result<FlowId, Failed_Data> {
         let address = &metaflow.address;
-        let snapshot = match self.store.configuration_snapshot() {
-            Ok(Some(snapshot)) => snapshot,
-            _ => return Err(Failed_Data::StoreRefused),
-        };
-        let Some(model) = snapshot
-            .models
-            .iter()
-            .find(|model| model.layer == address.layer)
-        else {
-            return Err(Failed_Data::CompositionRefused);
+        // The seat's model is the one configured for its layer and aspect.
+        let model = match self.store.configured_model(address) {
+            Ok(Some(model)) => model,
+            Ok(None) => return Err(Failed_Data::CompositionRefused),
+            Err(_) => return Err(Failed_Data::StoreRefused),
         };
         let launch_request_id = format!(
             "wake-{}-{}",
@@ -1074,7 +1070,7 @@ impl WakesInParts for RunningNexus {
         let seat = FreshSeat {
             address: address.clone(),
             launch_request_id: launch_request_id.clone(),
-            model_name: model.native.clone(),
+            model_name: model,
             effort: Self::WAKE_EFFORT.into(),
             herdr_session_name: fresh.herdr_session_name,
             system_modules: fresh.system_modules,

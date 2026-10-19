@@ -2656,6 +2656,7 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
         .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
             meta_signal_flow::ConfigureModel {
                 layer: Layer::Secondary,
+                aspect: Aspect::Mind,
                 native: native.into(),
             },
         ]))
@@ -2925,6 +2926,136 @@ fn a_refreshed_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
     assert!(!calls.contains(&seat.session), "{calls}");
 }
 
+/// A layer Model declared as a Claude alias is not an exact native model: a
+/// fresh wake from it is refused before any pane is opened, so no native
+/// session receives the queued work, and the work stays queued with the
+/// metaflow Asleep. Declared as the full name, the same wake starts and
+/// takes the work.
+#[test]
+fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
+    let mut fixture = NexusFixture::new();
+    resumable(&fixture);
+    fixture.claims_flow_ids();
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![Request::Order("A".into())],
+    ));
+    configure_secondary_model(&fixture, "haiku");
+    let at = address(Layer::Secondary);
+    assert_eq!(
+        refresh(&fixture, &at),
+        meta_signal_flow::Response::Refreshed(at.clone())
+    );
+    let world = fixture.fresh_world("unused");
+
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Failed(crate::generated::operation::Failed_Data::Unstarted)
+    );
+    let asleep = stored(&fixture, Layer::Secondary);
+    assert_eq!(asleep.state, State::Asleep);
+    assert_eq!(asleep.past, vec!["abc123".to_owned()]);
+    assert_eq!(asleep.queue.len(), 1);
+    let calls = fs::read_to_string(world.state.join("calls")).unwrap_or_default();
+    assert!(!calls.contains("--session-id"), "{calls}");
+
+    configure_secondary_model(&fixture, "claude-fixture");
+    let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
+        panic!(
+            "the exact Claude model wakes; Herdr calls: {}",
+            fs::read_to_string(world.state.join("calls")).unwrap_or_default()
+        );
+    };
+    let woken = stored(&fixture, Layer::Secondary);
+    assert_eq!(woken.state, State::Awake(flow_id));
+    assert!(woken.queue.is_empty());
+}
+
+/// A fresh wake takes the model configured for its seat's layer and
+/// aspect, never another aspect's model of the same layer: a Mind Secondary
+/// whose layer has only a Psyche model opens nothing and keeps its work
+/// queued Asleep; once Mind's Secondary model is declared beside Psyche's,
+/// the same wake launches on Mind's.
+#[test]
+fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
+    use crate::store::ReadsLaunchAttempt as _;
+    let mut fixture = NexusFixture::new();
+    resumable(&fixture);
+    fixture.claims_flow_ids();
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![Request::Order("A".into())],
+    ));
+    configure_secondary_model(&fixture, "claude-fixture");
+    let models = |fixture: &NexusFixture, declared: &[(Aspect, &str)]| {
+        fixture
+            .nexus
+            .store
+            .configure_change(meta_signal_flow::ConfigurationChange::Models(
+                declared
+                    .iter()
+                    .map(|(aspect, native)| meta_signal_flow::ConfigureModel {
+                        layer: Layer::Secondary,
+                        aspect: aspect.clone(),
+                        native: (*native).into(),
+                    })
+                    .collect(),
+            ))
+            .expect("models configured");
+    };
+    models(&fixture, &[(Aspect::Psyche, "claude-fixture")]);
+    let at = address(Layer::Secondary);
+    assert_eq!(at.aspect, Aspect::Mind);
+    assert_eq!(
+        refresh(&fixture, &at),
+        meta_signal_flow::Response::Refreshed(at.clone())
+    );
+    let world = fixture.fresh_world("unused");
+
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Failed(crate::generated::operation::Failed_Data::CompositionRefused)
+    );
+    let asleep = stored(&fixture, Layer::Secondary);
+    assert_eq!(asleep.state, State::Asleep);
+    assert_eq!(asleep.queue.len(), 1);
+    let calls = fs::read_to_string(world.state.join("calls")).unwrap_or_default();
+    assert!(!calls.contains("--session-id"), "{calls}");
+
+    models(
+        &fixture,
+        &[
+            (Aspect::Psyche, "claude-other"),
+            (Aspect::Mind, "claude-fixture"),
+        ],
+    );
+    let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
+        panic!(
+            "Mind's Secondary model wakes the seat; Herdr calls: {}",
+            fs::read_to_string(world.state.join("calls")).unwrap_or_default()
+        );
+    };
+    let woken = stored(&fixture, Layer::Secondary);
+    assert_eq!(woken.state, State::Awake(flow_id.clone()));
+    assert!(woken.queue.is_empty());
+    let launched = fixture
+        .nexus
+        .store
+        .launch_requests_bound_to(&flow_id)
+        .expect("launches read");
+    let attempt = fixture
+        .nexus
+        .store
+        .launch_attempt(launched.last().expect("the wake's launch"))
+        .expect("attempt reads")
+        .expect("attempt");
+    assert_eq!(attempt.launch_profile.model_name, "claude-fixture");
+}
+
 /// The first-turn send of a fresh Codex launch, against the fresh world: a
 /// Codex seat at SENDER whose first turn calls the send tool before it is
 /// ever idle, and the Refresh'd sleeping Claude seat abc123 the call
@@ -3001,10 +3132,12 @@ impl SetsUpFirstTurnSend for NexusFixture {
             .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
                     layer: Layer::Secondary,
+                    aspect: Aspect::Mind,
                     native: "claude-fixture".into(),
                 },
                 meta_signal_flow::ConfigureModel {
                     layer: Layer::Tertiary,
+                    aspect: Aspect::Field,
                     native: "fixture-model".into(),
                 },
             ]))

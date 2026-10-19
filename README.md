@@ -169,9 +169,19 @@ family whole, `Nexus`, `Models`, `Thresholds` or `LeaveOuts`, and replaces
 the committed family in one commit, so the effective configuration is always
 the last declaration of each family: an entry the declaration leaves out is
 removed. It answers `Configured.Replaced`, or `Configured.Unchanged` when
-nothing differs; `ConfigureRejected.DuplicateEntry` (one Layer or Address
-named twice) and `ConfigureRejected.CodexModelsOverlap` change nothing. A
-running Nexus serves replaced Codex endpoints from its next start. No `FLOW_` variable reaches the
+nothing differs; `ConfigureRejected.DuplicateEntry` (one Layer and Aspect,
+Layer or Address named twice) and `ConfigureRejected.CodexModelsOverlap`
+change nothing. `Models` holds one model per Layer and Aspect,
+`{ Secondary Mind gpt-6-sol }`; a Start or Replace naming any other model
+than the one configured for its Address's layer and aspect, compared name
+for name, is `StartRejected.ModelRefused.Differs.<configured>`, or
+`ModelRefused.Unconfigured` when none is, before anything is written,
+composed or opened, and a fresh wake launches on that model. A
+running Nexus serves replaced Codex endpoints from its next start. A model,
+declared or named by a launch, is the exact native model: a Codex model a
+configured endpoint lists, or a Claude model's full name as its transcript
+records it (`claude-haiku-5-5`); a launch naming an alias (`haiku`) or a
+suffixed name (`claude-opus-5-5[1m]`) is `StartRejected.CompositionRefused`. No `FLOW_` variable reaches the
 Nexus's configuration. The source root selects the bounded root used for
 exact-byte composition, the Codex native skill catalog working directory, the
 Flow workspace root, and the project Claude skill catalog. `CODEX_HOME` and

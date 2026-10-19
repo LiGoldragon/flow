@@ -93,11 +93,34 @@ impl SelectsCodexEndpoint for CodexEndpoints {
 
 /// The harness a model runs on: Codex when a configured Codex endpoint
 /// serves it, else Claude.
+///
+/// A launch compares the model its native transcript records with the model
+/// it named, string for string, so it names only a model that is exact on
+/// its harness. A Codex model is exact by the endpoint that lists it. Claude
+/// Code takes an alias for the latest model (`haiku`, `opus`) or a model's
+/// full name, and exposes no resolution of an alias; its transcript records
+/// the full name the API answered with (`claude-haiku-5-5`), which is
+/// `claude-` then lowercase letters, digits and hyphens. A Claude model of
+/// any other form, an alias or a name carrying a `[1m]` context suffix, is
+/// never launched.
 impl crate::generated::starter::DerivesHarness for CodexEndpoints {
     fn harness_for<N: crate::generated::starter::Textual>(&self, input: N) -> HarnessKind {
         match self.adapter_for(&input.text()) {
             Ok(_) => HarnessKind::Codex,
             Err(_) => HarnessKind::Claude,
+        }
+    }
+
+    fn launches_exactly<N: crate::generated::starter::Textual>(&self, input: N) -> bool {
+        let model = input.text();
+        match crate::generated::starter::DerivesHarness::harness_for(self, model.as_str()) {
+            HarnessKind::Codex => true,
+            HarnessKind::Claude => model.strip_prefix("claude-").is_some_and(|name| {
+                !name.is_empty()
+                    && name.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            }),
         }
     }
 }

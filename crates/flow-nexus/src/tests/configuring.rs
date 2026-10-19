@@ -70,6 +70,7 @@ impl ConfiguredStore {
             ConfigurationChange::Nexus(Self::nexus(&defaults, &[TERRA, SOL, LUNA], 30)),
             ConfigurationChange::Models(vec![ConfigureModel {
                 layer: Layer::Primary,
+                aspect: Aspect::Mind,
                 native: "gpt-6-astra".into(),
             }]),
             ConfigurationChange::Thresholds(vec![ConfigureThreshold {
@@ -283,6 +284,7 @@ fn a_refused_declaration_changes_nothing() {
     // One key named twice is not a family.
     let model = |native: &str| ConfigureModel {
         layer: Layer::Secondary,
+        aspect: Aspect::Psyche,
         native: native.into(),
     };
     assert_eq!(
@@ -306,14 +308,22 @@ fn each_family_is_its_last_declaration() {
     let nexus = fixture.open();
     let nexus_before = snapshot(&nexus).nexus;
 
-    // In the order the snapshot reads them, by layer name.
+    // In the order the snapshot reads them, by layer then aspect name; one
+    // layer holds a model for each aspect.
     let models = vec![
         ConfigureModel {
             layer: Layer::Quaternary,
+            aspect: Aspect::Psyche,
             native: "claude-haiku-5-5".into(),
         },
         ConfigureModel {
             layer: Layer::Secondary,
+            aspect: Aspect::Mind,
+            native: SOL.into(),
+        },
+        ConfigureModel {
+            layer: Layer::Secondary,
+            aspect: Aspect::Psyche,
             native: "claude-opus-5-5".into(),
         },
     ];
@@ -448,6 +458,43 @@ fn a_launch_after_a_replaced_declaration_takes_the_new_defaults() {
             signal_flow::LeaveOut::ClaudeMd
         ]
     );
+}
+
+/// A launch names its model exactly: the transcript's model is compared with
+/// it string for string. A Claude alias, which Claude Code resolves without
+/// telling, and a name carrying a context suffix are not composed, so no
+/// pane is opened and no prompt is typed for them; the full name the
+/// transcript records is composed; a model a Codex endpoint lists is exact
+/// by that list.
+#[test]
+fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
+    use crate::generated::starter::DerivesHarness;
+    let fixture = ConfiguredStore::new();
+    let mut nexus = fixture.open();
+    nexus.composer = crate::composition::tests::fixture_composer();
+    let mut profile = crate::composition::tests::fixture_profile();
+    profile.address = quaternary_field();
+    for inexact in [
+        "haiku",
+        "claude-opus-5-5[1m]",
+        "Claude-Haiku-5-5",
+        "claude-",
+    ] {
+        profile.model_name = inexact.into();
+        assert_eq!(
+            nexus.perform(Operation::Compose(profile.clone())),
+            Outcome::Failed(crate::generated::operation::Failed_Data::CompositionRefused),
+            "{inexact}"
+        );
+    }
+    profile.model_name = "claude-haiku-5-5".into();
+    assert!(matches!(
+        nexus.perform(Operation::Compose(profile.clone())),
+        Outcome::Composed(_)
+    ));
+    assert_eq!(nexus.codex_endpoints.harness_for(SOL), HarnessKind::Codex);
+    assert!(nexus.codex_endpoints.launches_exactly(SOL));
+    assert!(!nexus.codex_endpoints.launches_exactly("gpt-6-unlisted"));
 }
 
 #[test]

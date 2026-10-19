@@ -1100,6 +1100,7 @@ mod tests {
     mod configuring;
     mod delivery;
     mod launching_nexus;
+    mod model;
     mod reservation;
     mod send_tool;
     mod submission;
@@ -3340,6 +3341,23 @@ mod tests {
     const STAGED_SESSION: &str = "01a0b22c-e24f-7452-9940-64490878680f";
 
     impl NexusFixture {
+        /// Declares the model a profile names as the one model configured,
+        /// for its Address's layer and aspect, as a running Nexus's
+        /// configuration would before such a Start.
+        fn configure_model_of(&self, profile: &LaunchProfile) {
+            use crate::store::ManagesMetaflowState as _;
+            self.nexus
+                .store
+                .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
+                    meta_signal_flow::ConfigureModel {
+                        layer: profile.address.layer.clone(),
+                        aspect: profile.address.aspect.clone(),
+                        native: profile.model_name.clone(),
+                    },
+                ]))
+                .expect("model configured");
+        }
+
         fn staged_launch(
             &self,
             launch_request_id: &str,
@@ -3384,6 +3402,7 @@ mod tests {
             };
             let transcript_root = self.directory.path().join("native-transcripts/codex");
             fs::create_dir_all(&transcript_root).expect("transcript root");
+            self.configure_model_of(&profile);
             StagedLaunch {
                 binding: NativeLaunchBinding {
                     launch_request_id: launch_request_id.into(),
@@ -4278,6 +4297,7 @@ mod tests {
         fs::remove_file(&fixture.snapshot_program).expect("Herdr withdrawn");
         let mut rejected = fixture.staged_launch("rejected-request", None);
         rejected.profile.model_name = "claude-fixture".into();
+        fixture.configure_model_of(&rejected.profile);
         let rejection = fixture.nexus.dispatch(Query::Start(rejected.request()));
         assert_eq!(rejection, Response::StartRejected(pane_unopened()));
         assert_inspection_outcome(
@@ -4301,6 +4321,7 @@ mod tests {
         fixture.register_predecessor("fac697");
         let mut refused = fixture.staged_launch("refused-request", Some("fac697"));
         refused.profile.model_name = "claude-fixture".into();
+        fixture.configure_model_of(&refused.profile);
         let rejection = fixture.nexus.dispatch(Query::Replace(refused.request()));
         assert_eq!(
             rejection,

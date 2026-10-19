@@ -123,5 +123,10 @@ Library
                            composition_refused:{ [ OutcomeCarrying ] [ Response ] } ]
   NamesLaunchedRoute.[ launched.{ [ LaunchedRecording ] [ Launched ] } ]
   DerivesOrigin.[ origin_of.{ [ CallerProcessing ] [ Origin ] } ]
-  DerivesHarness.[ harness_for.{ [ Textual ] [ HarnessKind ] } ] ]
+  ; A model a launch names runs on the harness derived for it; it is
+  ; launched only when it is exact on that harness: a Codex model by the
+  ; endpoint that lists it, a Claude model as the full name the native
+  ; transcript records, `claude-` then lowercase letters, digits and hyphens.
+  DerivesHarness.[ harness_for.{ [ Textual ] [ HarnessKind ] }
+                   launches_exactly.{ [ Textual ] [ Boolean ] } ] ]
 []

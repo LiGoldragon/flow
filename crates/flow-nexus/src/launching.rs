@@ -21,6 +21,7 @@ use crate::herdr::launch::{
 use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
+use crate::store::NamesConfiguredModel;
 use crate::store::NamesLiveFlow;
 use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::address_hold::HoldsLaunchAddress;
@@ -170,6 +171,23 @@ impl LaunchesFlows for RunningNexus {
             return self.promote_ambiguous(attempt);
         }
         let persistence = || Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+        // A seat runs the model configured for its Address's layer and
+        // aspect, by its exact name: any other is refused before anything is
+        // written, composed or opened.
+        match self.store.model_refusal(&profile) {
+            Ok(None) => {}
+            Ok(Some(refusal)) => {
+                eprintln!(
+                    "flow-nexus: launch {} refused: model {} is not the model configured for {:?} {:?}: {refusal:?}",
+                    launch_request_id,
+                    profile.model_name,
+                    profile.address.aspect,
+                    profile.address.layer
+                );
+                return Response::StartRejected(StartRejection::ModelRefused(refusal));
+            }
+            Err(_) => return persistence(),
+        }
         // A hold an ended flow still keeps on this Address is given back
         // first, so the refusal reads what Metaflows reports.
         match self.store.give_back_ended_holds(&profile.address) {
@@ -573,6 +591,17 @@ impl LaunchesFlows for RunningNexus {
                 ));
             }
             Ok(_) => {}
+            Err(_) => return persistence(),
+        }
+        // A successor whose model is not the configured one is refused
+        // before the replacement is recorded.
+        match self.store.model_refusal(&profile) {
+            Ok(None) => {}
+            Ok(Some(refusal)) => {
+                return refused(ReplaceRejection::LaunchRefused(
+                    StartRejection::ModelRefused(refusal),
+                ));
+            }
             Err(_) => return persistence(),
         }
         match self.store.flow_node(&predecessor) {

@@ -2043,11 +2043,15 @@ fn codex_resolved_absent(
 fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_once() {
     use crate::codex_turns::{ThreadStatus, TurnEvent};
     use crate::waking::SleepsAndWakesSeats;
-    let (fixture, fake, first) = codex_resolved_absent(TurnEvent::Status(ThreadStatus::Idle));
+    let (fixture, fake, _) = codex_resolved_absent(TurnEvent::Status(ThreadStatus::Idle));
     assert_eq!(fake.queued_turn_texts().len(), 1, "handed over at once");
     fixture.nexus.drain_after_resolution(&seat_at());
     assert_eq!(fake.queued_turn_texts().len(), 1, "never twice");
-    assert_eq!(fixture.seat_queue(), vec![first]);
+    assert_eq!(
+        fixture.seat_queue(),
+        vec![],
+        "settled on the turn/start receipt"
+    );
 }
 
 /// A Codex seat in a turn waits for its completion.

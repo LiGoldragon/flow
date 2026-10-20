@@ -14,11 +14,11 @@
 
 use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
 pub use crate::generated::starter::{
-    AssemblesComposedLaunch, ComposesLaunch, ComposesVerifiedContext, ContextRequest,
-    FitsOneMessage, HarnessedProfile, JoinsContextAndBrief, LeanStart, LeaveOutListing,
-    PartNumbering, Profiled, ProfilesFreshSeat, ReadsVerifiedContext, RendersBrief,
-    RendersLeanStart, ResolvesLeaveOuts, SegmentListing, SplitsStartupMessage, SystemPrompted,
-    Textual,
+    AssemblesComposedLaunch, CarriesFlowId, ComposesLaunch, ComposesVerifiedContext,
+    ContextRequest, FitsOneMessage, HarnessedProfile, JoinsContextAndBrief, LeanStart,
+    LeaveOutListing, PartNumbering, Profiled, ProfilesFreshSeat, ReadsVerifiedContext,
+    RendersBrief, RendersLeanStart, ResolvesLeaveOuts, SegmentListing, SplitsStartupMessage,
+    SystemPrompted, Textual,
 };
 use crate::waking::WakePolicy;
 use datom_codec::Datomizable;
@@ -457,6 +457,37 @@ impl ComposesVerifiedContext for LaunchComposer {
     }
 }
 
+/// The launch section opens with the FlowId the launch claimed, so the seat
+/// knows its own id from its first turn. The section is the system
+/// prompt's tail, after a blank line; a launch with none gains one. Only
+/// the system prompt and its hash change: the first USER message, whose
+/// hashes the launch attempt journals at Reserve, is untouched.
+impl CarriesFlowId for ComposedLaunch {
+    fn carrying_flow_id<N: Textual>(&self, input: N) -> ComposedLaunch {
+        let flow_line = format!("Flow: {}\n", input.text());
+        let section = self.launch_profile.launch_section();
+        let mut text = self.system_prompt.system_prompt_text.clone();
+        match text.strip_suffix(section.as_str()) {
+            Some(context) if !section.is_empty() => {
+                text = format!("{context}{flow_line}{section}");
+            }
+            _ => {
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push('\n');
+                text.push_str(&flow_line);
+            }
+        }
+        let mut launch = self.clone();
+        launch.system_prompt = SystemPrompt {
+            system_prompt_sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+            system_prompt_text: text,
+        };
+        launch
+    }
+}
+
 /// A composed launch from its parts: `prompt_sha256` is SHA-256 over the
 /// exact UTF-8 bytes of the whole first USER message, and each part carries
 /// the SHA-256 of its own exact text. Hashes stay in the store and never
@@ -541,8 +572,9 @@ impl ComposesLaunch for LaunchComposer {
 /// The text a metaflow's queued requests become in a flow's prompt: one
 /// opening line, then each queued request as its own datom, oldest first,
 /// each on a line of its own: who sent it, then the Request, as
-/// `{ Sender.{ Mind flow Tertiary } Order.«...» }`, or `{ Unknown ... }` for
-/// one queued before Flow kept senders. It is typed as the datom it is, as a
+/// `{ Sender.{ Mind flow Tertiary } Order.«...» }`, `{ Flow ... }` for one
+/// Flow raised itself, or `{ Unknown ... }` for one queued before Flow kept
+/// senders. It is typed as the datom it is, as a
 /// Message is; a control character other than LF and TAB is a key to a
 /// harness, not a word, and is typed as U+FFFD. Work that carries the
 /// living's words ends with the presentation line.
@@ -751,6 +783,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_launch_carries_its_flow_id_first_in_its_launch_section() {
+        use super::CarriesFlowId;
+        let composed = fixture_composer()
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Claude,
+                    launch_profile: fixture_profile().clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap();
+        let carried = composed.carrying_flow_id("a1b2c3");
+        let system = &carried.system_prompt.system_prompt_text;
+        assert!(system.ends_with(
+            "<!-- end-module: intent-flow -->\n\nFlow: a1b2c3\nPredecessor: 1b8ac0\nRemembered: 836818\n"
+        ));
+        assert!(carried.has_canonical_first_prompt());
+        assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
+        // A launch with no predecessor and no memory gains the section.
+        let mut profile = fixture_profile();
+        profile.flow_id_option = None;
+        profile.remembered_flow_vector = vec![];
+        let bare = fixture_composer()
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Claude,
+                    launch_profile: profile,
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap()
+            .carrying_flow_id("a1b2c3");
+        assert!(
+            bare.system_prompt
+                .system_prompt_text
+                .ends_with("<!-- end-module: intent-flow -->\n\nFlow: a1b2c3\n")
+        );
+        assert!(bare.has_canonical_first_prompt());
+    }
+
+    #[test]
     fn a_codex_message_puts_its_launch_record_after_the_context() {
         let composed = fixture_composer()
             .compose(
@@ -903,6 +976,21 @@ pub(crate) mod tests {
         let text = [order, words].prompt_text();
         assert!(text.ends_with(PRESENTATION_LINE));
         assert_eq!(text.matches(PRESENTATION_LINE).count(), 1);
+    }
+
+    #[test]
+    fn a_request_flow_raised_names_flow_as_its_sender() {
+        use super::RendersQueuedWork;
+        use signal_flow::{QueuedRequest, Request, SentBy};
+        let order = QueuedRequest {
+            sent_by: SentBy::Flow,
+            request: Request::Order("investigate".into()),
+        };
+        assert!(
+            [order]
+                .prompt_text()
+                .ends_with("\n{ Flow Order.investigate }")
+        );
     }
 
     #[test]

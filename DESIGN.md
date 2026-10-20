@@ -217,6 +217,13 @@ own section, until the rest fits. The system prompt travels in no argument:
 Claude reads it from the Nexus's in-memory file and a Codex thread is given
 it as its base instructions. A brief that alone does not fit refuses.
 
+A seat knows its own FlowId before its first model call. A Claude launch's
+FlowId is claimed at Reserve, before the harness exists, and its launch
+section opens with `Flow: <id>`. A Codex launch's FlowId is claimed at Bind,
+from the thread Codex named, after the thread holds its base instructions;
+the seat is given `Flow: <id>` as one developer item in its history before
+its first turn. The first USER message is the same for both.
+
 The first prompt is the brief, and the seat's first answer performs it. The
 brief ends asking for a presentation, as does queued work that carries the
 living's words; a message from another flow carries no such line. The
@@ -371,9 +378,11 @@ its responder's resume.
 Every queued request carries who sent it, `QueuedRequest.{ SentBy Request }`:
 the Sender a Deliver's Lock named (which the bound Message peer asserts) or
 the metaflow a send-tool call is attributed to. A request queued before Flow
-kept senders reads `Unknown`; no address is supplied for it. A woken or
-drained flow reads each queued request as its datom, sender first:
-`{ Sender.{ Mind flow Tertiary } Order.«Run the tier tests.» }`.
+kept senders reads `Unknown`; no address is supplied for it. A request Flow
+raised itself (a landing's work and report, a compaction's investigation)
+reads `Flow`. A woken or drained flow reads each queued request as its
+datom, sender first: `{ Sender.{ Mind flow Tertiary } Order.«Run the tier
+tests.» }`, `{ Flow Order.«…» }`.
 
 This establishes which metaflow a call is attributed to, from Flow's records
 of the thread. It does not authenticate a human or a process as the call's
@@ -453,9 +462,8 @@ is recorded, carrying the commit, its subject, the path and the changed
 lines. A change with neither metaflow recorded fails the step and nothing
 of the landing is queued, so a retry queues each change once. The landing's report is queued to Psyche core Secondary: a Result
 once deploy, retrain and implement are witnessed, an Order when a step
-failed. Both are queued in the commit that records them on the landing, and
-both are sent as Psyche core Secondary, the flow that lands the living's
-approvals: `SentBy` has no variant for Flow itself.
+failed. Both are queued in the commit that records them on the landing.
+Every request the pipeline queues is sent by `Flow`.
 
 A flow is refreshed when its context passes its model's threshold
 (`Configure.Thresholds`, one `{ ModelName Refresh }` per model). Its context
@@ -478,8 +486,7 @@ an Order to the configured Investigation seat (`Configure.Investigation`,
 an Address): launched from its `Metaflows` declaration with the
 investigation as its brief, or, when the seat is Awake or waking, queued
 for it. A seat with no declaration is refused, and the compaction records
-why. Its sender is `Unknown`: `SentBy`
-names no Flow. The investigation names the flow, its metaflow and its
+why. Its sender is `Flow`. The investigation names the flow, its metaflow and its
 transcript or thread, and asks for the finding to go to Psyche core
 Secondary. A transcript first read in a Nexus's run raises only compactions
 made from ten minutes before the Nexus started, so a deploy raises none made

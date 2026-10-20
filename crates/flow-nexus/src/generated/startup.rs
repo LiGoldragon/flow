@@ -30,3 +30,21 @@ pub struct StoreRefusal {
 pub enum StartRefusal {
     Store(StoreRefusal),
 }
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct StoreCheckRequest {
+    pub store_path: StorePath,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum StoreCheck {
+    Opens(StorePath),
+    Absent(StorePath),
+    Refused(StoreRefusal),
+}
+#[rustfmt::skip]
+pub trait ChecksStore {
+    fn check(&self) -> StoreCheck;
+}

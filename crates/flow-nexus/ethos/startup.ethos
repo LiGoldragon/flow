@@ -10,6 +10,11 @@ Library
   Path.String
   Reason.String
   StoreRefusal.{ Path Reason }
-  StartRefusal.[ Store.StoreRefusal ] ]
-[]
+  StartRefusal.[ Store.StoreRefusal ]
+  ; Whether this Flow opens the store at a path, judged on a copy so the
+  ; store a running Nexus holds is never touched: a deploy runs it before
+  ; it activates this Flow.
+  StoreCheckRequest.{ StorePath }
+  StoreCheck.[ Opens.StorePath Absent.StorePath Refused.StoreRefusal ] ]
+[ ChecksStore.[ check.[ StoreCheck ] ] ]
 []

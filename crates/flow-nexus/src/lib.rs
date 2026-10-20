@@ -49,6 +49,7 @@ pub mod reporting;
 pub mod send_tool;
 pub mod sending;
 pub mod store;
+pub mod store_check;
 pub mod title;
 pub mod values;
 pub mod waking;

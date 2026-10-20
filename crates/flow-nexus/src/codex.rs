@@ -1178,10 +1178,29 @@ impl SubmitsBoundCodexPart for CodexAdapter {
             // The attached TUI replaced the thread's settings: they are
             // applied again and read back before anything more is sent.
             self.configure_bound_thread(&mut session, 2, launch, intent)?;
+            // The seat is told the FlowId Bind claimed before its first
+            // model call: one developer item in the thread's history, no
+            // turn, the first USER message untouched.
+            session.request(
+                3,
+                "thread/inject_items",
+                serde_json::json!({
+                    "threadId": intent.native_session_id,
+                    "items": [{
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{
+                            "type": "input_text",
+                            "text": format!("Flow: {}", intent.flow_id)
+                        }]
+                    }]
+                }),
+                self.timeout,
+            )?;
             // The first part is the thread's first turn, started on the idle
             // thread the TUI attached to; a later part follows the turn the
             // transcript showed completed.
-            session.request(3, "turn/start", params, self.timeout)?;
+            session.request(4, "turn/start", params, self.timeout)?;
             Ok(PromptDeliveryResult::Ambiguous(intent.clone()))
         })();
         session.stop_proxy();
@@ -2768,7 +2787,8 @@ mod tests {
 
     /// Once the TUI has attached, the base instructions, exclusions and
     /// flow environment are applied to the thread again and read back; only
-    /// then is the first part started as the thread's first turn.
+    /// then is the seat told its FlowId and the first part started as the
+    /// thread's first turn.
     #[test]
     fn after_attach_the_exclusions_are_applied_again_and_read_back() {
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
@@ -2780,7 +2800,8 @@ mod tests {
             fake.websocket_frame(
                 r#"{"id":2,"result":{"thread":{"id":"thread-lean"},"model":"gpt-6-astra","reasoningEffort":"medium","instructionSources":[]}}"#,
             ),
-            fake.websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#),
+            fake.websocket_frame(r#"{"id":3,"result":{}}"#),
+            fake.websocket_frame(r#"{"id":4,"result":{"turn":{"id":"turn-1"}}}"#),
         ];
         let (_directory, executable, record) = RecordingFakeProxy.install(&frames);
         assert_eq!(
@@ -2789,16 +2810,29 @@ mod tests {
                 .unwrap(),
             PromptDeliveryResult::Ambiguous(intent.clone())
         );
-        let requests = record.requests(4);
+        let requests = record.requests(5);
         let methods = requests
             .iter()
             .map(|request| request["method"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(
             methods,
-            ["initialize", "initialized", "thread/resume", "turn/start"]
+            [
+                "initialize",
+                "initialized",
+                "thread/resume",
+                "thread/inject_items",
+                "turn/start"
+            ]
         );
-        let turn = &requests[3]["params"];
+        let told = &requests[3]["params"];
+        assert_eq!(told["threadId"], "thread-lean");
+        assert_eq!(told["items"][0]["role"], "developer");
+        assert_eq!(
+            told["items"][0]["content"][0]["text"],
+            format!("Flow: {}", intent.flow_id)
+        );
+        let turn = &requests[4]["params"];
         assert_eq!(turn["threadId"], "thread-lean");
         assert_eq!(
             turn["input"][0]["text"],

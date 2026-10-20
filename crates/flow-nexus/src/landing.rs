@@ -35,7 +35,7 @@ use crate::generated::landing::{
 };
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::pane::{PaneAgent, WritesPane};
-use crate::store::landing::LandingSender;
+use crate::store::landing::LandingReport;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{
     AnnouncesLaunchChanges, FlowStore, ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows,
@@ -558,7 +558,7 @@ impl RunsLandings for RunningNexus {
             .filter(|landing| !landing.reported)
             .collect::<Vec<_>>();
         open.sort_by_key(|landing| watch.depth(landing.commit.as_str()));
-        let report_to = FlowStore::landing_sender();
+        let report_to = FlowStore::landing_report_address();
 
         // Deploy the newest landing not yet served, once.
         let mut served = self.served_module(&watch);

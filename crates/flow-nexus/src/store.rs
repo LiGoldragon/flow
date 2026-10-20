@@ -386,11 +386,46 @@ impl EngineRecord for StoredMetaflow {
 
 impl MemoryDefinition for StoredMetaflow {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-v4")
+    }
+}
+
+/// A metaflow as Flow 0.35.22 to 0.37.2 kept it, before `SentBy` named
+/// Flow. `Flow` is appended to `SentBy`, so every byte such a row holds
+/// reads as the current `Metaflow`; the edge moves it unchanged, and a
+/// Flow before 0.38.0 refuses the store that holds a Flow-sent request.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMetaflowV3 {
+    metaflow: Metaflow,
+}
+
+impl EngineRecord for StoredMetaflowV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaflowV3 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-metaflow-v3")
+    }
+}
+
+impl UpgradeFrom<StoredMetaflowV3> for StoredMetaflow {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredMetaflowV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            metaflow: previous.metaflow,
+        })
     }
 }
 
@@ -2334,6 +2369,8 @@ pub enum StoreError {
     MetaflowUpgrade(String),
     #[error("send call family upgrade failed: {0}")]
     SendCallUpgrade(String),
+    #[error("queue delivery family upgrade failed: {0}")]
+    QueueDeliveryUpgrade(String),
     #[error("the model family could not be upgraded: {0}")]
     ModelUpgrade(String),
     #[error("flow events upgrade failed: {0}")]
@@ -2528,11 +2565,23 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
     ) -> Result<TableReference<StoredMetaflow>, StoreError> {
-        // A 0.35.7 to 0.35.21 store holds v2 rows and an older one v1 rows;
-        // the newest edge is tried first, and a store it does not admit is
-        // tried on the next. An admission refusal writes nothing.
+        // A 0.35.22 to 0.37.2 store holds v3 rows, a 0.35.7 to 0.35.21 one
+        // v2 rows and an older one v1 rows; the newest edge is tried first,
+        // and a store it does not admit is tried on the next. An admission
+        // refusal writes nothing.
+        let from_v2 = descriptor.clone();
         let from_v1 = descriptor.clone();
-        match self.upgrade_table::<StoredMetaflowV2, StoredMetaflow>(descriptor) {
+        match self.upgrade_table::<StoredMetaflowV3, StoredMetaflow>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+            }
+        }
+        match self.upgrade_table::<StoredMetaflowV2, StoredMetaflow>(from_v2) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
@@ -2558,9 +2607,21 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<address_hold::AddressHold>,
     ) -> Result<TableReference<address_hold::AddressHold>, StoreError> {
+        let from_v2 = descriptor.clone();
         let from_v1 = descriptor.clone();
         match self
-            .upgrade_table::<address_hold::AddressHoldV2, address_hold::AddressHold>(descriptor)
+            .upgrade_table::<address_hold::AddressHoldV3, address_hold::AddressHold>(descriptor)
+        {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+            }
+        }
+        match self.upgrade_table::<address_hold::AddressHoldV2, address_hold::AddressHold>(from_v2)
         {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
@@ -3304,7 +3365,8 @@ impl OpensFlowStore for FlowStore {
             StoredMetaflow::schema_hash(),
         )
         .with_predecessor::<StoredMetaflowV1>()
-        .with_predecessor::<StoredMetaflowV2>();
+        .with_predecessor::<StoredMetaflowV2>()
+        .with_predecessor::<StoredMetaflowV3>();
         let metaflow_processes_descriptor = TableDescriptor::<StoredMetaflowProcess>::new(
             METAFLOW_PROCESS_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-process"),
@@ -3544,7 +3606,8 @@ impl OpensFlowStore for FlowStore {
                 StoredMetaflow::schema_hash(),
             )
             .with_predecessor::<StoredMetaflowV1>()
-            .with_predecessor::<StoredMetaflowV2>(),
+            .with_predecessor::<StoredMetaflowV2>()
+            .with_predecessor::<StoredMetaflowV3>(),
         )?;
         let metaflow_processes = engine.register_table(TableDescriptor::new(
             METAFLOW_PROCESS_TABLE_NAME,
@@ -6159,7 +6222,7 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-quarantined-launch-attempt",
                 "flow-nexus-quarantined-launch-attempt-v1",
             ),
-            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v3"),
+            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v4"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
                 "flow-nexus-metaflow-process-v1",
@@ -6234,11 +6297,11 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_requests" => (
                 "flow-nexus-queue-delivery-request",
-                "flow-nexus-queue-delivery-request-v2",
+                "flow-nexus-queue-delivery-request-v3",
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v4",
+                "flow-nexus-queue-delivery-attempt-v5",
             ),
             _ => return None,
         };
@@ -6282,6 +6345,7 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_metaflows" => &[
                 ("flow-nexus-metaflow", StoredMetaflowV1::schema_hash()),
                 ("flow-nexus-metaflow", StoredMetaflowV2::schema_hash()),
+                ("flow-nexus-metaflow", StoredMetaflowV3::schema_hash()),
             ],
             "flow_nexus_meta_model_configuration" => &[(
                 "flow-nexus-meta-model-configuration",
@@ -6300,10 +6364,22 @@ pub(crate) trait ReadsFlowMemory {
                     address_hold::ADDRESS_HOLD_FAMILY,
                     <address_hold::AddressHoldV2 as MemoryDefinition>::schema_hash(),
                 ),
+                (
+                    address_hold::ADDRESS_HOLD_FAMILY,
+                    <address_hold::AddressHoldV3 as MemoryDefinition>::schema_hash(),
+                ),
             ],
             "flow_nexus_send_calls" => &[(
                 send_call::SEND_CALL_FAMILY,
                 <send_call::SendCallV1 as MemoryDefinition>::schema_hash(),
+            )],
+            "flow_nexus_queue_delivery_requests" => &[(
+                "flow-nexus-queue-delivery-request",
+                <queue_delivery::StoredDeliveryRequestV2 as MemoryDefinition>::schema_hash(),
+            )],
+            "flow_nexus_queue_delivery_attempts" => &[(
+                "flow-nexus-queue-delivery-attempt",
+                <queue_delivery::QueueDeliveryAttemptV4 as MemoryDefinition>::schema_hash(),
             )],
             "flow_nexus_flow_events" => &[(
                 events::FLOW_EVENT_FAMILY,

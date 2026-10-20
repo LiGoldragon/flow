@@ -456,8 +456,8 @@ impl WatchesCompactions for RunningNexus {
             Err(error) => return Investigation::Refused(error.to_string()),
         };
         let order = QueuedRequest {
-            // No metaflow sent it: Flow raised it. SentBy names no Flow.
-            sent_by: SentBy::Unknown,
+            // No metaflow sent it: Flow raised it.
+            sent_by: SentBy::Flow,
             request: Request::Order(brief.to_owned()),
         };
         // A wake already running for the seat drains what is queued now.

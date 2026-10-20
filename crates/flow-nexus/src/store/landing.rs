@@ -76,11 +76,12 @@ impl RegistersLandingTables for LandingTables {
     }
 }
 
-/// The metaflow and the report the pipeline speaks as. A landing's work
-/// and its report are queued as Psyche core Secondary's, the flow that
-/// lands the living's approvals and routes their implementation.
-pub(crate) trait LandingSender {
-    fn landing_sender() -> Address {
+/// The metaflow a landing's report and failures go to: Psyche core
+/// Secondary, the flow that lands the living's approvals and routes their
+/// implementation. Flow raises a landing's work itself, so every request it
+/// queues is sent by Flow.
+pub(crate) trait LandingReport {
+    fn landing_report_address() -> Address {
         Address {
             aspect: signal_flow::Aspect::Psyche,
             topic: "core".into(),
@@ -89,7 +90,7 @@ pub(crate) trait LandingSender {
     }
 }
 
-impl LandingSender for FlowStore {}
+impl LandingReport for FlowStore {}
 
 impl KeepsLandings for FlowStore {
     fn landing_row<N: CommitNaming>(&self, input: N) -> Result<Option<Landing>, StoreError> {
@@ -158,7 +159,7 @@ impl KeepsLandings for FlowStore {
                 }
             };
             rows[position].1.metaflow.queue.push(QueuedRequest {
-                sent_by: SentBy::Sender(Self::landing_sender()),
+                sent_by: SentBy::Flow,
                 request: order.request,
             });
         }
@@ -362,14 +363,7 @@ mod tests {
             metaflow.queue[1].request,
             Request::Order("Implement the second change.".into())
         );
-        assert_eq!(
-            metaflow.queue[0].sent_by,
-            SentBy::Sender(Address {
-                aspect: Aspect::Psyche,
-                topic: "core".into(),
-                layer: Layer::Secondary,
-            })
-        );
+        assert_eq!(metaflow.queue[0].sent_by, SentBy::Flow);
         assert_eq!(store.landing_row("2d9fbb6").unwrap(), Some(implemented));
     }
 }

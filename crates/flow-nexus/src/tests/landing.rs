@@ -305,7 +305,7 @@ fn a_landing_is_deployed_retrained_implemented_and_reported() {
         .unwrap()
         .unwrap();
     assert_eq!(core.queue.len(), 1);
-    assert_eq!(core.queue[0].sent_by, SentBy::Sender(psyche_core()));
+    assert_eq!(core.queue[0].sent_by, SentBy::Flow);
     let Request::Order(failure) = &core.queue[0].request else {
         panic!("a failed step is an Order: {:?}", core.queue[0].request)
     };

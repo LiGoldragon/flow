@@ -2674,8 +2674,14 @@ esac
             named(3),
         ]
         .concat();
-        let readback = [initialized.clone(), opened(2)].concat();
-        let turn = websocket_frame(r#"{"id":3,"result":{"turn":{"id":"turn-fresh"}}}"#);
+        // The readback, then the FlowId told the seat, then its first turn.
+        let readback = [
+            initialized.clone(),
+            opened(2),
+            websocket_frame(r#"{"id":3,"result":{}}"#),
+        ]
+        .concat();
+        let turn = websocket_frame(r#"{"id":4,"result":{"turn":{"id":"turn-fresh"}}}"#);
         let account = [
             initialized,
             websocket_frame(r#"{"id":2,"result":{"data":[]}}"#),
@@ -3403,7 +3409,13 @@ impl ShowsCodexLaunchOrder for FirstTurnSend {
         );
         assert_eq!(
             methods("record-4"),
-            ["initialize", "initialized", "thread/resume", "turn/start"]
+            [
+                "initialize",
+                "initialized",
+                "thread/resume",
+                "thread/inject_items",
+                "turn/start"
+            ]
         );
     }
 }

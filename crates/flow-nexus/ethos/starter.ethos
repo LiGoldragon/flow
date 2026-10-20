@@ -105,6 +105,9 @@ Library
                             launch_system_prompt.{ [ Profiled ReadsVerifiedContext SegmentListing ] [ SystemPrompt ] } ]
   AssemblesComposedLaunch.[ assembled:{ [ Profiled SystemPrompted Textual SegmentListing LeaveOutListing ] [ ComposedLaunch ] } ]
   ComposesLaunch.[ compose.{ [ Profiled LeaveOutListing ] [ Result<ComposedLaunch CompositionError> ] } ]
+  ; A launch whose FlowId is claimed before its harness starts carries it:
+  ; its system prompt's launch section opens with `Flow: <id>`.
+  CarriesFlowId.[ carrying_flow_id.{ [ Textual ] [ ComposedLaunch ] } ]
   ProfilesFreshSeat.[ fresh_profile.[ LaunchProfile ] ]
   PromptsThroughHerdrSocket.[ herdr_session_socket.{ [ Textual ] [ Result<String String> ] }
                               prompt_through_socket.{ [ PaneBound Textual ] [ Result<JsonValue String> ] } ]

@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.37.2";
+            version = "0.38.0";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -242,6 +242,18 @@
             "composition::tests::a_message_too_large_for_one_message_puts_its_leading_modules_in_the_system_prompt";
           flow-presentation-asked = context.exactTest "flow-nexus"
             "composition::tests::a_first_prompt_and_the_living_s_words_end_asking_for_a_presentation";
+          flow-launch-carries-its-flow-id = context.exactTest "flow-nexus"
+            "composition::tests::a_launch_carries_its_flow_id_first_in_its_launch_section";
+          flow-codex-seat-told-its-flow-id = context.exactTest "flow-nexus"
+            "codex::tests::after_attach_the_exclusions_are_applied_again_and_read_back";
+          flow-sent-by-flow = context.exactTest "flow-nexus"
+            "composition::tests::a_request_flow_raised_names_flow_as_its_sender";
+          flow-store-before-flow-senders-upgrades = context.exactTest "flow-nexus"
+            "store::queue_delivery::tests::a_store_before_flow_senders_opens_with_its_queue_carried";
+          flow-store-check-refuses-a-later-store = context.exactTest "flow-nexus"
+            "store_check::tests::a_store_a_later_flow_wrote_is_refused";
+          flow-store-check-opens-untouched = context.exactTest "flow-nexus"
+            "store_check::tests::a_store_this_flow_opens_is_checked_open_and_left_untouched";
           flow-refresh-past-model-threshold = context.exactTest "flow-nexus"
             "tests::refresh_and_compaction::a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_flow";
           flow-deliver-past-threshold-refused = context.exactTest "flow-nexus"

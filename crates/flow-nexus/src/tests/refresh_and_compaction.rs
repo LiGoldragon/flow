@@ -337,7 +337,7 @@ fn a_compaction_during_continuous_work_is_investigated_once() {
     let Request::Order(brief) = &investigation.queue[0].request else {
         panic!("an Order: {:?}", investigation.queue[0]);
     };
-    assert_eq!(investigation.queue[0].sent_by, SentBy::Unknown);
+    assert_eq!(investigation.queue[0].sent_by, SentBy::Flow);
     assert!(brief.contains(&format!("flow {CLAUDE_SEAT} ({{ Mind flow Secondary }})")));
     assert!(brief.contains("Psyche core Secondary"));
 }

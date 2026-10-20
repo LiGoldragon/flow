@@ -1,3 +1,29 @@
+# Flow 0.38.0
+
+Pins signal-flow 25.0.0 (c67e561f) and meta-signal-flow 32.0.0 (c494af46);
+flow-ethos `SentBy` is `[ Sender Unknown Flow ]`. Every peer that reads a
+queued request repins. The store moves `flow-nexus-metaflow` to v4,
+`flow-nexus-address-hold` to v4, `flow-nexus-queue-delivery-request` to v3
+and `flow-nexus-queue-delivery-attempt` to v5 at the first open, each row
+carried unchanged; a Flow before 0.38.0 refuses the store from then on.
+
+- **A request Flow raised is sent by Flow.** A landing's orders, its
+  result and its failures, and a compaction's investigation, are queued
+  with `SentBy.Flow` and read `{ Flow Order.«…» }` in the seat's prompt.
+  The landing's report and failures still go to Psyche core Secondary.
+- **A seat knows its own FlowId from its first turn.** A Claude launch's
+  system prompt ends with its launch section opening `Flow: <id>`, the
+  FlowId Reserve claimed before the harness started. A Codex seat is
+  given `Flow: <id>` as one developer item (`thread/inject_items`) after
+  Bind claims it and before its first turn; the first USER message is
+  unchanged for both.
+- **`flow-store-check` judges a store before a deploy activates this
+  Flow.** `flow-store-check '{ /home/li/.local/state/flow-03521/flow.sema
+  }'` opens a private copy of the store as the Nexus would, upgrades
+  included, and answers `Opens.<path>`, `Absent.<path>` or
+  `Refused.{ <path> «reason» }`, exiting non-zero only on a refusal. The
+  store itself is never opened, so a running Nexus is not disturbed.
+
 # Flow 0.37.2
 
 No contract, store or deployment change.

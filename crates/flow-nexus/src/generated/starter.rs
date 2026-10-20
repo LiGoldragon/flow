@@ -334,6 +334,10 @@ pub trait ComposesLaunch {
     ) -> std::result::Result<signal_flow::ComposedLaunch, flow_nexus::CompositionError>;
 }
 #[rustfmt::skip]
+pub trait CarriesFlowId {
+    fn carrying_flow_id<N: Textual>(&self, input: N) -> signal_flow::ComposedLaunch;
+}
+#[rustfmt::skip]
 pub trait ProfilesFreshSeat {
     fn fresh_profile(&self) -> signal_flow::LaunchProfile;
 }

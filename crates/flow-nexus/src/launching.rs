@@ -10,7 +10,7 @@ use crate::generated::operation::{
     Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::generated::starter::{
-    DeliveryIntended, HarnessedProfile, OutcomeCarrying, Profiled, Progressing,
+    CarriesFlowId, DeliveryIntended, HarnessedProfile, OutcomeCarrying, Profiled, Progressing,
     SettlesStartupProgress, Textual,
 };
 use crate::herdr::ReadsHerdrPanes;
@@ -253,6 +253,13 @@ impl LaunchesFlows for RunningNexus {
                 ));
             }
             _ => return persistence(),
+        };
+        // A Claude launch knows its FlowId now, before its harness exists,
+        // and its seat is told it in its system prompt. A Codex seat is
+        // told it when Bind has claimed it, before its first turn.
+        let launch = match &reserved {
+            Some(flow_id) => launch.carrying_flow_id(flow_id),
+            None => launch,
         };
         let harness_kind = launch.harness_kind.clone();
         let response = self.launch_reserved(launch, origin, reserved.clone());

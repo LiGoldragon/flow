@@ -64,6 +64,7 @@ use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
 use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster};
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
+use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -456,6 +457,11 @@ pub trait PerformsWakeAndDrain {
     fn wake(&self, address: Address) -> Outcome;
     /// Performed under the dispatch gate.
     fn drain(&self, address: Address) -> Outcome;
+    /// Hands over as many queued requests as can be settled now, oldest
+    /// first. It stops at the first hand-over whose native receipt is not
+    /// yet established, or at any refusal; work behind that request stays
+    /// durable. The caller holds the dispatch gate.
+    fn drain_all(&self, address: Address) -> Outcome;
 }
 
 /// A flow the Nexus starts itself, as a wake starts one: no calling flow is
@@ -478,6 +484,11 @@ impl StartsUnbound for RunningNexus {
             let response = self.start(profile, Origin::Unbound);
             self.settle(&launch_request_id, response)
         };
+        // A send tool call made by the flow's first turn cannot wake its
+        // target while this launch holds the dispatch gate. The gate is
+        // released now, so deliver every deferred wake before interpreting
+        // the launch result.
+        self.wake_deferred();
         // The gate is released before the wait: the launch is settled by the
         // Nexus's own promoter, which needs the gate to do it.
         let response = match response {
@@ -1291,6 +1302,32 @@ impl PerformsWakeAndDrain for RunningNexus {
         }
         drained.push(oldest);
         Outcome::Drained(drained)
+    }
+
+    fn drain_all(&self, address: Address) -> Outcome {
+        let queued = match self.store.metaflow(&address) {
+            Ok(Some(metaflow)) => metaflow.queue,
+            Ok(None) => return Outcome::Failed(Failed_Data::NotAwake),
+            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+        };
+        let mut removed = 0;
+        loop {
+            let outcome = self.drain(address.clone());
+            let remaining = match self.store.metaflow(&address) {
+                Ok(Some(metaflow)) => metaflow.queue.len(),
+                _ => return Outcome::Failed(Failed_Data::StoreRefused),
+            };
+            let now_removed = queued.len().saturating_sub(remaining);
+            if now_removed == removed {
+                return match outcome {
+                    Outcome::Failed(_) if removed == 0 => outcome,
+                    // Only requests whose exact native receipt removed
+                    // them from the durable queue are reported drained.
+                    _ => Outcome::Drained(queued[..removed].to_vec()),
+                };
+            }
+            removed = now_removed;
+        }
     }
 }
 

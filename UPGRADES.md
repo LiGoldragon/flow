@@ -1,3 +1,17 @@
+# Flow 0.38.1
+
+No contract, store or deployment change.
+
+- **A Codex flow binds its seat from any of its own threads.** A command a
+  Codex subagent runs carries the subagent's thread; BindSeat reads that
+  thread's rollout, whose `session_meta` names the root thread of its
+  session, and binds the seat running the root, under the root's FlowId
+  claim. The seat is the one Herdr agent that reports the root as its
+  session, or a Codex agent that reports none and whose pane's
+  foreground process resumes it (`resume <thread>`, as Herdr's
+  `pane process-info` lists the pane's processes). Two such agents, or
+  none, leave the caller `Unidentified`.
+
 # Flow 0.38.0
 
 Pins signal-flow 25.0.0 (c67e561f) and meta-signal-flow 32.0.0 (c494af46);

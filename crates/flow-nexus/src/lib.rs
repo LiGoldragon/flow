@@ -1214,6 +1214,7 @@ mod tests {
     mod queue_drain;
     mod refresh_and_compaction;
     mod reservation;
+    mod seat_binding;
     mod secondary;
     mod send_tool;
     mod submission;

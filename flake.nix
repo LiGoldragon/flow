@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.38.0";
+            version = "0.38.1";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -252,6 +252,8 @@
             "store::queue_delivery::tests::a_store_before_flow_senders_opens_with_its_queue_carried";
           flow-store-check-refuses-a-later-store = context.exactTest "flow-nexus"
             "store_check::tests::a_store_a_later_flow_wrote_is_refused";
+          flow-codex-subagent-binds-its-seat = context.exactTest "flow-nexus"
+            "tests::seat_binding::a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for";
           flow-store-check-opens-untouched = context.exactTest "flow-nexus"
             "store_check::tests::a_store_this_flow_opens_is_checked_open_and_left_untouched";
           flow-refresh-past-model-threshold = context.exactTest "flow-nexus"

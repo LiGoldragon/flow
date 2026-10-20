@@ -405,7 +405,14 @@ pub trait ReadsHerdrPanes {
     fn pane_ownership(&self, node: &FlowNode) -> PaneOwnership;
     /// Whether a foreground process of the pane runs `resume <thread>`;
     /// None when Herdr's process information cannot be read.
-    fn foreground_resumes(&self, route: &HerdrRoute, thread: &str) -> Option<bool>;
+    fn foreground_resumes(&self, route: &HerdrRoute, thread: &str) -> Option<bool> {
+        self.foreground_threads(route)
+            .map(|threads| threads.contains(thread))
+    }
+    /// Every thread a foreground process of the pane resumes, as Herdr
+    /// lists the pane's foreground processes and the kernel their
+    /// arguments; None when Herdr's process information cannot be read.
+    fn foreground_threads(&self, route: &HerdrRoute) -> Option<BTreeSet<String>>;
     fn refresh_route(&self, node: FlowNode) -> FlowNode;
     fn snapshot(&self, route: &HerdrRoute) -> Option<serde_json::Value>;
     /// The snapshot of one Herdr session.
@@ -522,7 +529,7 @@ impl ReadsHerdrPanes for HerdrCli {
         }
     }
 
-    fn foreground_resumes(&self, route: &HerdrRoute, thread: &str) -> Option<bool> {
+    fn foreground_threads(&self, route: &HerdrRoute) -> Option<BTreeSet<String>> {
         use crate::herdr::launch::RunsHerdr;
         let processes = self
             .run_json(&[
@@ -545,18 +552,26 @@ impl ReadsHerdrPanes for HerdrCli {
         let foreground = information
             .get("foreground_processes")
             .and_then(serde_json::Value::as_array)?;
-        Some(foreground.iter().any(|process| {
-            process
-                .get("pid")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|pid| fs::read(format!("/proc/{pid}/cmdline")).ok())
-                .is_some_and(|cmdline| {
-                    let arguments = cmdline.split(|byte| *byte == 0).collect::<Vec<_>>();
+        Some(
+            foreground
+                .iter()
+                .filter_map(|process| {
+                    let pid = process.get("pid").and_then(serde_json::Value::as_u64)?;
+                    fs::read(format!("/proc/{pid}/cmdline")).ok()
+                })
+                .flat_map(|cmdline| {
+                    let arguments = cmdline
+                        .split(|byte| *byte == 0)
+                        .map(|argument| String::from_utf8_lossy(argument).into_owned())
+                        .collect::<Vec<_>>();
                     arguments
                         .windows(2)
-                        .any(|pair| pair[0] == b"resume" && pair[1] == thread.as_bytes())
+                        .filter(|pair| pair[0] == "resume" && !pair[1].is_empty())
+                        .map(|pair| pair[1].clone())
+                        .collect::<Vec<_>>()
                 })
-        }))
+                .collect(),
+        )
     }
 
     fn refresh_route(&self, mut node: FlowNode) -> FlowNode {

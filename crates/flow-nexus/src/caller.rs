@@ -324,6 +324,52 @@ impl LocatesCodexThread for CallerProcess {
     }
 }
 
+/// Names the thread a Codex flow's seat runs for a thread of that flow.
+/// A subagent's command carries its own thread, not its flow's: the
+/// subagent's rollout opens with a `session_meta` whose `session_id` names
+/// the root thread of the session it was spawned in, at any depth.
+pub trait NamesRootThread {
+    /// The root thread the one rollout of `thread` names; `thread` itself
+    /// when no single rollout under a configured transcript root names it,
+    /// or when its rollout names no other session.
+    fn root_thread(&self, thread: &str) -> String;
+}
+
+impl NamesRootThread for crate::codex::CodexEndpoints {
+    fn root_thread(&self, thread: &str) -> String {
+        use crate::herdr::launch::{NamesCodexThread, ReadsLaunchFiles};
+        use std::io::BufRead;
+        let roots: BTreeSet<&PathBuf> = [&self.stable.transcript_root, &self.next.transcript_root]
+            .into_iter()
+            .collect();
+        let mut found = Vec::new();
+        for root in roots {
+            let _ = root.collect_native_transcripts(
+                thread,
+                &signal_flow::HarnessKind::Codex,
+                0,
+                &mut found,
+            );
+        }
+        let [rollout] = found.as_slice() else {
+            return thread.to_owned();
+        };
+        let mut first = String::new();
+        let meta = fs::File::open(rollout)
+            .map(std::io::BufReader::new)
+            .and_then(|mut reader| reader.read_line(&mut first))
+            .ok()
+            .and_then(|_| serde_json::from_str::<serde_json::Value>(&first).ok())
+            .filter(|row| row.names_thread(thread));
+        meta.as_ref()
+            .and_then(|row| row.pointer("/payload/session_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|session| !session.is_empty())
+            .unwrap_or(thread)
+            .to_owned()
+    }
+}
+
 /// Answers ResolveCaller for the pane a connection's peer runs in.
 pub trait ResolvesCaller {
     fn resolve_caller(&self, pane: Option<CallerPane>, claim: Option<FlowId>) -> Response;

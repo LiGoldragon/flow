@@ -10,10 +10,14 @@
 //! refused when it leaves the routes between aspects. Launch starts a
 //! metaflow from its declaration in Flow's configuration. BindSeat binds the
 //! seat the caller runs in, with the FlowId its native session is claimed
-//! under, as the metaflow's flow.
+//! under, as the metaflow's flow. A Codex subagent's command binds the seat
+//! of its session's root thread, and a Codex seat Herdr reports no session
+//! for runs the thread its pane resumes in its foreground.
 
 use crate::RunningNexus;
-use crate::caller::{CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread};
+use crate::caller::{
+    CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
+};
 use crate::codex::SelectsCodexEndpoint;
 use crate::delivery::DeliversMessages;
 use crate::herdr::ReadsHerdrPanes;
@@ -434,8 +438,47 @@ struct SeenSeat {
 
 trait FindsSeat {
     /// The agent in the caller's pane, or, for a command a Codex
-    /// app-server started, the agent running the caller's thread.
+    /// app-server started, the one agent running the root thread of the
+    /// caller's thread, with the Codex thread the seat runs. A Codex agent
+    /// Herdr reports no session for runs the thread its pane's foreground
+    /// resumes.
     fn seat_of(&self, caller: CallerProcess) -> Option<(SeenSeat, Option<String>)>;
+}
+
+/// A Codex agent's thread, when Herdr reports no session for it.
+trait ReadsUnreportedThread {
+    /// The one thread a Codex agent's pane resumes in its foreground, when
+    /// the agent reports no session; None otherwise.
+    fn unreported_thread(
+        &self,
+        herdr_session_name: &str,
+        agent: &serde_json::Value,
+    ) -> Option<String>;
+}
+
+impl ReadsUnreportedThread for RunningNexus {
+    fn unreported_thread(
+        &self,
+        herdr_session_name: &str,
+        agent: &serde_json::Value,
+    ) -> Option<String> {
+        let text = |key: &str| agent.get(key).and_then(serde_json::Value::as_str);
+        if text("agent") != Some("codex") || agent.pointer("/agent_session/value").is_some() {
+            return None;
+        }
+        let route = HerdrRoute {
+            herdr_session_name: herdr_session_name.to_owned(),
+            herdr_agent_name: text("name").unwrap_or_default().to_owned(),
+            herdr_pane_id: text("pane_id")?.to_owned(),
+            herdr_terminal_id: text("terminal_id")?.to_owned(),
+        };
+        let threads = self.herdr.foreground_threads(&route)?;
+        let mut threads = threads.into_iter();
+        match (threads.next(), threads.next()) {
+            (Some(thread), None) => Some(thread),
+            _ => None,
+        }
+    }
 }
 
 impl FindsSeat for RunningNexus {
@@ -458,33 +501,45 @@ impl FindsSeat for RunningNexus {
                     agent.get("pane_id").and_then(serde_json::Value::as_str)
                         == Some(pane.herdr_pane_id.as_str())
                 })?;
+            let thread = self.unreported_thread(&pane.herdr_session_name, &agent);
             return Some((
                 SeenSeat {
                     herdr_session_name: pane.herdr_session_name,
                     agent,
                 },
-                None,
+                thread,
             ));
         }
         let app_servers = self.store.codex_app_servers().ok()?;
-        let thread = caller.codex_thread(&app_servers)?;
+        let thread = self
+            .codex_endpoints
+            .root_thread(&caller.codex_thread(&app_servers)?);
+        let mut seats = Vec::new();
         for session in self.herdr.herdr_sessions()? {
-            if let Some(agent) = agents_of(&session.name).into_iter().find(|agent| {
-                agent
+            for agent in agents_of(&session.name) {
+                let runs_thread = match agent
                     .pointer("/agent_session/value")
                     .and_then(serde_json::Value::as_str)
-                    == Some(thread.as_str())
-            }) {
-                return Some((
-                    SeenSeat {
-                        herdr_session_name: session.name,
+                {
+                    Some(reported) => reported == thread,
+                    None => {
+                        self.unreported_thread(&session.name, &agent).as_deref()
+                            == Some(thread.as_str())
+                    }
+                };
+                if runs_thread {
+                    seats.push(SeenSeat {
+                        herdr_session_name: session.name.clone(),
                         agent,
-                    },
-                    Some(thread),
-                ));
+                    });
+                }
             }
         }
-        None
+        let mut seats = seats.into_iter();
+        match (seats.next(), seats.next()) {
+            (Some(seat), None) => Some((seat, Some(thread))),
+            _ => None,
+        }
     }
 }
 

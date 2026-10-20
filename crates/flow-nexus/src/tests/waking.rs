@@ -1717,7 +1717,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
 }
 
 /// A process spawned for a test, killed when it is dropped.
-struct SpawnedProcess(std::process::Child);
+pub(super) struct SpawnedProcess(pub(super) std::process::Child);
 
 impl Drop for SpawnedProcess {
     fn drop(&mut self) {

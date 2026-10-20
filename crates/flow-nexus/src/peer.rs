@@ -6,17 +6,17 @@
 //!
 //! The meta socket admits the configured Message Nexus executable, a
 //! process in no flow's pane (the owner, at a terminal or in a service), and
-//! a flow whose aspect is in MetaAspects. Both sockets are `0600` under one
+//! any flow whose role Flow knows. Both sockets are `0600` under one
 //! Unix user, and a process that double-forks out of its pane loses its
 //! ancestry and reads as the owner: this gate stops accidents and model
 //! mistakes, not an adversary (F4).
 
-use crate::RunningNexus;
 use crate::binding::{ChecksProcessIdentity, ReadsProcessIdentity};
 use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ReadsProcess, ResolvesCaller};
+use crate::store::delivery::RecordsDeliveries;
 use crate::store::ManagesMetaflowState;
 use crate::store::ReadsFlowRoles;
-use crate::store::delivery::RecordsDeliveries;
+use crate::RunningNexus;
 use meta_signal_flow::{MetaRefusal, ProcessIdentity, ResolverIdentity, Response};
 use signal_flow::CallerResolutionRejection;
 use std::fs;
@@ -58,13 +58,10 @@ impl AdmitsMetaPeer for RunningNexus {
         let Some(peer) = peer else {
             return Some(MetaRefusal::PeerUnknown);
         };
-        let (message_binary, meta_aspects) = match self.store.configuration_snapshot() {
-            Ok(Some(snapshot)) => (
-                snapshot.nexus.message_nexus_binary,
-                snapshot.nexus.meta_aspects,
-            ),
+        let message_binary = match self.store.configuration_snapshot() {
+            Ok(Some(snapshot)) => snapshot.nexus.message_nexus_binary,
             Ok(None) => match self.store.delivery_configuration() {
-                Ok(legacy) => (legacy.message_nexus_path, legacy.meta_aspects),
+                Ok(legacy) => legacy.message_nexus_path,
                 Err(_) => return Some(MetaRefusal::PeerUnknown),
             },
             Err(_) => return Some(MetaRefusal::PeerUnknown),
@@ -74,20 +71,15 @@ impl AdmitsMetaPeer for RunningNexus {
             return None;
         }
         let pane = peer.caller_pane(&self.herdr);
-        let caller = match self.resolve_caller(pane.clone(), None) {
-            signal_flow::Response::CallerResolved(caller) => caller,
+        match self.resolve_caller(pane.clone(), None) {
+            signal_flow::Response::CallerResolved(_) => None,
             // In a pane that holds a flow whose role Flow does not know: a
             // flow still, never the owner.
             _ if pane.as_ref().is_some_and(|pane| self.pane_holds_flow(pane)) => {
-                return Some(MetaRefusal::PeerUnknown);
+                Some(MetaRefusal::PeerUnknown)
             }
             // In no pane, or in a pane that holds no flow: the owner.
-            _ => return None,
-        };
-        if meta_aspects.contains(&caller.aspect) {
-            None
-        } else {
-            Some(MetaRefusal::PeerNotAuthorized(caller))
+            _ => None,
         }
     }
 }

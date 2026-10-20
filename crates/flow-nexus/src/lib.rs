@@ -46,6 +46,7 @@ pub mod peer;
 pub mod performing;
 pub mod reporting;
 pub mod send_tool;
+pub mod sending;
 pub mod store;
 pub mod title;
 pub mod values;
@@ -68,6 +69,7 @@ use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
 use send_tool::ServesLaunchCalls;
+use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
     Origin, Process, Query, Response, RestartRejection,
@@ -116,6 +118,8 @@ pub struct RunningNexus {
     /// Whether each Codex thread is in a turn, as its app-server's events
     /// show it; see `codex_turns`.
     pub codex_turns: codex_turns::CodexTurns,
+    /// The Psyche metaflows each Field metaflow may answer; see `sending`.
+    pub psyche_spoke_to_field: sending::PsycheSpokeToField,
 }
 
 pub trait Dispatches {
@@ -150,6 +154,18 @@ impl Dispatches for RunningNexus {
                 self.settle(&launch_request_id, response)
             }
             Query::Replace(profile) => self.replace(profile, origin),
+            // A direct dispatch has no calling process: nothing sends or
+            // binds from it, and its Launch starts as an Unbound one would.
+            Query::Send(_) | Query::BindSeat(_) => {
+                Response::Refused(signal_flow::Refusal::Unidentified(signal_flow::Process {
+                    pid: 0,
+                    started: 0,
+                }))
+            }
+            Query::Launch(launch) => match self.declared_launch(launch, None) {
+                Ok(query) => self.dispatch_from(query, origin),
+                Err(refusal) => *refusal,
+            },
             Query::LaunchStatus(launch_request_id) => self.launch_status(&launch_request_id),
             // Over a connection Observe streams; a direct dispatch answers the
             // subscription's opening frame.
@@ -556,6 +572,7 @@ impl OpensRunningNexus for RunningNexus {
             stopping: Stopping::default(),
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
+            psyche_spoke_to_field: sending::PsycheSpokeToField::default(),
         })
     }
 }
@@ -644,6 +661,43 @@ impl ServesConnection for Connection {
                     nexus.wake_due(address);
                 }
                 return written;
+            }
+            // A flow's own Send: its sender is the calling process. A queued
+            // request's wake is read after the answer, off the gate.
+            Query::Send(send) => {
+                let answer = nexus.send_request(send, self.process.as_ref());
+                let written = self.peer.write_response(&answer.response);
+                drop(self);
+                if let Some(address) = answer.wake {
+                    nexus.wake_due(address);
+                }
+                return written;
+            }
+            Query::BindSeat(address) => {
+                let response = nexus.bind_seat(address.clone(), self.process.as_ref());
+                let written = self.peer.write_response(&response);
+                drop(self);
+                if matches!(response, Response::Bound(_)) {
+                    // What waits for the seat drains once its turn allows.
+                    nexus.wake_due(address);
+                }
+                return written;
+            }
+            // A Launch is the Start, or the Replace of the caller's own
+            // flow, its declaration names, from the calling process.
+            Query::Launch(launch) => {
+                let origin = nexus.origin_of(self.peer.peer_process());
+                let declared = {
+                    let _turn = nexus
+                        .dispatch_gate
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    nexus.declared_launch(launch, self.process.as_ref())
+                };
+                match declared {
+                    Ok(query) => nexus.dispatch_serially(query, origin),
+                    Err(refusal) => *refusal,
+                }
             }
             // A launch's origin is the calling process, as Identify reads
             // it: its pane's bound flow and that flow's native session.
@@ -1678,6 +1732,7 @@ mod tests {
                 stopping: crate::Stopping::default(),
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),
+                psyche_spoke_to_field: crate::sending::PsycheSpokeToField::default(),
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");
@@ -4805,6 +4860,199 @@ mod tests {
                 .nexus
                 .resolve_caller(marked_process.caller_pane(&fixture.nexus.herdr), None),
             Response::CallerResolved(mind_live())
+        );
+    }
+
+    /// A flow sends through Flow from the process it runs: the sender is
+    /// the metaflow Awake as the flow bound in the caller's pane, the request
+    /// is queued under it, Up names the layer above, a Send leaving the
+    /// routes between aspects is refused, and a process in no bound pane
+    /// sends nothing.
+    #[test]
+    fn a_send_is_queued_from_the_callers_metaflow_and_refused_off_route() {
+        use crate::sending::SendsRequests;
+        use crate::store::ReadsFlowMemory;
+        use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+        use signal_flow::{
+            Address, Layer, Message, Metaflow, QueuedRequest, Recipient, Refusal, Request,
+            Send_Data, SentBy, Unknown_Data,
+        };
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        let address = |aspect: Aspect, topic: &str, layer: Layer| Address {
+            aspect,
+            topic: topic.into(),
+            layer,
+        };
+        let sender = address(Aspect::Mind, "core", Layer::Secondary);
+        let sibling = address(Aspect::Mind, "flow", Layer::Secondary);
+        let field = address(Aspect::Field, "core", Layer::Secondary);
+        let elsewhere = address(Aspect::Psyche, "flow", Layer::Secondary);
+        for (held, state) in [
+            (sender.clone(), flow_ethos::State::Awake("mind-live".into())),
+            (sibling.clone(), flow_ethos::State::Asleep),
+            (field.clone(), flow_ethos::State::Asleep),
+            (elsewhere.clone(), flow_ethos::State::Asleep),
+        ] {
+            fixture.nexus.store.seed_metaflow(Metaflow {
+                address: held,
+                state,
+                past: vec![],
+                queue: vec![],
+            });
+        }
+        let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
+        let peer = FlowStore::process_identity_for_pid(caller.0.id()).expect("caller identity");
+        let send = |recipient: Recipient, request: Request, peer: &signal_flow::Process| {
+            fixture
+                .nexus
+                .send_request(
+                    Send_Data {
+                        recipient,
+                        message: Message::Soft(request),
+                    },
+                    Some(peer),
+                )
+                .response
+        };
+        let order = Request::Order("Review the drain fix".into());
+        assert_eq!(
+            send(Recipient::Address(sibling.clone()), order.clone(), &peer),
+            Response::Queued
+        );
+        assert_eq!(
+            send(
+                Recipient::Address(field.clone()),
+                Request::Notice("released".into()),
+                &peer
+            ),
+            Response::Queued
+        );
+        assert_eq!(
+            send(Recipient::Address(elsewhere.clone()), order.clone(), &peer),
+            Response::Refused(Refusal::OffRoute)
+        );
+        assert_eq!(
+            send(Recipient::Up, Request::Result("done".into()), &peer),
+            Response::Refused(Refusal::Unknown(Unknown_Data::Address(address(
+                Aspect::Mind,
+                "core",
+                Layer::Primary
+            ))))
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .metaflow(&sibling)
+                .expect("metaflow reads")
+                .expect("metaflow held")
+                .queue,
+            vec![QueuedRequest {
+                sent_by: SentBy::Sender(sender),
+                request: order.clone(),
+            }]
+        );
+        let stranger = MarkedProcess::spawn("sleep", &["30"], "pane-9");
+        let stranger =
+            FlowStore::process_identity_for_pid(stranger.0.id()).expect("stranger identity");
+        assert!(matches!(
+            send(Recipient::Address(sibling), order, &stranger),
+            Response::Refused(Refusal::Unidentified(_))
+        ));
+    }
+
+    /// Field reaches Psyche through Mind unless Psyche spoke to it; across
+    /// aspects only the same topic at the same layer is a route.
+    #[test]
+    fn routes_between_aspects_follow_topic_layer_and_who_spoke() {
+        use crate::sending::{RemembersPsycheSpeech, RoutesBetweenAspects};
+        use signal_flow::{Address, Layer};
+        let fixture = NexusFixture::new();
+        let address = |aspect: Aspect, topic: &str, layer: Layer| Address {
+            aspect,
+            topic: topic.into(),
+            layer,
+        };
+        let nexus = &fixture.nexus;
+        let psyche = address(Aspect::Psyche, "core", Layer::Secondary);
+        let field = address(Aspect::Field, "core", Layer::Secondary);
+        assert!(nexus.on_route(
+            &address(Aspect::Psyche, "core", Layer::Secondary),
+            &address(Aspect::Psyche, "book", Layer::Tertiary)
+        ));
+        assert!(nexus.on_route(&psyche, &address(Aspect::Mind, "core", Layer::Secondary)));
+        assert!(!nexus.on_route(&psyche, &address(Aspect::Mind, "flow", Layer::Secondary)));
+        assert!(!nexus.on_route(&psyche, &address(Aspect::Mind, "core", Layer::Primary)));
+        assert!(nexus.on_route(&psyche, &field));
+        assert!(!nexus.on_route(&field, &psyche));
+        nexus.psyche_spoke_to_field.note(&psyche, &field);
+        assert!(nexus.on_route(&field, &psyche));
+    }
+
+    /// A Launch starts from the metaflow's declaration in Flow's
+    /// configuration, at its layer's configured model and effort; an
+    /// undeclared Address is refused before anything launches.
+    #[test]
+    fn a_launch_is_composed_from_the_declaration_or_refused_undeclared() {
+        use crate::sending::LaunchesDeclared;
+        use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, ConfigureModel};
+        use signal_flow::{Address, Launch_Data, Layer};
+        let fixture = NexusFixture::new();
+        let declared = Address {
+            aspect: Aspect::Field,
+            topic: "publisher".into(),
+            layer: Layer::Quaternary,
+        };
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::Configure(
+                    ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+                        address: declared.clone(),
+                        system_modules: vec!["spirit-core".into()],
+                        user_modules: vec!["knowledge-flow".into()],
+                    }])
+                )),
+            meta_signal_flow::Response::Configured(_)
+        ));
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::Configure(
+                    ConfigurationChange::Models(vec![ConfigureModel {
+                        layer: Layer::Quaternary,
+                        aspect: Aspect::Field,
+                        native: "gpt-6-luna".into(),
+                    }])
+                )),
+            meta_signal_flow::Response::Configured(_)
+        ));
+        let launch = |address: Address| Launch_Data {
+            address,
+            instruction_prompt: "Publish the newest edition.".into(),
+        };
+        let Ok(Query::Start(profile)) = fixture
+            .nexus
+            .declared_launch(launch(declared.clone()), None)
+        else {
+            panic!("a declared Address launches as a Start");
+        };
+        assert_eq!(profile.address, declared);
+        assert_eq!(profile.system_modules, vec!["spirit-core".to_owned()]);
+        assert_eq!(profile.user_modules, vec!["knowledge-flow".to_owned()]);
+        assert_eq!(profile.model_name, "gpt-6-luna");
+        assert_eq!(profile.effort, "low");
+        assert_eq!(profile.flow_id_option, None);
+        assert_eq!(profile.instruction_prompt, "Publish the newest edition.");
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Launch(launch(Address {
+                aspect: Aspect::Mind,
+                topic: "nowhere".into(),
+                layer: Layer::Secondary,
+            }))),
+            Response::StartRejected(StartRejection::Undeclared)
         );
     }
 

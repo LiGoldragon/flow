@@ -13,10 +13,12 @@ pub mod events;
 pub(crate) mod landing;
 pub(crate) mod launch_cleanup;
 pub(crate) mod metaflow;
+pub(crate) mod metaflow_declaration;
 pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
 pub(crate) mod send_call;
 pub(crate) mod send_server;
+pub(crate) mod sent;
 mod staged_upgrade;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
@@ -163,6 +165,7 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_queue_delivery_attempts",
     "flow_nexus_landings",
     "flow_nexus_refresh_due",
+    "flow_nexus_meta_metaflow_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -2632,7 +2635,8 @@ pub(crate) struct MetaConfigurationTables {
     models: TableReference<StoredMetaModelConfiguration>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
     leave_outs: TableReference<StoredMetaLeaveOutConfiguration>,
-    send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
+    pub(crate) send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
+    pub(crate) metaflows: TableReference<metaflow_declaration::StoredMetaMetaflowConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -2657,6 +2661,9 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 .upgraded_leave_out_defaults(StoredMetaLeaveOutConfiguration::descriptor())?,
             send_servers: engine.register_table(
                 <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor(),
+            )?,
+            metaflows: engine.register_table(
+                <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
         })
     }
@@ -2769,6 +2776,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         );
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
+        let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
         if recognized {
             FlowStore::drop_retired_tables(path)?;
         }
@@ -2785,7 +2793,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
                 .with_family(&meta_leave_outs_descriptor)
-                .with_family(&meta_send_servers_descriptor),
+                .with_family(&meta_send_servers_descriptor)
+                .with_family(&meta_metaflows_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
@@ -2797,6 +2806,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
             leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
+            metaflows: engine.register_table(meta_metaflows_descriptor)?,
         };
         if !recognized {
             engine.assert(Assertion::new(
@@ -3340,6 +3350,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_thresholds_descriptor)
                 .with_family(&meta_leave_outs_descriptor)
                 .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
+                .with_family(&<metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor())
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
                 .with_family(&address_holds_descriptor)
@@ -3884,6 +3895,13 @@ impl AppliesFlowQuery for FlowStore {
             | Query::Lock(_)
             | Query::Deliver(_)
             | Query::Release(_) => Ok(Response::Refused(signal_flow::Refusal::NotMessage)),
+            // The sender is read from the socket, which the store never sees.
+            Query::Send(_) | Query::BindSeat(_) => Ok(Response::Refused(
+                signal_flow::Refusal::Unidentified(signal_flow::Process { pid: 0, started: 0 }),
+            )),
+            Query::Launch(_) => Ok(Response::StartRejected(
+                StartRejection::LaunchPersistenceRefused,
+            )),
             Query::Current(address) => self.current_metaflow(&address),
             Query::Metaflows => self.list_metaflows().map(Response::Listed),
             Query::Replace(_) => Ok(Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
@@ -3932,7 +3950,10 @@ impl ReservesPendingStart for FlowStore {
             | Query::IdentifyThread(_)
             | Query::Lock(_)
             | Query::Deliver(_)
-            | Query::Release(_) => Ok(None),
+            | Query::Release(_)
+            | Query::Send(_)
+            | Query::Launch(_)
+            | Query::BindSeat(_) => Ok(None),
         }
     }
 }
@@ -6073,6 +6094,10 @@ pub(crate) trait ReadsFlowMemory {
                 send_server::META_SEND_SERVER_CONFIGURATION_FAMILY,
                 send_server::META_SEND_SERVER_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_metaflow_configuration" => (
+                metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
+                metaflow_declaration::META_METAFLOW_CONFIGURATION_SCHEMA,
+            ),
             "flow_nexus_flow_events" => (events::FLOW_EVENT_FAMILY, events::FLOW_EVENT_SCHEMA),
             "flow_nexus_flow_context_sizes" => (
                 context::FLOW_CONTEXT_SIZE_FAMILY,
@@ -6242,6 +6267,7 @@ pub(crate) trait ReadsFlowMemory {
                 CONFIGURATION_ONLY_TABLES.contains(&name.as_str())
                     || name == "flow_nexus_meta_leave_out_configuration"
                     || name == "flow_nexus_meta_send_server_configuration"
+                    || name == "flow_nexus_meta_metaflow_configuration"
                     || name == "flow_nexus_queue_delivery_counter"
                     || name == "flow_nexus_queue_delivery_requests"
                     || name == "flow_nexus_queue_delivery_attempts"
@@ -6425,7 +6451,9 @@ pub(crate) trait ReadsFlowMemory {
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
         let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
+        let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
         if models_rows.database_marker() != marker
+            || metaflow_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
             || leave_out_rows.database_marker() != marker
             || send_server_rows.database_marker() != marker
@@ -6465,12 +6493,19 @@ pub(crate) trait ReadsFlowMemory {
             left.codex_app_server_binary
                 .cmp(&right.codex_app_server_binary)
         });
+        let mut metaflows = metaflow_rows
+            .records()
+            .iter()
+            .map(|stored| stored.metaflow.clone())
+            .collect::<Vec<_>>();
+        metaflows.sort_by_key(|metaflow| FlowStore::address_record_key(&metaflow.address));
         Ok(Some(ConfigurationSnapshot {
             nexus,
             models,
             thresholds,
             default_leave_outs,
             send_servers,
+            metaflows,
         }))
     }
 
@@ -6602,6 +6637,18 @@ pub(crate) trait ReadsFlowMemory {
                         .collect(),
                 )
             }
+            ConfigurationChange::Metaflows(metaflows) => FlowStore::replace_configuration_family(
+                engine,
+                tables.metaflows,
+                metaflows
+                    .into_iter()
+                    .map(
+                        |metaflow| metaflow_declaration::StoredMetaMetaflowConfiguration {
+                            metaflow,
+                        },
+                    )
+                    .collect(),
+            ),
             ConfigurationChange::SendServers(send_servers) => {
                 FlowStore::replace_configuration_family(
                     engine,

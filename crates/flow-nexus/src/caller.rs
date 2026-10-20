@@ -188,7 +188,9 @@ pub trait LocatesCallerPane: ReadsProcess {
 
     /// The pane of the nearest marked process. A process carrying only
     /// `HERDR_PANE_ID` (Herdr's default session) is placed in the one
-    /// session whose socket its Herdr server ancestor listens on.
+    /// session whose socket its Herdr server ancestor listens on. The
+    /// server is recognised by that socket alone, never by the path of its
+    /// executable, so no wrapper or PATH entry named `herdr` can hide it.
     fn caller_pane(&self, herdr: &impl KnowsHerdrServers) -> Option<CallerPane> {
         if let Some(pane) = self.marked_pane() {
             return Some(pane);
@@ -290,6 +292,37 @@ impl ServesListedSessions for ListedSessions {
 }
 
 impl LocatesCallerPane for CallerProcess {}
+
+/// Finds the Codex thread a process runs a command for: the Codex app-server
+/// names the thread in the environment of each command it starts, so the
+/// thread is read from the nearest ancestor whose parent is a configured
+/// Codex app-server, never from the caller's own environment.
+pub trait LocatesCodexThread: ReadsProcess {
+    /// Ancestors read before giving up.
+    const THREAD_ANCESTRY_LIMIT: usize = 64;
+
+    fn codex_thread(&self, app_servers: &BTreeSet<PathBuf>) -> Option<String>;
+}
+
+impl LocatesCodexThread for CallerProcess {
+    fn codex_thread(&self, app_servers: &BTreeSet<PathBuf>) -> Option<String> {
+        if app_servers.is_empty() {
+            return None;
+        }
+        let mut process = *self;
+        for _ in 0..Self::THREAD_ANCESTRY_LIMIT {
+            let parent = process.parent()?;
+            if parent
+                .executable()
+                .is_some_and(|executable| app_servers.contains(&executable))
+            {
+                return process.environment_mark("CODEX_THREAD_ID");
+            }
+            process = parent;
+        }
+        None
+    }
+}
 
 /// Answers ResolveCaller for the pane a connection's peer runs in.
 pub trait ResolvesCaller {

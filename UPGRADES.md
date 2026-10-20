@@ -1,3 +1,36 @@
+# Flow 0.37.0
+
+The contracts are signal-flow 24.0.0 (8796628) and meta-signal-flow 30.0.0
+(4dcbfa8); both only append, so a Message built against signal-flow 23.0.0
+keeps its wire. The store gains the table
+`flow_nexus_meta_metaflow_configuration`, added at the first open.
+
+- **A flow sends through Flow.** `flow 'Send.{ Address.{ Mind core Secondary }
+  Soft.Order.«...» }'` queues a request for the metaflow, named by the
+  calling process: the flow bound in its Herdr pane, or, for a command a
+  Codex app-server started, the flow of the thread the app-server named in
+  that command's environment (the SendServers family names the
+  app-servers). `Up` names the layer above. A HardAbrupt or MiddleAbrupt
+  message for a live Awake flow is typed into its pane under the lease;
+  refused there, it is queued. A Send leaving the routes between aspects is
+  `Refused.OffRoute`: across aspects only the same topic at the same layer,
+  and Field reaches Psyche only after Psyche sent to it while this Nexus
+  runs.
+- **A flow is launched from its declaration.** `flow-meta
+  'Configure.Metaflows.[ { { Psyche core Secondary } [ ... ] [ ... ] } ]'`
+  declares each metaflow's system and user modules; `flow 'Launch.{ {
+  Psyche core Secondary } «brief» }'` starts it at the model configured for
+  its layer and aspect, at medium effort (low for an OpenAI Quaternary),
+  with its default leave-outs; a Launch from the flow the Address is Awake as
+  replaces it. An undeclared Address is `StartRejected.Undeclared`. A wake
+  of a declared metaflow composes its declaration.
+- **A seat binds with its real id.** `flow 'BindSeat.{ Mind tools Secondary
+  }'`, run in a seat, reads the seat's harness and native session from
+  Herdr, claims its FlowId through `flow-id` (the claim a launch makes; an
+  existing claim answers its alias), records the flow live in its pane and
+  the metaflow Awake as it: `Bound.47d946`. No synthetic `flow-…` id is
+  minted for it.
+
 # Flow 0.36.0
 
 The contracts are unchanged: signal-flow 23.0.0 (c7dcc074) and

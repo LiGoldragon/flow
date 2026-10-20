@@ -413,6 +413,7 @@ fn each_family_is_its_last_declaration() {
             thresholds,
             default_leave_outs: second,
             send_servers,
+            metaflows: Vec::new(),
         }
     );
     // An empty declaration empties the family.

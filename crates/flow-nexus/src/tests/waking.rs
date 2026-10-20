@@ -24,8 +24,8 @@ use crate::store::{
     RegistersFlowIdentity, ReservesLaunchAttempt,
 };
 use crate::waking::{
-    AtStop, FreshContext, HoldsWakingMetaflows, KeptAtStop, SleepsAndWakesSeats, WakePlan,
-    WakePolicy,
+    AtStop, FreshContext, HoldsWakingMetaflows, KeptAtStop, PerformsWakeAndDrain,
+    SleepsAndWakesSeats, WakePlan, WakePolicy,
 };
 use flow_ethos::State;
 use signal_flow::{
@@ -454,6 +454,35 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
     let typed = fixture.typed().expect("typed into the pane");
     assert!(typed.contains("first"));
     assert!(!typed.contains("second"), "one request per Stop");
+}
+
+/// An explicit all-queue delivery uses each request's native receipt before
+/// advancing, preserving order and emptying the durable queue when every
+/// hand-over is witnessed.
+#[test]
+fn explicit_delivery_hands_over_every_queued_request_in_order() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 40_000);
+    let first = Request::Notice("first".into()).unsent();
+    let second = Request::Result("second".into()).unsent();
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: address(Layer::Secondary),
+        state: State::Awake(CLAUDE_SEAT.into()),
+        past: vec![],
+        queue: vec![first.clone(), second.clone()],
+    });
+
+    assert_eq!(
+        fixture.nexus.drain_all(address(Layer::Secondary)),
+        Outcome::Drained(vec![first, second])
+    );
+    assert!(stored(&fixture, Layer::Secondary).queue.is_empty());
+    let typed = fixture.typed().expect("both requests typed");
+    assert!(typed.find("first") < typed.find("second"));
 }
 
 /// A Claude agent Herdr shows Working, as its screen reads while its main

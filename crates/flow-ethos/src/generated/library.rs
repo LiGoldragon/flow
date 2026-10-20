@@ -99,6 +99,7 @@ pub enum Recipient {
 pub enum SentBy {
     Sender(Sender),
     Unknown,
+    Flow,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

@@ -31,8 +31,10 @@ Library
   Recipient.[ Address Up ]
   ; Who a queued request is from: the Address Flow resolved for its sender
   ; (the Lock's Sender of a Deliver, the thread's metaflow of a send-tool
-  ; call), or Unknown for a request queued before Flow kept senders.
-  SentBy.[ Sender Unknown ]
+  ; call), Unknown for a request queued before Flow kept senders, or Flow
+  ; for one Flow raised itself (a landing's orders, a compaction's
+  ; investigation).
+  SentBy.[ Sender Unknown Flow ]
   QueuedRequest.{ SentBy Request }
   ; A metaflow is Awake as its current flow or Asleep: a topic never dies,
   ; it goes idle, its flows turned off.

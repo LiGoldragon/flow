@@ -27,14 +27,14 @@ use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::sent::{NamesCodexAppServers, QueuesSentRequests};
 use crate::store::{FlowRegistration, NamesConfiguredModel, RegistersExistingFlow};
-use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats, WakePolicy};
+use crate::waking::{PerformsWakeAndDrain, RestsEndedAwake, SleepsAndWakesSeats, WakePolicy};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
-    HerdrRouteSelection, Launch_Data, LaunchProfile, Layer, Message, Origin, Process,
+    Delivery, HerdrRouteSelection, Launch_Data, LaunchProfile, Layer, Message, Origin, Process,
     QueuedRequest, Recipient, Refusal, RememberedFlow, Request, Response, RouteReadiness,
-    Send_Data, SentBy, StartRejection,
+    Send_Data, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -126,6 +126,8 @@ impl From<Response> for SendAnswer {
 pub trait SendsRequests {
     /// Answers a Send from `peer`, under the dispatch gate.
     fn send_request(&self, send: Send_Data, peer: Option<&Process>) -> SendAnswer;
+    /// Delivers every durable request currently queued at `address`.
+    fn deliver_all(&self, address: Address, peer: Option<&Process>) -> Response;
     /// The flow the metaflow at `address` is Awake as, when it is live.
     fn live_awake_flow(&self, address: &Address) -> Option<String>;
 }
@@ -151,6 +153,7 @@ impl SendsRequests for RunningNexus {
             Ok(sender) => sender,
             Err(refusal) => return (*refusal).into(),
         };
+        let delivery = send.delivery;
         let recipient = match send.recipient {
             Recipient::Address(address) => address,
             Recipient::Up => match sender.layer.above() {
@@ -182,7 +185,7 @@ impl SendsRequests for RunningNexus {
         };
         let queued = answer.response == Response::Queued;
         drop(_turn);
-        if queued {
+        if queued && delivery == Delivery::Wake {
             self.wake_due(recipient);
         }
         answer
@@ -198,6 +201,45 @@ impl SendsRequests for RunningNexus {
             .ok()
             .filter(|live| *live)
             .map(|_| flow_id)
+    }
+
+    fn deliver_all(&self, address: Address, peer: Option<&Process>) -> Response {
+        let turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(peer) = peer else {
+            return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }));
+        };
+        if let Err(refusal) = self.sending_address(peer) {
+            return *refusal;
+        }
+        self.rest_ended_awake(&address);
+        let asleep = match self.store.metaflow(&address) {
+            Ok(Some(metaflow)) => {
+                if metaflow.queue.is_empty() {
+                    return Response::Delivered;
+                }
+                metaflow.state == flow_ethos::State::Asleep
+            }
+            Ok(None) => {
+                return Response::Refused(Refusal::Unknown(Unknown_Data::Address(address)));
+            }
+            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+        };
+        if !asleep {
+            self.drain_all(address.clone());
+        }
+        drop(turn);
+        if asleep {
+            self.wake_due(address.clone());
+        }
+        match self.store.metaflow(&address) {
+            Ok(Some(metaflow)) if metaflow.queue.is_empty() => Response::Delivered,
+            Ok(Some(_)) => Response::Queued,
+            Ok(None) => Response::Refused(Refusal::Unknown(Unknown_Data::Address(address))),
+            Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+        }
     }
 }
 

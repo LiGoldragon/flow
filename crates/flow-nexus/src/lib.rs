@@ -157,7 +157,7 @@ impl Dispatches for RunningNexus {
             Query::Replace(profile) => self.replace(profile, origin),
             // A direct dispatch has no calling process: nothing sends or
             // binds from it, and its Launch starts as an Unbound one would.
-            Query::Send(_) | Query::BindSeat(_) => {
+            Query::Send(_) | Query::DeliverAll(_) | Query::BindSeat(_) => {
                 Response::Refused(signal_flow::Refusal::Unidentified(signal_flow::Process {
                     pid: 0,
                     started: 0,
@@ -663,6 +663,10 @@ impl ServesConnection for Connection {
             Query::Send(send) => {
                 let answer = nexus.send_request(send, self.process.as_ref());
                 return self.peer.write_response(&answer.response);
+            }
+            Query::DeliverAll(address) => {
+                let response = nexus.deliver_all(address, self.process.as_ref());
+                return self.peer.write_response(&response);
             }
             Query::BindSeat(address) => {
                 let response = nexus.bind_seat(address.clone(), self.process.as_ref());
@@ -4219,7 +4223,7 @@ mod tests {
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
         use signal_flow::{
-            Address, Layer, Message, Metaflow, QueuedRequest, Recipient, Refusal, Request,
+            Address, Delivery, Layer, Message, Metaflow, QueuedRequest, Recipient, Refusal, Request,
             Send_Data, SentBy, Unknown_Data,
         };
         let fixture = NexusFixture::new();
@@ -4255,6 +4259,7 @@ mod tests {
                 .send_request(
                     Send_Data {
                         recipient,
+                        delivery: Delivery::Queue,
                         message: Message::Soft(request),
                     },
                     Some(peer),

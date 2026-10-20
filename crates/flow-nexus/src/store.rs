@@ -4058,7 +4058,7 @@ impl AppliesFlowQuery for FlowStore {
             | Query::Deliver(_)
             | Query::Release(_) => Ok(Response::Refused(signal_flow::Refusal::NotMessage)),
             // The sender is read from the socket, which the store never sees.
-            Query::Send(_) | Query::BindSeat(_) => Ok(Response::Refused(
+            Query::Send(_) | Query::DeliverAll(_) | Query::BindSeat(_) => Ok(Response::Refused(
                 signal_flow::Refusal::Unidentified(signal_flow::Process { pid: 0, started: 0 }),
             )),
             Query::Launch(_) => Ok(Response::StartRejected(
@@ -4114,6 +4114,7 @@ impl ReservesPendingStart for FlowStore {
             | Query::Deliver(_)
             | Query::Release(_)
             | Query::Send(_)
+            | Query::DeliverAll(_)
             | Query::Launch(_)
             | Query::BindSeat(_) => Ok(None),
         }

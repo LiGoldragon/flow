@@ -1,9 +1,39 @@
 # Flow 0.37.0
 
-Pins meta-signal-flow 30.0.0 (498374aa): every meta-socket peer repins. The
-ordinary contract is unchanged, signal-flow 23.0.0 (c7dcc074). The store
-retires one table and gains three.
+Pins signal-flow 24.0.0 (8796628) and meta-signal-flow 31.0.0 (a5ba4abe).
+signal-flow only appends, so a Message built against signal-flow 23.0.0
+keeps its wire; meta-signal-flow changes `ConfigureThreshold`, so every
+meta-socket peer repins. The store gains
+`flow_nexus_meta_metaflow_configuration`,
+`flow_nexus_meta_model_threshold_configuration`,
+`flow_nexus_meta_investigation_configuration` and `flow_nexus_compactions`
+at the first open, and drops `flow_nexus_meta_threshold_configuration`.
 
+- **A flow sends through Flow.** `flow 'Send.{ Address.{ Mind core Secondary }
+  Soft.Order.«...» }'` queues a request for the metaflow, named by the
+  calling process: the flow bound in its Herdr pane, or, for a command a
+  Codex app-server started, the flow of the thread the app-server named in
+  that command's environment (the SendServers family names the
+  app-servers). `Up` names the layer above. A HardAbrupt or MiddleAbrupt
+  message for a live Awake flow is typed into its pane under the lease;
+  refused there, it is queued. A Send leaving the routes between aspects is
+  `Refused.OffRoute`: across aspects only the same topic at the same layer,
+  and Field reaches Psyche only after Psyche sent to it while this Nexus
+  runs.
+- **A flow is launched from its declaration.** `flow-meta
+  'Configure.Metaflows.[ { { Psyche core Secondary } [ ... ] [ ... ] } ]'`
+  declares each metaflow's system and user modules; `flow 'Launch.{ {
+  Psyche core Secondary } «brief» }'` starts it at the model configured for
+  its layer and aspect, at medium effort (low for an OpenAI Quaternary),
+  with its default leave-outs; a Launch from the flow the Address is Awake as
+  replaces it. An undeclared Address is `StartRejected.Undeclared`. A wake
+  of a declared metaflow composes its declaration.
+- **A seat binds with its real id.** `flow 'BindSeat.{ Mind tools Secondary
+  }'`, run in a seat, reads the seat's harness and native session from
+  Herdr, claims its FlowId through `flow-id` (the claim a launch makes; an
+  existing claim answers its alias), records the flow live in its pane and
+  the metaflow Awake as it: `Bound.47d946`. No synthetic `flow-…` id is
+  minted for it.
 - **A refresh threshold belongs to the model.** `Configure.Thresholds` holds
   one `{ ModelName Refresh }` per model:
   `Configure.Thresholds.[ { claude-opus-5-5 200000 } { gpt-6.1-sol 150000 } ]`.
@@ -33,9 +63,9 @@ retires one table and gains three.
   `compact_boundary` with trigger `auto`, or a Codex `contextCompaction` no
   Compact asked for, is recorded once (`flow_nexus_compactions`), logged at
   warning priority, and given as an Order to the seat
-  `Configure.Investigation.{ Address SystemModules UserModules HerdrSessionName }`
-  names: started fresh with it as its brief, or queued for it when it is
-  Awake (sender `Unknown`). With none configured the warning is logged only.
+  `Configure.Investigation.{ Psyche compaction Tertiary }` names: launched
+  from its `Metaflows` declaration with it as its brief, or queued for it
+  when it is Awake (sender `Unknown`). With none configured the warning is logged only.
   A transcript first read in a Nexus's run raises only compactions from ten
   minutes before the Nexus started on.
 

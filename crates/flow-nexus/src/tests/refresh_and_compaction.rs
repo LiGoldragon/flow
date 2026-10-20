@@ -16,7 +16,7 @@ use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{ManagesMetaflowState, ReadsFlowRows, SeedsRole};
 use crate::waking::{AtStop, SleepsAndWakesSeats};
 use flow_ethos::State;
-use meta_signal_flow::{ConfigurationChange, ConfigureInvestigation, ConfigureThreshold};
+use meta_signal_flow::{ConfigurationChange, ConfigureThreshold};
 use signal_flow::{
     Address, Aspect, Caller, FlowLifecycle, Layer, Metaflow, PowerLevel, QueuedRequest, Request,
     SentBy,
@@ -284,12 +284,7 @@ fn configure_investigation(fixture: &NexusFixture) {
     fixture
         .nexus
         .store
-        .configure_change(ConfigurationChange::Investigation(ConfigureInvestigation {
-            address: investigation_address(),
-            system_modules: vec!["spirit-core".into()],
-            user_modules: vec!["knowledge-flow".into()],
-            herdr_session_name: "default".into(),
-        }))
+        .configure_change(ConfigurationChange::Investigation(investigation_address()))
         .expect("investigation configured");
 }
 
@@ -397,4 +392,25 @@ fn a_codex_compaction_is_raised_unless_a_compact_asked_for_it() {
             .collect::<Vec<_>>(),
         ["item-own"]
     );
+}
+
+/// An Investigation seat that is not Awake is launched from its Metaflows
+/// declaration; one with no declaration is refused, and the compaction is
+/// recorded with why.
+#[test]
+fn an_undeclared_investigation_seat_is_refused_and_recorded() {
+    let fixture = NexusFixture::new();
+    claude_seat(&fixture, 40_000);
+    seat_metaflow(&fixture, vec![]);
+    configure_investigation(&fixture);
+    append_boundary(&fixture, "continuous", "auto", &now_transcript_time());
+    fixture
+        .nexus
+        .after_report(&CLAUDE_SEAT.to_owned(), &signal_flow::Event::Started);
+    let compactions = fixture.nexus.store.compactions_of(CLAUDE_SEAT).unwrap();
+    assert_eq!(compactions.len(), 1);
+    let Investigation::Refused(why) = &compactions[0].investigation else {
+        panic!("refused: {:?}", compactions[0].investigation);
+    };
+    assert!(why.contains("Undeclared"), "{why}");
 }

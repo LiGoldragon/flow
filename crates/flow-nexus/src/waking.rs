@@ -93,9 +93,6 @@ use std::sync::Mutex;
 
 /// The choices of rest and wake, each in one place.
 pub trait WakePolicy {
-    /// Effort a fresh seat is launched at: every seat runs at medium.
-    const WAKE_EFFORT: &'static str = "medium";
-
     /// A Claude seat that reported Stopped rests when Herdr shows it Idle
     /// or Done. Working, Blocked or unreadable is not resting.
     fn rests_at(agent_state: &AgentState) -> bool {
@@ -475,25 +472,39 @@ pub trait PerformsWakeAndDrain {
     fn drain(&self, address: Address) -> Outcome;
 }
 
-/// A fresh flow started for a metaflow by the Nexus itself, as a wake
-/// starts one, with the brief given.
-pub(crate) trait StartsFreshSeat {
-    fn start_fresh_seat(
-        &self,
-        metaflow: &Metaflow,
-        fresh: FreshContext,
-        text: &str,
-    ) -> Result<FlowId, Failed_Data>;
+/// A flow the Nexus starts itself, as a wake starts one: no calling flow is
+/// its origin. The start runs under the dispatch gate, which is released
+/// while the launch settles.
+pub(crate) trait StartsUnbound {
+    fn start_unbound(&self, profile: LaunchProfile) -> Result<FlowId, Failed_Data>;
 }
 
-impl StartsFreshSeat for RunningNexus {
-    fn start_fresh_seat(
-        &self,
-        metaflow: &Metaflow,
-        fresh: FreshContext,
-        text: &str,
-    ) -> Result<FlowId, Failed_Data> {
-        self.start_fresh(metaflow, fresh, text)
+impl StartsUnbound for RunningNexus {
+    fn start_unbound(&self, profile: LaunchProfile) -> Result<FlowId, Failed_Data> {
+        let launch_request_id = profile.launch_request_id.clone();
+        let response = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // The Nexus starts this flow itself: no calling flow is its
+            // origin.
+            let response = self.start(profile, Origin::Unbound);
+            self.settle(&launch_request_id, response)
+        };
+        // A first turn may have queued work meanwhile; its targets are woken
+        // now that the gate is given back.
+        self.wake_deferred();
+        // The gate is released before the wait: the launch is settled by the
+        // Nexus's own promoter, which needs the gate to do it.
+        let response = match response {
+            Response::StartAmbiguous(_) => self.settled_launch(&launch_request_id),
+            response => Some(response),
+        };
+        match response {
+            Some(Response::Started(launched)) => Ok(launched.flow_id),
+            _ => Err(Failed_Data::Unstarted),
+        }
     }
 }
 
@@ -1072,18 +1083,29 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan {
-        match metaflow
+        use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+        let last = metaflow
             .past
             .last()
-            .and_then(|flow_id| self.last_launch_profile(flow_id))
-        {
-            Some(profile) => WakePlan::Fresh(FreshContext {
+            .and_then(|flow_id| self.last_launch_profile(flow_id));
+        // A declared metaflow wakes with the modules it is bound to; one
+        // never declared, with those its last launch named.
+        match (self.store.metaflow_declaration(&metaflow.address), last) {
+            (Ok(Some(declared)), last) => WakePlan::Fresh(FreshContext {
+                herdr_session_name: last
+                    .map(|profile| profile.herdr_session_name)
+                    .unwrap_or_else(|| "default".to_owned()),
+                system_modules: declared.system_modules,
+                user_modules: declared.user_modules,
+                leave_outs_option: None,
+            }),
+            (_, Some(profile)) => WakePlan::Fresh(FreshContext {
                 herdr_session_name: profile.herdr_session_name,
                 system_modules: profile.system_modules,
                 user_modules: profile.user_modules,
                 leave_outs_option: profile.leave_outs_option,
             }),
-            None => WakePlan::Unplaceable,
+            (_, None) => WakePlan::Unplaceable,
         }
     }
 
@@ -1388,37 +1410,14 @@ impl WakesInParts for RunningNexus {
             address: address.clone(),
             launch_request_id: launch_request_id.clone(),
             model_name: model,
-            effort: Self::WAKE_EFFORT.into(),
+            effort: <Self as crate::sending::ChoosesEffort>::effort_of(address).into(),
             herdr_session_name: fresh.herdr_session_name,
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,
             leave_outs_option: fresh.leave_outs_option,
             prompt: text.to_owned(),
         };
-        let profile = seat.fresh_profile();
-        let response = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // The Nexus starts this flow itself: no calling flow is its
-            // origin.
-            let response = self.start(profile, Origin::Unbound);
-            self.settle(&launch_request_id, response)
-        };
-        // A first turn may have queued work meanwhile; its targets are woken
-        // now that the gate is given back.
-        self.wake_deferred();
-        // The gate is released before the wait: the launch is settled by the
-        // Nexus's own promoter, which needs the gate to do it.
-        let response = match response {
-            Response::StartAmbiguous(_) => self.settled_launch(&launch_request_id),
-            response => Some(response),
-        };
-        match response {
-            Some(Response::Started(launched)) => Ok(launched.flow_id),
-            _ => Err(Failed_Data::Unstarted),
-        }
+        self.start_unbound(seat.fresh_profile())
     }
 
     fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), HandOverRefusal> {

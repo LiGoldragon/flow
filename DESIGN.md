@@ -391,7 +391,8 @@ terminal lifecycle states before returning `Ready`.
 
 Fresh stores persist default sockets, source root, and Codex endpoints. Meta
 `Configure` declares one configuration family whole (`Nexus`, `Models`,
-`Thresholds`, `LeaveOuts`, `SendServers`, `Investigation`), replaces the committed family in one commit, and
+`Thresholds`, `LeaveOuts`, `SendServers`, `Metaflows`, `Investigation`),
+replaces the committed family in one commit, and
 answers `Configured.Replaced` or `Configured.Unchanged`; rebinding live
 sockets and adapters is deferred to a Nexus restart. A launch's receipt compares
 the model its native transcript records with the model it named, string for
@@ -473,9 +474,11 @@ reading stopped, for a `compact_boundary` whose trigger is `auto`; a Codex
 `contextCompaction` item counts unless a `Command.Compact` was typed into
 the flow. Each compaction is recorded once (`flow_nexus_compactions`) with
 what became of its investigation, logged at warning priority, and given as
-an Order to the configured Investigation seat (`Configure.Investigation`):
-a fresh flow started there with the investigation as its brief, or, when the
-seat is Awake or waking, queued for it. Its sender is `Unknown`: `SentBy`
+an Order to the configured Investigation seat (`Configure.Investigation`,
+an Address): launched from its `Metaflows` declaration with the
+investigation as its brief, or, when the seat is Awake or waking, queued
+for it. A seat with no declaration is refused, and the compaction records
+why. Its sender is `Unknown`: `SentBy`
 names no Flow. The investigation names the flow, its metaflow and its
 transcript or thread, and asks for the finding to go to Psyche core
 Secondary. A transcript first read in a Nexus's run raises only compactions

@@ -22,23 +22,26 @@
 //! warns once.
 //!
 //! The warning is a journal line at warning priority, and the investigation
-//! goes to the configured Investigation seat: a fresh flow is started there
-//! with it as its brief, or, when the seat is Awake or waking, it is queued
-//! there as an Order. With no seat configured the warning is logged only.
+//! goes to the configured Investigation seat: launched from its Metaflows
+//! declaration with it as its brief, or, when the seat is Awake or waking,
+//! queued there as an Order. With no seat configured the warning is logged
+//! only.
 
 use crate::RunningNexus;
 use crate::generated::operation::{Operation, Outcome, Record_Data, Record_Data_Context_Data};
 use crate::performing::Performs;
+use crate::sending::LaunchesDeclared;
 use crate::store::ManagesMetaflowState;
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
 use crate::store::context::RecordsContextSize;
 use crate::store::metaflow::{QueuesFlowRequest, SleepsMetaflows};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::waking::{
-    HoldsWakingMetaflows, ReadsClaudeDelivery, SleepsAndWakesSeats, StartsFreshSeat,
+    HoldsWakingMetaflows, ReadsClaudeDelivery, SleepsAndWakesSeats, StartsUnbound,
 };
 use signal_flow::{
-    Address, Aspect, FlowNode, HarnessKind, Layer, Metaflow, QueuedRequest, Request, SentBy,
+    Address, Aspect, FlowNode, HarnessKind, Launch_Data, Layer, Metaflow, QueuedRequest, Request,
+    SentBy,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -444,12 +447,11 @@ impl WatchesCompactions for RunningNexus {
     }
 
     fn investigate(&self, brief: &str) -> Investigation {
-        let investigation = match self.store.configured_investigation() {
-            Ok(Some(investigation)) => investigation,
+        let address = match self.store.configured_investigation() {
+            Ok(Some(address)) => address,
             Ok(None) => return Investigation::NotConfigured,
             Err(error) => return Investigation::Refused(error.to_string()),
         };
-        let address = investigation.address.clone();
         let order = QueuedRequest {
             // No metaflow sent it: Flow raised it. SentBy names no Flow.
             sent_by: SentBy::Unknown,
@@ -477,23 +479,25 @@ impl WatchesCompactions for RunningNexus {
             drop(lease);
             return self.queue_investigation(&address, order);
         }
-        let metaflow = metaflow.unwrap_or(Metaflow {
-            address: address.clone(),
-            state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
-        });
-        let fresh = crate::waking::FreshContext {
-            herdr_session_name: investigation.herdr_session_name,
-            system_modules: investigation.system_modules,
-            user_modules: investigation.user_modules,
-            leave_outs_option: None,
+        // The seat is launched from its Metaflows declaration, as a Launch
+        // no caller stands behind is.
+        let started = match self.declared_launch(
+            Launch_Data {
+                address: address.clone(),
+                instruction_prompt: brief.to_owned(),
+            },
+            None,
+        ) {
+            Ok(signal_flow::Query::Start(profile)) => self
+                .start_unbound(profile)
+                .map_err(|failure| format!("{failure:?}")),
+            Ok(_) => Err("the Launch named no Start".to_owned()),
+            Err(refusal) => Err(format!("{refusal:?}")),
         };
-        let started = self.start_fresh_seat(&metaflow, fresh, brief);
         drop(lease);
         match started {
             Ok(flow_id) => Investigation::Started(flow_id),
-            Err(failure) => Investigation::Refused(format!("{failure:?}")),
+            Err(failure) => Investigation::Refused(failure),
         }
     }
 }

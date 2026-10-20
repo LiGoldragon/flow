@@ -230,6 +230,8 @@ impl Dispatches for RunningNexus {
             Query::ResolveCaller(claim) => self.resolve_caller(None, claim),
             Query::Report(report) => self.report(report),
             Query::Current(address) => {
+                use crate::waking::RestsEndedAwake;
+                self.rest_ended_awake(&address);
                 self.store
                     .current_metaflow(&address)
                     .unwrap_or_else(|error| {
@@ -4884,6 +4886,46 @@ mod tests {
             Response::CallerResolutionRejected(
                 signal_flow::CallerResolutionRejection::CallerUnknown
             )
+        );
+    }
+
+    /// The Herdr server is known by the session socket it serves, never by
+    /// its binary: the `herdr` this Nexus runs (here the fixture script, as
+    /// on a host where a wrapper on `PATH` stands before Herdr's own binary)
+    /// is not the binary the server runs, and a process between the peer and
+    /// the server that serves no session is walked past.
+    #[test]
+    fn a_pane_id_names_the_session_its_server_serves_whatever_herdr_path_names() {
+        let fixture = NexusFixture::new();
+        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
+        let server = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let herdr_cli = fs::canonicalize(&fixture.snapshot_program).unwrap();
+        assert_ne!(herdr_cli, server);
+
+        let shell = MarkedProcess::spawn("sh", &["-c", "sleep 30; true"], "pane-1");
+        let shell_id = shell.0.id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let peer = loop {
+            let children = fs::read_to_string(format!("/proc/{shell_id}/task/{shell_id}/children"))
+                .unwrap_or_default();
+            if let Some(child) = children.split_whitespace().next() {
+                let process = CallerProcess {
+                    process_id: child.parse().unwrap(),
+                };
+                if process.marked_pane_id().as_deref() == Some("pane-1") {
+                    break process;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "fixture child");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(peer.caller_pane(&fixture.nexus.herdr), pane("pane-1"));
+        assert_eq!(
+            fixture
+                .nexus
+                .resolve_caller(peer.caller_pane(&fixture.nexus.herdr), None),
+            Response::CallerResolved(mind_live())
         );
     }
 

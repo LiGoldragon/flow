@@ -1,3 +1,14 @@
+# Flow 0.35.25
+
+The contracts are unchanged from 0.35.22: signal-flow 23.0.0 (c7dcc074) and
+meta-signal-flow 29.0.0 (2b03b506). No store change.
+
+- **A caller in Herdr's default session is named by the socket its server
+  serves.** A process marked only with `HERDR_PANE_ID` is placed in the
+  one listed session whose socket an ancestor listens on; the Herdr server
+  is the process serving that socket, whatever binary it runs and
+  whatever `herdr` `PATH` names.
+
 # Flow 0.35.24
 
 The contracts are unchanged from 0.35.22: signal-flow 23.0.0 (c7dcc074) and

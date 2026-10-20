@@ -1,4 +1,5 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use flow_nexus::generated::landing::RunsLandings;
 use flow_nexus::store::ConfiguresOnlyStore;
 use flow_nexus::{
     CarriesSignalFrames, ClaimedSocket, ClaimsSocket, HoldsStopRequest, OpensRunningNexus,
@@ -48,7 +49,7 @@ impl ParsesStart for [String] {
     fn parse_start(&self) -> Result<flow_ethos::Start, String> {
         let [source] = self else {
             return Err(
-                "usage: flow-nexus [--configure-only] '{ «ordinary-socket» «meta-socket» «store-path» }'"
+                "usage: flow-nexus [--configure-only] '{ «ordinary-socket» «meta-socket» «store-path» Some.{ «context-repository» «deploy-executable» } }'"
                     .into(),
             );
         };
@@ -162,6 +163,12 @@ fn main() -> ExitCode {
         scope.spawn(move || send_tool_nexus.serve_send_tool(scope));
         // A wake the last Nexus did not finish left its work queued: wake it.
         scope.spawn(|| nexus.recover_wakes());
+        // Every landing on the context repository's main is carried
+        // through its deploy, retraining and implementation.
+        if let Some(watch) = start.landing_watch_option.clone() {
+            let landing_nexus = &nexus;
+            scope.spawn(move || landing_nexus.watch_landings(&watch));
+        }
         scope.spawn(|| {
             if signals.watch(&|| nexus.stopping.requested()) {
                 nexus.stop(&sockets);
@@ -396,6 +403,10 @@ mod tests {
             ordinary_socket_path: "/run/user/test/flow.sock".into(),
             meta_socket_path: "/run/user/test/flow-meta.sock".into(),
             store_path: "/home/test/.local/state/flow-next/flow.sema".into(),
+            landing_watch_option: Some(flow_ethos::LandingWatch {
+                context_repository: "/git/psyche-context".into(),
+                deploy_binary: "/nix/store/x-context-deploy/bin/context-deploy".into(),
+            }),
         };
         let datom = expected.datomize(vec![]).protosize().compact();
         assert_eq!(
@@ -413,19 +424,36 @@ mod tests {
             ordinary_socket_path: "/run/flow.sock".into(),
             meta_socket_path: "/run/flow-meta.sock".into(),
             store_path: "/state/flow.sema".into(),
+            landing_watch_option: None,
         };
         for literal in [
-            "{ /run/flow.sock /run/flow-meta.sock /state/flow.sema }",
-            "{ «/run/flow.sock» «/run/flow-meta.sock» «/state/flow.sema» }",
+            "{ /run/flow.sock /run/flow-meta.sock /state/flow.sema None }",
+            "{ «/run/flow.sock» «/run/flow-meta.sock» «/state/flow.sema» None }",
         ] {
             assert_eq!([literal.to_owned()].parse_start().unwrap(), expected);
         }
         assert!(
-            ["Start.{ /run/flow.sock /run/flow-meta.sock /state/flow.sema }".into()]
+            ["Start.{ /run/flow.sock /run/flow-meta.sock /state/flow.sema None }".into()]
                 .parse_start()
                 .is_err()
         );
-        let spaced = ["{ «/run/o s» «/run/m s» «/state/f s» }".to_owned()]
+        assert!(
+            ["{ /run/flow.sock /run/flow-meta.sock /state/flow.sema }".into()]
+                .parse_start()
+                .is_err(),
+            "every position is written, the landing watch included"
+        );
+        let watched = ["{ /run/flow.sock /run/flow-meta.sock /state/flow.sema Some.{ /git/psyche-context /nix/store/x/bin/context-deploy } }".to_owned()]
+            .parse_start()
+            .expect("a landing watch parses");
+        assert_eq!(
+            watched.landing_watch_option,
+            Some(flow_ethos::LandingWatch {
+                context_repository: "/git/psyche-context".into(),
+                deploy_binary: "/nix/store/x/bin/context-deploy".into(),
+            })
+        );
+        let spaced = ["{ «/run/o s» «/run/m s» «/state/f s» None }".to_owned()]
             .parse_start()
             .expect("delimited path strings preserve spaces");
         assert_eq!(spaced.ordinary_socket_path, "/run/o s");
@@ -446,6 +474,13 @@ mod tests {
         assert_eq!(parsed.ordinary_socket_path, "ordinary-socket");
         assert_eq!(parsed.meta_socket_path, "meta-socket");
         assert_eq!(parsed.store_path, "store-path");
+        assert_eq!(
+            parsed.landing_watch_option,
+            Some(flow_ethos::LandingWatch {
+                context_repository: "context-repository".into(),
+                deploy_binary: "deploy-executable".into(),
+            })
+        );
     }
 
     #[test]
@@ -507,6 +542,7 @@ mod tests {
                 .join("custom/flow.sema")
                 .to_string_lossy()
                 .into_owned(),
+            landing_watch_option: None,
         };
         let store = ConfigurationOnlyStore::open(Path::new(&start.store_path)).expect("store lock");
         let socket = PathBuf::from(&start.meta_socket_path);
@@ -567,6 +603,7 @@ mod tests {
                 .join("store/configured.flow.sema")
                 .to_string_lossy()
                 .into_owned(),
+            landing_watch_option: None,
         };
         let (store, message_binary, listener) =
             ConfigurationStartup::open_configuration_listener(&start)

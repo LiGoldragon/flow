@@ -402,3 +402,43 @@ administrative protocol surface from the ordinary surface inside one Unix
 account and does not distinguish processes with the same UID. Reset callers
 supply the idempotency key so retries reuse it. Protocol tests cover framing, refusal, timeout,
 assigned-flow context, and the reset outcome mapping.
+
+## The approval pipeline
+
+When the living approves a vision, its landing is a commit on the context
+repository's `main`. The Start datom names that checkout and the deploy
+executable (`LandingWatch`); the Nexus watches the checkout's ref files
+(`refs/heads/main`, `packed-refs`), and every change, and its own start,
+runs one pass. A commit on `main` the context composer does not serve is a
+landing row (`flow_nexus_landings`), recorded once.
+
+A pass runs the deploy executable once, with `Deploy.{ Repository Commit }`
+for the newest landing not served; what it prints is its claim. The deploy
+is witnessed only by the composer: `ResolveSources` of a module of the
+repository names a revision that includes the landing's commit. Until then
+the landing's other steps wait, so a refreshed flow and the implementer wake
+into the landed modules. A failed step is recorded `Failed` with its reason
+and reported, and the next change of `main` or the next start tries it
+again; nothing re-reads on a timer.
+
+Once deployed, every live flow Awake at a metaflow whose launch profile's
+modules, with their dependency closure as the composer resolves it, include
+a changed path of the same repository is marked due a refresh
+(`flow_nexus_refresh_due`), in the commit that records it on the landing. A
+flow imported without a launch profile cannot be retrained and is named in
+the witness. A seat due a refresh is never handed work: at its rest Flow
+closes its pane under the pane's lease, records it Stopped (its metaflow
+Asleep) and the refresh done on the landing, and work queued for the
+metaflow wakes a fresh flow composed from the deployed modules. A Claude seat
+rests for this only when Herdr shows it Idle or Done, since a main turn that
+ended while background agents run shows Working and closing it would end
+them.
+
+Each changed module file, `<type>/<subject>.md`, is queued as an Order to
+Mind `<subject>` Secondary, or to Mind core Secondary when no such metaflow
+is recorded, carrying the commit, its subject, the path and the changed
+lines. The landing's report is queued to Psyche core Secondary: a Result
+once deploy, retrain and implement are witnessed, an Order when a step
+failed. Both are queued in the commit that records them on the landing, and
+both are sent as Psyche core Secondary, the flow that lands the living's
+approvals: `SentBy` has no variant for Flow itself.

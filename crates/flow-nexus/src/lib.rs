@@ -19,7 +19,7 @@ pub use generated::curriculum::{
     StartupSelection,
 };
 pub use generated::operation::Outcome as OperationOutcome;
-pub use store::{LaunchOutcome, Replacement};
+pub use store::{LaunchOutcome, Replacement, StoreError};
 pub mod binding;
 pub mod caller;
 pub mod claude;
@@ -39,6 +39,7 @@ mod fixture_executable;
 #[allow(unexpected_cfgs, clippy::large_enum_variant)]
 pub mod generated;
 pub mod herdr;
+pub mod landing;
 pub mod launching;
 pub mod observe_agent;
 pub mod peer;
@@ -1146,6 +1147,7 @@ mod tests {
     use crate::herdr::ReadsHerdrPanes;
     mod configuring;
     mod delivery;
+    mod landing;
     mod launching_nexus;
     mod model;
     mod queue_drain;

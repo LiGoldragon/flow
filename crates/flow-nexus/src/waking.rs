@@ -57,6 +57,7 @@ use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{FreshSeat, RendersQueuedWork};
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal};
+use crate::generated::landing::{KeepsLandings, RunsLandings};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data,
@@ -313,6 +314,10 @@ pub enum AtStop {
     Idle,
     /// The seat rested with work queued: the oldest request was typed in.
     Drained(QueuedRequest),
+    /// The seat was due a refresh and rested: its pane was closed, it was
+    /// recorded Stopped and its metaflow put Asleep; work queued for the
+    /// metaflow wakes a fresh flow.
+    Refreshed(Address),
     /// The seat stays as it is, for the reason named.
     Kept(KeptAtStop),
 }
@@ -340,6 +345,11 @@ pub enum KeptAtStop {
     ThreadNotResting,
     /// Work is queued and the Drain did not type it.
     DrainRefused(Box<Outcome>),
+    /// The seat is due a refresh and has no Herdr route to close.
+    RefreshUnrouted,
+    /// The seat is due a refresh and its close or its Stopped record was
+    /// refused; it stays due and is taken up at its next rest.
+    RefreshRefused(Box<Outcome>),
 }
 
 /// Why work was not typed into a live flow's pane. Each is logged by name;
@@ -465,6 +475,11 @@ trait WakesInParts {
     /// The body of `settle_stopped`: waits, boundedly and off the dispatch
     /// gate, for Herdr to show the seat resting, then drains it.
     fn settle_rested(&self, flow_id: &str) -> AtStop;
+    /// Ends a seat due a refresh that rests, under the dispatch gate the
+    /// caller holds: its pane is closed under the pane's lease, it is
+    /// recorded Stopped (its metaflow Asleep), and its refresh is recorded
+    /// done on the landing that made it due.
+    fn refresh_at_rest(&self, flow_id: &str, node: &FlowNode, address: Address) -> AtStop;
 }
 
 pub(crate) trait ReadsClaudeDelivery {
@@ -901,8 +916,17 @@ impl MarksUndecided for RunningNexus {
 impl SleepsAndWakesSeats for RunningNexus {
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
         let at_stop = self.settle_rested(flow_id);
-        if let AtStop::Kept(reason) = &at_stop {
-            eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
+        match &at_stop {
+            AtStop::Kept(reason) => {
+                eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
+            }
+            // The refreshed seat's work wakes the fresh flow, once the gate
+            // the refresh ran under is given back.
+            AtStop::Refreshed(address) => {
+                eprintln!("flow-nexus: flow {flow_id} refreshed at its rest");
+                self.wake_due(address.clone());
+            }
+            AtStop::Idle | AtStop::Drained(_) => {}
         }
         at_stop
     }
@@ -1430,6 +1454,25 @@ impl WakesInParts for RunningNexus {
         Ok(())
     }
 
+    fn refresh_at_rest(&self, flow_id: &str, node: &FlowNode, address: Address) -> AtStop {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return AtStop::Kept(KeptAtStop::RefreshUnrouted);
+        };
+        let closed = {
+            let _lease = self.pane_leases.hold(route);
+            self.perform(Operation::Close(node.clone()))
+        };
+        if closed != Outcome::Closed {
+            return AtStop::Kept(KeptAtStop::RefreshRefused(Box::new(closed)));
+        }
+        let recorded = self.perform(Operation::Record(Record_Data::Stopped(flow_id.to_owned())));
+        if recorded != Outcome::Recorded {
+            return AtStop::Kept(KeptAtStop::RefreshRefused(Box::new(recorded)));
+        }
+        self.end_refresh(flow_id);
+        AtStop::Refreshed(address)
+    }
+
     fn settle_rested(&self, flow_id: &str) -> AtStop {
         self.record_context_at_stop(flow_id);
         // A Codex seat's rest is its app-server's, and a Claude seat whose
@@ -1475,6 +1518,8 @@ impl WakesInParts for RunningNexus {
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
+        // A seat due a refresh is ended at its rest rather than handed work.
+        let refresh_due = matches!(self.store.refresh_due(flow_id), Ok(Some(_)));
         match node.harness_kind {
             // A Codex seat is handed work through its app-server, so only
             // the app-server's thread status says it rests, whatever its
@@ -1493,6 +1538,12 @@ impl WakesInParts for RunningNexus {
                     &pane_agent,
                     PaneAgent::Present { agent_state, .. } if Self::rests_at(agent_state)
                 );
+                // Closing a seat ends whatever runs in it: one whose main
+                // turn ended while its background agents run shows Working,
+                // and is refreshed only once Herdr shows it resting.
+                if refresh_due && !native_resting {
+                    return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
+                }
                 let claude_main_ready = self.claude_main_turn_ended(&node)
                     && matches!(
                         self.delivery_target(flow_id)
@@ -1504,6 +1555,9 @@ impl WakesInParts for RunningNexus {
                     return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
                 }
             }
+        }
+        if refresh_due {
+            return self.refresh_at_rest(flow_id, &node, address);
         }
         if !metaflow.queue.is_empty() {
             return match self.perform(Operation::Drain(address)) {

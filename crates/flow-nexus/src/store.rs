@@ -10,6 +10,7 @@ pub mod context;
 mod created_pane;
 pub mod delivery;
 pub mod events;
+pub(crate) mod landing;
 pub(crate) mod launch_cleanup;
 pub(crate) mod metaflow;
 pub(crate) mod opened_thread;
@@ -160,6 +161,8 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_queue_delivery_counter",
     "flow_nexus_queue_delivery_requests",
     "flow_nexus_queue_delivery_attempts",
+    "flow_nexus_landings",
+    "flow_nexus_refresh_due",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -2684,6 +2687,7 @@ pub struct FlowStore {
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
     launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
     queue_delivery: QueueDeliveryTables,
+    landing_tables: landing::LandingTables,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
@@ -3310,6 +3314,8 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups_descriptor =
             <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor();
         let queue_delivery_descriptors = QueueDeliveryTables::descriptors();
+        let landing_descriptors =
+            <landing::LandingTables as landing::RegistersLandingTables>::descriptors();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -3342,7 +3348,9 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&launch_cleanups_descriptor)
                 .with_family(&queue_delivery_descriptors.0)
                 .with_family(&queue_delivery_descriptors.1)
-                .with_family(&queue_delivery_descriptors.2),
+                .with_family(&queue_delivery_descriptors.2)
+                .with_family(&landing_descriptors.0)
+                .with_family(&landing_descriptors.1),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -3371,6 +3379,8 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
+        let landing_tables =
+            <landing::LandingTables as landing::RegistersLandingTables>::register(&mut engine)?;
         let store = Self {
             engine,
             flows,
@@ -3396,6 +3406,7 @@ impl OpensFlowStore for FlowStore {
             send_calls,
             launch_cleanups,
             queue_delivery,
+            landing_tables,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -3527,6 +3538,8 @@ impl OpensFlowStore for FlowStore {
         )?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, QueueDeliveryTables::descriptors())?;
+        let landing_tables =
+            <landing::LandingTables as landing::RegistersLandingTables>::register(&mut engine)?;
         let store = Self {
             engine,
             flows,
@@ -3552,6 +3565,7 @@ impl OpensFlowStore for FlowStore {
             send_calls,
             launch_cleanups,
             queue_delivery,
+            landing_tables,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -6077,6 +6091,8 @@ pub(crate) trait ReadsFlowMemory {
                 launch_cleanup::LAUNCH_CLEANUP_FAMILY,
                 launch_cleanup::LAUNCH_CLEANUP_SCHEMA,
             ),
+            "flow_nexus_landings" => (landing::LANDING_FAMILY, landing::LANDING_SCHEMA),
+            "flow_nexus_refresh_due" => (landing::REFRESH_DUE_FAMILY, landing::REFRESH_DUE_SCHEMA),
             "flow_nexus_queue_delivery_counter" => (
                 "flow-nexus-queue-delivery-counter",
                 "flow-nexus-queue-delivery-counter-v1",

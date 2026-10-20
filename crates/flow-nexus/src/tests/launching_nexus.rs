@@ -49,6 +49,7 @@ fn a_launch_receives_the_socket_from_each_typed_start() {
             .join("run/flow-next/flow-meta.sock")
             .to_string_lossy()
             .into_owned(),
+        landing_watch_option: None,
     };
     let nexus = RunningNexus::open(&defaults, &first_start).expect("configured Nexus opens");
     assert_eq!(
@@ -65,6 +66,7 @@ fn a_launch_receives_the_socket_from_each_typed_start() {
             .to_string_lossy()
             .into_owned(),
         meta_socket_path: first_start.meta_socket_path,
+        landing_watch_option: None,
     };
     let reopened = RunningNexus::open(&defaults, &second_start).expect("configured Nexus reopens");
     assert_eq!(

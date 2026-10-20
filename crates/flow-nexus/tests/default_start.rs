@@ -35,6 +35,7 @@ fn start(runtime: &Path, state: &Path) -> Start {
             .to_string_lossy()
             .into_owned(),
         store_path: state.join("flow.sema").to_string_lossy().into_owned(),
+        landing_watch_option: None,
     }
 }
 
@@ -52,7 +53,7 @@ fn spawn(home: &Path, runtime: &Path, start: &Start, configure_only: bool) -> St
         // Exercise the operator's literal argv, independently of Start's serializer.
         // These fixture paths are temporary ASCII paths without string delimiters.
         .arg(format!(
-            "{{ «{}» «{}» «{}» }}",
+            "{{ «{}» «{}» «{}» None }}",
             start.ordinary_socket_path, start.meta_socket_path, start.store_path
         ))
         .spawn()

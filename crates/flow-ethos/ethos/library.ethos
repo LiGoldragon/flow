@@ -46,7 +46,12 @@ Library
   OrdinarySocketPath.String
   MetaSocketPath.String
   StorePath.String
-  Start.{ OrdinarySocketPath MetaSocketPath StorePath }
+  ; The context repository whose main commits are landings, and the
+  ; executable that deploys a landed commit to the modules flows load.
+  ContextRepository.String
+  DeployBinary.String
+  LandingWatch.{ ContextRepository DeployBinary }
+  Start.{ OrdinarySocketPath MetaSocketPath StorePath Option<LandingWatch> }
   ; Startup refusal is distinct from the ordinary/meta socket Refusal.Store.String.
   StoreRefusal.{ Path Reason }
   StartRefusal.[ Store.StoreRefusal ]

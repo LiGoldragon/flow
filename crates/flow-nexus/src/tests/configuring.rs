@@ -63,6 +63,7 @@ impl ConfiguredStore {
             ordinary_socket_path: path("ordinary.sock"),
             meta_socket_path: path("meta.sock"),
             store_path: path("flow.sema"),
+            landing_watch_option: None,
         };
         let configuration = ConfigurationOnlyStore::open(std::path::Path::new(&start.store_path))
             .expect("configuration store");

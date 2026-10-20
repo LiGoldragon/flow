@@ -1,3 +1,36 @@
+# Flow 0.36.0
+
+The contracts are unchanged: signal-flow 23.0.0 (c7dcc074) and
+meta-signal-flow 29.0.0 (2b03b506). The store gains two tables; the Start
+datom gains a position.
+
+- **The Start datom names the landing watch.** `Start` is
+  `{ OrdinarySocketPath MetaSocketPath StorePath Option<LandingWatch> }`,
+  with `LandingWatch.{ ContextRepository DeployBinary }`. Every caller writes
+  the fourth position: `None` runs no approval pipeline (the configure-only
+  start writes `None`), and
+  `Some.{ /git/github.com/LiGoldragon/psyche-context /nix/store/…/bin/context-deploy }`
+  watches that checkout's `main`. A three-position Start is refused
+  `Arity { expected: 4, found: 3 }`.
+- **The approval pipeline.** Every commit on the context repository's main
+  that the context composer does not serve is a landing, recorded in
+  `flow_nexus_landings`. Flow runs the deploy executable with
+  `Deploy.{ Repository Commit }` for the newest landing and witnesses the
+  deploy only by the composer serving a revision that includes it; then it
+  marks every live flow whose launch modules (with their dependency closure)
+  include a changed path due a refresh (`flow_nexus_refresh_due`), queues
+  each changed module as an Order to Mind `<subject>` Secondary (else Mind
+  core Secondary) carrying the commit and its changed lines, and queues a
+  Result to Psyche core Secondary; a failed step is an Order to Psyche core
+  Secondary, and is tried again at the next change of main or the next start.
+- **A seat due a refresh is ended at its rest.** At its rest (Herdr shows a
+  Claude seat Idle or Done; a Codex thread rests) its pane is closed under
+  its lease, it is recorded Stopped and its metaflow Asleep, and work queued
+  for the metaflow wakes a fresh flow composed from the deployed modules.
+  Its queued work is never typed into it.
+- The flow-nexus checks need `git` (the pipeline's tests read a real
+  repository); the Nexus's own `git` comes from its PATH.
+
 # Flow 0.35.24
 
 The contracts are unchanged from 0.35.22: signal-flow 23.0.0 (c7dcc074) and

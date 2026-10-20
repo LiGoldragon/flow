@@ -157,12 +157,24 @@ pub type MetaSocketPath = String;
 #[rustfmt::skip]
 pub type StorePath = String;
 #[rustfmt::skip]
+pub type ContextRepository = String;
+#[rustfmt::skip]
+pub type DeployBinary = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct LandingWatch {
+    pub context_repository: ContextRepository,
+    pub deploy_binary: DeployBinary,
+}
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Start {
     pub ordinary_socket_path: OrdinarySocketPath,
     pub meta_socket_path: MetaSocketPath,
     pub store_path: StorePath,
+    pub landing_watch_option: std::option::Option<LandingWatch>,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

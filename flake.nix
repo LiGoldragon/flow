@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.35.24";
+            version = "0.36.0";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -173,6 +173,8 @@
             // {
               inherit (context) cargoArtifacts;
               cargoTestExtraArgs = "--workspace";
+              # The approval pipeline's tests read a real git repository.
+              nativeCheckInputs = [ context.pkgs.git ];
             }
           );
           fmt = context.craneLib.cargoFmt context.commonArgs;

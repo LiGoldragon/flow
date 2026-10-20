@@ -1,0 +1,106 @@
+; The approval pipeline. A landing is a commit on the context repository's
+; main that the context composer does not serve yet. For each one Flow
+; deploys the commit, witnesses the deployment through the composer,
+; marks every live flow whose launch modules changed due a refresh,
+; queues the change as an Order to the metaflow that implements it, and
+; reports to Psyche core Secondary; each step's state is kept on the
+; landing's row.
+;
+; A step is Pending until it is done, Witnessed with what witnessed it,
+; or Failed with why. A flow marked for retraining is Marked until Flow
+; ends it at its rest, then Ended.
+;
+; A flow due a refresh is closed at its next rest instead of being handed
+; work: its pane closes, it is recorded Stopped, its metaflow sleeps, and
+; work queued for the metaflow wakes a fresh flow composed from the
+; deployed modules. Landed names the landing that made it due.
+
+Library
+[ signal_flow:[ Address FlowId Request ]
+  flow_ethos:[ LandingWatch ]
+  flow_nexus:[ StoreError ] ]
+[ Commit.String
+  Subject.String
+  ChangedPath.String
+  ChangedLine.String
+  ChangedLines.Vector<ChangedLine>
+  ChangedModule.{ ChangedPath ChangedLines }
+  ChangedModules.Vector<ChangedModule>
+  LandedChange.{ Commit Subject ChangedModules }
+  Step.[ Pending Witnessed.String Failed.String ]
+  Retrained.[ Marked Ended ]
+  Retraining.{ FlowId Address Retrained }
+  ModuleIdentity.String
+  ModuleIdentities.Vector<ModuleIdentity>
+  RepositoryName.String
+  SourceRevision.String
+  SourceRelativePath.String
+  ModuleSource.{ ModuleIdentity RepositoryName SourceRevision SourceRelativePath }
+  ModuleSources.Vector<ModuleSource>
+  Base.String
+  ChangedPaths.Vector<ChangedPath>
+  Deploy.Step
+  Retrain.Step
+  Retrainings.Vector<Retraining>
+  Implement.Step
+  Owners.Vector<Address>
+  Reported.Boolean
+  Landing.{ Commit Base Subject ChangedPaths Deploy Retrain Retrainings Implement Owners Reported }
+  Landings.Vector<Landing>
+  RefreshCause.[ Landed.Commit ]
+  RefreshDue.{ FlowId RefreshCause }
+  RefreshesDue.Vector<RefreshDue>
+  LandingOrder.{ Address Request }
+  LandingOrders.Vector<LandingOrder> ]
+[ ; The values capabilities read, each through the trait that yields it.
+  CommitNaming.[ commit.[ Commit ] ]
+  FlowNaming.[ flow_id.[ FlowId ] ]
+  ModuleListing.[ module_identities.[ ModuleIdentities ] ]
+  ModuleSourcing.[ module_source.[ ModuleSource ] ]
+  LandingCarrying.[ carried_landing.[ Landing ] ]
+  RefreshDueCarrying.[ carried_refresh_due.[ RefreshDue ] ]
+  LandingOrdering.[ landing_orders.[ LandingOrders ] ]
+  LandingWatching.[ landing_watch.[ LandingWatch ] ]
+  ChangeCarrying.[ carried_change.[ LandedChange ] ]
+  ArgumentListing.[ arguments.[ Vector<String> ] ]
+  ; A module file's path, `<type>/<subject>.md`, names the module
+  ; `<type>-<subject>`, and its subject is the topic that implements it.
+  NamesModule.[ module_identity.[ Option<ModuleIdentity> ]
+                module_topic.[ Option<String> ] ]
+  ; The context repository, read through git.
+  ReadsContextRepository.[ git.{ [ ArgumentListing ] [ Result<String String> ] }
+                           main_commit.[ Result<Commit String> ]
+                           git_directory.[ Result<String String> ]
+                           module_paths.[ Result<ChangedPaths String> ]
+                           commits_after.{ [ CommitNaming ] [ Result<Vector<Commit> String> ] }
+                           landed_change.{ [ CommitNaming ] [ Result<LandedChange String> ] }
+                           includes.{ [ CommitNaming CommitNaming ] [ Boolean ] }
+                           depth.{ [ CommitNaming ] [ Integer ] } ]
+  ; Runs the deploy executable for one commit; its printed answer.
+  DeploysContext.[ deploy.{ [ CommitNaming ] [ Result<String String> ] } ]
+  ; The source of every module a launch's identities name, with their
+  ; dependency closure, as the context composer serves them now.
+  ResolvesModuleSources.[ module_sources.{ [ ModuleListing ] [ Result<ModuleSources String> ] } ]
+  ; What a landing tells Psyche core Secondary: the Result once its steps
+  ; are done, the Order when one failed.
+  ReportsLanding.[ finished_report.[ Option<Request> ]
+                   failure_report.[ Option<Request> ] ]
+  ; The landing and refresh rows.
+  KeepsLandings.[ landing_row.{ [ CommitNaming ] [ Result<Option<Landing> StoreError> ] }
+                  landing_rows.[ Result<Landings StoreError> ]
+                  write_landing.{ [ LandingCarrying ] [ Result<Boolean StoreError> ] }
+                  queue_landing_orders.{ [ LandingCarrying LandingOrdering ] [ Result<Vector<Address> StoreError> ] }
+                  refresh_due.{ [ FlowNaming ] [ Result<Option<RefreshDue> StoreError> ] }
+                  refreshes_due.[ Result<RefreshesDue StoreError> ]
+                  mark_refresh_due.{ [ LandingCarrying RefreshDueCarrying ] [ Result<Boolean StoreError> ] }
+                  clear_refresh_due.{ [ FlowNaming ] [ Result<Boolean StoreError> ] } ]
+  ; The Nexus's own work on landings.
+  RunsLandings.[ watch_landings.{ [ LandingWatching ] [ Boolean ] }
+                 served_module.{ [ LandingWatching ] [ Result<ModuleSource String> ] }
+                 record_landings.{ [ LandingWatching ] [ Result<Landings String> ] }
+                 advance_landings.{ [ LandingWatching ] [ Result<Landings String> ] }
+                 retrain_flows.{ [ ModuleSourcing LandingCarrying ] [ Result<Landing String> ] }
+                 implementation_orders.{ [ ChangeCarrying ] [ LandingOrders ] }
+                 settle_refreshes.[ Boolean ]
+                 end_refresh.{ [ FlowNaming ] [ Boolean ] } ] ]
+[]

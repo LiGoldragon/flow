@@ -1,5 +1,4 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
-use flow_nexus::generated::landing::RunsLandings;
 use flow_nexus::store::ConfiguresOnlyStore;
 use flow_nexus::{
     CarriesSignalFrames, ClaimedSocket, ClaimsSocket, HoldsStopRequest, OpensRunningNexus,
@@ -163,12 +162,6 @@ fn main() -> ExitCode {
         scope.spawn(move || send_tool_nexus.serve_send_tool(scope));
         // A wake the last Nexus did not finish left its work queued: wake it.
         scope.spawn(|| nexus.recover_wakes());
-        // Every landing on the context repository's main is carried
-        // through its deploy, retraining and implementation.
-        if let Some(watch) = start.landing_watch_option.clone() {
-            let landing_nexus = &nexus;
-            scope.spawn(move || landing_nexus.watch_landings(&watch));
-        }
         scope.spawn(|| {
             if signals.watch(&|| nexus.stopping.requested()) {
                 nexus.stop(&sockets);

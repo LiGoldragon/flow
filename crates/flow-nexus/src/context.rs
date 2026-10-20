@@ -23,9 +23,6 @@ use crate::generated::curriculum::{
     CallerMetaflow, ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery,
     StartupComposition, StartupPlacement, StartupSelection, Target,
 };
-use crate::generated::landing::{
-    ModuleListing, ModuleSource, ModuleSources, ResolvesModuleSources,
-};
 pub use crate::generated::starter::{
     ComposesFlowContext, ContextRequest, ContextRequesting, CurriculumQuerying, CutsRenderedText,
     ExchangesCurriculumFrames, OpensCurriculumComposer, ProvenanceListing, ReadsVerifiedContext,
@@ -327,9 +324,6 @@ impl ReadsVerifiedContext for VerifiedContext {
 #[derive(Debug, Clone, Default)]
 pub struct FixtureComposer {
     pub bodies: std::collections::BTreeMap<String, String>,
-    /// The revision its modules are served at, which a test moves as a
-    /// deploy would.
-    pub revision: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 #[cfg(test)]
@@ -340,7 +334,6 @@ impl From<&[(&str, &str)]> for FixtureComposer {
                 .iter()
                 .map(|(identity, body)| ((*identity).to_owned(), (*body).to_owned()))
                 .collect(),
-            revision: std::sync::Arc::new(std::sync::Mutex::new("0".repeat(40))),
         }
     }
 }
@@ -403,72 +396,6 @@ impl ComposesFlowContext for FixtureComposer {
             user_text,
             context_provenance_vector: rows,
         })
-    }
-}
-
-/// The module sources a launch's identities name, with their dependency
-/// closure: Curriculum resolves the closure (`ResolveSkills`), then the
-/// source of every module in it (`ResolveSources`).
-impl ResolvesModuleSources for CurriculumComposer {
-    fn module_sources<N: ModuleListing>(&self, input: N) -> Result<ModuleSources, String> {
-        let closure =
-            match self.exchange(CurriculumQuery::ResolveSkills(input.module_identities()))? {
-                CurriculumOutcome::ResolvedSkills(closure) => closure,
-                CurriculumOutcome::Rejected(reason) => return Err(reason),
-                _ => return Err("Curriculum answered ResolveSkills with another reply".into()),
-            };
-        match self.exchange(CurriculumQuery::ResolveSources(closure))? {
-            CurriculumOutcome::ResolvedSources(rows) => Ok(rows
-                .into_iter()
-                .map(|row| ModuleSource {
-                    module_identity: row.module_identity,
-                    repository_name: row.repository_name,
-                    source_revision: row.source_revision,
-                    source_relative_path: row.source_relative_path,
-                })
-                .collect()),
-            CurriculumOutcome::Rejected(reason) => Err(reason),
-            _ => Err("Curriculum answered ResolveSources with another reply".into()),
-        }
-    }
-}
-
-impl ResolvesModuleSources for ContextComposer {
-    fn module_sources<N: ModuleListing>(&self, input: N) -> Result<ModuleSources, String> {
-        match self {
-            Self::Curriculum(composer) => composer.module_sources(input),
-            #[cfg(test)]
-            Self::Fixture(composer) => composer.module_sources(input),
-        }
-    }
-}
-
-/// The fixture serves each identity it holds from `<type>/<subject>.md` of
-/// `fixture-context`, at its current revision; one it does not hold is
-/// rejected.
-#[cfg(test)]
-impl ResolvesModuleSources for FixtureComposer {
-    fn module_sources<N: ModuleListing>(&self, input: N) -> Result<ModuleSources, String> {
-        let revision = self
-            .revision
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        input
-            .module_identities()
-            .into_iter()
-            .map(|identity| {
-                if !self.bodies.contains_key(&identity) {
-                    return Err(format!("{identity} is not a module"));
-                }
-                Ok(ModuleSource {
-                    source_relative_path: format!("{}.md", identity.replacen('-', "/", 1)),
-                    module_identity: identity,
-                    repository_name: "fixture-context".into(),
-                    source_revision: revision.clone(),
-                })
-            })
-            .collect()
     }
 }
 

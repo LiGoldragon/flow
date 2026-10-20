@@ -57,7 +57,6 @@ use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{FreshSeat, RendersQueuedWork};
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal};
-use crate::generated::landing::{KeepsLandings, RunsLandings};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data,
@@ -336,8 +335,7 @@ pub enum AtStop {
     /// The seat was due a refresh and rested: its pane was closed, it was
     /// recorded Stopped and its metaflow put Asleep, in the same event;
     /// work queued for the metaflow wakes its next, fresh flow. It is due
-    /// when a landing changed its modules, or when its last measured
-    /// context passed its model's refresh threshold.
+    /// when its last measured context passed its model's refresh threshold.
     Refreshed(Address),
     /// The seat stays as it is, for the reason named.
     Kept(KeptAtStop),
@@ -533,9 +531,8 @@ trait WakesInParts {
     /// gate, for Herdr to show the seat resting, then drains it.
     fn settle_rested(&self, flow_id: &str) -> AtStop;
     /// Ends a seat due a refresh that rests, under the dispatch gate the
-    /// caller holds: its pane is closed under the pane's lease, it is
-    /// recorded Stopped (its metaflow Asleep), and its refresh is recorded
-    /// done on the landing that made it due.
+    /// caller holds: its pane is closed under the pane's lease and it is
+    /// recorded Stopped (its metaflow Asleep).
     fn refresh_at_rest(&self, flow_id: &str, node: &FlowNode, address: Address) -> AtStop;
 }
 
@@ -1521,7 +1518,6 @@ impl WakesInParts for RunningNexus {
         if recorded != Outcome::Recorded {
             return AtStop::Kept(KeptAtStop::RefreshRefused(Box::new(recorded)));
         }
-        self.end_refresh(flow_id);
         AtStop::Refreshed(address)
     }
 
@@ -1570,11 +1566,9 @@ impl WakesInParts for RunningNexus {
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        // A seat due a refresh is ended at its rest rather than handed work:
-        // one a landing marked, or one past its model's refresh threshold,
-        // which is told nothing and writes no handover.
-        let refresh_due = matches!(self.store.refresh_due(flow_id), Ok(Some(_)))
-            || matches!(self.store.past_threshold(flow_id), Ok(true));
+        // A seat past its model's refresh threshold is ended at its rest
+        // rather than handed work; it is told nothing and writes no handover.
+        let refresh_due = matches!(self.store.past_threshold(flow_id), Ok(true));
         match node.harness_kind {
             // A Codex seat is handed work through its app-server, so only
             // the app-server's thread status says it rests, whatever its

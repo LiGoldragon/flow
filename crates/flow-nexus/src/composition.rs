@@ -63,16 +63,6 @@ impl OpensLaunchComposer for LaunchComposer {
     }
 }
 
-/// A launch composer resolves module sources through its context composer.
-impl crate::generated::landing::ResolvesModuleSources for LaunchComposer {
-    fn module_sources<N: crate::generated::landing::ModuleListing>(
-        &self,
-        input: N,
-    ) -> Result<crate::generated::landing::ModuleSources, String> {
-        self.context.module_sources(input)
-    }
-}
-
 /// The trailing section a launch appends to its system prompt:
 /// `Predecessor:` when the profile names one, `Remembered:` when it
 /// remembers any flows, and nothing otherwise. Each line ends with a

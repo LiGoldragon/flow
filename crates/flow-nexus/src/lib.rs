@@ -40,7 +40,6 @@ mod fixture_executable;
 #[allow(unexpected_cfgs, clippy::large_enum_variant)]
 pub mod generated;
 pub mod herdr;
-pub mod landing;
 pub mod launching;
 pub mod observe_agent;
 pub mod peer;
@@ -1208,7 +1207,6 @@ mod tests {
     use crate::herdr::ReadsHerdrPanes;
     mod configuring;
     mod delivery;
-    mod landing;
     mod launching_nexus;
     mod model;
     mod queue_drain;

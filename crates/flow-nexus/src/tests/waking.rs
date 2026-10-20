@@ -351,13 +351,13 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert_ne!(world.session(), seat.session, "a new native session");
     assert!(woken.queue.is_empty());
+    let turns = world.user_turns(&fixture);
     assert!(
-        world
-            .user_turns(&fixture)
-            .iter()
-            .any(|turn| turn.contains(&queue.clone().unsent().prompt_text())),
-        "{:?}",
-        world.user_turns(&fixture)
+        queue.iter().all(|request| {
+            let text = vec![request.clone()].unsent().prompt_text();
+            turns.iter().any(|turn| *turn == text)
+        }),
+        "{turns:?}"
     );
 }
 
@@ -413,13 +413,13 @@ fn an_order_wakes_an_asleep_primary_fresh() {
     assert_ne!(world.session(), seat.session);
     let node = fixture.nexus.store.flow_node(flow_id).unwrap().unwrap();
     assert_eq!(node.session_id, world.session());
+    let turns = world.user_turns(&fixture);
     assert!(
-        world
-            .user_turns(&fixture)
-            .iter()
-            .any(|turn| turn.contains(&queue.clone().unsent().prompt_text())),
-        "{:?}",
-        world.user_turns(&fixture)
+        queue.iter().all(|request| {
+            let text = vec![request.clone()].unsent().prompt_text();
+            turns.iter().any(|turn| *turn == text)
+        }),
+        "{turns:?}"
     );
 }
 
@@ -689,7 +689,7 @@ fn every_wake_composes_a_fresh_flow_from_the_last_launch_whatever_its_end() {
 }
 
 #[test]
-fn a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work() {
+fn a_fresh_wake_composes_modules_without_queued_work() {
     let fixture = NexusFixture::new();
     let queue = [
         Request::Order("first".into()),
@@ -705,11 +705,11 @@ fn a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work() {
         system_modules: vec!["spirit-core".into(), "intent-flow".into()],
         user_modules: vec!["operation-main-flow".into(), "knowledge-flow".into()],
         leave_outs_option: None,
-        prompt: text.clone(),
+        prompt: String::new(),
     };
     let profile = seat.fresh_profile();
     assert_eq!(profile.address, address(Layer::Secondary));
-    assert_eq!(profile.instruction_prompt, text);
+    assert!(profile.instruction_prompt.is_empty());
     assert_eq!(profile.user_modules, seat.user_modules);
     let composed = fixture
         .nexus
@@ -722,8 +722,8 @@ fn a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work() {
             Vec::<signal_flow::LeaveOut>::new(),
         )
         .unwrap();
-    // The same full module text a Start of these identities carries, then
-    // the queued work as the brief.
+    // The same full module text a Start of these identities carries, with
+    // no queued work injected into its first prompt.
     let body = composed.first_prompt_payload.first_prompt_body;
     assert!(body.starts_with("These are your skills, given here; do not reload them."));
     assert!(body.contains("Main flow body.") && body.contains("Knowledge body."));
@@ -733,9 +733,9 @@ fn a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work() {
             .system_prompt_text
             .contains("Spirit body.")
     );
-    let first = body.find("Order.first").expect("first request");
-    let second = body.find("Question.second").expect("second request");
-    assert!(first < second, "oldest first");
+    assert!(!body.contains(&text));
+    assert!(!body.contains("Order.first"));
+    assert!(!body.contains("Question.second"));
     assert!(!body.contains("seat"));
 }
 
@@ -1103,11 +1103,11 @@ impl ReadsFreshWorld for FreshWorld {
 
 /// A queued Order wakes a fresh Claude flow, never the session that slept:
 /// a new FlowId on a new native session Flow chose, its first prompt
-/// carrying the whole queue, oldest first. What arrives while the wake
-/// holds the metaflow is handed to the woken flow after, and the flow that
-/// slept stays Stopped on its own session, in Past.
+/// carrying no queued work. The durable queue and what arrives while the
+/// wake holds the metaflow are handed to the woken flow after, oldest first,
+/// and the flow that slept stays Stopped on its own session, in Past.
 #[test]
-fn a_queued_order_wakes_a_fresh_claude_flow_with_the_whole_queue_then_what_arrived() {
+fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     let mut fixture = NexusFixture::new();
     let seat = ended_claude(&fixture);
     let at = address(Layer::Secondary);
@@ -1138,10 +1138,7 @@ fn a_queued_order_wakes_a_fresh_claude_flow_with_the_whole_queue_then_what_arriv
     assert_ne!(flow_id, "abc123", "a new flow, never the one that slept");
     // D arrives while the wake holds the metaflow.
     let mut woken = stored(&fixture, Layer::Secondary);
-    assert!(
-        woken.queue.is_empty(),
-        "the handed-over queue left with Awoken"
-    );
+    assert_eq!(woken.queue, queue.clone().unsent());
     woken.queue.push(Request::Order("D".into()).unsent());
     fixture.nexus.store.seed_metaflow(woken);
     fixture.nexus.drain_woken(&at, lease);
@@ -1159,15 +1156,20 @@ fn a_queued_order_wakes_a_fresh_claude_flow_with_the_whole_queue_then_what_arriv
     );
     assert!(!world.calls().contains(&seat.session), "{}", world.calls());
     let turns = world.user_turns(&fixture);
-    let first = turns
-        .iter()
-        .position(|turn| turn.contains(&queue.clone().unsent().prompt_text()))
-        .unwrap_or_else(|| panic!("the whole queue in the first prompt: {turns:?}"));
-    let after = turns
-        .iter()
-        .position(|turn| *turn == vec![Request::Order("D".into())].unsent().prompt_text())
-        .unwrap_or_else(|| panic!("D handed over after the wake: {turns:?}"));
-    assert!(first < after, "{turns:?}");
+    let expected = [
+        Request::Order("A".into()),
+        Request::Notice("B".into()),
+        Request::Question("C".into()),
+        Request::Order("D".into()),
+    ];
+    let positions = expected.map(|request| {
+        let text = vec![request].unsent().prompt_text();
+        turns
+            .iter()
+            .position(|turn| *turn == text)
+            .unwrap_or_else(|| panic!("queued request handed over after wake: {turns:?}"))
+    });
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{turns:?}");
 
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
@@ -1246,13 +1248,13 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
     };
     assert_ne!(flow_id, "abc123");
     assert!(woken.queue.is_empty());
+    let turns = world.user_turns(&fixture);
     assert!(
-        world
-            .user_turns(&fixture)
-            .iter()
-            .any(|turn| turn.contains(&queue.clone().unsent().prompt_text())),
-        "{:?}",
-        world.user_turns(&fixture)
+        queue.iter().all(|request| {
+            let text = vec![request.clone()].unsent().prompt_text();
+            turns.iter().any(|turn| *turn == text)
+        }),
+        "{turns:?}"
     );
     assert_eq!(world.claude_starts(), 1, "woken once: {}", world.calls());
     assert_eq!(stored(&fixture, Layer::Tertiary).state, State::Asleep);
@@ -2837,7 +2839,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
 
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(FRESH_CODEX_FLOW.into()));
-    assert!(woken.queue.is_empty());
+    assert_eq!(woken.queue, queue.clone().unsent());
     assert_eq!(woken.past, vec![old.flow_id.clone()]);
     let new_node = fixture
         .nexus
@@ -2882,7 +2884,7 @@ fn a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
         Layer::Secondary,
         State::Asleep,
         vec!["abc123"],
-        queue,
+        queue.clone(),
     ));
     let at = address(Layer::Secondary);
     let world = fixture.fresh_claude_world();
@@ -2896,7 +2898,7 @@ fn a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
     assert_ne!(flow_id, "abc123");
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
-    assert!(woken.queue.is_empty());
+    assert_eq!(woken.queue, queue.unsent());
     let new_node = fixture.nexus.store.flow_node(&flow_id).unwrap().unwrap();
     let new_session = fs::read_to_string(world.state.join("session")).unwrap();
     assert_eq!(new_node.session_id, new_session);
@@ -2954,7 +2956,7 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
     };
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id));
-    assert!(woken.queue.is_empty());
+    assert_eq!(woken.queue.len(), 1);
 }
 
 /// A fresh wake takes the model configured for its seat's layer and
@@ -3021,7 +3023,7 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
     };
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
-    assert!(woken.queue.is_empty());
+    assert_eq!(woken.queue.len(), 1);
     let launched = fixture
         .nexus
         .store

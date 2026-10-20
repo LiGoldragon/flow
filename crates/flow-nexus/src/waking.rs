@@ -1348,13 +1348,6 @@ impl WakesInParts for RunningNexus {
         if metaflow.queue.is_empty() {
             return Err(WakeRefusal::NothingQueued);
         }
-        // Read, not taken: the requests leave the queue only when the
-        // started flow is recorded Awake.
-        let requests = metaflow.queue.clone();
-        let Ok(delivered) = i64::try_from(requests.len()) else {
-            return Err(WakeRefusal::StoreUnreadable);
-        };
-        let text = requests.prompt_text();
         let plan = self.wake_plan(&metaflow);
         // The last flow's session must not be running still: a seat that
         // flow's harness keeps, as one started by hand would, is never
@@ -1378,7 +1371,7 @@ impl WakesInParts for RunningNexus {
             return Err(WakeRefusal::Unplaceable);
         };
         let flow_id = self
-            .start_fresh(&metaflow, fresh, &text)
+            .start_fresh(&metaflow, fresh, "")
             .map_err(WakeRefusal::FreshNotStarted)?;
         let _turn = self
             .dispatch_gate
@@ -1388,7 +1381,10 @@ impl WakesInParts for RunningNexus {
             Record_Data_Awoken_Data {
                 address: address.clone(),
                 flow_id: flow_id.clone(),
-                delivered,
+                // Starting the seat delivers no queued request. The durable
+                // queue is handed over through the ordinary drain path once
+                // the seat is Awake.
+                delivered: 0,
             },
         ))) {
             Outcome::Recorded => Ok(flow_id),

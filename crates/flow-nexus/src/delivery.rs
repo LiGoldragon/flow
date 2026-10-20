@@ -434,13 +434,27 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
     }
 
     fn run(&self) -> Result<Delivery, DeliveryRejection> {
-        let mut agent_state = self.nexus.writable_state(self.target)?;
+        let hard = matches!(self.request.message, Message::HardAbrupt(_));
+        // A hard delivery interrupts before inspecting the composer. The
+        // interrupt itself can restore Flow's previous letter to the
+        // composer; that letter is retracted below, while any other draft
+        // still refuses the delivery without being overwritten.
+        let mut agent_state = if hard {
+            match self.nexus.herdr.pane_agent(&self.target.node) {
+                PaneAgent::Present { agent_state, ready: true } => agent_state,
+                PaneAgent::Present { ready: false, .. } | PaneAgent::Unreadable => {
+                    return Err(DeliveryRejection::RouteUnavailable);
+                }
+                PaneAgent::Absent => return Err(DeliveryRejection::RouteUnavailable),
+            }
+        } else {
+            self.nexus.writable_state(self.target)?
+        };
         let soft = matches!(self.request.message, Message::Soft(_));
         if soft && !matches!(agent_state, AgentState::Idle | AgentState::Done) {
             return Err(DeliveryRejection::RecipientWorking);
         }
         self.step(LeaseStep::Acquired)?;
-        let hard = matches!(self.request.message, Message::HardAbrupt(_));
         let mut interrupt_witness = InterruptWitness::NotRequested;
         if hard && agent_state == AgentState::Working {
             let interruption = self
@@ -472,6 +486,8 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
                 }
                 Err(refusal) => return self.refuse(refusal.into()),
             };
+        } else if hard {
+            agent_state = self.nexus.writable_state(self.target)?;
         }
         let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
         let text = self.request.message.pane_text();

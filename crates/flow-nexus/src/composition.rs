@@ -512,15 +512,16 @@ impl ComposesLaunch for LaunchComposer {
 /// harness, not a word, and is typed as U+FFFD. Work that carries the
 /// living's words ends with the presentation line.
 pub trait RendersQueuedWork {
-    const QUEUED_WORK_OPENING: &'static str = "Work queued for this metaflow while no flow of it was running, oldest first, each with who sent it:";
     fn prompt_text(&self) -> String;
 }
 
 impl RendersQueuedWork for [QueuedRequest] {
     fn prompt_text(&self) -> String {
-        let mut text = String::from(Self::QUEUED_WORK_OPENING);
-        for request in self {
-            text.push('\n');
+        let mut text = String::new();
+        for (index, request) in self.iter().enumerate() {
+            if index > 0 {
+                text.push('\n');
+            }
             text.extend(
                 request
                     .datomize(Vec::new())
@@ -879,7 +880,7 @@ pub(crate) mod tests {
         assert!(
             [order]
                 .prompt_text()
-                .ends_with("\n{ Flow Order.investigate }")
+                .ends_with("{ Flow Order.investigate }")
         );
     }
 

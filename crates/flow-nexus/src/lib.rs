@@ -69,6 +69,7 @@ use observe_agent::ObservesAgent;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
+use send_tool::ServesLaunchCalls;
 use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
@@ -1007,11 +1008,15 @@ trait DispatchesSerially {
 
 impl DispatchesSerially for RunningNexus {
     fn dispatch_serially(&self, query: Query, origin: Origin) -> Response {
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.dispatch_from(query, origin)
+        let response = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.dispatch_from(query, origin)
+        };
+        self.wake_deferred();
+        response
     }
 
     fn dispatch_meta_serially(

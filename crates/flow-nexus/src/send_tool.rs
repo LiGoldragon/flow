@@ -47,7 +47,7 @@ use crate::generated::send_tool::{
 };
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
-use crate::waking::RestsEndedAwake;
+use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
 use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
@@ -273,11 +273,17 @@ impl HandlesSendCall for RunningNexus {
         if call.tool_name != SendTool::tool_name() {
             return Self::refused(SendRefusal::UnknownTool);
         }
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.handle_held_send_call(call)
+        let outcome = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.handle_held_send_call(call)
+        };
+        if let SendOutcome::Queued(queued) = &outcome {
+            self.wake_due(queued.target.clone());
+        }
+        outcome
     }
 
     fn handle_held_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
@@ -497,6 +503,9 @@ impl RespondsToSendCalls for RunningNexus {
             None => Self::refused(SendRefusal::Malformed),
         };
         let answered = subscription.answer(id, outcome.tool_response());
+        if let SendOutcome::Queued(queued) = outcome {
+            self.wake_due(queued.target);
+        }
         answered
     }
 }
@@ -514,6 +523,7 @@ pub(crate) type LaunchResponder = ThreadConnection;
 #[derive(Default)]
 pub struct LaunchCalls {
     responder: std::sync::Mutex<Option<LaunchResponder>>,
+    deferred_wakes: std::sync::Mutex<Vec<Address>>,
 }
 
 /// A running Codex launch serves its own thread's calls.
@@ -540,6 +550,8 @@ pub(crate) trait ServesLaunchCalls {
     /// read, then closes the connection. A later call is the Nexus's
     /// responders' (`ServesSendTool`).
     fn close_launch_responder(&self);
+    /// Off the dispatch gate, schedules every target queued during launch.
+    fn wake_deferred(&self);
 }
 
 impl ServesLaunchCalls for RunningNexus {
@@ -649,6 +661,13 @@ impl ServesLaunchCalls for RunningNexus {
             None => Self::refused(SendRefusal::Malformed),
         };
         let answered = responder.subscription.answer(id, outcome.tool_response());
+        if let SendOutcome::Queued(queued) = outcome {
+            self.launch_calls
+                .deferred_wakes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(queued.target);
+        }
         answered
     }
 
@@ -677,6 +696,15 @@ impl ServesLaunchCalls for RunningNexus {
         responder.subscription.close();
     }
 
+    fn wake_deferred(&self) {
+        let wakes = std::mem::take(
+            &mut *self.launch_calls.deferred_wakes.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for target in wakes {
+            self.wake_due(target);
+        }
+    }
 }
 
 /// What the calls replayed on an interrupted launch's thread were answered.

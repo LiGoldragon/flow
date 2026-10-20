@@ -197,6 +197,27 @@ fn a_draft_in_the_composer_is_never_appended_to() {
 }
 
 #[test]
+fn hard_abrupt_interrupts_before_it_refuses_an_occupied_composer() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.current_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.show_composer("\u{1b}[1m›\u{1b}[0m half a thought");
+    fixture.register_with(FlowLifecycle::Active);
+    assert_eq!(
+        fixture.deliver("hard-draft", Message::HardAbrupt(letter("stop now"))),
+        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
+    );
+    let operations = fixture.operations();
+    assert!(
+        operations.starts_with("--session messaging-build pane send-keys w1:p3 esc\n"),
+        "interrupt first: {operations}"
+    );
+    assert!(!operations.contains("agent prompt"), "draft preserved: {operations}");
+}
+
+#[test]
 fn hard_abrupt_interrupts_a_working_recipient_before_typing() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(

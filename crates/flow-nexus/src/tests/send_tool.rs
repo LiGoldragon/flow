@@ -1325,7 +1325,7 @@ fn a_queued_request_is_rendered_with_its_sender() {
     ];
     assert_eq!(
         queue.prompt_text(),
-        "Work queued for this metaflow while no flow of it was running, oldest first, each with who sent it:\n{ Sender.{ Mind alpha Tertiary } Order.«Carry on.» }\n{ Unknown Notice.kept }"
+        "{ Sender.{ Mind alpha Tertiary } Order.«Carry on.» }\n{ Unknown Notice.kept }"
     );
 }
 

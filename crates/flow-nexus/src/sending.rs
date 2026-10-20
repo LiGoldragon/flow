@@ -27,7 +27,7 @@ use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::sent::{NamesCodexAppServers, QueuesSentRequests};
 use crate::store::{FlowRegistration, NamesConfiguredModel, RegistersExistingFlow};
-use crate::waking::{RestsEndedAwake, WakePolicy};
+use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats, WakePolicy};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
@@ -175,13 +175,17 @@ impl SendsRequests for RunningNexus {
         {
             return response.into();
         }
-        match self.store.queue_sent(&sender, &recipient, request, now) {
-            Ok(Response::Queued) => {
-                SendAnswer { response: Response::Queued }
-            }
+        let answer = match self.store.queue_sent(&sender, &recipient, request, now) {
+            Ok(Response::Queued) => SendAnswer { response: Response::Queued },
             Ok(response) => response.into(),
             Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
+        };
+        let queued = answer.response == Response::Queued;
+        drop(_turn);
+        if queued {
+            self.wake_due(recipient);
         }
+        answer
     }
 
     fn live_awake_flow(&self, address: &Address) -> Option<String> {

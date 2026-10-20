@@ -5,22 +5,16 @@ use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSend
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
 use crate::waking::RestsEndedAwake;
 use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
-use signal_flow::{Address, IdentifyThread_Data, Process, Query, Refusal, Response};
+use signal_flow::{IdentifyThread_Data, Process, Query, Refusal, Response};
 
-/// A metaflow dispatch's answer, and the recipient a Deliver queued for.
-/// Whether it wakes is read from Flow's records after the answer is written
-/// or failed to be (`SleepsAndWakesSeats::wake_due`), off the dispatch gate.
+/// A metaflow dispatch's answer.
 pub(crate) struct MetaflowAnswer {
     pub response: Response,
-    pub wake: Option<Address>,
 }
 
 impl From<Response> for MetaflowAnswer {
     fn from(response: Response) -> Self {
-        Self {
-            response,
-            wake: None,
-        }
+        Self { response }
     }
 }
 
@@ -139,14 +133,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
                 .and_then(|pane| self.bound_caller(&pane).ok())
                 .map(|caller| caller.flow_id);
-            let address = binding.address.clone();
-            // A seat bound Awake drains what waits for it once its turn
-            // allows, as a queued request would: read after the answer.
             return match self.store.bind_metaflow(binding, peer, launched) {
-                Ok(response @ Response::Bound(_)) => MetaflowAnswer {
-                    response,
-                    wake: Some(address),
-                },
                 Ok(response) => response.into(),
                 Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
             };
@@ -161,15 +148,9 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Query::IdentifyThread(request) => self.identify_thread(request),
                 Query::Lock(request) => self.store.lock_metaflow(request, now),
                 Query::Deliver(request) => {
-                    let address = request.lock.address.clone();
-                    // Queued for a metaflow left Awake as an ended flow, the
-                    // request wakes it as it would an Asleep one.
-                    self.rest_ended_awake(&address);
+                    self.rest_ended_awake(&request.lock.address);
                     return match self.store.queue_metaflow(request, now) {
-                        Ok(response) => MetaflowAnswer {
-                            wake: (response == Response::Queued).then_some(address),
-                            response,
-                        },
+                        Ok(response) => response.into(),
                         Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
                     };
                 }

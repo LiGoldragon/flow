@@ -90,7 +90,13 @@ pub trait LaunchesFlows {
 }
 
 impl LaunchesFlows for RunningNexus {
-    fn start(&self, profile: LaunchProfile, origin: Origin) -> Response {
+    fn start(&self, mut profile: LaunchProfile, origin: Origin) -> Response {
+        profile.model_name = match self.store.configured_model(&profile.address) {
+            Ok(Some(model)) => model,
+            Ok(None) | Err(_) => {
+                return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+            }
+        };
         let launch_request_id = profile.launch_request_id.clone();
         let existing = match self.store.launch_attempt(&launch_request_id) {
             Ok(existing) => existing,
@@ -171,36 +177,6 @@ impl LaunchesFlows for RunningNexus {
             return self.promote_ambiguous(attempt);
         }
         let persistence = || Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-        // A seat runs the model configured for its Address's layer and
-        // aspect, by its exact name: any other is refused before anything is
-        // written, composed or opened.
-        match self.store.model_refusal(&profile) {
-            Ok(None) => {}
-            Ok(Some(refusal)) => {
-                eprintln!(
-                    "flow-nexus: launch {} refused: model {} is not the model configured for {:?} {:?}: {refusal:?}",
-                    launch_request_id,
-                    profile.model_name,
-                    profile.address.aspect,
-                    profile.address.layer
-                );
-                return Response::StartRejected(StartRejection::ModelRefused(refusal));
-            }
-            Err(_) => return persistence(),
-        }
-        // A Primary's Secondary starts first; without it the Start is
-        // refused before anything is written, composed or opened.
-        match self.store.secondary_refusal(&profile.address) {
-            Ok(None) => {}
-            Ok(Some(rejection)) => {
-                eprintln!(
-                    "flow-nexus: launch {launch_request_id} refused: no Secondary is recorded for {:?} {}",
-                    profile.address.aspect, profile.address.topic
-                );
-                return Response::StartRejected(rejection);
-            }
-            Err(_) => return persistence(),
-        }
         // A hold an ended flow still keeps on this Address is given back
         // first, so the refusal reads what Metaflows reports.
         match self.store.give_back_ended_holds(&profile.address) {
@@ -573,7 +549,15 @@ impl LaunchesFlows for RunningNexus {
         }
     }
 
-    fn replace(&self, profile: LaunchProfile, origin: Origin) -> Response {
+    fn replace(&self, mut profile: LaunchProfile, origin: Origin) -> Response {
+        profile.model_name = match self.store.configured_model(&profile.address) {
+            Ok(Some(model)) => model,
+            Ok(None) | Err(_) => {
+                return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::LaunchPersistenceRefused,
+                ));
+            }
+        };
         let refused = |rejection| Response::ReplaceRejected(rejection);
         let persistence = || {
             Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
@@ -612,17 +596,6 @@ impl LaunchesFlows for RunningNexus {
                 ));
             }
             Ok(_) => {}
-            Err(_) => return persistence(),
-        }
-        // A successor whose model is not the configured one is refused
-        // before the replacement is recorded.
-        match self.store.model_refusal(&profile) {
-            Ok(None) => {}
-            Ok(Some(refusal)) => {
-                return refused(ReplaceRejection::LaunchRefused(
-                    StartRejection::ModelRefused(refusal),
-                ));
-            }
             Err(_) => return persistence(),
         }
         match self.store.flow_node(&predecessor) {

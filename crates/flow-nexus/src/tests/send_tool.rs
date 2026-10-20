@@ -1256,17 +1256,15 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
             request: Request::Order("first-turn-witness".into()),
         }]
     );
-    fixture.nexus.wake_deferred();
-    let woken = fixture.stored_at(&asleep_target());
-    eprintln!("witness target {:?} queue {:?}", woken.state, woken.queue);
-    assert!(matches!(&woken.state, State::Awake(flow_id) if flow_id != "abc123"));
-    assert!(woken.queue.is_empty());
+    let held = fixture.stored_at(&asleep_target());
+    assert_eq!(held.state, State::Asleep);
+    assert_eq!(held.queue.len(), 1);
     let handed = super::waking::ReadsFreshWorld::user_turns(&world, &fixture)
         .concat()
         .matches("{ Sender.{ Field flow Secondary } Order.first-turn-witness }")
         .count();
     eprintln!("witness typed orders {handed}");
-    assert_eq!(handed, 1);
+    assert_eq!(handed, 0);
 }
 
 /// The first half of a restart witness against a scratch codex app-server:

@@ -538,20 +538,9 @@ fn a_flow_that_stopped_while_working_or_awaited_is_kept() {
     assert!(!closes(&waking));
 }
 
-/// An Order, a Question and the living's words wake a metaflow of any
-/// layer, a Primary included; a Result or a Notice waits queued.
+/// An explicit wake applies to queued work without judging its request kind.
 #[test]
-fn work_and_words_wake_every_layer_and_results_and_notices_wait() {
-    assert!(RunningNexus::wakes_for(&Request::Order("go".into())));
-    assert!(RunningNexus::wakes_for(&Request::Question("why".into())));
-    assert!(RunningNexus::wakes_for(&Request::Psyche(
-        flow_ethos::Said {
-            context: "c".into(),
-            verbatim: "v".into(),
-        }
-    )));
-    assert!(!RunningNexus::wakes_for(&Request::Result("done".into())));
-    assert!(!RunningNexus::wakes_for(&Request::Notice("fyi".into())));
+fn explicit_wake_does_not_judge_message_kind() {
     assert!(RunningNexus::rests_at(&signal_flow::AgentState::Idle));
     assert!(RunningNexus::rests_at(&signal_flow::AgentState::Done));
     assert!(!RunningNexus::rests_at(&signal_flow::AgentState::Working));
@@ -568,18 +557,9 @@ fn work_and_words_wake_every_layer_and_results_and_notices_wait() {
                 layer.clone(),
                 State::Asleep,
                 vec![],
-                vec![Request::Notice("fyi".into()), Request::Order("go".into())],
+                vec![Request::Notice("fyi".into())],
             )),
-            "an Order wakes a {layer:?}"
-        );
-        assert!(
-            !fixture.nexus.wake_is_due(&metaflow(
-                layer.clone(),
-                State::Asleep,
-                vec![],
-                vec![Request::Result("done".into())],
-            )),
-            "a Result waits at a {layer:?}"
+            "queued work can be explicitly woken at {layer:?}"
         );
     }
 }
@@ -1689,7 +1669,6 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         Some(&message),
     );
     assert_eq!(answer.response, Response::Queued);
-    assert_eq!(answer.wake, Some(at.clone()), "the Order wakes the seat");
 
     let world = fixture.fresh_claude_world();
     fixture.nexus.wake_due(at.clone());

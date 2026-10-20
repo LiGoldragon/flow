@@ -27,8 +27,7 @@
 //! that arrive while the wake runs are handed to the woken flow once it is
 //! up, oldest first.
 //!
-//! Each choice of when a seat rests and which requests wake is one function
-//! of [`WakePolicy`], so a ruling changes one place.
+//! Each choice of when a seat rests is one function of [`WakePolicy`].
 //!
 //! Whether a metaflow is due a wake is read from Flow's records alone
 //! ([`SleepsAndWakesSeats::wake_is_due`]): it is Asleep and holds work that
@@ -66,7 +65,6 @@ use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
 use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster};
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
-use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -84,7 +82,7 @@ use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Undecided};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Layer, Metaflow, NativePrompt, NativeStop, Origin, PowerLevel, QueuedRequest, Request,
+    Layer, Metaflow, NativePrompt, NativeStop, Origin, PowerLevel, QueuedRequest,
     Response,
 };
 use std::collections::HashSet;
@@ -96,15 +94,6 @@ pub trait WakePolicy {
     /// or Done. Working, Blocked or unreadable is not resting.
     fn rests_at(agent_state: &AgentState) -> bool {
         matches!(agent_state, AgentState::Idle | AgentState::Done)
-    }
-
-    /// Work and the living's words wake a seat; a Result or a Notice waits
-    /// queued for its next wake.
-    fn wakes_for(request: &Request) -> bool {
-        matches!(
-            request,
-            Request::Order(_) | Request::Question(_) | Request::Psyche(_) | Request::Psyches(_)
-        )
     }
 
     /// The power a fresh seat is registered with, by its layer.
@@ -490,9 +479,6 @@ impl StartsUnbound for RunningNexus {
             let response = self.start(profile, Origin::Unbound);
             self.settle(&launch_request_id, response)
         };
-        // A first turn may have queued work meanwhile; its targets are woken
-        // now that the gate is given back.
-        self.wake_deferred();
         // The gate is released before the wait: the launch is settled by the
         // Nexus's own promoter, which needs the gate to do it.
         let response = match response {
@@ -1107,11 +1093,7 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_is_due(&self, metaflow: &Metaflow) -> bool {
-        metaflow.state == flow_ethos::State::Asleep
-            && metaflow
-                .queue
-                .iter()
-                .any(|queued| Self::wakes_for(&queued.request))
+        metaflow.state == flow_ethos::State::Asleep && !metaflow.queue.is_empty()
     }
 
     fn recover_wakes(&self) {

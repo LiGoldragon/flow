@@ -1,7 +1,6 @@
 //! A flow past its model's refresh threshold is given no new message and is
 //! replaced as it goes idle, reaped in the same event; a compaction its
-//! harness made while it kept working raises a warning and an
-//! investigation.
+//! harness made while it kept working raises a warning.
 
 use super::waking::{
     CLAUDE_SEAT, append_main_rows, claude_agent, claude_seat, claude_stop, claude_transcript,
@@ -31,14 +30,6 @@ fn seat_address() -> Address {
         aspect: Aspect::Mind,
         topic: "flow".into(),
         layer: Layer::Secondary,
-    }
-}
-
-fn investigation_address() -> Address {
-    Address {
-        aspect: Aspect::Psyche,
-        topic: "compaction".into(),
-        layer: Layer::Tertiary,
     }
 }
 
@@ -280,31 +271,14 @@ fn append_boundary(fixture: &NexusFixture, uuid: &str, trigger: &str, timestamp:
     .unwrap();
 }
 
-fn configure_investigation(fixture: &NexusFixture) {
-    fixture
-        .nexus
-        .store
-        .configure_change(ConfigurationChange::Investigation(investigation_address()))
-        .expect("investigation configured");
-}
-
 /// A compaction the harness made on its own, while the flow kept working,
-/// raises a warning once and gives the investigation to the configured
-/// seat; one the flow was asked for raises nothing, and one made before
-/// this Nexus watched the transcript raises nothing.
+/// raises a warning once; one the flow was asked for raises nothing, and
+/// one made before this Nexus watched the transcript raises nothing.
 #[test]
-fn a_compaction_during_continuous_work_is_investigated_once() {
+fn a_compaction_during_continuous_work_is_recorded_once_without_an_order() {
     let fixture = NexusFixture::new();
     claude_seat(&fixture, 40_000);
     seat_metaflow(&fixture, vec![]);
-    configure_investigation(&fixture);
-    // The Investigation seat is Awake: the investigation is queued for it.
-    fixture.nexus.store.seed_metaflow(Metaflow {
-        address: investigation_address(),
-        state: State::Awake("1nv3st".into()),
-        past: vec![],
-        queue: vec![],
-    });
     append_boundary(&fixture, "before-watch", "auto", "2020-01-01T00:00:00.000Z");
     append_boundary(&fixture, "asked", "manual", &now_transcript_time());
     append_boundary(&fixture, "continuous", "auto", &now_transcript_time());
@@ -325,21 +299,8 @@ fn a_compaction_during_continuous_work_is_investigated_once() {
             .collect::<Vec<_>>(),
         ["continuous"]
     );
-    assert_eq!(compactions[0].investigation, Investigation::Queued);
+    assert_eq!(compactions[0].investigation, Investigation::NotConfigured);
     assert_eq!(compactions[0].address, Some(seat_address()));
-    let investigation = fixture
-        .nexus
-        .store
-        .metaflow(&investigation_address())
-        .unwrap()
-        .unwrap();
-    assert_eq!(investigation.queue.len(), 1, "queued once");
-    let Request::Order(brief) = &investigation.queue[0].request else {
-        panic!("an Order: {:?}", investigation.queue[0]);
-    };
-    assert_eq!(investigation.queue[0].sent_by, SentBy::Flow);
-    assert!(brief.contains(&format!("flow {CLAUDE_SEAT} ({{ Mind flow Secondary }})")));
-    assert!(brief.contains("Psyche core Secondary"));
 }
 
 /// With no Investigation seat configured the warning is logged and the
@@ -392,25 +353,4 @@ fn a_codex_compaction_is_raised_unless_a_compact_asked_for_it() {
             .collect::<Vec<_>>(),
         ["item-own"]
     );
-}
-
-/// An Investigation seat that is not Awake is launched from its Metaflows
-/// declaration; one with no declaration is refused, and the compaction is
-/// recorded with why.
-#[test]
-fn an_undeclared_investigation_seat_is_refused_and_recorded() {
-    let fixture = NexusFixture::new();
-    claude_seat(&fixture, 40_000);
-    seat_metaflow(&fixture, vec![]);
-    configure_investigation(&fixture);
-    append_boundary(&fixture, "continuous", "auto", &now_transcript_time());
-    fixture
-        .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &signal_flow::Event::Started);
-    let compactions = fixture.nexus.store.compactions_of(CLAUDE_SEAT).unwrap();
-    assert_eq!(compactions.len(), 1);
-    let Investigation::Refused(why) = &compactions[0].investigation else {
-        panic!("refused: {:?}", compactions[0].investigation);
-    };
-    assert!(why.contains("Undeclared"), "{why}");
 }

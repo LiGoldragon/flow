@@ -1,9 +1,7 @@
 //! Compaction during continuous work.
 //!
 //! A flow that keeps working without being given more work may compact.
-//! Its compaction raises a warning, and a flow investigates why it worked
-//! so long, so that the trouble is brought to the living or Psyche
-//! reconsiders the approach.
+//! Its compaction raises a warning.
 //!
 //! A compaction is continuous work when the harness made it on its own: a
 //! Claude transcript's `compact_boundary` row whose trigger is `auto`, or a
@@ -21,28 +19,17 @@
 //! recorded once ([`crate::store::compaction`]), so a compaction read twice
 //! warns once.
 //!
-//! The warning is a journal line at warning priority, and the investigation
-//! goes to the configured Investigation seat: launched from its Metaflows
-//! declaration with it as its brief, or, when the seat is Awake or waking,
-//! queued there as an Order. With no seat configured the warning is logged
-//! only.
+//! The warning is a journal line at warning priority.
 
 use crate::RunningNexus;
 use crate::generated::operation::{Operation, Outcome, Record_Data, Record_Data_Context_Data};
 use crate::performing::Performs;
-use crate::sending::LaunchesDeclared;
-use crate::store::ManagesMetaflowState;
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
 use crate::store::context::RecordsContextSize;
-use crate::store::metaflow::{QueuesFlowRequest, SleepsMetaflows};
+use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
-use crate::waking::{
-    HoldsWakingMetaflows, ReadsClaudeDelivery, SleepsAndWakesSeats, StartsUnbound,
-};
-use signal_flow::{
-    Address, Aspect, FlowNode, HarnessKind, Launch_Data, Layer, Metaflow, QueuedRequest, Request,
-    SentBy,
-};
+use crate::waking::ReadsClaudeDelivery;
+use signal_flow::{Address, Aspect, FlowNode, HarnessKind, Layer};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -230,21 +217,21 @@ impl ReadsCodexContextSignal for serde_json::Value {
     }
 }
 
-/// The brief an investigation is given.
-pub struct InvestigationBrief<'brief> {
-    pub flow_id: &'brief str,
-    pub address: Option<&'brief Address>,
-    pub harness_kind: &'brief HarnessKind,
-    pub session: &'brief str,
-    pub transcript: Option<&'brief Path>,
+/// The warning written for a continuous-work compaction.
+pub struct CompactionWarning<'warning> {
+    pub flow_id: &'warning str,
+    pub address: Option<&'warning Address>,
+    pub harness_kind: &'warning HarnessKind,
+    pub session: &'warning str,
+    pub transcript: Option<&'warning Path>,
     pub pre_tokens: Option<i64>,
 }
 
-pub trait RendersInvestigationBrief {
+pub trait RendersCompactionWarning {
     fn text(&self) -> String;
 }
 
-impl RendersInvestigationBrief for InvestigationBrief<'_> {
+impl RendersCompactionWarning for CompactionWarning<'_> {
     fn text(&self) -> String {
         let seat = self.address.map_or_else(
             || "a flow no metaflow is Awake as".to_owned(),
@@ -262,7 +249,7 @@ impl RendersInvestigationBrief for InvestigationBrief<'_> {
             (HarnessKind::Codex, _) => format!("Its Codex thread is {}.", self.session),
         };
         format!(
-            "Flow warning: flow {} ({seat}) compacted its context{size} while it kept working without being given more work. {source} Investigate why it worked so long: what it was given, what it did, and where it went on without a new order. Send your finding to Psyche core Secondary, so that the trouble is brought to the living or Psyche reconsiders the approach and gives guidance.",
+            "Flow warning: flow {} ({seat}) compacted its context{size} while it kept working without being given more work. {source}",
             self.flow_id
         )
     }
@@ -299,11 +286,8 @@ pub trait WatchesCompactions {
     /// A Compact was typed into the flow: its next Codex compaction is the
     /// one asked for.
     fn compaction_requested(&self, flow_id: &str);
-    /// Raises a compaction made during continuous work, once: the warning
-    /// and the investigation.
+    /// Raises a compaction made during continuous work once as a warning.
     fn raise_compaction(&self, node: &FlowNode, boundary: &str, pre_tokens: Option<i64>);
-    /// Gives the investigation to the configured Investigation seat.
-    fn investigate(&self, brief: &str) -> Investigation;
 }
 
 impl WatchesCompactions for RunningNexus {
@@ -409,7 +393,7 @@ impl WatchesCompactions for RunningNexus {
             HarnessKind::Claude => self.claude_transcript(node),
             HarnessKind::Codex => None,
         };
-        let brief = InvestigationBrief {
+        let warning = CompactionWarning {
             flow_id,
             address: address.as_ref(),
             harness_kind: &node.harness_kind,
@@ -418,13 +402,11 @@ impl WatchesCompactions for RunningNexus {
             pre_tokens,
         }
         .text();
-        // Recorded before the investigation starts, so a second reading of
-        // the same compaction, while it starts, raises nothing again.
         let compaction = Compaction {
             flow_id: flow_id.to_owned(),
             boundary: boundary.to_owned(),
             address: address.clone(),
-            investigation: Investigation::Refused("not yet investigated".into()),
+            investigation: Investigation::NotConfigured,
         };
         match self.store.record_compaction(compaction.clone()) {
             Ok(true) => {}
@@ -436,96 +418,7 @@ impl WatchesCompactions for RunningNexus {
                 return;
             }
         }
-        eprintln!("<4>flow-nexus: WARNING {brief}");
-        let investigation = self.investigate(&brief);
-        eprintln!(
-            "flow-nexus: compaction {boundary} of flow {flow_id} investigation: {investigation:?}"
-        );
-        if let Err(error) = self.store.settle_compaction(Compaction {
-            investigation,
-            ..compaction
-        }) {
-            eprintln!("flow-nexus: compaction {boundary} of flow {flow_id} not settled: {error}");
-        }
-    }
-
-    fn investigate(&self, brief: &str) -> Investigation {
-        let address = match self.store.configured_investigation() {
-            Ok(Some(address)) => address,
-            Ok(None) => return Investigation::NotConfigured,
-            Err(error) => return Investigation::Refused(error.to_string()),
-        };
-        let order = QueuedRequest {
-            // No metaflow sent it: Flow raised it.
-            sent_by: SentBy::Flow,
-            request: Request::Order(brief.to_owned()),
-        };
-        // A wake already running for the seat drains what is queued now.
-        let Some(lease) = self.waking.hold(&address) else {
-            return self.queue_investigation(&address, order);
-        };
-        let metaflow = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match self.store.metaflow(&address) {
-                Ok(metaflow) => metaflow,
-                Err(error) => return Investigation::Refused(error.to_string()),
-            }
-        };
-        if let Some(Metaflow {
-            state: flow_ethos::State::Awake(_),
-            ..
-        }) = metaflow
-        {
-            drop(lease);
-            return self.queue_investigation(&address, order);
-        }
-        // The seat is launched from its Metaflows declaration, as a Launch
-        // no caller stands behind is.
-        let started = match self.declared_launch(
-            Launch_Data {
-                address: address.clone(),
-                instruction_prompt: brief.to_owned(),
-            },
-            None,
-        ) {
-            Ok(signal_flow::Query::Start(profile)) => self
-                .start_unbound(profile)
-                .map_err(|failure| format!("{failure:?}")),
-            Ok(_) => Err("the Launch named no Start".to_owned()),
-            Err(refusal) => Err(format!("{refusal:?}")),
-        };
-        drop(lease);
-        match started {
-            Ok(flow_id) => Investigation::Started(flow_id),
-            Err(failure) => Investigation::Refused(failure),
-        }
-    }
-}
-
-trait QueuesInvestigation {
-    fn queue_investigation(&self, address: &Address, order: QueuedRequest) -> Investigation;
-}
-
-impl QueuesInvestigation for RunningNexus {
-    fn queue_investigation(&self, address: &Address, order: QueuedRequest) -> Investigation {
-        let queued = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.store.queue_flow_request(address, order)
-        };
-        match queued {
-            Ok(true) => {
-                self.wake_due(address.clone());
-                Investigation::Queued
-            }
-            Ok(false) => Investigation::Refused("the Investigation seat is not recorded".into()),
-            Err(error) => Investigation::Refused(error.to_string()),
-        }
+        eprintln!("<4>flow-nexus: WARNING {warning}");
     }
 }
 
@@ -544,8 +437,8 @@ impl FindsCodexFlow for RunningNexus {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeCompaction, CodexContextSignal, InvestigationBrief, ReadsClaudeCompactions,
-        ReadsCodexContextSignal, RendersInvestigationBrief, WritesTranscriptTime,
+        ClaudeCompaction, CodexContextSignal, CompactionWarning, ReadsClaudeCompactions,
+        ReadsCodexContextSignal, RendersCompactionWarning, WritesTranscriptTime,
     };
     use signal_flow::{Address, Aspect, HarnessKind, Layer};
     use std::io::Write;
@@ -667,14 +560,14 @@ mod tests {
     }
 
     #[test]
-    fn the_investigation_brief_names_the_flow_its_seat_and_where_to_send_the_finding() {
+    fn the_warning_names_the_flow_and_its_seat() {
         let address = Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
             layer: Layer::Secondary,
         };
         let transcript = std::path::PathBuf::from("/home/li/.claude/projects/p/s.jsonl");
-        let text = InvestigationBrief {
+        let text = CompactionWarning {
             flow_id: "5a4d0b",
             address: Some(&address),
             harness_kind: &HarnessKind::Claude,
@@ -687,6 +580,6 @@ mod tests {
             "Flow warning: flow 5a4d0b ({ Mind flow Secondary }) compacted its context at 219141 tokens while it kept working without being given more work."
         ));
         assert!(text.contains("Its transcript is /home/li/.claude/projects/p/s.jsonl."));
-        assert!(text.contains("Send your finding to Psyche core Secondary"));
+        assert!(!text.contains("Investigate"));
     }
 }

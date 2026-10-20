@@ -6,8 +6,7 @@
 //! app-server named in that command's environment.
 //!
 //! Send queues a request for a metaflow, or types it into the recipient's
-//! pane when its Priority is abrupt and the recipient's flow is live; it is
-//! refused when it leaves the routes between aspects. Launch starts a
+//! pane when its Priority is abrupt and the recipient's flow is live. Launch starts a
 //! metaflow from its declaration in Flow's configuration. BindSeat binds the
 //! seat the caller runs in, with the FlowId its native session is claimed
 //! under, as the metaflow's flow. A Codex subagent's command binds the seat
@@ -37,64 +36,7 @@ use signal_flow::{
     QueuedRequest, Recipient, Refusal, RememberedFlow, Request, Response, RouteReadiness,
     Send_Data, SentBy, StartRejection,
 };
-use std::collections::HashSet;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-/// The Psyche metaflows each Field metaflow may answer: a Field flow reaches
-/// Psyche through Mind, unless Psyche has spoken to it. Held while the Nexus
-/// runs; a restart forgets it, so a Field answer then goes through Mind.
-#[derive(Debug, Default)]
-pub struct PsycheSpokeToField {
-    spoken: Mutex<HashSet<(Address, Address)>>,
-}
-
-/// What Psyche said to Field, remembered for Field's answer.
-pub trait RemembersPsycheSpeech {
-    /// Psyche at `psyche` sent to Field at `field`.
-    fn note(&self, psyche: &Address, field: &Address);
-    /// Whether Field at `field` may answer Psyche at `psyche`.
-    fn allows(&self, field: &Address, psyche: &Address) -> bool;
-}
-
-impl RemembersPsycheSpeech for PsycheSpokeToField {
-    fn note(&self, psyche: &Address, field: &Address) {
-        self.spoken
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert((psyche.clone(), field.clone()));
-    }
-
-    fn allows(&self, field: &Address, psyche: &Address) -> bool {
-        self.spoken
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(&(psyche.clone(), field.clone()))
-    }
-}
-
-/// The routes Flow lets a Send take between metaflows.
-pub trait RoutesBetweenAspects {
-    /// Within one aspect every metaflow reaches every other. Across
-    /// aspects only the same topic at the same layer, and Field reaches
-    /// Psyche only after Psyche spoke to it.
-    fn on_route(&self, sender: &Address, recipient: &Address) -> bool;
-}
-
-impl RoutesBetweenAspects for RunningNexus {
-    fn on_route(&self, sender: &Address, recipient: &Address) -> bool {
-        if sender.aspect == recipient.aspect {
-            return true;
-        }
-        if sender.topic != recipient.topic || sender.layer != recipient.layer {
-            return false;
-        }
-        if sender.aspect == Aspect::Field && recipient.aspect == Aspect::Psyche {
-            return self.psyche_spoke_to_field.allows(sender, recipient);
-        }
-        true
-    }
-}
 
 /// Names the metaflow the calling process runs in.
 pub trait IdentifiesSender {
@@ -170,18 +112,14 @@ impl NamesLayerAbove for Layer {
     }
 }
 
-/// What a Send answers, and the metaflow whose wake it makes due.
+/// What a Send answers.
 pub struct SendAnswer {
     pub response: Response,
-    pub wake: Option<Address>,
 }
 
 impl From<Response> for SendAnswer {
     fn from(response: Response) -> Self {
-        Self {
-            response,
-            wake: None,
-        }
+        Self { response }
     }
 }
 
@@ -224,9 +162,6 @@ impl SendsRequests for RunningNexus {
                 None => return Response::Refused(Refusal::NoneAbove).into(),
             },
         };
-        if !self.on_route(&sender, &recipient) {
-            return Response::Refused(Refusal::OffRoute).into();
-        }
         // A metaflow left Awake as an ended flow is Asleep for what follows.
         self.rest_ended_awake(&recipient);
         let (abrupt, request) = match send.message {
@@ -238,16 +173,11 @@ impl SendsRequests for RunningNexus {
             && let Some(flow_id) = self.live_awake_flow(&recipient)
             && let Some(response) = self.deliver_abruptly(&sender, &flow_id, hard, &request)
         {
-            self.note_spoken(&sender, &recipient);
             return response.into();
         }
         match self.store.queue_sent(&sender, &recipient, request, now) {
             Ok(Response::Queued) => {
-                self.note_spoken(&sender, &recipient);
-                SendAnswer {
-                    response: Response::Queued,
-                    wake: Some(recipient),
-                }
+                SendAnswer { response: Response::Queued }
             }
             Ok(response) => response.into(),
             Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
@@ -277,7 +207,6 @@ trait DeliversAbruptly {
         hard: bool,
         request: &Request,
     ) -> Option<Response>;
-    fn note_spoken(&self, sender: &Address, recipient: &Address);
 }
 
 impl DeliversAbruptly for RunningNexus {
@@ -327,12 +256,6 @@ impl DeliversAbruptly for RunningNexus {
                 eprintln!("flow-nexus: abrupt send to {flow_id} queued instead: {refused:?}");
                 None
             }
-        }
-    }
-
-    fn note_spoken(&self, sender: &Address, recipient: &Address) {
-        if sender.aspect == Aspect::Psyche && recipient.aspect == Aspect::Field {
-            self.psyche_spoke_to_field.note(sender, recipient);
         }
     }
 }
@@ -390,9 +313,7 @@ impl LaunchesDeclared for RunningNexus {
             .configured_model(&address)
             .map_err(store_refused)?
         else {
-            return Err(Box::new(Response::StartRejected(
-                StartRejection::ModelRefused(signal_flow::ModelRefusal::Unconfigured),
-            )));
+            return Err(Box::new(Response::Refused(Refusal::NotConfigured)));
         };
         // A flow launching its own Address is replaced by the launch.
         let predecessor = caller

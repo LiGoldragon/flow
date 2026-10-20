@@ -359,12 +359,6 @@ pub(crate) trait TakesLaunchAddress {
     ) -> Result<Option<StartRejection>, StoreError>;
     /// Whether a flow is live: its row is Pending or Active.
     fn flow_is_live(&self, flow_id: &str) -> Result<bool, StoreError>;
-    /// Short term, a Primary is not started without its Secondary, and the
-    /// Secondary starts first: NoSecondary when the Address is a Primary
-    /// and no metaflow is recorded, Awake or Asleep, at the Secondary of
-    /// its aspect and topic, so a recorded Secondary is one that has
-    /// started.
-    fn secondary_refusal(&self, address: &Address) -> Result<Option<StartRejection>, StoreError>;
 }
 
 impl TakesLaunchAddress for FlowStore {
@@ -456,21 +450,6 @@ impl TakesLaunchAddress for FlowStore {
             }
         }
         Ok(None)
-    }
-
-    fn secondary_refusal(&self, address: &Address) -> Result<Option<StartRejection>, StoreError> {
-        if address.layer != Layer::Primary {
-            return Ok(None);
-        }
-        let secondary = Address {
-            aspect: address.aspect.clone(),
-            topic: address.topic.clone(),
-            layer: Layer::Secondary,
-        };
-        Ok(self
-            .stored_metaflow(&secondary)?
-            .is_none()
-            .then_some(StartRejection::NoSecondary))
     }
 
     fn flow_is_live(&self, flow_id: &str) -> Result<bool, StoreError> {

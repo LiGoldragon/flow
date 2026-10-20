@@ -69,7 +69,6 @@ use observe_agent::ObservesAgent;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
-use send_tool::ServesLaunchCalls;
 use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
@@ -121,8 +120,6 @@ pub struct RunningNexus {
     pub codex_turns: codex_turns::CodexTurns,
     /// How far each flow's compactions have been read; see `compacting`.
     pub compactions: compacting::CompactionWatch,
-    /// The Psyche metaflows each Field metaflow may answer; see `sending`.
-    pub psyche_spoke_to_field: sending::PsycheSpokeToField,
 }
 
 pub trait Dispatches {
@@ -576,7 +573,6 @@ impl OpensRunningNexus for RunningNexus {
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
             compactions: compacting::CompactionWatch::default(),
-            psyche_spoke_to_field: sending::PsycheSpokeToField::default(),
         })
     }
 }
@@ -659,33 +655,17 @@ impl ServesConnection for Connection {
                 // from Flow's records after the answer, whether or not the
                 // answer reached the sender, off the dispatch gate.
                 let answer = nexus.dispatch_metaflow_peer(query, self.process.as_ref());
-                let written = self.peer.write_response(&answer.response);
-                drop(self);
-                if let Some(address) = answer.wake {
-                    nexus.wake_due(address);
-                }
-                return written;
+                return self.peer.write_response(&answer.response);
             }
             // A flow's own Send: its sender is the calling process. A queued
             // request's wake is read after the answer, off the gate.
             Query::Send(send) => {
                 let answer = nexus.send_request(send, self.process.as_ref());
-                let written = self.peer.write_response(&answer.response);
-                drop(self);
-                if let Some(address) = answer.wake {
-                    nexus.wake_due(address);
-                }
-                return written;
+                return self.peer.write_response(&answer.response);
             }
             Query::BindSeat(address) => {
                 let response = nexus.bind_seat(address.clone(), self.process.as_ref());
-                let written = self.peer.write_response(&response);
-                drop(self);
-                if matches!(response, Response::Bound(_)) {
-                    // What waits for the seat drains once its turn allows.
-                    nexus.wake_due(address);
-                }
-                return written;
+                return self.peer.write_response(&response);
             }
             // A Launch is the Start, or the Replace of the caller's own
             // flow, its declaration names, from the calling process.
@@ -1083,9 +1063,6 @@ impl DispatchesSerially for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.dispatch_from(query, origin)
         };
-        // A launch's first turn may have queued work meanwhile; its targets
-        // are woken now that the gate is given back.
-        self.wake_deferred();
         // The gate is released before the wait: the launch is settled by the
         // Nexus's own promoter, which needs the gate to do it.
         match (launch_request_id, &response) {
@@ -1738,7 +1715,6 @@ mod tests {
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),
                 compactions: crate::compacting::CompactionWatch::default(),
-                psyche_spoke_to_field: crate::sending::PsycheSpokeToField::default(),
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");
@@ -4937,7 +4913,7 @@ mod tests {
         );
         assert_eq!(
             send(Recipient::Address(elsewhere.clone()), order.clone(), &peer),
-            Response::Refused(Refusal::OffRoute)
+            Response::Refused(Refusal::Unknown(Unknown_Data::Address(elsewhere)))
         );
         assert_eq!(
             send(Recipient::Up, Request::Result("done".into()), &peer),
@@ -4967,34 +4943,6 @@ mod tests {
             send(Recipient::Address(sibling), order, &stranger),
             Response::Refused(Refusal::Unidentified(_))
         ));
-    }
-
-    /// Field reaches Psyche through Mind unless Psyche spoke to it; across
-    /// aspects only the same topic at the same layer is a route.
-    #[test]
-    fn routes_between_aspects_follow_topic_layer_and_who_spoke() {
-        use crate::sending::{RemembersPsycheSpeech, RoutesBetweenAspects};
-        use signal_flow::{Address, Layer};
-        let fixture = NexusFixture::new();
-        let address = |aspect: Aspect, topic: &str, layer: Layer| Address {
-            aspect,
-            topic: topic.into(),
-            layer,
-        };
-        let nexus = &fixture.nexus;
-        let psyche = address(Aspect::Psyche, "core", Layer::Secondary);
-        let field = address(Aspect::Field, "core", Layer::Secondary);
-        assert!(nexus.on_route(
-            &address(Aspect::Psyche, "core", Layer::Secondary),
-            &address(Aspect::Psyche, "book", Layer::Tertiary)
-        ));
-        assert!(nexus.on_route(&psyche, &address(Aspect::Mind, "core", Layer::Secondary)));
-        assert!(!nexus.on_route(&psyche, &address(Aspect::Mind, "flow", Layer::Secondary)));
-        assert!(!nexus.on_route(&psyche, &address(Aspect::Mind, "core", Layer::Primary)));
-        assert!(nexus.on_route(&psyche, &field));
-        assert!(!nexus.on_route(&field, &psyche));
-        nexus.psyche_spoke_to_field.note(&psyche, &field);
-        assert!(nexus.on_route(&field, &psyche));
     }
 
     /// A Launch starts from the metaflow's declaration in Flow's

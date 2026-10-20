@@ -160,8 +160,6 @@ fn main() -> ExitCode {
         // One connection per live Codex thread answers its send-tool calls.
         let send_tool_nexus = &nexus;
         scope.spawn(move || send_tool_nexus.serve_send_tool(scope));
-        // A wake the last Nexus did not finish left its work queued: wake it.
-        scope.spawn(|| nexus.recover_wakes());
         scope.spawn(|| {
             if signals.watch(&|| nexus.stopping.requested()) {
                 nexus.stop(&sockets);

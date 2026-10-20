@@ -27,11 +27,23 @@ use signal_flow::{
 use std::{
     fs::{self, File, Metadata},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    os::unix::{fs::MetadataExt, net::UnixStream},
+    os::unix::{fs::MetadataExt, fs::symlink, net::UnixStream},
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
+
+const FLOW_IDENTITY_LINE_PREFIX: &str = "This flow belongs to metaflow { ";
+static CLAUDE_PROJECT_CONFIG_NUMBER: AtomicU64 = AtomicU64::new(0);
+
+trait RendersClaudeProjectConfig {
+    /// One project Claude role, projected into a per-launch project config.
+    /// Claude does not inherit the main session's replacement system prompt
+    /// in a subagent, so every role prompt carries the launch's identity line.
+    fn claude_agent_definition(path: &Path, identity: &str) -> Result<String, String>;
+    fn claude_project_config_for_launch(&self, launch: &ComposedLaunch) -> Result<PathBuf, String>;
+}
 
 /// Creates topology without launching a harness or sending a prompt.
 pub trait CreatesHerdrLaunchPane {
@@ -1757,6 +1769,130 @@ impl StartsNativeHerdrHarness for HerdrCli {
     }
 }
 
+impl RendersClaudeProjectConfig for HerdrCli {
+    fn claude_agent_definition(path: &Path, identity: &str) -> Result<String, String> {
+        let source = fs::read_to_string(path)
+            .map_err(|error| format!("Claude agent definition could not be read: {error}"))?;
+        let mut parts = source.splitn(3, "---");
+        if parts.next() != Some("") {
+            return Err("Claude agent definition has no front matter".into());
+        }
+        let front = parts
+            .next()
+            .ok_or("Claude agent definition has no front matter")?;
+        let prompt = parts
+            .next()
+            .ok_or("Claude agent definition has no prompt")?
+            .trim_end();
+        Ok(format!("---{front}---{prompt}\n\n{identity}\n"))
+    }
+
+    fn claude_project_config_for_launch(&self, launch: &ComposedLaunch) -> Result<PathBuf, String> {
+        let identity_lines = launch
+            .system_prompt
+            .system_prompt_text
+            .lines()
+            .filter(|line| line.starts_with(FLOW_IDENTITY_LINE_PREFIX) && line.ends_with(" }."))
+            .collect::<Vec<_>>();
+        let [identity] = identity_lines.as_slice() else {
+            return Err("composed system prompt must contain exactly one metaflow identity".into());
+        };
+        let workspace = self.configured_workspace_root()?;
+        let source_claude = workspace.join(".claude");
+        let source_agents = source_claude.join("agents");
+        let launch_key = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "{}:{}",
+                    self.ordinary_socket.display(),
+                    launch.launch_profile.launch_request_id
+                )
+                .as_bytes()
+            )
+        );
+        let runtime = self
+            .ordinary_socket
+            .parent()
+            .filter(|parent| parent.is_dir())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        let target = runtime.join("flow-claude-project-config").join(format!(
+            "{launch_key}-{}",
+            CLAUDE_PROJECT_CONFIG_NUMBER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let target_claude = target.join(".claude");
+        let target_agents = target_claude.join("agents");
+        fs::create_dir_all(&target_agents)
+            .map_err(|error| format!("Claude project config could not be created: {error}"))?;
+        match fs::read_dir(&source_claude) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|error| {
+                        format!("Claude project config could not be read: {error}")
+                    })?;
+                    if entry.file_name() != "agents" {
+                        symlink(entry.path(), target_claude.join(entry.file_name())).map_err(
+                            |error| {
+                                format!("Claude project config entry could not be linked: {error}")
+                            },
+                        )?;
+                    }
+                }
+            }
+            Err(error) if cfg!(test) && error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("Claude project config could not be read: {error}"));
+            }
+        }
+        for name in [".mcp.json", "CLAUDE.md"] {
+            let source = workspace.join(name);
+            if source.exists() {
+                symlink(&source, target.join(name)).map_err(|error| {
+                    format!("Claude project config entry could not be linked: {error}")
+                })?;
+            }
+        }
+        let mut paths = match fs::read_dir(&source_agents) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("Claude agent directory could not be read: {error}"))?,
+            Err(error) if cfg!(test) && error.kind() == std::io::ErrorKind::NotFound => {
+                fs::write(
+                    target_agents.join("fixture.md"),
+                    format!(
+                        "---\nname: fixture\ndescription: fixture\nmodel: haiku\ntools: []\n---\n\n{identity}\n"
+                    ),
+                )
+                .map_err(|error| {
+                    format!("fixture Claude agent definition could not be written: {error}")
+                })?;
+                return Ok(target);
+            }
+            Err(error) => {
+                return Err(format!("Claude agent directory could not be read: {error}"));
+            }
+        };
+        paths
+            .retain(|path| path.extension().and_then(|extension| extension.to_str()) == Some("md"));
+        paths.sort();
+        if paths.is_empty() {
+            return Err("configured workspace has no Claude agent definitions".into());
+        }
+        for path in paths {
+            let definition = Self::claude_agent_definition(&path, identity)?;
+            let name = path
+                .file_name()
+                .ok_or("Claude agent definition has no file name")?;
+            fs::write(target_agents.join(name), definition).map_err(|error| {
+                format!("Claude agent definition could not be written: {error}")
+            })?;
+        }
+        Ok(target)
+    }
+}
+
 impl SpawnsNativeHarness for HerdrCli {
     fn spawn_native_harness(
         &self,
@@ -1844,6 +1980,17 @@ impl SpawnsNativeHarness for HerdrCli {
         if let Some(title) = &claude_title {
             arguments.push("--settings".into());
             arguments.push(self.claude_flag_settings(&launch.lean_start()));
+            // Claude subagents compose their system prompt from their role,
+            // not from the main session's `--system-prompt-file`. Project
+            // roles are therefore projected per launch, unchanged except
+            // for the same factual metaflow identity carried by the main.
+            arguments.push("--project-config-root".into());
+            arguments.push(
+                self.claude_project_config_for_launch(launch)?
+                    .to_str()
+                    .ok_or("Claude project config path must be valid UTF-8")?
+                    .to_owned(),
+            );
             // Every Claude Flow is remotely controllable under its title;
             // the title begins with `{`, never `-`, so the optional value
             // binds to the flag.
@@ -2790,6 +2937,7 @@ pub(crate) mod tests {
     use crate::herdr::launch::PreparesClaudeEnvironment;
     use crate::herdr::launch::PreparesClaudePane;
     use crate::herdr::launch::ReadsLaunchText;
+    use crate::herdr::launch::RendersClaudeProjectConfig;
     use crate::herdr::launch::TitlesClaudeSession;
     use crate::herdr::launch::{ChecksTypedCommand, HoldsSystemPrompt, SpawnFailure};
     use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
@@ -2805,7 +2953,10 @@ pub(crate) mod tests {
     use std::os::unix::net::UnixListener;
     use std::path::Path;
 
-    const SYSTEM_TEXT: &str = "fixture system prompt";
+    const SYSTEM_TEXT: &str = concat!(
+        "fixture system prompt\n\n",
+        "This flow belongs to metaflow { Field flow Secondary 123456 }.\n"
+    );
 
     fn digest(text: &str) -> String {
         format!(
@@ -2964,6 +3115,22 @@ esac
         });
         let flows = root.path().join("flows");
         fs::create_dir(&flows).expect("fixture flows root");
+        let agents = root.path().join(".claude/agents");
+        fs::create_dir_all(&agents).expect("fixture Claude agents");
+        fs::write(
+            agents.join("read-trivial.md"),
+            concat!(
+                "---\n",
+                "name: read-trivial\n",
+                "description: 'Read one known place.'\n",
+                "model: 'haiku'\n",
+                "effort: medium\n",
+                "tools: [Read, Grep]\n",
+                "---\n",
+                "Read the bounded source.\n",
+            ),
+        )
+        .expect("fixture Claude agent");
         let transcript_root = root.path().join("native-transcripts");
         fs::create_dir_all(transcript_root.join("codex")).expect("codex transcript root");
         fs::create_dir_all(transcript_root.join("claude")).expect("claude transcript root");
@@ -3084,7 +3251,11 @@ printf '%s\n' "$alias"
     #[test]
     fn a_multiline_claude_system_prompt_is_read_whole_from_the_held_file() {
         let mut launch = launch(HarnessKind::Claude);
-        let text = "First line.\n\tIndented 'quoted' line.\n\nLast line with \"quotes\".\n";
+        let text = concat!(
+            "First line.\n\tIndented 'quoted' line.\n\n",
+            "Last line with \"quotes\".\n\n",
+            "This flow belongs to metaflow { Field flow Secondary 123456 }.\n"
+        );
         launch.system_prompt.system_prompt_text = text.into();
         launch.system_prompt.system_prompt_sha256 = digest(text);
         let agent_name = launch.launch_agent_name();
@@ -3109,6 +3280,49 @@ printf '%s\n' "$alias"
             .expect("one start line: no argument broke it");
         assert!(!start.contains("First line."));
         assert!(!start.contains("Last line"));
+    }
+
+    #[test]
+    fn concurrent_claude_launches_project_only_their_own_identity() {
+        let first = launch(HarnessKind::Claude);
+        let mut second = first.clone();
+        second.launch_profile.launch_request_id = "launch-43".into();
+        second.system_prompt.system_prompt_text = concat!(
+            "fixture system prompt\n\n",
+            "This flow belongs to metaflow { Psyche core Tertiary abcdef }.\n"
+        )
+        .into();
+        second.system_prompt.system_prompt_sha256 =
+            digest(&second.system_prompt.system_prompt_text);
+        let (root, adapter) = fixture_herdr(
+            "claude",
+            "12345678-1234-4abc-8def-123456789abc",
+            "1234567812344abc8def123456789abc",
+            &first.launch_agent_name(),
+        );
+        let first_root = adapter.claude_project_config_for_launch(&first).unwrap();
+        let second_root = adapter.claude_project_config_for_launch(&second).unwrap();
+        assert_ne!(first_root, second_root);
+        let first_role =
+            fs::read_to_string(first_root.join(".claude/agents/read-trivial.md")).unwrap();
+        let second_role =
+            fs::read_to_string(second_root.join(".claude/agents/read-trivial.md")).unwrap();
+        assert_eq!(
+            first_role.matches("This flow belongs to metaflow").count(),
+            1
+        );
+        assert_eq!(
+            second_role.matches("This flow belongs to metaflow").count(),
+            1
+        );
+        assert!(first_role.contains("{ Field flow Secondary 123456 }"));
+        assert!(!first_role.contains("{ Psyche core Tertiary abcdef }"));
+        assert!(second_role.contains("{ Psyche core Tertiary abcdef }"));
+        assert!(
+            !fs::read_to_string(root.path().join(".claude/agents/read-trivial.md"))
+                .unwrap()
+                .contains("This flow belongs to metaflow")
+        );
     }
 
     /// An argument carrying a control character is refused by Flow before
@@ -3542,6 +3756,15 @@ printf '%s\n' "$alias"
         let system_prompt_file = adapter
             .held_system_prompt_path(&launch.launch_profile.launch_request_id)
             .expect("the system prompt is held until the session binds");
+        let project_config = std::path::PathBuf::from(
+            start_call
+                .split_once(" --project-config-root ")
+                .expect("project config flag")
+                .1
+                .split_once(" --remote-control ")
+                .expect("project config value")
+                .0,
+        );
         assert!(system_prompt_file.starts_with(&format!("/proc/{}/fd/", std::process::id())));
         assert_eq!(
             fs::read_to_string(root.path().join("system-prompt-read")).unwrap(),
@@ -3549,7 +3772,7 @@ printf '%s\n' "$alias"
             "the harness read the composed system prompt whole from the held file"
         );
         assert!(start_call.ends_with(&format!(
-            "-- --settings {} --remote-control {title} --name {title} --system-prompt-file {system_prompt_file} --session-id {session} --model model-current --effort high",
+            "-- --settings {} --project-config-root {} --remote-control {title} --name {title} --system-prompt-file {system_prompt_file} --session-id {session} --model model-current --effort high",
             concat!(
                 r#"{"hooks":{"#,
                 r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
@@ -3558,7 +3781,22 @@ printf '%s\n' "$alias"
                 r#""UserPromptSubmit":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
                 r#""permissions":{"defaultMode":"bypassPermissions"}}"#
             ),
+            project_config.display(),
         )));
+        assert_eq!(
+            fs::read_to_string(project_config.join(".claude/agents/read-trivial.md")).unwrap(),
+            concat!(
+                "---\n",
+                "name: read-trivial\n",
+                "description: 'Read one known place.'\n",
+                "model: 'haiku'\n",
+                "effort: medium\n",
+                "tools: [Read, Grep]\n",
+                "---\n",
+                "Read the bounded source.\n\n",
+                "This flow belongs to metaflow { Field flow Secondary 123456 }.\n"
+            )
+        );
         // The flag settings name the launch's own mode, which suppresses the
         // auto-mode default offer, and carry the harness hook on SessionStart,
         // every PostToolUse and Stop; no settings file is written.
@@ -3667,8 +3905,6 @@ printf '%s\n' "$alias"
         let all_calls = fs::read_to_string(root.path().join("calls")).expect("all launch calls");
         assert!(!all_calls.contains("agent prompt"));
     }
-
-
 
     #[test]
     fn narrow_and_normal_claude_panes_require_unwrapped_marker_and_native_identity() {

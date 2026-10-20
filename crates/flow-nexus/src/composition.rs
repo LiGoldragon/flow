@@ -382,11 +382,11 @@ impl ComposesVerifiedContext for LaunchComposer {
     }
 }
 
-/// The launch section opens with the metaflow identity the launch claimed,
-/// so the whole flow, including its subagents and forks, inherits its Address
-/// and FlowId from the system prompt. The section is the system prompt's tail,
-/// after a blank line; a launch with none gains one. Only the system prompt
-/// and its hash change: the first USER message, whose hashes the launch
+/// The launch section opens with the metaflow identity the launch claimed.
+/// Harness launch projects this same line into each system context the flow
+/// creates, including subagents and forks. The section is the system prompt's
+/// tail, after a blank line; a launch with none gains one. Only the system
+/// prompt and its hash change: the first USER message, whose hashes the launch
 /// attempt journals at Reserve, is untouched.
 impl CarriesFlowId for ComposedLaunch {
     fn carrying_flow_id<N: Textual>(&self, input: N) -> ComposedLaunch {

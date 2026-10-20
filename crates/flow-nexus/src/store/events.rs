@@ -39,7 +39,7 @@ impl EngineRecord for FlowEvents {
 /// read-and-write: a harness may report two tool uses at once, and neither
 /// may be lost.
 pub struct EventTables {
-    events: TableReference<FlowEvents>,
+    pub(super) events: TableReference<FlowEvents>,
     append_gate: Mutex<()>,
 }
 

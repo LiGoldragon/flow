@@ -1048,10 +1048,9 @@ impl WakesInParts for RunningNexus {
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile> {
         let launch_request_id = self.store.launch_requests_bound_to(flow_id).ok()?.pop()?;
         self.store
-            .launch_attempt(&launch_request_id)
+            .composable_launch_profile(&launch_request_id)
             .ok()
             .flatten()
-            .map(|attempt| attempt.launch_profile)
     }
 
     fn record_context_at_stop(&self, flow_id: &str) {

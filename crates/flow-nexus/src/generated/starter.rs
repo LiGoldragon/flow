@@ -40,6 +40,73 @@ pub struct ReplacedRecord {
     pub launched_record: LaunchedRecord,
 }
 #[rustfmt::skip]
+pub type SourcePath = String;
+#[rustfmt::skip]
+pub type SourceSha256 = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct LaunchSource {
+    pub source_path: SourcePath,
+    pub source_sha256: SourceSha256,
+}
+#[rustfmt::skip]
+pub type LaunchSources = std::vec::Vec<LaunchSource>;
+#[rustfmt::skip]
+pub type SkillName = String;
+#[rustfmt::skip]
+pub type SkillPath = String;
+#[rustfmt::skip]
+pub type SkillSha256 = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct NativeSkill {
+    pub skill_name: SkillName,
+    pub skill_path: SkillPath,
+    pub skill_sha256: SkillSha256,
+}
+#[rustfmt::skip]
+pub type NativeSkills = std::vec::Vec<NativeSkill>;
+#[rustfmt::skip]
+pub type TurnId = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct OriginClue {
+    pub flow_id: signal_flow::FlowId,
+    pub session_id: signal_flow::SessionId,
+    pub turn_id: TurnId,
+}
+#[rustfmt::skip]
+pub type Skills = std::vec::Vec<String>;
+#[rustfmt::skip]
+pub type BundleFile = String;
+#[rustfmt::skip]
+pub type IntentSkills = std::option::Option<NativeSkills>;
+#[rustfmt::skip]
+pub type ResultSkills = std::option::Option<NativeSkills>;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ContextBeforeModules {
+    pub launch_sources: LaunchSources,
+    pub skills: Skills,
+    pub power_level: signal_flow::PowerLevel,
+    pub harness_kind: signal_flow::HarnessKind,
+    pub bundle_file: BundleFile,
+    pub origin_clue: OriginClue,
+    pub intent_skills: IntentSkills,
+    pub result_skills: ResultSkills,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum LaunchContext {
+    Modules,
+    BeforeModules(ContextBeforeModules),
+}
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum StartupProgress {

@@ -31,13 +31,16 @@
           ];
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
           # The Operation root's ethos source is read by flow-nexus's build
-          # script, which holds the committed generated module fresh.
+          # script, which holds the committed generated module fresh; the
+          # store fixtures are read by the upgrade tests.
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
             name = "source";
             filter =
               path: type:
-              (pkgs.lib.hasSuffix ".ethos" path) || (craneLib.filterCargoSources path type);
+              (pkgs.lib.hasSuffix ".ethos" path)
+              || (pkgs.lib.hasSuffix ".sema" path)
+              || (craneLib.filterCargoSources path type);
           };
           commonArgs = {
             inherit src;
@@ -175,6 +178,10 @@
             "store::tests::a_v5_flow_row_upgrades_to_its_derived_origin";
           flow-v2-outcomes-upgrade-to-derived-origin = context.exactTest "flow-nexus"
             "store::tests::v2_launch_outcomes_upgrade_to_their_derived_origin";
+          flow-0-34-launch-attempt-carried = context.exactTest "flow-nexus"
+            "store::tests::a_0_34_launch_attempt_row_is_carried_with_what_it_named_kept";
+          flow-0-34-4-store-every-row-reads = context.exactTest "flow-nexus"
+            "store::tests::a_0_34_4_store_opens_and_every_row_of_every_table_reads";
           flow-retired-tables-dropped-on-open = context.exactTest "flow-nexus"
             "store::tests::a_store_from_0_34_6_drops_its_retired_tables_when_it_opens";
           flow-start-origin-derived-from-caller = context.exactTest "flow-nexus"

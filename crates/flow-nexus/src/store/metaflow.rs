@@ -518,8 +518,8 @@ impl WritesTakenAddress for TakenAddress {
 /// deliver to it nor wake it.
 pub(crate) trait ForgetsEndedBindings {
     /// Retracts the metaflow at `address`, its process binding and any lock
-    /// on it, in one write, when it is Awake as `flow_id`, the binding's
-    /// process no longer runs, nothing is queued, and neither `flow_id` nor
+    /// on it, in one write, when it is Awake as `flow_id`, a binding is
+    /// recorded for it and its process no longer runs, nothing is queued, and neither `flow_id` nor
     /// any past id names a flow row. True when it was forgotten; false
     /// leaves it as it was.
     fn forget_ended_binding(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError>;
@@ -535,11 +535,9 @@ impl ForgetsEndedBindings for FlowStore {
         {
             return Ok(false);
         }
-        if self
-            .bound_process(address)?
-            .is_some_and(|process| FlowStore::process_is_live(&process))
-        {
-            return Ok(false);
+        match self.bound_process(address)? {
+            Some(process) if !FlowStore::process_is_live(&process) => {}
+            _ => return Ok(false),
         }
         for id in stored.metaflow.past.iter().chain(std::iter::once(&flow_id.to_owned())) {
             if self.flow(id)?.is_some() {
@@ -550,10 +548,8 @@ impl ForgetsEndedBindings for FlowStore {
         let mut commit = self
             .engine
             .begin_atomic_commit()
-            .retract(self.metaflows, RecordKey::new(key.clone()));
-        if self.stored_metaflow_process(address)?.is_some() {
-            commit = commit.retract(self.metaflow_processes, RecordKey::new(key.clone()));
-        }
+            .retract(self.metaflows, RecordKey::new(key.clone()))
+            .retract(self.metaflow_processes, RecordKey::new(key.clone()));
         if self.stored_metaflow_lock(address)?.is_some() {
             commit = commit.retract(self.metaflow_locks, RecordKey::new(key));
         }

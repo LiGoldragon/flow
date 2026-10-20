@@ -210,9 +210,9 @@ impl RestsEndedAwake for RunningNexus {
                     );
                     return true;
                 }
-                !matches!(
+                matches!(
                     self.store.bound_process(address),
-                    Ok(Some(process)) if FlowStore::process_is_live(&process)
+                    Ok(Some(process)) if !FlowStore::process_is_live(&process)
                 )
             }
             Err(_) => false,

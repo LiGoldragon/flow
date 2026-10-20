@@ -539,7 +539,12 @@ impl ForgetsEndedBindings for FlowStore {
             Some(process) if !FlowStore::process_is_live(&process) => {}
             _ => return Ok(false),
         }
-        for id in stored.metaflow.past.iter().chain(std::iter::once(&flow_id.to_owned())) {
+        for id in stored
+            .metaflow
+            .past
+            .iter()
+            .chain(std::iter::once(&flow_id.to_owned()))
+        {
             if self.flow(id)?.is_some() {
                 return Ok(false);
             }

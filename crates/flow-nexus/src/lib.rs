@@ -4905,9 +4905,8 @@ mod tests {
         let shell_id = shell.0.id();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let peer = loop {
-            let children =
-                fs::read_to_string(format!("/proc/{shell_id}/task/{shell_id}/children"))
-                    .unwrap_or_default();
+            let children = fs::read_to_string(format!("/proc/{shell_id}/task/{shell_id}/children"))
+                .unwrap_or_default();
             if let Some(child) = children.split_whitespace().next() {
                 let process = CallerProcess {
                     process_id: child.parse().unwrap(),

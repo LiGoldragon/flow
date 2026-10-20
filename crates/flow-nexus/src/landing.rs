@@ -45,6 +45,7 @@ use crate::waking::{SleepsAndWakesSeats, WakePolicy};
 use crate::{HoldsStopRequest, RunningNexus};
 use flow_ethos::{LandingWatch, State};
 use notify::Watcher;
+use sha2::{Digest, Sha256};
 use signal_flow::{Address, Aspect, HarnessKind, Layer, Request};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -420,6 +421,14 @@ fn deployment_observation(served: &Result<ModuleSource, String>) -> String {
     }
 }
 
+fn deploy_identity(watch: &LandingWatch) -> String {
+    let path = std::path::Path::new(&watch.deploy_binary);
+    match std::fs::read(path) {
+        Ok(content) => format!("{} sha256:{:x}", path.display(), Sha256::digest(content)),
+        Err(error) => format!("{} unreadable:{:?}", path.display(), error.kind()),
+    }
+}
+
 impl RunsLandings for RunningNexus {
     fn watch_landings<N: LandingWatching>(&self, input: N) -> bool {
         let watch = input.landing_watch();
@@ -433,6 +442,8 @@ impl RunsLandings for RunningNexus {
         let moved = Arc::new(AtomicBool::new(true));
         let flag = Arc::clone(&moved);
         let changes = self.store.launch_changes.clone();
+        let deploy_path = std::path::PathBuf::from(&watch.deploy_binary);
+        let watched_deploy_path = deploy_path.clone();
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             let Ok(event) = event else {
                 return;
@@ -442,7 +453,8 @@ impl RunsLandings for RunningNexus {
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name == "main" || name == "packed-refs")
             });
-            if concerns_main {
+            let concerns_deploy = event.paths.iter().any(|path| path == &watched_deploy_path);
+            if concerns_main || concerns_deploy {
                 flag.store(true, Ordering::SeqCst);
                 changes.announce();
             }
@@ -466,6 +478,13 @@ impl RunsLandings for RunningNexus {
                 notify::RecursiveMode::Recursive,
             ),
             (git_directory.clone(), notify::RecursiveMode::NonRecursive),
+            (
+                deploy_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf(),
+                notify::RecursiveMode::NonRecursive,
+            ),
         ] {
             if let Err(error) = watcher.watch(&path, mode) {
                 eprintln!(
@@ -579,10 +598,14 @@ impl RunsLandings for RunningNexus {
         // Deploy the newest landing not yet served, once.
         let mut served = self.served_module(&watch);
         let mut attempted: Option<Result<String, String>> = None;
-        let observation = deployment_observation(&served);
+        let retry_key = format!(
+            "retry key: main {} deploy {}",
+            watch.main_commit()?,
+            deploy_identity(&watch)
+        );
         if let Some(newest) = open.iter().rev().find(|landing| match &landing.deploy {
             Step::Pending => true,
-            Step::Failed(error) => !error.starts_with(&observation),
+            Step::Failed(error) => !error.starts_with(&retry_key),
             Step::Witnessed(_) => false,
         }) {
             let covered = served.as_ref().is_ok_and(|module| {
@@ -615,14 +638,14 @@ impl RunsLandings for RunningNexus {
                     )))
                 } else if matches!(landing.deploy, Step::Pending) {
                     Some(Step::Failed(format!(
-                        "{}; {answered}",
+                        "{retry_key}\n{}; {answered}",
                         deployment_observation(&served)
                     )))
                 } else if matches!(landing.deploy, Step::Failed(ref error)
-                    if !error.starts_with(&deployment_observation(&served)))
+                    if !error.starts_with(&retry_key))
                 {
                     Some(Step::Failed(format!(
-                        "{}; {answered}",
+                        "{retry_key}\n{}; {answered}",
                         deployment_observation(&served)
                     )))
                 } else {

@@ -383,8 +383,8 @@ fn a_landing_is_deployed_retrained_implemented_and_reported() {
     fixture.nexus.advance_landings(&watch).expect("advanced");
     assert_eq!(
         std::fs::read_to_string(&requests).unwrap().lines().count(),
-        2,
-        "a changed deploy path permits one new attempt"
+        1,
+        "a changed composer observation alone permits no retry"
     );
     assert_eq!(
         fixture
@@ -395,8 +395,35 @@ fn a_landing_is_deployed_retrained_implemented_and_reported() {
             .unwrap()
             .queue
             .len(),
+        1,
+        "a changed watch error alone repeats no Order"
+    );
+
+    write(
+        &repository,
+        "README.md",
+        "The context repository has a new main revision.\n",
+    );
+    git(&repository, &["commit", "-q", "-am", "Move context main"]);
+    fixture.nexus.advance_landings(&watch).expect("advanced");
+    assert_eq!(
+        std::fs::read_to_string(&requests).unwrap().lines().count(),
         2,
-        "the changed failed attempt has one new Order"
+        "a changed context main permits one new attempt"
+    );
+
+    FixtureExecutable {
+        path: script.clone(),
+    }
+    .install(&format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{}'\necho Deployed-v2\n",
+        requests.display()
+    ));
+    fixture.nexus.advance_landings(&watch).expect("advanced");
+    assert_eq!(
+        std::fs::read_to_string(&requests).unwrap().lines().count(),
+        3,
+        "changed deploy executable content permits one new attempt"
     );
 
     // The deploy takes effect: the composer serves the landing.
@@ -424,7 +451,7 @@ fn a_landing_is_deployed_retrained_implemented_and_reported() {
     assert_eq!(landing.retrainings[0].flow_id, CLAUDE_SEAT);
     assert_eq!(
         std::fs::read_to_string(&requests).unwrap().lines().count(),
-        2,
+        3,
         "serving the landing does not run the deploy again"
     );
 

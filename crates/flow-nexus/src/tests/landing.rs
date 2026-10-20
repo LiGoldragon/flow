@@ -11,7 +11,9 @@ use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::composition::{ComposesLaunch, HarnessedProfile, LaunchComposer, OpensLaunchComposer};
 use crate::context::{ContextComposer, FixtureComposer};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-use crate::generated::landing::{KeepsLandings, Landing, Retrained, RunsLandings, Step};
+use crate::generated::landing::{
+    DeploysContext, KeepsLandings, Landing, Retrained, RunsLandings, Step,
+};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{
     ReadsFlowRows, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, ReservesLaunchAttempt,
@@ -110,6 +112,27 @@ fn deploy_script(fixture: &NexusFixture) -> (PathBuf, PathBuf) {
         record.display()
     ));
     (script, record)
+}
+
+#[test]
+fn a_deploy_refusal_keeps_only_its_error_line() {
+    let fixture = NexusFixture::new();
+    let script = fixture.directory.path().join("context-deploy-refusal");
+    FixtureExecutable {
+        path: script.clone(),
+    }
+    .install(
+        "#!/bin/sh\necho 'Fetching origin'\necho 'remote: counting objects'\necho 'LandingRefused: deployment is locked'\nexit 1\n",
+    );
+    let watch = LandingWatch {
+        context_repository: "/context".into(),
+        deploy_binary: script.to_string_lossy().into_owned(),
+    };
+
+    assert_eq!(
+        watch.deploy("abc123").unwrap_err(),
+        "Deploy.{ /context abc123 } exited exit status: 1: LandingRefused: deployment is locked"
+    );
 }
 
 fn psyche_core() -> Address {
@@ -309,7 +332,12 @@ fn a_landing_is_deployed_retrained_implemented_and_reported() {
     let Request::Order(failure) = &core.queue[0].request else {
         panic!("a failed step is an Order: {:?}", core.queue[0].request)
     };
-    assert!(failure.contains("Deploy failed"), "{failure}");
+    assert_eq!(
+        failure,
+        &format!(
+            "Landing {landed} blocked.\nDeploy failed: the context composer serves fixture-context at {served}, which does not include it; the deploy answered Deployed"
+        )
+    );
     assert!(
         fixture
             .nexus
@@ -318,6 +346,57 @@ fn a_landing_is_deployed_retrained_implemented_and_reported() {
             .unwrap()
             .is_none(),
         "nothing is marked before the deploy is witnessed"
+    );
+
+    fixture.nexus.advance_landings(&watch).expect("advanced");
+    assert_eq!(
+        std::fs::read_to_string(&requests).unwrap().lines().count(),
+        1,
+        "an unchanged failed landing is not deployed again"
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&psyche_core())
+            .unwrap()
+            .unwrap()
+            .queue
+            .len(),
+        1,
+        "an unchanged failed landing does not repeat its Order"
+    );
+
+    git(&repository, &["checkout", "-q", "--detach", &served]);
+    write(
+        &repository,
+        "README.md",
+        "The context repository, deployed by another path.\n",
+    );
+    git(
+        &repository,
+        &["commit", "-q", "-am", "Change the deployed path"],
+    );
+    let changed_deploy_path = git(&repository, &["rev-parse", "HEAD"]);
+    git(&repository, &["checkout", "-q", "main"]);
+    *revision.lock().unwrap() = changed_deploy_path;
+    fixture.nexus.advance_landings(&watch).expect("advanced");
+    assert_eq!(
+        std::fs::read_to_string(&requests).unwrap().lines().count(),
+        2,
+        "a changed deploy path permits one new attempt"
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&psyche_core())
+            .unwrap()
+            .unwrap()
+            .queue
+            .len(),
+        2,
+        "the changed failed attempt has one new Order"
     );
 
     // The deploy takes effect: the composer serves the landing.
@@ -345,8 +424,8 @@ fn a_landing_is_deployed_retrained_implemented_and_reported() {
     assert_eq!(landing.retrainings[0].flow_id, CLAUDE_SEAT);
     assert_eq!(
         std::fs::read_to_string(&requests).unwrap().lines().count(),
-        1,
-        "a served landing is not deployed again"
+        2,
+        "serving the landing does not run the deploy again"
     );
 
     // The implementer holds the change with its lines.
@@ -547,7 +626,12 @@ fn a_change_with_no_recorded_implementer_is_reported_blocked() {
     let Request::Order(blocked) = &core.queue.last().unwrap().request else {
         panic!("a blocked landing is an Order")
     };
-    assert!(blocked.contains("Implement failed"), "{blocked}");
+    assert_eq!(
+        blocked,
+        &format!(
+            "Landing {landed} blocked.\nImplement failed: no metaflow is recorded to implement it: Mind core Secondary"
+        )
+    );
 }
 
 /// One real landing, run where a build runs: the context repository is a

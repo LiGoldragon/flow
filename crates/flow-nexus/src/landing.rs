@@ -342,11 +342,15 @@ impl DeploysContext for LandingWatch {
                 if output.status.success() {
                     Ok(printed)
                 } else {
-                    Err(format!(
-                        "{request} exited {}: {printed} {}",
-                        output.status,
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ))
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let error = printed
+                        .lines()
+                        .rev()
+                        .find(|line| !line.trim().is_empty())
+                        .or_else(|| stderr.lines().rev().find(|line| !line.trim().is_empty()))
+                        .unwrap_or("the deploy executable gave no error")
+                        .trim();
+                    Err(format!("{request} exited {}: {error}", output.status))
                 }
             }
             Ok(Err(error)) => Err(format!("{request} could not be waited on: {error}")),
@@ -388,19 +392,31 @@ impl ReportsLanding for Landing {
             ("Implement", &self.implement),
         ]
         .into_iter()
-        .filter_map(|(name, step)| match step {
-            Step::Failed(reason) => Some(format!("{name} failed: {reason}")),
+        .find_map(|(name, step)| match step {
+            Step::Failed(reason) => Some((name, reason)),
             _ => None,
-        })
-        .collect::<Vec<_>>();
-        (!failed.is_empty()).then(|| {
-            Request::Order(format!(
-                "Approval pipeline: landing {} ({}) is blocked.\n{}\nFlow tries it again at the next change of the context repository's main, or at its next start. Unblock it, then rewrite refs/heads/main to retry now.",
-                self.commit,
-                self.subject,
-                failed.join("\n")
-            ))
-        })
+        })?;
+        let error = failed
+            .1
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("unknown error")
+            .trim();
+        Some(Request::Order(format!(
+            "Landing {} blocked.\n{} failed: {error}",
+            self.commit, failed.0
+        )))
+    }
+}
+
+fn deployment_observation(served: &Result<ModuleSource, String>) -> String {
+    match served {
+        Ok(module) => format!(
+            "the context composer serves {} at {}, which does not include it",
+            module.repository_name, module.source_revision
+        ),
+        Err(error) => error.clone(),
     }
 }
 
@@ -563,11 +579,12 @@ impl RunsLandings for RunningNexus {
         // Deploy the newest landing not yet served, once.
         let mut served = self.served_module(&watch);
         let mut attempted: Option<Result<String, String>> = None;
-        if let Some(newest) = open
-            .iter()
-            .rev()
-            .find(|landing| !matches!(landing.deploy, Step::Witnessed(_)))
-        {
+        let observation = deployment_observation(&served);
+        if let Some(newest) = open.iter().rev().find(|landing| match &landing.deploy {
+            Step::Pending => true,
+            Step::Failed(error) => !error.starts_with(&observation),
+            Step::Witnessed(_) => false,
+        }) {
             let covered = served.as_ref().is_ok_and(|module| {
                 watch.includes(newest.commit.as_str(), module.source_revision.as_str())
             });
@@ -585,32 +602,48 @@ impl RunsLandings for RunningNexus {
 
         let mut advanced = Vec::new();
         for mut landing in open {
+            let mut changed = false;
             if !matches!(landing.deploy, Step::Witnessed(_)) {
-                landing.deploy = match &served {
-                    Ok(module)
-                        if watch
-                            .includes(landing.commit.as_str(), module.source_revision.as_str()) =>
-                    {
-                        Step::Witnessed(format!(
-                            "the context composer serves {} at {}, read from {}; {answered}",
-                            module.repository_name, module.source_revision, module.module_identity
-                        ))
-                    }
-                    Ok(module) => Step::Failed(format!(
-                        "the context composer serves {} at {}, which does not include it; {answered}",
-                        module.repository_name, module.source_revision
-                    )),
-                    Err(error) => Step::Failed(format!("{error}; {answered}")),
+                let covered = served.as_ref().is_ok_and(|module| {
+                    watch.includes(landing.commit.as_str(), module.source_revision.as_str())
+                });
+                let next = if covered {
+                    let module = served.as_ref().expect("covered module");
+                    Some(Step::Witnessed(format!(
+                        "the context composer serves {} at {}, read from {}; {answered}",
+                        module.repository_name, module.source_revision, module.module_identity
+                    )))
+                } else if matches!(landing.deploy, Step::Pending) {
+                    Some(Step::Failed(format!(
+                        "{}; {answered}",
+                        deployment_observation(&served)
+                    )))
+                } else if matches!(landing.deploy, Step::Failed(ref error)
+                    if !error.starts_with(&deployment_observation(&served)))
+                {
+                    Some(Step::Failed(format!(
+                        "{}; {answered}",
+                        deployment_observation(&served)
+                    )))
+                } else {
+                    None
                 };
-                self.store
-                    .write_landing(&landing)
-                    .map_err(|error| error.to_string())?;
+                if let Some(next) = next
+                    && next != landing.deploy
+                {
+                    landing.deploy = next;
+                    changed = true;
+                    self.store
+                        .write_landing(&landing)
+                        .map_err(|error| error.to_string())?;
+                }
             }
             let deployed = matches!(landing.deploy, Step::Witnessed(_));
             if deployed
                 && !matches!(landing.retrain, Step::Witnessed(_))
                 && let Ok(module) = &served
             {
+                let before = landing.retrain.clone();
                 landing = match self.retrain_flows(module, &landing) {
                     Ok(retrained) => retrained,
                     Err(error) => {
@@ -621,10 +654,12 @@ impl RunsLandings for RunningNexus {
                         landing
                     }
                 };
+                changed |= landing.retrain != before;
             }
             if matches!(landing.deploy, Step::Witnessed(_))
                 && !matches!(landing.implement, Step::Witnessed(_))
             {
+                let before = landing.implement.clone();
                 match watch.landed_change(landing.commit.as_str()) {
                     Ok(change) => {
                         let orders = self.implementation_orders(&change);
@@ -698,13 +733,15 @@ impl RunsLandings for RunningNexus {
                         .write_landing(&landing)
                         .map_err(|error| error.to_string())?;
                 }
+                changed |= landing.implement != before;
             }
             let report = match landing.finished_report() {
                 Some(report) => {
                     landing.reported = true;
                     Some(report)
                 }
-                None => landing.failure_report(),
+                None if changed => landing.failure_report(),
+                None => None,
             };
             if let Some(report) = report {
                 let queued = {

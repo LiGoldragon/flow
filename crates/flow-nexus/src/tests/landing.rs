@@ -138,9 +138,9 @@ fn seat_address() -> Address {
     }
 }
 
-/// The Claude seat `c1a0de`, launched with `modules` and Awake at Psyche
-/// flow Secondary, its pane showing it resting.
-fn launched_seat(fixture: &NexusFixture, modules: Vec<String>) {
+/// The Claude seat `c1a0de`, launched with these system and user modules
+/// and Awake at Psyche flow Secondary, its pane showing it resting.
+fn launched_seat(fixture: &NexusFixture, system_modules: Vec<String>, user_modules: Vec<String>) {
     fixture.accept_pane_operations(
         vec![claude_agent(fixture)],
         PromptFixture::Prompted("w1:p3"),
@@ -148,8 +148,8 @@ fn launched_seat(fixture: &NexusFixture, modules: Vec<String>) {
     claude_seat(fixture, 40_000);
     let profile = LaunchProfile {
         launch_request_id: "seat-launch".into(),
-        system_modules: modules,
-        user_modules: vec![],
+        system_modules,
+        user_modules,
         address: seat_address(),
         model_name: "claude-fixture".into(),
         effort: "medium".into(),
@@ -265,7 +265,11 @@ fn a_landing_is_deployed_retrained_implemented_and_reported() {
         context_repository: repository.to_string_lossy().into_owned(),
         deploy_binary: script.to_string_lossy().into_owned(),
     };
-    launched_seat(&fixture, vec!["spirit-core".into(), "intent-flow".into()]);
+    launched_seat(
+        &fixture,
+        vec!["spirit-core".into(), "intent-flow".into()],
+        vec![],
+    );
     seed_asleep(&fixture, psyche_core());
     seed_asleep(&fixture, mind("core"));
 
@@ -421,7 +425,8 @@ fn a_flow_loading_no_changed_module_is_not_marked() {
     };
     launched_seat(
         &fixture,
-        vec!["spirit-core".into(), "knowledge-flow".into()],
+        vec!["spirit-core".into()],
+        vec!["knowledge-flow".into()],
     );
     seed_asleep(&fixture, psyche_core());
     seed_asleep(&fixture, mind("core"));
@@ -454,7 +459,7 @@ fn a_working_seat_due_a_refresh_is_ended_only_at_its_rest() {
         context_repository: repository.to_string_lossy().into_owned(),
         deploy_binary: script.to_string_lossy().into_owned(),
     };
-    launched_seat(&fixture, vec!["intent-flow".into()]);
+    launched_seat(&fixture, vec!["intent-flow".into()], vec![]);
     let mut working = claude_agent(&fixture);
     working["agent_status"] = serde_json::Value::String("working".into());
     fixture.accept_pane_operations(vec![working], PromptFixture::Prompted("w1:p3"));
@@ -508,4 +513,119 @@ fn a_working_seat_due_a_refresh_is_ended_only_at_its_rest() {
         the_landing(&fixture, &landed).retrainings[0].retrained,
         Retrained::Ended
     );
+}
+
+/// A change whose implementer is not recorded is not dropped: the
+/// implement step fails, nothing is queued, and Psyche core Secondary is
+/// given the Order naming the missing metaflow.
+#[test]
+fn a_change_with_no_recorded_implementer_is_reported_blocked() {
+    let mut fixture = NexusFixture::new();
+    let (repository, served, landed) = context_repository(fixture.directory.path());
+    let revision = serve_at(&mut fixture, &served);
+    let (script, _) = deploy_script(&fixture);
+    let watch = LandingWatch {
+        context_repository: repository.to_string_lossy().into_owned(),
+        deploy_binary: script.to_string_lossy().into_owned(),
+    };
+    seed_asleep(&fixture, psyche_core());
+    fixture.nexus.record_landings(&watch).unwrap();
+    *revision.lock().unwrap() = landed.clone();
+    fixture.nexus.advance_landings(&watch).unwrap();
+    let landing = the_landing(&fixture, &landed);
+    let Step::Failed(reason) = &landing.implement else {
+        panic!("an unowned change fails its step: {:?}", landing.implement)
+    };
+    assert!(reason.contains("Mind core Secondary"), "{reason}");
+    assert!(!landing.reported);
+    let core = fixture
+        .nexus
+        .store
+        .metaflow(&psyche_core())
+        .unwrap()
+        .unwrap();
+    let Request::Order(blocked) = &core.queue.last().unwrap().request else {
+        panic!("a blocked landing is an Order")
+    };
+    assert!(blocked.contains("Implement failed"), "{blocked}");
+}
+
+/// One real landing, run where a build runs: the context repository is a
+/// checkout of the real psyche-context whose main is ahead of the revision
+/// a live Curriculum Nexus serves, and the deploy executable moves that
+/// Curriculum to the commit it is given. The seat is the fixture Herdr's,
+/// launched with real modules composed by that Curriculum. Every landing
+/// row and every queue is printed as the witness.
+///
+/// `FLOW_LANDING_REPOSITORY` names the checkout, `FLOW_LANDING_DEPLOY` the
+/// deploy executable, `FLOW_LANDING_CURRICULUM` the Curriculum socket and
+/// `FLOW_LANDING_SYSTEM_MODULES` and `FLOW_LANDING_USER_MODULES` the seat's
+/// modules, space-separated.
+#[test]
+#[ignore = "needs the FLOW_LANDING_ variables naming a staging repository, deploy, Curriculum and seat modules"]
+fn a_real_landing_runs_against_a_live_curriculum() {
+    use crate::context::{CurriculumComposer, OpensCurriculumComposer};
+    let variable = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is set"));
+    let mut fixture = NexusFixture::new();
+    fixture.nexus.composer = LaunchComposer::with_context(ContextComposer::Curriculum(
+        CurriculumComposer::at(variable("FLOW_LANDING_CURRICULUM").as_str()),
+    ));
+    let watch = LandingWatch {
+        context_repository: variable("FLOW_LANDING_REPOSITORY"),
+        deploy_binary: variable("FLOW_LANDING_DEPLOY"),
+    };
+    let modules = |name: &str| {
+        variable(name)
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    launched_seat(
+        &fixture,
+        modules("FLOW_LANDING_SYSTEM_MODULES"),
+        modules("FLOW_LANDING_USER_MODULES"),
+    );
+    seed_asleep(&fixture, psyche_core());
+    seed_asleep(&fixture, mind("core"));
+
+    let recorded = fixture.nexus.record_landings(&watch).expect("recorded");
+    assert!(!recorded.is_empty(), "main is ahead of what is served");
+    let advanced = fixture.nexus.advance_landings(&watch).expect("advanced");
+    for landing in &advanced {
+        eprintln!("WITNESS landing {landing:#?}");
+    }
+    for address in [psyche_core(), mind("core"), seat_address()] {
+        let metaflow = fixture.nexus.store.metaflow(&address).unwrap().unwrap();
+        eprintln!(
+            "WITNESS metaflow {:?} {} {:?}: {:?}, past {:?}",
+            address.aspect, address.topic, address.layer, metaflow.state, metaflow.past
+        );
+        for queued in &metaflow.queue {
+            eprintln!("WITNESS queued {queued:#?}");
+        }
+    }
+    eprintln!(
+        "WITNESS seat {CLAUDE_SEAT}: {:?}, pane closed {}",
+        fixture
+            .nexus
+            .store
+            .flow_node(CLAUDE_SEAT)
+            .unwrap()
+            .unwrap()
+            .flow_lifecycle,
+        closed_pane(&fixture)
+    );
+    for landing in &advanced {
+        assert!(
+            matches!(landing.deploy, Step::Witnessed(_)),
+            "{:?}",
+            landing.deploy
+        );
+        assert!(
+            matches!(landing.implement, Step::Witnessed(_)),
+            "{:?}",
+            landing.implement
+        );
+        assert!(landing.reported);
+    }
 }

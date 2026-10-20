@@ -443,6 +443,12 @@ impl RunsLandings for RunningNexus {
                 git_directory.join("refs/heads"),
                 notify::RecursiveMode::Recursive,
             ),
+            // A push moves origin's main: a deploy refused for a landing not
+            // yet pushed is tried again.
+            (
+                git_directory.join("refs/remotes"),
+                notify::RecursiveMode::Recursive,
+            ),
             (git_directory.clone(), notify::RecursiveMode::NonRecursive),
         ] {
             if let Err(error) = watcher.watch(&path, mode) {
@@ -622,46 +628,67 @@ impl RunsLandings for RunningNexus {
                 match watch.landed_change(landing.commit.as_str()) {
                     Ok(change) => {
                         let orders = self.implementation_orders(&change);
-                        let mut owners = Vec::new();
-                        for order in &orders {
-                            if !owners.contains(&order.address) {
-                                owners.push(order.address.clone());
-                            }
-                        }
-                        landing.owners = owners.clone();
-                        landing.implement = Step::Witnessed(if orders.is_empty() {
-                            "no module file changed; nothing to implement".to_owned()
-                        } else {
-                            format!(
-                                "{} Orders queued, to {}",
-                                orders.len(),
-                                owners
-                                    .iter()
-                                    .map(|address| format!(
-                                        "{:?} {} {:?}",
-                                        address.aspect, address.topic, address.layer
-                                    ))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        });
-                        let queued = {
-                            let _turn = self
-                                .dispatch_gate
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            self.store.queue_landing_orders(&landing, &orders)
-                        };
-                        match queued {
-                            Ok(queued) => {
-                                for address in queued {
-                                    self.wake_due(address);
+                        let unowned = orders
+                            .iter()
+                            .filter(|order| {
+                                !matches!(self.store.metaflow(&order.address), Ok(Some(_)))
+                            })
+                            .map(|order| {
+                                format!(
+                                    "{:?} {} {:?}",
+                                    order.address.aspect, order.address.topic, order.address.layer
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if unowned.is_empty() {
+                            let mut owners = Vec::new();
+                            for order in &orders {
+                                if !owners.contains(&order.address) {
+                                    owners.push(order.address.clone());
                                 }
                             }
-                            Err(error) => {
-                                landing.implement = Step::Failed(error.to_string());
-                                landing.owners = vec![];
+                            landing.owners = owners.clone();
+                            landing.implement = Step::Witnessed(if orders.is_empty() {
+                                "no module file changed; nothing to implement".to_owned()
+                            } else {
+                                format!(
+                                    "{} Orders queued, to {}",
+                                    orders.len(),
+                                    owners
+                                        .iter()
+                                        .map(|address| format!(
+                                            "{:?} {} {:?}",
+                                            address.aspect, address.topic, address.layer
+                                        ))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            });
+                            let queued = {
+                                let _turn = self
+                                    .dispatch_gate
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                self.store.queue_landing_orders(&landing, &orders)
+                            };
+                            match queued {
+                                Ok(queued) => {
+                                    for address in queued {
+                                        self.wake_due(address);
+                                    }
+                                }
+                                Err(error) => {
+                                    landing.implement = Step::Failed(error.to_string());
+                                    landing.owners = vec![];
+                                }
                             }
+                        } else {
+                            // Nothing is queued until every change has its
+                            // implementer, so a retry queues each change once.
+                            landing.implement = Step::Failed(format!(
+                                "no metaflow is recorded to implement it: {}",
+                                unowned.join(", ")
+                            ));
                         }
                     }
                     Err(error) => landing.implement = Step::Failed(error),
@@ -707,9 +734,19 @@ impl RunsLandings for RunningNexus {
             }
             advanced.push(landing);
         }
-        // A flow marked just now that already rests is ended now.
+        // A flow marked just now that already rests is ended now; the rows
+        // answered are the ones that records.
         self.settle_refreshes();
-        Ok(advanced)
+        let mut settled = Vec::new();
+        for landing in advanced {
+            settled.push(
+                self.store
+                    .landing_row(landing.commit.as_str())
+                    .map_err(|error| error.to_string())?
+                    .unwrap_or(landing),
+            );
+        }
+        Ok(settled)
     }
 
     fn retrain_flows<N: ModuleSourcing, O: LandingCarrying>(
@@ -855,12 +892,12 @@ impl RunsLandings for RunningNexus {
                     topic: module.changed_path.module_topic()?,
                     layer: Layer::Secondary,
                 };
+                // With neither recorded the Order is still made, to Mind core
+                // Secondary; the pass refuses to queue an unowned landing.
                 let address = if recorded(&topical) {
                     topical
-                } else if recorded(&core) {
-                    core.clone()
                 } else {
-                    return None;
+                    core.clone()
                 };
                 Some(LandingOrder {
                     address,

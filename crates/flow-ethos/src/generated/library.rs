@@ -104,8 +104,18 @@ pub enum SentBy {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum WakePolicy {
+    ByRequest,
+    Required,
+}
+pub type DeliveryId = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct QueuedRequest {
+    pub delivery_id_option: std::option::Option<DeliveryId>,
     pub sent_by: SentBy,
+    pub wake_policy: WakePolicy,
     pub request: Request,
 }
 #[rustfmt::skip]

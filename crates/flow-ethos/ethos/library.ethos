@@ -35,7 +35,12 @@ Library
   ; for one Flow raised itself (a landing's orders, a compaction's
   ; investigation).
   SentBy.[ Sender Unknown Flow ]
-  QueuedRequest.{ SentBy Request }
+  ; Every ordinary Send has one durable identity. Work raised by Flow or
+  ; admitted from Message has none. ByRequest follows the request-kind wake
+  ; rule; Required wakes for every kind.
+  DeliveryId.String
+  WakePolicy.[ ByRequest Required ]
+  QueuedRequest.{ Option<DeliveryId> SentBy WakePolicy Request }
   ; A metaflow is Awake as its current flow or Asleep: a topic never dies,
   ; it goes idle, its flows turned off.
   Metaflow.{ Address

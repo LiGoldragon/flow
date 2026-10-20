@@ -1,3 +1,16 @@
+# Flow 0.37.1
+
+No contract, store or deployment change.
+
+- **A Codex thread is resumable before its first turn.** codex
+  0.161.0-alpha.2 writes a thread's rollout only at its first turn, and a
+  TUI's `resume` of a thread with no rollout fails "invalid paginated
+  history lineage ... missing source rollout", so Herdr's start timed out
+  and every Codex start was refused. After naming the thread and reading
+  the name back, Flow sends `thread/section/move` with a null section,
+  which materializes the rollout with no turn; the TUI then resumes the
+  idle thread.
+
 # Flow 0.37.0
 
 Pins signal-flow 24.0.0 (8796628) and meta-signal-flow 31.0.0 (a5ba4abe).

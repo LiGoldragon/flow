@@ -246,7 +246,15 @@ pub enum ServedSessions {
     Several,
 }
 
-impl ListedSessions {
+/// Reads Herdr's sessions and names the ones a process serves.
+pub trait ServesListedSessions: Sized {
+    /// The sessions Herdr lists now; None when Herdr cannot be read.
+    fn read(herdr: &impl KnowsHerdrServers) -> Option<Self>;
+    /// The sessions whose socket the process listens on.
+    fn served_by(&self, process: &impl ReadsProcess) -> ServedSessions;
+}
+
+impl ServesListedSessions for ListedSessions {
     fn read(herdr: &impl KnowsHerdrServers) -> Option<Self> {
         let sessions = herdr
             .herdr_sessions()?
@@ -260,7 +268,6 @@ impl ListedSessions {
         Some(Self { sessions })
     }
 
-    /// The sessions whose socket the process listens on.
     fn served_by(&self, process: &impl ReadsProcess) -> ServedSessions {
         let listening: BTreeSet<PathBuf> = process
             .listening_sockets()

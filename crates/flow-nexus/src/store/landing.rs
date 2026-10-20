@@ -9,7 +9,7 @@
 //! on the landing's row, so a Nexus that dies between the two neither
 //! loses the work nor queues it twice.
 
-use super::{FlowStore, ManagesMetaflowState, StoreError};
+use super::{FlowStore, ManagesMetaflowState, StoreError, StoredMetaflow};
 use crate::generated::landing::{
     CommitNaming, FlowNaming, KeepsLandings, Landing, LandingCarrying, LandingOrdering, Landings,
     RefreshDue, RefreshDueCarrying, RefreshesDue,
@@ -140,18 +140,33 @@ impl KeepsLandings for FlowStore {
     ) -> Result<Vec<Address>, StoreError> {
         let landing = input_0.carried_landing();
         let exists = self.landing_row(landing.commit.as_str())?.is_some();
-        let mut commit = self.engine.begin_atomic_commit();
-        let mut queued = Vec::new();
+        // Each metaflow row is written once, holding every order for it in
+        // the order given: one commit cannot write a row twice.
+        let mut rows: Vec<(Address, StoredMetaflow)> = Vec::new();
         for order in input_1.landing_orders() {
-            let Some(mut stored) = self.stored_metaflow(&order.address)? else {
-                continue;
+            let position = match rows
+                .iter()
+                .position(|(address, _)| *address == order.address)
+            {
+                Some(position) => position,
+                None => {
+                    let Some(stored) = self.stored_metaflow(&order.address)? else {
+                        continue;
+                    };
+                    rows.push((order.address.clone(), stored));
+                    rows.len() - 1
+                }
             };
-            stored.metaflow.queue.push(QueuedRequest {
+            rows[position].1.metaflow.queue.push(QueuedRequest {
                 sent_by: SentBy::Sender(Self::landing_sender()),
                 request: order.request,
             });
+        }
+        let mut commit = self.engine.begin_atomic_commit();
+        let mut queued = Vec::new();
+        for (address, stored) in rows {
             commit = commit.mutate(self.metaflows, stored);
-            queued.push(order.address);
+            queued.push(address);
         }
         commit = if exists {
             commit.mutate(self.landing_tables.landings, landing)
@@ -326,6 +341,10 @@ mod tests {
                         request: Request::Order("Implement 2d9fbb6.".into()),
                     },
                     LandingOrder {
+                        address: mind_core(),
+                        request: Request::Order("Implement the second change.".into()),
+                    },
+                    LandingOrder {
                         address: unknown,
                         request: Request::Order("Lost.".into()),
                     },
@@ -334,7 +353,15 @@ mod tests {
             .unwrap();
         assert_eq!(queued, vec![mind_core()]);
         let metaflow = store.metaflow(&mind_core()).unwrap().unwrap();
-        assert_eq!(metaflow.queue.len(), 1);
+        assert_eq!(
+            metaflow.queue.len(),
+            2,
+            "two orders to one metaflow, in order"
+        );
+        assert_eq!(
+            metaflow.queue[1].request,
+            Request::Order("Implement the second change.".into())
+        );
         assert_eq!(
             metaflow.queue[0].sent_by,
             SentBy::Sender(Address {

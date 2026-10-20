@@ -137,6 +137,9 @@
               inherit (context) cargoArtifacts;
               pname = "flow";
               cargoExtraArgs = "--workspace";
+              # The package's tests include the approval pipeline's, which
+              # read a real git repository.
+              nativeCheckInputs = [ context.pkgs.git ];
             }
           );
           # The flow-nexus library test executable, built so a test kept

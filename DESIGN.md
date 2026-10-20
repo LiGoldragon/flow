@@ -408,8 +408,8 @@ assigned-flow context, and the reset outcome mapping.
 When the living approves a vision, its landing is a commit on the context
 repository's `main`. The Start datom names that checkout and the deploy
 executable (`LandingWatch`); the Nexus watches the checkout's ref files
-(`refs/heads/main`, `packed-refs`), and every change, and its own start,
-runs one pass. A commit on `main` the context composer does not serve is a
+(`refs/heads/main`, `packed-refs`, and the remote refs, so a push of a
+landing counts), and every change, and its own start, runs one pass. A commit on `main` the context composer does not serve is a
 landing row (`flow_nexus_landings`), recorded once.
 
 A pass runs the deploy executable once, with `Deploy.{ Repository Commit }`
@@ -437,7 +437,8 @@ them.
 Each changed module file, `<type>/<subject>.md`, is queued as an Order to
 Mind `<subject>` Secondary, or to Mind core Secondary when no such metaflow
 is recorded, carrying the commit, its subject, the path and the changed
-lines. The landing's report is queued to Psyche core Secondary: a Result
+lines. A change with neither metaflow recorded fails the step and nothing
+of the landing is queued, so a retry queues each change once. The landing's report is queued to Psyche core Secondary: a Result
 once deploy, retrain and implement are witnessed, an Order when a step
 failed. Both are queued in the commit that records them on the landing, and
 both are sent as Psyche core Secondary, the flow that lands the living's

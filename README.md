@@ -323,11 +323,15 @@ harness session equal the registered target. The legacy direct Codex starter
 injects `FLOW_ID` and `FLOW_DIRECTORY`; typed launches derive their workspace
 from the configured source root.
 
-For a user service installation, build the workspace in release mode, install
-the three binaries into `~/.local/bin`, copy
-`deployment/flow-nexus.service` into `~/.config/systemd/user`, then enable
-`flow-nexus.service`. Declarative environments should package the same unit
-and binaries instead of retaining this local copy.
+The Flow commands and the `flow-nexus.service` user unit are declared by the
+operating system's Home configuration, which pins this repository's package
+and writes the unit; this repository carries no installable unit.
+
+`launcher/flow-start.mjs` starts a standard flow from the workspace's
+`config/main-flow` declarations: `flow-start <Aspect> <topic> <Layer> [-p
+<predecessor>] [-n] [task ...]`. It reads `FLOW_WORKSPACE` (the workspace root)
+and `FLOW_START_LIBRARY` (the workspace tools directory holding the start
+adapter); the Home configuration packages it with both set.
 
 This branch is source-published and is not an installed or live-accepted
 deployment. Its final compilation and test gate must run on the configured

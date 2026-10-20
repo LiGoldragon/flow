@@ -118,9 +118,6 @@ impl LocatesNativeTranscripts for HerdrCli {
 /// The production Herdr roster reader.
 pub struct HerdrCli {
     pub(crate) executable: PathBuf,
-    /// The binary Herdr servers run, when it is not the executable this
-    /// Nexus runs Herdr by, as resolved through `PATH` at each reading.
-    server_binary: Option<PathBuf>,
     flow_id_executable: PathBuf,
     flows_root: PathBuf,
     codex_endpoints: CodexEndpoints,
@@ -159,7 +156,6 @@ impl Default for HerdrCli {
         let flows_root = workspace_root.join("flows");
         Self {
             executable: PathBuf::from("herdr"),
-            server_binary: None,
             flow_id_executable: PathBuf::from("flow-id"),
             flows_root: flows_root.clone(),
             codex_endpoints: CodexEndpoints {
@@ -367,10 +363,6 @@ impl ConfiguresHerdrCli for HerdrCli {
             .join("native-transcripts");
         Self {
             executable,
-            // The test process stands as the fixture Herdr server.
-            server_binary: std::env::current_exe()
-                .ok()
-                .and_then(|binary| fs::canonicalize(binary).ok()),
             flow_id_executable: fixture_root.join("flow-id"),
             flows_root: flows_root.clone(),
             codex_endpoints: CodexEndpoints {
@@ -656,19 +648,6 @@ impl crate::caller::KnowsHerdrServers for HerdrCli {
                 })
             })
             .collect()
-    }
-
-    fn herdr_binary(&self) -> Option<PathBuf> {
-        if let Some(binary) = &self.server_binary {
-            return Some(binary.clone());
-        }
-        if self.executable.components().count() > 1 {
-            return fs::canonicalize(&self.executable).ok();
-        }
-        std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|directory| directory.join(&self.executable))
-            .find(|candidate| candidate.is_file())
-            .and_then(|found| fs::canonicalize(found).ok())
     }
 }
 

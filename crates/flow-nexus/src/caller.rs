@@ -9,11 +9,12 @@
 //! carry the marks (an environment the harness scrubbed) its ancestors are
 //! read in turn. Herdr's default session exports no `HERDR_SESSION`, so a
 //! pane ID alone names its session through the kernel: the walk goes on up
-//! to the Herdr server, a process whose `/proc/<pid>/exe` is the Herdr
-//! binary, and the session is the one whose socket, as `herdr session list`
-//! names it, that server listens on. A server listening on the sockets of
-//! more than one session, a pane ID that changes on the way up, or no server
-//! at all names no pane. The pane found must hold exactly one routable flow
+//! to the Herdr server, the process that listens on a session's socket as
+//! `herdr session list` names it, and the session is that one. The server is
+//! known by the socket it serves, never by its binary: a Herdr reached by
+//! another path, or upgraded while its server runs, serves the same socket.
+//! A server listening on the sockets of more than one session, a pane ID
+//! that changes on the way up, or no server at all names no pane. The pane found must hold exactly one routable flow
 //! in the registry, and the live Herdr snapshot must still show that flow's
 //! binding (session, pane, terminal and harness), so a pane ID Herdr reused
 //! for a new terminal names no one.
@@ -55,8 +56,6 @@ pub trait KnowsHerdrServers {
     /// Every session Herdr lists, running or not; None when Herdr cannot
     /// be read.
     fn herdr_sessions(&self) -> Option<Vec<HerdrSession>>;
-    /// The binary a Herdr server runs, canonical.
-    fn herdr_binary(&self) -> Option<PathBuf>;
 }
 
 /// Names the process at the other end of a connection, as the kernel knows it.
@@ -195,15 +194,22 @@ pub trait LocatesCallerPane: ReadsProcess {
             return Some(pane);
         }
         let mut pane_id = self.marked_pane_id();
-        let mut herdr_binary = None;
+        let mut sessions = None;
         let mut ancestor = self.parent()?;
         for _ in 0..Self::ANCESTRY_LIMIT {
             if let Some(pane_id) = &pane_id {
-                if herdr_binary.is_none() {
-                    herdr_binary = Some(herdr.herdr_binary()?);
+                if sessions.is_none() {
+                    sessions = Some(ListedSessions::read(herdr)?);
                 }
-                if ancestor.executable() == herdr_binary {
-                    return ancestor.served_pane(herdr, pane_id);
+                match sessions.as_ref()?.served_by(&ancestor) {
+                    ServedSessions::One(herdr_session_name) => {
+                        return Some(CallerPane {
+                            herdr_session_name,
+                            herdr_pane_id: pane_id.to_owned(),
+                        });
+                    }
+                    ServedSessions::Several => return None,
+                    ServedSessions::None => {}
                 }
                 // Every marked process between the peer and its server
                 // names the same pane.
@@ -221,32 +227,65 @@ pub trait LocatesCallerPane: ReadsProcess {
         }
         None
     }
+}
 
-    /// The pane this Herdr server serves under the one session whose socket
-    /// it listens on; none when it listens on no listed session's socket or
-    /// on more than one session's.
-    fn served_pane(&self, herdr: &impl KnowsHerdrServers, pane_id: &str) -> Option<CallerPane> {
-        let listening: BTreeSet<PathBuf> = self
+/// The sessions Herdr lists, each at the socket its server listens on,
+/// canonical; a session whose socket does not exist is left out.
+pub struct ListedSessions {
+    sessions: Vec<(String, PathBuf)>,
+}
+
+/// Which listed sessions a process serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServedSessions {
+    /// It listens on no listed session's socket: it is no Herdr server.
+    None,
+    /// The Herdr server of this one session.
+    One(String),
+    /// It listens on the sockets of more than one session.
+    Several,
+}
+
+/// Reads Herdr's sessions and names the ones a process serves.
+pub trait ServesListedSessions: Sized {
+    /// The sessions Herdr lists now; None when Herdr cannot be read.
+    fn read(herdr: &impl KnowsHerdrServers) -> Option<Self>;
+    /// The sessions whose socket the process listens on.
+    fn served_by(&self, process: &impl ReadsProcess) -> ServedSessions;
+}
+
+impl ServesListedSessions for ListedSessions {
+    fn read(herdr: &impl KnowsHerdrServers) -> Option<Self> {
+        let sessions = herdr
+            .herdr_sessions()?
+            .into_iter()
+            .filter_map(|session| {
+                fs::canonicalize(&session.socket)
+                    .ok()
+                    .map(|socket| (session.name, socket))
+            })
+            .collect();
+        Some(Self { sessions })
+    }
+
+    fn served_by(&self, process: &impl ReadsProcess) -> ServedSessions {
+        let listening: BTreeSet<PathBuf> = process
             .listening_sockets()
             .iter()
             .filter_map(|socket| fs::canonicalize(socket).ok())
             .collect();
-        let sessions: BTreeSet<String> = herdr
-            .herdr_sessions()?
-            .into_iter()
-            .filter(|session| {
-                fs::canonicalize(&session.socket).is_ok_and(|socket| listening.contains(&socket))
-            })
-            .map(|session| session.name)
+        let served: BTreeSet<&String> = self
+            .sessions
+            .iter()
+            .filter(|(_, socket)| listening.contains(socket))
+            .map(|(name, _)| name)
             .collect();
-        let mut sessions = sessions.into_iter();
-        let (Some(herdr_session_name), None) = (sessions.next(), sessions.next()) else {
-            return None;
-        };
-        Some(CallerPane {
-            herdr_session_name,
-            herdr_pane_id: pane_id.to_owned(),
-        })
+        let mut served = served.into_iter();
+        match (served.next(), served.next()) {
+            (None, _) => ServedSessions::None,
+            (Some(name), None) => ServedSessions::One(name.clone()),
+            (Some(_), Some(_)) => ServedSessions::Several,
+        }
     }
 }
 

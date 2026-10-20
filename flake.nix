@@ -235,8 +235,18 @@
             "composition::tests::a_profile_naming_no_valid_identities_is_refused_before_composition";
           flow-context-verification-refusals = context.exactTest "flow-nexus"
             "context::tests::a_module_body_that_differs_from_its_rendered_hash_is_refused";
-          flow-message-split-where-modules-begin = context.exactTest "flow-nexus"
-            "composition::tests::a_message_too_large_for_one_part_is_split_where_modules_begin";
+          flow-start-is-one-message = context.exactTest "flow-nexus"
+            "composition::tests::a_message_too_large_for_one_message_puts_its_leading_modules_in_the_system_prompt";
+          flow-presentation-asked = context.exactTest "flow-nexus"
+            "composition::tests::a_first_prompt_and_the_living_s_words_end_asking_for_a_presentation";
+          flow-refresh-past-model-threshold = context.exactTest "flow-nexus"
+            "tests::refresh_and_compaction::a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_flow";
+          flow-deliver-past-threshold-refused = context.exactTest "flow-nexus"
+            "tests::delivery::a_deliver_into_a_flow_past_its_threshold_is_refused";
+          flow-compaction-investigated-once = context.exactTest "flow-nexus"
+            "tests::refresh_and_compaction::a_compaction_during_continuous_work_is_investigated_once";
+          flow-codex-context-measured = context.exactTest "flow-nexus"
+            "tests::refresh_and_compaction::a_codex_flow_s_context_is_its_thread_s_last_input";
           flow-one-message-through-herdr-socket = context.exactTest "flow-nexus"
             "herdr::launch::tests::stages_pane_native_claim_registration_and_one_ambiguous_prompt_write";
           flow-parts-received-in-order = context.exactTest "flow-nexus"
@@ -281,6 +291,12 @@
             "tests::replace_stops_the_predecessor_before_the_successor_is_routable";
           flow-live-pane-lists-active = context.exactTest "flow-nexus"
             "tests::a_pending_seat_whose_pane_herdr_shows_live_is_listed_active";
+          flow-caller-server-known-by-session-socket = context.exactTest "flow-nexus"
+            "tests::a_pane_id_names_the_session_its_server_serves_whatever_herdr_path_names";
+          flow-ended-binding-forgotten = context.exactTest "flow-nexus"
+            "tests::waking::an_address_held_only_through_an_ended_binding_is_forgotten";
+          flow-ended-binding-with-work-rests = context.exactTest "flow-nexus"
+            "tests::waking::an_ended_binding_holding_work_rests_asleep";
           flow-operation-outcomes = context.exactTest "flow-nexus"
             "tests::an_operation_is_answered_by_its_own_outcome";
           flow-report-recorded-or-refused = context.exactTest "flow-nexus"

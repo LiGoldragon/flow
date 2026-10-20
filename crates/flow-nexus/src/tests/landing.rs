@@ -117,6 +117,9 @@ fn deploy_script(fixture: &NexusFixture) -> (PathBuf, PathBuf) {
 #[test]
 fn a_deploy_refusal_keeps_only_its_error_line() {
     let fixture = NexusFixture::new();
+    let repository = fixture.directory.path().join("context");
+    std::fs::create_dir_all(&repository).unwrap();
+    git(&repository, &["init", "-q", "-b", "main"]);
     let script = fixture.directory.path().join("context-deploy-refusal");
     FixtureExecutable {
         path: script.clone(),
@@ -125,13 +128,24 @@ fn a_deploy_refusal_keeps_only_its_error_line() {
         "#!/bin/sh\necho 'Fetching origin'\necho 'remote: counting objects'\necho 'LandingRefused: deployment is locked'\nexit 1\n",
     );
     let watch = LandingWatch {
-        context_repository: "/context".into(),
+        context_repository: repository.to_string_lossy().into_owned(),
         deploy_binary: script.to_string_lossy().into_owned(),
     };
 
     assert_eq!(
         watch.deploy("abc123").unwrap_err(),
-        "Deploy.{ /context abc123 } exited exit status: 1: LandingRefused: deployment is locked"
+        format!(
+            "Deploy.{{ {} abc123 }} exited exit status: 1: LandingRefused: deployment is locked",
+            repository.display()
+        )
+    );
+    let log = repository.join(".git/flow-landing-logs/abc123.log");
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        format!(
+            "request: Deploy.{{ {} abc123 }}\noutcome: exit status: 1\nstdout:\nFetching origin\nremote: counting objects\nLandingRefused: deployment is locked\n\nstderr:\n\n",
+            repository.display()
+        )
     );
 }
 
@@ -335,8 +349,15 @@ fn a_landing_is_deployed_retrained_implemented_and_reported() {
     assert_eq!(
         failure,
         &format!(
-            "Landing {landed} blocked.\nDeploy failed: the context composer serves fixture-context at {served}, which does not include it; the deploy answered Deployed"
+            "Refusal: landing {landed}, Deploy failed.\nCause: the context composer serves fixture-context at {served}, which does not include it; the deploy answered Deployed\nLog: {}/.git/flow-landing-logs/{landed}.log",
+            repository.display()
         )
+    );
+    assert!(
+        std::fs::read_to_string(repository.join(format!(".git/flow-landing-logs/{landed}.log")))
+            .unwrap()
+            .contains("stdout:\nDeployed\n"),
+        "the Order's named log holds the complete deploy output"
     );
     assert!(
         fixture
@@ -656,8 +677,15 @@ fn a_change_with_no_recorded_implementer_is_reported_blocked() {
     assert_eq!(
         blocked,
         &format!(
-            "Landing {landed} blocked.\nImplement failed: no metaflow is recorded to implement it: Mind core Secondary"
+            "Refusal: landing {landed}, Implement failed.\nCause: no metaflow is recorded to implement it: Mind core Secondary\nLog: {}/.git/flow-landing-logs/{landed}.log",
+            repository.display()
         )
+    );
+    assert!(
+        repository
+            .join(format!(".git/flow-landing-logs/{landed}.log"))
+            .is_file(),
+        "every refusal names a durable diagnostic log"
     );
 }
 

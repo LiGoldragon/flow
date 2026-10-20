@@ -20,9 +20,9 @@
 //!    witnessed; an Order to it whenever a step fails.
 //!
 //! Retrain and Implement wait for the deploy, so a refreshed flow and the
-//! implementer both wake into the landed modules. A failed step is tried
-//! again at the next change of `main` and at the Nexus's next start; the
-//! watch is a file watch on the ref files, never a timer.
+//! implementer both wake into the landed modules. A failed deploy is tried
+//! again only when `main` or the deploy executable's identity changes; the
+//! watch covers both paths and is never a timer.
 
 use crate::codex_turns::SettlesRestingCodexSeats;
 use crate::generated::landing::{
@@ -47,6 +47,7 @@ use flow_ethos::{LandingWatch, State};
 use notify::Watcher;
 use sha2::{Digest, Sha256};
 use signal_flow::{Address, Aspect, HarnessKind, Layer, Request};
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,6 +55,41 @@ use std::time::Duration;
 
 /// How long one deploy may run before Flow ends it and records it failed.
 const DEPLOY_BOUND: Duration = Duration::from_secs(30 * 60);
+
+fn deploy_log_path(watch: &LandingWatch, commit: &str) -> Result<std::path::PathBuf, String> {
+    Ok(std::path::PathBuf::from(watch.git_directory()?)
+        .join("flow-landing-logs")
+        .join(format!("{commit}.log")))
+}
+
+fn write_deploy_log(
+    path: &std::path::Path,
+    request: &str,
+    outcome: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<(), String> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| format!("deploy log {} has no directory", path.display()))?;
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("deploy log directory {}: {error}", directory.display()))?;
+    let temporary = path.with_extension("log.tmp");
+    let mut file = std::fs::File::create(&temporary)
+        .map_err(|error| format!("deploy log {}: {error}", temporary.display()))?;
+    file.write_all(format!("request: {request}\noutcome: {outcome}\nstdout:\n").as_bytes())
+        .and_then(|_| file.write_all(stdout))
+        .and_then(|_| file.write_all(b"\nstderr:\n"))
+        .and_then(|_| file.write_all(stderr))
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("deploy log {}: {error}", temporary.display()))?;
+    std::fs::rename(&temporary, path)
+        .map_err(|error| format!("deploy log {}: {error}", path.display()))?;
+    std::fs::File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("deploy log directory {}: {error}", directory.display()))
+}
 
 impl CommitNaming for str {
     fn commit(&self) -> Commit {
@@ -320,18 +356,23 @@ impl DeploysContext for LandingWatch {
         if self.deploy_binary.is_empty() {
             return Err("no deploy executable is configured".into());
         }
-        let request = format!(
-            "Deploy.{{ {} {} }}",
-            self.context_repository,
-            input.commit()
-        );
-        let child = Command::new(&self.deploy_binary)
+        let commit = input.commit();
+        let request = format!("Deploy.{{ {} {} }}", self.context_repository, commit);
+        let log_path = deploy_log_path(self, &commit)?;
+        let child = match Command::new(&self.deploy_binary)
             .arg(&request)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| format!("{} did not start: {error}", self.deploy_binary))?;
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let refusal = format!("{} did not start: {error}", self.deploy_binary);
+                write_deploy_log(&log_path, &request, &refusal, &[], &[])?;
+                return Err(refusal);
+            }
+        };
         let process_id = child.id();
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -339,6 +380,13 @@ impl DeploysContext for LandingWatch {
         });
         match receiver.recv_timeout(DEPLOY_BOUND) {
             Ok(Ok(output)) => {
+                write_deploy_log(
+                    &log_path,
+                    &request,
+                    &output.status.to_string(),
+                    &output.stdout,
+                    &output.stderr,
+                )?;
                 let printed = String::from_utf8_lossy(&output.stdout).trim().to_owned();
                 if output.status.success() {
                     Ok(printed)
@@ -354,7 +402,11 @@ impl DeploysContext for LandingWatch {
                     Err(format!("{request} exited {}: {error}", output.status))
                 }
             }
-            Ok(Err(error)) => Err(format!("{request} could not be waited on: {error}")),
+            Ok(Err(error)) => {
+                let refusal = format!("{request} could not be waited on: {error}");
+                write_deploy_log(&log_path, &request, &refusal, &[], &[])?;
+                Err(refusal)
+            }
             Err(_) => {
                 if let Ok(process_id) = i32::try_from(process_id) {
                     // SAFETY: kill(2) on the child this thread spawned.
@@ -362,10 +414,12 @@ impl DeploysContext for LandingWatch {
                         libc::kill(process_id, libc::SIGKILL);
                     }
                 }
-                Err(format!(
+                let refusal = format!(
                     "{request} did not finish within {} minutes and was ended",
                     DEPLOY_BOUND.as_secs() / 60
-                ))
+                );
+                write_deploy_log(&log_path, &request, &refusal, &[], &[])?;
+                Err(refusal)
             }
         }
     }
@@ -397,16 +451,25 @@ impl ReportsLanding for Landing {
             Step::Failed(reason) => Some((name, reason)),
             _ => None,
         })?;
-        let error = failed
+        let cause = failed
             .1
             .lines()
             .rev()
-            .find(|line| !line.trim().is_empty())
+            .find(|line| {
+                !line.trim().is_empty()
+                    && !line.starts_with("log: ")
+                    && !line.starts_with("retry key: ")
+            })
             .unwrap_or("unknown error")
             .trim();
+        let log = failed
+            .1
+            .lines()
+            .find_map(|line| line.strip_prefix("log: "))
+            .unwrap_or("unavailable");
         Some(Request::Order(format!(
-            "Landing {} blocked.\n{} failed: {error}",
-            self.commit, failed.0
+            "Refusal: landing {}, {} failed.\nCause: {cause}\nLog: {log}",
+            self.commit, failed.0,
         )))
     }
 }
@@ -637,16 +700,20 @@ impl RunsLandings for RunningNexus {
                         module.repository_name, module.source_revision, module.module_identity
                     )))
                 } else if matches!(landing.deploy, Step::Pending) {
+                    let log = deploy_log_path(&watch, &landing.commit)?;
                     Some(Step::Failed(format!(
-                        "{retry_key}\n{}; {answered}",
-                        deployment_observation(&served)
+                        "{retry_key}\n{}; {answered}\nlog: {}",
+                        deployment_observation(&served),
+                        log.display()
                     )))
                 } else if matches!(landing.deploy, Step::Failed(ref error)
                     if !error.starts_with(&retry_key))
                 {
+                    let log = deploy_log_path(&watch, &landing.commit)?;
                     Some(Step::Failed(format!(
-                        "{retry_key}\n{}; {answered}",
-                        deployment_observation(&served)
+                        "{retry_key}\n{}; {answered}\nlog: {}",
+                        deployment_observation(&served),
+                        log.display()
                     )))
                 } else {
                     None
@@ -757,6 +824,38 @@ impl RunsLandings for RunningNexus {
                         .map_err(|error| error.to_string())?;
                 }
                 changed |= landing.implement != before;
+            }
+            let log = deploy_log_path(&watch, &landing.commit)?;
+            let failed_without_log = [
+                &mut landing.deploy,
+                &mut landing.retrain,
+                &mut landing.implement,
+            ]
+            .into_iter()
+            .find_map(|step| match step {
+                Step::Failed(reason) if !reason.lines().any(|line| line.starts_with("log: ")) => {
+                    Some(reason)
+                }
+                _ => None,
+            });
+            if let Some(reason) = failed_without_log {
+                if !log.exists() {
+                    let request = format!(
+                        "Deploy.{{ {} {} }}",
+                        watch.context_repository, landing.commit
+                    );
+                    write_deploy_log(
+                        &log,
+                        &request,
+                        "not run: the composer already served the landing",
+                        &[],
+                        &[],
+                    )?;
+                }
+                reason.push_str(&format!("\nlog: {}", log.display()));
+                self.store
+                    .write_landing(&landing)
+                    .map_err(|error| error.to_string())?;
             }
             let report = match landing.finished_report() {
                 Some(report) => {

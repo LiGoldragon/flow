@@ -2,13 +2,15 @@
 //! message, from the module identities its profile names.
 //!
 //! The context is composed by the context composer and verified
-//! ([`crate::context`]); nothing composed is written to disk. The system
-//! prompt is the verified system text, followed after a blank line by the
-//! launch's own section (its predecessor and remembered flows). The first
-//! USER message is the verified USER text, then the brief, sent once. When
-//! it does not fit one message, it is split where modules begin into parts,
-//! each opening with a header naming it part k of n; the brief is in the
-//! last part.
+//! ([`crate::context`]); nothing composed is written to disk. A start is one
+//! model call: every module the launch names is in the system prompt or the
+//! first USER message, sent once. The system prompt is the verified system
+//! text, then any USER modules that overflow the first message, followed
+//! after a blank line by the launch's own section (its predecessor and
+//! remembered flows). The first USER message is the verified USER text,
+//! then the brief. When it does not fit one message, its leading modules
+//! join the system prompt, which no process argument carries, until the
+//! rest fits.
 
 use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
 pub use crate::generated::starter::{
@@ -101,7 +103,6 @@ impl RendersLaunchSection for LaunchProfile {
 pub(crate) const HERDR_REQUEST_LINE_LIMIT: usize = 1024 * 1024;
 const HERDR_ENVELOPE_ALLOWANCE: usize = 1024;
 const CODEX_TEXT_CHARACTER_LIMIT: usize = 1 << 20;
-const ARGUMENT_BYTE_LIMIT: usize = 131_071;
 
 /// What one message and one argument may hold for a harness.
 ///
@@ -110,10 +111,9 @@ const ARGUMENT_BYTE_LIMIT: usize = 131_071;
 /// when its JSON-encoded text with the request envelope stays under that.
 /// A Codex part is one text item of `turn/start`, which the Codex
 /// app-server refuses over `MAX_USER_INPUT_TEXT_CHARS` (1 << 20)
-/// characters. The system prompt is held to what one process argument
-/// holds, 131072 bytes with its terminating NUL, though it no longer travels
-/// as one: Claude reads it from the Nexus's in-memory file and a Codex
-/// thread is given it as its base instructions.
+/// characters. The system prompt travels in no message and no argument:
+/// Claude reads it from the Nexus's in-memory file and a Codex thread is
+/// given it as its base instructions.
 impl FitsOneMessage for HarnessKind {
     fn fits_one_message<N: Textual>(&self, input: N) -> bool {
         let text = input.text();
@@ -123,24 +123,6 @@ impl FitsOneMessage for HarnessKind {
             }),
             HarnessKind::Codex => text.chars().count() <= CODEX_TEXT_CHARACTER_LIMIT,
         }
-    }
-
-    fn system_argument<N: Textual>(&self, input: N) -> String {
-        let text = input.text();
-        match self {
-            HarnessKind::Claude => text,
-            // A JSON string is a TOML basic string; Codex reads `-c` values
-            // as TOML.
-            HarnessKind::Codex => format!(
-                "instructions={}",
-                serde_json::to_string(&text).unwrap_or_default()
-            ),
-        }
-    }
-
-    fn fits_one_argument<N: Textual>(&self, input: N) -> bool {
-        let text = input.text();
-        !text.contains('\0') && self.system_argument(&text).len() <= ARGUMENT_BYTE_LIMIT
     }
 }
 
@@ -176,6 +158,24 @@ impl SplitsStartupMessage for HarnessKind {
                 "Startup message, part {number} of {count}. More of it follows: do nothing until part {count} of {count} arrives, and answer only that you are waiting for it.\n\n"
             )
         }
+    }
+
+    /// How many leading USER modules join the system prompt so that the
+    /// rest and the brief fit one message: none when the whole fits. A
+    /// brief that does not fit one message alone refuses.
+    fn system_overflow<N: SegmentListing, O: Textual>(
+        &self,
+        input_0: N,
+        input_1: O,
+    ) -> Result<i64, ContextRefusal> {
+        let segments = input_0.segments();
+        let brief = input_1.text();
+        for moved in 0..=segments.len() {
+            if self.fits_one_message(segments[moved..].joined_with(&brief).concat()) {
+                return i64::try_from(moved).map_err(|_| ContextRefusal::ModuleTooLarge);
+            }
+        }
+        Err(ContextRefusal::ModuleTooLarge)
     }
 
     fn startup_parts<N: SegmentListing, O: Textual>(
@@ -334,13 +334,41 @@ impl ValidatesLaunchProfile for LaunchProfile {
     }
 }
 
+/// What a flow is asked to end a turn with when it is given significant new
+/// context: its first turn, and every task, goal or question that
+/// originates in the psyche. A message from another flow that only updates
+/// it carries no such line.
+pub const PRESENTATION_LINE: &str = "End this turn with a presentation: a response that could fit into a book, taking its form from your context modules and this prompt.";
+
+/// A prompt that ends asking for a presentation: the text, then the
+/// presentation line after a blank line, once.
+pub trait AsksPresentation {
+    fn with_presentation(&self) -> String;
+}
+
+impl AsksPresentation for str {
+    fn with_presentation(&self) -> String {
+        if self.ends_with(PRESENTATION_LINE) {
+            return self.to_owned();
+        }
+        let mut text = self.trim_end_matches('\n').to_owned();
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(PRESENTATION_LINE);
+        text
+    }
+}
+
 /// The brief that follows the context: the instruction itself for Claude,
-/// under a launch record for Codex.
+/// under a launch record for Codex, ending with the presentation line, since
+/// a first turn ends in a presentation.
 impl RendersBrief for HarnessedProfile {
     fn brief(&self) -> String {
         let profile = &self.launch_profile;
+        let instruction = profile.instruction_prompt.with_presentation();
         if self.harness_kind == HarnessKind::Claude {
-            return profile.instruction_prompt.clone();
+            return instruction;
         }
         format!(
             "# Flow launch\n\nRole: {} {}\nHarness: Codex\nModel: {}\nEffort: {}\nHerdr session: {}\nRemote control: app-server endpoint\n\n{}",
@@ -349,7 +377,7 @@ impl RendersBrief for HarnessedProfile {
             profile.model_name,
             profile.effort,
             profile.herdr_session_name,
-            profile.instruction_prompt,
+            instruction,
         )
     }
 }
@@ -398,12 +426,21 @@ impl ComposesVerifiedContext for LaunchComposer {
         Ok(verified)
     }
 
-    fn launch_system_prompt<N: Profiled, O: ReadsVerifiedContext>(
+    fn launch_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
         &self,
         input_0: N,
         input_1: O,
-    ) -> Result<SystemPrompt, ContextRefusal> {
+        input_2: P,
+    ) -> SystemPrompt {
         let mut system_prompt_text = input_1.system_text();
+        // USER modules that overflow the first message follow the system
+        // text, each as rendered.
+        for segment in input_2.segments() {
+            if !system_prompt_text.is_empty() && !system_prompt_text.ends_with('\n') {
+                system_prompt_text.push('\n');
+            }
+            system_prompt_text.push_str(&segment);
+        }
         let section = input_0.profile().launch_section();
         if !section.is_empty() {
             if !system_prompt_text.is_empty() && !system_prompt_text.ends_with('\n') {
@@ -412,17 +449,11 @@ impl ComposesVerifiedContext for LaunchComposer {
             system_prompt_text.push('\n');
             system_prompt_text.push_str(&section);
         }
-        if !input_0
-            .harness_kind()
-            .fits_one_argument(&system_prompt_text)
-        {
-            return Err(ContextRefusal::SystemTooLarge);
-        }
         let system_prompt_sha256 = format!("{:x}", Sha256::digest(system_prompt_text.as_bytes()));
-        Ok(SystemPrompt {
+        SystemPrompt {
             system_prompt_text,
             system_prompt_sha256,
-        })
+        }
     }
 }
 
@@ -489,11 +520,14 @@ impl ComposesLaunch for LaunchComposer {
         };
         let leave_outs = harnessed.effective_leave_outs(input_1)?;
         let verified = self.verified_context(&harnessed)?;
-        let system_prompt = self.launch_system_prompt(&harnessed, &verified)?;
         let brief = harnessed.brief();
-        let segments = verified.user_segments();
-        let body = segments.joined_with(&brief).concat();
-        let parts = harnessed.harness_kind.startup_parts(&segments, &brief)?;
+        let mut segments = verified.user_segments();
+        let overflow = usize::try_from(harnessed.harness_kind.system_overflow(&segments, &brief)?)
+            .map_err(|_| ContextRefusal::ModuleTooLarge)?;
+        let kept = segments.split_off(overflow);
+        let system_prompt = self.launch_system_prompt(&harnessed, &verified, &segments);
+        let body = kept.joined_with(&brief).concat();
+        let parts = harnessed.harness_kind.startup_parts(&kept, &brief)?;
         Ok(Self::assembled(
             &harnessed,
             &system_prompt,
@@ -510,7 +544,8 @@ impl ComposesLaunch for LaunchComposer {
 /// `{ Sender.{ Mind flow Tertiary } Order.«...» }`, or `{ Unknown ... }` for
 /// one queued before Flow kept senders. It is typed as the datom it is, as a
 /// Message is; a control character other than LF and TAB is a key to a
-/// harness, not a word, and is typed as U+FFFD.
+/// harness, not a word, and is typed as U+FFFD. Work that carries the
+/// living's words ends with the presentation line.
 pub trait RendersQueuedWork {
     const QUEUED_WORK_OPENING: &'static str = "Work queued for this metaflow while no flow of it was running, oldest first, each with who sent it:";
     fn prompt_text(&self) -> String;
@@ -533,6 +568,15 @@ impl RendersQueuedWork for [QueuedRequest] {
                         glyph => glyph,
                     }),
             );
+        }
+        let from_the_psyche = self.iter().any(|queued| {
+            matches!(
+                queued.request,
+                signal_flow::Request::Psyche(_) | signal_flow::Request::Psyches(_)
+            )
+        });
+        if from_the_psyche {
+            text = text.with_presentation();
         }
         text
     }
@@ -670,7 +714,10 @@ pub(crate) mod tests {
         let body = &composed.first_prompt_payload.first_prompt_body;
         assert!(body.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: operation-main-flow, knowledge-flow\n"));
         assert!(body.contains("\n<!-- module: knowledge-flow -->\nKnowledge body.\n<!-- end-module: knowledge-flow -->\n"));
-        assert!(body.ends_with("<!-- end-module: knowledge-flow -->\n\nCarry the bounded task."));
+        assert!(body.ends_with(&format!(
+            "<!-- end-module: knowledge-flow -->\n\nCarry the bounded task.\n\n{}",
+            super::PRESENTATION_LINE
+        )));
         assert_eq!(body.matches("Main flow body.").count(), 1);
         assert!(!body.contains("Spirit body."));
         assert_eq!(composed.first_prompt_payload.prompt_part_vector.len(), 1);
@@ -720,14 +767,14 @@ pub(crate) mod tests {
             "<!-- end-module: knowledge-flow -->\n\n# Flow launch\n\n",
             "Role: Field Medium\nHarness: Codex\nModel: gpt-6-astra\nEffort: medium\n",
             "Herdr session: messaging-build\nRemote control: app-server endpoint\n\n",
-            "Carry the bounded task."
+            "Carry the bounded task.\n\nEnd this turn with a presentation: a response that could fit into a book, taking its form from your context modules and this prompt."
         )));
         assert!(!body.contains('$'));
         assert!(composed.has_canonical_first_prompt());
     }
 
     #[test]
-    fn a_message_too_large_for_one_part_is_split_where_modules_begin() {
+    fn a_message_too_large_for_one_message_puts_its_leading_modules_in_the_system_prompt() {
         let size = 400_000;
         let (composer, names) = large(&[size, size, size]);
         let mut profile = fixture_profile();
@@ -742,39 +789,64 @@ pub(crate) mod tests {
                     Vec::<signal_flow::LeaveOut>::new(),
                 )
                 .unwrap();
+            // One message, so one model call: no part waits on an answer.
             let parts = &composed.first_prompt_payload.prompt_part_vector;
-            assert_eq!(parts.len(), 2, "{harness:?}");
-            assert!(parts[0].prompt_part_text.starts_with(
-                "Startup message, part 1 of 2. More of it follows: do nothing until part 2 of 2 arrives, and answer only that you are waiting for it.\n\nThese are your skills"
-            ));
-            assert!(parts[1].prompt_part_text.starts_with(
-                "Startup message, part 2 of 2, the last.\n\n\n<!-- module: knowledge-large-2 -->\n"
-            ));
-            assert!(
-                parts[1]
-                    .prompt_part_text
-                    .ends_with("Carry the bounded task.")
-            );
-            assert!(
-                !parts[0]
-                    .prompt_part_text
-                    .contains("Carry the bounded task.")
-            );
-            for part in parts {
-                assert!(harness.fits_one_message(&part.prompt_part_text));
-                assert!(!part.prompt_part_text.contains("seat"));
+            assert_eq!(parts.len(), 1, "{harness:?}");
+            let body = &composed.first_prompt_payload.first_prompt_body;
+            assert_eq!(&parts[0].prompt_part_text, body);
+            assert!(harness.fits_one_message(body));
+            assert!(!body.contains("Startup message, part"));
+            assert!(body.contains("<!-- module: knowledge-large-2 -->"));
+            assert!(body.ends_with(super::PRESENTATION_LINE));
+            // The leading module joined the system prompt, after the system
+            // text and before the launch section; no module is left out.
+            let system = &composed.system_prompt.system_prompt_text;
+            assert!(system.contains("<!-- module: knowledge-large-0 -->"));
+            assert!(!body.contains("<!-- module: knowledge-large-0 -->"));
+            let module = system.find("<!-- module: knowledge-large-0 -->").unwrap();
+            assert!(system.find("<!-- module: intent-flow -->").unwrap() < module);
+            assert!(system.find("Predecessor: 1b8ac0").unwrap() > module);
+            for name in &names {
+                let marker = format!("<!-- module: {name} -->");
+                assert_eq!(
+                    usize::from(system.contains(&marker)) + usize::from(body.contains(&marker)),
+                    1,
+                    "{name} placed once"
+                );
             }
             assert!(composed.has_canonical_first_prompt());
         }
     }
 
     #[test]
-    fn a_module_that_cannot_fit_one_part_refuses_the_launch() {
+    fn a_module_too_large_for_one_message_starts_in_the_system_prompt() {
         let (composer, names) = large(&[1_100_000]);
         let mut profile = fixture_profile();
         profile.user_modules = names;
+        let composed = composer
+            .compose(
+                crate::composition::HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: profile.clone(),
+                },
+                Vec::<signal_flow::LeaveOut>::new(),
+            )
+            .unwrap();
+        assert!(
+            composed
+                .system_prompt
+                .system_prompt_text
+                .contains("<!-- module: knowledge-large-0 -->")
+        );
+        assert_eq!(composed.first_prompt_payload.prompt_part_vector.len(), 1);
+    }
+
+    #[test]
+    fn a_brief_too_large_for_one_message_refuses_the_launch() {
+        let mut profile = fixture_profile();
+        profile.instruction_prompt = "x".repeat(1_100_000);
         assert_eq!(
-            composer.compose(
+            fixture_composer().compose(
                 crate::composition::HarnessedProfile {
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone()
@@ -786,21 +858,51 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_system_prompt_past_one_argument_refuses_the_launch() {
+    fn a_system_prompt_past_one_argument_is_composed_whole() {
         let (composer, names) = large(&[10, 140_000]);
         let mut profile = fixture_profile();
         profile.system_modules = vec!["spirit-core".into(), names[1].clone()];
         profile.user_modules = vec![names[0].clone()];
-        assert_eq!(
-            composer.compose(
+        let composed = composer
+            .compose(
                 crate::composition::HarnessedProfile {
                     harness_kind: HarnessKind::Codex,
-                    launch_profile: profile.clone()
+                    launch_profile: profile.clone(),
                 },
                 Vec::<signal_flow::LeaveOut>::new(),
-            ),
-            Err(CompositionError::Context(ContextRefusal::SystemTooLarge))
+            )
+            .unwrap();
+        assert!(composed.system_prompt.system_prompt_text.len() > 140_000);
+    }
+
+    #[test]
+    fn a_first_prompt_and_the_living_s_words_end_asking_for_a_presentation() {
+        use super::{AsksPresentation, PRESENTATION_LINE, RendersQueuedWork};
+        use signal_flow::{QueuedRequest, Request, SentBy};
+        assert_eq!(
+            "Do it.".with_presentation(),
+            format!("Do it.\n\n{PRESENTATION_LINE}")
         );
+        assert_eq!(
+            "Do it.".with_presentation().with_presentation(),
+            "Do it.".with_presentation()
+        );
+        let order = QueuedRequest {
+            sent_by: SentBy::Unknown,
+            request: Request::Order("Run the tier tests.".into()),
+        };
+        // Another flow's message carries no presentation line.
+        assert!(![order.clone()].prompt_text().contains(PRESENTATION_LINE));
+        let words = QueuedRequest {
+            sent_by: SentBy::Unknown,
+            request: Request::Psyche(flow_ethos::Said {
+                context: "c".into(),
+                verbatim: "v".into(),
+            }),
+        };
+        let text = [order, words].prompt_text();
+        assert!(text.ends_with(PRESENTATION_LINE));
+        assert_eq!(text.matches(PRESENTATION_LINE).count(), 1);
     }
 
     #[test]
@@ -853,21 +955,17 @@ pub(crate) mod tests {
 
     #[test]
     fn a_tampered_part_is_not_canonical() {
-        let size = 400_000;
-        let (composer, names) = large(&[size, size, size]);
-        let mut profile = fixture_profile();
-        profile.user_modules = names;
-        let mut composed = composer
+        let mut composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
                     harness_kind: HarnessKind::Codex,
-                    launch_profile: profile.clone(),
+                    launch_profile: fixture_profile(),
                 },
                 Vec::<signal_flow::LeaveOut>::new(),
             )
             .unwrap();
         assert!(composed.has_canonical_first_prompt());
-        composed.first_prompt_payload.prompt_part_vector[1]
+        composed.first_prompt_payload.prompt_part_vector[0]
             .prompt_part_text
             .push('x');
         assert!(!composed.has_canonical_first_prompt());

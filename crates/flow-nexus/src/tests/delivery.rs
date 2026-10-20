@@ -81,11 +81,18 @@ impl NexusFixture {
         fs::read_to_string(self.directory.path().join("herdr-operations.log")).unwrap_or_default()
     }
 
-    /// The fixture flow Awake as { Psyche flow Secondary }, its layer's
-    /// Refresh threshold `refresh` tokens.
+    /// The fixture flow Awake as { Psyche flow Secondary }, running
+    /// claude-opus-5-5, whose refresh threshold is `refresh` tokens.
     fn at_secondary_refreshing_at(&self, refresh: i64) {
         use crate::store::ManagesMetaflowState as _;
+        use crate::store::SeedsRole as _;
         use crate::store::metaflow::SeedsMetaflow as _;
+        self.nexus.store.seed_role(signal_flow::Caller {
+            flow_id: "908786".into(),
+            aspect: signal_flow::Aspect::Psyche,
+            power_level: signal_flow::PowerLevel::Medium,
+            model_name: "claude-opus-5-5".into(),
+        });
         self.nexus.store.seed_metaflow(signal_flow::Metaflow {
             address: signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
@@ -100,8 +107,7 @@ impl NexusFixture {
             .store
             .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
                 meta_signal_flow::ConfigureThreshold {
-                    layer: signal_flow::Layer::Secondary,
-                    handover: refresh / 2,
+                    model_name: "claude-opus-5-5".into(),
                     refresh,
                 },
             ]))
@@ -529,8 +535,8 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
 }
 
 /// Compaction is an emergency measure: a Compact is refused, before any
-/// key reaches the pane, until the flow's context at its last Stop reaches
-/// the Refresh threshold of its layer; at the threshold it is placed.
+/// key reaches the pane, until the flow's last measured context reaches the
+/// refresh threshold of its model; at the threshold it is placed.
 #[test]
 fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
     use crate::store::context::RecordsContextSize as _;
@@ -544,7 +550,7 @@ fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
     let refused =
         |refusal| MetaResponse::CommandRejected(CommandRejection::CompactionRefused(refusal));
 
-    // No metaflow is Awake as the flow and no launch names its layer.
+    // Flow knows no model for the flow.
     assert_eq!(
         fixture.command(HarnessCommand::Compact),
         refused(CompactionRefusal::NoThreshold)
@@ -703,4 +709,34 @@ impl Drop for PanePeer {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+/// A flow past its model's refresh threshold is given no new message: a
+/// Deliver into it is refused before anything reaches the pane.
+#[test]
+fn a_deliver_into_a_flow_past_its_threshold_is_refused() {
+    use crate::store::context::RecordsContextSize as _;
+    let fixture = NexusFixture::new();
+    let log = fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    fixture.at_secondary_refreshing_at(200_000);
+    fixture
+        .nexus
+        .store
+        .record_context_size("908786", 200_000)
+        .expect("context size recorded");
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Deliver(meta_signal_flow::DeliveryRequest {
+                delivery_id: "delivery-past".into(),
+                flow_id: "908786".into(),
+                message: middle_abrupt("one more thing"),
+            })),
+        MetaResponse::DeliveryRejected(meta_signal_flow::DeliveryRejection::PastThreshold)
+    );
+    assert!(prompts(&log).is_empty(), "nothing reached the pane");
 }

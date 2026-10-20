@@ -266,12 +266,15 @@ pub trait CutsRenderedText {
 #[rustfmt::skip]
 pub trait FitsOneMessage {
     fn fits_one_message<N: Textual>(&self, input: N) -> bool;
-    fn system_argument<N: Textual>(&self, input: N) -> String;
-    fn fits_one_argument<N: Textual>(&self, input: N) -> bool;
 }
 #[rustfmt::skip]
 pub trait SplitsStartupMessage {
     fn part_header<N: PartNumbering>(input: N) -> String;
+    fn system_overflow<N: SegmentListing, O: Textual>(
+        &self,
+        input_0: N,
+        input_1: O,
+    ) -> std::result::Result<i64, signal_flow::ContextRefusal>;
     fn startup_parts<N: SegmentListing, O: Textual>(
         &self,
         input_0: N,
@@ -299,11 +302,12 @@ pub trait ComposesVerifiedContext {
         &self,
         input: N,
     ) -> std::result::Result<flow_nexus::VerifiedContext, flow_nexus::CompositionError>;
-    fn launch_system_prompt<N: Profiled, O: ReadsVerifiedContext>(
+    fn launch_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
         &self,
         input_0: N,
         input_1: O,
-    ) -> std::result::Result<signal_flow::SystemPrompt, signal_flow::ContextRefusal>;
+        input_2: P,
+    ) -> signal_flow::SystemPrompt;
 }
 #[rustfmt::skip]
 pub trait AssemblesComposedLaunch {

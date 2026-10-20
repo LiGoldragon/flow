@@ -75,8 +75,7 @@ impl ConfiguredStore {
                 native: "gpt-6-astra".into(),
             }]),
             ConfigurationChange::Thresholds(vec![ConfigureThreshold {
-                layer: Layer::Primary,
-                handover: 100_000,
+                model_name: "claude-fable-5-1".into(),
                 refresh: 200_000,
             }]),
         ] {
@@ -340,11 +339,16 @@ fn each_family_is_its_last_declaration() {
         MetaResponse::Configured(ConfigureOutcome::Unchanged)
     );
 
-    let thresholds = vec![ConfigureThreshold {
-        layer: Layer::Primary,
-        handover: 150_000,
-        refresh: 250_000,
-    }];
+    let thresholds = vec![
+        ConfigureThreshold {
+            model_name: "claude-opus-5-5".into(),
+            refresh: 200_000,
+        },
+        ConfigureThreshold {
+            model_name: "gpt-6.1-sol".into(),
+            refresh: 150_000,
+        },
+    ];
     assert_eq!(
         configure(&nexus, ConfigurationChange::Thresholds(thresholds.clone())),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
@@ -413,6 +417,7 @@ fn each_family_is_its_last_declaration() {
             thresholds,
             default_leave_outs: second,
             send_servers,
+            investigation: None,
         }
     );
     // An empty declaration empties the family.

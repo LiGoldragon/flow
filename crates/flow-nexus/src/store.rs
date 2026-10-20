@@ -6,6 +6,7 @@
 
 use crate::store::delivery::RegistersDeliveryTables;
 pub(crate) mod address_hold;
+pub mod compaction;
 pub mod context;
 mod created_pane;
 pub mod delivery;
@@ -35,8 +36,8 @@ use std::{
 };
 
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureLeaveOut, ConfigureModel, ConfigureNexus,
-    ConfigureOutcome, ConfigureThreshold,
+    ConfigurationChange, ConfigurationSnapshot, ConfigureInvestigation, ConfigureLeaveOut,
+    ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureThreshold,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -78,7 +79,15 @@ const META_NEXUS_CONFIGURATION_TABLE_NAME: TableName =
 const META_MODEL_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_model_configuration");
 const META_THRESHOLD_CONFIGURATION_TABLE_NAME: TableName =
-    TableName::new("flow_nexus_meta_threshold_configuration");
+    TableName::new("flow_nexus_meta_model_threshold_configuration");
+const META_THRESHOLD_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-model-threshold-configuration";
+const META_THRESHOLD_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-model-threshold-configuration-v1";
+const META_INVESTIGATION_CONFIGURATION_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_meta_investigation_configuration");
+const META_INVESTIGATION_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-investigation-configuration";
+const META_INVESTIGATION_CONFIGURATION_SCHEMA: &str =
+    "flow-nexus-meta-investigation-configuration-v1";
 const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_leave_out_configuration");
 /// The tables an older store kept and an open drops: the meta
@@ -86,8 +95,10 @@ const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
 /// configures, and the system-prompt bundle 0.34.6 kept for each Address,
 /// both dropped from 0.35.0 on; and the fresh-wake marks, which chose
 /// between resuming a sleeping flow and waking it fresh, dropped from
-/// 0.35.22 on, since every wake is fresh. Each is named with the family
-/// identity it was registered under.
+/// 0.35.22 on, since every wake is fresh; and the thresholds kept one per
+/// layer with a handover, dropped from 0.35.25 on, since a threshold
+/// belongs to a model and no flow writes a handover. Each is named with the
+/// family identity it was registered under.
 const RETIRED_TABLES: &[(&str, &str, &str)] = &[
     (
         "flow_nexus_meta_module_configuration",
@@ -104,6 +115,11 @@ const RETIRED_TABLES: &[(&str, &str, &str)] = &[
         "flow-nexus-metaflow-refresh",
         "flow-nexus-metaflow-refresh-v1",
     ),
+    (
+        "flow_nexus_meta_threshold_configuration",
+        "flow-nexus-meta-threshold-configuration",
+        "flow-nexus-meta-threshold-configuration-v1",
+    ),
 ];
 /// The tables a configuration-only store holds, all of them.
 const CONFIGURATION_ONLY_TABLES: &[&str] = &[
@@ -113,7 +129,6 @@ const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_delivery_configuration",
     "flow_nexus_meta_nexus_configuration",
     "flow_nexus_meta_model_configuration",
-    "flow_nexus_meta_threshold_configuration",
 ];
 /// The tables every running store holds.
 const RUNNING_TABLES: &[&str] = &[
@@ -136,7 +151,6 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_delivery_configuration",
     "flow_nexus_meta_nexus_configuration",
     "flow_nexus_meta_model_configuration",
-    "flow_nexus_meta_threshold_configuration",
     "flow_nexus_flow_events",
 ];
 // A running store keeps each flow's context size from 0.28.0 on, and
@@ -163,6 +177,17 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_queue_delivery_attempts",
     "flow_nexus_landings",
     "flow_nexus_refresh_due",
+    "flow_nexus_meta_model_threshold_configuration",
+    "flow_nexus_meta_investigation_configuration",
+    "flow_nexus_compactions",
+];
+/// The tables a configuration-only store may hold beside its own, each
+/// added by a later Flow.
+const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
+    "flow_nexus_meta_leave_out_configuration",
+    "flow_nexus_meta_send_server_configuration",
+    "flow_nexus_meta_model_threshold_configuration",
+    "flow_nexus_meta_investigation_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -626,6 +651,7 @@ impl DescribesModelTable for StoredMetaModelConfiguration {
     }
 }
 
+/// One model's refresh threshold, keyed by the model's name.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct StoredMetaThresholdConfiguration {
     threshold: ConfigureThreshold,
@@ -633,7 +659,47 @@ struct StoredMetaThresholdConfiguration {
 
 impl EngineRecord for StoredMetaThresholdConfiguration {
     fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::layer_key(&self.threshold.layer))
+        RecordKey::new(self.threshold.model_name.clone())
+    }
+}
+
+trait DescribesThresholdTable {
+    fn descriptor() -> TableDescriptor<StoredMetaThresholdConfiguration>;
+}
+
+impl DescribesThresholdTable for StoredMetaThresholdConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaThresholdConfiguration> {
+        TableDescriptor::new(
+            META_THRESHOLD_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_THRESHOLD_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_THRESHOLD_CONFIGURATION_SCHEMA),
+        )
+    }
+}
+
+/// The Investigation seat, one row.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaInvestigationConfiguration {
+    investigation: ConfigureInvestigation,
+}
+
+impl EngineRecord for StoredMetaInvestigationConfiguration {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new("investigation")
+    }
+}
+
+trait DescribesInvestigationTable {
+    fn descriptor() -> TableDescriptor<StoredMetaInvestigationConfiguration>;
+}
+
+impl DescribesInvestigationTable for StoredMetaInvestigationConfiguration {
+    fn descriptor() -> TableDescriptor<StoredMetaInvestigationConfiguration> {
+        TableDescriptor::new(
+            META_INVESTIGATION_CONFIGURATION_TABLE_NAME,
+            FamilyName::new(META_INVESTIGATION_CONFIGURATION_FAMILY),
+            SchemaHash::for_label(META_INVESTIGATION_CONFIGURATION_SCHEMA),
+        )
     }
 }
 
@@ -932,6 +998,21 @@ struct StoredRole {
 impl EngineRecord for StoredRole {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.caller.flow_id.clone())
+    }
+}
+
+/// Seeds a flow's role directly, for tests of what reads its model.
+#[cfg(test)]
+pub(crate) trait SeedsRole {
+    fn seed_role(&self, role: Caller);
+}
+
+#[cfg(test)]
+impl SeedsRole for FlowStore {
+    fn seed_role(&self, role: Caller) {
+        self.engine
+            .assert(Assertion::new(self.roles, StoredRole { caller: role }))
+            .expect("role seeded");
     }
 }
 
@@ -2633,6 +2714,7 @@ pub(crate) struct MetaConfigurationTables {
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
     leave_outs: TableReference<StoredMetaLeaveOutConfiguration>,
     send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
+    investigation: TableReference<StoredMetaInvestigationConfiguration>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -2648,16 +2730,14 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
                 SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
             ))?,
             models: engine.upgraded_models(StoredMetaModelConfiguration::descriptor())?,
-            thresholds: engine.register_table(TableDescriptor::new(
-                META_THRESHOLD_CONFIGURATION_TABLE_NAME,
-                FamilyName::new("flow-nexus-meta-threshold-configuration"),
-                SchemaHash::for_label("flow-nexus-meta-threshold-configuration-v1"),
-            ))?,
+            thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
             leave_outs: engine
                 .upgraded_leave_out_defaults(StoredMetaLeaveOutConfiguration::descriptor())?,
             send_servers: engine.register_table(
                 <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor(),
             )?,
+            investigation: engine
+                .register_table(StoredMetaInvestigationConfiguration::descriptor())?,
         })
     }
 }
@@ -2686,6 +2766,7 @@ pub struct FlowStore {
     opened_threads: TableReference<opened_thread::OpenedLaunchThread>,
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
     launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
+    compactions: TableReference<compaction::Compaction>,
     queue_delivery: QueueDeliveryTables,
     landing_tables: landing::LandingTables,
     pub launch_changes: LaunchChanges,
@@ -2762,11 +2843,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
         );
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
-        let meta_thresholds_descriptor = TableDescriptor::new(
-            META_THRESHOLD_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-meta-threshold-configuration"),
-            SchemaHash::for_label("flow-nexus-meta-threshold-configuration-v1"),
-        );
+        let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
+        let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         if recognized {
@@ -2785,7 +2863,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
                 .with_family(&meta_leave_outs_descriptor)
-                .with_family(&meta_send_servers_descriptor),
+                .with_family(&meta_send_servers_descriptor)
+                .with_family(&meta_investigation_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
@@ -2797,6 +2876,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
             leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
+            investigation: engine.register_table(meta_investigation_descriptor)?,
         };
         if !recognized {
             engine.assert(Assertion::new(
@@ -3296,11 +3376,10 @@ impl OpensFlowStore for FlowStore {
             SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
         );
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
-        let meta_thresholds_descriptor = TableDescriptor::<StoredMetaThresholdConfiguration>::new(
-            META_THRESHOLD_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-meta-threshold-configuration"),
-            SchemaHash::for_label("flow-nexus-meta-threshold-configuration-v1"),
-        );
+        let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
+        let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
+        let compactions_descriptor =
+            <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let events_descriptor = <events::FlowEvents as events::DescribesEventTable>::descriptor();
         let context_sizes_descriptor =
@@ -3340,6 +3419,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_thresholds_descriptor)
                 .with_family(&meta_leave_outs_descriptor)
                 .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
+                .with_family(&meta_investigation_descriptor)
+                .with_family(&compactions_descriptor)
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
                 .with_family(&address_holds_descriptor)
@@ -3377,6 +3458,7 @@ impl OpensFlowStore for FlowStore {
         let opened_threads = engine.register_table(opened_threads_descriptor)?;
         let send_calls = engine.upgraded_send_calls(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
+        let compactions = engine.register_table(compactions_descriptor)?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
         let landing_tables =
@@ -3405,6 +3487,7 @@ impl OpensFlowStore for FlowStore {
             opened_threads,
             send_calls,
             launch_cleanups,
+            compactions,
             queue_delivery,
             landing_tables,
             launch_changes: LaunchChanges::default(),
@@ -3536,6 +3619,9 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups = engine.register_table(
             <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor(),
         )?;
+        let compactions = engine.register_table(
+            <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor(),
+        )?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, QueueDeliveryTables::descriptors())?;
         let landing_tables =
@@ -3564,6 +3650,7 @@ impl OpensFlowStore for FlowStore {
             opened_threads,
             send_calls,
             launch_cleanups,
+            compactions,
             queue_delivery,
             landing_tables,
             launch_changes: LaunchChanges::default(),
@@ -3656,9 +3743,13 @@ pub(crate) trait ManagesMetaflowState: Sized {
     /// Replace one configuration family whole with its declaration.
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
-    /// The threshold configured for one layer, if any.
-    fn configured_threshold(&self, layer: &Layer)
-    -> Result<Option<ConfigureThreshold>, StoreError>;
+    /// The refresh threshold configured for one model, if any.
+    fn configured_threshold(
+        &self,
+        model_name: &str,
+    ) -> Result<Option<ConfigureThreshold>, StoreError>;
+    /// The Investigation seat, if one is configured.
+    fn configured_investigation(&self) -> Result<Option<ConfigureInvestigation>, StoreError>;
     /// The leave-outs a metaflow's Start on one harness takes when it names
     /// none; empty when none are configured for that harness.
     fn default_leave_outs(
@@ -3700,15 +3791,26 @@ impl ManagesMetaflowState for FlowStore {
 
     fn configured_threshold(
         &self,
-        layer: &Layer,
+        model_name: &str,
     ) -> Result<Option<ConfigureThreshold>, StoreError> {
         let rows = self.engine.match_records(QueryPlan::key(
             self.meta_configuration_tables.thresholds,
-            RecordKey::new(FlowStore::layer_key(layer)),
+            RecordKey::new(model_name),
         ))?;
         match rows.records() {
             [] => Ok(None),
             [stored] => Ok(Some(stored.threshold.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+
+    fn configured_investigation(&self) -> Result<Option<ConfigureInvestigation>, StoreError> {
+        let rows = self
+            .engine
+            .match_records(QueryPlan::all(self.meta_configuration_tables.investigation))?;
+        match rows.records() {
+            [] => Ok(None),
+            [stored] => Ok(Some(stored.investigation.clone())),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -6059,10 +6161,17 @@ pub(crate) trait ReadsFlowMemory {
                     StoredMetaModelConfiguration::schema_hash(),
                 ));
             }
-            "flow_nexus_meta_threshold_configuration" => (
-                "flow-nexus-meta-threshold-configuration",
-                "flow-nexus-meta-threshold-configuration-v1",
+            "flow_nexus_meta_model_threshold_configuration" => (
+                META_THRESHOLD_CONFIGURATION_FAMILY,
+                META_THRESHOLD_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_investigation_configuration" => (
+                META_INVESTIGATION_CONFIGURATION_FAMILY,
+                META_INVESTIGATION_CONFIGURATION_SCHEMA,
+            ),
+            "flow_nexus_compactions" => {
+                (compaction::COMPACTION_FAMILY, compaction::COMPACTION_SCHEMA)
+            }
             "flow_nexus_meta_leave_out_configuration" => {
                 return Some((
                     "flow-nexus-meta-leave-out-configuration",
@@ -6240,8 +6349,7 @@ pub(crate) trait ReadsFlowMemory {
             .all(|name| actual.contains(*name))
             && actual.iter().all(|name| {
                 CONFIGURATION_ONLY_TABLES.contains(&name.as_str())
-                    || name == "flow_nexus_meta_leave_out_configuration"
-                    || name == "flow_nexus_meta_send_server_configuration"
+                    || CONFIGURATION_ONLY_ADDED_TABLES.contains(&name.as_str())
                     || name == "flow_nexus_queue_delivery_counter"
                     || name == "flow_nexus_queue_delivery_requests"
                     || name == "flow_nexus_queue_delivery_attempts"
@@ -6425,10 +6533,12 @@ pub(crate) trait ReadsFlowMemory {
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
         let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
+        let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
         if models_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
             || leave_out_rows.database_marker() != marker
             || send_server_rows.database_marker() != marker
+            || investigation_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
@@ -6447,7 +6557,12 @@ pub(crate) trait ReadsFlowMemory {
             .iter()
             .map(|stored| stored.threshold.clone())
             .collect::<Vec<_>>();
-        thresholds.sort_by_key(|threshold| FlowStore::layer_key(&threshold.layer));
+        thresholds.sort_by(|left, right| left.model_name.cmp(&right.model_name));
+        let investigation = match investigation_rows.records() {
+            [] => None,
+            [stored] => Some(stored.investigation.clone()),
+            _ => return Err(StoreError::StateInvariant),
+        };
         let mut default_leave_outs = leave_out_rows
             .records()
             .iter()
@@ -6471,6 +6586,7 @@ pub(crate) trait ReadsFlowMemory {
             thresholds,
             default_leave_outs,
             send_servers,
+            investigation,
         }))
     }
 
@@ -6614,6 +6730,13 @@ pub(crate) trait ReadsFlowMemory {
                             },
                         )
                         .collect(),
+                )
+            }
+            ConfigurationChange::Investigation(investigation) => {
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.investigation,
+                    vec![StoredMetaInvestigationConfiguration { investigation }],
                 )
             }
         }
@@ -8746,10 +8869,18 @@ mod tests {
                         .len(),
                 ),
                 read(
-                    "flow_nexus_meta_threshold_configuration",
+                    "flow_nexus_meta_model_threshold_configuration",
                     engine
                         .match_records(QueryPlan::all(meta.thresholds))
                         .expect("meta threshold configuration reads")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_meta_investigation_configuration",
+                    engine
+                        .match_records(QueryPlan::all(meta.investigation))
+                        .expect("meta investigation configuration reads")
                         .records()
                         .len(),
                 ),
@@ -8806,6 +8937,14 @@ mod tests {
                     engine
                         .match_records(QueryPlan::all(self.launch_cleanups))
                         .expect("launch cleanups read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_compactions",
+                    engine
+                        .match_records(QueryPlan::all(self.compactions))
+                        .expect("compactions read")
                         .records()
                         .len(),
                 ),

@@ -76,6 +76,10 @@ impl RecordsReports for RunningNexus {
     }
 
     fn after_report(&self, flow_id: &FlowId, event: &Event) {
+        // Every report of a Claude flow has its transcript read for a
+        // compaction its harness made on its own; SessionStart follows one
+        // at once.
+        crate::compacting::WatchesCompactions::watch_claude_compactions(self, flow_id);
         match event {
             Event::Stopped(stop) => {
                 // A launch sending its first message in parts waits on a

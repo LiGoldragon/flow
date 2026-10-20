@@ -1,10 +1,12 @@
 ; The direct-text starter: a launch names its flow's context by module
 ; identity; the context composer composes it and Flow verifies it; the
 ; first USER message is the composed USER text then the brief, sent whole
-; through Herdr's socket or the Codex app-server, or in parts split where
-; modules begin, each part after the first sent once the flow has answered
-; the one before; the receipt is every part seen in order, then the flow's
-; first answer.
+; through Herdr's socket or the Codex app-server, so that a flow's start is
+; one model call. When the USER text and the brief do not fit one message,
+; the leading USER modules join the end of the system prompt, which no
+; process argument carries, until the rest fits; the system prompt holds
+; much of the context and the first message the rest. The receipt is the
+; message seen, then the flow's first answer.
 ;
 ; A capability takes traits, never concrete values: each value a starter
 ; capability reads (a text, a profile, a request, a transcript row) reaches
@@ -92,16 +94,15 @@ Library
                          system_text.[ String ]
                          user_segments.[ Vector<String> ] ]
   CutsRenderedText.[ rendered_segments.{ [ ProvenanceListing ] [ Option<Vector<String>> ] } ]
-  FitsOneMessage.[ fits_one_message.{ [ Textual ] [ Boolean ] }
-                   system_argument.{ [ Textual ] [ String ] }
-                   fits_one_argument.{ [ Textual ] [ Boolean ] } ]
+  FitsOneMessage.[ fits_one_message.{ [ Textual ] [ Boolean ] } ]
   SplitsStartupMessage.[ part_header:{ [ PartNumbering ] [ String ] }
+                         system_overflow.{ [ SegmentListing Textual ] [ Result<Integer ContextRefusal> ] }
                          startup_parts.{ [ SegmentListing Textual ] [ Result<Vector<String> ContextRefusal> ] } ]
   JoinsContextAndBrief.[ joined_with.{ [ Textual ] [ Vector<String> ] } ]
   RendersBrief.[ brief.[ String ] ]
   ResolvesLeaveOuts.[ effective_leave_outs.{ [ LeaveOutListing ] [ Result<LeaveOuts CompositionError> ] } ]
   ComposesVerifiedContext.[ verified_context.{ [ Profiled ] [ Result<VerifiedContext CompositionError> ] }
-                            launch_system_prompt.{ [ Profiled ReadsVerifiedContext ] [ Result<SystemPrompt ContextRefusal> ] } ]
+                            launch_system_prompt.{ [ Profiled ReadsVerifiedContext SegmentListing ] [ SystemPrompt ] } ]
   AssemblesComposedLaunch.[ assembled:{ [ Profiled SystemPrompted Textual SegmentListing LeaveOutListing ] [ ComposedLaunch ] } ]
   ComposesLaunch.[ compose.{ [ Profiled LeaveOutListing ] [ Result<ComposedLaunch CompositionError> ] } ]
   ProfilesFreshSeat.[ fresh_profile.[ LaunchProfile ] ]

@@ -513,6 +513,32 @@ impl WritesTakenAddress for TakenAddress {
 }
 
 /// One metaflow row written back in its own atomic commit.
+/// Queues a request Flow itself raises for a metaflow it holds.
+pub(crate) trait QueuesFlowRequest {
+    /// Appends the request to the metaflow's queue; false when Flow holds
+    /// no such metaflow.
+    fn queue_flow_request(
+        &self,
+        address: &Address,
+        request: QueuedRequest,
+    ) -> Result<bool, StoreError>;
+}
+
+impl QueuesFlowRequest for FlowStore {
+    fn queue_flow_request(
+        &self,
+        address: &Address,
+        request: QueuedRequest,
+    ) -> Result<bool, StoreError> {
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Ok(false);
+        };
+        stored.metaflow.queue.push(request);
+        self.write_metaflow(stored)?;
+        Ok(true)
+    }
+}
+
 trait WritesMetaflow {
     fn write_metaflow(&self, stored: StoredMetaflow) -> Result<(), StoreError>;
 }

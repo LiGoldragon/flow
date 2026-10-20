@@ -70,6 +70,7 @@ use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
+use crate::store::context::JudgesThreshold;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{
@@ -315,8 +316,10 @@ pub enum AtStop {
     /// The seat rested with work queued: the oldest request was typed in.
     Drained(QueuedRequest),
     /// The seat was due a refresh and rested: its pane was closed, it was
-    /// recorded Stopped and its metaflow put Asleep; work queued for the
-    /// metaflow wakes a fresh flow.
+    /// recorded Stopped and its metaflow put Asleep, in the same event;
+    /// work queued for the metaflow wakes its next, fresh flow. It is due
+    /// when a landing changed its modules, or when its last measured
+    /// context passed its model's refresh threshold.
     Refreshed(Address),
     /// The seat stays as it is, for the reason named.
     Kept(KeptAtStop),
@@ -449,6 +452,28 @@ pub trait PerformsWakeAndDrain {
     fn wake(&self, address: Address) -> Outcome;
     /// Performed under the dispatch gate.
     fn drain(&self, address: Address) -> Outcome;
+}
+
+/// A fresh flow started for a metaflow by the Nexus itself, as a wake
+/// starts one, with the brief given.
+pub(crate) trait StartsFreshSeat {
+    fn start_fresh_seat(
+        &self,
+        metaflow: &Metaflow,
+        fresh: FreshContext,
+        text: &str,
+    ) -> Result<FlowId, Failed_Data>;
+}
+
+impl StartsFreshSeat for RunningNexus {
+    fn start_fresh_seat(
+        &self,
+        metaflow: &Metaflow,
+        fresh: FreshContext,
+        text: &str,
+    ) -> Result<FlowId, Failed_Data> {
+        self.start_fresh(metaflow, fresh, text)
+    }
 }
 
 /// The steps a wake takes.
@@ -921,7 +946,9 @@ impl SleepsAndWakesSeats for RunningNexus {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
             }
             // The refreshed seat's work wakes the fresh flow, once the gate
-            // the refresh ran under is given back.
+            // the refresh ran under is given back; with nothing queued the
+            // metaflow sleeps until an Order, a Question or the living's
+            // words.
             AtStop::Refreshed(address) => {
                 eprintln!("flow-nexus: flow {flow_id} refreshed at its rest");
                 self.wake_due(address.clone());
@@ -1129,6 +1156,11 @@ impl PerformsWakeAndDrain for RunningNexus {
                 Reconciled::Refused => return Outcome::Failed(Failed_Data::StoreRefused),
             },
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+        }
+        // A flow past its model's refresh threshold is given no new
+        // message: what is queued stays for the metaflow's next flow.
+        if matches!(self.store.past_threshold(&flow_id), Ok(true)) {
+            return Outcome::Drained(drained);
         }
         let oldest = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => metaflow.queue.into_iter().next(),
@@ -1518,8 +1550,11 @@ impl WakesInParts for RunningNexus {
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        // A seat due a refresh is ended at its rest rather than handed work.
-        let refresh_due = matches!(self.store.refresh_due(flow_id), Ok(Some(_)));
+        // A seat due a refresh is ended at its rest rather than handed work:
+        // one a landing marked, or one past its model's refresh threshold,
+        // which is told nothing and writes no handover.
+        let refresh_due = matches!(self.store.refresh_due(flow_id), Ok(Some(_)))
+            || matches!(self.store.past_threshold(flow_id), Ok(true));
         match node.harness_kind {
             // A Codex seat is handed work through its app-server, so only
             // the app-server's thread status says it rests, whatever its

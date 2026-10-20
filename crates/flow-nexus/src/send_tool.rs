@@ -39,6 +39,7 @@ use crate::codex::{
     SubscribesThread, SubscriptionEnd, ThreadConnection, ThreadSubscription,
 };
 use crate::codex_turns::{ReadsThreadStatus, ReadsTurnEvent, SettlesRestingCodexSeats, TurnEvent};
+use crate::compacting::{ReadsCodexContextSignal, WatchesCompactions};
 use crate::generated::send_tool::{
     AnswersToolCall, DeclaresSendTool, HandlesSendCall, ParamsCarrying, ReadsSendArguments,
     ReadsToolCall, SendArguments, SendCall, SendKind, SendOutcome, SendRefusal, ToolCall,
@@ -475,6 +476,12 @@ impl RespondsToSendCalls for RunningNexus {
             self.codex_events(&thread, vec![event]);
             return Ok(());
         }
+        if let Some(thread) = subscription.thread.clone()
+            && let Some(signal) = request.context_signal(&thread)
+        {
+            self.codex_context_signal(&thread, signal);
+            return Ok(());
+        }
         if request.get("method").and_then(serde_json::Value::as_str) != Some("item/tool/call") {
             return Ok(());
         }
@@ -625,6 +632,16 @@ impl ServesLaunchCalls for RunningNexus {
             && let Some(event) = request.turn_event(&thread)
         {
             self.observe_codex_events(&thread, vec![event]);
+            return Ok(());
+        }
+        // A first turn's context size is kept as any turn's is. A
+        // compaction in it is not raised: raising starts a flow, which
+        // waits on the gate this launch holds.
+        if let Some(thread) = responder.subscription.thread.clone()
+            && let Some(signal @ crate::compacting::CodexContextSignal::TokenUsage(_)) =
+                request.context_signal(&thread)
+        {
+            self.codex_context_signal(&thread, signal);
             return Ok(());
         }
         if request.get("method").and_then(serde_json::Value::as_str) != Some("item/tool/call") {

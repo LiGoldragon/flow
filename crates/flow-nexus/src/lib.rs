@@ -25,6 +25,7 @@ pub mod caller;
 pub mod claude;
 pub mod codex;
 pub mod codex_turns;
+pub mod compacting;
 pub mod composition;
 pub mod context;
 pub mod delivery;
@@ -116,6 +117,8 @@ pub struct RunningNexus {
     /// Whether each Codex thread is in a turn, as its app-server's events
     /// show it; see `codex_turns`.
     pub codex_turns: codex_turns::CodexTurns,
+    /// How far each flow's compactions have been read; see `compacting`.
+    pub compactions: compacting::CompactionWatch,
 }
 
 pub trait Dispatches {
@@ -554,6 +557,7 @@ impl OpensRunningNexus for RunningNexus {
             stopping: Stopping::default(),
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
+            compactions: compacting::CompactionWatch::default(),
         })
     }
 }
@@ -1151,6 +1155,7 @@ mod tests {
     mod launching_nexus;
     mod model;
     mod queue_drain;
+    mod refresh_and_compaction;
     mod reservation;
     mod secondary;
     mod send_tool;
@@ -1676,6 +1681,7 @@ mod tests {
                 stopping: crate::Stopping::default(),
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),
+                compactions: crate::compacting::CompactionWatch::default(),
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");

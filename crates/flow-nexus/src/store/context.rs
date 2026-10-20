@@ -1,14 +1,15 @@
 //! How big each flow's context was when its harness last stopped: the
 //! tokens its native session carried into its last turn, read from the
-//! session's transcript when the flow's hook reports `Stopped`. One row per
-//! flow, keyed by its FlowId, rewritten at each Stop. A wake reads it to
-//! choose between resuming the session and launching fresh.
+//! Claude session's transcript when the flow's hook reports `Stopped`, or
+//! from a Codex thread's token usage as its app-server reports it. One row
+//! per flow, keyed by its FlowId, rewritten at each reading. It is judged
+//! against the refresh threshold of the flow's model: a flow at or past it
+//! is given no new message and is replaced as it goes idle.
 //!
 //! The row lives in its own table, so a store written before context sizes
 //! were kept opens with the table added and its flows simply have none.
 
-use super::metaflow::SleepsMetaflows;
-use super::{FlowStore, ManagesMetaflowState, ReadsLaunchAttempt, StoreError};
+use super::{FlowStore, ManagesMetaflowState, ReadsFlowRoles, ReadsLaunchAttempt, StoreError};
 use meta_signal_flow::{CompactionRefusal, ContextBelowThreshold};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -106,11 +107,77 @@ impl RecordsContextSize for FlowStore {
     }
 }
 
+/// The model a flow runs: the one its role records, else the one its
+/// launch named.
+pub trait NamesFlowModel {
+    fn flow_model(&self, flow_id: &str) -> Result<Option<String>, StoreError>;
+}
+
+impl NamesFlowModel for FlowStore {
+    fn flow_model(&self, flow_id: &str) -> Result<Option<String>, StoreError> {
+        if let Some(role) = self.role(flow_id)? {
+            return Ok(Some(role.model_name));
+        }
+        Ok(match self.launch_requests_bound_to(flow_id)?.pop() {
+            Some(launch_request_id) => self
+                .launch_attempt(&launch_request_id)?
+                .map(|attempt| attempt.launch_profile.model_name),
+            None => None,
+        })
+    }
+}
+
+/// Where a flow's last measured context stands against its model's
+/// refresh threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThresholdStanding {
+    /// Its model has no threshold configured, or Flow knows no model for it.
+    NoThreshold,
+    /// No context size is recorded for it.
+    Unmeasured,
+    /// Below the threshold.
+    Below { context: i64, refresh: i64 },
+    /// At or past the threshold: it is given no new message and is
+    /// replaced as it goes idle.
+    Past { context: i64, refresh: i64 },
+}
+
+pub trait JudgesThreshold {
+    fn threshold_standing(&self, flow_id: &str) -> Result<ThresholdStanding, StoreError>;
+    /// Whether the flow is at or past its model's refresh threshold.
+    fn past_threshold(&self, flow_id: &str) -> Result<bool, StoreError> {
+        Ok(matches!(
+            self.threshold_standing(flow_id)?,
+            ThresholdStanding::Past { .. }
+        ))
+    }
+}
+
+impl JudgesThreshold for FlowStore {
+    fn threshold_standing(&self, flow_id: &str) -> Result<ThresholdStanding, StoreError> {
+        let threshold = match self.flow_model(flow_id)? {
+            Some(model) => self.configured_threshold(&model)?,
+            None => None,
+        };
+        let Some(threshold) = threshold else {
+            return Ok(ThresholdStanding::NoThreshold);
+        };
+        let Some(context) = self.context_size(flow_id)? else {
+            return Ok(ThresholdStanding::Unmeasured);
+        };
+        let refresh = threshold.refresh;
+        Ok(if context < refresh {
+            ThresholdStanding::Below { context, refresh }
+        } else {
+            ThresholdStanding::Past { context, refresh }
+        })
+    }
+}
+
 /// Compaction is an emergency measure, refused while the context is below
-/// a threshold: a flow is compacted only when its context at its last Stop
-/// was at or above the Refresh threshold configured for its layer, the
-/// point past which the flow should already have been refreshed. Its layer
-/// is the one of the metaflow Awake as it, else the one its launch named.
+/// a threshold: a flow is compacted only when its last measured context is
+/// at or above the refresh threshold configured for its model, the point
+/// past which the flow should already have been refreshed.
 pub trait JudgesCompaction {
     /// Why a Compact of this flow is refused; None when it may compact.
     fn compaction_refusal(&self, flow_id: &str) -> Result<Option<CompactionRefusal>, StoreError>;
@@ -118,33 +185,17 @@ pub trait JudgesCompaction {
 
 impl JudgesCompaction for FlowStore {
     fn compaction_refusal(&self, flow_id: &str) -> Result<Option<CompactionRefusal>, StoreError> {
-        let layer = match self.metaflow_awake_as(flow_id)? {
-            Some(metaflow) => Some(metaflow.address.layer),
-            None => match self.launch_requests_bound_to(flow_id)?.pop() {
-                Some(launch_request_id) => self
-                    .launch_attempt(&launch_request_id)?
-                    .map(|attempt| attempt.launch_profile.address.layer),
-                None => None,
-            },
-        };
-        let threshold = match layer {
-            Some(layer) => self.configured_threshold(&layer)?,
-            None => None,
-        };
-        let Some(threshold) = threshold else {
-            return Ok(Some(CompactionRefusal::NoThreshold));
-        };
-        let Some(tokens) = self.context_size(flow_id)? else {
-            return Ok(Some(CompactionRefusal::Unmeasured));
-        };
-        Ok(
-            (tokens < threshold.refresh).then_some(CompactionRefusal::BelowThreshold(
-                ContextBelowThreshold {
-                    context_tokens: tokens,
-                    refresh_tokens: threshold.refresh,
-                },
-            )),
-        )
+        Ok(match self.threshold_standing(flow_id)? {
+            ThresholdStanding::NoThreshold => Some(CompactionRefusal::NoThreshold),
+            ThresholdStanding::Unmeasured => Some(CompactionRefusal::Unmeasured),
+            ThresholdStanding::Below { context, refresh } => {
+                Some(CompactionRefusal::BelowThreshold(ContextBelowThreshold {
+                    context_tokens: context,
+                    refresh_tokens: refresh,
+                }))
+            }
+            ThresholdStanding::Past { .. } => None,
+        })
     }
 }
 

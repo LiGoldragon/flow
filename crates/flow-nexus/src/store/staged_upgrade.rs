@@ -15,8 +15,8 @@ use redb::{ReadableDatabase as _, ReadableTable as _, TableHandle as _};
 use sema_engine::TableRegistration;
 
 use super::{
-    ADDED_LATER_TABLES, CONFIGURATION_ONLY_TABLES, FlowStore, RETIRED_TABLES, RUNNING_TABLES,
-    ReadsFlowMemory, SEMA_CATALOG_TABLE, StoreError,
+    ADDED_LATER_TABLES, CONFIGURATION_ONLY_ADDED_TABLES, CONFIGURATION_ONLY_TABLES, FlowStore,
+    RETIRED_TABLES, RUNNING_TABLES, ReadsFlowMemory, SEMA_CATALOG_TABLE, StoreError,
 };
 
 /// The tables one entry point registers, and so may add or upgrade.
@@ -38,11 +38,8 @@ impl NamesScopeTables for UpgradeScope {
         match self {
             UpgradeScope::ConfigurationOnly => CONFIGURATION_ONLY_TABLES
                 .iter()
+                .chain(CONFIGURATION_ONLY_ADDED_TABLES)
                 .copied()
-                .chain([
-                    "flow_nexus_meta_leave_out_configuration",
-                    "flow_nexus_meta_send_server_configuration",
-                ])
                 .collect(),
             UpgradeScope::Running => RUNNING_TABLES
                 .iter()

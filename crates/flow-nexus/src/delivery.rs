@@ -15,10 +15,11 @@ pub mod body;
 pub mod lease;
 
 use crate::RunningNexus;
+use crate::compacting::WatchesCompactions;
 use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::pane::{Interruption, PaneAgent, Placement, Submission, WritesPane};
 use crate::performing::Performs;
-use crate::store::context::JudgesCompaction;
+use crate::store::context::{JudgesCompaction, JudgesThreshold};
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::{ReadsFlowRows, RecordsReplacement};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
@@ -210,6 +211,13 @@ impl DeliversMessages for RunningNexus {
         if let Some(refusal) = request.message.refusal(&target.profile) {
             return Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
         }
+        // A flow past its model's refresh threshold is given no new
+        // message.
+        match self.store.past_threshold(&target.node.flow_id) {
+            Ok(false) => {}
+            Ok(true) => return Response::DeliveryRejected(DeliveryRejection::PastThreshold),
+            Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
+        }
         let _lease = self.pane_leases.hold(&target.route);
         match LeasedDelivery::new(self, &request, &target).run() {
             Ok(delivery) => Response::Delivered(delivery),
@@ -233,7 +241,7 @@ impl DeliversMessages for RunningNexus {
             Ok(target) => target,
             Err(refusal) => return Response::CommandRejected(refusal.into()),
         };
-        // Compaction is an emergency measure: below its layer's Refresh
+        // Compaction is an emergency measure: below its model's refresh
         // threshold it is refused before anything reaches the pane.
         if request.harness_command == HarnessCommand::Compact {
             match self.store.compaction_refusal(&target.node.flow_id) {
@@ -268,6 +276,8 @@ impl DeliversMessages for RunningNexus {
                 }
             }
             HarnessCommand::Compact => {
+                // The compaction this asks for is not continuous work.
+                self.compaction_requested(&target.node.flow_id);
                 let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
                 match self.herdr.place(&target.route, "/compact", observe) {
                     Placement::Refused => {

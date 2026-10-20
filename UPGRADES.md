@@ -1,3 +1,44 @@
+# Flow 0.37.0
+
+Pins meta-signal-flow 30.0.0 (498374aa): every meta-socket peer repins. The
+ordinary contract is unchanged, signal-flow 23.0.0 (c7dcc074). The store
+retires one table and gains three.
+
+- **A refresh threshold belongs to the model.** `Configure.Thresholds` holds
+  one `{ ModelName Refresh }` per model:
+  `Configure.Thresholds.[ { claude-opus-5-5 200000 } { gpt-6.1-sol 150000 } ]`.
+  The layer-keyed `{ Layer Handover Refresh }` no longer reads, and its table
+  `flow_nexus_meta_threshold_configuration` is dropped at the first open; a
+  deployment declares the model thresholds again.
+- **A flow past its model's threshold is refreshed.** It is told nothing and
+  writes no handover. It is given no new message: a Drain hands it nothing,
+  and a meta Deliver into it is refused `DeliveryRejected.PastThreshold`;
+  what is queued stays for the metaflow's next flow. At its rest it is ended
+  as a seat due a refresh is (0.36.0): its pane closed, the flow Stopped and
+  its metaflow Asleep in the same event, and queued work wakes a fresh flow.
+- **A Codex flow's context is measured.** Its app-server's
+  `thread/tokenUsage/updated` (the last model call's input tokens) is
+  recorded as a Claude flow's transcript reading is, so Compact and refresh
+  judge both harnesses.
+- **A start is one model call.** When the USER modules and the brief do not
+  fit one message, the leading modules join the end of the system prompt
+  until the rest fits; the system prompt travels in no argument and is no
+  longer refused `SystemTooLarge`. A brief that alone does not fit one
+  message refuses `ModuleTooLarge`.
+- **A presentation is asked for.** Every first prompt, and queued work that
+  carries the living's words (`Psyche`, `Psyches`), ends with: "End this
+  turn with a presentation: a response that could fit into a book, taking
+  its form from your context modules and this prompt."
+- **A compaction during continuous work is investigated.** A Claude
+  `compact_boundary` with trigger `auto`, or a Codex `contextCompaction` no
+  Compact asked for, is recorded once (`flow_nexus_compactions`), logged at
+  warning priority, and given as an Order to the seat
+  `Configure.Investigation.{ Address SystemModules UserModules HerdrSessionName }`
+  names: started fresh with it as its brief, or queued for it when it is
+  Awake (sender `Unknown`). With none configured the warning is logged only.
+  A transcript first read in a Nexus's run raises only compactions from ten
+  minutes before the Nexus started on.
+
 # Flow 0.36.0
 
 The contracts are unchanged: signal-flow 23.0.0 (c7dcc074) and

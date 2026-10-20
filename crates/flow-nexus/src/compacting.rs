@@ -242,14 +242,7 @@ impl RendersInvestigationBrief for InvestigationBrief<'_> {
     fn text(&self) -> String {
         let seat = self.address.map_or_else(
             || "a flow no metaflow is Awake as".to_owned(),
-            |address| {
-                format!(
-                    "{{ {} {} {} }}",
-                    aspect_name(&address.aspect),
-                    address.topic,
-                    layer_name(&address.layer)
-                )
-            },
+            WritesSeat::seat_text,
         );
         let size = self
             .pre_tokens
@@ -269,20 +262,25 @@ impl RendersInvestigationBrief for InvestigationBrief<'_> {
     }
 }
 
-fn aspect_name(aspect: &Aspect) -> &'static str {
-    match aspect {
-        Aspect::Psyche => "Psyche",
-        Aspect::Mind => "Mind",
-        Aspect::Field => "Field",
-    }
+/// An Address as a title writes it: `{ Mind flow Secondary }`.
+pub trait WritesSeat {
+    fn seat_text(&self) -> String;
 }
 
-fn layer_name(layer: &Layer) -> &'static str {
-    match layer {
-        Layer::Primary => "Primary",
-        Layer::Secondary => "Secondary",
-        Layer::Tertiary => "Tertiary",
-        Layer::Quaternary => "Quaternary",
+impl WritesSeat for Address {
+    fn seat_text(&self) -> String {
+        let aspect = match self.aspect {
+            Aspect::Psyche => "Psyche",
+            Aspect::Mind => "Mind",
+            Aspect::Field => "Field",
+        };
+        let layer = match self.layer {
+            Layer::Primary => "Primary",
+            Layer::Secondary => "Secondary",
+            Layer::Tertiary => "Tertiary",
+            Layer::Quaternary => "Quaternary",
+        };
+        format!("{{ {aspect} {} {layer} }}", self.topic)
     }
 }
 

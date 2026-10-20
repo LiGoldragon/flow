@@ -154,10 +154,11 @@ to a `PaneLease` row; a row found when the store opens settles `Uncertain`
 and is never retried, and `Deliver` repeats answer the stored `Delivery`. A
 Pending row is promoted only by a Presented Deliver; no probe or marker is
 ever typed to promote it. `Command.Compact` is an emergency measure: before
-the lease is taken it is refused `CompactionRefused` unless the flow's
-context at its last Stop (`flow_nexus_flow_context_sizes`) reached the
-Refresh threshold of its layer, the layer of the metaflow Awake as it, else
-of its launch. Stop changes the durable lifecycle only after the
+the lease is taken it is refused `CompactionRefused` unless the flow's last
+measured context (`flow_nexus_flow_context_sizes`) reached the refresh
+threshold of its model, the model its role records, else the one its launch
+named. A `Deliver` into a flow at or past that threshold is refused
+`PastThreshold`. Stop changes the durable lifecycle only after the
 exact pane closes successfully, and closes under the lease. `List` reads the
 same store rows and sorts them by Flow ID.
 
@@ -207,7 +208,18 @@ dispatch gate and waits for the launch's outcome, which the same watch
 produces, and answers it. `StartAmbiguous` is what a seat that never answers
 at all comes to, once the wait's bound has passed.
 
+A start is one model call. Every module the launch names is in the system
+prompt or the first USER message, and the first USER message is sent once:
+when the USER modules and the brief do not fit one message (Herdr's 1 MiB
+request line for Claude, the app-server's 1 << 20 characters for Codex), the
+leading USER modules join the end of the system prompt, before the launch's
+own section, until the rest fits. The system prompt travels in no argument:
+Claude reads it from the Nexus's in-memory file and a Codex thread is given
+it as its base instructions. A brief that alone does not fit refuses.
+
 The first prompt is the brief, and the seat's first answer performs it. The
+brief ends asking for a presentation, as does queued work that carries the
+living's words; a message from another flow carries no such line. The
 receipt is what the native transcript of the bound
 session shows: the first turn authenticated by its body digest, every selected
 skill loaded in order, and, for Claude, the seat's first answer after them at
@@ -379,7 +391,7 @@ terminal lifecycle states before returning `Ready`.
 
 Fresh stores persist default sockets, source root, and Codex endpoints. Meta
 `Configure` declares one configuration family whole (`Nexus`, `Models`,
-`Thresholds`, `LeaveOuts`), replaces the committed family in one commit, and
+`Thresholds`, `LeaveOuts`, `SendServers`, `Investigation`), replaces the committed family in one commit, and
 answers `Configured.Replaced` or `Configured.Unchanged`; rebinding live
 sockets and adapters is deferred to a Nexus restart. A launch's receipt compares
 the model its native transcript records with the model it named, string for
@@ -442,3 +454,29 @@ once deploy, retrain and implement are witnessed, an Order when a step
 failed. Both are queued in the commit that records them on the landing, and
 both are sent as Psyche core Secondary, the flow that lands the living's
 approvals: `SentBy` has no variant for Flow itself.
+
+A flow is refreshed when its context passes its model's threshold
+(`Configure.Thresholds`, one `{ ModelName Refresh }` per model). Its context
+is measured at each Claude Stop from the transcript, and for Codex from each
+`thread/tokenUsage/updated` its app-server sends. A flow at or past the
+threshold is told nothing and writes no handover; it is given no new message
+(a Drain hands it nothing, a Deliver is refused), so what is queued stays for
+the metaflow's next flow. At its rest it is a seat due a refresh, the same
+predicate a landing sets: its pane is closed under its lease, it is recorded
+Stopped and its metaflow Asleep, and queued work wakes a fresh flow.
+
+A flow that keeps working without being given more work may compact; its
+harness's own compaction raises a warning and an investigation. Flow reads a
+Claude flow's transcript at every Report its hook sends, from where the last
+reading stopped, for a `compact_boundary` whose trigger is `auto`; a Codex
+`contextCompaction` item counts unless a `Command.Compact` was typed into
+the flow. Each compaction is recorded once (`flow_nexus_compactions`) with
+what became of its investigation, logged at warning priority, and given as
+an Order to the configured Investigation seat (`Configure.Investigation`):
+a fresh flow started there with the investigation as its brief, or, when the
+seat is Awake or waking, queued for it. Its sender is `Unknown`: `SentBy`
+names no Flow. The investigation names the flow, its metaflow and its
+transcript or thread, and asks for the finding to go to Psyche core
+Secondary. A transcript first read in a Nexus's run raises only compactions
+made from ten minutes before the Nexus started, so a deploy raises none made
+before it.

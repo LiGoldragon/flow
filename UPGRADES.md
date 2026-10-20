@@ -8,6 +8,14 @@ meta-signal-flow 29.0.0 (2b03b506). No store change.
   one listed session whose socket an ancestor listens on; the Herdr server
   is the process serving that socket, whatever binary it runs and
   whatever `herdr` `PATH` names.
+- **A binding ends with its process.** A metaflow Awake as a process
+  binding (an id that names no flow row, as `Bind` writes for a peer that
+  runs in no flow Flow launched) whose process no longer runs is ended:
+  when nothing is queued and no flow row was ever at the Address, the
+  metaflow, its binding and any lock are forgotten, so `Current` answers
+  `Unknown`; otherwise it is recorded Asleep with its work kept. `Current`
+  applies this before it answers, and the Nexus applies it to every
+  metaflow at its start.
 
 # Flow 0.35.24
 

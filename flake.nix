@@ -281,6 +281,10 @@
             "tests::a_pending_seat_whose_pane_herdr_shows_live_is_listed_active";
           flow-caller-server-known-by-session-socket = context.exactTest "flow-nexus"
             "tests::a_pane_id_names_the_session_its_server_serves_whatever_herdr_path_names";
+          flow-ended-binding-forgotten = context.exactTest "flow-nexus"
+            "tests::waking::an_address_held_only_through_an_ended_binding_is_forgotten";
+          flow-ended-binding-with-work-rests = context.exactTest "flow-nexus"
+            "tests::waking::an_ended_binding_holding_work_rests_asleep";
           flow-operation-outcomes = context.exactTest "flow-nexus"
             "tests::an_operation_is_answered_by_its_own_outcome";
           flow-report-recorded-or-refused = context.exactTest "flow-nexus"

@@ -229,6 +229,7 @@ impl Dispatches for RunningNexus {
             Query::ResolveCaller(claim) => self.resolve_caller(None, claim),
             Query::Report(report) => self.report(report),
             Query::Current(address) => {
+                self.rest_ended_awake(&address);
                 self.store
                     .current_metaflow(&address)
                     .unwrap_or_else(|error| {

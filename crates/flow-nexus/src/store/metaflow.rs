@@ -512,6 +512,56 @@ impl WritesTakenAddress for TakenAddress {
     }
 }
 
+/// An Address Flow holds only through process bindings: Awake as an id
+/// that names no flow row, every past id naming none either. Bind writes
+/// one for a peer that runs in no flow Flow launched; Flow can neither
+/// deliver to it nor wake it.
+pub(crate) trait ForgetsEndedBindings {
+    /// Retracts the metaflow at `address`, its process binding and any lock
+    /// on it, in one write, when it is Awake as `flow_id`, the binding's
+    /// process no longer runs, nothing is queued, and neither `flow_id` nor
+    /// any past id names a flow row. True when it was forgotten; false
+    /// leaves it as it was.
+    fn forget_ended_binding(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError>;
+}
+
+impl ForgetsEndedBindings for FlowStore {
+    fn forget_ended_binding(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError> {
+        let Some(stored) = self.stored_metaflow(address)? else {
+            return Ok(false);
+        };
+        if stored.metaflow.state != MetaflowState::Awake(flow_id.to_owned())
+            || !stored.metaflow.queue.is_empty()
+        {
+            return Ok(false);
+        }
+        if self
+            .bound_process(address)?
+            .is_some_and(|process| FlowStore::process_is_live(&process))
+        {
+            return Ok(false);
+        }
+        for id in stored.metaflow.past.iter().chain(std::iter::once(&flow_id.to_owned())) {
+            if self.flow(id)?.is_some() {
+                return Ok(false);
+            }
+        }
+        let key = FlowStore::address_record_key(address);
+        let mut commit = self
+            .engine
+            .begin_atomic_commit()
+            .retract(self.metaflows, RecordKey::new(key.clone()));
+        if self.stored_metaflow_process(address)?.is_some() {
+            commit = commit.retract(self.metaflow_processes, RecordKey::new(key.clone()));
+        }
+        if self.stored_metaflow_lock(address)?.is_some() {
+            commit = commit.retract(self.metaflow_locks, RecordKey::new(key));
+        }
+        self.engine.commit_atomic(commit)?;
+        Ok(true)
+    }
+}
+
 /// One metaflow row written back in its own atomic commit.
 trait WritesMetaflow {
     fn write_metaflow(&self, stored: StoredMetaflow) -> Result<(), StoreError>;

@@ -1,3 +1,13 @@
+# Flow 0.37.2
+
+No contract, store or deployment change.
+
+- **A Codex usage with no input is not a measurement.** Codex reports a
+  `thread/tokenUsage/updated` whose last call has no input as its thread
+  compacts; Flow recorded it as the flow's context, so the investigation of
+  that compaction said it happened "at 0 tokens". Such a usage is now
+  ignored, and the flow keeps its last real measurement.
+
 # Flow 0.37.1
 
 No contract, store or deployment change.

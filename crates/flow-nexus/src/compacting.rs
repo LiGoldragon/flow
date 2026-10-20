@@ -211,9 +211,12 @@ impl ReadsCodexContextSignal for serde_json::Value {
             return None;
         }
         match self.get("method").and_then(serde_json::Value::as_str)? {
+            // A usage carrying no input names no model call: Codex reports
+            // one as its thread compacts, and it measures nothing.
             "thread/tokenUsage/updated" => params
                 .pointer("/tokenUsage/last/inputTokens")
                 .and_then(serde_json::Value::as_i64)
+                .filter(|tokens| *tokens > 0)
                 .map(CodexContextSignal::TokenUsage),
             "item/completed" => {
                 let item = params.get("item")?;
@@ -636,6 +639,17 @@ mod tests {
             Some(CodexContextSignal::TokenUsage(160000))
         );
         assert_eq!(usage.context_signal("t2"), None);
+        // Witnessed live (Field core Secondary 42265e, 2026-10-19 20:35): a
+        // usage with no input arrives around a compaction; it is not a
+        // measurement.
+        let emptied = serde_json::json!({
+            "method": "thread/tokenUsage/updated",
+            "params": {"threadId": "t1", "turnId": "u1", "tokenUsage": {
+                "total": {"totalTokens": 900, "inputTokens": 800},
+                "last": {"totalTokens": 0, "inputTokens": 0},
+                "modelContextWindow": 272000}}
+        });
+        assert_eq!(emptied.context_signal("t1"), None);
         let compacted = serde_json::json!({
             "method": "item/completed",
             "params": {"threadId": "t1", "turnId": "u1",

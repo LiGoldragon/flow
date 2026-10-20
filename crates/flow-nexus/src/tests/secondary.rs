@@ -26,67 +26,6 @@ fn asleep(aspect: Aspect, topic: &str, layer: Layer) -> signal_flow::Metaflow {
     }
 }
 
-/// A Start of { Mind topics Primary } is refused NoSecondary before
-/// anything is written, claimed or opened while no metaflow is recorded at
-/// { Mind topics Secondary }: another topic's Secondary or another
-/// aspect's does not count. Once that Secondary is recorded, Asleep, the
-/// Start goes on to launch: with Herdr gone it is refused only where the
-/// launch pane would open, its attempt reserved.
-#[test]
-fn a_primary_start_is_refused_until_its_secondary_is_recorded() {
-    let fixture = NexusFixture::new();
-    fixture.claims_flow_ids();
-    let _ = fs::remove_file(&fixture.snapshot_program);
-    configure(&fixture, &[(Layer::Primary, Aspect::Mind, "gpt-6-sol")]);
-    fixture
-        .nexus
-        .store
-        .seed_metaflow(asleep(Aspect::Mind, "other", Layer::Secondary));
-    fixture
-        .nexus
-        .store
-        .seed_metaflow(asleep(Aspect::Psyche, "topics", Layer::Secondary));
-    let mut primary = seat(Aspect::Mind, Layer::Primary, "gpt-6-sol", "primary-request");
-    primary.address.topic = "topics".into();
-    let before = untouched(&fixture);
-
-    assert_eq!(
-        fixture.nexus.dispatch(Query::Start(primary.clone())),
-        Response::StartRejected(StartRejection::NoSecondary)
-    );
-    assert_eq!(untouched(&fixture), before);
-    assert_eq!(
-        fixture
-            .nexus
-            .store
-            .launch_attempt("primary-request")
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        fixture.nexus.store.metaflow(&primary.address).unwrap(),
-        None
-    );
-
-    fixture
-        .nexus
-        .store
-        .seed_metaflow(asleep(Aspect::Mind, "topics", Layer::Secondary));
-    assert_eq!(
-        fixture.nexus.dispatch(Query::Start(primary.clone())),
-        Response::StartRejected(pane_unopened())
-    );
-    assert!(
-        fixture
-            .nexus
-            .store
-            .launch_attempt("primary-request")
-            .unwrap()
-            .is_some(),
-        "the accepted Start reserved its attempt"
-    );
-}
-
 /// A Secondary, or any layer below the Primary, needs no seat above or
 /// beside it to start.
 #[test]

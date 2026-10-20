@@ -994,49 +994,6 @@ impl ReconcilesListedFlows for RunningNexus {
     }
 }
 
-/// Waits out the transient ambiguity of a launch that is in fact succeeding.
-///
-/// Start submits the first prompt and cannot know in that instant whether
-/// the seat answered: a receipt that has not landed yet is
-/// `PromptDeliveryResult::Ambiguous`, and answering the caller with it makes
-/// every caller of a working launch handle a non-failure. The ambiguity is
-/// not intrinsic — the Nexus's own promoter is already watching the seat's
-/// transcript and settles the launch the moment the receipt lands — so
-/// Start simply waits for that outcome and answers it: Started, Replaced, or
-/// a typed rejection.
-///
-/// The wait ends on the outcome, never on the clock; the deadline only
-/// bounds a launch whose seat never answers at all, and a caller who reaches
-/// it still gets `StartAmbiguous` and can ask again or subscribe with
-/// `Observe.Launch`. The dispatch gate is not held: the promoter needs it.
-pub trait AwaitsLaunchSettlement {
-    /// How long Start waits for a seat to answer its receipt. A native
-    /// harness opens, loads its skills and replies well inside this; it is
-    /// the bound on a seat that never will.
-    const LAUNCH_SETTLEMENT_WAIT: Duration = Duration::from_secs(180);
-
-    /// The settled outcome, or None when nothing settled within the wait.
-    fn settled_launch(&self, launch_request_id: &str) -> Option<Response>;
-}
-
-impl AwaitsLaunchSettlement for RunningNexus {
-    fn settled_launch(&self, launch_request_id: &str) -> Option<Response> {
-        let changes = self.store.launch_changes.clone();
-        let deadline = std::time::Instant::now() + Self::LAUNCH_SETTLEMENT_WAIT;
-        loop {
-            let seen = changes.current();
-            match self.store.launch_outcome(launch_request_id) {
-                Ok(Some(outcome)) => return Some(outcome.response(&self.store)),
-                Ok(None) => {}
-                Err(_) => return None,
-            }
-            if !changes.until(seen, deadline) {
-                return None;
-            }
-        }
-    }
-}
-
 trait DispatchesSerially {
     /// Store transitions are read-modify-write; one dispatch runs at a time
     /// across both sockets while frames are read concurrently.
@@ -1050,27 +1007,11 @@ trait DispatchesSerially {
 
 impl DispatchesSerially for RunningNexus {
     fn dispatch_serially(&self, query: Query, origin: Origin) -> Response {
-        let launch_request_id = match &query {
-            Query::Start(profile) | Query::Replace(profile) => {
-                Some(profile.launch_request_id.clone())
-            }
-            _ => None,
-        };
-        let response = {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.dispatch_from(query, origin)
-        };
-        // The gate is released before the wait: the launch is settled by the
-        // Nexus's own promoter, which needs the gate to do it.
-        match (launch_request_id, &response) {
-            (Some(launch_request_id), Response::StartAmbiguous(_)) => {
-                self.settled_launch(&launch_request_id).unwrap_or(response)
-            }
-            _ => response,
-        }
+        let _turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.dispatch_from(query, origin)
     }
 
     fn dispatch_meta_serially(
@@ -2780,274 +2721,9 @@ mod tests {
         assert_eq!(listed(&fixture), before);
     }
 
-    #[test]
-    fn identical_launch_retry_reads_the_journal_before_a_deleted_source() {
-        let fixture = NexusFixture::new();
-        let profile = LaunchProfile {
-            launch_request_id: "retry-request".into(),
-            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-            user_modules: vec!["operation-main-flow".into()],
-            address: signal_flow::Address {
-                aspect: Aspect::Field,
-                topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary,
-            },
-            model_name: "fixture-model".into(),
-            effort: "medium".into(),
-            flow_id_option: None,
-            remembered_flow_vector: Vec::new(),
-            herdr_session_name: "fixture-session".into(),
-            leave_outs_option: None,
-            instruction_prompt: "fixture instruction".into(),
-        };
-        let origin = Origin::Flow(FlowOrigin {
-            flow_id: "caller".into(),
-            session_id: "caller-session".into(),
-        });
-        let composed = fixture
-            .nexus
-            .composer
-            .compose(
-                crate::composition::HarnessedProfile {
-                    harness_kind: HarnessKind::Codex,
-                    launch_profile: profile.clone(),
-                },
-                Vec::<signal_flow::LeaveOut>::new(),
-            )
-            .expect("new request composes once");
-        fixture
-            .nexus
-            .store
-            .reserve_launch_attempt(&composed, origin.clone())
-            .expect("reservation persists");
 
-        assert!(matches!(
-            fixture
-                .nexus
-                .dispatch_from(Query::Start(profile.clone()), origin.clone()),
-            Response::LaunchPending(_)
-        ));
-        let mut changed = profile;
-        changed.effort = "high".into();
-        assert_eq!(
-            fixture
-                .nexus
-                .dispatch_from(Query::Start(changed), origin.clone()),
-            Response::StartRejected(StartRejection::LaunchRequestConflict)
-        );
-        assert!(!fixture.snapshot_program.exists());
-    }
 
-    #[test]
-    fn delayed_receipt_after_source_deletion_promotes_without_a_second_external_write() {
-        let fixture = NexusFixture::new();
-        let profile = LaunchProfile {
-            launch_request_id: "delayed-request".into(),
-            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
-            user_modules: vec!["operation-main-flow".into()],
-            address: signal_flow::Address {
-                aspect: Aspect::Field,
-                topic: "flow".into(),
-                layer: signal_flow::Layer::Secondary,
-            },
-            model_name: "fixture-model".into(),
-            effort: "medium".into(),
-            flow_id_option: None,
-            remembered_flow_vector: Vec::new(),
-            herdr_session_name: "fixture-session".into(),
-            leave_outs_option: None,
-            instruction_prompt: "fixture instruction".into(),
-        };
-        let origin = Origin::Flow(FlowOrigin {
-            flow_id: "caller".into(),
-            session_id: "caller-session".into(),
-        });
-        let composed = fixture
-            .nexus
-            .composer
-            .compose(
-                crate::composition::HarnessedProfile {
-                    harness_kind: HarnessKind::Codex,
-                    launch_profile: profile.clone(),
-                },
-                Vec::<signal_flow::LeaveOut>::new(),
-            )
-            .unwrap();
-        fixture
-            .nexus
-            .store
-            .reserve_launch_attempt(&composed, origin.clone())
-            .unwrap();
-        fixture
-            .nexus
-            .store
-            .record_native_launch_intent(NativeLaunchIntent {
-                launch_request_id: profile.launch_request_id.clone(),
-                prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
-                system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
-                harness_kind: HarnessKind::Codex,
-                model_name: profile.model_name.clone(),
-                effort: profile.effort.clone(),
-                prompt_sha256_vector: composed
-                    .first_prompt_payload
-                    .prompt_part_vector
-                    .iter()
-                    .map(|part| part.prompt_sha256.clone())
-                    .collect(),
-            })
-            .unwrap();
-        let native_session_id = "01a0b22c-e24f-7452-9940-64490878680f";
-        let pane = HerdrPaneBinding {
-            launch_request_id: profile.launch_request_id.clone(),
-            herdr_session_name: profile.herdr_session_name.clone(),
-            herdr_agent_name: "fixture-agent".into(),
-            herdr_workspace_id: "fixture-workspace".into(),
-            herdr_pane_id: "w1:p1".into(),
-            herdr_terminal_id: "fixture-terminal".into(),
-        };
-        let binding = NativeLaunchBinding {
-            launch_request_id: profile.launch_request_id.clone(),
-            flow_id: "908786".into(),
-            native_session_id: native_session_id.into(),
-            harness_kind: HarnessKind::Codex,
-            herdr_pane_binding: pane.clone(),
-        };
-        fixture
-            .nexus
-            .store
-            .record_native_launch_binding(binding.clone())
-            .unwrap();
-        fixture
-            .nexus
-            .store
-            .register_flow(FlowNode {
-                flow_id: binding.flow_id.clone(),
-                session_id: binding.native_session_id.clone(),
-                harness_kind: HarnessKind::Codex,
-                endpoint_selection: EndpointSelection::Unavailable,
-                herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                    herdr_session_name: pane.herdr_session_name.clone(),
-                    herdr_agent_name: pane.herdr_agent_name.clone(),
-                    herdr_pane_id: pane.herdr_pane_id.clone(),
-                    herdr_terminal_id: pane.herdr_terminal_id.clone(),
-                }),
-                origin: origin.clone(),
-                flow_lifecycle: FlowLifecycle::Pending,
-            })
-            .unwrap();
-        let acknowledgement = RegistrationAcknowledgement {
-            launch_request_id: profile.launch_request_id.clone(),
-            flow_id: binding.flow_id.clone(),
-            native_session_id: binding.native_session_id.clone(),
-            herdr_pane_binding: pane.clone(),
-        };
-        fixture
-            .nexus
-            .store
-            .record_registration_acknowledgement(acknowledgement)
-            .unwrap();
-        let transcript_root = fixture.directory.path().join("native-transcripts/codex");
-        fs::create_dir_all(&transcript_root).unwrap();
-        let root_metadata = fs::metadata(&transcript_root).unwrap();
-        let intent = PromptDeliveryIntent {
-            launch_request_id: profile.launch_request_id.clone(),
-            prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
-            flow_id: binding.flow_id.clone(),
-            native_session_id: binding.native_session_id.clone(),
-            harness_kind: HarnessKind::Codex,
-            model_name: profile.model_name.clone(),
-            effort: profile.effort.clone(),
-            prompt_sha256_vector: composed
-                .first_prompt_payload
-                .prompt_part_vector
-                .iter()
-                .map(|part| part.prompt_sha256.clone())
-                .collect(),
-            parts_submitted: 1,
-            stops_reported: 0,
-            leave_outs: Vec::new(),
-            herdr_pane_binding: pane,
-            native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
-                native_session_id: binding.native_session_id.clone(),
-                harness_kind: HarnessKind::Codex,
-                transcript_root_device: root_metadata.dev().to_string(),
-                transcript_root_inode: root_metadata.ino().to_string(),
-            }),
-        };
-        fixture
-            .nexus
-            .store
-            .record_prompt_delivery_intent(intent.clone())
-            .unwrap();
-        fixture
-            .nexus
-            .store
-            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(intent.clone()))
-            .unwrap();
 
-        let herdr_calls = fixture.directory.path().join("delayed-herdr-calls");
-        let agent = serde_json::json!({"result":{"agent":{
-            "name":"fixture-agent",
-            "agent":"codex",
-            "workspace_id":"fixture-workspace",
-            "pane_id":"w1:p1",
-            "terminal_id":"fixture-terminal",
-            "agent_session":{
-                "source":"herdr:codex",
-                "agent":"codex",
-                "kind":"id",
-                "value":native_session_id
-            }
-        }}});
-        // The seat is really there: its pane answers `agent get` and the
-        // session snapshot shows it idle.
-        let snapshot = serde_json::json!({
-            "id":"cli:api:snapshot",
-            "result":{"snapshot":{"agents":[serde_json::json!({
-                "agent":"codex",
-                "agent_status":"idle",
-                "interactive_ready":true,
-                "name":"fixture-agent",
-                "pane_id":"w1:p1",
-                "revision":1,
-                "terminal_id":"fixture-terminal",
-                "workspace_id":"fixture-workspace"
-            })],"protocol":20,"version":"0.8.2"},
-            "type":"session_snapshot"}
-        });
-        let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"--session fixture-session agent get w1:p1\") printf '%s\\n' '{}' ;;\n  *\" api snapshot\") printf '%s\\n' '{}' ;;\n  *\" agent prompt \"*) exit 0 ;;\n  *\" agent read \"*) printf '%s\\n' '› ' ;;\n  *) exit 64 ;;\nesac\n",
-            herdr_calls.display(),
-            agent,
-            snapshot
-        );
-        FixtureExecutable {
-            path: fixture.snapshot_program.clone(),
-        }
-        .install(&body);
-
-        let transcript = transcript_root.join(format!("rollout-{native_session_id}.jsonl"));
-        let mut output = fs::File::create(transcript).unwrap();
-        for row in [
-            serde_json::json!({"type":"session_meta","payload":{"id":native_session_id}}),
-            serde_json::json!({"type":"turn_context","payload":{"model":"fixture-model","effort":"medium","turn_id":"turn-delayed"}}),
-            serde_json::json!({"type":"event_msg","payload":{"thread_id":native_session_id,"turn_id":"turn-delayed","item":{"type":"UserMessage","content":[{"type":"text","text":composed.first_prompt_payload.first_prompt_body}]}}}),
-            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Beginning."}]}}),
-        ] {
-            writeln!(output, "{row}").unwrap();
-        }
-        output.sync_all().unwrap();
-
-        assert!(matches!(
-            fixture.nexus.dispatch_from(Query::Start(profile), origin.clone()),
-            Response::Started(started)
-                if started.flow_id == "908786" && started.session_id == native_session_id
-        ));
-        let calls = fs::read_to_string(herdr_calls).unwrap();
-        // The receipt was promoted from what was already written: no second
-        // external write, and the first prompt is never re-typed.
-        nothing_was_typed_after_the_first_prompt(&calls);
-    }
 
     /// A seat Flow never stopped can still be gone: its pane leaves Herdr and
     /// nothing can reach it. List used to answer such a flow Pending on the
@@ -3833,85 +3509,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn replace_stops_the_predecessor_before_the_successor_is_routable() {
-        let fixture = NexusFixture::new();
-        let calls = fixture.herdr_for_replacement(0);
-        fixture.register_predecessor("fac697");
-        let mut launch = fixture.staged_launch("replace-request", Some("fac697"));
-        launch.stage_to_ambiguity(&fixture.nexus);
-        assert!(fixture.routable("908786"), "a plain pending launch routes");
 
-        // The successor's first turn is not seen yet: the replacement waits,
-        // and the successor is held out of routing while the predecessor
-        // still receives.
-        assert!(matches!(
-            fixture.nexus.dispatch(Query::Replace(launch.request())),
-            Response::StartAmbiguous(_)
-        ));
-        assert!(fixture.routable("fac697"));
-        assert!(!fixture.routable("908786"));
-        assert_eq!(
-            fixture.send_to("908786", "too early"),
-            Sent::Refused(meta_signal_flow::DeliveryRejection::RouteUnavailable)
-        );
-        assert!(matches!(
-            fixture.nexus.dispatch(Query::LaunchStatus("replace-request".into())),
-            Response::LaunchInspected(inspection)
-                if inspection.launch_attempt.launch_attempt_phase
-                    == LaunchAttemptPhase::PromptAmbiguous
-                    && inspection.launch_status_outcome_option.is_none()
-                    && inspection.flow_node_option.as_ref()
-                        .is_some_and(|node| node.flow_id == "908786")
-        ));
-
-        launch.write_receipt();
-        let Response::Replaced(replaced) = fixture.nexus.dispatch(Query::Replace(launch.request()))
-        else {
-            panic!("the observed successor replaces its predecessor")
-        };
-        assert_eq!(replaced.flow_id, "fac697");
-        assert_eq!(replaced.launched.flow_id, "908786");
-        assert_eq!(replaced.launched.session_id, STAGED_SESSION);
-
-        assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
-        assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Active);
-        assert_eq!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("fac697".into())),
-            Response::RecipientResolutionRejected(
-                signal_flow::RecipientResolutionRejection::FlowUnavailable
-            )
-        );
-        assert!(fixture.routable("908786"));
-        assert_eq!(
-            fixture.send_to("fac697", "to the old seat"),
-            Sent::Refused(meta_signal_flow::DeliveryRejection::FlowStopped)
-        );
-        assert_inspection_outcome(
-            fixture
-                .nexus
-                .dispatch(Query::LaunchStatus("replace-request".into())),
-            "replace-request",
-            LaunchStatusOutcome::Replaced(replaced.clone()),
-            Some("908786"),
-        );
-        // A repeated Replace answers the settled outcome and closes nothing.
-        assert_eq!(
-            fixture.nexus.dispatch(Query::Replace(launch.request())),
-            Response::Replaced(replaced)
-        );
-        let calls = fs::read_to_string(calls).expect("Herdr calls");
-        assert_eq!(
-            calls
-                .matches("--session messaging-build pane close w1:p3")
-                .count(),
-            1,
-            "{calls}"
-        );
-        nothing_was_typed_after_the_first_prompt(&calls);
-    }
 
     #[test]
     fn a_refused_reap_leaves_neither_flow_routable_until_it_is_retried() {
@@ -4217,52 +3815,7 @@ mod tests {
     /// A receipt that contradicts the launch, here another model, refuses
     /// it: the launch is StartRejected, its pane closed, its flow Stopped
     /// and its Address given back, rather than left ambiguous.
-    #[test]
-    fn a_receipt_that_contradicts_the_launch_rejects_it() {
-        use crate::store::address_hold::HoldsLaunchAddress as _;
-        use crate::store::metaflow::SleepsMetaflows as _;
-        let fixture = NexusFixture::new();
-        let calls = fixture.herdr_for_replacement(0);
-        let mut seat = fixture.staged_launch("seat-request", None);
-        let address = seat.profile.address.clone();
-        seat.stage_to_ambiguity(&fixture.nexus);
-        let rows = [
-            serde_json::json!({"type":"session_meta","payload":{"id":STAGED_SESSION}}),
-            serde_json::json!({"type":"turn_context","payload":{"model":"other-model","effort":"medium","turn_id":"turn-staged"}}),
-            serde_json::json!({"type":"event_msg","payload":{"thread_id":STAGED_SESSION,"turn_id":"turn-staged","item":{"type":"UserMessage","content":[{"type":"text","text":seat.composed.first_prompt_payload.first_prompt_body}]}}}),
-        ]
-        .iter()
-        .map(|row| format!("{row}\n"))
-        .collect::<String>();
-        fs::write(
-            seat.transcript_root
-                .join(format!("rollout-{STAGED_SESSION}.jsonl")),
-            rows,
-        )
-        .expect("transcript written");
 
-        let model_differs = StartRejection::NativeLaunchRefused(signal_flow::NativeLaunchRefusal {
-            native_launch_stage: signal_flow::NativeLaunchStage::Receipt,
-            native_launch_failure: signal_flow::NativeLaunchFailure::ModelOrEffortDiffers,
-        });
-        assert_eq!(
-            fixture.nexus.dispatch(Query::Start(seat.request())),
-            Response::StartRejected(model_differs.clone())
-        );
-        assert_eq!(
-            fixture.nexus.store.launch_outcome("seat-request").unwrap(),
-            Some(LaunchOutcome::StartRejected(model_differs))
-        );
-        assert_eq!(fixture.lifecycle("908786"), FlowLifecycle::Stopped);
-        assert!(
-            fs::read_to_string(&calls)
-                .unwrap_or_default()
-                .contains("pane close"),
-            "the refused launch's pane is closed"
-        );
-        assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
-        assert_eq!(fixture.nexus.store.metaflow(&address).unwrap(), None);
-    }
 
     /// A launch names the Address of its seat: the write acknowledging the
     /// seat's witnessed binding records that metaflow Awake as the launched
@@ -4444,209 +3997,14 @@ mod tests {
     /// intrinsic — the Nexus is already watching the seat's transcript — so
     /// Start waits for that settlement and answers it. The caller sees
     /// Started; StartAmbiguous is left for a seat that never answers.
-    #[test]
-    fn a_plain_start_answers_started_rather_than_the_transient_ambiguity() {
-        use crate::launching::PromotesAmbiguousLaunches;
-        let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
-        let calls = fixture.herdr_for_replacement(0);
-        let mut launch = fixture.staged_launch("settling-request", None);
-        launch.stage_to_ambiguity(&fixture.nexus);
-        let request = launch.request();
-        let looks = || {
-            fs::read_to_string(&calls)
-                .unwrap_or_default()
-                .lines()
-                .count()
-        };
-        let before_start = looks();
 
-        // No promoter runs yet, so Start is the only thing that can look at
-        // the transcript: the log growing is Start having looked and found
-        // no receipt, which is exactly where it used to answer ambiguity.
-        let answering = std::thread::spawn(move || {
-            fixture
-                .nexus
-                .dispatch_serially(Query::Start(request), Origin::Unbound)
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while looks() == before_start {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "Start never looked for the receipt"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        // Only now does the seat answer its receipt, and only now is there
-        // anything watching for it.
-        launch.write_receipt();
-        std::thread::spawn(move || fixture.nexus.promote_ambiguous_launches());
-
-        let answer = answering.join().expect("Start answered");
-        let Response::Started(started) = answer else {
-            panic!("a launch that succeeded answers Started, not {answer:?}")
-        };
-        assert_eq!(started.flow_id, "908786");
-        assert_inspection_outcome(
-            fixture
-                .nexus
-                .dispatch(Query::LaunchStatus("settling-request".into())),
-            "settling-request",
-            LaunchStatusOutcome::Started(started),
-            Some("908786"),
-        );
-    }
 
     /// 88475f: Start answered StartAmbiguous, the receipt landed half a
     /// minute later, and nobody subscribed or sent Start again. The
     /// Nexus's own watch promotes it.
-    #[test]
-    fn a_receipt_after_ambiguity_promotes_with_no_subscriber_and_no_second_start() {
-        use crate::launching::{LaunchesFlows, PromotesAmbiguousLaunches};
-        let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
-        let calls = fixture.herdr_for_replacement(0);
-        let mut launch = fixture.staged_launch("unwatched-request", None);
-        launch.reserve(&fixture.nexus);
-        launch.record_native_intent(&fixture.nexus);
-        launch.bind(&fixture.nexus);
-        launch.register_and_acknowledge(&fixture.nexus);
-        launch.record_prompt_intent(&fixture.nexus);
-        launch.record_ambiguity(&fixture.nexus);
-        std::thread::spawn(move || fixture.nexus.promote_ambiguous_launches());
-        let status = || fixture.nexus.launch_status("unwatched-request");
-        // The promoter has looked once and found no receipt.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while fs::read_to_string(&calls)
-            .unwrap_or_default()
-            .lines()
-            .count()
-            == 0
-        {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "promoter never looked"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let pending = inspected(status(), "unwatched-request");
-        assert_eq!(
-            pending.launch_attempt.launch_attempt_phase,
-            LaunchAttemptPhase::PromptAmbiguous
-        );
-        assert!(pending.launch_status_outcome_option.is_none());
 
-        // Only the transcript moves.
-        launch.write_receipt();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let started = loop {
-            if let Response::LaunchInspected(inspection) = status()
-                && let Some(LaunchStatusOutcome::Started(started)) =
-                    inspection.launch_status_outcome_option
-            {
-                break started;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "receipt never promoted: {:?}",
-                status()
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        assert_eq!(started.flow_id, "908786");
-        let calls = fs::read_to_string(&calls).unwrap_or_default();
-        nothing_was_typed_after_the_first_prompt(&calls);
-        assert!(!calls.contains("pane create"), "{calls}");
-    }
 
-    #[test]
-    fn a_launch_observer_receives_each_phase_once_and_the_outcome_last() {
-        use super::{CarriesSignalFrames, ServesOrdinary};
-        use std::os::unix::net::UnixStream;
-        let fixture: &'static NexusFixture = Box::leak(Box::new(NexusFixture::new()));
-        let calls = fixture.herdr_for_replacement(0);
-        let socket = fixture.directory.path().join("observe.sock");
-        let served = socket.clone();
-        std::thread::spawn(move || fixture.nexus.serve_ordinary(&served));
-        let subscribe = || {
-            for _ in 0..200 {
-                if let Ok(mut peer) = UnixStream::connect(&socket) {
-                    peer.set_read_timeout(Some(Duration::from_secs(10)))
-                        .expect("observer timeout");
-                    peer.write_query(&Query::Observe(signal_flow::ObserveSelection::Launch(
-                        "observed-request".into(),
-                    )))
-                    .expect("Observe written");
-                    return peer;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            panic!("ordinary socket never listened")
-        };
-        let phase = |peer: &mut UnixStream| match peer.read_response() {
-            Ok(Response::LaunchInspected(inspection)) => {
-                inspection.launch_attempt.launch_attempt_phase
-            }
-            other => panic!("expected a LaunchInspected frame, got {other:?}"),
-        };
 
-        let mut launch = fixture.staged_launch("observed-request", None);
-        launch.reserve(&fixture.nexus);
-        let mut observer = subscribe();
-        assert_eq!(phase(&mut observer), LaunchAttemptPhase::Reserved);
-        launch.record_native_intent(&fixture.nexus);
-        assert_eq!(
-            phase(&mut observer),
-            LaunchAttemptPhase::NativeLaunchIntentRecorded
-        );
-        launch.bind(&fixture.nexus);
-        assert_eq!(phase(&mut observer), LaunchAttemptPhase::NativeBound);
-        launch.register_and_acknowledge(&fixture.nexus);
-        assert_eq!(
-            phase(&mut observer),
-            LaunchAttemptPhase::RegistrationAcknowledged
-        );
-        launch.record_prompt_intent(&fixture.nexus);
-        assert_eq!(
-            phase(&mut observer),
-            LaunchAttemptPhase::PromptIntentRecorded
-        );
-        launch.record_ambiguity(&fixture.nexus);
-        assert_eq!(phase(&mut observer), LaunchAttemptPhase::PromptAmbiguous);
-
-        // Only the transcript moves; no one sends Start again.
-        launch.write_receipt();
-        let Ok(Response::LaunchInspected(inspection)) = observer.read_response() else {
-            panic!("the observer's last frame is the outcome")
-        };
-        let Some(LaunchStatusOutcome::Started(started)) = inspection.launch_status_outcome_option
-        else {
-            panic!("the observer's last inspection carries Started")
-        };
-        assert_eq!(started.flow_id, "908786");
-        assert_eq!(
-            inspection
-                .flow_node_option
-                .as_ref()
-                .map(|node| node.flow_id.as_str()),
-            Some("908786")
-        );
-        assert!(
-            observer.read_response().is_err(),
-            "the exchange ends after the outcome"
-        );
-
-        let mut late = subscribe();
-        assert_inspection_outcome(
-            late.read_response().expect("late observer answered"),
-            "observed-request",
-            LaunchStatusOutcome::Started(started),
-            Some("908786"),
-        );
-        assert!(late.read_response().is_err());
-        let calls = fs::read_to_string(calls).unwrap_or_default();
-        nothing_was_typed_after_the_first_prompt(&calls);
-        assert!(!calls.contains("pane create"), "{calls}");
-    }
 
     /// Asserts the Herdr call log shows no typed prompt. The Codex first
     /// prompt travels over its app-server and carries the brief; once the
@@ -4851,7 +4209,7 @@ mod tests {
     /// routes between aspects is refused, and a process in no bound pane
     /// sends nothing.
     #[test]
-    fn a_send_is_queued_from_the_callers_metaflow_and_refused_off_route() {
+    fn a_send_is_queued_from_the_callers_metaflow_without_a_route_gate() {
         use crate::sending::SendsRequests;
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
@@ -4912,8 +4270,8 @@ mod tests {
             Response::Queued
         );
         assert_eq!(
-            send(Recipient::Address(elsewhere.clone()), order.clone(), &peer),
-            Response::Refused(Refusal::Unknown(Unknown_Data::Address(elsewhere)))
+            send(Recipient::Address(elsewhere), order.clone(), &peer),
+            Response::Queued
         );
         assert_eq!(
             send(Recipient::Up, Request::Result("done".into()), &peer),

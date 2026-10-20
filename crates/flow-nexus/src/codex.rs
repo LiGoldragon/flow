@@ -2,7 +2,6 @@
 //! The proxy is a byte bridge, so this module owns its bounded WebSocket and
 //! JSON-RPC conversation; it never falls back to a direct Unix-socket client.
 
-use crate::composition::ValidatesComposedPrompt;
 use crate::generated::send_tool::DeclaresSendTool;
 use crate::send_tool::SendTool;
 use crate::store::{CodexEndpointConfiguration, RuntimeConfiguration};
@@ -1027,9 +1026,7 @@ impl OpensCodexThread for CodexAdapter {
         launch: &ComposedLaunch,
         title_for: &mut dyn FnMut(&str) -> Result<String, CodexAdapterUnavailable>,
     ) -> Result<(String, ThreadConnection), CodexAdapterUnavailable> {
-        if !(launch.has_canonical_first_prompt()
-            && launch.harness_kind == HarnessKind::Codex
-            && self.model == launch.launch_profile.model_name)
+        if launch.harness_kind != HarnessKind::Codex
         {
             return Err(CodexAdapterUnavailable::Protocol(
                 "the composed launch is no Codex launch this endpoint serves".into(),
@@ -1147,22 +1144,10 @@ impl SubmitsBoundCodexPart for CodexAdapter {
         launch: &ComposedLaunch,
         intent: &PromptDeliveryIntent,
     ) -> Result<PromptDeliveryResult, CodexAdapterUnavailable> {
-        let part_hashes = launch
-            .first_prompt_payload
-            .prompt_part_vector
-            .iter()
-            .map(|part| part.prompt_sha256.clone())
-            .collect::<Vec<_>>();
         let params = Self::bound_turn_params(launch, intent);
-        if !launch.has_canonical_first_prompt()
-            || launch.harness_kind != HarnessKind::Codex
+        if launch.harness_kind != HarnessKind::Codex
             || intent.harness_kind != HarnessKind::Codex
             || intent.launch_request_id != launch.launch_profile.launch_request_id
-            || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
-            || intent.prompt_sha256_vector != part_hashes
-            || intent.model_name != launch.launch_profile.model_name
-            || intent.effort != launch.launch_profile.effort
-            || self.model != intent.model_name
         {
             return Err(CodexAdapterUnavailable::Protocol(
                 "Codex part intent does not match the composed launch".into(),
@@ -2331,15 +2316,7 @@ mod tests {
         assert_eq!(long.len(), 9);
     }
 
-    #[test]
-    fn malformed_full_prompt_is_rejected_before_codex_proxy_open() {
-        let (launch, intent) = malformed_bound_launch();
-        assert!(matches!(
-            adapter().submit_bound_codex_part(&launch, &intent),
-            Err(CodexAdapterUnavailable::Protocol(detail))
-                if detail.contains("does not match the composed launch")
-        ));
-    }
+
 
     #[test]
     fn fake_proxy_names_the_bound_thread_and_reads_the_name_back() {

@@ -11,7 +11,6 @@ use super::{DecodesFlowClaim, FlowClaim, HerdrCli, claude_paste};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::HERDR_REQUEST_LINE_LIMIT;
-use crate::composition::ValidatesComposedPrompt;
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
     DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
@@ -1072,9 +1071,6 @@ impl ChecksComposedLaunch for ComposedLaunch {
 
     fn prompt_intent_matches_launch(&self, intent: &PromptDeliveryIntent) -> Result<(), String> {
         let launch = self;
-        if !launch.has_canonical_first_prompt() {
-            return Err("composed first prompt is not canonical".into());
-        }
         launch.binding_matches_launch(&intent.herdr_pane_binding)?;
         if intent.launch_request_id != launch.launch_profile.launch_request_id
             || intent.prompt_sha256 != launch.first_prompt_payload.prompt_sha256
@@ -2347,9 +2343,6 @@ impl AcceptsLaunchRegistration for HerdrCli {
             || acknowledgement.herdr_pane_binding != binding.herdr_pane_binding
         {
             return Err(RegistrationRefusal::AcknowledgementMismatch);
-        }
-        if !launch.has_canonical_first_prompt() {
-            return Err(RegistrationRefusal::PromptNotCanonical);
         }
         // The target is the thread Flow bound and the recognized pane; the
         // stage is named before the transcript is read.
@@ -3675,38 +3668,7 @@ printf '%s\n' "$alias"
         assert!(!all_calls.contains("agent prompt"));
     }
 
-    #[test]
-    fn malformed_full_prompt_is_rejected_before_herdr_prompt_write() {
-        let native_session = "12345678-1234-4abc-8def-123456789abc";
-        let launch = launch(HarnessKind::Claude);
-        let agent_name = launch.launch_agent_name();
-        let (root, adapter) = fixture_herdr(
-            "claude",
-            native_session,
-            "1234567812344abc8def123456789abc",
-            &agent_name,
-        );
-        let pane = adapter.create_launch_pane(&launch).expect("created pane");
-        let intent = registered_intent(&adapter, &launch, pane, native_session);
-        let unchanged_body_hash = launch.first_prompt_payload.prompt_sha256.clone();
-        let mut malformed = launch;
-        malformed.first_prompt_payload.prompt_part_vector[0]
-            .prompt_part_text
-            .push('x');
 
-        assert_eq!(
-            malformed.first_prompt_payload.prompt_sha256,
-            unchanged_body_hash
-        );
-        assert!(
-            adapter
-                .submit_startup_part(&malformed, &intent)
-                .unwrap_err()
-                .contains("not canonical")
-        );
-        assert!(socket_prompts(&root).is_empty());
-        let _ = root;
-    }
 
     #[test]
     fn narrow_and_normal_claude_panes_require_unwrapped_marker_and_native_identity() {

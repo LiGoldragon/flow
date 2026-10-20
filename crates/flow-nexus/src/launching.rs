@@ -9,15 +9,9 @@ use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
     Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
-use crate::generated::starter::{
-    CarriesFlowId, DeliveryIntended, HarnessedProfile, OutcomeCarrying, Profiled, Progressing,
-    SettlesStartupProgress, Textual,
-};
+use crate::generated::starter::CarriesFlowId;
 use crate::herdr::ReadsHerdrPanes;
-use crate::herdr::launch::{
-    ChecksComposedLaunch, ObservesNativeLaunchBinding, StartupProgress, TranscriptRefusal,
-    WaitsForPaneRest,
-};
+use crate::herdr::launch::{ChecksComposedLaunch, ObservesNativeLaunchBinding};
 use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
@@ -36,28 +30,43 @@ use crate::store::{AnswersLaunchOutcome, LaunchedRecord, ReplacedRecord};
 use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation, WakePolicy};
 use crate::{
     RunningNexus,
-    herdr::{
-        LocatesNativeTranscripts, PaneOwnership, PanePresence,
-        launch::{AcceptsLaunchRegistration, ObservesNativeTargetReceipt},
-    },
+    herdr::{PaneOwnership, PanePresence, launch::AcceptsLaunchRegistration},
     store::{
-        LaunchChanges, LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,
+        LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,
         RecordsLaunchOutcome, RecordsReplacement, Replacement, StoreError,
     },
 };
-use notify::Watcher;
 use signal_flow::{
-    BindingRefusal, ComposedLaunch, ContextRefusal, EndpointSelection, Event, FlowLifecycle,
+    BindingRefusal, ComposedLaunch, EndpointSelection, Event, FlowLifecycle,
     FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase,
     LaunchAttemptReservation, LaunchInspection, LaunchProfile, LaunchStatusRejection, Launched,
     NativeLaunchFailure, NativeLaunchIntent, NativeLaunchRefusal, NativeLaunchStage, Origin,
-    PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement, RegistrationRefusal,
+    RegistrationAcknowledgement, RegistrationRefusal,
     ReplaceRejection, Replaced, Response, StartRejection, StopRejection,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+
+
+impl RunningNexus {
+    fn stops_reported(&self, flow_id: &str) -> i64 {
+        let session = self.store.flow_node(flow_id).ok().flatten()
+            .map(|node| node.session_id).unwrap_or_default();
+        self.store.events(flow_id).ok().flatten().map(|events| {
+            events.iter().filter(|event| matches!(event, Event::Stopped(stop)
+                if session.is_empty() || stop.native_session_id_option.as_deref()
+                    .is_none_or(|stopped| stopped == session))).count()
+        }).unwrap_or_default() as i64
+    }
+
+    fn composition_refused(outcome: Outcome) -> Response {
+        match outcome {
+            Outcome::Failed(Failed_Data::ContextRefused(refusal)) =>
+                Response::StartRejected(StartRejection::ContextRefused(refusal)),
+            Outcome::Failed(Failed_Data::LeaveOutRefused(refusal)) =>
+                Response::StartRejected(StartRejection::LeaveOutRefused(refusal)),
+            _ => Response::StartRejected(StartRejection::CompositionRefused),
+        }
+    }
+}
 
 /// The launch verbs of the running Nexus. `start` is the one Start path;
 /// `settle` records what a launch came to and, for a replacement, stops and
@@ -65,9 +74,6 @@ use std::sync::{
 pub trait LaunchesFlows {
     /// Runs or resumes the launch a profile names, for its origin.
     fn start(&self, profile: LaunchProfile, origin: Origin) -> Response;
-    /// Looks again at the native transcript of a launch whose first prompt
-    /// was not yet seen, promoting it when the receipt is there.
-    fn promote_ambiguous(&self, attempt: LaunchAttempt) -> Response;
     /// The recorded outcome of a request already settled, or None.
     fn settled(&self, profile: &LaunchProfile, origin: &Origin) -> Option<Response>;
     /// Records what a Start-path response settles, completing a replacement.
@@ -171,10 +177,14 @@ impl LaunchesFlows for RunningNexus {
                         StartRejection::LaunchPersistenceRefused,
                     ));
             }
-            if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
-                return Response::LaunchPending(attempt);
+            if matches!(
+                attempt.launch_attempt_phase,
+                LaunchAttemptPhase::PromptIntentRecorded | LaunchAttemptPhase::PromptAmbiguous
+            ) && let Some(binding) = attempt.native_launch_binding_option
+            {
+                return self.confirmed(&binding.flow_id);
             }
-            return self.promote_ambiguous(attempt);
+            return Response::LaunchPending(attempt);
         }
         let persistence = || Response::StartRejected(StartRejection::LaunchPersistenceRefused);
         // A hold an ended flow still keeps on this Address is given back
@@ -408,71 +418,15 @@ impl LaunchesFlows for RunningNexus {
         {
             return Response::StartRejected(StartRejection::IntentPersistenceRefused);
         }
-        let launch_profile = launch.launch_profile.clone();
-        let initial = match self.perform(Operation::Submit(Submit_Data {
+        match self.perform(Operation::Submit(Submit_Data {
             composed_launch: launch,
             prompt_delivery_intent: delivery_intent.clone(),
         })) {
-            Outcome::Submitted(result) => result,
-            _ => PromptDeliveryResult::Ambiguous(delivery_intent.clone()),
-        };
-        if self.perform(Operation::Record(Record_Data::Delivered(initial.clone())))
-            != Outcome::Recorded
-        {
-            return persistence();
-        }
-        // A transcript that contradicts the launch (another model, another
-        // first input) refuses it; only an unread receipt stays ambiguous.
-        let recorded = match initial {
-            PromptDeliveryResult::Observed(receipt) => return self.confirmed(&receipt.flow_id),
-            PromptDeliveryResult::Ambiguous(intent) => intent,
-        };
-        match self.herdr.observe_native_target_receipt(&recorded) {
-            Ok(progress) => self.settle_progress(
-                HarnessedProfile {
-                    launch_profile,
-                    harness_kind: recorded.harness_kind.clone(),
-                },
-                &recorded,
-                progress,
-            ),
-            Err(refusal) => {
-                eprintln!(
-                    "flow-nexus: launch {} refused by its receipt: {refusal}",
-                    recorded.launch_request_id
-                );
-                Self::receipt_refused(&refusal)
+            Outcome::Submitted(_) => self.confirmed(&binding.flow_id),
+            outcome => {
+                Self::native_refused(NativeLaunchStage::Confirm, outcome)
             }
         }
-    }
-
-    fn promote_ambiguous(&self, attempt: LaunchAttempt) -> Response {
-        let Some(intent) = attempt.prompt_delivery_intent_option else {
-            return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-        };
-        let response = match self.herdr.observe_native_target_receipt(&intent) {
-            Ok(progress) => self.settle_progress(
-                HarnessedProfile {
-                    launch_profile: attempt.launch_profile.clone(),
-                    harness_kind: intent.harness_kind.clone(),
-                },
-                &intent,
-                progress,
-            ),
-            Err(refusal) => {
-                eprintln!(
-                    "flow-nexus: launch {} refused by its receipt: {refusal}",
-                    attempt.launch_request_id
-                );
-                Self::receipt_refused(&refusal)
-            }
-        };
-        // The refused launch leaves nothing running, as one refused before
-        // its first part does.
-        if let Response::StartRejected(_) = &response {
-            self.abandon_refused_launch(&attempt.launch_request_id, &intent.harness_kind, None);
-        }
-        response
     }
 
     fn settled(&self, profile: &LaunchProfile, origin: &Origin) -> Option<Response> {
@@ -996,143 +950,6 @@ impl DescribesLaunchInspection for LaunchInspectionRecords {
     }
 }
 
-/// How a launch's first USER message reaches its flow, part by part.
-/// What one reading of the transcript comes to: the receipt confirms the
-/// launch; a waiting launch stays ambiguous, recording an adopted cursor; an
-/// answered part sends the next. The next part is sent once the flow is done
-/// with the one before: for Claude, a Stop reported after it and Herdr
-/// showing the pane at rest; for Codex, the turn the transcript showed
-/// completed. The part is recorded as submitted before it is typed, and
-/// never typed twice.
-impl SettlesStartupProgress for RunningNexus {
-    fn settle_progress<N: Profiled, O: DeliveryIntended, P: Progressing>(
-        &self,
-        input_0: N,
-        input_1: O,
-        input_2: P,
-    ) -> Response {
-        let recorded = input_1.intent();
-        match input_2.progress() {
-            StartupProgress::Received(receipt) => {
-                let flow_id = receipt.flow_id.clone();
-                if self.perform(Operation::Record(Record_Data::Delivered(
-                    PromptDeliveryResult::Observed(receipt),
-                ))) != Outcome::Recorded
-                {
-                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-                }
-                self.confirmed(&flow_id)
-            }
-            StartupProgress::Waiting(updated) => {
-                if updated != recorded
-                    && self.perform(Operation::Record(Record_Data::Delivered(
-                        PromptDeliveryResult::Ambiguous(updated.clone()),
-                    ))) != Outcome::Recorded
-                {
-                    return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-                }
-                Response::StartAmbiguous(updated)
-            }
-            StartupProgress::PartAnswered(intent) => self.advance_startup(&input_0, &intent),
-        }
-    }
-
-    fn advance_startup<N: Profiled, O: DeliveryIntended>(
-        &self,
-        input_0: N,
-        input_1: O,
-    ) -> Response {
-        let intent = input_1.intent();
-        let mut next = intent.clone();
-        if intent.harness_kind == HarnessKind::Claude {
-            let stops = self.stops_reported(&intent.flow_id);
-            if stops <= intent.stops_reported
-                || self
-                    .herdr
-                    .await_pane_rest(&intent.herdr_pane_binding)
-                    .is_err()
-            {
-                return Response::StartAmbiguous(intent);
-            }
-            next.stops_reported = stops;
-        }
-        let launch = match self.perform(Operation::Compose(input_0.profile())) {
-            Outcome::Composed(launch) => launch,
-            outcome => return Self::composition_refused(outcome),
-        };
-        if launch.part_hashes() != intent.prompt_sha256_vector {
-            eprintln!(
-                "flow-nexus: launch {} composed other parts than it recorded",
-                intent.launch_request_id
-            );
-            return Response::StartRejected(StartRejection::ContextRefused(
-                ContextRefusal::PayloadMismatch,
-            ));
-        }
-        next.parts_submitted += 1;
-        if self.perform(Operation::Record(Record_Data::Delivered(
-            PromptDeliveryResult::Ambiguous(next.clone()),
-        ))) != Outcome::Recorded
-        {
-            return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-        }
-        if let Outcome::Failed(failure) = self.perform(Operation::Submit(Submit_Data {
-            composed_launch: launch,
-            prompt_delivery_intent: next.clone(),
-        })) {
-            // It may have reached the flow: it is never typed again.
-            eprintln!(
-                "flow-nexus: launch {} part {} not confirmed typed: {failure:?}",
-                next.launch_request_id, next.parts_submitted
-            );
-        }
-        Response::StartAmbiguous(next)
-    }
-
-    fn stops_reported<N: Textual>(&self, input: N) -> i64 {
-        let flow_id = input.text();
-        // A Stop that names another native session than the flow's own (a
-        // harness the seat started, under the same FLOW_ID) is not its Stop.
-        let session = self
-            .store
-            .flow_node(&flow_id)
-            .ok()
-            .flatten()
-            .map(|node| node.session_id)
-            .unwrap_or_default();
-        self.store
-            .events(&flow_id)
-            .ok()
-            .flatten()
-            .map(|events| {
-                events
-                    .iter()
-                    .filter(|event| {
-                        matches!(event, Event::Stopped(stop)
-                            if session.is_empty()
-                                || stop
-                                    .native_session_id_option
-                                    .as_deref()
-                                    .is_none_or(|stopped| stopped == session))
-                    })
-                    .count()
-            })
-            .unwrap_or_default() as i64
-    }
-
-    fn composition_refused<N: OutcomeCarrying>(input: N) -> Response {
-        match input.outcome() {
-            Outcome::Failed(Failed_Data::ContextRefused(refusal)) => {
-                Response::StartRejected(StartRejection::ContextRefused(refusal))
-            }
-            Outcome::Failed(Failed_Data::LeaveOutRefused(refusal)) => {
-                Response::StartRejected(StartRejection::LeaveOutRefused(refusal))
-            }
-            _ => Response::StartRejected(StartRejection::CompositionRefused),
-        }
-    }
-}
-
 /// Helpers of the launch verbs that are not themselves wire operations.
 trait ResumesReplacement {
     fn resume_reaping(&self, launch_request_id: &str, attempt: LaunchAttempt) -> Response;
@@ -1145,9 +962,6 @@ trait ResumesReplacement {
     /// and category its operation failed with, else the step's stage with
     /// the catch-all category.
     fn native_refused(stage: NativeLaunchStage, outcome: Outcome) -> Response;
-    /// The answer to a launch its receipt refused: the Receipt stage and the
-    /// refusal's category.
-    fn receipt_refused(refusal: &TranscriptRefusal) -> Response;
 }
 
 impl ResumesReplacement for RunningNexus {
@@ -1158,13 +972,6 @@ impl ResumesReplacement for RunningNexus {
                 native_launch_stage: stage,
                 native_launch_failure: NativeLaunchFailure::AdapterRefused,
             },
-        }))
-    }
-
-    fn receipt_refused(refusal: &TranscriptRefusal) -> Response {
-        Response::StartRejected(StartRejection::NativeLaunchRefused(NativeLaunchRefusal {
-            native_launch_stage: NativeLaunchStage::Receipt,
-            native_launch_failure: refusal.into(),
         }))
     }
 
@@ -1229,68 +1036,7 @@ impl ResumesReplacement for RunningNexus {
     }
 }
 
-/// A file-change subscription on the native transcript root of one
-/// ambiguous launch. The watcher announces a change of the session's
-/// transcript through the store's launch changes and marks itself moved.
-pub struct TranscriptWatch {
-    _watcher: notify::RecommendedWatcher,
-    moved: Arc<AtomicBool>,
-}
 
-pub trait WatchesTranscript: Sized {
-    fn open(
-        root: &std::path::Path,
-        native_session_id: &str,
-        changes: LaunchChanges,
-    ) -> Result<Self, String>;
-    /// Whether the transcript moved since this was last asked.
-    fn moved(&self) -> bool;
-}
-
-impl WatchesTranscript for TranscriptWatch {
-    fn open(
-        root: &std::path::Path,
-        native_session_id: &str,
-        changes: LaunchChanges,
-    ) -> Result<Self, String> {
-        let moved = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&moved);
-        let session = native_session_id.to_owned();
-        let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                let Ok(event) = event else {
-                    return;
-                };
-                let concerns_session = event.paths.iter().any(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.ends_with(".jsonl") && name.contains(&session))
-                });
-                if concerns_session {
-                    flag.store(true, Ordering::SeqCst);
-                    changes.announce();
-                }
-            })
-            .map_err(|error| error.to_string())?;
-        watcher
-            .watch(root, notify::RecursiveMode::Recursive)
-            .map_err(|error| error.to_string())?;
-        Ok(Self {
-            _watcher: watcher,
-            moved,
-        })
-    }
-
-    fn moved(&self) -> bool {
-        self.moved.swap(false, Ordering::SeqCst)
-    }
-}
-
-/// The Observe.Launch subscription. The connection is the subscription: the
-/// current inspection on open, one LaunchInspected frame per phase change,
-/// and the inspection with outcome last. It waits on announced changes,
-/// never on a timer, and holds the dispatch gate only while it promotes an
-/// ambiguous launch.
 pub trait ObservesLaunch {
     fn observe_launch(
         &self,
@@ -1307,7 +1053,6 @@ impl ObservesLaunch for RunningNexus {
     ) -> Result<(), String> {
         let changes = self.store.launch_changes.clone();
         let mut sent_phase: Option<LaunchAttemptPhase> = None;
-        let mut watch: Option<TranscriptWatch> = None;
         loop {
             let seen = changes.current();
             if self.stopping.requested() {
@@ -1320,168 +1065,12 @@ impl ObservesLaunch for RunningNexus {
             if inspection.launch_status_outcome_option.is_some() {
                 return send(&answer);
             }
-            let attempt = &inspection.launch_attempt;
-            if sent_phase.as_ref() != Some(&attempt.launch_attempt_phase) {
+            let phase = &inspection.launch_attempt.launch_attempt_phase;
+            if sent_phase.as_ref() != Some(phase) {
                 send(&answer)?;
-                sent_phase = Some(attempt.launch_attempt_phase.clone());
-            }
-            if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous {
-                let promote = match (&watch, &attempt.prompt_delivery_intent_option) {
-                    (None, Some(intent)) => match self.watch_transcript(intent) {
-                        // Whatever landed before the watch began is looked at once.
-                        Ok(opened) => {
-                            watch = Some(opened);
-                            true
-                        }
-                        Err(error) => {
-                            eprintln!(
-                                "flow-nexus: launch {launch_request_id} transcript watch: {error}"
-                            );
-                            false
-                        }
-                    },
-                    (Some(watch), _) => watch.moved(),
-                    (None, None) => false,
-                };
-                if promote {
-                    self.promote_serially(launch_request_id);
-                    continue;
-                }
+                sent_phase = Some(phase.clone());
             }
             changes.after(seen);
         }
-    }
-}
-
-/// The Nexus's own watch over ambiguous launches. A receipt that lands
-/// after Start answered StartAmbiguous promotes the launch whether or not
-/// anyone subscribes or sends Start again: each ambiguous launch's
-/// transcript is watched, and every change of it re-observes the receipt.
-/// It waits on announced changes, never on a timer.
-pub trait PromotesAmbiguousLaunches {
-    /// Runs until the Nexus is told to stop.
-    fn promote_ambiguous_launches(&self);
-}
-
-impl PromotesAmbiguousLaunches for RunningNexus {
-    fn promote_ambiguous_launches(&self) {
-        let changes = self.store.launch_changes.clone();
-        let mut watches = AmbiguousLaunchWatches::default();
-        while !self.stopping.requested() {
-            let seen = changes.current();
-            watches.pass(self);
-            changes.after(seen);
-        }
-    }
-}
-
-/// One transcript watch per ambiguous launch; None when the watch could not
-/// be opened (logged once).
-#[derive(Default)]
-pub struct AmbiguousLaunchWatches {
-    watches: std::collections::BTreeMap<String, Option<TranscriptWatch>>,
-}
-
-pub trait WatchesAmbiguousLaunches {
-    /// Opens a watch for each newly ambiguous launch and looks at it once;
-    /// re-observes each launch whose transcript moved; drops settled ones.
-    fn pass(&mut self, nexus: &RunningNexus);
-}
-
-impl WatchesAmbiguousLaunches for AmbiguousLaunchWatches {
-    fn pass(&mut self, nexus: &RunningNexus) {
-        let attempts = match nexus.store.ambiguous_launch_attempts() {
-            Ok(attempts) => attempts,
-            Err(error) => {
-                eprintln!("flow-nexus: ambiguous launches unreadable: {error}");
-                return;
-            }
-        };
-        self.watches.retain(|launch_request_id, _| {
-            attempts
-                .iter()
-                .any(|attempt| &attempt.launch_request_id == launch_request_id)
-        });
-        for attempt in attempts {
-            let launch_request_id = attempt.launch_request_id.clone();
-            let promote = match self.watches.get(&launch_request_id) {
-                None => {
-                    let watch = attempt
-                        .prompt_delivery_intent_option
-                        .as_ref()
-                        .map(|intent| nexus.watch_transcript(intent))
-                        .transpose()
-                        .unwrap_or_else(|error| {
-                            eprintln!(
-                                "flow-nexus: launch {launch_request_id} transcript watch: {error}"
-                            );
-                            None
-                        });
-                    self.watches.insert(launch_request_id.clone(), watch);
-                    // Whatever landed before the watch began is looked at once.
-                    true
-                }
-                Some(Some(watch)) => watch.moved(),
-                Some(None) => false,
-            };
-            // A launch whose first message has parts still to send is looked
-            // at on every announced change: its next part waits on a Stop
-            // report as well as on the transcript.
-            let parts_pending =
-                attempt
-                    .prompt_delivery_intent_option
-                    .as_ref()
-                    .is_some_and(|intent| {
-                        usize::try_from(intent.parts_submitted)
-                            .is_ok_and(|parts| parts < intent.prompt_sha256_vector.len())
-                    });
-            if promote || parts_pending {
-                nexus.promote_serially(&launch_request_id);
-            }
-        }
-    }
-}
-
-trait PromotesObservedLaunch {
-    fn watch_transcript(&self, intent: &PromptDeliveryIntent) -> Result<TranscriptWatch, String>;
-    /// Promotes under the dispatch gate, then settles any Stop the
-    /// confirmation found waiting.
-    fn promote_serially(&self, launch_request_id: &str);
-    fn promote_under_gate(&self, launch_request_id: &str);
-}
-
-impl PromotesObservedLaunch for RunningNexus {
-    fn watch_transcript(&self, intent: &PromptDeliveryIntent) -> Result<TranscriptWatch, String> {
-        let root = self
-            .herdr
-            .native_transcript_root(&intent.harness_kind, &intent.model_name)?;
-        TranscriptWatch::open(
-            &root,
-            &intent.native_session_id,
-            self.store.launch_changes.clone(),
-        )
-    }
-
-    fn promote_serially(&self, launch_request_id: &str) {
-        self.promote_under_gate(launch_request_id);
-        self.settle_stops_at_confirmation();
-    }
-
-    fn promote_under_gate(&self, launch_request_id: &str) {
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !matches!(self.store.launch_outcome(launch_request_id), Ok(None)) {
-            return;
-        }
-        let Ok(Some(attempt)) = self.store.launch_attempt(launch_request_id) else {
-            return;
-        };
-        if attempt.launch_attempt_phase != LaunchAttemptPhase::PromptAmbiguous {
-            return;
-        }
-        let response = self.promote_ambiguous(attempt);
-        self.settle(launch_request_id, response);
     }
 }

@@ -5,10 +5,9 @@ use flow_nexus::{
     RunningNexus, ServesMeta, ServesOrdinary, StopsNexus, TerminationSignals,
     WatchesTerminationSignals,
     caller::{IdentifiesPeer, LocatesCallerPane},
-    launching::{PromotesAmbiguousLaunches, ReconcilesInterruptedLaunches},
+    launching::ReconcilesInterruptedLaunches,
     send_tool::ServesSendTool,
     store::{ConfigurationOnlyStore, DefaultConfiguration, ReadsAnchors, StoreError},
-    waking::SleepsAndWakesSeats,
 };
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
@@ -156,7 +155,6 @@ fn main() -> ExitCode {
     // Every thread borrows the Nexus inside this scope, so when a stop has
     // ended them all the Nexus drops here and its store closes cleanly.
     std::thread::scope(|scope| {
-        scope.spawn(|| nexus.promote_ambiguous_launches());
         // One connection per live Codex thread answers its send-tool calls.
         let send_tool_nexus = &nexus;
         scope.spawn(move || send_tool_nexus.serve_send_tool(scope));

@@ -43,7 +43,6 @@
 //! [`WakingMetaflows`], so a second request starts no second wake and a
 //! turn end does not drain the waking seat.
 
-use crate::AwaitsLaunchSettlement;
 use crate::RunningNexus;
 use crate::claude::{
     ClaudeQueuedHistory, ClaudeTranscriptCursor, LocatesClaudeTranscript, MeasuresClaudeContext,
@@ -482,7 +481,6 @@ impl StartsUnbound for RunningNexus {
         // The gate is released before the wait: the launch is settled by the
         // Nexus's own promoter, which needs the gate to do it.
         let response = match response {
-            Response::StartAmbiguous(_) => self.settled_launch(&launch_request_id),
             response => Some(response),
         };
         match response {

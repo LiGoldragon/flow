@@ -202,45 +202,6 @@ impl SplitsStartupMessage for HarnessKind {
     }
 }
 
-/// Verifies the exact body and part digests, and that the parts are the
-/// body, before a composed prompt crosses either native harness boundary.
-pub trait ValidatesComposedPrompt {
-    fn has_canonical_first_prompt(&self) -> bool;
-}
-
-impl ValidatesComposedPrompt for ComposedLaunch {
-    fn has_canonical_first_prompt(&self) -> bool {
-        let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
-        let payload = &self.first_prompt_payload;
-        let parts = &payload.prompt_part_vector;
-        if digest(&payload.first_prompt_body) != payload.prompt_sha256
-            || self.target_receipt_request.launch_request_id
-                != self.launch_profile.launch_request_id
-            || self.target_receipt_request.prompt_sha256 != payload.prompt_sha256
-            || digest(&self.system_prompt.system_prompt_text)
-                != self.system_prompt.system_prompt_sha256
-            || parts.is_empty()
-            || parts
-                .iter()
-                .any(|part| digest(&part.prompt_part_text) != part.prompt_sha256)
-        {
-            return false;
-        }
-        if parts.len() == 1 {
-            return parts[0].prompt_part_text == payload.first_prompt_body;
-        }
-        let mut body = String::new();
-        for (index, part) in parts.iter().enumerate() {
-            let header = HarnessKind::part_header((index + 1, parts.len()));
-            let Some(chunk) = part.prompt_part_text.strip_prefix(&header) else {
-                return false;
-            };
-            body.push_str(chunk);
-        }
-        body == payload.first_prompt_body
-    }
-}
-
 trait NamesRole {
     fn aspect_name(&self) -> &'static str;
     fn power_name(&self) -> &'static str;
@@ -324,39 +285,13 @@ impl ValidatesLaunchProfile for LaunchProfile {
     }
 }
 
-/// What a flow is asked to end a turn with when it is given significant new
-/// context: its first turn, and every task, goal or question that
-/// originates in the psyche. A message from another flow that only updates
-/// it carries no such line.
-pub const PRESENTATION_LINE: &str = "End this turn with a presentation: a response that could fit into a book, taking its form from your context modules and this prompt.";
-
-/// A prompt that ends asking for a presentation: the text, then the
-/// presentation line after a blank line, once.
-pub trait AsksPresentation {
-    fn with_presentation(&self) -> String;
-}
-
-impl AsksPresentation for str {
-    fn with_presentation(&self) -> String {
-        if self.ends_with(PRESENTATION_LINE) {
-            return self.to_owned();
-        }
-        let mut text = self.trim_end_matches('\n').to_owned();
-        if !text.is_empty() {
-            text.push_str("\n\n");
-        }
-        text.push_str(PRESENTATION_LINE);
-        text
-    }
-}
-
 /// The brief that follows the context: the instruction itself for Claude,
 /// under a launch record for Codex, ending with the presentation line, since
 /// a first turn ends in a presentation.
 impl RendersBrief for HarnessedProfile {
     fn brief(&self) -> String {
         let profile = &self.launch_profile;
-        let instruction = profile.instruction_prompt.with_presentation();
+        let instruction = profile.instruction_prompt.clone();
         if self.harness_kind == HarnessKind::Claude {
             return instruction;
         }
@@ -599,15 +534,6 @@ impl RendersQueuedWork for [QueuedRequest] {
                     }),
             );
         }
-        let from_the_psyche = self.iter().any(|queued| {
-            matches!(
-                queued.request,
-                signal_flow::Request::Psyche(_) | signal_flow::Request::Psyches(_)
-            )
-        });
-        if from_the_psyche {
-            text = text.with_presentation();
-        }
         text
     }
 }
@@ -654,7 +580,7 @@ impl ProfilesFreshSeat for FreshSeat {
 pub(crate) mod tests {
     use super::{
         ComposesLaunch, CompositionError, FitsOneMessage, LaunchComposer, OpensLaunchComposer,
-        SplitsStartupMessage, ValidatesComposedPrompt,
+        SplitsStartupMessage,
     };
     use crate::context::FixtureComposer;
     use signal_flow::{
@@ -744,10 +670,9 @@ pub(crate) mod tests {
         let body = &composed.first_prompt_payload.first_prompt_body;
         assert!(body.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: operation-main-flow, knowledge-flow\n"));
         assert!(body.contains("\n<!-- module: knowledge-flow -->\nKnowledge body.\n<!-- end-module: knowledge-flow -->\n"));
-        assert!(body.ends_with(&format!(
-            "<!-- end-module: knowledge-flow -->\n\nCarry the bounded task.\n\n{}",
-            super::PRESENTATION_LINE
-        )));
+        assert!(body.ends_with(
+            "<!-- end-module: knowledge-flow -->\n\nCarry the bounded task."
+        ));
         assert_eq!(body.matches("Main flow body.").count(), 1);
         assert!(!body.contains("Spirit body."));
         assert_eq!(composed.first_prompt_payload.prompt_part_vector.len(), 1);
@@ -756,7 +681,6 @@ pub(crate) mod tests {
             body
         );
         assert!(!body.contains("Skill tool") && !body.contains("/operation-main-flow"));
-        assert!(composed.has_canonical_first_prompt());
     }
 
     #[test]
@@ -797,7 +721,6 @@ pub(crate) mod tests {
         assert!(system.ends_with(
             "<!-- end-module: intent-flow -->\n\nThis flow belongs to metaflow { Field flow Secondary a1b2c3 }.\nPredecessor: 1b8ac0\nRemembered: 836818\n"
         ));
-        assert!(carried.has_canonical_first_prompt());
         assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
         // A launch with no predecessor and no memory gains the section.
         let mut profile = fixture_profile();
@@ -818,7 +741,6 @@ pub(crate) mod tests {
                 .system_prompt_text
                 .ends_with("<!-- end-module: intent-flow -->\n\nThis flow belongs to metaflow { Field flow Secondary a1b2c3 }.\n")
         );
-        assert!(bare.has_canonical_first_prompt());
     }
 
     #[test]
@@ -838,10 +760,9 @@ pub(crate) mod tests {
             "<!-- end-module: knowledge-flow -->\n\n# Flow launch\n\n",
             "Role: Field Medium\nHarness: Codex\nModel: gpt-6-astra\nEffort: medium\n",
             "Herdr session: messaging-build\nRemote control: app-server endpoint\n\n",
-            "Carry the bounded task.\n\nEnd this turn with a presentation: a response that could fit into a book, taking its form from your context modules and this prompt."
+            "Carry the bounded task."
         )));
         assert!(!body.contains('$'));
-        assert!(composed.has_canonical_first_prompt());
     }
 
     #[test]
@@ -868,7 +789,7 @@ pub(crate) mod tests {
             assert!(harness.fits_one_message(body));
             assert!(!body.contains("Startup message, part"));
             assert!(body.contains("<!-- module: knowledge-large-2 -->"));
-            assert!(body.ends_with(super::PRESENTATION_LINE));
+            assert!(body.ends_with("Carry the bounded task."));
             // The leading module joined the system prompt, after the system
             // text and before the launch section; no module is left out.
             let system = &composed.system_prompt.system_prompt_text;
@@ -885,7 +806,6 @@ pub(crate) mod tests {
                     "{name} placed once"
                 );
             }
-            assert!(composed.has_canonical_first_prompt());
         }
     }
 
@@ -946,35 +866,7 @@ pub(crate) mod tests {
         assert!(composed.system_prompt.system_prompt_text.len() > 140_000);
     }
 
-    #[test]
-    fn a_first_prompt_and_the_living_s_words_end_asking_for_a_presentation() {
-        use super::{AsksPresentation, PRESENTATION_LINE, RendersQueuedWork};
-        use signal_flow::{QueuedRequest, Request, SentBy};
-        assert_eq!(
-            "Do it.".with_presentation(),
-            format!("Do it.\n\n{PRESENTATION_LINE}")
-        );
-        assert_eq!(
-            "Do it.".with_presentation().with_presentation(),
-            "Do it.".with_presentation()
-        );
-        let order = QueuedRequest {
-            sent_by: SentBy::Unknown,
-            request: Request::Order("Run the tier tests.".into()),
-        };
-        // Another flow's message carries no presentation line.
-        assert!(![order.clone()].prompt_text().contains(PRESENTATION_LINE));
-        let words = QueuedRequest {
-            sent_by: SentBy::Unknown,
-            request: Request::Psyche(flow_ethos::Said {
-                context: "c".into(),
-                verbatim: "v".into(),
-            }),
-        };
-        let text = [order, words].prompt_text();
-        assert!(text.ends_with(PRESENTATION_LINE));
-        assert_eq!(text.matches(PRESENTATION_LINE).count(), 1);
-    }
+
 
     #[test]
     fn a_request_flow_raised_names_flow_as_its_sender() {
@@ -1050,11 +942,9 @@ pub(crate) mod tests {
                 Vec::<signal_flow::LeaveOut>::new(),
             )
             .unwrap();
-        assert!(composed.has_canonical_first_prompt());
         composed.first_prompt_payload.prompt_part_vector[0]
             .prompt_part_text
             .push('x');
-        assert!(!composed.has_canonical_first_prompt());
     }
 
     #[test]

@@ -22,17 +22,17 @@ use crate::{
         },
     },
     store::{
-        LaunchChanges, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt, RecordsLaunchOutcome,
-        RecordsReplacement, Replacement,
+        LaunchChanges, LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,
+        RecordsLaunchOutcome, RecordsReplacement, Replacement, StoreError,
     },
 };
 use notify::Watcher;
 use signal_flow::{
-    ComposedLaunch, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
-    HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
-    LaunchStatusRejection, Launched, NativeLaunchIntent, OriginClue, PromptDeliveryIntent,
-    PromptDeliveryResult, RegistrationAcknowledgement, ReplaceRejection, Replaced, Response,
-    StartRejection, StartRequest, StopRejection,
+    BindingRefusal, ComposedLaunch, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind,
+    HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
+    LaunchInspection, LaunchStatusOutcome, LaunchStatusRejection, Launched, NativeLaunchIntent,
+    OriginClue, PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
+    ReplaceRejection, Replaced, Response, StartRejection, StartRequest, StopRejection,
 };
 use std::sync::{
     Arc,
@@ -132,7 +132,9 @@ impl LaunchesFlows for RunningNexus {
                 return Response::StartRejected(StartRejection::LaunchRequestConflict);
             }
             Outcome::Failed(Failed_Data::ClaimRefused) => {
-                return Response::StartRejected(StartRejection::BindingRefused);
+                return Response::StartRejected(StartRejection::BindingRefused(
+                    BindingRefusal::ClaimUnavailable,
+                ));
             }
             _ => return persistence(),
         };
@@ -178,7 +180,7 @@ impl LaunchesFlows for RunningNexus {
         }
         let binding = match self.perform(Operation::Bind(pane_launch)) {
             Outcome::Bound(binding) => binding,
-            _ => return Response::StartRejected(StartRejection::BindingRefused),
+            _ => return Response::StartRejected(StartRejection::NativeLaunchRefused),
         };
         if self.perform(Operation::Record(Record_Data::Binding(binding.clone())))
             != Outcome::Recorded
@@ -204,7 +206,7 @@ impl LaunchesFlows for RunningNexus {
         }
         let caller = signal_flow::Caller {
             flow_id: binding.flow_id.clone(),
-            flow_aspect: launch.launch_profile.flow_aspect.clone(),
+            aspect: launch.launch_profile.aspect.clone(),
             power_level: launch.launch_profile.power_level.clone(),
             model_name: launch.launch_profile.model_name.clone(),
         };
@@ -234,7 +236,7 @@ impl LaunchesFlows for RunningNexus {
             native_launch_binding: binding.clone(),
         })) != Outcome::Titled
         {
-            return Response::StartRejected(StartRejection::BindingRefused);
+            return Response::StartRejected(StartRejection::NativeLaunchRefused);
         }
         let native_skill_selection_vector = match launch.launch_profile.harness_kind {
             HarnessKind::Codex => self
@@ -552,18 +554,33 @@ impl LaunchesFlows for RunningNexus {
     }
 
     fn launch_status(&self, launch_request_id: &str) -> Response {
-        let persistence =
-            || Response::LaunchStatusRejected(LaunchStatusRejection::PersistenceRefused);
-        match self.store.launch_outcome(launch_request_id) {
-            Ok(Some(outcome)) => return outcome.response(),
-            Ok(None) => {}
-            Err(_) => return persistence(),
-        }
-        match self.store.launch_attempt(launch_request_id) {
-            Ok(Some(attempt)) => Response::LaunchPending(attempt),
+        match self.store.launch_inspection_records(launch_request_id) {
+            Ok(Some(records)) => Response::LaunchInspected(launch_inspection(records)),
             Ok(None) => Response::LaunchStatusRejected(LaunchStatusRejection::UnknownLaunchRequest),
-            Err(_) => persistence(),
+            Err(StoreError::LaunchStatusReadViewChanged) => {
+                Response::LaunchStatusRejected(LaunchStatusRejection::ReadViewChanged)
+            }
+            Err(StoreError::LaunchStatusInconsistent) => {
+                Response::LaunchStatusRejected(LaunchStatusRejection::InconsistentRecords)
+            }
+            Err(_) => Response::LaunchStatusRejected(LaunchStatusRejection::PersistenceRefused),
         }
+    }
+}
+
+fn launch_inspection(records: LaunchInspectionRecords) -> LaunchInspection {
+    let launch_status_outcome_option = records.launch_outcome_option.map(|outcome| match outcome {
+        LaunchOutcome::Started(launched) => LaunchStatusOutcome::Started(launched),
+        LaunchOutcome::Replaced(replaced) => LaunchStatusOutcome::Replaced(replaced),
+        LaunchOutcome::StartRejected(rejection) => LaunchStatusOutcome::StartRejected(rejection),
+        LaunchOutcome::ReplaceRejected(rejection) => {
+            LaunchStatusOutcome::ReplaceRejected(rejection)
+        }
+    });
+    LaunchInspection {
+        launch_attempt: records.launch_attempt,
+        launch_status_outcome_option,
+        flow_node_option: records.flow_node_option,
     }
 }
 
@@ -706,9 +723,10 @@ impl WatchesTranscript for TranscriptWatch {
 }
 
 /// The Observe.Launch subscription. The connection is the subscription: the
-/// current answer on open, one LaunchPending frame per phase change, and the
-/// outcome frame last. It waits on announced changes, never on a timer, and
-/// holds the dispatch gate only while it promotes an ambiguous launch.
+/// current inspection on open, one LaunchInspected frame per phase change,
+/// and the inspection with outcome last. It waits on announced changes,
+/// never on a timer, and holds the dispatch gate only while it promotes an
+/// ambiguous launch.
 pub trait ObservesLaunch {
     fn observe_launch(
         &self,
@@ -729,9 +747,13 @@ impl ObservesLaunch for RunningNexus {
         loop {
             let seen = changes.current();
             let answer = self.launch_status(launch_request_id);
-            let Response::LaunchPending(attempt) = &answer else {
+            let Response::LaunchInspected(inspection) = &answer else {
                 return send(&answer);
             };
+            if inspection.launch_status_outcome_option.is_some() {
+                return send(&answer);
+            }
+            let attempt = &inspection.launch_attempt;
             if sent_phase.as_ref() != Some(&attempt.launch_attempt_phase) {
                 send(&answer)?;
                 sent_phase = Some(attempt.launch_attempt_phase.clone());

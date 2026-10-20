@@ -42,10 +42,39 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.24.0";
+            version = "0.25.0";
             strictDeps = true;
           };
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          flowEthosSource = pkgs.lib.cleanSourceWith {
+            src = ./crates/flow-ethos;
+            filter =
+              path: type:
+              (type == "directory")
+              || (pkgs.lib.hasSuffix ".rs" path)
+              || (pkgs.lib.hasSuffix ".ethos" path);
+          };
+          dependencyDummySrc = craneLib.mkDummySrc (
+            commonArgs
+            // {
+              # The git-pinned Signal and Meta crates depend on this workspace
+              # package through the Cargo patch. Crane stubs workspace source
+              # in buildDepsOnly, so restore only the shared type crate's real
+              # Rust and Ethos inputs after stubbing. Keep its build script
+              # dummy so this derivation still only primes dependency artifacts.
+              extraDummyScript = ''
+                # Crane's stub files are copied from the read-only Nix store.
+                # Replace those two dummy trees before restoring the real leaf
+                # inputs; never change permissions on the source or store.
+                rm -rf "$out/crates/flow-ethos/src" "$out/crates/flow-ethos/ethos"
+                mkdir -p "$out/crates/flow-ethos/src" "$out/crates/flow-ethos/ethos"
+                cp -R ${flowEthosSource}/src/. "$out/crates/flow-ethos/src/"
+                cp -R ${flowEthosSource}/ethos/. "$out/crates/flow-ethos/ethos/"
+              '';
+            }
+          );
+          cargoArtifacts = craneLib.buildDepsOnly (
+            commonArgs // { dummySrc = dependencyDummySrc; }
+          );
           # The two trait laws are read off the Rust text, so their check
           # needs every `.rs` file plus the shell the check itself is written
           # in — a different set from what crane compiles.

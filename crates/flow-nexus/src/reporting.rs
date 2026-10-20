@@ -12,7 +12,7 @@ use crate::generated::operation::{
 use crate::performing::Performs;
 use crate::store::events::RecordsHarnessEvents;
 use meta_signal_flow::{EventsRead_Data, ReadEventsRejected_Data};
-use signal_flow::{FlowId, Refused_Data, Report_Data, Response};
+use signal_flow::{FlowId, Refusal, Report_Data, Response, Unknown_Data};
 
 pub trait RecordsReports {
     fn report(&self, report: Report_Data) -> Response;
@@ -29,15 +29,17 @@ impl RecordsReports for RunningNexus {
             },
         ))) {
             Outcome::Recorded => Response::Reported,
-            Outcome::Failed(Failed_Data::UnknownFlow) => {
-                Response::Refused(Refused_Data::UnknownFlow(flow_id))
+            Outcome::Failed(Failed_Data::UnknownFlow) => Response::Refused(Refusal::Unknown(
+                Unknown_Data::FlowId(flow_id),
+            )),
+            Outcome::Failed(Failed_Data::StoreRefused) => {
+                Response::Refused(Refusal::Store("Report could not be recorded".into()))
             }
-            // signal-flow 9.0.0 names no persistence refusal for Report, so
-            // a store that fails is answered as a flow Flow cannot vouch
-            // for, and logged.
             outcome => {
                 eprintln!("flow-nexus: Report for {flow_id} not recorded: {outcome:?}");
-                Response::Refused(Refused_Data::UnknownFlow(flow_id))
+                Response::Refused(Refusal::Store(format!(
+                    "Report was refused with outcome {outcome:?}"
+                )))
             }
         }
     }

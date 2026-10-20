@@ -1,36 +1,86 @@
-//! A launched flow's hook reports to the Nexus that launched it: the Nexus
-//! hands every Claude launch the ordinary socket its own store configures,
-//! the one it serves, never the default path under some other runtime
-//! directory.
+//! The ordinary socket is supplied by the typed Start input. Durable Nexus
+//! settings come from the committed Meta configuration snapshot.
 
-use crate::store::{ConfiguresFlowStore, DefaultConfiguration};
-use crate::{OpensRunningNexus, RunningNexus};
+use crate::{OpensRunningNexus, RunningNexus, store::ConfigurationOnlyStore};
+use meta_signal_flow::{ConfigurationChange, ConfigureNexus};
+use signal_flow::Start;
 
 #[test]
-fn a_launch_carries_the_ordinary_socket_the_store_configures() {
+fn a_launch_receives_the_socket_from_each_typed_start() {
     let directory = tempfile::tempdir().expect("fixture root");
-    // The next slot's layout: the Nexus's runtime directory is not the one
-    // a pane's shell has.
-    let defaults = DefaultConfiguration {
+    let defaults = crate::store::DefaultConfiguration {
         home: directory.path().join("home"),
         runtime_directory: directory.path().join("run/flow-next"),
     };
-    let nexus = RunningNexus::open(&defaults).expect("fresh Nexus opens");
+    std::fs::create_dir_all(defaults.state_directory()).expect("state directory");
+    let config = ConfigurationOnlyStore::open(&defaults.store_path()).expect("config store");
+    config
+        .configure_change(ConfigurationChange::Nexus(ConfigureNexus {
+            source_root: directory.path().to_string_lossy().into_owned(),
+            stable_codex: endpoint(directory.path(), "stable"),
+            next_codex: endpoint(directory.path(), "next"),
+            harness_profiles: vec![],
+            meta_aspects: vec![meta_signal_flow::FlowAspect::Psyche],
+            message_nexus_path: directory
+                .path()
+                .join("message.sock")
+                .to_string_lossy()
+                .into_owned(),
+            message_nexus_binary: directory
+                .path()
+                .join("message-nexus")
+                .to_string_lossy()
+                .into_owned(),
+            lease: 60,
+        }))
+        .expect("whole typed Nexus configuration commits");
+    drop(config);
+
+    let first_start = Start {
+        ordinary_socket_path: directory
+            .path()
+            .join("run/flow-next/flow.sock")
+            .to_string_lossy()
+            .into_owned(),
+        meta_socket_path: directory
+            .path()
+            .join("run/flow-next/flow-meta.sock")
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let nexus = RunningNexus::open(&defaults, &first_start).expect("configured Nexus opens");
     assert_eq!(
         nexus.herdr.ordinary_socket,
-        directory.path().join("run/flow-next/flow/flow.sock")
+        directory.path().join("run/flow-next/flow.sock")
     );
-    let mut configuration = nexus.store.configuration().expect("configuration");
-    configuration.ordinary_socket_path = directory
-        .path()
-        .join("elsewhere/ordinary.sock")
-        .to_string_lossy()
-        .into_owned();
-    nexus.store.configure(configuration).expect("configured");
     drop(nexus);
-    let reopened = RunningNexus::open(&defaults).expect("populated Nexus opens");
+
+    let second_start = Start {
+        ordinary_socket_path: directory
+            .path()
+            .join("elsewhere/ordinary.sock")
+            .to_string_lossy()
+            .into_owned(),
+        meta_socket_path: first_start.meta_socket_path,
+    };
+    let reopened = RunningNexus::open(&defaults, &second_start).expect("configured Nexus reopens");
     assert_eq!(
         reopened.herdr.ordinary_socket,
         directory.path().join("elsewhere/ordinary.sock")
     );
+}
+
+fn endpoint(root: &std::path::Path, name: &str) -> meta_signal_flow::CodexEndpoint {
+    meta_signal_flow::CodexEndpoint {
+        client_path: root.join(name).to_string_lossy().into_owned(),
+        home: root
+            .join(format!("{name}-home"))
+            .to_string_lossy()
+            .into_owned(),
+        control_socket_path: root
+            .join(format!("{name}.sock"))
+            .to_string_lossy()
+            .into_owned(),
+        model_name_vector: vec![format!("{name}-model")],
+    }
 }

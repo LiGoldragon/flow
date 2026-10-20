@@ -57,11 +57,18 @@ impl AdmitsMetaPeer for RunningNexus {
         let Some(peer) = peer else {
             return Some(MetaRefusal::PeerUnknown);
         };
-        let Ok(configuration) = self.store.delivery_configuration() else {
-            return Some(MetaRefusal::PeerUnknown);
+        let (message_binary, meta_aspects) = match self.store.configuration_snapshot() {
+            Ok(Some(snapshot)) => (
+                snapshot.nexus.message_nexus_binary,
+                snapshot.nexus.meta_aspects,
+            ),
+            Ok(None) => match self.store.delivery_configuration() {
+                Ok(legacy) => (legacy.message_nexus_path, legacy.meta_aspects),
+                Err(_) => return Some(MetaRefusal::PeerUnknown),
+            },
+            Err(_) => return Some(MetaRefusal::PeerUnknown),
         };
-        if !configuration.message_nexus_path.is_empty()
-            && peer.executable() == fs::canonicalize(&configuration.message_nexus_path).ok()
+        if !message_binary.is_empty() && peer.executable() == fs::canonicalize(&message_binary).ok()
         {
             return None;
         }
@@ -76,7 +83,7 @@ impl AdmitsMetaPeer for RunningNexus {
             // In no pane, or in a pane that holds no flow: the owner.
             _ => return None,
         };
-        if configuration.meta_aspects.contains(&caller.flow_aspect) {
+        if meta_aspects.contains(&caller.aspect) {
             None
         } else {
             Some(MetaRefusal::PeerNotAuthorized(caller))

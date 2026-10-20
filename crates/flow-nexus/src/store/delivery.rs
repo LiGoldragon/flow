@@ -8,7 +8,7 @@
 //! opens is a delivery a crash interrupted: it settles `Uncertain` then and
 //! there and is never retried, since what reached the pane is not known.
 
-use super::{DefaultConfiguration, FlowStore, SeedsConfiguration, StoreError};
+use super::{Configuration, DefaultConfiguration, FlowStore, SeedsConfiguration, StoreError};
 use meta_signal_flow::{
     Delivery, DeliveryGrade, DeliveryId, HarnessProfile, InterruptWitness, MessageNexusPath,
     MetaAspects,
@@ -102,8 +102,8 @@ impl EngineRecord for DeliveryConfiguration {
     }
 }
 
-impl From<&meta_signal_flow::Configuration> for DeliveryConfiguration {
-    fn from(configuration: &meta_signal_flow::Configuration) -> Self {
+impl From<&Configuration> for DeliveryConfiguration {
+    fn from(configuration: &Configuration) -> Self {
         Self {
             harness_profile_vector: configuration.harness_profile_vector.clone(),
             meta_aspects: configuration.meta_aspects.clone(),
@@ -304,6 +304,13 @@ impl RecordsDeliveries for FlowStore {
     }
 
     fn delivery_configuration(&self) -> Result<DeliveryConfiguration, StoreError> {
+        if let Some(snapshot) = self.configuration_snapshot()? {
+            return Ok(DeliveryConfiguration {
+                harness_profile_vector: snapshot.nexus.harness_profiles,
+                meta_aspects: snapshot.nexus.meta_aspects,
+                message_nexus_path: snapshot.nexus.message_nexus_path,
+            });
+        }
         let records = self
             .engine
             .match_records(QueryPlan::key(

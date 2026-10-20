@@ -1,6 +1,6 @@
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
-use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
-use meta_signal_flow::{CreditSelection, Query, ResetRequest, Response};
+use flow_defaults::{DefaultConfiguration, LaysOutDefaults};
+use meta_signal_flow::{Query, Response};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
     env,
@@ -14,104 +14,33 @@ struct FlowMetaClient {
 
 trait ParsesMetaCommand {
     fn parse_command(&self, arguments: impl Iterator<Item = String>) -> Result<Query, String>;
-
-    fn registration_usage() -> String {
-        "usage: flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint]".into()
-    }
 }
+
 trait CallsMetaNexus {
     fn call(&self, query: &Query) -> Result<Response, String>;
 }
 
+fn parse_datom<T: datom_codec::Composing>(source: String, subject: &str) -> Result<T, String> {
+    let mut budget = Budget {
+        remaining: 65_536,
+        reader: ReaderBudget { remaining: 65_536 },
+        depth: 0,
+        maximum_depth: 1_024,
+    };
+    Potential::<T>::from(source)
+        .actualize(&mut budget)
+        .map_err(|error| format!("invalid {subject} datom: {error:?}"))
+}
+
 impl ParsesMetaCommand for FlowMetaClient {
     fn parse_command(&self, mut arguments: impl Iterator<Item = String>) -> Result<Query, String> {
-        let operation = arguments.next();
-        match operation.as_deref() {
-            Some("reset") => {
-                let Some(idempotency_key) = arguments.next() else {
-                    return Err("usage: flow-meta reset <idempotency-key> [credit-id]".into());
-                };
-                let credit_selection = arguments.next()
-                    .map(CreditSelection::Specific)
-                    .unwrap_or(CreditSelection::Next);
-                if arguments.next().is_some() {
-                    return Err("usage: flow-meta reset <idempotency-key> [credit-id]".into());
-                }
-                Ok(Query::ConsumeReset(ResetRequest { idempotency_key, credit_selection }))
-            }
-            Some("register-codex") | Some("register-claude") => {
-                let harness = operation.expect("matched operation");
-                let Some(flow_id) = arguments.next() else { return Err(Self::registration_usage()) };
-                let Some(session_id) = arguments.next() else { return Err(Self::registration_usage()) };
-                let Some(herdr_session_name) = arguments.next() else { return Err(Self::registration_usage()) };
-                let Some(herdr_agent_name) = arguments.next() else { return Err(Self::registration_usage()) };
-                let Some(herdr_pane_id) = arguments.next() else { return Err(Self::registration_usage()) };
-                let Some(herdr_terminal_id) = arguments.next() else { return Err(Self::registration_usage()) };
-                let endpoint = arguments.next();
-                if arguments.next().is_some() { return Err(Self::registration_usage()) }
-                let harness_kind = if harness == "register-codex" {
-                    signal_flow::HarnessKind::Codex
-                } else {
-                    signal_flow::HarnessKind::Claude
-                };
-                let endpoint_path = endpoint.unwrap_or_else(|| {
-                    if harness_kind == signal_flow::HarnessKind::Codex {
-                        DefaultConfiguration::from_environment().stable_codex().socket
-                    } else {
-                        String::new()
-                    }
-                });
-                let endpoint_selection = if endpoint_path.is_empty() {
-                    signal_flow::EndpointSelection::Unavailable
-                } else {
-                    signal_flow::EndpointSelection::Available(signal_flow::Available_Data {
-                        endpoint_path,
-                        route_readiness: if harness_kind == signal_flow::HarnessKind::Codex {
-                            signal_flow::RouteReadiness::Ready
-                        } else {
-                            signal_flow::RouteReadiness::Parked
-                        },
-                    })
-                };
-                Ok(Query::RegisterFlow(signal_flow::FlowNode {
-                    flow_id: flow_id.clone(),
-                    session_id: session_id.clone(),
-                    harness_kind,
-                    endpoint_selection,
-                    herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
-                        signal_flow::HerdrRoute {
-                            herdr_session_name,
-                            herdr_agent_name,
-                            herdr_pane_id,
-                            herdr_terminal_id,
-                        },
-                    ),
-                    origin_clue: signal_flow::OriginClue {
-                        flow_id,
-                        session_id,
-                        turn_id: "unavailable".into(),
-                    },
-                    flow_lifecycle: signal_flow::FlowLifecycle::Active,
-                }))
-            }
-            // A capitalized argument is one inline meta Query datom, the
-            // shape every request takes once the word commands retire.
-            Some(datom) if datom.starts_with(|first: char| first.is_ascii_uppercase()) => {
-                if arguments.next().is_some() {
-                    return Err("usage: flow-meta '<one inline meta Query datom>'".into());
-                }
-                let mut budget = Budget {
-                    remaining: 65_536,
-                    reader: ReaderBudget { remaining: 65_536 },
-                    depth: 0,
-                    maximum_depth: 1_024,
-                };
-                Potential::<Query>::from(datom.to_owned())
-                    .actualize(&mut budget)
-                    .map_err(|error| format!("invalid Flow meta query: {error:?}"))
-            }
-            _ => Err("usage: flow-meta reset <idempotency-key> [credit-id] | flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint] | flow-meta '<one inline meta Query datom>'".into()),
+        let Some(datom) = arguments.next() else {
+            return Err("usage: flow-meta '<one typed Query Datom>'".into());
+        };
+        if arguments.next().is_some() {
+            return Err("flow-meta accepts exactly one typed Query Datom".into());
         }
+        parse_datom::<Query>(datom, "Flow meta query")
     }
 }
 
@@ -135,8 +64,6 @@ impl CallsMetaNexus for FlowMetaClient {
 }
 
 fn main() {
-    // The Nexus's default meta socket under this caller's runtime
-    // directory, unless the caller names another Nexus's socket.
     let client = FlowMetaClient {
         socket: env::var("FLOW_META_SOCKET").unwrap_or_else(|_| {
             DefaultConfiguration::from_environment()
@@ -160,114 +87,49 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{FlowMetaClient, ParsesMetaCommand};
-    use meta_signal_flow::{CreditSelection, Query};
+    use datom_codec::Datomizable;
+    use meta_signal_flow::Query;
+    use protos::{Compactable, Protosizable};
 
     #[test]
-    fn configure_is_one_inline_datom_carrying_the_whole_configuration() {
-        let client = FlowMetaClient {
-            socket: "unused".into(),
-        };
-        let Query::Configure(configuration) = client
-            .parse_command(
-                ["Configure.{ /run/user/1001/flow/flow.sock /run/user/1001/flow/flow-meta.sock /home/li/primary { /etc/profiles/per-user/li/bin/codex-stable-flow-client /home/li/.codex /home/li/.codex/app-server-control/app-server-control.sock [ gpt-5.6-terra gpt-5.6-sol gpt-5.6-luna ] } { /etc/profiles/per-user/li/bin/codex-next-flow-client /home/li/.codex-next /home/li/.codex-next/app-server-control/app-server-control.sock [ gpt-6-sol gpt-6-luna gpt-6-astra ] } [ { Claude [ / «!» # ] [ esc esc ] [ enter ] } { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] /etc/profiles/per-user/li/bin/message-nexus }".into()]
-                    .into_iter(),
-            )
-            .expect("configure datom parses")
-        else {
-            panic!("Configure datom must stay a Configure query")
-        };
-        assert_eq!(configuration.source_root, "/home/li/primary");
+    fn accepts_one_typed_configuration_query() {
+        let source = Query::Configuration
+            .datomize(vec![])
+            .protosize()
+            .compact();
         assert_eq!(
-            configuration.next_codex.model_name_vector,
-            ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"]
+            FlowMetaClient {
+                socket: "unused".into()
+            }
+            .parse_command([source].into_iter())
+            .expect("typed query parses"),
+            Query::Configuration
         );
-        assert_eq!(
-            configuration.harness_profile_vector[0].interrupt_keys,
-            ["esc", "esc"]
-        );
-        assert_eq!(
-            configuration.harness_profile_vector[1].command_sigil_vector,
-            ["/", "!"]
-        );
-        assert_eq!(
-            configuration.meta_aspects,
-            [signal_flow::FlowAspect::Psyche]
-        );
+    }
+
+    #[test]
+    fn refuses_extra_arguments_instead_of_composing_fragments() {
+        let source = Query::Configuration
+            .datomize(vec![])
+            .protosize()
+            .compact();
         assert!(
-            client
-                .parse_command(["configure".into(), "/a".into(), "/b".into()].into_iter())
-                .is_err()
+            FlowMetaClient {
+                socket: "unused".into()
+            }
+            .parse_command([source, "extra".into()].into_iter())
+            .is_err()
         );
     }
 
     #[test]
-    fn deliver_is_one_inline_datom_carrying_a_typed_message() {
-        let client = FlowMetaClient {
-            socket: "unused".into(),
-        };
-        let Query::Deliver(request) = client
-            .parse_command(
-                ["Deliver.{ m-7f3a2c:7d41e0:0 7d41e0 Soft.{ m-7f3a2c Flow.e167d8 Text.«Stage 1 is deployed; run the tier tests.» } }".into()]
-                    .into_iter(),
-            )
-            .expect("deliver datom parses")
-        else {
-            panic!("Deliver datom must stay a Deliver query")
-        };
-        assert_eq!(request.delivery_id, "m-7f3a2c:7d41e0:0");
-        assert_eq!(request.flow_id, "7d41e0");
-        assert!(matches!(
-            request.message,
-            meta_signal_flow::Message::Soft(_)
-        ));
-    }
-
-    #[test]
-    fn reset_keeps_the_callers_retry_key() {
-        let client = FlowMetaClient {
-            socket: "unused".into(),
-        };
-        let Query::ConsumeReset(request) = client
-            .parse_command(["reset".into(), "attempt-1".into()].into_iter())
-            .expect("reset command")
-        else {
-            panic!("reset query")
-        };
-        assert_eq!(request.credit_selection, CreditSelection::Next);
-        assert_eq!(request.idempotency_key, "attempt-1");
-    }
-
-    #[test]
-    fn registration_carries_the_complete_herdr_binding() {
-        let client = FlowMetaClient {
-            socket: "unused".into(),
-        };
-        let Query::RegisterFlow(node) = client
-            .parse_command(
-                [
-                    "register-claude",
-                    "da1e3f",
-                    "da1e3f9d-full",
-                    "messaging-build",
-                    "recipient",
-                    "w1:p2",
-                    "term-current",
-                ]
-                .map(String::from)
-                .into_iter(),
-            )
-            .expect("registration query")
-        else {
-            panic!("registration query")
-        };
-        assert_eq!(
-            node.herdr_route_selection,
-            signal_flow::HerdrRouteSelection::Available(signal_flow::HerdrRoute {
-                herdr_session_name: "messaging-build".into(),
-                herdr_agent_name: "recipient".into(),
-                herdr_pane_id: "w1:p2".into(),
-                herdr_terminal_id: "term-current".into(),
-            })
+    fn refuses_the_retired_configure_files_word_command() {
+        assert!(
+            FlowMetaClient {
+                socket: "unused".into()
+            }
+            .parse_command(["configure-files".into()].into_iter())
+            .is_err()
         );
     }
 }

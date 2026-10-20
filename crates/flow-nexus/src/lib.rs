@@ -45,7 +45,7 @@ use performing::Performs;
 use reporting::RecordsReports;
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
-    Query, Response, RestartRejection,
+    Process, Query, Response, RestartRejection,
 };
 use std::{
     collections::HashSet,
@@ -125,9 +125,7 @@ impl Dispatches for RunningNexus {
                             .refresh_route(self.herdr.claude_daemon.refreshed(node)),
                     ),
                     Ok(response) => response,
-                    Err(_) => Response::RecipientResolutionRejected(
-                        signal_flow::RecipientResolutionRejection::FlowUnavailable,
-                    ),
+                    Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
                 }
             }
             Query::Stop(flow_id) => {
@@ -136,10 +134,8 @@ impl Dispatches for RunningNexus {
                     Ok(None) => {
                         return Response::StopRejected(signal_flow::StopRejection::UnknownFlow);
                     }
-                    Err(_) => {
-                        return Response::StopRejected(
-                            signal_flow::StopRejection::PersistenceRefused,
-                        );
+                    Err(error) => {
+                        return Response::Refused(signal_flow::Refusal::Store(error.to_string()));
                     }
                 };
                 // A Retired seat is gone already, so there is nothing left
@@ -181,35 +177,37 @@ impl Dispatches for RunningNexus {
                 Response::TurnEndRejected(signal_flow::TurnEndRejection::QueueRefused)
             }
             Query::Report(report) => self.report(report),
-            Query::List(_) => self
-                .store
-                .flow_nodes()
-                .map(|nodes| Response::Listed(self.reconciled(nodes)))
-                .unwrap_or(Response::ListRejected(
-                    signal_flow::ListRejection::PersistenceRefused,
-                )),
+            Query::Current(address) => {
+                self.store
+                    .current_metaflow(&address)
+                    .unwrap_or_else(|error| {
+                        Response::Refused(signal_flow::Refusal::Store(error.to_string()))
+                    })
+            }
+            Query::Metaflows => self.store.list_metaflows().map_or_else(
+                |error| Response::Refused(signal_flow::Refusal::Store(error.to_string())),
+                Response::Listed,
+            ),
         }
     }
 
     fn dispatch_meta(&self, query: meta_signal_flow::Query) -> meta_signal_flow::Response {
         match query {
-            meta_signal_flow::Query::Configure(configuration) => {
-                // The Codex adapters and the composer read the runtime
-                // configuration when the Nexus opens, so every change waits
-                // for the next start.
-                let stored = self
-                    .store
-                    .configure(configuration)
-                    .and_then(|_| self.store.configuration());
-                let Ok(configuration) = stored else {
-                    return meta_signal_flow::Response::ConfigureRejected(
-                        meta_signal_flow::ConfigureRejection::StoreRefused,
-                    );
-                };
-                meta_signal_flow::Response::Configured(meta_signal_flow::Configured {
-                    configuration,
-                    activation: meta_signal_flow::Activation::NexusRestartRequired,
-                })
+            meta_signal_flow::Query::Configuration => match self.store.configuration_snapshot() {
+                Ok(Some(snapshot)) => meta_signal_flow::Response::Configuration(snapshot),
+                Ok(None) => meta_signal_flow::Response::Unconfigured,
+                Err(error) => meta_signal_flow::Response::Refused(error.to_string()),
+            },
+            meta_signal_flow::Query::Configure(change) => {
+                match self.store.configure_change(change) {
+                    Ok(()) => meta_signal_flow::Response::Configured,
+                    Err(store::StoreError::ConfigurationConflict) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::Conflict,
+                        )
+                    }
+                    Err(error) => meta_signal_flow::Response::Refused(error.to_string()),
+                }
             }
             meta_signal_flow::Query::ConsumeReset(request) => self
                 .codex_endpoints
@@ -350,7 +348,7 @@ impl Dispatches for RunningNexus {
                     };
                     let role = signal_flow::Caller {
                         flow_id: flow_id.clone(),
-                        flow_aspect: binding.flow_aspect,
+                        aspect: binding.aspect,
                         power_level: binding.power_level,
                         model_name: binding.model_name,
                     };
@@ -411,19 +409,32 @@ impl Dispatches for RunningNexus {
 }
 
 pub trait OpensRunningNexus {
-    /// Opens the Nexus from its default configuration: the store at the
-    /// default location seeds or resumes configuration, which changes only
-    /// over the meta socket.
-    fn open(defaults: &store::DefaultConfiguration) -> Result<Self, store::StoreError>
+    /// Opens the configured Nexus from one typed Start payload. Durable
+    /// runner values come from the committed Meta configuration snapshot;
+    /// socket paths come only from this Start value.
+    fn open(
+        defaults: &store::DefaultConfiguration,
+        start: &flow_ethos::Start,
+    ) -> Result<Self, store::StoreError>
     where
         Self: Sized;
 }
 
 impl OpensRunningNexus for RunningNexus {
-    fn open(defaults: &store::DefaultConfiguration) -> Result<Self, store::StoreError> {
+    fn open(
+        defaults: &store::DefaultConfiguration,
+        start: &flow_ethos::Start,
+    ) -> Result<Self, store::StoreError> {
         use store::LaysOutDefaults;
-        let store = FlowStore::open_seeded(&defaults.store_path(), defaults)?;
-        let runtime = store.runtime_configuration()?;
+        let store_path = Path::new(&start.store_path);
+        // The configured opener checks the typed store path read-only first,
+        // reads the committed snapshot, and only then registers runtime tables.
+        // It never seeds defaults, upgrades a predecessor, or settles work.
+        let store = FlowStore::open_configured(store_path)?;
+        let snapshot = store
+            .configuration_snapshot()?
+            .ok_or(store::StoreError::NotConfigured)?;
+        let runtime = store::RuntimeConfiguration::from(&snapshot.nexus);
         let codex_endpoints = CodexEndpoints::from(&runtime);
         let overlap = codex_endpoints.overlapping_models();
         if !overlap.is_empty() {
@@ -435,7 +446,7 @@ impl OpensRunningNexus for RunningNexus {
         let launch_bundles = LaunchBundles::at(defaults.launch_bundle_directory());
         // The socket this Nexus serves: a changed one takes effect only on
         // restart, so the store's value at open is the one being served.
-        let ordinary_socket = PathBuf::from(store.configuration()?.ordinary_socket_path);
+        let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
         Ok(Self {
             store,
             codex_endpoints: codex_endpoints.clone(),
@@ -457,6 +468,9 @@ impl OpensRunningNexus for RunningNexus {
 /// a failed write drops only this connection.
 pub struct Connection {
     peer: UnixStream,
+    /// PID and kernel start token captured when this socket was accepted.
+    /// Privileged ordinary operations recheck both before using the peer.
+    process: Option<Process>,
 }
 
 pub trait ServesConnection: Sized {
@@ -472,7 +486,10 @@ impl ServesConnection for Connection {
         peer.set_read_timeout(Some(Self::READ_TIMEOUT))
             .and_then(|_| peer.set_write_timeout(Some(Self::WRITE_TIMEOUT)))
             .map_err(|error| error.to_string())?;
-        Ok(Self { peer })
+        let process = peer
+            .peer_process()
+            .and_then(|peer| store::process_identity_for_pid(peer.process_id));
+        Ok(Self { peer, process })
     }
 
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
@@ -579,9 +596,9 @@ impl ListensOnSocket for RunningNexus {}
 /// `Deliver` that finds the pane gone — persists an ended lifecycle. Reading the
 /// truth and recording it are deliberately separate.
 ///
-/// Only a live flow is looked at: one already Stopped, Exited or Retired is
-/// answered from its row, and a pane Herdr cannot be read for is answered
-/// exactly as stored — an unreadable Herdr neither promotes nor ends anything.
+/// This helper is for internal native-flow reconciliation. Metaflows on the
+/// ordinary wire are read from their own durable records and never projected
+/// from these native seat rows.
 pub trait ReconcilesListedFlows {
     fn reconciled(&self, nodes: Vec<FlowNode>) -> Vec<FlowNode>;
     fn reconciled_node(&self, node: FlowNode) -> FlowNode;
@@ -804,19 +821,20 @@ mod tests {
         composition::{ComposesLaunch, LaunchBundles, LaunchComposer, OpensLaunchComposer},
         herdr::HerdrCli,
         store::{
-            FlowStore, OpensFlowStore, RecordsFlowLifecycle, RecordsNativeLaunchBinding,
-            RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
-            RecordsRegistrationAcknowledgement, RegistersFlowIdentity, ReservesLaunchAttempt,
+            FlowStore, LaunchOutcome, OpensFlowStore, RecordsFlowLifecycle, RecordsLaunchOutcome,
+            RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
+            RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersFlowIdentity,
+            ReservesLaunchAttempt,
         },
     };
     use sha2::{Digest, Sha256};
     use signal_flow::{
-        Caller, EndpointSelection, FlowAspect, FlowLifecycle, FlowNode, HarnessKind,
+        Caller, EndpointSelection, Aspect, FlowLifecycle, FlowNode, HarnessKind,
         HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile,
-        LaunchSource, NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence,
-        NativeTranscriptBoundary, OriginClue, PowerLevel, PromptDeliveryIntent,
-        PromptDeliveryResult, Query, RegistrationAcknowledgement, Response, StartRejection,
-        StartRequest,
+        LaunchSource, LaunchStatusOutcome, NativeLaunchBinding, NativeLaunchIntent,
+        NativeTranscriptAbsence, NativeTranscriptBoundary, OriginClue, PowerLevel,
+        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
+        StartRejection, StartRequest,
     };
     use std::{
         collections::BTreeSet,
@@ -832,6 +850,37 @@ mod tests {
         directory: tempfile::TempDir,
         nexus: RunningNexus,
         snapshot_program: PathBuf,
+    }
+
+    fn inspected(response: Response, launch_request_id: &str) -> signal_flow::LaunchInspection {
+        let Response::LaunchInspected(inspection) = response else {
+            panic!("expected a launch inspection, got {response:?}")
+        };
+        assert_eq!(
+            inspection.launch_attempt.launch_profile.launch_request_id,
+            launch_request_id
+        );
+        inspection
+    }
+
+    fn assert_inspection_outcome(
+        response: Response,
+        launch_request_id: &str,
+        expected_outcome: LaunchStatusOutcome,
+        expected_flow_id: Option<&str>,
+    ) {
+        let inspection = inspected(response, launch_request_id);
+        assert_eq!(
+            inspection.launch_status_outcome_option,
+            Some(expected_outcome)
+        );
+        assert_eq!(
+            inspection
+                .flow_node_option
+                .as_ref()
+                .map(|node| node.flow_id.as_str()),
+            expected_flow_id
+        );
     }
 
     /// How the fixture Herdr answers `agent prompt`, shaped as Herdr 0.8.2
@@ -909,7 +958,7 @@ mod tests {
     fn existing_binding(flow_id: &str, pane: &str) -> meta_signal_flow::FlowBinding {
         meta_signal_flow::FlowBinding {
             flow_id: flow_id.into(),
-            flow_aspect: FlowAspect::Mind,
+            aspect: Aspect::Mind,
             power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
             harness_kind: HarnessKind::Codex,
@@ -1125,8 +1174,8 @@ mod tests {
         assert!(garbage.read_response().is_err());
 
         let mut peer = connect();
-        peer.write_query(&Query::List(signal_flow::ListRequest {}))
-            .expect("list written");
+        peer.write_query(&Query::Metaflows)
+            .expect("metaflows query written");
         assert!(matches!(
             peer.read_response().expect("list answered"),
             Response::Listed(_)
@@ -1198,8 +1247,8 @@ mod tests {
         }
 
         /// The lifecycle as the row holds it, with no reconciliation. This
-        /// is what the Deliver path did or did not write; List answers the
-        /// reconciled truth instead, which is a separate claim.
+        /// is what the Deliver path did or did not write; reconciliation is
+        /// a separate claim from the stored row.
         fn stored_lifecycle(&self) -> FlowLifecycle {
             use crate::store::ReadsFlowRows as _;
             self.nexus
@@ -1211,14 +1260,10 @@ mod tests {
         }
 
         fn only_lifecycle(&self) -> FlowLifecycle {
-            let Response::Listed(rows) = self
-                .nexus
-                .dispatch(Query::List(signal_flow::ListRequest {}))
-            else {
-                panic!("list must return durable Flow rows")
-            };
+            use crate::store::ReadsFlowRows as _;
+            let rows = self.nexus.store.flow_nodes().expect("Flow rows read");
             assert_eq!(rows.len(), 1);
-            rows[0].flow_lifecycle.clone()
+            self.nexus.reconciled_node(rows[0].clone()).flow_lifecycle
         }
     }
 
@@ -1488,12 +1533,8 @@ mod tests {
             fixture.send_to("908786", "stale route prompt"),
             Sent::Refused(meta_signal_flow::DeliveryRejection::RouteUnavailable)
         );
-        let Response::Listed(rows) = fixture
-            .nexus
-            .dispatch(Query::List(signal_flow::ListRequest {}))
-        else {
-            panic!("list must return durable Flow rows")
-        };
+        use crate::store::ReadsFlowRows as _;
+        let rows = fixture.nexus.store.flow_nodes().expect("Flow rows read");
         assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Pending);
     }
 
@@ -1658,14 +1699,10 @@ mod tests {
     }
 
     fn listed(fixture: &NexusFixture) -> FlowNode {
-        let Response::Listed(rows) = fixture
-            .nexus
-            .dispatch(Query::List(signal_flow::ListRequest {}))
-        else {
-            panic!("list must return durable Flow rows")
-        };
+        use crate::store::ReadsFlowRows as _;
+        let rows = fixture.nexus.store.flow_nodes().expect("Flow rows read");
         assert_eq!(rows.len(), 1);
-        rows[0].clone()
+        fixture.nexus.reconciled_node(rows[0].clone())
     }
 
     // The fixture's Codex endpoints name sockets that do not exist: an
@@ -1786,7 +1823,7 @@ mod tests {
 
         let role = Caller {
             flow_id: "908786".into(),
-            flow_aspect: FlowAspect::Mind,
+            aspect: Aspect::Mind,
             power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
         };
@@ -1864,7 +1901,7 @@ mod tests {
                 source_sha256: format!("{:x}", Sha256::digest(b"exact source bytes\n")),
             }],
             skill_name_vector: Vec::new(),
-            flow_aspect: FlowAspect::Field,
+            aspect: Aspect::Field,
             power_level: PowerLevel::High,
             harness_kind: HarnessKind::Codex,
             model_name: "fixture-model".into(),
@@ -1925,7 +1962,7 @@ mod tests {
                 source_sha256: format!("{:x}", Sha256::digest(b"delayed exact bytes\n")),
             }],
             skill_name_vector: Vec::new(),
-            flow_aspect: FlowAspect::Field,
+            aspect: Aspect::Field,
             power_level: PowerLevel::High,
             harness_kind: HarnessKind::Codex,
             model_name: "fixture-model".into(),
@@ -2133,12 +2170,9 @@ mod tests {
         // The pane exits. Nothing else changes.
         fixture.set_agents(vec![]);
 
-        let Response::Listed(rows) = fixture
-            .nexus
-            .dispatch(Query::List(signal_flow::ListRequest {}))
-        else {
-            panic!("List answers")
-        };
+        use crate::store::ReadsFlowRows as _;
+        let rows = fixture.nexus.store.flow_nodes().expect("Flow rows read");
+        let rows = fixture.nexus.reconciled(rows);
         assert_eq!(rows.len(), 1, "the row and its history stay");
         assert_eq!(rows[0].flow_id, "908786");
         assert_eq!(rows[0].flow_lifecycle, FlowLifecycle::Exited);
@@ -2273,7 +2307,7 @@ mod tests {
     /// The owner reads the events back with ReadEvents.
     #[test]
     fn a_report_is_recorded_for_a_held_flow_and_refused_for_an_unknown_one() {
-        use signal_flow::{Event, Refused_Data, Report_Data};
+        use signal_flow::{Event, Refusal, Report_Data, Unknown_Data};
         let fixture = NexusFixture::new();
         fixture.set_agents(vec![fixture.current_agent()]);
         fixture.register_with(FlowLifecycle::Active);
@@ -2286,7 +2320,7 @@ mod tests {
 
         assert_eq!(
             report("0a0a0a", Event::Started),
-            Response::Refused(Refused_Data::UnknownFlow("0a0a0a".into()))
+            Response::Refused(Refusal::Unknown(Unknown_Data::FlowId("0a0a0a".into())))
         );
         assert_eq!(
             fixture
@@ -2544,7 +2578,7 @@ mod tests {
                     source_sha256: format!("{:x}", Sha256::digest(b"staged exact bytes\n")),
                 }],
                 skill_name_vector: Vec::new(),
-                flow_aspect: FlowAspect::Field,
+                aspect: Aspect::Field,
                 power_level: PowerLevel::High,
                 harness_kind: HarnessKind::Codex,
                 model_name: "fixture-model".into(),
@@ -2706,15 +2740,12 @@ mod tests {
         }
 
         fn lifecycle(&self, flow_id: &str) -> FlowLifecycle {
-            let Response::Listed(rows) = self
-                .nexus
-                .dispatch(Query::List(signal_flow::ListRequest {}))
-            else {
-                panic!("List answers")
-            };
-            rows.into_iter()
-                .find(|row| row.flow_id == flow_id)
-                .expect("listed flow")
+            use crate::store::ReadsFlowRows as _;
+            self.nexus
+                .store
+                .flow_node(flow_id)
+                .expect("Flow row read")
+                .expect("flow row")
                 .flow_lifecycle
         }
     }
@@ -2884,8 +2915,12 @@ mod tests {
         );
         assert!(matches!(
             fixture.nexus.dispatch(Query::LaunchStatus("replace-request".into())),
-            Response::LaunchPending(attempt)
-                if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous
+            Response::LaunchInspected(inspection)
+                if inspection.launch_attempt.launch_attempt_phase
+                    == LaunchAttemptPhase::PromptAmbiguous
+                    && inspection.launch_status_outcome_option.is_none()
+                    && inspection.flow_node_option.as_ref()
+                        .is_some_and(|node| node.flow_id == "908786")
         ));
 
         launch.write_receipt();
@@ -2922,11 +2957,13 @@ mod tests {
             fixture.send_to("fac697", "to the old seat"),
             Sent::Refused(meta_signal_flow::DeliveryRejection::FlowStopped)
         );
-        assert_eq!(
+        assert_inspection_outcome(
             fixture
                 .nexus
                 .dispatch(Query::LaunchStatus("replace-request".into())),
-            Response::Replaced(replaced.clone())
+            "replace-request",
+            LaunchStatusOutcome::Replaced(replaced.clone()),
+            Some("908786"),
         );
         // A repeated Replace answers the settled outcome and closes nothing.
         assert_eq!(
@@ -2953,9 +2990,9 @@ mod tests {
         launch.stage_to_ambiguity(&fixture.nexus);
         launch.write_receipt();
 
-        let refused = Response::ReplaceRejected(signal_flow::ReplaceRejection::ReapRefused(
-            signal_flow::StopRejection::CloseRefused,
-        ));
+        let rejection =
+            signal_flow::ReplaceRejection::ReapRefused(signal_flow::StopRejection::CloseRefused);
+        let refused = Response::ReplaceRejected(rejection.clone());
         assert_eq!(
             fixture.nexus.dispatch(Query::Replace(launch.request())),
             refused
@@ -2963,11 +3000,13 @@ mod tests {
         assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
         assert!(!fixture.routable("fac697"));
         assert!(!fixture.routable("908786"));
-        assert_eq!(
+        assert_inspection_outcome(
             fixture
                 .nexus
                 .dispatch(Query::LaunchStatus("reap-request".into())),
-            refused
+            "reap-request",
+            LaunchStatusOutcome::ReplaceRejected(rejection),
+            Some("908786"),
         );
 
         fixture.herdr_for_replacement(0);
@@ -2989,9 +3028,10 @@ mod tests {
         launch.write_receipt();
 
         let calls = fixture.herdr_unreachable_for_predecessor();
-        let refused = Response::ReplaceRejected(signal_flow::ReplaceRejection::ReapRefused(
+        let rejection = signal_flow::ReplaceRejection::ReapRefused(
             signal_flow::StopRejection::RouteUnavailable,
-        ));
+        );
+        let refused = Response::ReplaceRejected(rejection.clone());
         assert_eq!(
             fixture.nexus.dispatch(Query::Replace(launch.request())),
             refused,
@@ -3002,11 +3042,13 @@ mod tests {
         assert!(!logged.contains("pane close"), "{logged}");
         assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
         assert!(!fixture.routable("908786"));
-        assert_eq!(
+        assert_inspection_outcome(
             fixture
                 .nexus
                 .dispatch(Query::LaunchStatus("unreachable-request".into())),
-            refused
+            "unreachable-request",
+            LaunchStatusOutcome::ReplaceRejected(rejection),
+            Some("908786"),
         );
 
         // Herdr answers again and shows the pane: the retry closes it.
@@ -3041,11 +3083,16 @@ mod tests {
         assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Stopped);
         assert!(!fixture.routable("fac697"));
         assert!(fixture.routable("908786"));
-        assert_eq!(
+        assert_inspection_outcome(
             fixture
                 .nexus
                 .dispatch(Query::LaunchStatus("exited-request".into())),
-            replaced
+            "exited-request",
+            LaunchStatusOutcome::Replaced(match replaced {
+                Response::Replaced(replaced) => replaced,
+                other => panic!("expected replaced outcome, got {other:?}"),
+            }),
+            Some("908786"),
         );
         let calls = fs::read_to_string(calls).expect("Herdr call log");
         assert!(
@@ -3082,6 +3129,20 @@ mod tests {
                 )
             );
         }
+        fixture
+            .nexus
+            .store
+            .record_launch_outcome(
+                "outcome-without-attempt",
+                LaunchOutcome::StartRejected(StartRejection::CompositionRefused),
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("outcome-without-attempt".into())),
+            Response::LaunchStatusRejected(signal_flow::LaunchStatusRejection::InconsistentRecords)
+        );
         assert!(
             !fixture.snapshot_program.exists(),
             "no launch was attempted"
@@ -3104,21 +3165,29 @@ mod tests {
         fixture.herdr_for_replacement(0);
         let mut started = fixture.staged_launch("started-request", None);
         started.stage_to_ambiguity(&fixture.nexus);
-        assert!(matches!(
-            fixture.nexus.dispatch(Query::LaunchStatus("started-request".into())),
-            Response::LaunchPending(attempt)
-                if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous
-        ));
+        let pending = inspected(
+            fixture
+                .nexus
+                .dispatch(Query::LaunchStatus("started-request".into())),
+            "started-request",
+        );
+        assert_eq!(
+            pending.launch_attempt.launch_attempt_phase,
+            LaunchAttemptPhase::PromptAmbiguous
+        );
+        assert!(pending.launch_status_outcome_option.is_none());
         started.write_receipt();
         let Response::Started(outcome) = fixture.nexus.dispatch(Query::Start(started.request()))
         else {
             panic!("the observed launch starts")
         };
-        assert_eq!(
+        assert_inspection_outcome(
             fixture
                 .nexus
                 .dispatch(Query::LaunchStatus("started-request".into())),
-            Response::Started(outcome)
+            "started-request",
+            LaunchStatusOutcome::Started(outcome),
+            Some("908786"),
         );
 
         // StartRejected after reservation: Herdr cannot open the pane. The
@@ -3132,11 +3201,13 @@ mod tests {
             rejection,
             Response::StartRejected(StartRejection::NativeLaunchRefused)
         );
-        assert_eq!(
+        assert_inspection_outcome(
             fixture
                 .nexus
                 .dispatch(Query::LaunchStatus("rejected-request".into())),
-            rejection
+            "rejected-request",
+            LaunchStatusOutcome::StartRejected(StartRejection::NativeLaunchRefused),
+            None,
         );
         assert_eq!(
             fixture.nexus.dispatch(Query::Start(rejected.request())),
@@ -3161,11 +3232,15 @@ mod tests {
                 StartRejection::NativeLaunchRefused
             ))
         );
-        assert_eq!(
+        assert_inspection_outcome(
             fixture
                 .nexus
                 .dispatch(Query::LaunchStatus("refused-request".into())),
-            rejection
+            "refused-request",
+            LaunchStatusOutcome::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
+                StartRejection::NativeLaunchRefused,
+            )),
+            None,
         );
         assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Active);
         assert!(!bundles.file_for_request("refused-request").exists());
@@ -3218,11 +3293,13 @@ mod tests {
             panic!("a launch that succeeded answers Started, not {answer:?}")
         };
         assert_eq!(started.flow_id, "908786");
-        assert_eq!(
+        assert_inspection_outcome(
             fixture
                 .nexus
                 .dispatch(Query::LaunchStatus("settling-request".into())),
-            Response::Started(started)
+            "settling-request",
+            LaunchStatusOutcome::Started(started),
+            Some("908786"),
         );
     }
 
@@ -3257,17 +3334,21 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(matches!(
-            status(),
-            Response::LaunchPending(attempt)
-                if attempt.launch_attempt_phase == LaunchAttemptPhase::PromptAmbiguous
-        ));
+        let pending = inspected(status(), "unwatched-request");
+        assert_eq!(
+            pending.launch_attempt.launch_attempt_phase,
+            LaunchAttemptPhase::PromptAmbiguous
+        );
+        assert!(pending.launch_status_outcome_option.is_none());
 
         // Only the transcript moves.
         launch.write_receipt();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let started = loop {
-            if let Response::Started(started) = status() {
+            if let Response::LaunchInspected(inspection) = status()
+                && let Some(LaunchStatusOutcome::Started(started)) =
+                    inspection.launch_status_outcome_option
+            {
                 break started;
             }
             assert!(
@@ -3322,8 +3403,10 @@ mod tests {
             panic!("ordinary socket never listened")
         };
         let phase = |peer: &mut UnixStream| match peer.read_response() {
-            Ok(Response::LaunchPending(attempt)) => attempt.launch_attempt_phase,
-            other => panic!("expected a LaunchPending frame, got {other:?}"),
+            Ok(Response::LaunchInspected(inspection)) => {
+                inspection.launch_attempt.launch_attempt_phase
+            }
+            other => panic!("expected a LaunchInspected frame, got {other:?}"),
         };
 
         let mut launch = fixture.staged_launch("observed-request", None);
@@ -3352,19 +3435,32 @@ mod tests {
 
         // Only the transcript moves; no one sends Start again.
         launch.write_receipt();
-        let Ok(Response::Started(started)) = observer.read_response() else {
+        let Ok(Response::LaunchInspected(inspection)) = observer.read_response() else {
             panic!("the observer's last frame is the outcome")
         };
+        let Some(LaunchStatusOutcome::Started(started)) = inspection.launch_status_outcome_option
+        else {
+            panic!("the observer's last inspection carries Started")
+        };
         assert_eq!(started.flow_id, "908786");
+        assert_eq!(
+            inspection
+                .flow_node_option
+                .as_ref()
+                .map(|node| node.flow_id.as_str()),
+            Some("908786")
+        );
         assert!(
             observer.read_response().is_err(),
             "the exchange ends after the outcome"
         );
 
         let mut late = subscribe();
-        assert_eq!(
+        assert_inspection_outcome(
             late.read_response().expect("late observer answered"),
-            Response::Started(started)
+            "observed-request",
+            LaunchStatusOutcome::Started(started),
+            Some("908786"),
         );
         assert!(late.read_response().is_err());
         let calls = fs::read_to_string(calls).unwrap_or_default();
@@ -3428,7 +3524,7 @@ mod tests {
     fn mind_live() -> Caller {
         Caller {
             flow_id: "mind-live".into(),
-            flow_aspect: FlowAspect::Mind,
+            aspect: Aspect::Mind,
             power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
         }
@@ -3634,18 +3730,24 @@ mod tests {
         };
         let fixture = NexusFixture::with_store(|path| rows.seed(path));
         assert_eq!(fixture.nexus.store.opening_settlements.len(), 2);
-        assert!(matches!(
+        use crate::store::ReadsFlowRows as _;
+        assert_eq!(
             fixture
                 .nexus
-                .dispatch(Query::List(signal_flow::ListRequest {})),
-            Response::Listed(rows) if rows.len() == 1 && rows[0].flow_id == "launched-earlier"
-        ));
+                .store
+                .flow_node("launched-earlier")
+                .expect("Flow row read")
+                .expect("earlier Flow row")
+                .flow_id,
+            "launched-earlier"
+        );
         assert!(matches!(
             fixture.nexus.dispatch(Query::LaunchStatus(
                 crate::store::EarlierLaunchAttemptRows::EARLIER_REQUEST.into()
             )),
-            Response::LaunchPending(attempt)
-                if attempt.launch_profile.flow_aspect == FlowAspect::Psyche
+            Response::LaunchInspected(inspection)
+                if inspection.launch_attempt.launch_profile.aspect == Aspect::Psyche
+                    && inspection.launch_status_outcome_option.is_none()
         ));
         assert!(matches!(
             fixture.nexus.dispatch(Query::LaunchStatus(

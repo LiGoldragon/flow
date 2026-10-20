@@ -27,7 +27,7 @@ fn the_client_reaches_the_default_ordinary_socket_under_the_runtime_directory() 
     let output = Command::new(env!("CARGO_BIN_EXE_flow"))
         .env_clear()
         .env("XDG_RUNTIME_DIR", runtime.path())
-        .arg("List.{ }")
+        .arg("Metaflows")
         .output()
         .expect("flow runs");
     assert!(output.status.success(), "{output:?}");

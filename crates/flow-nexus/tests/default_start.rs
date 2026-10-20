@@ -77,8 +77,8 @@ fn nexus_starts_from_defaults_and_answers_after_meta_configure() {
             submit_keys: Vec::new(),
         }],
         meta_aspects: vec![
-            signal_flow::FlowAspect::Psyche,
-            signal_flow::FlowAspect::Mind,
+            signal_flow::Aspect::Psyche,
+            signal_flow::Aspect::Mind,
         ],
         message_nexus_path: "/opt/message-nexus".into(),
     };
@@ -102,8 +102,8 @@ fn nexus_starts_from_defaults_and_answers_after_meta_configure() {
 
     let mut ordinary = connect(&ordinary_socket, &mut nexus);
     ordinary
-        .write_query(&signal_flow::Query::List(signal_flow::ListRequest {}))
-        .expect("list written");
+        .write_query(&signal_flow::Query::Metaflows)
+        .expect("metaflows query written");
     assert!(matches!(
         ordinary.read_response().expect("list answered"),
         signal_flow::Response::Listed(rows) if rows.is_empty()

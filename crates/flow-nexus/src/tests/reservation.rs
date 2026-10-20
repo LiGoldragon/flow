@@ -8,7 +8,9 @@ use super::NexusFixture;
 use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use meta_signal_flow::{Query as MetaQuery, Response as MetaResponse};
-use signal_flow::{Event, HarnessKind, Query, Refused_Data, Report_Data, Response, StartRejection};
+use signal_flow::{
+    Event, HarnessKind, Query, Refusal, Report_Data, Response, StartRejection, Unknown_Data,
+};
 use std::fs;
 
 impl NexusFixture {
@@ -105,7 +107,7 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
     );
     assert_eq!(
         fixture.report(&flow_id, Event::Started),
-        Response::Refused(Refused_Data::UnknownFlow(flow_id.clone()))
+        Response::Refused(Refusal::Unknown(Unknown_Data::FlowId(flow_id.clone())))
     );
     assert!(!flows_root.join(format!(".{flow_id}.flow-id")).exists());
     assert!(!flows_root.join(&flow_id).exists());
@@ -127,7 +129,9 @@ fn a_claude_launch_whose_flow_id_cannot_be_claimed_is_refused_before_any_pane() 
     let log = fixture.herdr_logging_every_call();
     assert_eq!(
         fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::BindingRefused)
+        Response::StartRejected(StartRejection::BindingRefused(
+            signal_flow::BindingRefusal::ClaimUnavailable,
+        ))
     );
     assert_eq!(fs::read_to_string(log).unwrap_or_default(), "");
 }

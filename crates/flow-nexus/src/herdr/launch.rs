@@ -2119,7 +2119,7 @@ pub(crate) mod tests {
     use crate::herdr::launch::TitlesClaudeSession;
     use crate::title::ShowsNativeTitle;
     use signal_flow::{
-        ComposedLaunch, Effort, FirstPromptPayload, FlowAspect, HarnessKind, LaunchProfile,
+        ComposedLaunch, Effort, FirstPromptPayload, Aspect, HarnessKind, LaunchProfile,
         ModelName, NativeLaunchBinding, NativeTargetReceipt, NativeTranscriptBoundary, PowerLevel,
         PromptDeliveryIntent, PromptDeliveryResult, RegistrationAcknowledgement,
         TargetReceiptRequest,
@@ -2136,7 +2136,7 @@ pub(crate) mod tests {
                 launch_request_id: "launch-42".into(),
                 launch_source_vector: vec![],
                 skill_name_vector: vec![],
-                flow_aspect: FlowAspect::Field,
+                aspect: Aspect::Field,
                 power_level: PowerLevel::Medium,
                 harness_kind,
                 model_name: ModelName::from("model-current"),
@@ -3808,7 +3808,7 @@ printf '%s\n' 123456
     fn claude_title_is_set_after_the_claim_and_read_back() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let mut launch = launch(HarnessKind::Claude);
-        launch.launch_profile.flow_aspect = FlowAspect::Psyche;
+        launch.launch_profile.aspect = Aspect::Psyche;
         launch.launch_profile.model_name = "claude-fable-5-1".into();
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
@@ -3874,7 +3874,7 @@ printf '%s\n' 123456
     fn claude_title_readback_that_differs_refuses_before_the_label() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let mut launch = launch(HarnessKind::Claude);
-        launch.launch_profile.flow_aspect = FlowAspect::Psyche;
+        launch.launch_profile.aspect = Aspect::Psyche;
         launch.launch_profile.model_name = "claude-fable-5-1".into();
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(

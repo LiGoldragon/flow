@@ -447,14 +447,22 @@ impl ComposesVerifiedContext for LaunchComposer {
     }
 }
 
-/// The launch section opens with the FlowId the launch claimed, so the seat
-/// knows its own id from its first turn. The section is the system
-/// prompt's tail, after a blank line; a launch with none gains one. Only
-/// the system prompt and its hash change: the first USER message, whose
-/// hashes the launch attempt journals at Reserve, is untouched.
+/// The launch section opens with the metaflow identity the launch claimed,
+/// so the whole flow, including its subagents and forks, inherits its Address
+/// and FlowId from the system prompt. The section is the system prompt's tail,
+/// after a blank line; a launch with none gains one. Only the system prompt
+/// and its hash change: the first USER message, whose hashes the launch
+/// attempt journals at Reserve, is untouched.
 impl CarriesFlowId for ComposedLaunch {
     fn carrying_flow_id<N: Textual>(&self, input: N) -> ComposedLaunch {
-        let flow_line = format!("Flow: {}\n", input.text());
+        let address = &self.launch_profile.address;
+        let flow_line = format!(
+            "This flow belongs to metaflow {{ {:?} {} {:?} {} }}.\n",
+            address.aspect,
+            address.topic,
+            address.layer,
+            input.text(),
+        );
         let section = self.launch_profile.launch_section();
         let mut text = self.system_prompt.system_prompt_text.clone();
         match text.strip_suffix(section.as_str()) {
@@ -787,7 +795,7 @@ pub(crate) mod tests {
         let carried = composed.carrying_flow_id("a1b2c3");
         let system = &carried.system_prompt.system_prompt_text;
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nFlow: a1b2c3\nPredecessor: 1b8ac0\nRemembered: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nThis flow belongs to metaflow { Field flow Secondary a1b2c3 }.\nPredecessor: 1b8ac0\nRemembered: 836818\n"
         ));
         assert!(carried.has_canonical_first_prompt());
         assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
@@ -808,7 +816,7 @@ pub(crate) mod tests {
         assert!(
             bare.system_prompt
                 .system_prompt_text
-                .ends_with("<!-- end-module: intent-flow -->\n\nFlow: a1b2c3\n")
+                .ends_with("<!-- end-module: intent-flow -->\n\nThis flow belongs to metaflow { Field flow Secondary a1b2c3 }.\n")
         );
         assert!(bare.has_canonical_first_prompt());
     }

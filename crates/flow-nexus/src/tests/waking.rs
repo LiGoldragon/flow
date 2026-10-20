@@ -754,6 +754,117 @@ fn an_asleep_seat_no_launch_of_record_names_is_unplaceable() {
     );
 }
 
+/// A short-lived process standing as a peer that Bind binds: no flow Flow
+/// launched runs it, so its Address is Awake as an id that names no flow.
+struct BoundPeer(std::process::Child);
+
+impl BoundPeer {
+    fn spawn() -> Self {
+        Self(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("peer process"),
+        )
+    }
+
+    fn process(&self) -> signal_flow::Process {
+        let pid = self.0.id();
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).expect("peer stat");
+        let (_, fields) = stat.rsplit_once(") ").expect("stat fields");
+        signal_flow::Process {
+            pid: i64::from(pid),
+            started: fields
+                .split_whitespace()
+                .nth(19)
+                .and_then(|field| field.parse().ok())
+                .expect("start time"),
+        }
+    }
+
+    fn bind(&self, fixture: &NexusFixture, address: Address) {
+        use crate::store::metaflow::MutatesMetaflows;
+        let process = self.process();
+        assert!(matches!(
+            fixture.nexus.store.bind_metaflow(
+                signal_flow::Bind_Data {
+                    address,
+                    process: process.clone(),
+                },
+                &process,
+                None,
+            ),
+            Ok(signal_flow::Response::Bound(_))
+        ));
+    }
+
+    fn end(mut self) {
+        self.0.kill().expect("peer killed");
+        self.0.wait().expect("peer reaped");
+    }
+}
+
+fn current(fixture: &NexusFixture, address: Address) -> signal_flow::Response {
+    use crate::Dispatches;
+    fixture.nexus.dispatch(signal_flow::Query::Current(address))
+}
+
+/// An Address Flow holds only through a binding is forgotten once the bound
+/// process has ended: Flow can neither deliver to it nor wake it, and the
+/// seat behind it is no flow Flow holds.
+#[test]
+fn an_address_held_only_through_an_ended_binding_is_forgotten() {
+    let fixture = NexusFixture::new();
+    let peer = BoundPeer::spawn();
+    peer.bind(&fixture, address(Layer::Secondary));
+    assert!(matches!(
+        current(&fixture, address(Layer::Secondary)),
+        signal_flow::Response::Current(signal_flow::Current_Data::Awake(_))
+    ));
+    peer.end();
+    assert_eq!(
+        current(&fixture, address(Layer::Secondary)),
+        signal_flow::Response::Current(signal_flow::Current_Data::Unknown)
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&address(Layer::Secondary))
+            .unwrap(),
+        None
+    );
+}
+
+/// An ended binding whose Address holds work is not forgotten: the metaflow
+/// is rested Asleep, its work still queued.
+#[test]
+fn an_ended_binding_holding_work_rests_asleep() {
+    let fixture = NexusFixture::new();
+    let peer = BoundPeer::spawn();
+    peer.bind(&fixture, address(Layer::Secondary));
+    let mut bound = fixture
+        .nexus
+        .store
+        .metaflow(&address(Layer::Secondary))
+        .unwrap()
+        .expect("bound metaflow");
+    bound.queue = vec![Request::Order("Kept.".into()).unsent()];
+    fixture.nexus.store.seed_metaflow(bound);
+    peer.end();
+    assert_eq!(
+        current(&fixture, address(Layer::Secondary)),
+        signal_flow::Response::Current(signal_flow::Current_Data::Asleep)
+    );
+    let rested = fixture
+        .nexus
+        .store
+        .metaflow(&address(Layer::Secondary))
+        .unwrap()
+        .expect("rested metaflow");
+    assert_eq!(rested.queue, vec![Request::Order("Kept.".into()).unsent()]);
+}
+
 /// The Claude flow `abc123` Flow launched at the Mind flow Secondary, its
 /// launch of record kept, in pane w1:p3 of `fixture-session`.
 pub(super) struct LaunchedClaude {

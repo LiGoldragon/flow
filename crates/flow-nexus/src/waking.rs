@@ -179,7 +179,10 @@ impl Drop for WakingLease<'_> {
 pub trait RestsEndedAwake {
     /// Records the metaflow at `address` Asleep (`Record.Asleep`), its flow
     /// joining Past, when it is Awake as a flow whose row is Stopped,
-    /// Retired or Exited and that holds no Address hold. True when it was.
+    /// Retired or Exited, or as a process binding whose process no longer
+    /// runs, and that holds no Address hold. An Address held only through
+    /// ended bindings, with nothing queued, is forgotten instead. True when
+    /// either was done.
     fn rest_ended_awake(&self, address: &Address) -> bool;
     /// The same for every metaflow, at the Nexus's start.
     fn rest_every_ended_awake(&self);
@@ -193,10 +196,28 @@ impl RestsEndedAwake for RunningNexus {
         let flow_ethos::State::Awake(flow_id) = metaflow.state else {
             return false;
         };
-        let ended = matches!(
-            self.store.flow_node(&flow_id),
-            Ok(Some(node)) if !node.flow_lifecycle.is_live()
-        );
+        let ended = match self.store.flow_node(&flow_id) {
+            Ok(Some(node)) => !node.flow_lifecycle.is_live(),
+            // Awake as no flow: a process binding. Its process gone, an
+            // Address held only through bindings is forgotten; one holding
+            // work or a flow's past is rested as an ended flow's would be.
+            Ok(None) => {
+                use crate::store::metaflow::ForgetsEndedBindings;
+                use crate::store::{FlowStore, ReadsFlowMemory};
+                if matches!(self.store.forget_ended_binding(address, &flow_id), Ok(true)) {
+                    eprintln!(
+                        "flow-nexus: {:?} {} {:?} held only through ended binding {flow_id} is forgotten",
+                        address.aspect, address.topic, address.layer
+                    );
+                    return true;
+                }
+                matches!(
+                    self.store.bound_process(address),
+                    Ok(Some(process)) if !FlowStore::process_is_live(&process)
+                )
+            }
+            Err(_) => false,
+        };
         if !ended || !matches!(self.store.address_hold(&flow_id), Ok(None)) {
             return false;
         }

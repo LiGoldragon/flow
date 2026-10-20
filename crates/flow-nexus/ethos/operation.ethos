@@ -29,7 +29,8 @@
 ; launch's exclusions in its config and reads them back; the thread is
 ; recorded for the launch request, so a launch recovered after its start
 ; binds to it, its FlowId is claimed, and it is named with its title and
-; the name read back, which stores the thread so a TUI can resume it. The
+; the name read back, then moved out of any section, which writes its
+; rollout so a TUI can resume it. The
 ; TUI then attaches to the idle thread, and Spawned names it. A start Herdr
 ; refuses, or one Flow refuses before calling Herdr, fails SpawnRefused with
 ; its cause and, for Codex, the thread it had opened, archived. Open, a

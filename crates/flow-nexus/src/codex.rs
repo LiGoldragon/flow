@@ -1103,11 +1103,21 @@ impl OpensCodexThread for CodexAdapter {
                 "thread/read",
                 serde_json::json!({ "threadId": thread, "includeTurns": false }),
             )?;
-            Self::read_back_name(&thread, &title, &read)
+            Self::read_back_name(&thread, &title, &read)?;
+            // codex 0.161.0-alpha.2 writes a thread's rollout at its first
+            // turn; a TUI's `resume` of a thread with no rollout fails
+            // "missing source rollout". Moving the thread out of any section
+            // materializes its rollout with no turn.
+            ask(
+                5,
+                "thread/section/move",
+                serde_json::json!({ "threadId": thread, "sectionId": null }),
+            )?;
+            Ok(())
         });
         if let Err(refusal) = named {
             let _ = ask(
-                5,
+                6,
                 "thread/archive",
                 serde_json::json!({ "threadId": thread }),
             );
@@ -2417,6 +2427,7 @@ mod tests {
                 &serde_json::json!({"id":4,"result":{"thread":{"id":"thread-lean","name":OPENED_TITLE}}})
                     .to_string(),
             ),
+            fake.websocket_frame(r#"{"id":5,"result":{}}"#),
         ];
         let (_directory, executable, record) = RecordingFakeProxy.install_probed(&frames);
         let mut given = Vec::new();
@@ -2431,7 +2442,7 @@ mod tests {
             "thread-lean"
         );
         assert_eq!(given, ["thread-lean"]);
-        let requests = record.requests(5);
+        let requests = record.requests(6);
         let methods = requests
             .iter()
             .map(|request| request["method"].as_str().unwrap())
@@ -2443,7 +2454,8 @@ mod tests {
                 "initialized",
                 "thread/start",
                 "thread/name/set",
-                "thread/read"
+                "thread/read",
+                "thread/section/move"
             ]
         );
         let start = &requests[2]["params"];
@@ -2614,6 +2626,7 @@ mod tests {
                 &serde_json::json!({"id":4,"result":{"thread":{"id":thread,"name":OPENED_TITLE}}})
                     .to_string(),
             ),
+            fake.websocket_frame(r#"{"id":5,"result":{}}"#),
         ];
         let (_proxy, executable, record) = RecordingFakeProxy.install_probed(&frames);
         let mut codex_endpoints = endpoints();
@@ -2629,7 +2642,7 @@ mod tests {
             .expect("the app-server opens the thread");
         assert_eq!(opened, thread);
         let methods = record
-            .requests(5)
+            .requests(6)
             .iter()
             .map(|request| request["method"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
@@ -2640,7 +2653,8 @@ mod tests {
                 "initialized",
                 "thread/start",
                 "thread/name/set",
-                "thread/read"
+                "thread/read",
+                "thread/section/move"
             ]
         );
 

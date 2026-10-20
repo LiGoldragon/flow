@@ -2665,6 +2665,7 @@ esac
             opened(2),
             websocket_frame(r#"{"id":3,"result":{}}"#),
             named(4),
+            websocket_frame(r#"{"id":5,"result":{}}"#),
         ]
         .concat();
         let naming = [
@@ -3396,7 +3397,8 @@ impl ShowsCodexLaunchOrder for FirstTurnSend {
                 "initialized",
                 "thread/start",
                 "thread/name/set",
-                "thread/read"
+                "thread/read",
+                "thread/section/move"
             ]
         );
         assert_eq!(

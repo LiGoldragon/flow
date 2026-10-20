@@ -139,7 +139,41 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{AnswersVersion, FlowClient, ParsesFlowCommand, TextualizesFlowReply};
-    use signal_flow::{Query, Response};
+    use signal_flow::{Delivery, Message, Query, Recipient, Request, Response};
+
+    #[test]
+    fn send_names_queue_or_wake_and_deliver_all_is_typed() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        let Query::Send(send) = client
+            .parse_command([
+                "Send.{ Address.{ Mind core Secondary } Wake Soft.Order.«Review.» }".into(),
+            ]
+            .into_iter())
+            .expect("current Send parses")
+        else {
+            panic!("fixture must remain a Send")
+        };
+        assert!(matches!(send.recipient, Recipient::Address(_)));
+        assert_eq!(send.delivery, Delivery::Wake);
+        assert_eq!(send.message, Message::Soft(Request::Order("Review.".into())));
+        assert!(
+            client
+                .parse_command([
+                    "Send.{ Address.{ Mind core Secondary } Soft.Order.«Review.» }".into(),
+                ]
+                .into_iter())
+                .is_err(),
+            "the former two-position Send is not the live wire"
+        );
+        assert!(matches!(
+            client
+                .parse_command(["DeliverAll.{ Mind core Secondary }".into()].into_iter())
+                .expect("DeliverAll parses"),
+            Query::DeliverAll(_)
+        ));
+    }
 
     #[test]
     fn version_is_the_one_non_datom_invocation() {

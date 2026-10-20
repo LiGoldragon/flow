@@ -1,6 +1,23 @@
 # Flow 0.38.1
 
-No contract, store or deployment change.
+Pins signal-flow 26.0.0 (10bc29be) and meta-signal-flow 33.0.0
+(2e71b900). Every ordinary-socket peer repins because `Send` gains its
+delivery position.
+
+- **The sender chooses whether queued work wakes its recipient.**
+  `flow 'Send.{ Address.{ Mind core Secondary } Wake Soft.Order.«...» }'`
+  durably queues the request and schedules its recipient. `Queue` in the
+  same position leaves the request queued. Priority still controls how a
+  message is delivered to an already-live recipient; it does not decide
+  whether a queued message wakes one.
+- **A sender can deliver everything already queued.**
+  `flow 'DeliverAll.{ Mind core Secondary }'` hands over the durable queue
+  oldest first. It sends nothing when the queue is empty. `Delivered`
+  means the queue is empty afterward; `Queued` means work remains held.
+- **Fresh-flow startup contains no queued requests.** A wake composes the
+  new flow from its modules with an empty instruction prompt. The durable
+  queue remains in Flow and is handed over afterward through the ordinary
+  delivery path, one sender-bearing datom at a time.
 
 - **A Codex flow binds its seat from any of its own threads.** A command a
   Codex subagent runs carries the subagent's thread; BindSeat reads that

@@ -68,7 +68,11 @@ trait Unsent {
 impl Unsent for Request {
     type Queued = QueueEntry;
     fn unsent(self) -> QueueEntry {
-        let logical_delivery_id = format!("test-{:?}", self);
+        use sha2::Digest;
+        let logical_delivery_id = format!(
+            "test-{:x}",
+            sha2::Sha256::digest(format!("{self:?}").as_bytes())
+        );
         QueueEntry {
             logical_delivery_id,
             sent_by: SentBy::Unknown,

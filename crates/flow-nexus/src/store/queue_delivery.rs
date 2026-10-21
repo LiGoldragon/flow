@@ -1576,8 +1576,11 @@ mod tests {
             QueueDeliveryPhase::Uncertain(Some(Undecided::AbsenceUnprovable))
         );
         assert_eq!(
-            store.outstanding_delivery(&address()).unwrap(),
-            Some(attempt)
+            store
+                .outstanding_delivery(&address())
+                .unwrap()
+                .map(|outstanding| outstanding.attempt_id),
+            Some(attempt.attempt_id)
         );
     }
 
@@ -1585,7 +1588,11 @@ mod tests {
     fn owner_resolution_refuses_legacy_attempt_without_logical_lineage() {
         use ResolveQueueDeliveryRejected_Data as Rejected;
         let (_fixture, store) = Fixture::new();
-        let mut attempt = prepare_claude(&store);
+        let attempt = prepare_claude(&store);
+        let mut attempt = store
+            .queue_delivery_attempt(&attempt.attempt_id)
+            .unwrap()
+            .unwrap();
         let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
             panic!("fixture initially has a logical request")
         };
@@ -1605,6 +1612,7 @@ mod tests {
         let mut request = request.clone();
         request.queue_evidence = legacy.clone();
         attempt.queue_evidence = legacy;
+        attempt.phase = QueueDeliveryPhase::Uncertain(Some(Undecided::AbsenceUnprovable));
         store
             .engine
             .commit_atomic(
@@ -1842,22 +1850,27 @@ mod tests {
             vec![queued("other"), queued("second")]
         );
 
-        // Resolved is not Uncertain: a resolution is made once.
+        // Owner Absent is resolved once and cannot be contradicted later.
         store.seed_metaflow(Metaflow {
             address: address(),
             state: State::Awake("flow-delivery".into()),
             past: vec![],
             queue: vec![queued("second")],
         });
-        store
-            .resolve_uncertain_delivery(&second.attempt_id, delivered.clone())
+        let absent = resolution(QueueResolutionOutcome::Absent, "it was not taken");
+        let resolved = store
+            .resolve_uncertain_delivery(&second.attempt_id, absent.clone())
             .unwrap()
             .unwrap();
+        assert_eq!(resolved.phase, QueueDeliveryPhase::Resolved(absent.clone()));
         assert_eq!(
             store
-                .resolve_uncertain_delivery(&second.attempt_id, delivered)
+                .resolve_uncertain_delivery(
+                    &second.attempt_id,
+                    resolution(QueueResolutionOutcome::Absent, "different reason"),
+                )
                 .unwrap(),
-            Err(Rejected::NotUncertain)
+            Err(Rejected::AlreadyResolved(absent))
         );
     }
 

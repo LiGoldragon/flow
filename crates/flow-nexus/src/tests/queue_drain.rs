@@ -40,8 +40,9 @@ struct TestRequest {
 }
 
 fn from_core(body: &str) -> TestRequest {
+    use sha2::Digest;
     TestRequest {
-        logical_delivery_id: format!("test-{}", body.replace(' ', "-")),
+        logical_delivery_id: format!("test-{:x}", sha2::Sha256::digest(body.as_bytes())),
         sent_by: SentBy::Sender(Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),

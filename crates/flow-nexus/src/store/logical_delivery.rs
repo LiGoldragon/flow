@@ -536,6 +536,11 @@ impl RecordsLogicalDeliveries for FlowStore {
         sender: &Address,
         after_cursor: Option<i64>,
     ) -> Result<SendObservation, StoreError> {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let current = self
             .engine
             .match_records(QueryPlan::all(self.logical_deliveries.current))?;

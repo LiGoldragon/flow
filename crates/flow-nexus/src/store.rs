@@ -38,6 +38,7 @@ use staged_upgrade::{StagedUpgrade, StagesUpgrade, UpgradeScope};
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
     fs,
+    os::unix::fs::MetadataExt,
     path::Path,
     sync::{Arc, Condvar, Mutex},
 };
@@ -66,6 +67,8 @@ use signal_flow::{
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
+const FLOW_NATIVE_OWNER_PROOF_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_native_owner_proofs");
 const FLOW_STATE_TABLE_NAME: TableName = TableName::new("flow_nexus_state");
 const FLOW_CONFIGURATION_TABLE_NAME: TableName = TableName::new("flow_nexus_configuration");
 const FLOW_HERDR_ROUTE_TABLE_NAME: TableName = TableName::new("flow_nexus_herdr_routes");
@@ -170,6 +173,7 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_meta_model_configuration",
     "flow_nexus_flow_events",
 ];
+const RUNNING_ADDED_TABLES: &[&str] = &["flow_nexus_native_owner_proofs"];
 // A running store keeps each flow's context size from 0.28.0 on, and
 // each launch's Address hold from 0.32.0 on; a running store written
 // before either opens, and its first full open adds the table, as
@@ -386,6 +390,161 @@ pub(crate) struct FlowRecord {
     endpoint_selection: EndpointSelection,
     lifecycle: FlowLifecycle,
     generation: u64,
+}
+
+/// Exact foreground process witnessed at adoption, scoped to this host boot.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct NativeOwnerProof {
+    process_id: i64,
+    process_user_id: i64,
+    process_start_token: String,
+    host_id: String,
+    boot_id: String,
+    harness_kind: HarnessKind,
+    native_session_id: String,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct NativeOwnerProofRecord {
+    flow_id: String,
+    proof: NativeOwnerProof,
+}
+
+impl EngineRecord for NativeOwnerProofRecord {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+
+impl MemoryDefinition for NativeOwnerProofRecord {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-native-owner-proof-v1")
+    }
+}
+
+trait DescribesNativeOwnerProofTable {
+    fn descriptor() -> TableDescriptor<NativeOwnerProofRecord>;
+}
+
+impl DescribesNativeOwnerProofTable for NativeOwnerProofRecord {
+    fn descriptor() -> TableDescriptor<NativeOwnerProofRecord> {
+        TableDescriptor::new(
+            FLOW_NATIVE_OWNER_PROOF_TABLE_NAME,
+            FamilyName::new("flow-nexus-native-owner-proof"),
+            NativeOwnerProofRecord::schema_hash(),
+        )
+    }
+}
+
+trait DerivesNativeOwnerProof {
+    fn from_binding(binding: &meta_signal_flow::FlowBinding) -> Option<Self>
+    where
+        Self: Sized;
+    fn current_process_state(&self) -> NativeOwnerState;
+}
+
+impl DerivesNativeOwnerProof for NativeOwnerProof {
+    fn from_binding(binding: &meta_signal_flow::FlowBinding) -> Option<Self> {
+        let host_id = fs::read_to_string("/etc/machine-id")
+            .ok()?
+            .trim()
+            .to_owned();
+        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .ok()?
+            .trim()
+            .to_owned();
+        (!host_id.is_empty() && !boot_id.is_empty()).then(|| Self {
+            process_id: binding.process_identity.process_id,
+            process_user_id: binding.process_identity.process_user_id,
+            process_start_token: binding.process_identity.process_start_token.clone(),
+            host_id,
+            boot_id,
+            harness_kind: binding.harness_kind.clone(),
+            native_session_id: binding.native_session_id.clone(),
+        })
+    }
+
+    fn current_process_state(&self) -> NativeOwnerState {
+        let Ok(host_id) = fs::read_to_string("/etc/machine-id") else {
+            return NativeOwnerState::Unknown;
+        };
+        let Ok(boot_id) = fs::read_to_string("/proc/sys/kernel/random/boot_id") else {
+            return NativeOwnerState::Unknown;
+        };
+        if host_id.trim() != self.host_id || boot_id.trim() != self.boot_id {
+            return NativeOwnerState::Unknown;
+        }
+        let Ok(process_id) = u32::try_from(self.process_id) else {
+            return NativeOwnerState::Unknown;
+        };
+        let root = std::path::PathBuf::from(format!("/proc/{process_id}"));
+        let metadata = match fs::metadata(&root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return NativeOwnerState::Dead;
+            }
+            Err(_) => return NativeOwnerState::Unknown,
+        };
+        if i64::from(metadata.uid()) != self.process_user_id {
+            return NativeOwnerState::Unknown;
+        }
+        let Ok(stat) = fs::read_to_string(root.join("stat")) else {
+            return NativeOwnerState::Unknown;
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            return NativeOwnerState::Unknown;
+        };
+        let Some(start_token) = fields.split_whitespace().nth(19) else {
+            return NativeOwnerState::Unknown;
+        };
+        if start_token == self.process_start_token {
+            NativeOwnerState::Live
+        } else {
+            NativeOwnerState::Dead
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeOwnerState {
+    Live,
+    Dead,
+    Unknown,
+}
+
+trait ReadsNativeOwnerProof {
+    fn native_owner_proof_record(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<NativeOwnerProofRecord>, StoreError>;
+    fn native_owner_proof(&self, flow_id: &str) -> Result<Option<NativeOwnerProof>, StoreError>;
+}
+
+impl ReadsNativeOwnerProof for FlowStore {
+    fn native_owner_proof_record(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<NativeOwnerProofRecord>, StoreError> {
+        Ok(self
+            .engine
+            .match_records(QueryPlan::key(
+                self.native_owner_proofs,
+                RecordKey::new(flow_id.to_owned()),
+            ))?
+            .records()
+            .first()
+            .cloned())
+    }
+
+    fn native_owner_proof(&self, flow_id: &str) -> Result<Option<NativeOwnerProof>, StoreError> {
+        Ok(self
+            .native_owner_proof_record(flow_id)?
+            .map(|record| record.proof))
+    }
 }
 
 /// The durable address-indexed Metaflow defined by `flow_ethos::Metaflow`.
@@ -2987,6 +3146,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
 pub struct FlowStore {
     engine: Engine,
     flows: TableReference<FlowRecord>,
+    native_owner_proofs: TableReference<NativeOwnerProofRecord>,
     state: TableReference<FlowStoreState>,
     metaflows: TableReference<StoredMetaflow>,
     metaflow_processes: TableReference<StoredMetaflowProcess>,
@@ -3252,6 +3412,13 @@ pub enum FlowRegistration {
     ConflictingBinding,
 }
 
+/// A witnessed existing seat and its Address became one durable binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExistingSeatAdoption {
+    Bound(Box<FlowNode>),
+    Refused(meta_signal_flow::FlowBindingRefusalReason),
+}
+
 /// The constructor is a trait operation so the Nexus's storage boundary is
 /// part of its ontology rather than an unclassified helper.
 pub trait OpensFlowStore {
@@ -3342,11 +3509,13 @@ pub trait RegistersFlowIdentity {
 
 /// Imports one already-running native flow without claiming a launch receipt.
 pub trait RegistersExistingFlow {
-    fn register_existing_flow(
+    fn adopt_existing_flow(
         &self,
         flow_node: FlowNode,
         role: Caller,
-    ) -> Result<FlowRegistration, StoreError>;
+        address: Address,
+        binding: &meta_signal_flow::FlowBinding,
+    ) -> Result<ExistingSeatAdoption, StoreError>;
 }
 
 /// The role each flow was bound or launched in, and the flows a Herdr pane
@@ -3528,6 +3697,7 @@ impl OpensFlowStore for FlowStore {
             FlowRecord::schema_hash(),
         )
         .with_predecessor::<FlowRecordV5>();
+        let native_owner_proofs_descriptor = NativeOwnerProofRecord::descriptor();
         let state_descriptor = TableDescriptor::<FlowStoreState>::new(
             FLOW_STATE_TABLE_NAME,
             FamilyName::new("flow-nexus-state"),
@@ -3646,6 +3816,7 @@ impl OpensFlowStore for FlowStore {
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
+                .with_family(&native_owner_proofs_descriptor)
                 .with_family(&state_descriptor)
                 .with_family(&metaflows_descriptor)
                 .with_family(&metaflow_processes_descriptor)
@@ -3686,6 +3857,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&logical_delivery_descriptors.events),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
+        let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
         let metaflows = engine.upgraded_metaflows(metaflows_descriptor)?;
         let metaflow_processes = engine.register_table(metaflow_processes_descriptor)?;
@@ -3719,6 +3891,7 @@ impl OpensFlowStore for FlowStore {
         let store = Self {
             engine,
             flows,
+            native_owner_proofs,
             state,
             metaflows,
             metaflow_processes,
@@ -3775,6 +3948,7 @@ impl OpensFlowStore for FlowStore {
             )
             .with_predecessor::<FlowRecordV5>(),
         )?;
+        let native_owner_proofs = engine.register_table(NativeOwnerProofRecord::descriptor())?;
         let state = engine.register_table(TableDescriptor::new(
             FLOW_STATE_TABLE_NAME,
             FamilyName::new("flow-nexus-state"),
@@ -3888,6 +4062,7 @@ impl OpensFlowStore for FlowStore {
         let store = Self {
             engine,
             flows,
+            native_owner_proofs,
             state,
             metaflows,
             metaflow_processes,
@@ -4827,25 +5002,179 @@ impl RegistersFlowIdentity for FlowStore {
 }
 
 impl RegistersExistingFlow for FlowStore {
-    fn register_existing_flow(
+    fn adopt_existing_flow(
         &self,
         flow_node: FlowNode,
         role: Caller,
-    ) -> Result<FlowRegistration, StoreError> {
-        if flow_node.flow_lifecycle != SignalFlowLifecycle::Pending
-            || role.flow_id != flow_node.flow_id
+        address: Address,
+        binding: &meta_signal_flow::FlowBinding,
+    ) -> Result<ExistingSeatAdoption, StoreError> {
+        use meta_signal_flow::FlowBindingRefusalReason as Refusal;
+        if role.flow_id != flow_node.flow_id || role.aspect != address.aspect {
+            return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
+        }
+        let expected_power = match address.layer {
+            Layer::Primary => PowerLevel::High,
+            Layer::Secondary => PowerLevel::Medium,
+            Layer::Tertiary => PowerLevel::Low,
+            Layer::Quaternary => PowerLevel::UltraLow,
+        };
+        if role.power_level != expected_power
+            || self.configured_model(&address)?.as_deref() != Some(role.model_name.as_str())
         {
-            return Ok(FlowRegistration::ConflictingBinding);
+            return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
         }
-        if let Some(flow) = self.flow(&flow_node.flow_id)? {
-            return self.assert_role_of_matching_binding(flow, &flow_node, role);
+        let HerdrRouteSelection::Available(route) = flow_node.herdr_route_selection.clone() else {
+            return Ok(ExistingSeatAdoption::Refused(Refusal::AnatomyMismatch));
+        };
+        let existing_metaflow = self.stored_metaflow(&address)?;
+        let already_bound_elsewhere = self
+            .engine
+            .match_records(QueryPlan::all(self.metaflows))?
+            .records()
+            .iter()
+            .any(|stored| {
+                &stored.metaflow.address != &address
+                    && matches!(
+                        &stored.metaflow.state,
+                        MetaflowState::Awake(current) if current == &flow_node.flow_id
+                    )
+            });
+        if already_bound_elsewhere {
+            return Ok(ExistingSeatAdoption::Refused(Refusal::DuplicateFlowId));
         }
-        // The flow type keeps the form it had before roles were a record.
-        let flow_type = format!(
-            "{:?}:{:?}:{}",
-            role.aspect, role.power_level, role.model_name
-        );
-        self.register_flow_as(flow_node, flow_type, Some(role))
+        let mut metaflow = existing_metaflow
+            .as_ref()
+            .map(|stored| stored.metaflow.clone())
+            .unwrap_or(Metaflow {
+                address: address.clone(),
+                state: MetaflowState::Asleep,
+                past: Vec::new(),
+                queue: Vec::new(),
+            });
+        let previous_flow = match &metaflow.state {
+            MetaflowState::Awake(current) if current == &flow_node.flow_id => None,
+            MetaflowState::Awake(_) => {
+                let MetaflowState::Awake(current) = &metaflow.state else {
+                    unreachable!();
+                };
+                let Some(previous) = self.flow(current)? else {
+                    return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
+                };
+                let Some(proof) = self.native_owner_proof(current)? else {
+                    return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
+                };
+                if proof.harness_kind != previous.harness_kind
+                    || previous.thread_id.as_deref() != Some(proof.native_session_id.as_str())
+                {
+                    return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
+                }
+                match proof.current_process_state() {
+                    NativeOwnerState::Live => {
+                        return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerLive));
+                    }
+                    NativeOwnerState::Unknown => {
+                        return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
+                    }
+                    NativeOwnerState::Dead => Some(current.clone()),
+                }
+            }
+            MetaflowState::Asleep => None,
+        };
+        if let Some(previous) = &previous_flow {
+            metaflow.past.push(previous.clone());
+        }
+        metaflow.past.retain(|past| past != &flow_node.flow_id);
+        metaflow.state = MetaflowState::Awake(flow_node.flow_id.clone());
+
+        let existing_flow = self.flow(&flow_node.flow_id)?;
+        if let Some(existing) = &existing_flow {
+            if existing.thread_id.as_deref() != Some(flow_node.session_id.as_str())
+                || existing.harness_kind != flow_node.harness_kind
+            {
+                return Ok(ExistingSeatAdoption::Refused(
+                    Refusal::NativeIdentityMismatch,
+                ));
+            }
+            if self
+                .role(&flow_node.flow_id)?
+                .is_some_and(|stored| stored != role)
+            {
+                return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
+            }
+        }
+        let lifecycle = match flow_node.flow_lifecycle {
+            SignalFlowLifecycle::Pending | SignalFlowLifecycle::Active => FlowLifecycle::Active,
+            SignalFlowLifecycle::Stopped
+            | SignalFlowLifecycle::Retired
+            | SignalFlowLifecycle::Exited => {
+                return Ok(ExistingSeatAdoption::Refused(Refusal::DeadProcess));
+            }
+        };
+        let flow_record = FlowRecord {
+            flow_id: flow_node.flow_id.clone(),
+            flow_type: format!(
+                "{:?}:{:?}:{}",
+                role.aspect, role.power_level, role.model_name
+            ),
+            origin: flow_node.origin.clone(),
+            thread_id: Some(flow_node.session_id.clone()),
+            harness_kind: flow_node.harness_kind.clone(),
+            endpoint_selection: flow_node.endpoint_selection.clone(),
+            lifecycle,
+            generation: existing_flow.as_ref().map_or(1, |flow| flow.generation),
+        };
+        let Some(owner_proof) = NativeOwnerProof::from_binding(binding) else {
+            return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
+        };
+        let owner_proof = NativeOwnerProofRecord {
+            flow_id: flow_node.flow_id.clone(),
+            proof: owner_proof,
+        };
+        let existing_owner_proof = self.native_owner_proof_record(&flow_node.flow_id)?;
+        let existing_route = self.herdr_route(&flow_node.flow_id)?;
+        let existing_role = self.role(&flow_node.flow_id)?;
+        let mut commit = self.engine.begin_atomic_commit();
+        commit = match existing_flow {
+            Some(_) => commit.mutate(self.flows, flow_record),
+            None => commit.assert(self.flows, flow_record),
+        };
+        commit = match existing_route {
+            Some(_) => commit.mutate(
+                self.herdr_routes,
+                FlowHerdrRouteRecord {
+                    flow_id: flow_node.flow_id.clone(),
+                    route,
+                },
+            ),
+            None => commit.assert(
+                self.herdr_routes,
+                FlowHerdrRouteRecord {
+                    flow_id: flow_node.flow_id.clone(),
+                    route,
+                },
+            ),
+        };
+        if existing_role.is_none() {
+            commit = commit.assert(self.roles, StoredRole { caller: role });
+        }
+        commit = match existing_owner_proof {
+            Some(_) => commit.mutate(self.native_owner_proofs, owner_proof),
+            None => commit.assert(self.native_owner_proofs, owner_proof),
+        };
+        if let Some(previous) = previous_flow.filter(|previous| previous != &flow_node.flow_id)
+            && let Some(mut old) = self.flow(&previous)?
+            && old.lifecycle.is_live()
+        {
+            old.lifecycle = FlowLifecycle::Exited;
+            commit = commit.mutate(self.flows, old);
+        }
+        commit = match existing_metaflow {
+            Some(_) => commit.mutate(self.metaflows, StoredMetaflow { metaflow }),
+            None => commit.assert(self.metaflows, StoredMetaflow { metaflow }),
+        };
+        self.engine.commit_atomic(commit)?;
+        Ok(ExistingSeatAdoption::Bound(Box::new(flow_node)))
     }
 }
 
@@ -6679,6 +7008,7 @@ pub(crate) trait ReadsFlowMemory {
         let running = RUNNING_TABLES.iter().all(|name| actual.contains(*name))
             && actual.iter().all(|name| {
                 RUNNING_TABLES.contains(&name.as_str())
+                    || RUNNING_ADDED_TABLES.contains(&name.as_str())
                     || ADDED_LATER_TABLES.contains(&name.as_str())
                     || retired(name)
             });
@@ -7127,6 +7457,7 @@ impl ReadsFlowMemory for FlowStore {}
 #[cfg(test)]
 mod tests {
     use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
+    use std::fs;
     #[test]
     fn created_pane_survives_reopen_and_a_second_failed_binding_is_orphaned() {
         let fixture = StoreFixture::new();
@@ -7202,13 +7533,53 @@ mod tests {
 
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfigurationOnlyStore, ConfiguresFlowStore,
-        ConfirmsStartedFlow, FlowStore, LaunchOutcome, LaunchOutcomeV2, OpensFlowStore,
-        ReadsFlowRoles, ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome,
-        RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPendingThread,
-        RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
-        RecordsRegistrationAcknowledgement, RecordsRestartedFlow, RegistersExistingFlow,
+        ConfirmsStartedFlow, DerivesNativeOwnerProof, FlowStore, LaunchOutcome, LaunchOutcomeV2,
+        NativeOwnerProof, NativeOwnerState, OpensFlowStore, ReadsFlowRoles, ReadsFlowStore,
+        ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
+        RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
+        RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsRestartedFlow,
         RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart, StoredLaunchOutcomeV2,
     };
+
+    #[test]
+    fn native_owner_death_requires_same_host_boot_and_pid_start_evidence() {
+        let process_id = std::process::id();
+        let metadata = fs::metadata(format!("/proc/{process_id}")).expect("current process");
+        let stat = fs::read_to_string(format!("/proc/{process_id}/stat")).expect("process stat");
+        let (_, fields) = stat.rsplit_once(") ").expect("stat comm boundary");
+        let start_token = fields
+            .split_whitespace()
+            .nth(19)
+            .expect("process start token")
+            .to_owned();
+        let host_id = fs::read_to_string("/etc/machine-id").expect("host identity");
+        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot identity");
+        let proof = NativeOwnerProof {
+            process_id: i64::from(process_id),
+            process_user_id: i64::from(metadata.uid()),
+            process_start_token: start_token.clone(),
+            host_id: host_id.trim().to_owned(),
+            boot_id: boot_id.trim().to_owned(),
+            harness_kind: HarnessKind::Codex,
+            native_session_id: "native-session".into(),
+        };
+        assert_eq!(proof.current_process_state(), NativeOwnerState::Live);
+        let mut reused = proof.clone();
+        reused.process_start_token = "not-the-recorded-start".into();
+        assert_eq!(reused.current_process_state(), NativeOwnerState::Dead);
+        let mut another_boot = proof.clone();
+        another_boot.boot_id = "another-boot".into();
+        assert_eq!(
+            another_boot.current_process_state(),
+            NativeOwnerState::Unknown
+        );
+        let mut another_host = proof;
+        another_host.host_id = "another-host".into();
+        assert_eq!(
+            another_host.current_process_state(),
+            NativeOwnerState::Unknown
+        );
+    }
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
     use super::{FlowRecordV5, LaunchedRecordV2, OriginClueBeforeOrigin, ReplacedRecordV2};
     use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
@@ -9588,7 +9959,7 @@ mod tests {
         let node = pane_node("psyche-high", "w1:p3");
         assert!(matches!(
             store
-                .register_existing_flow(node.clone(), role.clone())
+                .register_flow_in_role(node.clone(), role.clone())
                 .unwrap(),
             super::FlowRegistration::Registered(_)
         ));

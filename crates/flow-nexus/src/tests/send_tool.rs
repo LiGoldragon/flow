@@ -15,9 +15,7 @@ use crate::send_tool::{DescribesSendInvocation, RespondsToSendCalls, SendTool, S
 use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
-use crate::store::{
-    AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersExistingFlow, RegistersFlowIdentity,
-};
+use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
 use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
 use meta_signal_flow::QueueEvidence;
@@ -1501,7 +1499,7 @@ impl SeatsAwakeCodexSeat for NexusFixture {
         let mut node = self.node();
         node.flow_lifecycle = signal_flow::FlowLifecycle::Pending;
         assert!(matches!(
-            self.nexus.store.register_existing_flow(
+            self.nexus.store.register_flow_in_role(
                 node,
                 Caller {
                     flow_id: "908786".into(),

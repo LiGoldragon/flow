@@ -69,7 +69,8 @@ impl NexusFixture {
 fn unreported_codex(pane: &str) -> serde_json::Value {
     serde_json::json!({
         "agent":"codex","agent_status":"done","name":"mind_context_secondary_877549",
-        "pane_id":pane,"terminal_id":format!("term-{pane}"),"workspace_id":"w12"
+        "pane_id":pane,"terminal_id":format!("term-{pane}"),"workspace_id":"w12",
+        "tab_id":format!("tab-{pane}")
     })
 }
 

@@ -14,6 +14,7 @@
 //! for runs the thread its pane resumes in its foreground.
 
 use crate::RunningNexus;
+use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
 use crate::caller::{
     CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
 };
@@ -29,7 +30,7 @@ use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::sent::NamesCodexAppServers;
-use crate::store::{FlowRegistration, NamesConfiguredModel, RegistersExistingFlow};
+use crate::store::{ExistingSeatAdoption, NamesConfiguredModel, RegistersExistingFlow};
 use crate::waking::{PerformsWakeAndDrain, RestsEndedAwake, SleepsAndWakesSeats, WakePolicy};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
@@ -524,7 +525,22 @@ impl FindsSeat for RunningNexus {
                     agent.get("pane_id").and_then(serde_json::Value::as_str)
                         == Some(pane.herdr_pane_id.as_str())
                 })?;
-            let thread = self.unreported_thread(&pane.herdr_session_name, &agent);
+            if agent.get("agent").and_then(serde_json::Value::as_str) != Some("codex") {
+                return None;
+            }
+            let app_servers = self.store.codex_app_servers().ok()?;
+            let caller_thread = self
+                .codex_endpoints
+                .root_thread(&caller.codex_thread(&app_servers)?);
+            let seat_thread = agent
+                .pointer("/agent_session/value")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| self.unreported_thread(&pane.herdr_session_name, &agent))?;
+            if seat_thread != caller_thread {
+                return None;
+            }
+            let thread = Some(caller_thread);
             return Some((
                 SeenSeat {
                     herdr_session_name: pane.herdr_session_name,
@@ -598,27 +614,81 @@ impl BindsSeats for RunningNexus {
             Some("codex") => HarnessKind::Codex,
             _ => return unidentified(),
         };
-        let Some(native_session_id) = text("/agent_session/value").or(thread) else {
+        let Some(native_session_id) = text("/agent_session/value").or(thread.clone()) else {
             return unidentified();
         };
-        let (Some(herdr_pane_id), Some(herdr_terminal_id)) =
-            (text("/pane_id"), text("/terminal_id"))
+        let (
+            Some(herdr_workspace_id),
+            Some(herdr_pane_id),
+            Some(herdr_terminal_id),
+            Some(herdr_tab_id),
+        ) = (
+            text("/workspace_id"),
+            text("/pane_id"),
+            text("/terminal_id"),
+            text("/tab_id"),
+        )
         else {
             return unidentified();
         };
         let herdr_agent_name = text("/name").unwrap_or_default();
-        let Ok(flow_id) = self
-            .herdr
-            .claim_flow_identity(&harness_kind, &native_session_id)
-        else {
-            return unidentified();
-        };
         let model_name = self
             .store
             .configured_model(&address)
             .ok()
             .flatten()
             .unwrap_or_default();
+        if model_name.is_empty() || thread.as_deref() != Some(native_session_id.as_str()) {
+            return unidentified();
+        }
+        let route = HerdrRoute {
+            herdr_session_name: seat.herdr_session_name.clone(),
+            herdr_agent_name: herdr_agent_name.clone(),
+            herdr_pane_id: herdr_pane_id.clone(),
+            herdr_terminal_id: herdr_terminal_id.clone(),
+        };
+        let Some(mut foreground) = self.herdr.foreground_processes(&route) else {
+            return unidentified();
+        };
+        foreground.retain(|process| {
+            process
+                .arguments
+                .windows(2)
+                .any(|pair| pair[0] == "resume" && pair[1] == native_session_id)
+        });
+        let [foreground] = foreground.as_slice() else {
+            return unidentified();
+        };
+        let Some(process_identity) = meta_signal_flow::ProcessIdentity::of(foreground.process_id)
+        else {
+            return unidentified();
+        };
+        let Ok(working_directory) =
+            std::fs::canonicalize(format!("/proc/{}/cwd", foreground.process_id))
+        else {
+            return unidentified();
+        };
+        let Ok(flow_id) = self
+            .herdr
+            .claim_flow_identity(&harness_kind, &native_session_id)
+        else {
+            return unidentified();
+        };
+        let binding = meta_signal_flow::FlowBinding {
+            flow_id: flow_id.clone(),
+            aspect: address.aspect.clone(),
+            power_level: Self::power_of(&address.layer),
+            model_name: model_name.clone(),
+            harness_kind: harness_kind.clone(),
+            native_session_id: native_session_id.clone(),
+            herdr_workspace_id,
+            herdr_pane_id: herdr_pane_id.clone(),
+            herdr_tab_id,
+            herdr_terminal_id: herdr_terminal_id.clone(),
+            herdr_agent_name: herdr_agent_name.clone(),
+            process_identity,
+            working_directory: working_directory.to_string_lossy().into_owned(),
+        };
         let endpoint_selection = match harness_kind {
             HarnessKind::Codex => match self.codex_endpoints.endpoint_for(&model_name) {
                 Ok(endpoint) => EndpointSelection::Available(signal_flow::Available_Data {
@@ -634,12 +704,7 @@ impl BindsSeats for RunningNexus {
             session_id: native_session_id,
             harness_kind,
             endpoint_selection,
-            herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                herdr_session_name: seat.herdr_session_name,
-                herdr_agent_name,
-                herdr_pane_id,
-                herdr_terminal_id,
-            }),
+            herdr_route_selection: HerdrRouteSelection::Available(route),
             origin: Origin::Unbound,
             flow_lifecycle: FlowLifecycle::Pending,
         };
@@ -649,26 +714,16 @@ impl BindsSeats for RunningNexus {
             power_level: Self::power_of(&address.layer),
             model_name,
         };
-        match self.store.register_existing_flow(node, role) {
-            Ok(FlowRegistration::Registered(_)) => {}
-            Ok(FlowRegistration::ConflictingBinding) => {
-                return Response::Refused(Refusal::Taken(address));
-            }
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
-        }
-        // A metaflow left Awake as an ended flow is taken over.
-        self.rest_ended_awake(&address);
-        match self.store.address_taking(&address, &flow_id, None, 0) {
-            Ok(crate::store::metaflow::AddressTaking::Takes(_)) => {}
-            Ok(crate::store::metaflow::AddressTaking::Refused(_)) => {
-                return Response::Refused(Refusal::Taken(address));
-            }
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
-        }
-        match self.store.awaken_metaflow(&address, &flow_id, 0) {
-            Ok(true) => Response::Bound(flow_id),
-            Ok(false) => Response::Refused(Refusal::Taken(address)),
-            Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+        match self.verified_seat_node(&seat.herdr_session_name, &address, &binding) {
+            Err(_) => unidentified(),
+            Ok(node) => match self
+                .store
+                .adopt_existing_flow(node, role, address.clone(), &binding)
+            {
+                Ok(ExistingSeatAdoption::Bound(_)) => Response::Bound(flow_id),
+                Ok(ExistingSeatAdoption::Refused(_)) => Response::Refused(Refusal::Taken(address)),
+                Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+            },
         }
     }
 }

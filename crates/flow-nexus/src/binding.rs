@@ -1,9 +1,14 @@
 //! What MetaBindExisting checks of a container and each flow it binds
 //! before any binding reaches the store.
 
+use crate::{RunningNexus, codex::SelectsCodexEndpoint, store::NamesConfiguredModel};
 use meta_signal_flow::{
     FlowBinding, FlowBindingRefusalReason, FlowBindingResult, FlowContainer, ProcessIdentity,
     RefusedFlowBinding,
+};
+use signal_flow::{
+    Address, EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, Origin,
+    PowerLevel, RouteReadiness,
 };
 use std::{
     fs,
@@ -111,6 +116,83 @@ impl ChecksFlowBinding for FlowBinding {
     }
 }
 
+/// The node admitted only after native identity, process and Herdr agree.
+pub(crate) trait VerifiesAdoptedSeat {
+    fn verified_seat_node(
+        &self,
+        herdr_session_name: &str,
+        address: &Address,
+        binding: &FlowBinding,
+    ) -> Result<FlowNode, FlowBindingRefusalReason>;
+}
+
+impl VerifiesAdoptedSeat for RunningNexus {
+    fn verified_seat_node(
+        &self,
+        herdr_session_name: &str,
+        address: &Address,
+        binding: &FlowBinding,
+    ) -> Result<FlowNode, FlowBindingRefusalReason> {
+        if !binding.is_well_formed()
+            || binding.aspect != address.aspect
+            || binding.power_level
+                != match address.layer {
+                    signal_flow::Layer::Primary => PowerLevel::High,
+                    signal_flow::Layer::Secondary => PowerLevel::Medium,
+                    signal_flow::Layer::Tertiary => PowerLevel::Low,
+                    signal_flow::Layer::Quaternary => PowerLevel::UltraLow,
+                }
+        {
+            return Err(FlowBindingRefusalReason::RoleMismatch);
+        }
+        if !binding.process_identity.is_live_process() {
+            return Err(FlowBindingRefusalReason::DeadProcess);
+        }
+        if !binding
+            .process_identity
+            .works_in(&binding.working_directory)
+        {
+            return Err(FlowBindingRefusalReason::AnatomyMismatch);
+        }
+        let configured_model = self
+            .store
+            .configured_model(address)
+            .map_err(|_| FlowBindingRefusalReason::HerdrUnreadable)?;
+        if configured_model.as_deref() != Some(binding.model_name.as_str()) {
+            return Err(FlowBindingRefusalReason::RoleMismatch);
+        }
+        self.herdr
+            .verify_existing_binding(herdr_session_name, binding)?;
+        let endpoint_selection = match binding.harness_kind {
+            signal_flow::HarnessKind::Codex => self
+                .codex_endpoints
+                .endpoint_for(&binding.model_name)
+                .map(|endpoint| {
+                    EndpointSelection::Available(signal_flow::Available_Data {
+                        endpoint_path: endpoint.socket.clone(),
+                        route_readiness: RouteReadiness::Ready,
+                    })
+                })
+                .unwrap_or(EndpointSelection::Unavailable),
+            signal_flow::HarnessKind::Claude => EndpointSelection::Unavailable,
+        };
+        Ok(FlowNode {
+            flow_id: binding.flow_id.clone(),
+            session_id: binding.native_session_id.clone(),
+            harness_kind: binding.harness_kind.clone(),
+            endpoint_selection,
+            herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
+                herdr_session_name: herdr_session_name.to_owned(),
+                herdr_agent_name: binding.herdr_agent_name.clone(),
+                herdr_pane_id: binding.herdr_pane_id.clone(),
+                herdr_terminal_id: binding.herdr_terminal_id.clone(),
+            }),
+            origin: Origin::Unbound,
+            flow_lifecycle: FlowLifecycle::Active,
+        })
+    }
+}
+
 /// A refusal reason refuses the binding of one flow.
 pub trait RefusesBinding {
     fn refusal_of(self, flow_id: String) -> FlowBindingResult;
@@ -147,7 +229,7 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
         binding: &FlowBinding,
     ) -> Result<(), FlowBindingRefusalReason> {
         use crate::herdr::launch::{
-            NamesCodexThread, NamesHerdrHarness, ReadsLaunchFiles, RunsHerdr,
+            ClaimsNativeIdentity, NamesCodexThread, NamesHerdrHarness, ReadsLaunchFiles, RunsHerdr,
         };
         use crate::herdr::{LocatesNativeTranscripts, ReadsHerdrPanes};
         use signal_flow::HarnessKind;
@@ -166,16 +248,25 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         };
-        let agent = agents
-            .iter()
-            .find(|agent| {
-                field(agent, "workspace_id").as_deref() == Some(binding.herdr_workspace_id.as_str())
-                    && field(agent, "pane_id").as_deref() == Some(binding.herdr_pane_id.as_str())
-                    && field(agent, "terminal_id").as_deref()
-                        == Some(binding.herdr_terminal_id.as_str())
-                    && field(agent, "agent").as_deref() == Some(expected)
-            })
+        let mut matching_agents = agents.iter().filter(|agent| {
+            field(agent, "workspace_id").as_deref() == Some(binding.herdr_workspace_id.as_str())
+                && field(agent, "pane_id").as_deref() == Some(binding.herdr_pane_id.as_str())
+                && field(agent, "terminal_id").as_deref()
+                    == Some(binding.herdr_terminal_id.as_str())
+                && field(agent, "agent").as_deref() == Some(expected)
+        });
+        let agent = matching_agents
+            .next()
             .ok_or(FlowBindingRefusalReason::PaneAbsent)?;
+        if matching_agents.next().is_some() {
+            return Err(FlowBindingRefusalReason::AmbiguousPane);
+        }
+        let claimed_native_identity = self
+            .claimed_native_identity(&binding.flow_id, &binding.harness_kind)
+            .map_err(|_| FlowBindingRefusalReason::NativeIdentityMismatch)?;
+        if claimed_native_identity != binding.native_session_id {
+            return Err(FlowBindingRefusalReason::NativeIdentityMismatch);
+        }
         let processes = self
             .run_json(&[
                 "--session".into(),

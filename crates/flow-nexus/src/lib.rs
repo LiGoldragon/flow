@@ -57,7 +57,7 @@ pub mod waking;
 
 use binding::{
     ChecksFlowBinding, ChecksFlowContainer, ChecksProcessIdentity, RefusesBinding,
-    VerifiesExistingBinding,
+    VerifiesAdoptedSeat, VerifiesExistingBinding,
 };
 use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
@@ -396,114 +396,64 @@ impl Dispatches for RunningNexus {
                         meta_signal_flow::BindExistingRejection::ContainerIdentityMismatch,
                     );
                 }
-
-                let mut seen_flow_ids = HashSet::new();
-                let mut seen_panes = HashSet::new();
-                let mut results = Vec::with_capacity(request.flow_binding_vector.len());
-                for binding in request.flow_binding_vector {
-                    let flow_id = binding.flow_id.clone();
-                    if !seen_flow_ids.insert(flow_id.clone()) {
-                        results.push(
-                            meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId
-                                .refusal_of(flow_id),
-                        );
-                        continue;
-                    }
-                    if !binding.is_well_formed() {
-                        results.push(
-                            meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch
-                                .refusal_of(flow_id),
-                        );
-                        continue;
-                    }
-                    let pane_identity = (
-                        binding.herdr_workspace_id.clone(),
-                        binding.herdr_pane_id.clone(),
-                        binding.herdr_tab_id.clone(),
-                        binding.herdr_terminal_id.clone(),
-                        binding.herdr_agent_name.clone(),
+                if resolver
+                    .as_ref()
+                    .and_then(|identity| identity.flow_id_option.as_deref())
+                    != Some(container.meta_flow_owner_id.as_str())
+                {
+                    return meta_signal_flow::Response::BindExistingRejected(
+                        meta_signal_flow::BindExistingRejection::OwnerMismatch,
                     );
-                    if !seen_panes.insert(pane_identity) {
-                        results.push(
-                            meta_signal_flow::FlowBindingRefusalReason::AmbiguousPane
-                                .refusal_of(flow_id),
-                        );
-                        continue;
-                    }
-                    if !binding.process_identity.is_live_process() {
-                        results.push(
-                            meta_signal_flow::FlowBindingRefusalReason::DeadProcess
-                                .refusal_of(flow_id),
-                        );
-                        continue;
-                    }
-                    if !binding
-                        .process_identity
-                        .works_in(&binding.working_directory)
-                    {
-                        results.push(
-                            meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch
-                                .refusal_of(flow_id),
-                        );
-                        continue;
-                    }
-                    if let Err(reason) = self
-                        .herdr
-                        .verify_existing_binding(&container.herdr_session_name, &binding)
-                    {
-                        results.push(reason.refusal_of(flow_id));
-                        continue;
-                    }
-                    // A flow already in the store is not imported again: the
-                    // store asserts the binding's role only when the stored
-                    // flow is this binding, and refuses any other.
-                    let node = FlowNode {
-                        flow_id: flow_id.clone(),
-                        session_id: binding.native_session_id,
-                        harness_kind: binding.harness_kind,
-                        endpoint_selection: EndpointSelection::Unavailable,
-                        herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
-                            herdr_session_name: container.herdr_session_name.clone(),
-                            herdr_agent_name: binding.herdr_agent_name,
-                            herdr_pane_id: binding.herdr_pane_id,
-                            herdr_terminal_id: binding.herdr_terminal_id,
-                        }),
-                        // A flow bound after the fact has no launch that asked
-                        // for it.
-                        origin: Origin::Unbound,
-                        flow_lifecycle: FlowLifecycle::Pending,
-                    };
-                    let role = signal_flow::Caller {
-                        flow_id: flow_id.clone(),
-                        aspect: binding.aspect,
-                        power_level: binding.power_level,
-                        model_name: binding.model_name,
-                    };
-                    match self.store.register_existing_flow(node, role) {
-                        Ok(store::FlowRegistration::Registered(_)) => {
-                            results.push(meta_signal_flow::FlowBindingResult::Bound(
-                                meta_signal_flow::BoundFlowBinding {
-                                    flow_id,
-                                    flow_lifecycle:
-                                        meta_signal_flow::FlowLifecycle::RegisteredUnconfirmed,
-                                },
-                            ))
-                        }
-                        Ok(store::FlowRegistration::ConflictingBinding) => results.push(
-                            meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId
-                                .refusal_of(flow_id),
-                        ),
-                        Err(_) => {
-                            return meta_signal_flow::Response::BindExistingRejected(
-                                meta_signal_flow::BindExistingRejection::StoreRefused,
-                            );
-                        }
-                    }
                 }
 
+                let binding = request.flow_binding;
+                let flow_id = binding.flow_id.clone();
+                let refusal = |reason| {
+                    meta_signal_flow::FlowBindingResult::Refused(
+                        meta_signal_flow::RefusedFlowBinding {
+                            flow_id: flow_id.clone(),
+                            flow_binding_refusal_reason: reason,
+                        },
+                    )
+                };
+                let result = match self.verified_seat_node(
+                    &container.herdr_session_name,
+                    &request.address,
+                    &binding,
+                ) {
+                    Err(reason) => refusal(reason),
+                    Ok(node) => {
+                        let role = signal_flow::Caller {
+                            flow_id: flow_id.clone(),
+                            aspect: binding.aspect.clone(),
+                            power_level: binding.power_level.clone(),
+                            model_name: binding.model_name.clone(),
+                        };
+                        match self
+                            .store
+                            .adopt_existing_flow(node, role, request.address, &binding)
+                        {
+                            Ok(store::ExistingSeatAdoption::Bound(_)) => {
+                                meta_signal_flow::FlowBindingResult::Bound(
+                                    meta_signal_flow::BoundFlowBinding {
+                                        flow_id,
+                                        flow_lifecycle:
+                                            meta_signal_flow::FlowLifecycle::AdoptedActive,
+                                    },
+                                )
+                            }
+                            Ok(store::ExistingSeatAdoption::Refused(reason)) => refusal(reason),
+                            Err(_) => {
+                                return meta_signal_flow::Response::BindExistingRejected(
+                                    meta_signal_flow::BindExistingRejection::StoreRefused,
+                                );
+                            }
+                        }
+                    }
+                };
                 meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
                     flow_container: container,
-                    flow_binding_result_vector: results,
+                    flow_binding_result: result,
                 })
             }
             meta_signal_flow::Query::Deliver(request) => self.deliver(request),
@@ -1535,7 +1485,7 @@ mod tests {
             power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
             harness_kind: HarnessKind::Codex,
-            native_session_id: format!("native-{flow_id}"),
+            native_session_id: "01a0b22ce24f7452994064490878680f".into(),
             herdr_workspace_id: "workspace".into(),
             herdr_pane_id: pane.into(),
             herdr_tab_id: "tab".into(),
@@ -1550,8 +1500,8 @@ mod tests {
     }
 
     /// Herdr and the Codex rollouts as they show `bindings` live, for the
-    /// one MetaBindExisting `run` performs: each pane in the snapshot with
-    /// its harness, this test process in its foreground, each Codex session
+    /// one MetaBindExisting `run` performs: the pane in the snapshot with
+    /// its harness, this test process in its foreground, and a Codex session
     /// named by a rollout's session_meta. The fixture's own Herdr returns
     /// after it.
     fn with_bound_world<T>(
@@ -1564,6 +1514,15 @@ mod tests {
             .iter()
             .map(|binding| {
                 let harness = binding.harness_kind.expected_harness();
+                let flows_root = fixture.directory.path().join("flows");
+                fs::write(
+                    flows_root.join(format!(".{}.flow-id", binding.flow_id)),
+                    format!(
+                        "version=1\nharness={}\nidentity={}\nalias={}\n",
+                        harness, binding.native_session_id, binding.flow_id
+                    ),
+                )
+                .expect("native identity claim written");
                 let mut agent = serde_json::json!({
                     "agent": harness,
                     "agent_status": "idle",
@@ -1639,22 +1598,27 @@ mod tests {
         let socket_path = fixture.directory.path().join("herdr-verify.sock");
         let _ = fs::remove_file(&socket_path);
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
-        let meta_signal_flow::Response::BoundExisting(bound) =
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
-                    meta_signal_flow::MetaBindExisting {
-                        flow_container: flow_container(&socket_path),
-                        flow_binding_vector: vec![binding],
-                    },
-                ))
-        else {
+        let address = signal_flow::Address {
+            aspect: binding.aspect.clone(),
+            topic: "core".into(),
+            layer: match binding.power_level {
+                signal_flow::PowerLevel::High => signal_flow::Layer::Primary,
+                signal_flow::PowerLevel::Medium => signal_flow::Layer::Secondary,
+                signal_flow::PowerLevel::Low => signal_flow::Layer::Tertiary,
+                signal_flow::PowerLevel::UltraLow => signal_flow::Layer::Quaternary,
+            },
+        };
+        let meta_signal_flow::Response::BoundExisting(bound) = fixture.nexus.dispatch_meta_from(
+            meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                flow_container: flow_container(&socket_path),
+                address,
+                flow_binding: binding,
+            }),
+            Some(adoption_resolver()),
+        ) else {
             panic!("a live container answers per binding")
         };
-        let [result] = bound.flow_binding_result_vector.as_slice() else {
-            panic!("one binding, one result")
-        };
-        result.clone()
+        bound.flow_binding_result
     }
 
     fn refused_for(
@@ -1804,6 +1768,13 @@ mod tests {
             herdr_server_socket_path: socket.to_string_lossy().into_owned(),
             herdr_server_process_identity: current_process_identity(),
             meta_flow_owner_id: "field-owner".into(),
+        }
+    }
+
+    fn adoption_resolver() -> meta_signal_flow::ResolverIdentity {
+        meta_signal_flow::ResolverIdentity {
+            process_identity: current_process_identity(),
+            flow_id_option: Some("field-owner".into()),
         }
     }
 
@@ -2582,23 +2553,17 @@ mod tests {
     }
 
     #[test]
-    fn meta_bind_existing_imports_only_verified_processes_as_pending() {
+    fn meta_bind_existing_atomically_adopts_one_verified_seat() {
         let fixture = NexusFixture::new();
         let socket_path = fixture.directory.path().join("herdr.sock");
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let container = flow_container(&socket_path);
         let accepted = existing_binding("mind-live", "pane-1");
-        let ambiguous = existing_binding("field-ambiguous", "pane-1");
-        let mut dead = existing_binding("psyche-dead", "pane-3");
-        dead.process_identity.process_id = i64::MAX;
-        let duplicate = existing_binding("mind-live", "pane-4");
-        let mut wrong_cwd = existing_binding("field-wrong-cwd", "pane-5");
-        wrong_cwd.working_directory = fixture
-            .directory
-            .path()
-            .join("absent")
-            .display()
-            .to_string();
+        let address = signal_flow::Address {
+            aspect: Aspect::Mind,
+            topic: "message".into(),
+            layer: Layer::Secondary,
+        };
 
         let response = with_bound_world(&fixture, &[&accepted.clone()], || {
             fixture
@@ -2606,45 +2571,21 @@ mod tests {
                 .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
                     meta_signal_flow::MetaBindExisting {
                         flow_container: container.clone(),
-                        flow_binding_vector: vec![accepted, ambiguous, dead, duplicate, wrong_cwd],
+                        address: address.clone(),
+                        flow_binding: accepted,
                     },
                 ))
         });
         let meta_signal_flow::Response::BoundExisting(bound) = response else {
-            panic!("valid container must return ordered per-flow results")
+            panic!("valid container must return the one-seat result")
         };
         assert_eq!(bound.flow_container, container);
-        assert_eq!(bound.flow_binding_result_vector.len(), 5);
         assert!(matches!(
-            &bound.flow_binding_result_vector[0],
+            &bound.flow_binding_result,
             meta_signal_flow::FlowBindingResult::Bound(binding)
                 if binding.flow_id == "mind-live"
                     && binding.flow_lifecycle
-                        == meta_signal_flow::FlowLifecycle::RegisteredUnconfirmed
-        ));
-        assert!(matches!(
-            &bound.flow_binding_result_vector[1],
-            meta_signal_flow::FlowBindingResult::Refused(binding)
-                if binding.flow_binding_refusal_reason
-                    == meta_signal_flow::FlowBindingRefusalReason::AmbiguousPane
-        ));
-        assert!(matches!(
-            &bound.flow_binding_result_vector[2],
-            meta_signal_flow::FlowBindingResult::Refused(binding)
-                if binding.flow_binding_refusal_reason
-                    == meta_signal_flow::FlowBindingRefusalReason::DeadProcess
-        ));
-        assert!(matches!(
-            &bound.flow_binding_result_vector[3],
-            meta_signal_flow::FlowBindingResult::Refused(binding)
-                if binding.flow_binding_refusal_reason
-                    == meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId
-        ));
-        assert!(matches!(
-            &bound.flow_binding_result_vector[4],
-            meta_signal_flow::FlowBindingResult::Refused(binding)
-                if binding.flow_binding_refusal_reason
-                    == meta_signal_flow::FlowBindingRefusalReason::AnatomyMismatch
+                        == meta_signal_flow::FlowLifecycle::AdoptedActive
         ));
 
         let Response::RecipientResolved(node) = fixture
@@ -2653,8 +2594,7 @@ mod tests {
         else {
             panic!("accepted existing flow must resolve")
         };
-        assert_eq!(node.flow_lifecycle, FlowLifecycle::Pending);
-        assert_eq!(node.endpoint_selection, EndpointSelection::Unavailable);
+        assert_eq!(node.flow_lifecycle, FlowLifecycle::Active);
         assert_eq!(node.origin, Origin::Unbound);
         assert!(matches!(
             fixture
@@ -2680,7 +2620,12 @@ mod tests {
                 .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
                     meta_signal_flow::MetaBindExisting {
                         flow_container: container,
-                        flow_binding_vector: vec![existing_binding("not-imported", "pane-1")],
+                        address: signal_flow::Address {
+                            aspect: Aspect::Mind,
+                            topic: "message".into(),
+                            layer: Layer::Secondary,
+                        },
+                        flow_binding: existing_binding("not-imported", "pane-1"),
                     }
                 ),),
             meta_signal_flow::Response::BindExistingRejected(
@@ -2691,6 +2636,46 @@ mod tests {
             fixture
                 .nexus
                 .dispatch(Query::ResolveRecipient("not-imported".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::UnknownFlow
+            )
+        ));
+    }
+
+    #[test]
+    fn meta_bind_existing_requires_the_authenticated_container_owner() {
+        let fixture = NexusFixture::new();
+        let socket_path = fixture.directory.path().join("herdr-owner.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let binding = existing_binding("owner-mismatch", "pane-1");
+        let address = signal_flow::Address {
+            aspect: Aspect::Mind,
+            topic: "message".into(),
+            layer: Layer::Secondary,
+        };
+        let response = with_bound_world(&fixture, &[&binding], || {
+            fixture.nexus.dispatch_meta_from(
+                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                    flow_container: flow_container(&socket_path),
+                    address,
+                    flow_binding: binding,
+                }),
+                Some(meta_signal_flow::ResolverIdentity {
+                    process_identity: current_process_identity(),
+                    flow_id_option: Some("different-owner".into()),
+                }),
+            )
+        });
+        assert_eq!(
+            response,
+            meta_signal_flow::Response::BindExistingRejected(
+                meta_signal_flow::BindExistingRejection::OwnerMismatch
+            )
+        );
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("owner-mismatch".into())),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
@@ -2821,22 +2806,28 @@ mod tests {
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let meta_signal_flow::Response::BoundExisting(bound) =
             with_bound_world(fixture, &[&binding.clone()], || {
-                fixture
-                    .nexus
-                    .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
-                        meta_signal_flow::MetaBindExisting {
-                            flow_container: flow_container(&socket_path),
-                            flow_binding_vector: vec![binding],
+                fixture.nexus.dispatch_meta_from(
+                    meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                        flow_container: flow_container(&socket_path),
+                        address: signal_flow::Address {
+                            aspect: binding.aspect.clone(),
+                            topic: "core".into(),
+                            layer: match binding.power_level {
+                                PowerLevel::High => Layer::Primary,
+                                PowerLevel::Medium => Layer::Secondary,
+                                PowerLevel::Low => Layer::Tertiary,
+                                PowerLevel::UltraLow => Layer::Quaternary,
+                            },
                         },
-                    ))
+                        flow_binding: binding,
+                    }),
+                    Some(adoption_resolver()),
+                )
             })
         else {
             panic!("a live container answers per binding")
         };
-        let [result] = bound.flow_binding_result_vector.as_slice() else {
-            panic!("one binding, one result")
-        };
-        result.clone()
+        bound.flow_binding_result
     }
 
     /// The binding of the registered 908786 row (a RegisterFlow row, Active
@@ -4223,22 +4214,28 @@ mod tests {
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let binding = existing_binding(flow_id, pane);
         let response = with_bound_world(fixture, &[&binding.clone()], || {
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
-                    meta_signal_flow::MetaBindExisting {
-                        flow_container: flow_container(&socket_path),
-                        flow_binding_vector: vec![binding],
+            fixture.nexus.dispatch_meta_from(
+                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                    flow_container: flow_container(&socket_path),
+                    address: signal_flow::Address {
+                        aspect: binding.aspect.clone(),
+                        topic: "core".into(),
+                        layer: match binding.power_level {
+                            PowerLevel::High => Layer::Primary,
+                            PowerLevel::Medium => Layer::Secondary,
+                            PowerLevel::Low => Layer::Tertiary,
+                            PowerLevel::UltraLow => Layer::Quaternary,
+                        },
                     },
-                ))
+                    flow_binding: binding,
+                }),
+                Some(adoption_resolver()),
+            )
         });
         assert!(matches!(
             response,
             meta_signal_flow::Response::BoundExisting(bound)
-                if matches!(
-                    bound.flow_binding_result_vector.as_slice(),
-                    [meta_signal_flow::FlowBindingResult::Bound(_)]
-                )
+                if matches!(bound.flow_binding_result, meta_signal_flow::FlowBindingResult::Bound(_))
         ));
     }
 

@@ -413,6 +413,11 @@ pub trait ReadsHerdrPanes {
     /// lists the pane's foreground processes and the kernel their
     /// arguments; None when Herdr's process information cannot be read.
     fn foreground_threads(&self, route: &HerdrRoute) -> Option<BTreeSet<String>>;
+    /// Foreground processes and their kernel-read command lines for the exact pane.
+    fn foreground_processes(&self, route: &HerdrRoute) -> Option<Vec<ForegroundProcess>> {
+        let _ = route;
+        None
+    }
     fn refresh_route(&self, node: FlowNode) -> FlowNode;
     fn snapshot(&self, route: &HerdrRoute) -> Option<serde_json::Value>;
     /// The snapshot of one Herdr session.
@@ -423,6 +428,12 @@ pub trait ReadsHerdrPanes {
     /// Flow recorded for the flow, Herdr recognizing a Codex agent in it,
     /// runs the flow's opened thread unless it reports another session.
     fn holds_native_session(&self, herdr_session_name: &str, node: &FlowNode) -> Option<bool>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForegroundProcess {
+    pub process_id: u32,
+    pub arguments: Vec<String>,
 }
 
 impl ReadsHerdrPanes for HerdrCli {
@@ -530,6 +541,22 @@ impl ReadsHerdrPanes for HerdrCli {
     }
 
     fn foreground_threads(&self, route: &HerdrRoute) -> Option<BTreeSet<String>> {
+        self.foreground_processes(route).map(|processes| {
+            processes
+                .into_iter()
+                .flat_map(|process| {
+                    process
+                        .arguments
+                        .windows(2)
+                        .filter(|pair| pair[0] == "resume" && !pair[1].is_empty())
+                        .map(|pair| pair[1].clone())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        })
+    }
+
+    fn foreground_processes(&self, route: &HerdrRoute) -> Option<Vec<ForegroundProcess>> {
         use crate::herdr::launch::RunsHerdr;
         let processes = self
             .run_json(&[
@@ -556,19 +583,17 @@ impl ReadsHerdrPanes for HerdrCli {
             foreground
                 .iter()
                 .filter_map(|process| {
-                    let pid = process.get("pid").and_then(serde_json::Value::as_u64)?;
-                    fs::read(format!("/proc/{pid}/cmdline")).ok()
-                })
-                .flat_map(|cmdline| {
+                    let process_id = u32::try_from(process.get("pid")?.as_u64()?).ok()?;
+                    let cmdline = fs::read(format!("/proc/{process_id}/cmdline")).ok()?;
                     let arguments = cmdline
                         .split(|byte| *byte == 0)
+                        .filter(|argument| !argument.is_empty())
                         .map(|argument| String::from_utf8_lossy(argument).into_owned())
-                        .collect::<Vec<_>>();
-                    arguments
-                        .windows(2)
-                        .filter(|pair| pair[0] == "resume" && !pair[1].is_empty())
-                        .map(|pair| pair[1].clone())
-                        .collect::<Vec<_>>()
+                        .collect();
+                    Some(ForegroundProcess {
+                        process_id,
+                        arguments,
+                    })
                 })
                 .collect(),
         )

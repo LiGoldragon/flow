@@ -2508,6 +2508,9 @@ mod tests {
             start["baseInstructions"],
             launch.system_prompt.system_prompt_text
         );
+        assert!(start["baseInstructions"].as_str().unwrap().contains(
+            "Metaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
+        ));
         assert_eq!(start["config"]["project_doc_max_bytes"], 0);
         assert_eq!(start["config"]["skills.include_instructions"], false);
         // The developer-instructions leave-out empties the developer

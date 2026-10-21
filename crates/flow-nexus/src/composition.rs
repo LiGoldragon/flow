@@ -6,9 +6,10 @@
 //! model call: every module the launch names is in the system prompt or the
 //! first USER message, sent once. The system prompt is the verified system
 //! text, then any USER modules that overflow the first message, followed
-//! after a blank line by the launch's own section (its predecessor and
-//! remembered flows). The first USER message is the verified USER text,
-//! then the brief. When it does not fit one message, its leading modules
+//! after a blank line by the launch's identity section (its Address, Flow ID
+//! state, native-binding state, predecessor and remembered flows). The first
+//! USER message is the verified USER text, then the brief. When it does not
+//! fit one message, its leading modules
 //! join the system prompt, which no process argument carries, until the
 //! rest fits.
 
@@ -21,14 +22,12 @@ pub use crate::generated::starter::{
     RendersBrief, RendersLeanStart, ResolvesLeaveOuts, SegmentListing, SplitsStartupMessage,
     SystemPrompted, Textual,
 };
-use crate::waking::WakePolicy;
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
-    Address, Aspect, ComposedLaunch, ContextRefusal, FirstPromptPayload, HarnessKind,
-    LaunchProfile, LeaveOut, LeaveOutRefusal, PowerLevel, PromptPart, QueueEntry, SystemPrompt,
-    TargetReceiptRequest,
+    Address, ComposedLaunch, ContextRefusal, FirstPromptPayload, HarnessKind, LaunchProfile,
+    LeaveOut, LeaveOutRefusal, PromptPart, QueueEntry, SystemPrompt, TargetReceiptRequest,
 };
 use std::collections::HashSet;
 
@@ -64,17 +63,22 @@ impl OpensLaunchComposer for LaunchComposer {
     }
 }
 
-/// The trailing section a launch appends to its system prompt:
-/// `Predecessor:` when the profile names one, `Remembered:` when it
-/// remembers any flows, and nothing otherwise. Each line ends with a
-/// newline.
+/// The launch's common identity section: the exact Address datom, a truthful
+/// Flow ID state, and a distinct native-binding state, followed by any
+/// predecessor or remembered-flow facts.
 pub trait RendersLaunchSection {
-    fn launch_section(&self) -> String;
+    fn launch_section(&self, flow_id: Option<&str>) -> String;
 }
 
 impl RendersLaunchSection for LaunchProfile {
-    fn launch_section(&self) -> String {
-        let mut section = String::new();
+    fn launch_section(&self, flow_id: Option<&str>) -> String {
+        let address = self.address.datomize(Vec::new()).protosize().compact();
+        let mut section = format!(
+            "Metaflow: {address}\nModel: {}\nEffort: {}\nFlow ID: {}\nNative binding: pending\n",
+            self.model_name,
+            self.effort,
+            flow_id.unwrap_or("pending"),
+        );
         if let Some(predecessor) = &self.flow_id_option {
             section.push_str(&format!("Predecessor: {predecessor}\n"));
         }
@@ -203,30 +207,6 @@ impl SplitsStartupMessage for HarnessKind {
     }
 }
 
-trait NamesRole {
-    fn aspect_name(&self) -> &'static str;
-    fn power_name(&self) -> &'static str;
-}
-
-impl NamesRole for LaunchProfile {
-    fn aspect_name(&self) -> &'static str {
-        match self.address.aspect {
-            Aspect::Psyche => "Psyche",
-            Aspect::Mind => "Mind",
-            Aspect::Field => "Field",
-        }
-    }
-
-    fn power_name(&self) -> &'static str {
-        match <crate::RunningNexus as WakePolicy>::power_of(&self.address.layer) {
-            PowerLevel::High => "High",
-            PowerLevel::Medium => "Medium",
-            PowerLevel::Low => "Low",
-            PowerLevel::UltraLow => "Ultra Low",
-        }
-    }
-}
-
 trait ValidatesLaunchProfile {
     fn validate(&self) -> Result<(), CompositionError>;
 }
@@ -297,13 +277,8 @@ impl RendersBrief for HarnessedProfile {
             return instruction;
         }
         format!(
-            "# Flow launch\n\nRole: {} {}\nHarness: Codex\nModel: {}\nEffort: {}\nHerdr session: {}\nRemote control: app-server endpoint\n\n{}",
-            profile.aspect_name(),
-            profile.power_name(),
-            profile.model_name,
-            profile.effort,
-            profile.herdr_session_name,
-            instruction,
+            "# Flow launch\n\nHarness: Codex\nHerdr session: {}\nRemote control: app-server endpoint\n\n{}",
+            profile.herdr_session_name, instruction,
         )
     }
 }
@@ -367,7 +342,7 @@ impl ComposesVerifiedContext for LaunchComposer {
             }
             system_prompt_text.push_str(&segment);
         }
-        let section = input_0.profile().launch_section();
+        let section = input_0.profile().launch_section(None);
         if !section.is_empty() {
             if !system_prompt_text.is_empty() && !system_prompt_text.ends_with('\n') {
                 system_prompt_text.push('\n');
@@ -383,34 +358,26 @@ impl ComposesVerifiedContext for LaunchComposer {
     }
 }
 
-/// The launch section opens with the metaflow identity the launch claimed,
-/// so the whole flow, including its subagents and forks, inherits its Address
-/// and FlowId from the system prompt. The section is the system prompt's tail,
-/// after a blank line; a launch with none gains one. Only the system prompt
-/// and its hash change: the first USER message, whose hashes the launch
-/// attempt journals at Reserve, is untouched.
+/// Carries the known Flow ID as a fact distinct from the Address and native
+/// binding. A launch whose harness has not yet bound retains `pending` for
+/// its native binding. Only the system prompt and its hash change.
 impl CarriesFlowId for ComposedLaunch {
     fn carrying_flow_id<N: Textual>(&self, input: N) -> ComposedLaunch {
-        let address = &self.launch_profile.address;
-        let flow_line = format!(
-            "This flow belongs to metaflow {{ {:?} {} {:?} {} }}.\n",
-            address.aspect,
-            address.topic,
-            address.layer,
-            input.text(),
-        );
-        let section = self.launch_profile.launch_section();
+        let previous_section = self.launch_profile.launch_section(None);
+        let section = self
+            .launch_profile
+            .launch_section(Some(input.text().as_str()));
         let mut text = self.system_prompt.system_prompt_text.clone();
-        match text.strip_suffix(section.as_str()) {
-            Some(context) if !section.is_empty() => {
-                text = format!("{context}{flow_line}{section}");
+        match text.strip_suffix(previous_section.as_str()) {
+            Some(context) => {
+                text = format!("{context}{section}");
             }
             _ => {
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
                 }
                 text.push('\n');
-                text.push_str(&flow_line);
+                text.push_str(&section);
             }
         }
         let mut launch = self.clone();
@@ -680,7 +647,7 @@ pub(crate) mod tests {
         let system = &composed.system_prompt.system_prompt_text;
         assert!(system.contains("<!-- module: spirit-core -->\nSpirit body.\n"));
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nPredecessor: 1b8ac0\nRemembered: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembered: 836818\n"
         ));
         assert!(!system.contains("Knowledge body."));
         let body = &composed.first_prompt_payload.first_prompt_body;
@@ -702,7 +669,7 @@ pub(crate) mod tests {
         let carried = composed.carrying_flow_id("a1b2c3");
         let system = &carried.system_prompt.system_prompt_text;
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nThis flow belongs to metaflow { Field flow Secondary a1b2c3 }.\nPredecessor: 1b8ac0\nRemembered: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembered: 836818\n"
         ));
         assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
         // A launch with no predecessor and no memory gains the section.
@@ -722,8 +689,9 @@ pub(crate) mod tests {
         assert!(
             bare.system_prompt
                 .system_prompt_text
-                .ends_with("<!-- end-module: intent-flow -->\n\nThis flow belongs to metaflow { Field flow Secondary a1b2c3 }.\n")
+                .ends_with("<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
         );
+        assert!(!system.contains("This flow belongs to metaflow"));
     }
 
     #[test]
@@ -741,11 +709,65 @@ pub(crate) mod tests {
         assert!(body.starts_with("These are your skills"));
         assert!(body.ends_with(concat!(
             "<!-- end-module: knowledge-flow -->\n\n# Flow launch\n\n",
-            "Role: Field Medium\nHarness: Codex\nModel: gpt-6-astra\nEffort: medium\n",
+            "Harness: Codex\n",
             "Herdr session: messaging-build\nRemote control: app-server endpoint\n\n",
             "Carry the bounded task."
         )));
+        assert!(composed.system_prompt.system_prompt_text.contains(
+            "Metaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
+        ));
+        assert!(!body.contains("Role: Field Medium"));
         assert!(!body.contains('$'));
+    }
+
+    #[test]
+    fn both_harnesses_receive_the_exact_typed_address_datoms() {
+        for (aspect, aspect_name) in [
+            (Aspect::Psyche, "Psyche"),
+            (Aspect::Mind, "Mind"),
+            (Aspect::Field, "Field"),
+        ] {
+            for (layer, layer_name) in [
+                (Layer::Primary, "Primary"),
+                (Layer::Secondary, "Secondary"),
+                (Layer::Tertiary, "Tertiary"),
+                (Layer::Quaternary, "Quaternary"),
+            ] {
+                for harness_kind in [HarnessKind::Claude, HarnessKind::Codex] {
+                    let mut profile = fixture_profile();
+                    profile.address = Address {
+                        aspect: aspect.clone(),
+                        topic: "coreTopic".into(),
+                        layer: layer.clone(),
+                    };
+                    let composed = fixture_composer()
+                        .compose(
+                            HarnessedProfile {
+                                harness_kind,
+                                launch_profile: profile,
+                            },
+                            Vec::<signal_flow::LeaveOut>::new(),
+                        )
+                        .unwrap();
+                    let identity = format!(
+                        "Metaflow: {{ {aspect_name} coreTopic {layer_name} }}\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
+                    );
+                    assert!(
+                        composed
+                            .system_prompt
+                            .system_prompt_text
+                            .contains(&identity)
+                    );
+                    assert!(!composed.system_prompt.system_prompt_text.contains("Role:"));
+                    assert!(
+                        !composed
+                            .first_prompt_payload
+                            .first_prompt_body
+                            .contains("Role:")
+                    );
+                }
+            }
+        }
     }
 
     #[test]

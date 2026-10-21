@@ -2810,7 +2810,7 @@ pub(crate) mod tests {
     use std::os::unix::net::UnixListener;
     use std::path::Path;
 
-    const SYSTEM_TEXT: &str = "fixture system prompt";
+    const SYSTEM_TEXT: &str = "Metaflow: { Field flow Secondary }\nModel: model-current\nEffort: high\nFlow ID: pending\nNative binding: pending\nfixture system prompt";
 
     fn digest(text: &str) -> String {
         format!(

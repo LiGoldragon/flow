@@ -14,6 +14,10 @@
 ; the turn and the call, so a replayed call is answered from the record and
 ; queued once.
 ;
+; Every handled invocation, including a replay and any refusal, is written to
+; the process journal as a typed SendInvocation with its own ID, call key,
+; content digest and result; the request body is not journaled.
+;
 ; A request queued for an Asleep metaflow wakes it by what Flow's records
 ; hold, never by what the answer to the call carries: after the commit
 ; that queues it, after a replayed call is answered from its record, and
@@ -70,6 +74,9 @@ Library
   ; Queued is a durable enqueue for the target, never a claim of delivery.
   SendOutcome.[ Queued.{ Sender Target }
                 Refused.SendRefusal ]
+  ; A typed journal entry for each handling attempt, including a replay.
+  SendInvocationId.String
+  SendInvocation.{ SendInvocationId ToolCallKey ToolName ContentSha256 SendOutcome }
   ; The record a handled call leaves.
   SendCall.{ ToolCallKey ContentSha256 SendOutcome } ]
 [ ; The values the capabilities read, each through the trait that yields it.

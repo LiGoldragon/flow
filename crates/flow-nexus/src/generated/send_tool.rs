@@ -78,6 +78,18 @@ pub enum SendOutcome {
     Refused(SendRefusal),
 }
 #[rustfmt::skip]
+pub type SendInvocationId = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SendInvocation {
+    pub send_invocation_id: SendInvocationId,
+    pub tool_call_key: ToolCallKey,
+    pub tool_name: ToolName,
+    pub content_sha256: ContentSha256,
+    pub send_outcome: SendOutcome,
+}
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct SendCall {

@@ -42,10 +42,10 @@ use crate::codex_turns::{ReadsThreadStatus, ReadsTurnEvent, SettlesRestingCodexS
 use crate::compacting::{ReadsCodexContextSignal, WatchesCompactions};
 use crate::generated::send_tool::{
     AnswersToolCall, DeclaresSendTool, HandlesSendCall, ParamsCarrying, ReadsSendArguments,
-    ReadsToolCall, SendArguments, SendCall, SendKind, SendOutcome, SendRefusal, ToolCall,
-    ToolCallCarrying, ToolCallKey, ToolName,
+    ReadsToolCall, SendArguments, SendCall, SendInvocation, SendKind, SendOutcome, SendRefusal,
+    ToolCall, ToolCallCarrying, ToolCallKey, ToolName,
 };
-use crate::sending::AdmitsSendPayload;
+use crate::sending::{AdmitsSendPayload, MintsId};
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
@@ -138,6 +138,38 @@ impl ReadsToolCall for ToolCall {
             // the same, however the app-server spaced them.
             arguments: serde_json::to_string(params.get("arguments")?).ok()?,
         })
+    }
+}
+
+/// Gives each invocation a unique, typed journal identity without carrying
+/// the potentially large request body into the journal.
+pub trait DescribesSendInvocation {
+    fn send_invocation(&self, outcome: SendOutcome) -> SendInvocation;
+}
+
+impl DescribesSendInvocation for ToolCall {
+    fn send_invocation(&self, outcome: SendOutcome) -> SendInvocation {
+        SendInvocation {
+            send_invocation_id: "send-invocation".minted_id(),
+            tool_call_key: self.tool_call_key.clone(),
+            tool_name: self.tool_name.clone(),
+            content_sha256: self.content_sha256(),
+            send_outcome: outcome,
+        }
+    }
+}
+
+/// Writes one dynamic Send invocation's typed result to the process journal.
+pub trait JournalsSendInvocations {
+    fn journal_send_invocation(&self, call: &ToolCall, outcome: SendOutcome) -> SendOutcome;
+}
+
+impl JournalsSendInvocations for RunningNexus {
+    fn journal_send_invocation(&self, call: &ToolCall, outcome: SendOutcome) -> SendOutcome {
+        let invocation = call.send_invocation(outcome.clone());
+        let datom = invocation.datomize(Vec::new()).protosize().compact();
+        eprintln!("flow-nexus: {datom}");
+        outcome
     }
 }
 
@@ -271,9 +303,6 @@ impl RefusesSendCall for RunningNexus {}
 impl HandlesSendCall for RunningNexus {
     fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
         let call = input.tool_call();
-        if call.tool_name != SendTool::tool_name() {
-            return Self::refused(SendRefusal::UnknownTool);
-        }
         let outcome = {
             let _turn = self
                 .dispatch_gate
@@ -289,75 +318,80 @@ impl HandlesSendCall for RunningNexus {
 
     fn handle_held_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
         let call = input.tool_call();
-        if call.tool_name != SendTool::tool_name() {
-            return Self::refused(SendRefusal::UnknownTool);
-        }
-        let key = &call.tool_call_key;
-        let store_refused = |error: crate::store::StoreError| {
-            eprintln!(
-                "flow-nexus: send call {} of thread {} refused by the store: {error}",
-                key.call_id, key.thread_id
-            );
-            Self::refused(SendRefusal::Store)
-        };
-        // The sender is read again for every call, a replayed one included.
-        let sender = match self.store.thread_sender(&key.thread_id) {
-            Ok(Ok(sender)) => sender,
-            Ok(Err(refusal)) => return Self::refused(refusal),
-            Err(error) => return store_refused(error),
-        };
-        let content_sha256 = call.content_sha256();
-        match self.store.send_call(key) {
-            Ok(Some(recorded)) if recorded.content_sha256 == content_sha256 => {
-                return recorded.send_outcome;
+        let outcome = (|| {
+            if call.tool_name != SendTool::tool_name() {
+                return Self::refused(SendRefusal::UnknownTool);
             }
-            Ok(Some(_)) => return Self::refused(SendRefusal::KeyReused),
-            Ok(None) => {}
-            Err(error) => return store_refused(error),
-        }
-        let Some(arguments) = call.send_arguments() else {
-            let outcome = SendOutcome::Refused(SendRefusal::Malformed);
-            return match self.store.record_send_call(SendCall {
-                tool_call_key: key.clone(),
-                content_sha256,
-                send_outcome: outcome.clone(),
-            }) {
-                Ok(()) => outcome,
-                Err(error) => store_refused(error),
+            let key = &call.tool_call_key;
+            let store_refused = |error: crate::store::StoreError| {
+                eprintln!(
+                    "flow-nexus: send call {} of thread {} refused by the store: {error}",
+                    key.call_id, key.thread_id
+                );
+                Self::refused(SendRefusal::Store)
             };
-        };
-        let Some(now) = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-        else {
-            return Self::refused(SendRefusal::Store);
-        };
-        let request = arguments.request();
-        if let Some(signal_flow::Refusal::Oversized(size)) = request.oversized_refusal(&sender) {
-            let outcome = SendOutcome::Refused(SendRefusal::Oversized(size));
-            return match self.store.record_send_call(SendCall {
-                tool_call_key: key.clone(),
-                content_sha256,
-                send_outcome: outcome.clone(),
-            }) {
-                Ok(()) => outcome,
-                Err(error) => store_refused(error),
+            // The sender is read again for every call, a replayed one included.
+            let root_thread = self.codex_endpoints.root_thread(&key.thread_id);
+            let sender = match self.store.thread_sender(&root_thread) {
+                Ok(Ok(sender)) => sender,
+                Ok(Err(refusal)) => return Self::refused(refusal),
+                Err(error) => return store_refused(error),
             };
-        }
-        // Queued for a metaflow left Awake as an ended flow, the request
-        // wakes it as it would an Asleep one.
-        self.rest_ended_awake(&arguments.target);
-        self.store
-            .queue_send(
-                key,
-                &content_sha256,
-                sender,
-                &arguments.target,
-                request,
-                now,
-            )
-            .unwrap_or_else(store_refused)
+            let content_sha256 = call.content_sha256();
+            match self.store.send_call(key) {
+                Ok(Some(recorded)) if recorded.content_sha256 == content_sha256 => {
+                    return recorded.send_outcome;
+                }
+                Ok(Some(_)) => return Self::refused(SendRefusal::KeyReused),
+                Ok(None) => {}
+                Err(error) => return store_refused(error),
+            }
+            let Some(arguments) = call.send_arguments() else {
+                let outcome = SendOutcome::Refused(SendRefusal::Malformed);
+                return match self.store.record_send_call(SendCall {
+                    tool_call_key: key.clone(),
+                    content_sha256,
+                    send_outcome: outcome.clone(),
+                }) {
+                    Ok(()) => outcome,
+                    Err(error) => store_refused(error),
+                };
+            };
+            let Some(now) = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            else {
+                return Self::refused(SendRefusal::Store);
+            };
+            let request = arguments.request();
+            if let Some(signal_flow::Refusal::Oversized(size)) = request.oversized_refusal(&sender)
+            {
+                let outcome = SendOutcome::Refused(SendRefusal::Oversized(size));
+                return match self.store.record_send_call(SendCall {
+                    tool_call_key: key.clone(),
+                    content_sha256,
+                    send_outcome: outcome.clone(),
+                }) {
+                    Ok(()) => outcome,
+                    Err(error) => store_refused(error),
+                };
+            }
+            // Queued for a metaflow left Awake as an ended flow, the request
+            // wakes it as it would an Asleep one.
+            self.rest_ended_awake(&arguments.target);
+            self.store
+                .queue_send(
+                    key,
+                    &content_sha256,
+                    sender,
+                    &arguments.target,
+                    request,
+                    now,
+                )
+                .unwrap_or_else(store_refused)
+        })();
+        self.journal_send_invocation(&call, outcome)
     }
 }
 
@@ -804,25 +838,30 @@ impl RefusesInterruptedCalls for RunningNexus {
         thread: &str,
         call: Option<ToolCall>,
     ) -> (SendOutcome, bool) {
-        let Some(call) = call.filter(|call| {
-            call.tool_name == SendTool::tool_name() && call.tool_call_key.thread_id == thread
-        }) else {
+        let Some(call) = call else {
             return (Self::refused(SendRefusal::ThreadUnowned), false);
         };
-        match self.store.send_call(&call.tool_call_key) {
-            Ok(Some(recorded)) if recorded.content_sha256 == call.content_sha256() => {
-                (recorded.send_outcome, true)
+        let (outcome, recorded) = if call.tool_name != SendTool::tool_name()
+            || call.tool_call_key.thread_id != thread
+        {
+            (Self::refused(SendRefusal::ThreadUnowned), false)
+        } else {
+            match self.store.send_call(&call.tool_call_key) {
+                Ok(Some(recorded)) if recorded.content_sha256 == call.content_sha256() => {
+                    (recorded.send_outcome, true)
+                }
+                Ok(Some(_)) => (Self::refused(SendRefusal::KeyReused), false),
+                Ok(None) => (Self::refused(SendRefusal::ThreadUnowned), false),
+                Err(error) => {
+                    eprintln!(
+                        "flow-nexus: replayed call {} of thread {thread} refused by the store: {error}",
+                        call.tool_call_key.call_id
+                    );
+                    (Self::refused(SendRefusal::Store), false)
+                }
             }
-            Ok(Some(_)) => (Self::refused(SendRefusal::KeyReused), false),
-            Ok(None) => (Self::refused(SendRefusal::ThreadUnowned), false),
-            Err(error) => {
-                eprintln!(
-                    "flow-nexus: replayed call {} of thread {thread} refused by the store: {error}",
-                    call.tool_call_key.call_id
-                );
-                (Self::refused(SendRefusal::Store), false)
-            }
-        }
+        };
+        (self.journal_send_invocation(&call, outcome), recorded)
     }
 }
 

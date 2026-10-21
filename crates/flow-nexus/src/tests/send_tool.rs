@@ -12,7 +12,7 @@ use crate::generated::send_tool::{
     HandlesSendCall, Queued_Data, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall,
     ToolCallKey,
 };
-use crate::send_tool::{RespondsToSendCalls, SendTool, ServesSendTool};
+use crate::send_tool::{DescribesSendInvocation, RespondsToSendCalls, SendTool, ServesSendTool};
 use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
@@ -825,6 +825,18 @@ fn an_oversized_dynamic_send_is_typed_durable_and_not_queued() {
     );
     assert_eq!(fixture.nexus.handle_send_call(call), outcome);
     assert!(fixture.target_queue().is_empty());
+}
+
+#[test]
+fn each_dynamic_send_invocation_has_a_unique_typed_content_free_journal_event() {
+    let call = tool_call(THREAD_A, "call-audit", "sensitive body text");
+    let outcome = SendOutcome::Refused(SendRefusal::Malformed);
+    let first = call.send_invocation(outcome.clone());
+    let second = call.send_invocation(outcome);
+    assert_ne!(first.send_invocation_id, second.send_invocation_id);
+    assert_eq!(first.tool_call_key, call.tool_call_key);
+    assert_eq!(first.tool_name, SendTool::tool_name());
+    assert!(!format!("{first:?}").contains("sensitive body text"));
 }
 
 /// Starts a witness launch's first turn, its one part, on the connection

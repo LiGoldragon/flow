@@ -2662,7 +2662,7 @@ impl UpgradesFlowFamilies for Engine {
         descriptor: TableDescriptor<crate::generated::send_tool::SendCall>,
     ) -> Result<TableReference<crate::generated::send_tool::SendCall>, StoreError> {
         match self.upgrade_table::<send_call::SendCallV2, crate::generated::send_tool::SendCall>(
-            descriptor,
+            descriptor.clone(),
         ) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),

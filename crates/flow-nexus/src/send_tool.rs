@@ -34,6 +34,7 @@
 //! the answer was written or not; a Nexus that died before it is replaced
 //! by one whose start wakes every metaflow so left.
 
+use crate::caller::NamesRootThread;
 use crate::codex::{
     CodexAdapter, ExchangesOnSubscription, ProxyEvent, ResponderSignal, SelectsCodexEndpoint,
     SubscribesThread, SubscriptionEnd, ThreadConnection, ThreadSubscription,

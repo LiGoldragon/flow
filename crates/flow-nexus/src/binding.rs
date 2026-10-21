@@ -1,14 +1,14 @@
 //! What MetaBindExisting checks of a container and each flow it binds
 //! before any binding reaches the store.
 
-use crate::{RunningNexus, codex::SelectsCodexEndpoint, store::NamesConfiguredModel};
+use crate::{RunningNexus, store::NamesConfiguredModel};
 use meta_signal_flow::{
     FlowBinding, FlowBindingRefusalReason, FlowBindingResult, FlowContainer, ProcessIdentity,
     RefusedFlowBinding,
 };
 use signal_flow::{
     Address, EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, Origin,
-    PowerLevel, RouteReadiness,
+    PowerLevel,
 };
 use std::{
     fs,
@@ -163,19 +163,11 @@ impl VerifiesAdoptedSeat for RunningNexus {
         }
         self.herdr
             .verify_existing_binding(herdr_session_name, binding)?;
-        let endpoint_selection = match binding.harness_kind {
-            signal_flow::HarnessKind::Codex => self
-                .codex_endpoints
-                .endpoint_for(&binding.model_name)
-                .map(|endpoint| {
-                    EndpointSelection::Available(signal_flow::Available_Data {
-                        endpoint_path: endpoint.socket.clone(),
-                        route_readiness: RouteReadiness::Ready,
-                    })
-                })
-                .unwrap_or(EndpointSelection::Unavailable),
-            signal_flow::HarnessKind::Claude => EndpointSelection::Unavailable,
-        };
+        // Configuration names an endpoint that may serve this model; it does
+        // not witness that the existing native flow is connected to it.
+        // Keep endpoint readiness unavailable until a live connection is
+        // independently observed.
+        let endpoint_selection = EndpointSelection::Unavailable;
         Ok(FlowNode {
             flow_id: binding.flow_id.clone(),
             session_id: binding.native_session_id.clone(),
@@ -264,7 +256,9 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
         let claimed_native_identity = self
             .claimed_native_identity(&binding.flow_id, &binding.harness_kind)
             .map_err(|_| FlowBindingRefusalReason::NativeIdentityMismatch)?;
-        if claimed_native_identity != binding.native_session_id {
+        if claimed_native_identity
+            != crate::herdr::launch::HerdrCli::canonical_native_identity(&binding.native_session_id)
+        {
             return Err(FlowBindingRefusalReason::NativeIdentityMismatch);
         }
         let processes = self

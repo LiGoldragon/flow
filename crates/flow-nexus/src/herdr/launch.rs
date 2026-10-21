@@ -580,6 +580,7 @@ impl RunsHerdr for HerdrCli {
 }
 
 pub(crate) trait ClaimsNativeIdentity {
+    fn canonical_native_identity(native_session_id: &str) -> String;
     fn configured_workspace_root(&self) -> Result<&Path, String>;
     fn claimed_native_identity(
         &self,
@@ -600,6 +601,15 @@ pub(crate) trait ClaimsNativeIdentity {
 }
 
 impl ClaimsNativeIdentity for HerdrCli {
+    fn canonical_native_identity(native_session_id: &str) -> String {
+        native_session_id
+            .bytes()
+            .filter(|byte| *byte != b'-')
+            .map(char::from)
+            .collect::<String>()
+            .to_ascii_lowercase()
+    }
+
     fn configured_workspace_root(&self) -> Result<&Path, String> {
         if !self.flows_root.is_absolute()
             || self.flows_root.file_name().and_then(|name| name.to_str()) != Some("flows")
@@ -2297,12 +2307,7 @@ impl ObservesBoundPane for HerdrCli {
             })?;
             observed_native_session(session)?
         };
-        let normalized_identity = native_session_id
-            .bytes()
-            .filter(|byte| *byte != b'-')
-            .map(char::from)
-            .collect::<String>()
-            .to_ascii_lowercase();
+        let normalized_identity = Self::canonical_native_identity(&native_session_id);
         if reserved.is_some()
             && self.reserved_native_session_id(launch).as_deref()
                 != Some(native_session_id.as_str())
@@ -3667,8 +3672,6 @@ printf '%s\n' "$alias"
         let all_calls = fs::read_to_string(root.path().join("calls")).expect("all launch calls");
         assert!(!all_calls.contains("agent prompt"));
     }
-
-
 
     #[test]
     fn narrow_and_normal_claude_panes_require_unwrapped_marker_and_native_identity() {

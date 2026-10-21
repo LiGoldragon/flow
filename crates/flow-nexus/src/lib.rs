@@ -1510,6 +1510,33 @@ mod tests {
             .expect("existing binding model declared");
     }
 
+    fn write_native_identity_claim(
+        fixture: &NexusFixture,
+        binding: &meta_signal_flow::FlowBinding,
+    ) {
+        use crate::herdr::launch::ClaimsNativeIdentity;
+        let harness = binding.harness_kind.expected_harness();
+        let identity =
+            crate::herdr::HerdrCli::canonical_native_identity(&binding.native_session_id);
+        let version = if binding.harness_kind == HarnessKind::Claude {
+            "uuid-version=uuid-v4\n"
+        } else {
+            ""
+        };
+        fs::write(
+            fixture
+                .directory
+                .path()
+                .join("flows")
+                .join(format!(".{}.flow-id", binding.flow_id)),
+            format!(
+                "version=1\nharness={}\nidentity={}\nalias={}\n{}",
+                harness, identity, binding.flow_id, version
+            ),
+        )
+        .expect("native identity claim written");
+    }
+
     /// Herdr and the Codex rollouts as they show `bindings` live, for the
     /// one MetaBindExisting `run` performs: the pane in the snapshot with
     /// its harness, this test process in its foreground, and a Codex session
@@ -1526,15 +1553,7 @@ mod tests {
             .iter()
             .map(|binding| {
                 let harness = binding.harness_kind.expected_harness();
-                let flows_root = fixture.directory.path().join("flows");
-                fs::write(
-                    flows_root.join(format!(".{}.flow-id", binding.flow_id)),
-                    format!(
-                        "version=1\nharness={}\nidentity={}\nalias={}\n",
-                        harness, binding.native_session_id, binding.flow_id
-                    ),
-                )
-                .expect("native identity claim written");
+                write_native_identity_claim(fixture, binding);
                 let mut agent = serde_json::json!({
                     "agent": harness,
                     "agent_status": "idle",
@@ -1608,6 +1627,7 @@ mod tests {
         binding: meta_signal_flow::FlowBinding,
     ) -> meta_signal_flow::FlowBindingResult {
         configure_existing_binding_model(fixture);
+        write_native_identity_claim(fixture, &binding);
         let socket_path = fixture.directory.path().join("herdr-verify.sock");
         let _ = fs::remove_file(&socket_path);
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
@@ -1671,14 +1691,14 @@ mod tests {
             path: fixture.snapshot_program.clone(),
         }
         .install("#!/bin/sh\nexit 64\n");
-        let codex = existing_binding("codex-unread", "pane-1");
+        let codex = existing_binding("b001", "pane-1");
         assert_eq!(
             refused_for(&bound_once(&fixture, codex)),
             Some(Reason::HerdrUnreadable)
         );
 
         // The pane is not in the session, or another harness runs in it.
-        let absent = existing_binding("codex-absent", "pane-2");
+        let absent = existing_binding("b002", "pane-2");
         let mut elsewhere = shown(&absent);
         elsewhere["pane_id"] = serde_json::Value::String("pane-9".into());
         herdr_world(&fixture, vec![elsewhere], me);
@@ -1695,7 +1715,7 @@ mod tests {
         );
 
         // The pane runs another process.
-        let other_process = existing_binding("codex-other-process", "pane-3");
+        let other_process = existing_binding("b003", "pane-3");
         herdr_world(&fixture, vec![shown(&other_process)], 1);
         assert_eq!(
             refused_for(&bound_once(&fixture, other_process)),
@@ -1703,7 +1723,7 @@ mod tests {
         );
 
         // Herdr reports another session.
-        let mismatched = existing_binding("codex-mismatched", "pane-4");
+        let mismatched = existing_binding("b004", "pane-4");
         let mut reporting = shown(&mismatched);
         reporting["agent_session"] = serde_json::json!({
             "source":"herdr:codex","agent":"codex","kind":"id","value":"native-someone-else"
@@ -1715,7 +1735,7 @@ mod tests {
         );
 
         // A Codex pane reporting no session, and no rollout names it.
-        let unproven = existing_binding("codex-unproven", "pane-5");
+        let unproven = existing_binding("b005", "pane-5");
         herdr_world(&fixture, vec![shown(&unproven)], me);
         assert_eq!(
             refused_for(&bound_once(&fixture, unproven.clone())),
@@ -1726,7 +1746,7 @@ mod tests {
         let rollouts = fixture.directory.path().join("native-transcripts/codex");
         fs::create_dir_all(&rollouts).unwrap();
         fs::write(
-            rollouts.join("rollout-native-codex-unproven.jsonl"),
+            rollouts.join(format!("rollout-{}.jsonl", unproven.native_session_id)),
             "{\"type\":\"session_meta\",\"payload\":{\"id\":\"another-thread\"}}\n",
         )
         .unwrap();
@@ -1736,15 +1756,19 @@ mod tests {
         );
         // The rollout naming it proves it.
         fs::write(
-            rollouts.join("rollout-native-codex-unproven.jsonl"),
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-codex-unproven\"}}\n",
+            rollouts.join(format!("rollout-{}.jsonl", unproven.native_session_id)),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\"}}}}\n",
+                unproven.native_session_id
+            ),
         )
         .unwrap();
         assert_eq!(refused_for(&bound_once(&fixture, unproven)), None);
 
         // A Claude pane must report its session, and that session.
-        let mut claude = existing_binding("claude-quiet", "pane-6");
+        let mut claude = existing_binding("b006", "pane-6");
         claude.harness_kind = HarnessKind::Claude;
+        claude.native_session_id = "01a0b22ce24f4452994064490878680f".into();
         herdr_world(&fixture, vec![shown(&claude)], me);
         assert_eq!(
             refused_for(&bound_once(&fixture, claude.clone())),
@@ -1752,18 +1776,13 @@ mod tests {
         );
         let mut reporting = shown(&claude);
         reporting["agent_session"] = serde_json::json!({
-            "source":"herdr:claude","agent":"claude","kind":"id","value":"native-claude-quiet"
+            "source":"herdr:claude","agent":"claude","kind":"id","value":claude.native_session_id
         });
         herdr_world(&fixture, vec![reporting], me);
         assert_eq!(refused_for(&bound_once(&fixture, claude)), None);
 
         // Nothing refused was stored.
-        for refused in [
-            "codex-unread",
-            "codex-absent",
-            "codex-other-process",
-            "codex-mismatched",
-        ] {
+        for refused in ["b001", "b002", "b003", "b004"] {
             assert!(matches!(
                 fixture
                     .nexus
@@ -2578,7 +2597,8 @@ mod tests {
         let socket_path = fixture.directory.path().join("herdr.sock");
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let container = flow_container(&socket_path);
-        let accepted = existing_binding("mind-live", "pane-1");
+        let mut accepted = existing_binding("a001", "pane-1");
+        accepted.native_session_id = "01a0b22c-e24f-7452-9940-64490878680f".into();
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
             topic: "message".into(),
@@ -2596,21 +2616,22 @@ mod tests {
                     },
                 ))
         });
-        let meta_signal_flow::Response::BoundExisting(bound) = response else {
-            panic!("valid container must return the one-seat result")
+        let bound = match response {
+            meta_signal_flow::Response::BoundExisting(bound) => bound,
+            other => panic!("valid container returned {other:?}"),
         };
         assert_eq!(bound.flow_container, container);
         assert!(matches!(
             &bound.flow_binding_result,
             meta_signal_flow::FlowBindingResult::Bound(binding)
-                if binding.flow_id == "mind-live"
+                if binding.flow_id == "a001"
                     && binding.flow_lifecycle
                         == meta_signal_flow::FlowLifecycle::AdoptedActive
         ));
 
         let Response::RecipientResolved(node) = fixture
             .nexus
-            .dispatch(Query::ResolveRecipient("mind-live".into()))
+            .dispatch(Query::ResolveRecipient("a001".into()))
         else {
             panic!("accepted existing flow must resolve")
         };
@@ -2645,7 +2666,7 @@ mod tests {
                             topic: "message".into(),
                             layer: Layer::Secondary,
                         },
-                        flow_binding: existing_binding("not-imported", "pane-1"),
+                        flow_binding: existing_binding("a002", "pane-1"),
                     }
                 ),),
             meta_signal_flow::Response::BindExistingRejected(
@@ -2655,7 +2676,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .nexus
-                .dispatch(Query::ResolveRecipient("not-imported".into())),
+                .dispatch(Query::ResolveRecipient("a002".into())),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
@@ -2667,7 +2688,7 @@ mod tests {
         let fixture = NexusFixture::new();
         let socket_path = fixture.directory.path().join("herdr-owner.sock");
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
-        let binding = existing_binding("owner-mismatch", "pane-1");
+        let binding = existing_binding("a003", "pane-1");
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
             topic: "message".into(),
@@ -2695,10 +2716,77 @@ mod tests {
         assert!(matches!(
             fixture
                 .nexus
-                .dispatch(Query::ResolveRecipient("owner-mismatch".into())),
+                .dispatch(Query::ResolveRecipient("a003".into())),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
+        ));
+    }
+
+    #[test]
+    fn native_claim_compares_the_canonical_identity_of_a_uuid_session() {
+        let fixture = NexusFixture::new();
+        let socket_path = fixture.directory.path().join("herdr-canonical-id.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let binding = existing_binding("a008", "pane-1");
+        let response = with_bound_world(&fixture, &[&binding], || {
+            let claim = fixture.directory.path().join("flows/.a008.flow-id");
+            fs::write(
+                claim,
+                "version=1\nharness=codex\nidentity=ffffffffffffffffffffffffffffffff\nalias=a008\n",
+            )
+            .expect("mismatched canonical claim written");
+            fixture.nexus.dispatch_meta_from(
+                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                    flow_container: flow_container(&socket_path),
+                    address: signal_flow::Address {
+                        aspect: Aspect::Mind,
+                        topic: "core".into(),
+                        layer: Layer::Secondary,
+                    },
+                    flow_binding: binding.clone(),
+                }),
+                Some(adoption_resolver()),
+            )
+        });
+        assert!(matches!(
+            response,
+            meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
+                flow_binding_result: meta_signal_flow::FlowBindingResult::Refused(
+                    meta_signal_flow::RefusedFlowBinding {
+                        flow_binding_refusal_reason:
+                            meta_signal_flow::FlowBindingRefusalReason::NativeIdentityMismatch,
+                        ..
+                    }
+                ),
+                ..
+            })
+        ));
+        let accepted = existing_binding("a009", "pane-2");
+        let accepted = meta_signal_flow::FlowBinding {
+            native_session_id: "01a0b22c-e24f-7452-9940-64490878680f".into(),
+            ..accepted
+        };
+        let response = with_bound_world(&fixture, &[&accepted], || {
+            fixture.nexus.dispatch_meta_from(
+                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                    flow_container: flow_container(&socket_path),
+                    address: signal_flow::Address {
+                        aspect: Aspect::Mind,
+                        topic: "core".into(),
+                        layer: Layer::Secondary,
+                    },
+                    flow_binding: accepted.clone(),
+                }),
+                Some(adoption_resolver()),
+            )
+        });
+        assert!(matches!(
+            response,
+            meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
+                flow_binding_result: meta_signal_flow::FlowBindingResult::Bound(_),
+                ..
+            })
         ));
     }
 
@@ -2748,7 +2836,7 @@ mod tests {
 
         let socket_path = fixture.directory.path().join("herdr-unknown-owner.sock");
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
-        let binding = existing_binding("replacement-owner", "pane-1");
+        let binding = existing_binding("a004", "pane-1");
         let response = with_bound_world(&fixture, &[&binding], || {
             fixture.nexus.dispatch_meta_from(
                 meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
@@ -2779,7 +2867,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .nexus
-                .dispatch(Query::ResolveRecipient("replacement-owner".into())),
+                .dispatch(Query::ResolveRecipient("a004".into())),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
@@ -2791,7 +2879,7 @@ mod tests {
         use crate::store::ManagesMetaflowState;
         use crate::store::metaflow::SeedsMetaflow;
         let fixture = NexusFixture::new();
-        let binding = existing_binding("mind-live", "pane-1");
+        let binding = existing_binding("a001", "pane-1");
         let address = signal_flow::Address {
             aspect: binding.aspect.clone(),
             topic: "core".into(),
@@ -2840,7 +2928,7 @@ mod tests {
             topic: "core".into(),
             layer: Layer::Secondary,
         };
-        let incumbent = existing_binding("incumbent-live", "pane-incumbent");
+        let incumbent = existing_binding("a005", "pane-incumbent");
         let incumbent_result = with_bound_world(&fixture, &[&incumbent], || {
             fixture.nexus.dispatch_meta_from(
                 meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
@@ -2860,7 +2948,7 @@ mod tests {
         ));
         let original = fixture.nexus.store.list_metaflows().unwrap();
 
-        let challenger = existing_binding("challenger-live", "pane-challenger");
+        let challenger = existing_binding("a006", "pane-challenger");
         let response = with_bound_world(&fixture, &[&challenger], || {
             fixture.nexus.dispatch_meta_from(
                 meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
@@ -2888,7 +2976,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .nexus
-                .dispatch(Query::ResolveRecipient("challenger-live".into())),
+                .dispatch(Query::ResolveRecipient("a006".into())),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
@@ -2901,7 +2989,7 @@ mod tests {
         let fixture = NexusFixture::new();
         let socket_path = fixture.directory.path().join("herdr-role-mismatch.sock");
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
-        let binding = existing_binding("wrong-role", "pane-1");
+        let binding = existing_binding("a007", "pane-1");
         let response = with_bound_world(&fixture, &[&binding], || {
             fixture.nexus.dispatch_meta_from(
                 meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
@@ -2932,7 +3020,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .nexus
-                .dispatch(Query::ResolveRecipient("wrong-role".into())),
+                .dispatch(Query::ResolveRecipient("a007".into())),
             Response::RecipientResolutionRejected(
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
@@ -3091,7 +3179,6 @@ mod tests {
     /// The binding of the registered 908786 row (a RegisterFlow row, Active
     /// and roleless, as 5f38bc is live) under a newer agent name.
     fn binding_of_registered_row(fixture: &NexusFixture) -> meta_signal_flow::FlowBinding {
-        let node = fixture.node();
         let mut binding = existing_binding("908786", "w1:p3");
         binding.native_session_id = node.session_id;
         binding.herdr_terminal_id = "term_65bb7f87270cb3".into();
@@ -4490,11 +4577,14 @@ mod tests {
                 Some(adoption_resolver()),
             )
         });
-        assert!(matches!(
-            response,
-            meta_signal_flow::Response::BoundExisting(bound)
-                if matches!(bound.flow_binding_result, meta_signal_flow::FlowBindingResult::Bound(_))
-        ));
+        assert!(
+            matches!(
+                &response,
+                meta_signal_flow::Response::BoundExisting(bound)
+                    if matches!(bound.flow_binding_result, meta_signal_flow::FlowBindingResult::Bound(_))
+            ),
+            "{response:?}"
+        );
     }
 
     fn codex_agent_in(pane: &str, terminal: &str) -> serde_json::Value {
@@ -4513,7 +4603,7 @@ mod tests {
 
     fn mind_live() -> Caller {
         Caller {
-            flow_id: "mind-live".into(),
+            flow_id: "a001".into(),
             aspect: Aspect::Mind,
             power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
@@ -4592,7 +4682,7 @@ mod tests {
     #[test]
     fn a_caller_bound_in_the_registry_resolves_with_its_role() {
         let fixture = NexusFixture::new();
-        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
 
         assert_eq!(
@@ -4602,7 +4692,7 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .resolve_caller(pane("pane-1"), Some("mind-live".into())),
+                .resolve_caller(pane("pane-1"), Some("a001".into())),
             Response::CallerResolved(mind_live())
         );
     }
@@ -4610,7 +4700,7 @@ mod tests {
     #[test]
     fn a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors() {
         let fixture = NexusFixture::new();
-        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
         // The first sleeper carries the pane mark itself; the second shell
         // stays the parent of a sleeper whose environment drops it. Neither
@@ -4675,7 +4765,7 @@ mod tests {
             SendRequest, SentBy, Unknown_Data,
         };
         let fixture = NexusFixture::new();
-        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
         let address = |aspect: Aspect, topic: &str, layer: Layer| Address {
             aspect,
@@ -4687,7 +4777,7 @@ mod tests {
         let field = address(Aspect::Field, "core", Layer::Secondary);
         let elsewhere = address(Aspect::Psyche, "flow", Layer::Secondary);
         for (held, state) in [
-            (sender.clone(), flow_ethos::State::Awake("mind-live".into())),
+            (sender.clone(), flow_ethos::State::Awake("a001".into())),
             (sibling.clone(), flow_ethos::State::Asleep),
             (field.clone(), flow_ethos::State::Asleep),
             (elsewhere.clone(), flow_ethos::State::Asleep),
@@ -4837,14 +4927,14 @@ mod tests {
         use crate::generated::starter::DerivesOrigin;
         use crate::store::ReadsFlowRows;
         let fixture = NexusFixture::new();
-        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
         let bound = MarkedProcess::spawn("sleep", &["30"], "pane-1");
         let unbound = MarkedProcess::spawn("sleep", &["30"], "pane-9");
         let session_id = fixture
             .nexus
             .store
-            .flow_node("mind-live")
+            .flow_node("a001")
             .unwrap()
             .expect("the bound flow's row")
             .session_id;
@@ -4853,7 +4943,7 @@ mod tests {
                 process_id: bound.0.id(),
             })),
             Origin::Flow(FlowOrigin {
-                flow_id: "mind-live".into(),
+                flow_id: "a001".into(),
                 session_id,
             })
         );
@@ -4875,7 +4965,7 @@ mod tests {
     #[test]
     fn a_pane_id_whose_herdr_server_serves_two_sessions_names_no_pane() {
         let fixture = NexusFixture::new();
-        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
         let marked = MarkedProcess::spawn("sleep", &["30"], "pane-1");
         let marked_process = CallerProcess {
@@ -4917,7 +5007,7 @@ mod tests {
     #[test]
     fn a_pane_id_names_the_session_its_server_serves_whatever_herdr_path_names() {
         let fixture = NexusFixture::new();
-        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
         let server = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
         let herdr_cli = fs::canonicalize(&fixture.snapshot_program).unwrap();
@@ -4952,7 +5042,7 @@ mod tests {
     #[test]
     fn an_unbound_peer_is_caller_unknown() {
         let fixture = NexusFixture::new();
-        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![
             codex_agent_in("pane-1", "terminal-pane-1"),
             codex_agent_in("pane-9", "terminal-pane-9"),
@@ -4975,7 +5065,7 @@ mod tests {
     #[test]
     fn a_claimed_flow_id_that_differs_is_caller_mismatch() {
         let fixture = NexusFixture::new();
-        bind_existing_caller(&fixture, "mind-live", "pane-1");
+        bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
         assert_eq!(
             fixture

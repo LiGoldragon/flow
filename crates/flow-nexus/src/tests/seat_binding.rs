@@ -59,7 +59,7 @@ impl NexusFixture {
             path: helper_root.join("flow-id"),
         }
         .install(&format!(
-            "#!/bin/sh\n[ \"$1\" = codex ] && [ \"$CODEX_SESSION_ID\" = '{ROOT}' ] || exit 2\nprintf '877549\\n'\n"
+            "#!/bin/sh\n[ \"$1\" = codex ] && [ \"$CODEX_SESSION_ID\" = '{ROOT}' ] || exit 2\nidentity=$(printf '%s' \"$CODEX_SESSION_ID\" | tr -d '-')\nprintf 'version=1\\nharness=codex\\nidentity=%s\\nalias=877549\\n' \"$identity\" > \"$3/.877549.flow-id\"\nprintf '877549\\n'\n"
         ));
     }
 }
@@ -92,6 +92,17 @@ fn command_of(thread: &str) -> (SpawnedProcess, signal_flow::Process) {
 #[test]
 fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
     let fixture = NexusFixture::new();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
+            meta_signal_flow::ConfigureModel {
+                layer: Layer::Secondary,
+                aspect: Aspect::Mind,
+                native: "gpt-6-sol".into(),
+            },
+        ]))
+        .unwrap();
     // One running session: the fixture's Herdr shows the same agents in
     // every session it is asked for.
     fixture.list_herdr_sessions(&[(

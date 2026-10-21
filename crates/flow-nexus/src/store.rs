@@ -4237,9 +4237,13 @@ impl AppliesFlowQuery for FlowStore {
             | Query::Deliver(_)
             | Query::Release(_) => Ok(Response::Refused(signal_flow::Refusal::NotMessage)),
             // The sender is read from the socket, which the store never sees.
-            Query::Send(_) | Query::DeliverAll(_) | Query::BindSeat(_) => Ok(Response::Refused(
-                signal_flow::Refusal::Unidentified(signal_flow::Process { pid: 0, started: 0 }),
-            )),
+            Query::Send(_)
+            | Query::DeliverAll(_)
+            | Query::BindSeat(_)
+            | Query::ObserveSends(_)
+            | Query::ObserveSender(_) => Ok(Response::Refused(signal_flow::Refusal::Unidentified(
+                signal_flow::Process { pid: 0, started: 0 },
+            ))),
             Query::Launch(_) => Ok(Response::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
@@ -4284,6 +4288,8 @@ impl ReservesPendingStart for FlowStore {
             | Query::Replace(_)
             | Query::LaunchStatus(_)
             | Query::Observe(_)
+            | Query::ObserveSends(_)
+            | Query::ObserveSender(_)
             | Query::ResolveCaller(_)
             | Query::Report(_)
             | Query::Bind(_)
@@ -6511,7 +6517,10 @@ pub(crate) trait ReadsFlowMemory {
                 && identity.schema_hash() == schema_hash
         };
         let predecessors: &[(&str, SchemaHash)] = match table_key {
-            "flow_nexus_send_outcomes" => &[(send_outcome::OUTCOME_FAMILY, send_outcome::StoredSendOutcomeV1::schema_hash())],
+            "flow_nexus_send_outcomes" => &[(
+                send_outcome::OUTCOME_FAMILY,
+                send_outcome::StoredSendOutcomeV1::schema_hash(),
+            )],
             "flow_nexus_flows" => &[("flow-nexus-flow", FlowRecordV5::schema_hash())],
             "flow_nexus_launch_outcomes" => &[
                 (

@@ -160,7 +160,10 @@ impl Dispatches for RunningNexus {
             Query::Replace(profile) => self.replace(profile, origin),
             // A direct dispatch has no calling process: nothing sends or
             // binds from it, and its Launch starts as an Unbound one would.
-            Query::DeliverAll(_) | Query::BindSeat(_) => {
+            Query::DeliverAll(_)
+            | Query::BindSeat(_)
+            | Query::ObserveSends(_)
+            | Query::ObserveSender(_) => {
                 Response::Refused(signal_flow::Refusal::Unidentified(signal_flow::Process {
                     pid: 0,
                     started: 0,

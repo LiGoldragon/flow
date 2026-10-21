@@ -1682,7 +1682,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     else {
         panic!("the identified sender locks the recipient")
     };
-    let oversized = Request::Order("x".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES));
+    let oversized = Request::Order("x".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES + 1));
     let expected_size = oversized.native_prompt_bytes(&sender_address);
     let refusal = Response::Refused(signal_flow::Refusal::Oversized(
         signal_flow::SendPayloadSize {

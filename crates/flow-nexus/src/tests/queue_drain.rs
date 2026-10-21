@@ -354,12 +354,20 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
         .store
         .read_logical_delivery_snapshots(&first_sender, None)
         .unwrap();
-    assert!(matches!(
-        settled.delivery_snapshot_vector.as_slice(),
-        [snapshot]
-            if snapshot.logical_delivery_id == first.logical_delivery_id
-                && matches!(&snapshot.delivery_state, signal_flow::DeliveryState::Delivered(_))
-    ));
+    assert!(settled.delivery_snapshot_vector.iter().any(|snapshot| {
+        snapshot.logical_delivery_id == first.logical_delivery_id
+            && matches!(
+                &snapshot.delivery_state,
+                signal_flow::DeliveryState::Delivered(_)
+            )
+    }));
+    assert!(settled.delivery_snapshot_vector.iter().any(|snapshot| {
+        snapshot.logical_delivery_id == second.logical_delivery_id
+            && !matches!(
+                &snapshot.delivery_state,
+                signal_flow::DeliveryState::Delivered(_)
+            )
+    }));
     report(
         &fixture,
         submitted(CLAUDE_SESSION, "prompt-first", &typed_text(&first)),

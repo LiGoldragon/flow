@@ -751,7 +751,7 @@ mod tests {
             Response::Refused(Refusal::Unknown(_))
         ));
         assert!(fixture.store.list_metaflows().unwrap()[0].queue.is_empty());
-        assert_eq!(
+        assert!(matches!(
             fixture
                 .store
                 .queue_metaflow(
@@ -764,7 +764,7 @@ mod tests {
                 )
                 .unwrap(),
             Response::SendAccepted(_)
-        );
+        ));
         // Queued with the Sender its Lock named.
         assert_eq!(
             fixture.store.list_metaflows().unwrap()[0].queue[0].sent_by,
@@ -787,7 +787,8 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock,
-                        request: Request::Notice("duplicate".into())
+                        delivery: flow_ethos::Delivery::Queue,
+                        message: flow_ethos::Message::Soft(Request::Notice("duplicate".into()))
                     },
                     102
                 )
@@ -832,7 +833,8 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock,
-                        request: Request::Notice("expired".into())
+                        delivery: flow_ethos::Delivery::Queue,
+                        message: flow_ethos::Message::Soft(Request::Notice("expired".into()))
                     },
                     40
                 )

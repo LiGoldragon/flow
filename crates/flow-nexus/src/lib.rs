@@ -1378,7 +1378,7 @@ mod tests {
             records
                 .iter()
                 .filter(|record| matches!(
-                    record.ordinary_send_outcome,
+                    &record.ordinary_send_outcome,
                     OrdinarySendOutcome::Accepted(acceptance)
                         if matches!(acceptance.delivery_state, signal_flow::DeliveryState::Queued)
                 ))

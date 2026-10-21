@@ -7458,6 +7458,7 @@ impl ReadsFlowMemory for FlowStore {}
 mod tests {
     use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
     use std::fs;
+    use std::os::unix::fs::MetadataExt;
     #[test]
     fn created_pane_survives_reopen_and_a_second_failed_binding_is_orphaned() {
         let fixture = StoreFixture::new();
@@ -7580,6 +7581,7 @@ mod tests {
             NativeOwnerState::Unknown
         );
     }
+
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
     use super::{FlowRecordV5, LaunchedRecordV2, OriginClueBeforeOrigin, ReplacedRecordV2};
     use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
@@ -7596,12 +7598,12 @@ mod tests {
         SchemaVersion, TableDescriptor, TableName,
     };
     use signal_flow::{
-        Aspect, BindingRefusal, ComposedLaunch, FirstPromptPayload, FlowOrigin, HarnessKind,
-        HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile,
-        NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt, NativeTranscriptAbsence,
-        NativeTranscriptBoundary, NativeTranscriptCursor, Origin, PowerLevel, PromptDeliveryIntent,
-        PromptDeliveryResult, Query, RegistrationAcknowledgement, ReplaceRejection, Response,
-        Restarted, StartRejection, StopRejection, TargetReceiptRequest,
+        Address, Aspect, BindingRefusal, Caller, ComposedLaunch, FirstPromptPayload, FlowOrigin,
+        HarnessKind, HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile,
+        Layer, NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt,
+        NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, Origin,
+        PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
+        ReplaceRejection, Response, Restarted, StartRejection, StopRejection, TargetReceiptRequest,
     };
 
     struct StoreFixture {

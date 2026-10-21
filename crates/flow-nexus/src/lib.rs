@@ -55,10 +55,7 @@ pub mod title;
 pub mod values;
 pub mod waking;
 
-use binding::{
-    ChecksFlowBinding, ChecksFlowContainer, ChecksProcessIdentity, RefusesBinding,
-    VerifiesAdoptedSeat, VerifiesExistingBinding,
-};
+use binding::{ChecksFlowBinding, ChecksFlowContainer, ChecksProcessIdentity, VerifiesAdoptedSeat};
 use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchComposer, OpensLaunchComposer};
@@ -75,11 +72,10 @@ use reporting::RecordsReports;
 use send_tool::ServesLaunchCalls;
 use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
 use signal_flow::{
-    EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, ObserveSelection,
-    Origin, Process, Query, Response, RestartRejection,
+    EndpointSelection, FlowLifecycle, FlowNode, HerdrRouteSelection, ObserveSelection, Origin,
+    Process, Query, Response, RestartRejection,
 };
 use std::{
-    collections::HashSet,
     fs,
     io::{Read, Write},
     os::unix::{
@@ -95,7 +91,7 @@ use std::{
 };
 use store::{
     AppliesFlowQuery, AuthorizesFlowRestart, FlowStore, NamesLiveFlow, OpensFlowStore,
-    ReadsFlowRows, RecordsLaunchOutcome, RegistersExistingFlow, RegistersFlowIdentity,
+    ReadsFlowRows, RegistersExistingFlow, RegistersFlowIdentity,
 };
 use waking::SettlesStopsAtConfirmation;
 use waking::SleepsAndWakesSeats;
@@ -1204,14 +1200,14 @@ mod tests {
     use signal_flow::{
         Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
         HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile,
-        LaunchStatusOutcome, NativeLaunchBinding, NativeLaunchIntent, NativeTranscriptAbsence,
-        NativeTranscriptBoundary, Origin, PowerLevel, PromptDeliveryIntent, PromptDeliveryResult,
-        Query, RegistrationAcknowledgement, Response, StartRejection,
+        LaunchStatusOutcome, Layer, NativeLaunchBinding, NativeLaunchIntent,
+        NativeTranscriptAbsence, NativeTranscriptBoundary, Origin, PowerLevel,
+        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
+        StartRejection,
     };
     use std::{
         collections::BTreeSet,
         fs,
-        io::Write,
         os::unix::fs::MetadataExt,
         os::unix::net::UnixListener,
         path::{Path, PathBuf},
@@ -2680,6 +2676,178 @@ mod tests {
                 signal_flow::RecipientResolutionRejection::UnknownFlow
             )
         ));
+    }
+
+    #[test]
+    fn adoption_of_a_historical_owner_without_process_proof_refuses_without_touching_queue() {
+        use crate::store::ManagesMetaflowState;
+        use crate::store::metaflow::SeedsMetaflow;
+        let fixture = NexusFixture::new();
+        let address = signal_flow::Address {
+            aspect: Aspect::Mind,
+            topic: "message".into(),
+            layer: Layer::Secondary,
+        };
+        let mut previous = fixture.node();
+        previous.flow_id = "historical-owner".into();
+        previous.session_id = "historical-session".into();
+        previous.flow_lifecycle = FlowLifecycle::Active;
+        let previous_role = Caller {
+            flow_id: previous.flow_id.clone(),
+            aspect: Aspect::Mind,
+            power_level: PowerLevel::Medium,
+            model_name: "gpt-sol".into(),
+        };
+        fixture
+            .nexus
+            .store
+            .register_flow_in_role(previous, previous_role)
+            .expect("legacy owner row persists without native proof");
+        let original = signal_flow::Metaflow {
+            address: address.clone(),
+            state: flow_ethos::State::Awake("historical-owner".into()),
+            past: vec![],
+            queue: vec![signal_flow::QueueEntry {
+                logical_delivery_id: "retained-logical-id".into(),
+                sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
+                    aspect: Aspect::Field,
+                    topic: "core".into(),
+                    layer: Layer::Tertiary,
+                }),
+                delivery: signal_flow::Delivery::Queue,
+                message: signal_flow::Message::Soft(signal_flow::Request::Order(
+                    "leave queued".into(),
+                )),
+            }],
+        };
+        fixture.nexus.store.seed_metaflow(original.clone());
+
+        let socket_path = fixture.directory.path().join("herdr-unknown-owner.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let binding = existing_binding("replacement-owner", "pane-1");
+        let response = with_bound_world(&fixture, &[&binding], || {
+            fixture.nexus.dispatch_meta_from(
+                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                    flow_container: flow_container(&socket_path),
+                    address: address.clone(),
+                    flow_binding: binding,
+                }),
+                Some(adoption_resolver()),
+            )
+        });
+        assert!(matches!(
+            response,
+            meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
+                flow_binding_result: meta_signal_flow::FlowBindingResult::Refused(
+                    meta_signal_flow::RefusedFlowBinding {
+                        flow_binding_refusal_reason:
+                            meta_signal_flow::FlowBindingRefusalReason::AddressOwnerUnknown,
+                        ..
+                    }
+                ),
+                ..
+            })
+        ));
+        assert_eq!(
+            fixture.nexus.store.list_metaflows().unwrap(),
+            vec![original]
+        );
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("replacement-owner".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::UnknownFlow
+            )
+        ));
+    }
+
+    #[test]
+    fn same_verified_owner_can_refresh_without_changing_queued_logical_work() {
+        use crate::store::ManagesMetaflowState;
+        use crate::store::metaflow::SeedsMetaflow;
+        let fixture = NexusFixture::new();
+        let binding = existing_binding("mind-live", "pane-1");
+        let address = signal_flow::Address {
+            aspect: binding.aspect.clone(),
+            topic: "core".into(),
+            layer: Layer::Secondary,
+        };
+        let original_queue = vec![signal_flow::QueueEntry {
+            logical_delivery_id: "retained-logical-id".into(),
+            sent_by: signal_flow::SentBy::Sender(signal_flow::Address {
+                aspect: Aspect::Field,
+                topic: "core".into(),
+                layer: Layer::Tertiary,
+            }),
+            delivery: signal_flow::Delivery::Queue,
+            message: signal_flow::Message::Soft(signal_flow::Request::Order("leave queued".into())),
+        }];
+        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            address,
+            state: flow_ethos::State::Asleep,
+            past: vec![],
+            queue: original_queue.clone(),
+        });
+        let first = bound_once(&fixture, binding.clone());
+        let second = bound_once(&fixture, binding);
+        assert!(matches!(
+            first,
+            meta_signal_flow::FlowBindingResult::Bound(_)
+        ));
+        assert!(matches!(
+            second,
+            meta_signal_flow::FlowBindingResult::Bound(_)
+        ));
+        assert_eq!(
+            fixture.nexus.store.list_metaflows().unwrap()[0].queue,
+            original_queue
+        );
+    }
+
+    #[test]
+    fn adoption_refuses_an_address_whose_role_does_not_match_without_partial_rows() {
+        use crate::store::ManagesMetaflowState;
+        let fixture = NexusFixture::new();
+        let socket_path = fixture.directory.path().join("herdr-role-mismatch.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let binding = existing_binding("wrong-role", "pane-1");
+        let response = with_bound_world(&fixture, &[&binding], || {
+            fixture.nexus.dispatch_meta_from(
+                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                    flow_container: flow_container(&socket_path),
+                    address: signal_flow::Address {
+                        aspect: Aspect::Mind,
+                        topic: "message".into(),
+                        layer: Layer::Primary,
+                    },
+                    flow_binding: binding,
+                }),
+                Some(adoption_resolver()),
+            )
+        });
+        assert!(matches!(
+            response,
+            meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
+                flow_binding_result: meta_signal_flow::FlowBindingResult::Refused(
+                    meta_signal_flow::RefusedFlowBinding {
+                        flow_binding_refusal_reason:
+                            meta_signal_flow::FlowBindingRefusalReason::RoleMismatch,
+                        ..
+                    }
+                ),
+                ..
+            })
+        ));
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("wrong-role".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::UnknownFlow
+            )
+        ));
+        assert!(fixture.nexus.store.list_metaflows().unwrap().is_empty());
     }
 
     /// A Codex pane as Herdr 0.8.2 reports a rested imported Codex flow: done,

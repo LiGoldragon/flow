@@ -197,6 +197,7 @@ mod tests {
     #[test]
     fn send_outcome_counter_and_records_survive_reopen() {
         let fixture = tempfile::tempdir().expect("temporary store path");
+        let store_path = fixture.path().join("outcomes.sema");
         let first = SendOutcomeRecord {
             send_outcome_id: "send-outcome-0000000000000001".into(),
             process_option: None,
@@ -208,7 +209,7 @@ mod tests {
         {
             let descriptors = SendOutcomeTables::descriptors();
             let mut engine = Engine::open(
-                EngineOpen::new(fixture.path(), SchemaVersion::new(1))
+                EngineOpen::new(&store_path, SchemaVersion::new(1))
                     .with_family(&descriptors.counter)
                     .with_family(&descriptors.outcomes),
             )
@@ -229,7 +230,7 @@ mod tests {
         {
             let descriptors = SendOutcomeTables::descriptors();
             let mut engine = Engine::open(
-                EngineOpen::new(fixture.path(), SchemaVersion::new(1))
+                EngineOpen::new(&store_path, SchemaVersion::new(1))
                     .with_family(&descriptors.counter)
                     .with_family(&descriptors.outcomes),
             )

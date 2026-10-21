@@ -163,7 +163,6 @@ impl From<Response> for SendAnswer {
 pub trait SendsRequests {
     /// Answers a Send from `peer`, under the dispatch gate.
     fn send_request(&self, send: Send_Data, peer: Option<&Process>) -> SendAnswer;
-    fn send_request_inner(&self, send: Send_Data, peer: Option<&Process>) -> SendAnswer;
     /// Delivers every durable request currently queued at `address`.
     fn deliver_all(&self, address: Address, peer: Option<&Process>) -> Response;
     /// The flow the metaflow at `address` is Awake as, when it is live.
@@ -189,7 +188,76 @@ impl SendsRequests for RunningNexus {
                 }),
         };
         let sender = peer.and_then(|peer| self.sending_address(peer).ok());
-        let answer = self.send_request_inner(send, peer);
+        let answer = (|| -> SendAnswer {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(peer) = peer else {
+                return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }))
+                    .into();
+            };
+            let Some(now) = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+            else {
+                return Response::Refused(Refusal::Store(
+                    "clock is outside the lease range".into(),
+                ))
+                .into();
+            };
+            let sender = match self.sending_address(peer) {
+                Ok(sender) => sender,
+                Err(refusal) => return (*refusal).into(),
+            };
+            let request = match &send.message {
+                Message::HardAbrupt(request)
+                | Message::MiddleAbrupt(request)
+                | Message::Soft(request) => request,
+            };
+            if let Some(refusal) = request.oversized_refusal(&sender) {
+                return Response::Refused(refusal).into();
+            }
+            let delivery = send.delivery;
+            let recipient = match send.recipient {
+                Recipient::Address(address) => address,
+                Recipient::Up => match sender.layer.above() {
+                    Some(layer) => Address {
+                        aspect: sender.aspect.clone(),
+                        topic: sender.topic.clone(),
+                        layer,
+                    },
+                    None => return Response::Refused(Refusal::NoneAbove).into(),
+                },
+            };
+            // A metaflow left Awake as an ended flow is Asleep for what follows.
+            self.rest_ended_awake(&recipient);
+            let (abrupt, request) = match send.message {
+                Message::HardAbrupt(request) => (Some(true), request),
+                Message::MiddleAbrupt(request) => (Some(false), request),
+                Message::Soft(request) => (None, request),
+            };
+            if let Some(hard) = abrupt
+                && let Some(flow_id) = self.live_awake_flow(&recipient)
+                && let Some(response) = self.deliver_abruptly(&sender, &flow_id, hard, &request)
+            {
+                return response.into();
+            }
+            let answer = match self.store.queue_sent(&sender, &recipient, request, now) {
+                Ok(Response::Queued) => SendAnswer {
+                    response: Response::Queued,
+                },
+                Ok(response) => response.into(),
+                Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
+            };
+            let queued = answer.response == Response::Queued;
+            drop(_turn);
+            if queued && delivery == Delivery::Wake {
+                self.wake_due(recipient);
+            }
+            answer
+        })();
         match self.store.record_send_outcome(
             peer.cloned(),
             sender,
@@ -205,74 +273,6 @@ impl SendsRequests for RunningNexus {
                 }
             }
         }
-    }
-
-    fn send_request_inner(&self, send: Send_Data, peer: Option<&Process>) -> SendAnswer {
-        let _turn = self
-            .dispatch_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(peer) = peer else {
-            return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 })).into();
-        };
-        let Some(now) = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-        else {
-            return Response::Refused(Refusal::Store("clock is outside the lease range".into()))
-                .into();
-        };
-        let sender = match self.sending_address(peer) {
-            Ok(sender) => sender,
-            Err(refusal) => return (*refusal).into(),
-        };
-        let request = match &send.message {
-            Message::HardAbrupt(request)
-            | Message::MiddleAbrupt(request)
-            | Message::Soft(request) => request,
-        };
-        if let Some(refusal) = request.oversized_refusal(&sender) {
-            return Response::Refused(refusal).into();
-        }
-        let delivery = send.delivery;
-        let recipient = match send.recipient {
-            Recipient::Address(address) => address,
-            Recipient::Up => match sender.layer.above() {
-                Some(layer) => Address {
-                    aspect: sender.aspect.clone(),
-                    topic: sender.topic.clone(),
-                    layer,
-                },
-                None => return Response::Refused(Refusal::NoneAbove).into(),
-            },
-        };
-        // A metaflow left Awake as an ended flow is Asleep for what follows.
-        self.rest_ended_awake(&recipient);
-        let (abrupt, request) = match send.message {
-            Message::HardAbrupt(request) => (Some(true), request),
-            Message::MiddleAbrupt(request) => (Some(false), request),
-            Message::Soft(request) => (None, request),
-        };
-        if let Some(hard) = abrupt
-            && let Some(flow_id) = self.live_awake_flow(&recipient)
-            && let Some(response) = self.deliver_abruptly(&sender, &flow_id, hard, &request)
-        {
-            return response.into();
-        }
-        let answer = match self.store.queue_sent(&sender, &recipient, request, now) {
-            Ok(Response::Queued) => SendAnswer {
-                response: Response::Queued,
-            },
-            Ok(response) => response.into(),
-            Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
-        };
-        let queued = answer.response == Response::Queued;
-        drop(_turn);
-        if queued && delivery == Delivery::Wake {
-            self.wake_due(recipient);
-        }
-        answer
     }
 
     fn live_awake_flow(&self, address: &Address) -> Option<String> {

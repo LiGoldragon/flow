@@ -3,7 +3,7 @@
 ; nominal type shared by addresses, launch profiles and meta configuration.
 
 Library
-[]
+[ :crate:generated:delivery:[ Delivery Message ] ]
 [ FlowId.String
   ; ethos-zero 16 cannot express Topic:Name yet; check camelCase at input.
   Topic.String
@@ -31,10 +31,6 @@ Library
   LogicalDeliveryId.String
   ; The selected request kind and routing policy are common to every
   ; consumer of Flow messages.
-  Message.[ HardAbrupt.Request
-            MiddleAbrupt.Request
-            Soft.Request ]
-  Delivery.[ Queue Wake ]
   Aspect.[ Psyche Mind Field ]
   Address.{ Aspect Topic Layer }
   Recipient.[ Address Up ]

@@ -1,0 +1,10 @@
+; Shared delivery policy and priority are a vocabulary of their own.
+; Queue is a policy variant here, not the Metaflow queue collection type.
+Library
+[ :crate:generated:library:Request ] ; request body is shared by every priority
+[ Message.[ HardAbrupt.Request ; interruption requested by the sender
+            MiddleAbrupt.Request ; insertion at the next boundary
+            Soft.Request ] ; insertion after the active turn
+  Delivery.[ Queue Wake ] ] ; whether an asleep recipient is explicitly woken
+[] ; no traits
+[] ; no associations

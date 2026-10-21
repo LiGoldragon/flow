@@ -131,6 +131,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
 /// changes and lifecycle transitions have one durability boundary.
 pub(crate) trait RecordsLogicalDeliveries {
     fn seed_missing_queued_deliveries(&self) -> Result<(), StoreError>;
+    fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError>;
     fn accept_logical_delivery(
         &self,
         address: &Address,
@@ -157,6 +158,32 @@ pub(crate) trait RecordsLogicalDeliveries {
     ) -> Result<(i64, Vec<DeliverySnapshot>), StoreError>;
 }
 impl RecordsLogicalDeliveries for FlowStore {
+    fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError> {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Err(StoreError::StateInvariant);
+        };
+        let mut changed = false;
+        for entry in &mut stored.metaflow.queue {
+            if entry.delivery != Delivery::Wake {
+                entry.delivery = Delivery::Wake;
+                changed = true;
+            }
+        }
+        if changed {
+            self.engine.commit_atomic(
+                self.engine
+                    .begin_atomic_commit()
+                    .mutate(self.metaflows, stored),
+            )?;
+            self.launch_changes.announce();
+        }
+        Ok(())
+    }
     fn seed_missing_queued_deliveries(&self) -> Result<(), StoreError> {
         let _guard = self
             .logical_deliveries

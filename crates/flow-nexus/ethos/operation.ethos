@@ -110,6 +110,7 @@ Operation
   Woken.FlowId
   Drained.Vector<QueueEntry>
   AwaitingReceipt.LogicalDeliveryId
+  WaitingForTurn.LogicalDeliveryId
   Failed.[ CompositionRefused
            StoreRefused
            ConflictingBinding

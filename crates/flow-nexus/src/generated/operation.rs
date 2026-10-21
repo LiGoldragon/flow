@@ -163,5 +163,6 @@ pub enum Outcome {
     Woken(signal_flow::FlowId),
     Drained(std::vec::Vec<signal_flow::QueueEntry>),
     AwaitingReceipt(signal_flow::LogicalDeliveryId),
+    WaitingForTurn(signal_flow::LogicalDeliveryId),
     Failed(Failed_Data),
 }

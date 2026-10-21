@@ -1220,6 +1220,15 @@ impl PerformsWakeAndDrain for RunningNexus {
         let Some(oldest) = oldest else {
             return Outcome::Drained(drained);
         };
+        if matches!(oldest.message, signal_flow::Message::Soft(_)) {
+            let resting = match node.harness_kind {
+                HarnessKind::Codex => self.codex_resting(&flow_id),
+                HarnessKind::Claude => self.claude_main_turn_ended(&node),
+            };
+            if !resting {
+                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
+            }
+        }
         let refused = |drained: Vec<QueueEntry>, failure| {
             if drained.is_empty() {
                 Outcome::Failed(failure)
@@ -1395,7 +1404,7 @@ impl PerformsWakeAndDrain for RunningNexus {
             let now_removed = queued.len().saturating_sub(remaining);
             if now_removed == removed {
                 return match outcome {
-                    Outcome::AwaitingReceipt(_) => outcome,
+                    Outcome::AwaitingReceipt(_) | Outcome::WaitingForTurn(_) => outcome,
                     Outcome::Failed(_) if removed == 0 => outcome,
                     // Only requests whose exact native receipt removed
                     // them from the durable queue are reported drained.

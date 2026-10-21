@@ -13,14 +13,21 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver},
+    },
     thread,
     time::{Duration, Instant},
 };
 use thiserror::Error;
+use tungstenite::{
+    Message,
+    protocol::{Role, WebSocket, WebSocketConfig},
+};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
-const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct CodexAdapter {
@@ -357,7 +364,7 @@ pub trait NamesBoundCodexThread {
 
 struct ProxySession {
     child: Child,
-    input: ChildStdin,
+    input: Arc<Mutex<ChildStdin>>,
     replies: Receiver<ProxyEvent>,
 }
 
@@ -365,22 +372,42 @@ struct ProxySession {
 /// its reader thread hands each event to the sink it was spawned with.
 pub(crate) struct ProxyChild {
     pub(crate) child: Child,
-    pub(crate) input: ChildStdin,
+    pub(crate) input: Arc<Mutex<ChildStdin>>,
+}
+
+struct ProxyWebSocketIo<R> {
+    reader: R,
+    input: Arc<Mutex<ChildStdin>>,
+}
+
+impl<R: Read> Read for ProxyWebSocketIo<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buffer)
+    }
+}
+
+impl<R> Write for ProxyWebSocketIo<R> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let mut input = self
+            .input
+            .lock()
+            .map_err(|_| std::io::Error::other("Codex proxy input lock poisoned"))?;
+        input.write_all(buffer)?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.input
+            .lock()
+            .map_err(|_| std::io::Error::other("Codex proxy input lock poisoned"))?
+            .flush()
+    }
 }
 
 pub(crate) enum ProxyEvent {
     Upgraded,
-    /// A ping the app-server sent; its payload is answered with a pong.
     Ping(Vec<u8>),
     Reply(Result<serde_json::Value, CodexAdapterUnavailable>),
-}
-
-/// One WebSocket frame read from the proxy: a text message, or a ping or
-/// pong, which carry no JSON.
-enum ProxyFrame {
-    Text(serde_json::Value),
-    Ping(Vec<u8>),
-    Pong,
 }
 
 trait OpensCodexProxy {
@@ -427,10 +454,9 @@ impl SpawnsCodexProxy for CodexAdapter {
             .stdout(Stdio::piped())
             .spawn()
             .map_err(|error| CodexAdapterUnavailable::Proxy(error.to_string()))?;
-        let mut input = child
-            .stdin
-            .take()
-            .ok_or_else(|| CodexAdapterUnavailable::Proxy("proxy stdin was unavailable".into()))?;
+        let input = Arc::new(Mutex::new(child.stdin.take().ok_or_else(|| {
+            CodexAdapterUnavailable::Proxy("proxy stdin was unavailable".into())
+        })?));
         let output = child
             .stdout
             .take()
@@ -453,14 +479,22 @@ impl SpawnsCodexProxy for CodexAdapter {
         let upgrade = format!(
             "GET / HTTP/1.1\r\nHost: flow-nexus\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
         );
-        if let Err(error) = input
-            .write_all(upgrade.as_bytes())
-            .and_then(|_| input.flush())
-        {
+        let upgrade_write = match input.lock() {
+            Ok(mut input) => input
+                .write_all(upgrade.as_bytes())
+                .and_then(|_| input.flush()),
+            Err(_) => {
+                return Err(CodexAdapterUnavailable::Proxy(
+                    "Codex proxy input lock poisoned".into(),
+                ));
+            }
+        };
+        if let Err(error) = upgrade_write {
             let _ = child.kill();
             let _ = child.wait();
             return Err(CodexAdapterUnavailable::Proxy(error.to_string()));
         }
+        let reader_input = Arc::clone(&input);
         thread::spawn(move || {
             let mut output = BufReader::new(output);
             let outcome = ProxySessionReader {
@@ -474,16 +508,42 @@ impl SpawnsCodexProxy for CodexAdapter {
             if !sink(ProxyEvent::Upgraded) {
                 return;
             }
+            let mut config = WebSocketConfig::default();
+            config.max_message_size = Some(MAX_MESSAGE_BYTES);
+            config.max_frame_size = Some(MAX_MESSAGE_BYTES);
+            let mut socket = WebSocket::from_raw_socket(
+                ProxyWebSocketIo {
+                    reader: output,
+                    input: reader_input,
+                },
+                Role::Client,
+                Some(config),
+            );
             loop {
-                let event = match (ProxySessionReader {
-                    output: &mut output,
-                })
-                .read_frame()
-                {
-                    Ok(ProxyFrame::Text(message)) => ProxyEvent::Reply(Ok(message)),
-                    Ok(ProxyFrame::Ping(payload)) => ProxyEvent::Ping(payload),
-                    Ok(ProxyFrame::Pong) => continue,
-                    Err(error) => ProxyEvent::Reply(Err(error)),
+                let event = match socket.read() {
+                    Ok(Message::Text(message)) => match serde_json::from_str(message.as_ref()) {
+                        Ok(message) => ProxyEvent::Reply(Ok(message)),
+                        Err(error) => ProxyEvent::Reply(Err(CodexAdapterUnavailable::Protocol(
+                            error.to_string(),
+                        ))),
+                    },
+                    Ok(Message::Ping(_)) => match socket.flush() {
+                        Ok(()) => continue,
+                        Err(error) => ProxyEvent::Reply(Err(CodexAdapterUnavailable::Protocol(
+                            error.to_string(),
+                        ))),
+                    },
+                    Ok(Message::Pong(_)) => continue,
+                    Ok(Message::Close(_)) => {
+                        ProxyEvent::Reply(Err(CodexAdapterUnavailable::Closed))
+                    }
+                    Ok(Message::Binary(_)) => ProxyEvent::Reply(Err(
+                        CodexAdapterUnavailable::Protocol("non-text WebSocket message".into()),
+                    )),
+                    Ok(Message::Frame(_)) => continue,
+                    Err(error) => {
+                        ProxyEvent::Reply(Err(CodexAdapterUnavailable::Protocol(error.to_string())))
+                    }
                 };
                 let closed = matches!(
                     event,
@@ -505,7 +565,7 @@ impl OpensCodexProxy for CodexAdapter {
             self.spawn_proxy(move |event| sender.send(event).is_ok())?;
         let mut session = ProxySession {
             child,
-            input,
+            input: Arc::clone(&input),
             replies,
         };
         match session.replies.recv_timeout(self.timeout) {
@@ -534,9 +594,6 @@ struct ProxySessionReader<'a, R: BufRead> {
 
 trait ReadsCodexProxy {
     fn read_upgrade(&mut self, accept: &str) -> Result<(), CodexAdapterUnavailable>;
-    /// One whole frame. A frame past the size limit is read through and
-    /// refused, so the stream stays at a frame boundary.
-    fn read_frame(&mut self) -> Result<ProxyFrame, CodexAdapterUnavailable>;
 }
 
 impl<R: BufRead> ReadsCodexProxy for ProxySessionReader<'_, R> {
@@ -589,71 +646,6 @@ impl<R: BufRead> ReadsCodexProxy for ProxySessionReader<'_, R> {
         }
         Ok(())
     }
-
-    fn read_frame(&mut self) -> Result<ProxyFrame, CodexAdapterUnavailable> {
-        let mut first = [0; 2];
-        match self.output.read_exact(&mut first) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err(CodexAdapterUnavailable::Closed);
-            }
-            Err(error) => return Err(CodexAdapterUnavailable::Protocol(error.to_string())),
-        }
-        let opcode = first[0] & 0x0f;
-        if first[0] & 0x80 == 0 {
-            return Err(CodexAdapterUnavailable::Protocol(
-                "fragmented WebSocket frame".into(),
-            ));
-        }
-        let masked = first[1] & 0x80 != 0;
-        let mut length = u64::from(first[1] & 0x7f);
-        if length == 126 {
-            let mut bytes = [0; 2];
-            self.output
-                .read_exact(&mut bytes)
-                .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
-            length = u64::from(u16::from_be_bytes(bytes));
-        } else if length == 127 {
-            let mut bytes = [0; 8];
-            self.output
-                .read_exact(&mut bytes)
-                .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
-            length = u64::from_be_bytes(bytes);
-        }
-        let mut mask = [0; 4];
-        if masked {
-            self.output
-                .read_exact(&mut mask)
-                .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
-        }
-        if length > MAX_MESSAGE_BYTES as u64 {
-            std::io::copy(&mut (&mut *self.output).take(length), &mut std::io::sink())
-                .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
-            return Err(CodexAdapterUnavailable::Protocol(
-                "WebSocket message exceeds limit".into(),
-            ));
-        }
-        let mut bytes = vec![0; length as usize];
-        self.output
-            .read_exact(&mut bytes)
-            .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string()))?;
-        if masked {
-            for (index, byte) in bytes.iter_mut().enumerate() {
-                *byte ^= mask[index % mask.len()];
-            }
-        }
-        match opcode {
-            8 => Err(CodexAdapterUnavailable::Closed),
-            9 => Ok(ProxyFrame::Ping(bytes)),
-            10 => Ok(ProxyFrame::Pong),
-            1 => serde_json::from_slice(&bytes)
-                .map(ProxyFrame::Text)
-                .map_err(|error| CodexAdapterUnavailable::Protocol(error.to_string())),
-            _ => Err(CodexAdapterUnavailable::Protocol(
-                "non-text WebSocket frame".into(),
-            )),
-        }
-    }
 }
 
 impl ExchangesCodexRpc for ProxySession {
@@ -684,10 +676,7 @@ impl ExchangesCodexRpc for ProxySession {
                 .map_err(|_| CodexAdapterUnavailable::TimedOut)?
             {
                 ProxyEvent::Reply(reply) => reply?,
-                ProxyEvent::Ping(payload) => {
-                    self.input.write_frame(0x8a, &payload)?;
-                    continue;
-                }
+                ProxyEvent::Ping(_) => continue,
                 ProxyEvent::Upgraded => {
                     return Err(CodexAdapterUnavailable::Protocol(
                         "duplicate WebSocket upgrade".into(),
@@ -759,9 +748,20 @@ impl WritesCodexProxy for ChildStdin {
     }
 }
 
+impl WritesCodexProxy for Arc<Mutex<ChildStdin>> {
+    fn write_frame(&mut self, head: u8, payload: &[u8]) -> Result<(), CodexAdapterUnavailable> {
+        self.lock()
+            .map_err(|_| CodexAdapterUnavailable::Proxy("Codex proxy input lock poisoned".into()))?
+            .write_frame(head, payload)
+    }
+}
+
 impl WritesCodexProxy for ProxySession {
     fn write_frame(&mut self, head: u8, payload: &[u8]) -> Result<(), CodexAdapterUnavailable> {
-        self.input.write_frame(head, payload)
+        self.input
+            .lock()
+            .map_err(|_| CodexAdapterUnavailable::Proxy("Codex proxy input lock poisoned".into()))?
+            .write_frame(head, payload)
     }
 }
 
@@ -1026,8 +1026,7 @@ impl OpensCodexThread for CodexAdapter {
         launch: &ComposedLaunch,
         title_for: &mut dyn FnMut(&str) -> Result<String, CodexAdapterUnavailable>,
     ) -> Result<(String, ThreadConnection), CodexAdapterUnavailable> {
-        if launch.harness_kind != HarnessKind::Codex
-        {
+        if launch.harness_kind != HarnessKind::Codex {
             return Err(CodexAdapterUnavailable::Protocol(
                 "the composed launch is no Codex launch this endpoint serves".into(),
             ));
@@ -2316,8 +2315,6 @@ mod tests {
         assert_eq!(long.len(), 9);
     }
 
-
-
     #[test]
     fn fake_proxy_names_the_bound_thread_and_reads_the_name_back() {
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
@@ -2371,6 +2368,58 @@ mod tests {
                 .unwrap(),
             meta_signal_flow::ResetOutcome::NothingToReset
         );
+    }
+
+    fn server_frame(fin: bool, opcode: u8, payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![(if fin { 0x80 } else { 0 }) | opcode];
+        if payload.len() < 126 {
+            frame.push(payload.len() as u8);
+        } else if let Ok(length) = u16::try_from(payload.len()) {
+            frame.push(126);
+            frame.extend_from_slice(&length.to_be_bytes());
+        } else {
+            frame.push(127);
+            frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        }
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    #[test]
+    fn websocket_parser_accepts_json_above_one_megabyte() {
+        use std::io::Cursor;
+
+        let json = format!(r#"{{"data":"{}"}}"#, "x".repeat(1024 * 1024));
+        let frame = server_frame(true, 1, json.as_bytes());
+        let mut config = WebSocketConfig::default();
+        config.max_message_size = Some(MAX_MESSAGE_BYTES);
+        config.max_frame_size = Some(MAX_MESSAGE_BYTES);
+        let mut socket = WebSocket::from_raw_socket(Cursor::new(frame), Role::Client, Some(config));
+        let Message::Text(message) = socket.read().unwrap() else {
+            panic!("expected text message")
+        };
+        let value: serde_json::Value = serde_json::from_str(message.as_ref()).unwrap();
+        assert_eq!(value["data"].as_str().unwrap().len(), 1024 * 1024);
+    }
+
+    #[test]
+    fn websocket_parser_reassembles_fragmented_json() {
+        use std::io::Cursor;
+
+        let json = br#"{"data":"fragmented"}"#;
+        let split = json.len() / 2;
+        let mut frames = server_frame(false, 1, &json[..split]);
+        frames.extend(server_frame(true, 0, &json[split..]));
+        let mut config = WebSocketConfig::default();
+        config.max_message_size = Some(MAX_MESSAGE_BYTES);
+        config.max_frame_size = Some(MAX_MESSAGE_BYTES);
+        let mut socket =
+            WebSocket::from_raw_socket(Cursor::new(frames), Role::Client, Some(config));
+        let Message::Text(message) = socket.read().unwrap() else {
+            panic!("expected reassembled text message")
+        };
+        let value: serde_json::Value = serde_json::from_str(message.as_ref()).unwrap();
+        assert_eq!(value["data"], "fragmented");
     }
 
     /// A Codex launch the fake app-server serves: the fixture's composed

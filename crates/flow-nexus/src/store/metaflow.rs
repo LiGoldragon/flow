@@ -1,10 +1,11 @@
 //! Ordinary metaflow mutations. The connection supplies the witnessed peer;
 //! the serial dispatcher holds exclusion across authorization and mutation.
+use super::logical_delivery::{RecordsLogicalDeliveries, VerifiedDeliveryLock};
 use super::*;
 use crate::sending::AdmitsSendPayload;
 use signal_flow::{
-    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, QueuedRequest, Recipient, Refusal,
-    SentBy, StartRejection, Unknown_Data,
+    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Recipient, Refusal, SentBy,
+    StartRejection, Unknown_Data,
 };
 
 pub(crate) trait MutatesMetaflows {
@@ -44,7 +45,7 @@ pub(crate) trait SleepsMetaflows {
     fn remove_oldest_queued(
         &self,
         address: &Address,
-        typed: &QueuedRequest,
+        typed: &flow_ethos::QueueEntry,
     ) -> Result<bool, StoreError>;
     /// The metaflow currently Awake as this flow, if any.
     fn metaflow_awake_as(&self, flow_id: &str) -> Result<Option<Metaflow>, StoreError>;
@@ -238,30 +239,23 @@ impl MutatesMetaflows for FlowStore {
                 request.lock.address,
             ))));
         };
-        if let Some(refusal) = request.request.oversized_refusal(&request.lock.sender) {
+        if let Some(refusal) = request.message.oversized_refusal(&request.lock.sender) {
             let released = self.release_metaflow_lock(request.lock.clone(), now)?;
             if released != Response::Released {
                 return Ok(released);
             }
             return Ok(Response::Refused(refusal));
         }
-        // The request is queued with the Sender its Lock named, which the
-        // bound Message peer asserted.
-        stored.metaflow.queue.push(QueuedRequest {
-            sent_by: SentBy::Sender(request.lock.sender.clone()),
-            request: request.request,
-        });
-        let commit = self
-            .engine
-            .begin_atomic_commit()
-            .mutate(self.metaflows, stored)
-            .retract(
-                self.metaflow_locks,
-                RecordKey::new(FlowStore::address_record_key(&request.lock.address)),
-            );
-        self.engine.commit_atomic(commit)?;
-        // This is durable enqueue, never a claim of native delivery or wake.
-        Ok(Response::Queued)
+        self.accept_logical_delivery(
+            &request.lock.address,
+            SentBy::Sender(request.lock.sender.clone()),
+            request.delivery,
+            request.message,
+            Some(VerifiedDeliveryLock {
+                lock: request.lock,
+                now,
+            }),
+        )
     }
 }
 
@@ -298,7 +292,7 @@ impl SleepsMetaflows for FlowStore {
     fn remove_oldest_queued(
         &self,
         address: &Address,
-        typed: &QueuedRequest,
+        typed: &flow_ethos::QueueEntry,
     ) -> Result<bool, StoreError> {
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(false);
@@ -558,7 +552,7 @@ pub(crate) trait QueuesFlowRequest {
     fn queue_flow_request(
         &self,
         address: &Address,
-        request: QueuedRequest,
+        request: flow_ethos::QueueEntry,
     ) -> Result<bool, StoreError>;
 }
 
@@ -566,14 +560,19 @@ impl QueuesFlowRequest for FlowStore {
     fn queue_flow_request(
         &self,
         address: &Address,
-        request: QueuedRequest,
+        request: flow_ethos::QueueEntry,
     ) -> Result<bool, StoreError> {
-        let Some(mut stored) = self.stored_metaflow(address)? else {
+        if self.stored_metaflow(address)?.is_none() {
             return Ok(false);
-        };
-        stored.metaflow.queue.push(request);
-        self.write_metaflow(stored)?;
-        Ok(true)
+        }
+        let response = self.accept_logical_delivery(
+            address,
+            request.sent_by,
+            request.delivery,
+            request.message,
+            None,
+        )?;
+        Ok(matches!(response, Response::SendAccepted(_)))
     }
 }
 
@@ -612,6 +611,8 @@ impl SeedsMetaflow for FlowStore {
             commit.assert(self.metaflows, StoredMetaflow { metaflow })
         };
         self.engine.commit_atomic(commit).expect("metaflow seeded");
+        self.seed_missing_queued_deliveries()
+            .expect("seed queued lifecycle snapshots");
     }
 }
 
@@ -741,7 +742,8 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock: forged,
-                        request: body.clone()
+                        delivery: flow_ethos::Delivery::Queue,
+                        message: flow_ethos::Message::Soft(body.clone())
                     },
                     101
                 )
@@ -755,20 +757,22 @@ mod tests {
                 .queue_metaflow(
                     Deliver_Data {
                         lock: lock.clone(),
-                        request: body.clone()
+                        delivery: flow_ethos::Delivery::Queue,
+                        message: flow_ethos::Message::Soft(body.clone())
                     },
                     101
                 )
                 .unwrap(),
-            Response::Queued
+            Response::SendAccepted(_)
         );
         // Queued with the Sender its Lock named.
         assert_eq!(
-            fixture.store.list_metaflows().unwrap()[0].queue,
-            vec![QueuedRequest {
-                sent_by: SentBy::Sender(lock.sender.clone()),
-                request: body
-            }]
+            fixture.store.list_metaflows().unwrap()[0].queue[0].sent_by,
+            SentBy::Sender(lock.sender.clone())
+        );
+        assert_eq!(
+            fixture.store.list_metaflows().unwrap()[0].queue[0].message,
+            flow_ethos::Message::Soft(body)
         );
         assert!(
             fixture

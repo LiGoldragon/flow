@@ -12,6 +12,7 @@ mod created_pane;
 pub mod delivery;
 pub mod events;
 pub(crate) mod launch_cleanup;
+pub(crate) mod logical_delivery;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
 pub(crate) mod opened_thread;
@@ -25,6 +26,9 @@ use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
+use logical_delivery::{
+    DeclaresLogicalDeliveryTables, LogicalDeliveryTables, RecordsLogicalDeliveries,
+};
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
 use queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
 use queue_delivery::{DeclaresQueueDeliveryTables, QueueDeliveryTables};
@@ -194,6 +198,9 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_compactions",
     "flow_nexus_send_outcome_counter",
     "flow_nexus_send_outcomes",
+    "flow_nexus_logical_delivery_counter",
+    "flow_nexus_logical_delivery_current",
+    "flow_nexus_logical_delivery_events",
 ];
 /// The tables a configuration-only store may hold beside its own, each
 /// added by a later Flow.
@@ -397,21 +404,98 @@ impl EngineRecord for StoredMetaflow {
 
 impl MemoryDefinition for StoredMetaflow {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
+        MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-metaflow-v4")
+        SchemaHash::for_label("flow-nexus-metaflow-v5")
     }
 }
 
-/// A metaflow as Flow 0.35.22 to 0.37.2 kept it, before `SentBy` named
-/// Flow. `Flow` is appended to `SentBy`, so every byte such a row holds
-/// reads as the current `Metaflow`; the edge moves it unchanged, and a
-/// Flow before 0.38.0 refuses the store that holds a Flow-sent request.
+/// Queue shape from before logical-delivery identities. Keep this mirror
+/// distinct: the new QueueEntry has a different archived representation.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct QueuedRequestBeforeLogicalId {
+    sent_by: flow_ethos::SentBy,
+    request: Request,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum SentByBeforeFlow {
+    Sender(flow_ethos::Sender),
+    Unknown,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct QueuedRequestBeforeFlow {
+    sent_by: SentByBeforeFlow,
+    request: Request,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct MetaflowBeforeFlow {
+    address: Address,
+    state: MetaflowState,
+    past: Vec<String>,
+    queue: Vec<QueuedRequestBeforeFlow>,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct MetaflowBeforeLogicalIds {
+    address: Address,
+    state: MetaflowState,
+    past: Vec<String>,
+    queue: Vec<QueuedRequestBeforeLogicalId>,
+}
+fn carry_legacy_queue(
+    address: &Address,
+    queue: Vec<QueuedRequestBeforeLogicalId>,
+) -> Vec<flow_ethos::QueueEntry> {
+    queue
+        .into_iter()
+        .enumerate()
+        .map(|(index, old)| flow_ethos::QueueEntry {
+            logical_delivery_id: format!(
+                "legacy:{}:{index:016x}",
+                FlowStore::address_record_key(address)
+            ),
+            sent_by: old.sent_by,
+            delivery: flow_ethos::Delivery::Queue,
+            message: flow_ethos::Message::Soft(old.request),
+        })
+        .collect()
+}
+fn carry_legacy_metaflow(old: MetaflowBeforeLogicalIds) -> Metaflow {
+    let queue = carry_legacy_queue(&old.address, old.queue);
+    Metaflow {
+        address: old.address,
+        state: old.state,
+        past: old.past,
+        queue,
+    }
+}
+fn carry_before_flow(old: MetaflowBeforeFlow) -> Metaflow {
+    let queue = old
+        .queue
+        .into_iter()
+        .map(|entry| QueuedRequestBeforeLogicalId {
+            sent_by: match entry.sent_by {
+                SentByBeforeFlow::Sender(sender) => flow_ethos::SentBy::Sender(sender),
+                SentByBeforeFlow::Unknown => flow_ethos::SentBy::Unknown,
+            },
+            request: entry.request,
+        })
+        .collect();
+    carry_legacy_metaflow(MetaflowBeforeLogicalIds {
+        address: old.address,
+        state: old.state,
+        past: old.past,
+        queue,
+    })
+}
+
+/// The last metaflow shape before stable logical identities, stored at
+/// memory v4. Historical queue entries retain their payload and sender,
+/// but receive deterministic migration IDs and are not linked to attempts.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaflowV3 {
-    metaflow: Metaflow,
+    metaflow: MetaflowBeforeFlow,
 }
 
 impl EngineRecord for StoredMetaflowV3 {
@@ -435,7 +519,33 @@ impl UpgradeFrom<StoredMetaflowV3> for StoredMetaflow {
 
     fn upgrade_from(previous: StoredMetaflowV3) -> Decision<Self, Self::Refusal> {
         Decision::Ready(Self {
-            metaflow: previous.metaflow,
+            metaflow: carry_before_flow(previous.metaflow),
+        })
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMetaflowV4 {
+    metaflow: MetaflowBeforeLogicalIds,
+}
+impl EngineRecord for StoredMetaflowV4 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+    }
+}
+impl MemoryDefinition for StoredMetaflowV4 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-v4")
+    }
+}
+impl UpgradeFrom<StoredMetaflowV4> for StoredMetaflow {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredMetaflowV4) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            metaflow: carry_legacy_metaflow(previous.metaflow),
         })
     }
 }
@@ -467,17 +577,17 @@ pub(crate) struct MetaflowBeforeIdle {
     address: Address,
     state: StateBeforeIdle,
     past: Vec<String>,
-    queue: Vec<flow_ethos::QueuedRequest>,
+    queue: Vec<QueuedRequestBeforeFlow>,
 }
 
 impl From<MetaflowBeforeIdle> for Metaflow {
     fn from(previous: MetaflowBeforeIdle) -> Self {
-        Self {
+        carry_before_flow(MetaflowBeforeFlow {
             address: previous.address,
             state: previous.state.into(),
             past: previous.past,
             queue: previous.queue,
-        }
+        })
     }
 }
 
@@ -496,19 +606,19 @@ pub(crate) struct MetaflowBeforeSenders {
 /// Unknown, and an ended metaflow Asleep; nothing else changes.
 impl From<MetaflowBeforeSenders> for Metaflow {
     fn from(previous: MetaflowBeforeSenders) -> Self {
-        Self {
+        carry_before_flow(MetaflowBeforeFlow {
             address: previous.address,
             state: previous.state.into(),
             past: previous.past,
             queue: previous
                 .queue
                 .into_iter()
-                .map(|request| flow_ethos::QueuedRequest {
-                    sent_by: flow_ethos::SentBy::Unknown,
+                .map(|request| QueuedRequestBeforeFlow {
+                    sent_by: SentByBeforeFlow::Unknown,
                     request,
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -2382,6 +2492,8 @@ pub enum StoreError {
     SendCallUpgrade(String),
     #[error("queue delivery family upgrade failed: {0}")]
     QueueDeliveryUpgrade(String),
+    #[error("logical delivery family upgrade failed: {0}")]
+    LogicalDeliveryUpgrade(String),
     #[error("the model family could not be upgraded: {0}")]
     ModelUpgrade(String),
     #[error("flow events upgrade failed: {0}")]
@@ -2576,13 +2688,24 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
     ) -> Result<TableReference<StoredMetaflow>, StoreError> {
-        // A 0.35.22 to 0.37.2 store holds v3 rows, a 0.35.7 to 0.35.21 one
-        // v2 rows and an older one v1 rows; the newest edge is tried first,
-        // and a store it does not admit is tried on the next. An admission
-        // refusal writes nothing.
+        // v4 predates stable queue identities; older families are tried only
+        // after each newer archived shape declines admission.
+        let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
         let from_v1 = descriptor.clone();
-        match self.upgrade_table::<StoredMetaflowV3, StoredMetaflow>(descriptor) {
+        match self.upgrade_table::<StoredMetaflowV4, StoredMetaflow>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+            }
+        }
+        // The newest edge is tried first and an admission refusal writes
+        // nothing; legacy rows are converted only by their matching mirror.
+        match self.upgrade_table::<StoredMetaflowV3, StoredMetaflow>(from_v3) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
@@ -2867,6 +2990,7 @@ pub struct FlowStore {
     compactions: TableReference<compaction::Compaction>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
+    logical_deliveries: LogicalDeliveryTables,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
@@ -3395,7 +3519,8 @@ impl OpensFlowStore for FlowStore {
         )
         .with_predecessor::<StoredMetaflowV1>()
         .with_predecessor::<StoredMetaflowV2>()
-        .with_predecessor::<StoredMetaflowV3>();
+        .with_predecessor::<StoredMetaflowV3>()
+        .with_predecessor::<StoredMetaflowV4>();
         let metaflow_processes_descriptor = TableDescriptor::<StoredMetaflowProcess>::new(
             METAFLOW_PROCESS_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-process"),
@@ -3496,6 +3621,7 @@ impl OpensFlowStore for FlowStore {
             <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor();
         let queue_delivery_descriptors = QueueDeliveryTables::descriptors();
         let send_outcome_descriptors = SendOutcomeTables::descriptors();
+        let logical_delivery_descriptors = LogicalDeliveryTables::descriptors();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -3533,7 +3659,10 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&queue_delivery_descriptors.1)
                 .with_family(&queue_delivery_descriptors.2)
                 .with_family(&send_outcome_descriptors.counter)
-                .with_family(&send_outcome_descriptors.outcomes),
+                .with_family(&send_outcome_descriptors.outcomes)
+                .with_family(&logical_delivery_descriptors.counter)
+                .with_family(&logical_delivery_descriptors.current)
+                .with_family(&logical_delivery_descriptors.events),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -3564,6 +3693,8 @@ impl OpensFlowStore for FlowStore {
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
+        let logical_deliveries =
+            LogicalDeliveryTables::register(&mut engine, logical_delivery_descriptors)?;
         let store = Self {
             engine,
             flows,
@@ -3591,6 +3722,7 @@ impl OpensFlowStore for FlowStore {
             compactions,
             queue_delivery,
             send_outcomes,
+            logical_deliveries,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -3602,6 +3734,7 @@ impl OpensFlowStore for FlowStore {
         // these reads require the complete committed configuration before any
         // runtime adapter is constructed by RunningNexus.
         store.state()?;
+        store.seed_missing_queued_deliveries()?;
         store
             .configuration_snapshot()?
             .ok_or(StoreError::NotConfigured)?;
@@ -3634,7 +3767,8 @@ impl OpensFlowStore for FlowStore {
             )
             .with_predecessor::<StoredMetaflowV1>()
             .with_predecessor::<StoredMetaflowV2>()
-            .with_predecessor::<StoredMetaflowV3>(),
+            .with_predecessor::<StoredMetaflowV3>()
+            .with_predecessor::<StoredMetaflowV4>(),
         )?;
         let metaflow_processes = engine.register_table(TableDescriptor::new(
             METAFLOW_PROCESS_TABLE_NAME,
@@ -3728,6 +3862,8 @@ impl OpensFlowStore for FlowStore {
             QueueDeliveryTables::register(&mut engine, QueueDeliveryTables::descriptors())?;
         let send_outcomes =
             SendOutcomeTables::register(&mut engine, SendOutcomeTables::descriptors())?;
+        let logical_deliveries =
+            LogicalDeliveryTables::register(&mut engine, LogicalDeliveryTables::descriptors())?;
         let store = Self {
             engine,
             flows,
@@ -3755,9 +3891,11 @@ impl OpensFlowStore for FlowStore {
             compactions,
             queue_delivery,
             send_outcomes,
+            logical_deliveries,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
+        store.seed_missing_queued_deliveries()?;
         if store
             .engine
             .match_records(QueryPlan::key(store.state, RecordKey::new(STATE_KEY)))?
@@ -6250,7 +6388,7 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-quarantined-launch-attempt",
                 "flow-nexus-quarantined-launch-attempt-v1",
             ),
-            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v4"),
+            "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v5"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
                 "flow-nexus-metaflow-process-v1",
@@ -6288,6 +6426,18 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_send_outcomes" => {
                 (send_outcome::OUTCOME_FAMILY, send_outcome::OUTCOME_SCHEMA)
             }
+            "flow_nexus_logical_delivery_counter" => (
+                "flow-nexus-logical-delivery-counter",
+                "flow-nexus-logical-delivery-counter-v1",
+            ),
+            "flow_nexus_logical_delivery_current" => (
+                "flow-nexus-logical-delivery-current",
+                "flow-nexus-logical-delivery-current-v1",
+            ),
+            "flow_nexus_logical_delivery_events" => (
+                "flow-nexus-logical-delivery-event",
+                "flow-nexus-logical-delivery-event-v1",
+            ),
             "flow_nexus_compactions" => {
                 (compaction::COMPACTION_FAMILY, compaction::COMPACTION_SCHEMA)
             }
@@ -6329,11 +6479,11 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_requests" => (
                 "flow-nexus-queue-delivery-request",
-                "flow-nexus-queue-delivery-request-v3",
+                "flow-nexus-queue-delivery-request-v4",
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v5",
+                "flow-nexus-queue-delivery-attempt-v6",
             ),
             _ => return None,
         };
@@ -6378,6 +6528,7 @@ pub(crate) trait ReadsFlowMemory {
                 ("flow-nexus-metaflow", StoredMetaflowV1::schema_hash()),
                 ("flow-nexus-metaflow", StoredMetaflowV2::schema_hash()),
                 ("flow-nexus-metaflow", StoredMetaflowV3::schema_hash()),
+                ("flow-nexus-metaflow", StoredMetaflowV4::schema_hash()),
             ],
             "flow_nexus_meta_model_configuration" => &[(
                 "flow-nexus-meta-model-configuration",
@@ -6411,14 +6562,26 @@ pub(crate) trait ReadsFlowMemory {
                     <send_call::SendCallV2 as MemoryDefinition>::schema_hash(),
                 ),
             ],
-            "flow_nexus_queue_delivery_requests" => &[(
-                "flow-nexus-queue-delivery-request",
-                <queue_delivery::StoredDeliveryRequestV2 as MemoryDefinition>::schema_hash(),
-            )],
-            "flow_nexus_queue_delivery_attempts" => &[(
-                "flow-nexus-queue-delivery-attempt",
-                <queue_delivery::QueueDeliveryAttemptV4 as MemoryDefinition>::schema_hash(),
-            )],
+            "flow_nexus_queue_delivery_requests" => &[
+                (
+                    "flow-nexus-queue-delivery-request",
+                    <queue_delivery::StoredDeliveryRequestV2 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    "flow-nexus-queue-delivery-request",
+                    <queue_delivery::StoredDeliveryRequestV3 as MemoryDefinition>::schema_hash(),
+                ),
+            ],
+            "flow_nexus_queue_delivery_attempts" => &[
+                (
+                    "flow-nexus-queue-delivery-attempt",
+                    <queue_delivery::QueueDeliveryAttemptV4 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    "flow-nexus-queue-delivery-attempt",
+                    <queue_delivery::QueueDeliveryAttemptV5 as MemoryDefinition>::schema_hash(),
+                ),
+            ],
             "flow_nexus_flow_events" => &[(
                 events::FLOW_EVENT_FAMILY,
                 <events::FlowEventsV1 as MemoryDefinition>::schema_hash(),
@@ -9596,13 +9759,25 @@ mod tests {
         assert_eq!(
             metaflow.queue,
             vec![
-                flow_ethos::QueuedRequest {
+                flow_ethos::QueueEntry {
+                    logical_delivery_id: format!(
+                        "legacy:{}:{:016x}",
+                        FlowStore::address_record_key(&address),
+                        0
+                    ),
                     sent_by: flow_ethos::SentBy::Unknown,
-                    request: Request::Order("first".into()),
+                    delivery: flow_ethos::Delivery::Queue,
+                    message: flow_ethos::Message::Soft(Request::Order("first".into())),
                 },
-                flow_ethos::QueuedRequest {
+                flow_ethos::QueueEntry {
+                    logical_delivery_id: format!(
+                        "legacy:{}:{:016x}",
+                        FlowStore::address_record_key(&address),
+                        1
+                    ),
                     sent_by: flow_ethos::SentBy::Unknown,
-                    request: Request::Notice("second".into()),
+                    delivery: flow_ethos::Delivery::Queue,
+                    message: flow_ethos::Message::Soft(Request::Notice("second".into())),
                 },
             ]
         );
@@ -9638,8 +9813,8 @@ mod tests {
             .expect("metaflow rows drop");
         write.commit().expect("catalog commits");
         drop(database);
-        let queued = vec![flow_ethos::QueuedRequest {
-            sent_by: flow_ethos::SentBy::Unknown,
+        let queued = vec![super::QueuedRequestBeforeFlow {
+            sent_by: super::SentByBeforeFlow::Unknown,
             request: Request::Order("kept".into()),
         }];
         {

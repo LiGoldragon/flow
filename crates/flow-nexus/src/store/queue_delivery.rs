@@ -9,13 +9,35 @@
 //! proves the request never reached the seat ends an attempt Absent, with
 //! that proof recorded, and only then may the request be handed over again.
 
+use super::logical_delivery::RecordsLogicalDeliveries;
 use super::*;
+use flow_ethos::Request;
 use meta_signal_flow::{
-    AbsenceProof, QueueResolutionOutcome, QueueResolutionRecord, ResolveQueueDeliveryRejected_Data,
-    Undecided,
+    AbsenceProof, Legacy_Data, QueueEvidence, QueueResolutionOutcome, QueueResolutionRecord,
+    ResolveQueueDeliveryRejected_Data, Undecided,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use signal_flow::{Address, HarnessKind, QueuedRequest};
+use sema_engine::AtomicCommit;
+use signal_flow::{Address, DeliveryState, HarnessKind, NativeReceipt, RetryCause, SentBy};
+
+fn legacy_queue_evidence(sent_by: SentBy, request: Request) -> QueueEvidence {
+    QueueEvidence::Legacy(Legacy_Data { sent_by, request })
+}
+fn commit_attempt_state(
+    store: &FlowStore,
+    evidence: &QueueEvidence,
+    state: DeliveryState,
+    commit: AtomicCommit,
+) -> Result<(), StoreError> {
+    if let QueueEvidence::Logical(entry) = evidence {
+        store.commit_logical_transition(&entry.logical_delivery_id, state, commit)?;
+    } else {
+        // Legacy attempts predate stable logical identity; retain their
+        // attempt history without fabricating a lifecycle link.
+        store.engine.commit_atomic(commit)?;
+    }
+    Ok(())
+}
 
 const DELIVERY_COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_counter");
 const DELIVERY_REQUEST_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_requests");
@@ -47,7 +69,7 @@ enum RequestState {
 pub(crate) struct StoredDeliveryRequest {
     request_id: String,
     address: Address,
-    queued: QueuedRequest,
+    queue_evidence: QueueEvidence,
     state: RequestState,
 }
 
@@ -59,11 +81,11 @@ impl EngineRecord for StoredDeliveryRequest {
 
 impl MemoryDefinition for StoredDeliveryRequest {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-request-v3")
+        SchemaHash::for_label("flow-nexus-queue-delivery-request-v4")
     }
 }
 
@@ -74,7 +96,7 @@ impl MemoryDefinition for StoredDeliveryRequest {
 pub(crate) struct StoredDeliveryRequestV2 {
     request_id: String,
     address: Address,
-    queued: QueuedRequest,
+    queued: super::QueuedRequestBeforeFlow,
     state: RequestState,
 }
 
@@ -101,7 +123,45 @@ impl UpgradeFrom<StoredDeliveryRequestV2> for StoredDeliveryRequest {
         Decision::Ready(Self {
             request_id: previous.request_id,
             address: previous.address,
-            queued: previous.queued,
+            queue_evidence: legacy_queue_evidence(
+                match previous.queued.sent_by {
+                    super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
+                    super::SentByBeforeFlow::Unknown => SentBy::Unknown,
+                },
+                previous.queued.request,
+            ),
+            state: previous.state,
+        })
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredDeliveryRequestV3 {
+    request_id: String,
+    address: Address,
+    queued: super::QueuedRequestBeforeLogicalId,
+    state: RequestState,
+}
+impl EngineRecord for StoredDeliveryRequestV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.request_id.clone())
+    }
+}
+impl MemoryDefinition for StoredDeliveryRequestV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-queue-delivery-request-v3")
+    }
+}
+impl UpgradeFrom<StoredDeliveryRequestV3> for StoredDeliveryRequest {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredDeliveryRequestV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            request_id: previous.request_id,
+            address: previous.address,
+            queue_evidence: legacy_queue_evidence(previous.queued.sent_by, previous.queued.request),
             state: previous.state,
         })
     }
@@ -180,7 +240,7 @@ pub struct QueueDeliveryAttempt {
     pub harness_kind: HarnessKind,
     pub history_anchor: NativeHistoryAnchor,
     pub address: Address,
-    pub queued: QueuedRequest,
+    pub queue_evidence: QueueEvidence,
     pub phase: QueueDeliveryPhase,
 }
 
@@ -192,11 +252,11 @@ impl EngineRecord for QueueDeliveryAttempt {
 
 impl MemoryDefinition for QueueDeliveryAttempt {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
+        MemoryVersion::new(6)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v5")
+        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v6")
     }
 }
 
@@ -213,7 +273,7 @@ pub struct QueueDeliveryAttemptV4 {
     harness_kind: HarnessKind,
     history_anchor: NativeHistoryAnchor,
     address: Address,
-    queued: QueuedRequest,
+    queued: super::QueuedRequestBeforeFlow,
     phase: QueueDeliveryPhase,
 }
 
@@ -246,7 +306,57 @@ impl UpgradeFrom<QueueDeliveryAttemptV4> for QueueDeliveryAttempt {
             harness_kind: previous.harness_kind,
             history_anchor: previous.history_anchor,
             address: previous.address,
-            queued: previous.queued,
+            queue_evidence: legacy_queue_evidence(
+                match previous.queued.sent_by {
+                    super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
+                    super::SentByBeforeFlow::Unknown => SentBy::Unknown,
+                },
+                previous.queued.request,
+            ),
+            phase: previous.phase,
+        })
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct QueueDeliveryAttemptV5 {
+    request_id: String,
+    attempt_id: String,
+    native_request_id: u64,
+    flow_id: String,
+    thread_id: String,
+    harness_kind: HarnessKind,
+    history_anchor: NativeHistoryAnchor,
+    address: Address,
+    queued: super::QueuedRequestBeforeLogicalId,
+    phase: QueueDeliveryPhase,
+}
+impl EngineRecord for QueueDeliveryAttemptV5 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.attempt_id.clone())
+    }
+}
+impl MemoryDefinition for QueueDeliveryAttemptV5 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-queue-delivery-attempt-v5")
+    }
+}
+impl UpgradeFrom<QueueDeliveryAttemptV5> for QueueDeliveryAttempt {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: QueueDeliveryAttemptV5) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            request_id: previous.request_id,
+            attempt_id: previous.attempt_id,
+            native_request_id: previous.native_request_id,
+            flow_id: previous.flow_id,
+            thread_id: previous.thread_id,
+            harness_kind: previous.harness_kind,
+            history_anchor: previous.history_anchor,
+            address: previous.address,
+            queue_evidence: legacy_queue_evidence(previous.queued.sent_by, previous.queued.request),
             phase: previous.phase,
         })
     }
@@ -284,10 +394,25 @@ pub(crate) trait DeclaresQueueDeliveryTables: Sized {
         engine: &mut Engine,
         descriptor: TableDescriptor<StoredDeliveryRequest>,
     ) -> Result<TableReference<StoredDeliveryRequest>, StoreError> {
-        match engine.upgrade_table::<StoredDeliveryRequestV2, StoredDeliveryRequest>(descriptor) {
+        let from_v2 = descriptor.clone();
+        match engine.upgrade_table::<StoredDeliveryRequestV3, StoredDeliveryRequest>(descriptor) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission =>
+            {
+                match engine
+                    .upgrade_table::<StoredDeliveryRequestV2, StoredDeliveryRequest>(from_v2)
+                {
+                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                    UpgradeOutcome::Failed(failure) => {
+                        Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")))
+                    }
+                }
+            }
             UpgradeOutcome::Failed(failure) => {
                 Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")))
             }
@@ -298,10 +423,24 @@ pub(crate) trait DeclaresQueueDeliveryTables: Sized {
         engine: &mut Engine,
         descriptor: TableDescriptor<QueueDeliveryAttempt>,
     ) -> Result<TableReference<QueueDeliveryAttempt>, StoreError> {
-        match engine.upgrade_table::<QueueDeliveryAttemptV4, QueueDeliveryAttempt>(descriptor) {
+        let from_v4 = descriptor.clone();
+        match engine.upgrade_table::<QueueDeliveryAttemptV5, QueueDeliveryAttempt>(descriptor) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission =>
+            {
+                match engine.upgrade_table::<QueueDeliveryAttemptV4, QueueDeliveryAttempt>(from_v4)
+                {
+                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                    UpgradeOutcome::Failed(failure) => {
+                        Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")))
+                    }
+                }
+            }
             UpgradeOutcome::Failed(failure) => {
                 Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")))
             }
@@ -322,13 +461,15 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
                 FamilyName::new("flow-nexus-queue-delivery-request"),
                 StoredDeliveryRequest::schema_hash(),
             )
-            .with_predecessor::<StoredDeliveryRequestV2>(),
+            .with_predecessor::<StoredDeliveryRequestV2>()
+            .with_predecessor::<StoredDeliveryRequestV3>(),
             TableDescriptor::new(
                 DELIVERY_ATTEMPT_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-attempt"),
                 QueueDeliveryAttempt::schema_hash(),
             )
-            .with_predecessor::<QueueDeliveryAttemptV4>(),
+            .with_predecessor::<QueueDeliveryAttemptV4>()
+            .with_predecessor::<QueueDeliveryAttemptV5>(),
         )
     }
 
@@ -519,16 +660,27 @@ impl AccountsQueueDelivery for FlowStore {
             ),
             _ => return Err(StoreError::StateInvariant),
         };
-        let request_number = current.as_ref().map_or(1, |value| value.next_request);
         let attempt_number = current.as_ref().map_or(3, |value| value.next_attempt);
-        let request_id = format!("queue-request-{request_number:016x}");
+        let request_id = queued.logical_delivery_id.clone();
         let attempt_id = format!("queue-attempt-{attempt_number:016x}");
         let native_request_id = attempt_number;
         let request = StoredDeliveryRequest {
             request_id: request_id.clone(),
             address: address.clone(),
-            queued: queued.clone(),
+            queue_evidence: QueueEvidence::Logical(queued.clone()),
             state: RequestState::Queued,
+        };
+        let logical_delivery_id = queued.logical_delivery_id.clone();
+        let old_request = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(request_id.clone()),
+        ))?;
+        let old_request = match old_request.records() {
+            [] => None,
+            [old] if old.address == *address && old.queue_evidence == request.queue_evidence => {
+                Some(old.clone())
+            }
+            _ => return Err(StoreError::StateInvariant),
         };
         let attempt = QueueDeliveryAttempt {
             request_id,
@@ -539,7 +691,7 @@ impl AccountsQueueDelivery for FlowStore {
             harness_kind,
             history_anchor,
             address: address.clone(),
-            queued,
+            queue_evidence: QueueEvidence::Logical(queued),
             phase: QueueDeliveryPhase::Prepared,
         };
         let commit = self.engine.begin_atomic_commit();
@@ -548,10 +700,15 @@ impl AccountsQueueDelivery for FlowStore {
         } else {
             commit.assert(self.queue_delivery.counter, new_counter)
         };
-        self.engine.commit_atomic(
-            commit
-                .assert(self.queue_delivery.requests, request)
-                .assert(self.queue_delivery.attempts, attempt.clone()),
+        let commit = if old_request.is_some() {
+            commit.mutate(self.queue_delivery.requests, request)
+        } else {
+            commit.assert(self.queue_delivery.requests, request)
+        };
+        self.commit_logical_transition(
+            &logical_delivery_id,
+            DeliveryState::Attempting,
+            commit.assert(self.queue_delivery.attempts, attempt.clone()),
         )?;
         Ok(PrepareQueueDelivery::Prepared(attempt))
     }
@@ -603,7 +760,16 @@ impl AccountsQueueDelivery for FlowStore {
         let Some(mut metaflow) = self.stored_metaflow(&attempt.address)? else {
             return Ok(false);
         };
-        if metaflow.metaflow.queue.first() != Some(&attempt.queued) {
+        let QueueEvidence::Logical(logical_entry) = &attempt.queue_evidence else {
+            return Ok(false);
+        };
+        let logical_id = logical_entry.logical_delivery_id.clone();
+        let native_receipt = NativeReceipt {
+            harness_kind: attempt.harness_kind.clone(),
+            native_session_id: attempt.thread_id.clone(),
+            native_prompt_id: receipt.turn_id.clone(),
+        };
+        if metaflow.metaflow.queue.first() != Some(logical_entry) {
             return Ok(false);
         }
         let requests = self
@@ -618,7 +784,7 @@ impl AccountsQueueDelivery for FlowStore {
             return Err(StoreError::StateInvariant);
         };
         if request.address != attempt.address
-            || request.queued != attempt.queued
+            || request.queue_evidence != attempt.queue_evidence
             || request.state != RequestState::Queued
         {
             return Err(StoreError::StateInvariant);
@@ -627,12 +793,16 @@ impl AccountsQueueDelivery for FlowStore {
         request.state = RequestState::Settled;
         metaflow.metaflow.queue.remove(0);
         attempt.phase = QueueDeliveryPhase::Settled(receipt);
-        self.engine.commit_atomic(
-            self.engine
-                .begin_atomic_commit()
-                .mutate(self.metaflows, metaflow)
-                .mutate(self.queue_delivery.requests, request)
-                .mutate(self.queue_delivery.attempts, attempt),
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, metaflow)
+            .mutate(self.queue_delivery.requests, request)
+            .mutate(self.queue_delivery.attempts, attempt);
+        self.commit_logical_transition(
+            &logical_id,
+            DeliveryState::Delivered(native_receipt),
+            commit,
         )?;
         Ok(true)
     }
@@ -641,14 +811,19 @@ impl AccountsQueueDelivery for FlowStore {
         let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
             return Ok(false);
         };
-        match attempt.phase {
+        let evidence = attempt.queue_evidence.clone();
+        match &attempt.phase {
             QueueDeliveryPhase::Prepared => {
                 attempt.phase = QueueDeliveryPhase::Uncertain(None);
-                self.engine.mutate_keyed(KeyedMutation::new(
-                    self.queue_delivery.attempts,
-                    RecordKey::new(attempt_id),
-                    attempt,
-                ))?;
+                let commit = self
+                    .engine
+                    .begin_atomic_commit()
+                    .mutate_keyed(KeyedMutation::new(
+                        self.queue_delivery.attempts,
+                        RecordKey::new(attempt_id),
+                        attempt,
+                    ));
+                commit_attempt_state(self, &evidence, DeliveryState::Uncertain, commit)?;
                 Ok(true)
             }
             QueueDeliveryPhase::Uncertain(_) => Ok(true),
@@ -672,17 +847,22 @@ impl AccountsQueueDelivery for FlowStore {
             return Ok(true);
         }
         if !matches!(
-            attempt.phase,
+            &attempt.phase,
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
         ) {
             return Ok(false);
         }
+        let evidence = attempt.queue_evidence.clone();
         attempt.phase = marked;
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.queue_delivery.attempts,
-            RecordKey::new(attempt_id),
-            attempt,
-        ))?;
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate_keyed(KeyedMutation::new(
+                self.queue_delivery.attempts,
+                RecordKey::new(attempt_id),
+                attempt,
+            ));
+        commit_attempt_state(self, &evidence, DeliveryState::Uncertain, commit)?;
         Ok(true)
     }
 
@@ -718,13 +898,19 @@ impl AccountsQueueDelivery for FlowStore {
             return Err(StoreError::StateInvariant);
         }
         let mut request = request.clone();
+        let evidence = attempt.queue_evidence.clone();
         request.state = RequestState::Unsent;
         attempt.phase = QueueDeliveryPhase::Absent(absence);
-        self.engine.commit_atomic(
-            self.engine
-                .begin_atomic_commit()
-                .mutate(self.queue_delivery.requests, request)
-                .mutate(self.queue_delivery.attempts, attempt),
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.queue_delivery.requests, request)
+            .mutate(self.queue_delivery.attempts, attempt);
+        commit_attempt_state(
+            self,
+            &evidence,
+            DeliveryState::Retryable(RetryCause::HistoryAbsent),
+            commit,
         )?;
         Ok(true)
     }
@@ -747,7 +933,10 @@ impl AccountsQueueDelivery for FlowStore {
         let Some(mut metaflow) = self.stored_metaflow(&attempt.address)? else {
             return Ok(Err(Rejected::NotOldest));
         };
-        if metaflow.metaflow.queue.first() != Some(&attempt.queued) {
+        let QueueEvidence::Logical(logical_entry) = &attempt.queue_evidence else {
+            return Ok(Err(Rejected::NotOldest));
+        };
+        if metaflow.metaflow.queue.first() != Some(logical_entry) {
             return Ok(Err(Rejected::NotOldest));
         }
         let requests = self
@@ -762,7 +951,7 @@ impl AccountsQueueDelivery for FlowStore {
             return Err(StoreError::StateInvariant);
         };
         if request.address != attempt.address
-            || request.queued != attempt.queued
+            || request.queue_evidence != attempt.queue_evidence
             || request.state != RequestState::Queued
         {
             return Err(StoreError::StateInvariant);
@@ -876,15 +1065,30 @@ mod tests {
         }
     }
 
-    fn queued(body: &str) -> QueuedRequest {
-        QueuedRequest {
+    fn queued(body: &str) -> QueueEntry {
+        QueueEntry {
+            logical_delivery_id: format!("logical-{body}"),
             sent_by: SentBy::Sender(Address {
                 aspect: Aspect::Psyche,
                 topic: "core".into(),
                 layer: Layer::Secondary,
             }),
-            request: Request::Order(body.into()),
+            delivery: flow_ethos::Delivery::Queue,
+            message: flow_ethos::Message::Soft(Request::Order(body.into())),
         }
+    }
+
+    fn before_flow(entry: &QueueEntry) -> super::super::QueuedRequestBeforeFlow {
+        let sent_by = match &entry.sent_by {
+            SentBy::Sender(sender) => super::super::SentByBeforeFlow::Sender(sender.clone()),
+            SentBy::Unknown | SentBy::Flow => super::super::SentByBeforeFlow::Unknown,
+        };
+        let request = match &entry.message {
+            flow_ethos::Message::Soft(request)
+            | flow_ethos::Message::MiddleAbrupt(request)
+            | flow_ethos::Message::HardAbrupt(request) => request.clone(),
+        };
+        super::super::QueuedRequestBeforeFlow { sent_by, request }
     }
 
     fn defaults(directory: &Path) -> DefaultConfiguration {
@@ -962,7 +1166,10 @@ mod tests {
         };
         assert_ne!(prepared.request_id, prepared.attempt_id);
         assert!(prepared.native_request_id >= 3);
-        assert_eq!(prepared.queued, queued("first"));
+        assert_eq!(
+            prepared.queue_evidence,
+            QueueEvidence::Logical(queued("first"))
+        );
         drop(store);
 
         let reopened = fixture.reopen();
@@ -1056,7 +1263,10 @@ mod tests {
             panic!("next request gets its own attempt")
         };
         assert_ne!(next.attempt_id, prepared.attempt_id);
-        assert_eq!(next.queued, queued("second"));
+        assert_eq!(
+            next.queue_evidence,
+            QueueEvidence::Logical(queued("second"))
+        );
     }
 
     #[test]
@@ -1211,7 +1421,10 @@ mod tests {
         };
         assert_ne!(second.attempt_id, first.attempt_id);
         assert_ne!(second.native_request_id, first.native_request_id);
-        assert_eq!(second.queued, queued("first"));
+        assert_eq!(
+            second.queue_evidence,
+            QueueEvidence::Logical(queued("first"))
+        );
         let unsettled = store.unsettled_deliveries(&address()).unwrap();
         assert_eq!(
             unsettled
@@ -1359,7 +1572,10 @@ mod tests {
         else {
             panic!("the next request is prepared")
         };
-        assert_eq!(next.queued, queued("second"));
+        assert_eq!(
+            next.queue_evidence,
+            QueueEvidence::Logical(queued("second"))
+        );
     }
 
     #[test]
@@ -1397,7 +1613,7 @@ mod tests {
             panic!("a resolution to Absent authorises a new attempt")
         };
         assert_ne!(next.attempt_id, attempt.attempt_id);
-        assert_eq!(next.queued, queued("first"));
+        assert_eq!(next.queue_evidence, QueueEvidence::Logical(queued("first")));
         assert!(matches!(
             store
                 .prepare_oldest_delivery(
@@ -1562,6 +1778,13 @@ mod tests {
             panic!("oldest request prepared")
         };
         let metaflow = store.metaflow(&address()).unwrap().expect("seeded");
+        let mut migrated_metaflow = metaflow.clone();
+        for (index, entry) in migrated_metaflow.queue.iter_mut().enumerate() {
+            entry.logical_delivery_id = format!(
+                "legacy:{}:{index:016x}",
+                FlowStore::address_record_key(&migrated_metaflow.address)
+            );
+        }
         let requests = store
             .engine
             .match_records(QueryPlan::all(store.queue_delivery.requests))
@@ -1607,7 +1830,12 @@ mod tests {
                 .assert(Assertion::new(
                     metaflows,
                     super::super::StoredMetaflowV3 {
-                        metaflow: metaflow.clone(),
+                        metaflow: super::super::MetaflowBeforeFlow {
+                            address: metaflow.address.clone(),
+                            state: metaflow.state.clone(),
+                            past: metaflow.past.clone(),
+                            queue: metaflow.queue.iter().map(before_flow).collect(),
+                        },
                     },
                 ))
                 .expect("v3 metaflow persists");
@@ -1625,7 +1853,10 @@ mod tests {
                         StoredDeliveryRequestV2 {
                             request_id: request.request_id.clone(),
                             address: request.address.clone(),
-                            queued: request.queued.clone(),
+                            queued: match &request.queue_evidence {
+                                QueueEvidence::Logical(entry) => before_flow(entry),
+                                QueueEvidence::Legacy(_) => unreachable!(),
+                            },
                             state: request.state.clone(),
                         },
                     ))
@@ -1650,7 +1881,10 @@ mod tests {
                         harness_kind: prepared.harness_kind.clone(),
                         history_anchor: prepared.history_anchor.clone(),
                         address: prepared.address.clone(),
-                        queued: prepared.queued.clone(),
+                        queued: match &prepared.queue_evidence {
+                            QueueEvidence::Logical(entry) => before_flow(entry),
+                            QueueEvidence::Legacy(_) => unreachable!(),
+                        },
                         phase: prepared.phase.clone(),
                     },
                 ))
@@ -1658,16 +1892,43 @@ mod tests {
         }
 
         let reopened = fixture.reopen();
-        assert_eq!(reopened.metaflow(&address()).unwrap(), Some(metaflow));
+        assert_eq!(
+            reopened.metaflow(&address()).unwrap(),
+            Some(migrated_metaflow)
+        );
         // Carried as it was; the open makes a receipt-less attempt Uncertain.
+        let QueueEvidence::Logical(old_entry) = &prepared.queue_evidence else {
+            unreachable!()
+        };
+        let old_entry = before_flow(old_entry);
+        let mut migrated_attempt = prepared.clone();
+        migrated_attempt.phase = QueueDeliveryPhase::Uncertain(None);
+        migrated_attempt.queue_evidence = legacy_queue_evidence(
+            match old_entry.sent_by {
+                super::super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
+                super::super::SentByBeforeFlow::Unknown => SentBy::Unknown,
+            },
+            old_entry.request,
+        );
+        let mut migrated_requests = requests.clone();
+        for request in &mut migrated_requests {
+            let QueueEvidence::Logical(entry) = &request.queue_evidence else {
+                unreachable!()
+            };
+            let legacy = before_flow(entry);
+            request.queue_evidence = legacy_queue_evidence(
+                match legacy.sent_by {
+                    super::super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
+                    super::super::SentByBeforeFlow::Unknown => SentBy::Unknown,
+                },
+                legacy.request,
+            );
+        }
         assert_eq!(
             reopened
                 .queue_delivery_attempt(&prepared.attempt_id)
                 .unwrap(),
-            Some(QueueDeliveryAttempt {
-                phase: QueueDeliveryPhase::Uncertain(None),
-                ..prepared.clone()
-            })
+            Some(migrated_attempt)
         );
         assert_eq!(
             reopened
@@ -1676,12 +1937,14 @@ mod tests {
                 .unwrap()
                 .records()
                 .to_vec(),
-            requests
+            migrated_requests
         );
         // A request Flow raised is kept, and kept across an open.
-        let raised = QueuedRequest {
+        let raised = QueueEntry {
+            logical_delivery_id: "flow-raised".into(),
             sent_by: SentBy::Flow,
-            request: Request::Order("investigate".into()),
+            delivery: flow_ethos::Delivery::Queue,
+            message: flow_ethos::Message::Soft(Request::Order("investigate".into())),
         };
         assert!(
             reopened
@@ -1695,6 +1958,13 @@ mod tests {
             .unwrap()
             .unwrap()
             .queue;
-        assert_eq!(queue.last(), Some(&raised));
+        assert_eq!(
+            queue.last().map(|entry| &entry.sent_by),
+            Some(&SentBy::Flow)
+        );
+        assert_eq!(
+            queue.last().map(|entry| &entry.message),
+            Some(&raised.message)
+        );
     }
 }

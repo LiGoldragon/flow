@@ -75,33 +75,6 @@ pub type LogicalDeliveryId = String;
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum Message {
-    HardAbrupt(Request),
-    MiddleAbrupt(Request),
-    Soft(Request),
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-#[rkyv(
-    serialize_bounds(
-        __S:rkyv::ser::Writer+rkyv::ser::Allocator,
-        __S::Error:rkyv::rancor::Source
-    )
-)]
-#[rkyv(deserialize_bounds(__D::Error:rkyv::rancor::Source))]
-#[rkyv(
-    bytecheck(
-        bounds(__C:rkyv::validation::ArchiveContext, __C::Error:rkyv::rancor::Source)
-    )
-)]
-pub enum Delivery {
-    Queue(#[rkyv(omit_bounds)] Queue),
-    Wake,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Aspect {
     Psyche,
     Mind,
@@ -133,24 +106,11 @@ pub enum SentBy {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-#[rkyv(
-    serialize_bounds(
-        __S:rkyv::ser::Writer+rkyv::ser::Allocator,
-        __S::Error:rkyv::rancor::Source
-    )
-)]
-#[rkyv(deserialize_bounds(__D::Error:rkyv::rancor::Source))]
-#[rkyv(
-    bytecheck(
-        bounds(__C:rkyv::validation::ArchiveContext, __C::Error:rkyv::rancor::Source)
-    )
-)]
 pub struct QueueEntry {
     pub logical_delivery_id: LogicalDeliveryId,
     pub sent_by: SentBy,
-    #[rkyv(omit_bounds)]
-    pub delivery: Delivery,
-    pub message: Message,
+    pub delivery: crate::Delivery,
+    pub message: crate::Message,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -158,7 +118,7 @@ pub struct QueueEntry {
 pub struct NativeInput {
     pub logical_delivery_id: LogicalDeliveryId,
     pub sent_by: SentBy,
-    pub message: Message,
+    pub message: crate::Message,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

@@ -3,7 +3,7 @@
 ; nominal type shared by addresses, launch profiles and meta configuration.
 
 Library
-[ :crate:generated:delivery:[ Delivery Message ] ]
+[ crate:[ Delivery Message ] ]
 [ FlowId.String
   ; ethos-zero 16 cannot express Topic:Name yet; check camelCase at input.
   Topic.String

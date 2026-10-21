@@ -1852,12 +1852,14 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
         .store
         .awaken_metaflow(&sender_address, "deliver-all-sender", 0)
         .unwrap();
-    let snapshot = fs::read_to_string(&fixture.snapshot_program).unwrap();
-    let sender_agent = r#"{"agent":"claude","agent_status":"working","name":"sender-agent","pane_id":"w5:p1","terminal_id":"term-sender","workspace_id":"w5"}"#;
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&snapshot.replace(r#""agents":[]"#, &format!(r#""agents":[{sender_agent}]"#)));
+    fixture.set_agents(vec![serde_json::json!({
+        "agent":"claude",
+        "agent_status":"working",
+        "name":"sender-agent",
+        "pane_id":"w5:p1",
+        "terminal_id":"term-sender",
+        "workspace_id":"w5"
+    })]);
     let sender = super::MarkedProcess::spawn("sleep", &["30"], "w5:p1");
     let sender_process = FlowStore::process_identity_for_pid(sender.0.id()).unwrap();
     assert_eq!(

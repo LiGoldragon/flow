@@ -1177,6 +1177,36 @@ impl PerformsWakeAndDrain for RunningNexus {
                     drained.push(queued);
                 }
                 Reconciled::Absent => {}
+                Reconciled::Undecided(Undecided::AbsenceUnprovable) => {
+                    eprintln!(
+                        "flow-nexus: queued delivery {} remains uncertain (AbsenceUnprovable); parking it without retry",
+                        attempt.attempt_id
+                    );
+                    if !self
+                        .store
+                        .park_uncertain_delivery(&attempt.attempt_id)
+                        .unwrap_or(false)
+                    {
+                        return Outcome::Failed(Failed_Data::StoreRefused);
+                    }
+                    return match self.drain(address) {
+                        Outcome::Drained(mut following) => {
+                            drained.append(&mut following);
+                            Outcome::Drained(drained)
+                        }
+                        Outcome::AwaitingReceipt(id) if drained.is_empty() => {
+                            Outcome::AwaitingReceipt(id)
+                        }
+                        Outcome::AwaitingReceipt(_) => Outcome::Drained(drained),
+                        Outcome::WaitingForTurn(id) if drained.is_empty() => {
+                            Outcome::WaitingForTurn(id)
+                        }
+                        Outcome::WaitingForTurn(_) => Outcome::Drained(drained),
+                        Outcome::Failed(reason) if drained.is_empty() => Outcome::Failed(reason),
+                        Outcome::Failed(_) => Outcome::Drained(drained),
+                        other => other,
+                    };
+                }
                 Reconciled::Undecided(undecided) => {
                     eprintln!(
                         "flow-nexus: queued delivery {} stays uncertain ({undecided:?}); it is never handed over again",
@@ -1375,23 +1405,43 @@ impl PerformsWakeAndDrain for RunningNexus {
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
         };
         let mut removed = 0;
+        let mut delivered = Vec::new();
         loop {
             let outcome = self.drain(address.clone());
+            match outcome {
+                Outcome::Drained(mut entries) => delivered.append(&mut entries),
+                Outcome::AwaitingReceipt(id) if delivered.is_empty() => {
+                    return Outcome::AwaitingReceipt(id);
+                }
+                Outcome::AwaitingReceipt(_) => return Outcome::Drained(delivered),
+                Outcome::WaitingForTurn(id) if delivered.is_empty() => {
+                    return Outcome::WaitingForTurn(id);
+                }
+                Outcome::WaitingForTurn(_) => return Outcome::Drained(delivered),
+                Outcome::Failed(reason) if delivered.is_empty() => return Outcome::Failed(reason),
+                Outcome::Failed(_) => return Outcome::Drained(delivered),
+                _ => {}
+            }
             let remaining = match self.store.metaflow(&address) {
                 Ok(Some(metaflow)) => metaflow.queue.len(),
                 _ => return Outcome::Failed(Failed_Data::StoreRefused),
             };
             let now_removed = queued.len().saturating_sub(remaining);
             if now_removed == removed {
-                return match outcome {
-                    Outcome::AwaitingReceipt(_) | Outcome::WaitingForTurn(_) => outcome,
-                    Outcome::Failed(_) if removed == 0 => outcome,
-                    // Only requests whose exact native receipt removed
-                    // them from the durable queue are reported drained.
-                    _ => Outcome::Drained(queued[..removed].to_vec()),
+                return if delivered.is_empty() && now_removed > 0 {
+                    Outcome::Failed(Failed_Data::HerdrRefused)
+                } else {
+                    Outcome::Drained(delivered)
                 };
             }
             removed = now_removed;
+            if remaining == 0 {
+                return if delivered.is_empty() && !queued.is_empty() {
+                    Outcome::Failed(Failed_Data::HerdrRefused)
+                } else {
+                    Outcome::Drained(delivered)
+                };
+            }
         }
     }
 }

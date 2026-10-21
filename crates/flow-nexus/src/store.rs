@@ -6282,6 +6282,12 @@ pub(crate) trait ReadsFlowMemory {
                 META_INVESTIGATION_CONFIGURATION_FAMILY,
                 META_INVESTIGATION_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_send_outcome_counter" => {
+                (send_outcome::COUNTER_FAMILY, send_outcome::COUNTER_SCHEMA)
+            }
+            "flow_nexus_send_outcomes" => {
+                (send_outcome::OUTCOME_FAMILY, send_outcome::OUTCOME_SCHEMA)
+            }
             "flow_nexus_compactions" => {
                 (compaction::COMPACTION_FAMILY, compaction::COMPACTION_SCHEMA)
             }

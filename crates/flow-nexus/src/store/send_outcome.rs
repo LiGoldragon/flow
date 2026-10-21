@@ -4,6 +4,11 @@ use super::*;
 use meta_signal_flow::{OrdinarySendOutcome, SendOutcomeRecord};
 use signal_flow::{Address, Process, Response};
 
+pub(super) const COUNTER_FAMILY: &str = "flow-nexus-send-outcome-counter";
+pub(super) const COUNTER_SCHEMA: &str = "flow-nexus-send-outcome-counter-v1";
+pub(super) const OUTCOME_FAMILY: &str = "flow-nexus-send-outcome";
+pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v1";
+
 const COUNTER_KEY: &str = "counter";
 const SEND_OUTCOME_COUNTER_TABLE_NAME: TableName =
     TableName::new("flow_nexus_send_outcome_counter");
@@ -26,7 +31,7 @@ impl MemoryDefinition for SendOutcomeCounter {
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-send-outcome-counter-v1")
+        SchemaHash::for_label(COUNTER_SCHEMA)
     }
 }
 
@@ -47,7 +52,7 @@ impl MemoryDefinition for StoredSendOutcome {
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-send-outcome-v1")
+        SchemaHash::for_label(OUTCOME_SCHEMA)
     }
 }
 
@@ -75,12 +80,12 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
         SendOutcomeDescriptors {
             counter: TableDescriptor::new(
                 SEND_OUTCOME_COUNTER_TABLE_NAME,
-                FamilyName::new("flow-nexus-send-outcome-counter"),
+                FamilyName::new(COUNTER_FAMILY),
                 SendOutcomeCounter::schema_hash(),
             ),
             outcomes: TableDescriptor::new(
                 SEND_OUTCOME_TABLE_NAME,
-                FamilyName::new("flow-nexus-send-outcome"),
+                FamilyName::new(OUTCOME_FAMILY),
                 StoredSendOutcome::schema_hash(),
             ),
         }

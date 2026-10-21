@@ -157,7 +157,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     let sender = request.lock.sender.clone();
                     let recipient = request.lock.address.clone();
                     self.rest_ended_awake(&request.lock.address);
-                    let response = match self.store.queue_metaflow(request, now) {
+                    let response: MetaflowAnswer = match self.store.queue_metaflow(request, now) {
                         Ok(response) => response.into(),
                         Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
                     };

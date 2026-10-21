@@ -1331,7 +1331,18 @@ mod tests {
             response,
             Response::Refused(signal_flow::Refusal::Unidentified(_))
         ));
-        for response in [Response::Queued, Response::Delivered] {
+        for response in [
+            Response::SendAccepted(signal_flow::SendAcceptance {
+                logical_delivery_id: "logical-delivery-1".into(),
+                delivery_cursor: 1,
+                delivery_state: signal_flow::DeliveryState::Queued,
+            }),
+            Response::SendAccepted(signal_flow::SendAcceptance {
+                logical_delivery_id: "logical-delivery-2".into(),
+                delivery_cursor: 2,
+                delivery_state: signal_flow::DeliveryState::Attempting,
+            }),
+        ] {
             fixture
                 .nexus
                 .store
@@ -1355,17 +1366,18 @@ mod tests {
                 .iter()
                 .filter(|record| matches!(
                     record.ordinary_send_outcome,
-                    OrdinarySendOutcome::Queued
+                    OrdinarySendOutcome::Accepted(_)
                 ))
                 .count(),
-            1
+            2
         );
         assert_eq!(
             records
                 .iter()
                 .filter(|record| matches!(
                     record.ordinary_send_outcome,
-                    OrdinarySendOutcome::Delivered
+                    OrdinarySendOutcome::Accepted(acceptance)
+                        if matches!(acceptance.delivery_state, signal_flow::DeliveryState::Queued)
                 ))
                 .count(),
             1
@@ -4401,8 +4413,8 @@ mod tests {
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
         use signal_flow::{
-            Address, Delivery, Layer, Message, Metaflow, QueuedRequest, Recipient, Refusal,
-            Request, Send_Data, SentBy, Unknown_Data,
+            Address, Delivery, Layer, Message, Metaflow, QueueEntry, Recipient, Refusal, Request,
+            SendRequest, SentBy, Unknown_Data,
         };
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "mind-live", "pane-1");
@@ -4435,7 +4447,7 @@ mod tests {
             fixture
                 .nexus
                 .send_request(
-                    Send_Data {
+                    SendRequest {
                         recipient,
                         delivery: Delivery::Queue,
                         message: Message::Soft(request),
@@ -4445,22 +4457,22 @@ mod tests {
                 .response
         };
         let order = Request::Order("Review the drain fix".into());
-        assert_eq!(
+        assert!(matches!(
             send(Recipient::Address(sibling.clone()), order.clone(), &peer),
-            Response::Queued
-        );
-        assert_eq!(
+            Response::SendAccepted(_)
+        ));
+        assert!(matches!(
             send(
                 Recipient::Address(field.clone()),
                 Request::Notice("released".into()),
                 &peer
             ),
-            Response::Queued
-        );
-        assert_eq!(
+            Response::SendAccepted(_)
+        ));
+        assert!(matches!(
             send(Recipient::Address(elsewhere), order.clone(), &peer),
-            Response::Queued
-        );
+            Response::SendAccepted(_)
+        ));
         assert_eq!(
             send(Recipient::Up, Request::Result("done".into()), &peer),
             Response::Refused(Refusal::Unknown(Unknown_Data::Address(address(
@@ -4477,9 +4489,11 @@ mod tests {
                 .expect("metaflow reads")
                 .expect("metaflow held")
                 .queue,
-            vec![QueuedRequest {
+            vec![QueueEntry {
+                logical_delivery_id: "logical-delivery-0000000000000001".into(),
                 sent_by: SentBy::Sender(sender),
-                request: order.clone(),
+                delivery: Delivery::Queue,
+                message: Message::Soft(order.clone()),
             }]
         );
         let stranger = MarkedProcess::spawn("sleep", &["30"], "pane-9");

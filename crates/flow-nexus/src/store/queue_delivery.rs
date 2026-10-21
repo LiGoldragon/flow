@@ -20,8 +20,17 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::AtomicCommit;
 use signal_flow::{Address, DeliveryState, HarnessKind, NativeReceipt, RetryCause, SentBy};
 
-fn legacy_queue_evidence(sent_by: SentBy, request: Request) -> QueueEvidence {
-    QueueEvidence::Legacy(Legacy_Data { sent_by, request })
+trait CarriesLegacySender {
+    fn with_legacy_sender(self, sent_by: SentBy) -> QueueEvidence;
+}
+
+impl CarriesLegacySender for Request {
+    fn with_legacy_sender(self, sent_by: SentBy) -> QueueEvidence {
+        QueueEvidence::Legacy(Legacy_Data {
+            sent_by,
+            request: self,
+        })
+    }
 }
 fn commit_attempt_state(
     store: &FlowStore,
@@ -123,12 +132,11 @@ impl UpgradeFrom<StoredDeliveryRequestV2> for StoredDeliveryRequest {
         Decision::Ready(Self {
             request_id: previous.request_id,
             address: previous.address,
-            queue_evidence: legacy_queue_evidence(
+            queue_evidence: previous.queued.request.with_legacy_sender(
                 match previous.queued.sent_by {
                     super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
                     super::SentByBeforeFlow::Unknown => SentBy::Unknown,
                 },
-                previous.queued.request,
             ),
             state: previous.state,
         })
@@ -161,7 +169,10 @@ impl UpgradeFrom<StoredDeliveryRequestV3> for StoredDeliveryRequest {
         Decision::Ready(Self {
             request_id: previous.request_id,
             address: previous.address,
-            queue_evidence: legacy_queue_evidence(previous.queued.sent_by, previous.queued.request),
+            queue_evidence: previous
+                .queued
+                .request
+                .with_legacy_sender(previous.queued.sent_by),
             state: previous.state,
         })
     }
@@ -306,12 +317,11 @@ impl UpgradeFrom<QueueDeliveryAttemptV4> for QueueDeliveryAttempt {
             harness_kind: previous.harness_kind,
             history_anchor: previous.history_anchor,
             address: previous.address,
-            queue_evidence: legacy_queue_evidence(
+            queue_evidence: previous.queued.request.with_legacy_sender(
                 match previous.queued.sent_by {
                     super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
                     super::SentByBeforeFlow::Unknown => SentBy::Unknown,
                 },
-                previous.queued.request,
             ),
             phase: previous.phase,
         })
@@ -356,7 +366,10 @@ impl UpgradeFrom<QueueDeliveryAttemptV5> for QueueDeliveryAttempt {
             harness_kind: previous.harness_kind,
             history_anchor: previous.history_anchor,
             address: previous.address,
-            queue_evidence: legacy_queue_evidence(previous.queued.sent_by, previous.queued.request),
+            queue_evidence: previous
+                .queued
+                .request
+                .with_legacy_sender(previous.queued.sent_by),
             phase: previous.phase,
         })
     }
@@ -533,12 +546,9 @@ pub trait AccountsQueueDelivery {
         absence: AbsenceRecord,
     ) -> Result<bool, StoreError>;
 
-    /// The owner's resolution of one Uncertain attempt. Delivered removes
-    /// the still-oldest request from the queue, Absent leaves it queued for
-    /// a new attempt; either way the attempt ends Resolved with `record`,
-    /// in the same commit. Refused, with nothing written, when the attempt
-    /// is unknown, is not Uncertain, is no longer the address's oldest
-    /// request, or the reason is empty.
+    /// The owner's resolution of one Uncertain attempt. Only Absent is
+    /// actionable: it retains the request and authorises a retry. Delivered
+    /// requires an exact native receipt and cannot be asserted by an owner.
     fn resolve_uncertain_delivery(
         &self,
         attempt_id: &str,
@@ -916,20 +926,40 @@ impl AccountsQueueDelivery for FlowStore {
         let Some(mut attempt) = self.queue_delivery_attempt(attempt_id)? else {
             return Ok(Err(Rejected::UnknownAttempt));
         };
+        if let QueueDeliveryPhase::Settled(receipt) = &attempt.phase {
+            return Ok(Err(Rejected::AlreadyDelivered(NativeReceipt {
+                harness_kind: attempt.harness_kind.clone(),
+                native_session_id: attempt.thread_id.clone(),
+                native_prompt_id: receipt.turn_id.clone(),
+            })));
+        }
+        if let QueueDeliveryPhase::Resolved(prior) = &attempt.phase {
+            if prior.queue_resolution_outcome == QueueResolutionOutcome::Absent
+                && record.queue_resolution_outcome == QueueResolutionOutcome::Absent
+                && prior.resolver_identity == record.resolver_identity
+                && prior.queue_resolution_reason == record.queue_resolution_reason
+            {
+                return Ok(Ok(attempt));
+            }
+            return Ok(Err(Rejected::AlreadyResolved(prior.clone())));
+        }
         if !matches!(attempt.phase, QueueDeliveryPhase::Uncertain(_)) {
             return Ok(Err(Rejected::NotUncertain));
         }
         if record.queue_resolution_reason.trim().is_empty() {
             return Ok(Err(Rejected::EmptyReason));
         }
-        let Some(mut metaflow) = self.stored_metaflow(&attempt.address)? else {
+        let Some(metaflow) = self.stored_metaflow(&attempt.address)? else {
             return Ok(Err(Rejected::NotOldest));
         };
         let QueueEvidence::Logical(logical_entry) = &attempt.queue_evidence else {
-            return Ok(Err(Rejected::NotOldest));
+            return Ok(Err(Rejected::LegacyUncorrelated));
         };
         if metaflow.metaflow.queue.first() != Some(logical_entry) {
             return Ok(Err(Rejected::NotOldest));
+        }
+        if record.queue_resolution_outcome == QueueResolutionOutcome::Delivered {
+            return Ok(Err(Rejected::NativeReceiptRequired));
         }
         let requests = self
             .engine
@@ -949,23 +979,19 @@ impl AccountsQueueDelivery for FlowStore {
             return Err(StoreError::StateInvariant);
         }
         let mut request = request.clone();
-        let commit = self.engine.begin_atomic_commit();
-        let commit = match record.queue_resolution_outcome {
-            QueueResolutionOutcome::Delivered => {
-                request.state = RequestState::Settled;
-                metaflow.metaflow.queue.remove(0);
-                commit.mutate(self.metaflows, metaflow)
-            }
-            QueueResolutionOutcome::Absent => {
-                request.state = RequestState::Unsent;
-                commit
-            }
-        };
+        request.state = RequestState::Unsent;
         attempt.phase = QueueDeliveryPhase::Resolved(record);
-        self.engine.commit_atomic(
-            commit
-                .mutate(self.queue_delivery.requests, request)
-                .mutate(self.queue_delivery.attempts, attempt.clone()),
+        let evidence = attempt.queue_evidence.clone();
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.queue_delivery.requests, request)
+            .mutate(self.queue_delivery.attempts, attempt.clone());
+        commit_attempt_state(
+            self,
+            &evidence,
+            DeliveryState::Retryable(RetryCause::OwnerResolvedAbsent),
+            commit,
         )?;
         Ok(Ok(attempt))
     }
@@ -1001,11 +1027,12 @@ impl AccountsQueueDelivery for FlowStore {
             match attempt.phase.clone() {
                 QueueDeliveryPhase::Prepared => {
                     attempt.phase = QueueDeliveryPhase::Uncertain(None);
-                    self.engine.mutate_keyed(KeyedMutation::new(
-                        self.queue_delivery.attempts,
-                        RecordKey::new(attempt.attempt_id.clone()),
-                        attempt.clone(),
-                    ))?;
+                    let evidence = attempt.queue_evidence.clone();
+                    let commit = self
+                        .engine
+                        .begin_atomic_commit()
+                        .mutate(self.queue_delivery.attempts, attempt.clone());
+                    commit_attempt_state(self, &evidence, DeliveryState::Uncertain, commit)?;
                     outstanding.push(attempt);
                 }
                 QueueDeliveryPhase::Uncertain(_) | QueueDeliveryPhase::ReceiptRecorded(_) => {
@@ -1046,7 +1073,7 @@ mod tests {
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::metaflow::SleepsMetaflows;
     use flow_defaults::DefaultConfiguration;
-    use flow_ethos::{Aspect, Layer, Metaflow, Request, SentBy, State};
+    use flow_ethos::{Aspect, Layer, Metaflow, QueueEntry, Request, SentBy, State};
     use std::path::{Path, PathBuf};
 
     fn address() -> Address {
@@ -1198,6 +1225,7 @@ mod tests {
 
     #[test]
     fn native_acceptance_after_a_crash_reconciles_without_another_attempt() {
+        use super::super::logical_delivery::RecordsLogicalDeliveries;
         let (fixture, store) = Fixture::new();
         let PrepareQueueDelivery::Prepared(prepared) = store
             .prepare_oldest_delivery(
@@ -1224,6 +1252,17 @@ mod tests {
         };
         assert_eq!(uncertain.attempt_id, prepared.attempt_id);
         assert_eq!(uncertain.phase, QueueDeliveryPhase::Uncertain(None));
+        let sender = match queued("first").sent_by {
+            SentBy::Sender(sender) => sender,
+            _ => panic!("test request has a sender"),
+        };
+        let observation = reopened
+            .read_logical_delivery_snapshots(&sender, None)
+            .unwrap();
+        assert!(observation.delivery_snapshot_vector.iter().any(|snapshot| {
+            snapshot.logical_delivery_id == queued("first").logical_delivery_id
+                && snapshot.delivery_state == DeliveryState::Uncertain
+        }));
         assert!(
             reopened
                 .record_delivery_receipt(&prepared.attempt_id, receipt(&prepared))
@@ -1513,21 +1552,20 @@ mod tests {
     }
 
     #[test]
-    fn resolved_delivered_leaves_the_queue_with_its_record_and_survives_restart() {
+    fn owner_delivered_resolution_requires_native_receipt_and_changes_nothing() {
+        use ResolveQueueDeliveryRejected_Data as Rejected;
         let (fixture, store) = Fixture::new();
         let attempt = prepare_claude(&store);
         let record = resolution(QueueResolutionOutcome::Delivered, "seen in the pane");
-        let resolved = store
-            .resolve_uncertain_delivery(&attempt.attempt_id, record.clone())
-            .unwrap()
-            .unwrap();
-        assert_eq!(resolved.phase, QueueDeliveryPhase::Resolved(record.clone()));
-        drop(store);
-
-        let store = fixture.reopen();
+        assert_eq!(
+            store
+                .resolve_uncertain_delivery(&attempt.attempt_id, record)
+                .unwrap(),
+            Err(Rejected::NativeReceiptRequired)
+        );
         assert_eq!(
             store.metaflow(&address()).unwrap().unwrap().queue,
-            vec![queued("second")]
+            vec![queued("first"), queued("second")]
         );
         assert_eq!(
             store
@@ -1535,50 +1573,122 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .phase,
-            QueueDeliveryPhase::Resolved(record.clone())
+            QueueDeliveryPhase::Uncertain(Some(Undecided::AbsenceUnprovable))
         );
-        assert!(store.outstanding_delivery(&address()).unwrap().is_none());
+        assert_eq!(
+            store.outstanding_delivery(&address()).unwrap(),
+            Some(attempt)
+        );
+    }
+
+    #[test]
+    fn owner_resolution_refuses_legacy_attempt_without_logical_lineage() {
+        use ResolveQueueDeliveryRejected_Data as Rejected;
+        let (_fixture, store) = Fixture::new();
+        let mut attempt = prepare_claude(&store);
+        let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+            panic!("fixture initially has a logical request")
+        };
+        let legacy = Request::Order("first".into()).with_legacy_sender(entry.sent_by.clone());
+        let requests = store
+            .engine
+            .match_records(QueryPlan::key(
+                store.queue_delivery.requests,
+                RecordKey::new(attempt.request_id.clone()),
+            ))
+            .unwrap()
+            .records()
+            .to_vec();
+        let [request] = requests.as_slice() else {
+            panic!("one request is prepared")
+        };
+        let mut request = request.clone();
+        request.queue_evidence = legacy.clone();
+        attempt.queue_evidence = legacy;
+        store
+            .engine
+            .commit_atomic(
+                store
+                    .engine
+                    .begin_atomic_commit()
+                    .mutate(store.queue_delivery.requests, request)
+                    .mutate(store.queue_delivery.attempts, attempt.clone()),
+            )
+            .unwrap();
+
         assert_eq!(
             store
-                .unsettled_deliveries(&address())
-                .unwrap()
-                .into_iter()
-                .map(|attempt| attempt.phase)
-                .collect::<Vec<_>>(),
-            vec![QueueDeliveryPhase::Resolved(record)]
+                .resolve_uncertain_delivery(
+                    &attempt.attempt_id,
+                    resolution(QueueResolutionOutcome::Absent, "no matching receipt"),
+                )
+                .unwrap(),
+            Err(Rejected::LegacyUncorrelated)
         );
-        // The next request gets its own attempt.
-        let PrepareQueueDelivery::Prepared(next) = store
-            .prepare_oldest_delivery(
-                &address(),
-                "flow-delivery",
-                "thread-7",
-                HarnessKind::Claude,
-                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
-                    device: 1,
-                    inode: 2,
-                    offset: 4,
-                }),
-            )
-            .unwrap()
-        else {
-            panic!("the next request is prepared")
-        };
         assert_eq!(
-            next.queue_evidence,
-            QueueEvidence::Logical(queued("second"))
+            store.queue_delivery_attempt(&attempt.attempt_id).unwrap(),
+            Some(attempt)
+        );
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("first"), queued("second")]
         );
     }
 
     #[test]
     fn resolved_absent_keeps_the_request_and_authorises_exactly_one_new_attempt() {
+        use super::super::logical_delivery::RecordsLogicalDeliveries;
         let (fixture, store) = Fixture::new();
         let attempt = prepare_claude(&store);
         let record = resolution(QueueResolutionOutcome::Absent, "composer was empty");
-        store
+        let resolved = store
             .resolve_uncertain_delivery(&attempt.attempt_id, record.clone())
             .unwrap()
             .unwrap();
+        assert_eq!(resolved.phase, QueueDeliveryPhase::Resolved(record.clone()));
+        let sender = match queued("first").sent_by {
+            SentBy::Sender(sender) => sender,
+            _ => panic!("test request has a sender"),
+        };
+        let before_duplicate = store
+            .read_logical_delivery_snapshots(&sender, None)
+            .unwrap();
+        assert!(
+            before_duplicate
+                .delivery_snapshot_vector
+                .iter()
+                .any(|snapshot| {
+                    snapshot.logical_delivery_id == queued("first").logical_delivery_id
+                        && snapshot.delivery_state
+                            == DeliveryState::Retryable(RetryCause::OwnerResolvedAbsent)
+                })
+        );
+        assert_eq!(
+            store
+                .resolve_uncertain_delivery(&attempt.attempt_id, record.clone())
+                .unwrap()
+                .unwrap(),
+            resolved,
+            "same owner resolution is idempotent"
+        );
+        assert_eq!(
+            store
+                .read_logical_delivery_snapshots(&sender, None)
+                .unwrap(),
+            before_duplicate,
+            "duplicate resolution does not allocate another cursor"
+        );
+        assert_eq!(
+            store
+                .resolve_uncertain_delivery(
+                    &attempt.attempt_id,
+                    resolution(QueueResolutionOutcome::Absent, "different reason"),
+                )
+                .unwrap(),
+            Err(ResolveQueueDeliveryRejected_Data::AlreadyResolved(
+                record.clone()
+            ))
+        );
         drop(store);
 
         let store = fixture.reopen();
@@ -1686,7 +1796,11 @@ mod tests {
             store
                 .resolve_uncertain_delivery(&prepared.attempt_id, delivered.clone())
                 .unwrap(),
-            Err(Rejected::NotUncertain)
+            Err(Rejected::AlreadyDelivered(NativeReceipt {
+                harness_kind: HarnessKind::Claude,
+                native_session_id: "thread-7".into(),
+                native_prompt_id: "turn-9".into(),
+            }))
         );
 
         // An empty reason is refused and nothing is written.
@@ -1895,26 +2009,23 @@ mod tests {
         let old_entry = before_flow(old_entry);
         let mut migrated_attempt = prepared.clone();
         migrated_attempt.phase = QueueDeliveryPhase::Uncertain(None);
-        migrated_attempt.queue_evidence = legacy_queue_evidence(
-            match old_entry.sent_by {
-                super::super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
-                super::super::SentByBeforeFlow::Unknown => SentBy::Unknown,
-            },
-            old_entry.request,
-        );
+        migrated_attempt.queue_evidence =
+            old_entry
+                .request
+                .with_legacy_sender(match old_entry.sent_by {
+                    super::super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
+                    super::super::SentByBeforeFlow::Unknown => SentBy::Unknown,
+                });
         let mut migrated_requests = requests.clone();
         for request in &mut migrated_requests {
             let QueueEvidence::Logical(entry) = &request.queue_evidence else {
                 unreachable!()
             };
             let legacy = before_flow(entry);
-            request.queue_evidence = legacy_queue_evidence(
-                match legacy.sent_by {
-                    super::super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
-                    super::super::SentByBeforeFlow::Unknown => SentBy::Unknown,
-                },
-                legacy.request,
-            );
+            request.queue_evidence = legacy.request.with_legacy_sender(match legacy.sent_by {
+                super::super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
+                super::super::SentByBeforeFlow::Unknown => SentBy::Unknown,
+            });
         }
         assert_eq!(
             reopened

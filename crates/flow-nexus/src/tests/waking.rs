@@ -1924,7 +1924,9 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
             .deliver_all(queued.clone(), Some(&sender_process)),
         Response::Drained(signal_flow::DrainOutcome {
             address: queued.clone(),
-            drain_state: signal_flow::DrainState::Held(vec![request.unsent().logical_delivery_id]),
+            drain_state: signal_flow::DrainState::Held(vec![
+                request.clone().unsent().logical_delivery_id
+            ]),
         })
     );
     assert_eq!(
@@ -1935,7 +1937,7 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
             .unwrap()
             .unwrap()
             .queue,
-        vec![request.unsent()],
+        vec![request.clone().unsent()],
     );
 }
 
@@ -2249,7 +2251,8 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
     let Response::SendAccepted(accepted) = response else {
         panic!("the identified sender's message is admitted")
     };
-    let [entry] = stored(&fixture, Layer::Secondary).queue.as_slice() else {
+    let metaflow = stored(&fixture, Layer::Secondary);
+    let [entry] = metaflow.queue.as_slice() else {
         panic!("one logical entry is retained")
     };
     assert_eq!(entry.logical_delivery_id, accepted.logical_delivery_id);

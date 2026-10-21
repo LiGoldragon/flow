@@ -54,13 +54,16 @@ fn from_core(body: &str) -> TestRequest {
 
 /// The text a hand-over types for one queued request.
 fn typed_text(request: &TestRequest) -> String {
-    [QueueEntry {
+    [queue_entry(request)].prompt_text()
+}
+
+fn queue_entry(request: &TestRequest) -> QueueEntry {
+    QueueEntry {
         logical_delivery_id: request.logical_delivery_id.clone(),
         sent_by: request.sent_by.clone(),
         delivery: request.delivery.clone(),
         message: Message::Soft(request.request.clone()),
-    }]
-    .prompt_text()
+    }
 }
 
 /// The fixture Claude seat Awake at the Secondary address, holding `queue`.
@@ -545,7 +548,7 @@ fn a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it() {
         address: address(Layer::Secondary),
         state: State::Asleep,
         past: vec![],
-        queue: vec![first.clone()],
+        queue: vec![queue_entry(&first)],
     });
     append_main_rows(&fixture, &[end_turn("first-turn")]);
     report(&fixture, claude_stop(&fixture));
@@ -557,7 +560,7 @@ fn a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it() {
         address: address(Layer::Secondary),
         state: State::Awake(CLAUDE_SEAT.into()),
         past: vec![],
-        queue: vec![first.clone()],
+        queue: vec![queue_entry(&first)],
     });
     {
         let _gate = fixture.nexus.dispatch_gate.lock().unwrap();
@@ -584,7 +587,7 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
         address: address(Layer::Secondary),
         state: State::Awake(CLAUDE_SEAT.into()),
         past: vec![],
-        queue: vec![first.clone()],
+        queue: vec![queue_entry(&first)],
     });
     append_main_rows(
         &fixture,
@@ -690,11 +693,10 @@ fn stuck_hand_over(fixture: &NexusFixture, queue: Vec<TestRequest>) -> String {
     attempt_id(fixture)
 }
 
-/// The owner resolves a stuck hand-over as Delivered: the request leaves the
-/// queue, the next is handed over at the next turn end, and the record names
-/// the peer, the reason and the time.
+/// The owner cannot resolve an uncertain hand-over as Delivered: only an
+/// exact native receipt can settle the queue entry.
 #[test]
-fn an_uncertain_hand_over_resolved_delivered_leaves_the_queue_with_its_record() {
+fn an_uncertain_hand_over_cannot_be_resolved_delivered_without_a_native_receipt() {
     let fixture = NexusFixture::new();
     let first = from_core("first-request-body");
     let second = from_core("second-request-body");
@@ -707,35 +709,19 @@ fn an_uncertain_hand_over_resolved_delivered_leaves_the_queue_with_its_record() 
             QueueResolutionOutcome::Delivered,
             "the pane shows it taken"
         ),
-        MetaResponse::QueueDeliveryResolved(QueueDeliveryResolved_Data {
-            address: address(Layer::Secondary),
-            queue_delivery_resolution: QueueDeliveryResolution {
-                queue_attempt_id: attempt.clone(),
-                queue_resolution_outcome: QueueResolutionOutcome::Delivered,
-                queue_resolution_reason: "the pane shows it taken".into(),
-            },
-        })
+        MetaResponse::ResolveQueueDeliveryRejected(
+            ResolveQueueDeliveryRejected_Data::NativeReceiptRequired,
+        )
     );
-    assert_eq!(queue(&fixture), vec![second]);
-    let read = standings(&fixture);
-    let [QueueDeliveryStanding::Resolved(record)] = read.as_slice() else {
-        panic!("the resolution is read: {read:?}")
-    };
-    assert_eq!(
-        record.queue_resolution_outcome,
-        QueueResolutionOutcome::Delivered
-    );
-    assert_eq!(record.resolver_identity, resolver());
-    assert_eq!(record.queue_resolution_reason, "the pane shows it taken");
-    assert!(record.unix_seconds > 1_700_000_000);
+    assert_eq!(queue(&fixture), vec![first.clone(), second.clone()]);
+    assert!(matches!(
+        standings(&fixture).as_slice(),
+        [QueueDeliveryStanding::Uncertain(_)]
+    ));
 
     report(&fixture, claude_stop(&fixture));
-    assert_eq!(
-        typed_count(&fixture, "first-request-body"),
-        1,
-        "never again"
-    );
-    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
+    assert_eq!(typed_count(&fixture, "first-request-body"), 1);
+    assert_eq!(typed_count(&fixture, "second-request-body"), 0);
 }
 
 /// Resolved Absent keeps the request queued and the next turn end hands it
@@ -759,6 +745,41 @@ fn an_uncertain_hand_over_resolved_absent_is_followed_by_exactly_one_new_attempt
         MetaResponse::QueueDeliveryResolved(_)
     ));
     assert_eq!(queue(&fixture), vec![first.clone(), second]);
+    let SentBy::Sender(first_sender) = first.sent_by.clone() else {
+        panic!("first queued request has a sender")
+    };
+    let before_repeat = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(&first_sender, None)
+        .unwrap();
+    let first_state = before_repeat
+        .delivery_snapshot_vector
+        .iter()
+        .find(|snapshot| snapshot.logical_delivery_id == first.logical_delivery_id)
+        .expect("owner-resolved request has a lifecycle snapshot");
+    assert!(matches!(
+        &first_state.delivery_state,
+        signal_flow::DeliveryState::Retryable(signal_flow::RetryCause::OwnerResolvedAbsent)
+    ));
+    assert!(matches!(
+        resolve(
+            &fixture,
+            &attempt,
+            QueueResolutionOutcome::Absent,
+            "composer was empty"
+        ),
+        MetaResponse::QueueDeliveryResolved(_)
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .read_logical_delivery_snapshots(&first_sender, None)
+            .unwrap(),
+        before_repeat,
+        "same owner absence resolution is idempotent"
+    );
     assert_eq!(
         typed_count(&fixture, "first-request-body"),
         1,
@@ -817,7 +838,12 @@ fn a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attemp
     );
     assert_eq!(queue(&fixture), vec![first]);
 
-    resolve(&fixture, &attempt, QueueResolutionOutcome::Delivered, "x");
+    assert_eq!(
+        resolve(&fixture, &attempt, QueueResolutionOutcome::Delivered, "x"),
+        MetaResponse::ResolveQueueDeliveryRejected(
+            ResolveQueueDeliveryRejected_Data::NativeReceiptRequired
+        )
+    );
     assert_eq!(
         resolve(&fixture, &attempt, QueueResolutionOutcome::Absent, "again"),
         MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotUncertain)
@@ -867,17 +893,22 @@ fn a_working_claude_seat_resolved_absent_waits_for_its_turn_end() {
     assert_eq!(typed_count(&fixture, "first-request-body"), 2);
 }
 
-/// A resting seat resolved Delivered with a second entry queued is handed
-/// the second at once; the first is not typed again.
+/// A resting seat cannot advance after an owner asserts Delivered without
+/// an exact native receipt.
 #[test]
-fn a_resting_claude_seat_resolved_delivered_is_handed_the_second_at_once() {
+fn a_resting_claude_seat_does_not_advance_after_unwitnessed_delivered_resolution() {
     let fixture = NexusFixture::new();
     let first = from_core("first-request-body");
     let second = from_core("second-request-body");
     let attempt = stuck_hand_over(&fixture, vec![first, second.clone()]);
 
-    resolve_served(&fixture, &attempt, QueueResolutionOutcome::Delivered);
+    assert_eq!(
+        resolve_served(&fixture, &attempt, QueueResolutionOutcome::Delivered),
+        MetaResponse::ResolveQueueDeliveryRejected(
+            ResolveQueueDeliveryRejected_Data::NativeReceiptRequired
+        )
+    );
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
-    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
+    assert_eq!(typed_count(&fixture, "second-request-body"), 0);
     assert_eq!(queue(&fixture), vec![second]);
 }

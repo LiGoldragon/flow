@@ -20,6 +20,7 @@ use crate::store::{
 };
 use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
+use meta_signal_flow::QueueEvidence;
 use signal_flow::{
     Address, Aspect, Caller, Delivery, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Message,
     Metaflow, PowerLevel, QueueEntry, Request, SentBy,
@@ -1750,7 +1751,17 @@ fn crashed_before_receipt(fixture: &NexusFixture) -> TestRequest {
             .len(),
         1
     );
-    attempt.queued
+    let QueueEvidence::Logical(entry) = attempt.queue_evidence else {
+        panic!("current queued request has logical lineage")
+    };
+    TestRequest {
+        sent_by: entry.sent_by,
+        request: match entry.message {
+            Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request) => request,
+        },
+    }
 }
 
 fn codex_standings(fixture: &NexusFixture) -> Vec<meta_signal_flow::QueueDeliveryStanding> {
@@ -1783,22 +1794,15 @@ fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
     fixture.adapter("gpt-sol", &fake);
     let queued = crashed_before_receipt(&fixture);
     assert_eq!(queued, first);
+    let first_text = [queue_entry("seat-0", first.clone())].prompt_text();
     fake.serve_turn_history(
         1,
         SEAT_THREAD,
         true,
         vec![
             history_turn("turn-other", "completed", Some("someone else")),
-            history_turn(
-                "turn-queued",
-                "completed",
-                Some(&[first.clone()].prompt_text()),
-            ),
-            history_turn(
-                "turn-before",
-                "completed",
-                Some(&[first.clone()].prompt_text()),
-            ),
+            history_turn("turn-queued", "completed", Some(&first_text)),
+            history_turn("turn-before", "completed", Some(&first_text)),
         ],
     );
 
@@ -1848,7 +1852,7 @@ fn a_codex_turn_absent_from_an_idle_thread_is_handed_over_again_once() {
     fake.accept_queued_turns(SEAT_THREAD, 2..=3);
     assert_eq!(
         fixture.nexus.perform(Operation::Drain(seat_at())),
-        Outcome::Drained(vec![first])
+        Outcome::Drained(vec![queue_entry("seat-0", first)])
     );
     assert_eq!(fake.queued_turn_texts().len(), 1, "handed over once");
     assert_eq!(fixture.seat_queue(), vec![]);

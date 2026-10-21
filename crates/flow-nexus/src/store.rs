@@ -7535,11 +7535,12 @@ mod tests {
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfigurationOnlyStore, ConfiguresFlowStore,
         ConfirmsStartedFlow, DerivesNativeOwnerProof, FlowStore, LaunchOutcome, LaunchOutcomeV2,
-        NativeOwnerProof, NativeOwnerState, OpensFlowStore, ReadsFlowRoles, ReadsFlowStore,
-        ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
+        ManagesMetaflowState, NativeOwnerProof, NativeOwnerState, OpensFlowStore, ReadsFlowRoles,
+        ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
         RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
         RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsRestartedFlow,
-        RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart, StoredLaunchOutcomeV2,
+        RegistersExistingFlow, RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
+        StoredLaunchOutcomeV2,
     };
 
     #[test]
@@ -7594,6 +7595,133 @@ mod tests {
         assert_eq!(
             unavailable.current_process_state(),
             NativeOwnerState::Unknown
+        );
+    }
+
+    #[test]
+    fn adoption_replaces_only_an_exactly_observed_exited_process_owner() {
+        use std::process::{Command, Stdio};
+
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        let store = fixture.store();
+        let mut incumbent_process = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("incumbent native process starts");
+        let process_id = incumbent_process.id();
+        let metadata = fs::metadata(format!("/proc/{process_id}")).expect("process metadata");
+        let stat = fs::read_to_string(format!("/proc/{process_id}/stat")).expect("process stat");
+        let (_, fields) = stat.rsplit_once(") ").expect("stat comm boundary");
+        let start_token = fields
+            .split_whitespace()
+            .nth(19)
+            .expect("process start token")
+            .to_owned();
+        let address = Address {
+            aspect: Aspect::Mind,
+            topic: "core".into(),
+            layer: Layer::Secondary,
+        };
+        let route = |flow_id: &str| signal_flow::FlowNode {
+            flow_id: flow_id.into(),
+            session_id: format!("session-{flow_id}"),
+            harness_kind: HarnessKind::Claude,
+            endpoint_selection: signal_flow::EndpointSelection::Unavailable,
+            herdr_route_selection: signal_flow::HerdrRouteSelection::Available(
+                signal_flow::HerdrRoute {
+                    herdr_session_name: "messaging-build".into(),
+                    herdr_agent_name: format!("agent-{flow_id}"),
+                    herdr_pane_id: format!("pane-{flow_id}"),
+                    herdr_terminal_id: format!("terminal-{flow_id}"),
+                },
+            ),
+            origin: Origin::Unbound,
+            flow_lifecycle: signal_flow::FlowLifecycle::Active,
+        };
+        let binding =
+            |flow_id: &str, pid: i64, uid: i64, start: String| meta_signal_flow::FlowBinding {
+                flow_id: flow_id.into(),
+                aspect: Aspect::Mind,
+                power_level: PowerLevel::Medium,
+                model_name: "gpt-sol".into(),
+                harness_kind: HarnessKind::Claude,
+                native_session_id: format!("session-{flow_id}"),
+                herdr_workspace_id: "workspace".into(),
+                herdr_pane_id: format!("pane-{flow_id}"),
+                herdr_tab_id: format!("tab-{flow_id}"),
+                herdr_terminal_id: format!("terminal-{flow_id}"),
+                herdr_agent_name: format!("agent-{flow_id}"),
+                process_identity: meta_signal_flow::ProcessIdentity {
+                    process_id: pid,
+                    process_user_id: uid,
+                    process_start_token: start,
+                },
+                working_directory: "/tmp".into(),
+            };
+        let incumbent = binding(
+            "incumbent",
+            i64::from(process_id),
+            i64::from(metadata.uid()),
+            start_token,
+        );
+        let role = |flow_id: &str| Caller {
+            flow_id: flow_id.into(),
+            aspect: Aspect::Mind,
+            power_level: PowerLevel::Medium,
+            model_name: "gpt-sol".into(),
+        };
+        assert!(matches!(
+            store
+                .adopt_existing_flow(
+                    route("incumbent"),
+                    role("incumbent"),
+                    address.clone(),
+                    &incumbent
+                )
+                .expect("initial live owner imports"),
+            super::ExistingSeatAdoption::Bound(_)
+        ));
+        incumbent_process.kill().expect("incumbent process exits");
+        incumbent_process.wait().expect("incumbent process reaped");
+
+        let current = std::process::id();
+        let current_metadata = fs::metadata(format!("/proc/{current}")).expect("current process");
+        let current_stat =
+            fs::read_to_string(format!("/proc/{current}/stat")).expect("current process stat");
+        let (_, current_fields) = current_stat.rsplit_once(") ").expect("stat comm boundary");
+        let challenger = binding(
+            "challenger",
+            i64::from(current),
+            i64::from(current_metadata.uid()),
+            current_fields
+                .split_whitespace()
+                .nth(19)
+                .expect("process start token")
+                .to_owned(),
+        );
+        assert!(matches!(
+            store
+                .adopt_existing_flow(
+                    route("challenger"),
+                    role("challenger"),
+                    address.clone(),
+                    &challenger
+                )
+                .expect("exact dead process owner can be replaced"),
+            super::ExistingSeatAdoption::Bound(_)
+        ));
+        let adopted = store
+            .stored_metaflow(&address)
+            .expect("metaflow reads")
+            .expect("metaflow remains");
+        assert_eq!(adopted.metaflow.past, vec!["incumbent"]);
+        assert_eq!(
+            adopted.metaflow.state,
+            flow_ethos::State::Awake("challenger".into())
         );
     }
 

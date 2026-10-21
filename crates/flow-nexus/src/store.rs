@@ -6908,10 +6908,6 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-queue-delivery-attempt",
                 "flow-nexus-queue-delivery-attempt-v6",
             ),
-            "flow_nexus_native_owner_proofs" => (
-                "flow-nexus-native-owner-proof",
-                "flow-nexus-native-owner-proof-v1",
-            ),
             _ => return None,
         };
         Some((family, SchemaHash::for_label(version)))

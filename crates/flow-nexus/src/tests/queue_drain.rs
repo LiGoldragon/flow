@@ -401,7 +401,8 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
         &fixture,
         &[
             serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-second",
-            "message":{"content":typed_text(&second)}}),
+            "message":{"content":format!("\n\n<pasted_content id=\"04ef\">\n{}\n</pasted_content id=\"04ef\">\n", typed_text(&second))}}),
+            end_turn("second-received"),
         ],
     );
     report(&fixture, claude_stop(&fixture));

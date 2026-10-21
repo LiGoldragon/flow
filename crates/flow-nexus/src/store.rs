@@ -6902,7 +6902,7 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_requests" => (
                 "flow-nexus-queue-delivery-request",
-                "flow-nexus-queue-delivery-request-v4",
+                "flow-nexus-queue-delivery-request-v5",
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
@@ -7001,6 +7001,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     "flow-nexus-queue-delivery-request",
                     <queue_delivery::StoredDeliveryRequestV3 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    "flow-nexus-queue-delivery-request",
+                    <queue_delivery::StoredDeliveryRequestV4 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_queue_delivery_attempts" => &[

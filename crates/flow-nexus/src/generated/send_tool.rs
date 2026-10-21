@@ -60,6 +60,7 @@ pub enum SendRefusal {
     KeyReused,
     UnknownRecipient(Target),
     Held,
+    Oversized(signal_flow::SendPayloadSize),
     Store,
 }
 #[rustfmt::skip]

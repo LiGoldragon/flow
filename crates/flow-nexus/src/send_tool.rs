@@ -45,6 +45,7 @@ use crate::generated::send_tool::{
     ReadsToolCall, SendArguments, SendCall, SendKind, SendOutcome, SendRefusal, ToolCall,
     ToolCallCarrying, ToolCallKey, ToolName,
 };
+use crate::sending::AdmitsSendPayload;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
@@ -333,6 +334,17 @@ impl HandlesSendCall for RunningNexus {
             return Self::refused(SendRefusal::Store);
         };
         let request = arguments.request();
+        if let Some(signal_flow::Refusal::Oversized(size)) = request.oversized_refusal(&sender) {
+            let outcome = SendOutcome::Refused(SendRefusal::Oversized(size));
+            return match self.store.record_send_call(SendCall {
+                tool_call_key: key.clone(),
+                content_sha256,
+                send_outcome: outcome.clone(),
+            }) {
+                Ok(()) => outcome,
+                Err(error) => store_refused(error),
+            };
+        }
         // Queued for a metaflow left Awake as an ended flow, the request
         // wakes it as it would an Asleep one.
         self.rest_ended_awake(&arguments.target);
@@ -698,7 +710,10 @@ impl ServesLaunchCalls for RunningNexus {
 
     fn wake_deferred(&self) {
         let wakes = std::mem::take(
-            &mut *self.launch_calls.deferred_wakes.lock()
+            &mut *self
+                .launch_calls
+                .deferred_wakes
+                .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
         for target in wakes {

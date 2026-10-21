@@ -30,7 +30,7 @@
 ; a turn on a thread through the app-server socket.
 
 Library
-[ signal_flow:[ Address Sender ]
+[ signal_flow:[ Address Sender SendPayloadSize ]
   serde_json:JsonValue.Value ]
 [ SendKind.[ Order Question Result Notice ]
   Target.Address
@@ -55,7 +55,8 @@ Library
   ; moved it on). KeyReused: the call's key was recorded with
   ; other content. UnknownRecipient: the target is no metaflow. Held:
   ; Message holds a lock on the target, about to deliver. Store: the store
-  ; refused; the Nexus log names why.
+  ; refused; the Nexus log names why. Oversized: the rendered native
+  ; prompt exceeds Flow's Send admission budget.
   SendRefusal.[ UnknownTool
                 Malformed
                 ThreadUnowned
@@ -64,6 +65,7 @@ Library
                 KeyReused
                 UnknownRecipient.Target
                 Held
+                Oversized.SendPayloadSize
                 Store ]
   ; Queued is a durable enqueue for the target, never a claim of delivery.
   SendOutcome.[ Queued.{ Sender Target }

@@ -13,6 +13,7 @@ use crate::generated::send_tool::{
     ToolCallKey,
 };
 use crate::send_tool::{RespondsToSendCalls, SendTool, ServesSendTool};
+use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{
@@ -674,15 +675,12 @@ fn handed_orders(fixture: &NexusFixture, world: &super::waking::FreshWorld, body
 /// app-server replays the call to the next connection, which is answered
 /// from its record, queues nothing more and wakes nothing more.
 
-
 /// A call the last Nexus queued and recorded for an Asleep metaflow, then
 /// died before answering or waking, wakes the target when it is replayed.
-
 
 /// A Result or a Notice for an Asleep Secondary is queued and wakes
 /// nothing; an Order for an Asleep Primary wakes it fresh, as an Order
 /// wakes every layer.
-
 
 #[test]
 fn a_call_key_recorded_with_other_content_is_refused() {
@@ -790,6 +788,43 @@ fn a_malformed_call_is_refused_and_recorded() {
             .unwrap()
             .is_some()
     );
+}
+
+#[test]
+fn an_oversized_dynamic_send_is_typed_durable_and_not_queued() {
+    let fixture = NexusFixture::new();
+    fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
+    fixture.awake_target();
+    let base = Request::Order(String::new()).native_prompt_bytes(&sender_a());
+    let body = "x".repeat(MAX_SEND_PAYLOAD_BYTES - base + 1);
+    let request = Request::Order(body.clone());
+    assert_eq!(
+        request.native_prompt_bytes(&sender_a()),
+        MAX_SEND_PAYLOAD_BYTES + 1
+    );
+    let call = tool_call(THREAD_A, "call-oversized", &body);
+    let outcome = fixture.nexus.handle_send_call(call.clone());
+    assert!(matches!(
+        outcome,
+        SendOutcome::Refused(SendRefusal::Oversized(signal_flow::SendPayloadSize {
+            actual_bytes,
+            maximum_bytes,
+        })) if actual_bytes == (MAX_SEND_PAYLOAD_BYTES + 1) as i64
+            && maximum_bytes == MAX_SEND_PAYLOAD_BYTES as i64
+    ));
+    assert!(fixture.target_queue().is_empty());
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .send_call(&call.tool_call_key)
+            .unwrap()
+            .unwrap()
+            .send_outcome,
+        outcome
+    );
+    assert_eq!(fixture.nexus.handle_send_call(call), outcome);
+    assert!(fixture.target_queue().is_empty());
 }
 
 /// Starts a witness launch's first turn, its one part, on the connection
@@ -1584,7 +1619,6 @@ fn a_working_codex_seat_is_not_drained() {
 /// A first turn that completes while the launch is not yet confirmed (its
 /// registration or Bind still running) finds the seat only holding its
 /// Address and keeps its work; the confirmation hands that work over.
-
 
 fn fs_text(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()

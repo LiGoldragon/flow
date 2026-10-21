@@ -26,34 +26,58 @@ use meta_signal_flow::{
     ResolverIdentity, Response as MetaResponse, Undecided,
 };
 use signal_flow::{
-    Address, Aspect, Event, Layer, Metaflow, NativePrompt, NativeStop, QueuedRequest, Report_Data,
-    Request, Response, SentBy,
+    Address, Aspect, Delivery, Event, Layer, Message, Metaflow, NativePrompt, NativeStop,
+    QueueEntry, Report_Data, Request, Response, SentBy,
 };
 
-fn from_core(body: &str) -> QueuedRequest {
-    QueuedRequest {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TestRequest {
+    logical_delivery_id: String,
+    sent_by: SentBy,
+    request: Request,
+    delivery: Delivery,
+}
+
+fn from_core(body: &str) -> TestRequest {
+    TestRequest {
+        logical_delivery_id: format!("test-{}", body.replace(' ', "-")),
         sent_by: SentBy::Sender(Address {
             aspect: Aspect::Psyche,
             topic: "core".into(),
             layer: Layer::Secondary,
         }),
         request: Request::Order(body.into()),
+        delivery: Delivery::Wake,
     }
 }
 
 /// The text a hand-over types for one queued request.
-fn typed_text(request: &QueuedRequest) -> String {
-    [request.clone()].prompt_text()
+fn typed_text(request: &TestRequest) -> String {
+    [QueueEntry {
+        logical_delivery_id: request.logical_delivery_id.clone(),
+        sent_by: request.sent_by.clone(),
+        delivery: request.delivery.clone(),
+        message: Message::Soft(request.request.clone()),
+    }]
+    .prompt_text()
 }
 
 /// The fixture Claude seat Awake at the Secondary address, holding `queue`.
-fn seat(fixture: &NexusFixture, queue: Vec<QueuedRequest>) {
+fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
     claude_seat(fixture, 40_000);
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Layer::Secondary),
         state: State::Awake(CLAUDE_SEAT.into()),
         past: vec![],
-        queue,
+        queue: queue
+            .into_iter()
+            .map(|request| QueueEntry {
+                logical_delivery_id: request.logical_delivery_id,
+                sent_by: request.sent_by,
+                delivery: request.delivery,
+                message: Message::Soft(request.request),
+            })
+            .collect(),
     });
 }
 
@@ -84,8 +108,21 @@ fn submitted(session: &str, prompt_id: &str, text: &str) -> Event {
     })
 }
 
-fn queue(fixture: &NexusFixture) -> Vec<QueuedRequest> {
-    stored(fixture, Layer::Secondary).queue
+fn queue(fixture: &NexusFixture) -> Vec<TestRequest> {
+    stored(fixture, Layer::Secondary)
+        .queue
+        .into_iter()
+        .map(|entry| TestRequest {
+            logical_delivery_id: entry.logical_delivery_id,
+            sent_by: entry.sent_by,
+            delivery: entry.delivery,
+            request: match entry.message {
+                Message::HardAbrupt(request)
+                | Message::MiddleAbrupt(request)
+                | Message::Soft(request) => request,
+            },
+        })
+        .collect()
 }
 
 fn typed_count(fixture: &NexusFixture, body: &str) -> usize {
@@ -533,7 +570,7 @@ fn resolve_served(
 
 /// A Claude hand-over typed and never seen again, its Stop reconciled to
 /// Uncertain(AbsenceUnprovable). Returns the attempt id.
-fn stuck_hand_over(fixture: &NexusFixture, queue: Vec<QueuedRequest>) -> String {
+fn stuck_hand_over(fixture: &NexusFixture, queue: Vec<TestRequest>) -> String {
     fixture.accept_pane_operations(
         vec![working_claude_agent(fixture)],
         PromptFixture::PromptedUnrecorded("w1:p3"),

@@ -29,9 +29,9 @@ use crate::waking::{
 };
 use flow_ethos::State;
 use signal_flow::{
-    Address, Aspect, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Metaflow, NativeLaunchBinding,
-    NativeLaunchIntent, Origin, PowerLevel, QueuedRequest, Request, SentBy,
+    Address, Aspect, Delivery, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
+    HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Message, Metaflow, NativeLaunchBinding,
+    NativeLaunchIntent, Origin, PowerLevel, QueueEntry, Request, SentBy,
 };
 use std::fs;
 
@@ -66,19 +66,33 @@ trait Unsent {
 }
 
 impl Unsent for Request {
-    type Queued = QueuedRequest;
-    fn unsent(self) -> QueuedRequest {
-        QueuedRequest {
+    type Queued = QueueEntry;
+    fn unsent(self) -> QueueEntry {
+        let logical_delivery_id = format!("test-{:?}", self);
+        QueueEntry {
+            logical_delivery_id,
             sent_by: SentBy::Unknown,
-            request: self,
+            delivery: Delivery::Wake,
+            message: Message::Soft(self),
         }
     }
 }
 
 impl Unsent for Vec<Request> {
-    type Queued = Vec<QueuedRequest>;
-    fn unsent(self) -> Vec<QueuedRequest> {
-        self.into_iter().map(Unsent::unsent).collect()
+    type Queued = Vec<QueueEntry>;
+    fn unsent(self) -> Vec<QueueEntry> {
+        let mut ids = std::collections::HashSet::new();
+        self.into_iter()
+            .enumerate()
+            .map(|(index, request)| {
+                let mut entry = request.unsent();
+                if !ids.insert(entry.logical_delivery_id.clone()) {
+                    entry.logical_delivery_id.push_str(&format!("-{index}"));
+                    ids.insert(entry.logical_delivery_id.clone());
+                }
+                entry
+            })
+            .collect()
     }
 }
 
@@ -1710,7 +1724,8 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .dispatch_metaflow_peer(
                 signal_flow::Query::Deliver(Deliver_Data {
                     lock: lock.clone(),
-                    request: oversized,
+                    delivery: Delivery::Wake,
+                    message: Message::Soft(oversized),
                 }),
                 Some(&message),
             )
@@ -1763,11 +1778,14 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     let answer = fixture.nexus.dispatch_metaflow_peer(
         signal_flow::Query::Deliver(Deliver_Data {
             lock,
-            request: order.clone(),
+            delivery: Delivery::Wake,
+            message: Message::Soft(order.clone()),
         }),
         Some(&message),
     );
-    assert_eq!(answer.response, Response::Queued);
+    let Response::SendAccepted(acceptance) = answer.response else {
+        panic!("delivery is accepted with a logical identity")
+    };
 
     let world = fixture.fresh_claude_world();
     fixture.nexus.wake_due(at.clone());
@@ -1781,9 +1799,11 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     assert_ne!(flow_id, "abc123", "a fresh flow");
     assert!(woken.queue.is_empty());
     // The woken flow reads the Order with the Sender its Lock named.
-    let sent = QueuedRequest {
+    let sent = QueueEntry {
+        logical_delivery_id: acceptance.logical_delivery_id,
         sent_by: SentBy::Sender(sender_address.clone()),
-        request: order.clone(),
+        delivery: Delivery::Wake,
+        message: Message::Soft(order.clone()),
     };
     let turns = world.user_turns(&fixture);
     assert!(
@@ -1879,8 +1899,13 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
         .store
         .seed_metaflow(metaflow(Layer::Secondary, State::Asleep, vec![], vec![]));
     assert_eq!(
-        fixture.nexus.deliver_all(empty, Some(&sender_process)),
-        Response::Delivered
+        fixture
+            .nexus
+            .deliver_all(empty.clone(), Some(&sender_process)),
+        Response::Drained(signal_flow::DrainOutcome {
+            address: empty.clone(),
+            drain_state: signal_flow::DrainState::Delivered,
+        })
     );
 
     // With no launch record the sleeping seat cannot be woken. DeliverAll
@@ -1897,7 +1922,10 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
         fixture
             .nexus
             .deliver_all(queued.clone(), Some(&sender_process)),
-        Response::Queued
+        Response::Drained(signal_flow::DrainOutcome {
+            address: queued.clone(),
+            drain_state: signal_flow::DrainState::Held(vec![request.unsent().logical_delivery_id]),
+        })
     );
     assert_eq!(
         fixture
@@ -1907,10 +1935,7 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
             .unwrap()
             .unwrap()
             .queue,
-        vec![signal_flow::QueuedRequest {
-            sent_by: signal_flow::SentBy::Unknown,
-            request,
-        }],
+        vec![request.unsent()],
     );
 }
 
@@ -2210,26 +2235,27 @@ fn a_launched_seat_sends_an_order_from_its_first_tool_call_before_any_answer() {
         panic!("the identified seat locks its recipient")
     };
     let order = Request::Order("Run the tier tests.".into());
-    assert_eq!(
-        fixture
-            .nexus
-            .dispatch_metaflow_peer(
-                signal_flow::Query::Deliver(Deliver_Data {
-                    lock,
-                    request: order.clone(),
-                }),
-                Some(&message),
-            )
-            .response,
-        Response::Queued
-    );
-    assert_eq!(
-        stored(&fixture, Layer::Secondary).queue,
-        vec![QueuedRequest {
-            sent_by: SentBy::Sender(sender_address),
-            request: order
-        }]
-    );
+    let response = fixture
+        .nexus
+        .dispatch_metaflow_peer(
+            signal_flow::Query::Deliver(Deliver_Data {
+                lock,
+                delivery: Delivery::Wake,
+                message: Message::Soft(order.clone()),
+            }),
+            Some(&message),
+        )
+        .response;
+    let Response::SendAccepted(accepted) = response else {
+        panic!("the identified sender's message is admitted")
+    };
+    let [entry] = stored(&fixture, Layer::Secondary).queue.as_slice() else {
+        panic!("one logical entry is retained")
+    };
+    assert_eq!(entry.logical_delivery_id, accepted.logical_delivery_id);
+    assert_eq!(entry.sent_by, SentBy::Sender(sender_address));
+    assert_eq!(entry.delivery, Delivery::Wake);
+    assert_eq!(entry.message, Message::Soft(order));
 }
 
 /// A launch refused before it was confirmed gives the Address back as it
@@ -4126,12 +4152,9 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
     );
 }
 
-/// A send call the earlier Nexus committed (its request queued and the call
-/// recorded in one commit) before it could answer, then the Nexus exited:
-/// the restarted Nexus answers the replayed call from its record, Queued,
-/// and queues nothing more. The one request stays queued from the
-/// launch's Address, and the target is due its wake, which the start's
-/// `recover_wakes` (or the next request queued for it) takes.
+/// A send call the earlier Nexus committed with a logical identity before it
+/// could answer, then the Nexus exited: the restarted Nexus answers the
+/// replay from its record and queues nothing more.
 #[test]
 fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_restart() {
     use super::send_tool::ReadsClientFrames;
@@ -4151,8 +4174,10 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
             "target": {
                 "aspect": "Mind",
                 "topic": recipient.topic,
-                "layer": format!("{:?}", recipient.layer)
+            "layer": format!("{:?}", recipient.layer)
             },
+            "delivery": "Wake",
+            "priority": "Soft",
             "kind": "Order",
             "body": FIRST_CALL_BODY
         }
@@ -4160,10 +4185,11 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     let call = ToolCall::read_tool_call(params).expect("the call reads");
     // The earlier Nexus commits the call; its answer never leaves.
     let committed = fixture.nexus.handle_send_call(call);
-    let SendOutcome::Queued(queued) = &committed else {
-        panic!("the call is committed Queued: {committed:?}")
+    let SendOutcome::Accepted(accepted) = &committed else {
+        panic!("the call is committed with a logical identity: {committed:?}")
     };
-    assert_eq!(queued.sender, setup.sender.address);
+    assert_eq!(accepted.sender, setup.sender.address);
+    let logical_delivery_id = accepted.send_acceptance.logical_delivery_id.clone();
     assert_eq!(stored(&fixture, Layer::Secondary).queue.len(), 1);
 
     // The Nexus exits: the store as it lies on disk opens in a new one.
@@ -4185,7 +4211,7 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
         answer.pointer("/result/success"),
         Some(&serde_json::json!(true))
     );
-    assert!(answer.to_string().contains("Queued"), "{answer}");
+    assert!(answer.to_string().contains("Accepted"), "{answer}");
     assert_eq!(
         restarted
             .nexus
@@ -4202,9 +4228,10 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
         SentBy::Sender(setup.sender.address.clone()),
         "its sender is kept"
     );
+    assert_eq!(target.queue[0].logical_delivery_id, logical_delivery_id);
     assert_eq!(
-        target.queue[0].request,
-        Request::Order(FIRST_CALL_BODY.into())
+        target.queue[0].message,
+        Message::Soft(Request::Order(FIRST_CALL_BODY.into()))
     );
     assert!(
         restarted.nexus.wake_is_due(&target),

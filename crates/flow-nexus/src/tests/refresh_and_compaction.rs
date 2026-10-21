@@ -17,8 +17,8 @@ use crate::waking::{AtStop, SleepsAndWakesSeats};
 use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureThreshold};
 use signal_flow::{
-    Address, Aspect, Caller, FlowLifecycle, Layer, Metaflow, PowerLevel, QueuedRequest, Request,
-    SentBy,
+    Address, Aspect, Caller, Delivery, FlowLifecycle, Layer, Message, Metaflow, PowerLevel,
+    Request, SentBy,
 };
 use std::fs;
 use std::io::Write;
@@ -59,9 +59,12 @@ fn seat_metaflow(fixture: &NexusFixture, queue: Vec<Request>) {
         past: vec![],
         queue: queue
             .into_iter()
-            .map(|request| QueuedRequest {
+            .enumerate()
+            .map(|(index, request)| signal_flow::QueueEntry {
+                logical_delivery_id: format!("refresh-test-{index}"),
                 sent_by: SentBy::Unknown,
-                request,
+                delivery: Delivery::Queue,
+                message: Message::Soft(request),
             })
             .collect(),
     });
@@ -172,7 +175,11 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
         metaflow
             .queue
             .iter()
-            .map(|queued| &queued.request)
+            .map(|queued| match &queued.message {
+                Message::HardAbrupt(request)
+                | Message::MiddleAbrupt(request)
+                | Message::Soft(request) => request,
+            })
             .collect::<Vec<_>>(),
         [&Request::Order("Held for the next flow.".into())],
         "the work waits for the next flow"

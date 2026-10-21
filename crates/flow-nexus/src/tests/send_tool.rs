@@ -35,12 +35,12 @@ const THREAD_B: &str = "01a0b22c-0000-7000-8000-00000000000b";
 const TURN: &str = "01a0b22c-0000-7000-8000-0000000000f0";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct QueuedRequest {
+struct TestRequest {
     sent_by: SentBy,
     request: Request,
 }
 
-fn queue_entry(id: impl Into<String>, queued: QueuedRequest) -> QueueEntry {
+fn queue_entry(id: impl Into<String>, queued: TestRequest) -> QueueEntry {
     QueueEntry {
         logical_delivery_id: id.into(),
         sent_by: queued.sent_by,
@@ -367,8 +367,8 @@ fn answer_to(messages: &[serde_json::Value], request_id: u64) -> Option<serde_js
 }
 
 /// An Order as the target's queue holds it: with the Sender Flow resolved.
-fn sent(sender: Address, body: &str) -> QueuedRequest {
-    QueuedRequest {
+fn sent(sender: Address, body: &str) -> TestRequest {
+    TestRequest {
         sent_by: SentBy::Sender(sender),
         request: Request::Order(body.into()),
     }
@@ -388,7 +388,7 @@ trait SeatsCodexFlows {
     /// The target metaflow, Awake as a flow Flow does not hold, so nothing
     /// queued for it wakes anything.
     fn awake_target(&self);
-    fn target_queue(&self) -> Vec<QueuedRequest>;
+    fn target_queue(&self) -> Vec<TestRequest>;
     /// The adapter of the endpoint `model` selects, its client the fake.
     fn adapter(&mut self, model: &str, fake: &FakeAppServer) -> CodexAdapter;
 }
@@ -433,7 +433,7 @@ impl SeatsCodexFlows for NexusFixture {
         });
     }
 
-    fn target_queue(&self) -> Vec<QueuedRequest> {
+    fn target_queue(&self) -> Vec<TestRequest> {
         self.nexus
             .store
             .metaflow(&target())
@@ -441,7 +441,7 @@ impl SeatsCodexFlows for NexusFixture {
             .expect("target held")
             .queue
             .into_iter()
-            .map(|entry| QueuedRequest {
+            .map(|entry| TestRequest {
                 sent_by: entry.sent_by,
                 request: match entry.message {
                     Message::HardAbrupt(request)
@@ -1448,8 +1448,8 @@ fn core() -> Address {
     }
 }
 
-fn from_core(request: Request) -> QueuedRequest {
-    QueuedRequest {
+fn from_core(request: Request) -> TestRequest {
+    TestRequest {
         sent_by: SentBy::Sender(core()),
         request,
     }
@@ -1487,14 +1487,14 @@ trait SeatsAwakeCodexSeat {
     /// The fixture's Codex seat 908786, Active, resting in pane w1:p3 as
     /// Herdr's screen shows it, its metaflow Awake as it at `seat_at`
     /// holding `queue`; gamma Awake as a flow Flow does not hold.
-    fn awake_codex_seat(&self, queue: Vec<QueuedRequest>);
-    fn seat_queue(&self) -> Vec<QueuedRequest>;
+    fn awake_codex_seat(&self, queue: Vec<TestRequest>);
+    fn seat_queue(&self) -> Vec<TestRequest>;
     /// How many times `request`, with its sender, was typed into the pane.
-    fn typed_count(&self, request: &QueuedRequest) -> usize;
+    fn typed_count(&self, request: &TestRequest) -> usize;
 }
 
 impl SeatsAwakeCodexSeat for NexusFixture {
-    fn awake_codex_seat(&self, queue: Vec<QueuedRequest>) {
+    fn awake_codex_seat(&self, queue: Vec<TestRequest>) {
         use super::PromptFixture;
         self.accept_pane_operations(vec![self.settled_agent()], PromptFixture::Prompted("w1:p3"));
         let mut node = self.node();
@@ -1524,7 +1524,7 @@ impl SeatsAwakeCodexSeat for NexusFixture {
         self.awake_target();
     }
 
-    fn seat_queue(&self) -> Vec<QueuedRequest> {
+    fn seat_queue(&self) -> Vec<TestRequest> {
         self.nexus
             .store
             .metaflow(&seat_at())
@@ -1532,7 +1532,7 @@ impl SeatsAwakeCodexSeat for NexusFixture {
             .expect("seat held")
             .queue
             .into_iter()
-            .map(|entry| QueuedRequest {
+            .map(|entry| TestRequest {
                 sent_by: entry.sent_by,
                 request: match entry.message {
                     Message::HardAbrupt(request)
@@ -1543,7 +1543,7 @@ impl SeatsAwakeCodexSeat for NexusFixture {
             .collect()
     }
 
-    fn typed_count(&self, request: &QueuedRequest) -> usize {
+    fn typed_count(&self, request: &TestRequest) -> usize {
         usize::from(!self.seat_queue().contains(request))
     }
 }
@@ -1651,7 +1651,7 @@ fn work_queued_while_a_codex_turn_runs_is_held_until_its_completion() {
         ],
         43,
     );
-    let queued = QueuedRequest {
+    let queued = TestRequest {
         sent_by: SentBy::Sender(seat_at()),
         request: Request::Order("later".into()),
     };
@@ -1723,7 +1723,7 @@ fn history_turn(id: &str, status: &str, text: Option<&str>) -> serde_json::Value
 /// The seat's oldest request was prepared with its thread's newest turn as
 /// anchor, and the Nexus stopped before `turn/start` answered. The store's
 /// recovery makes it Uncertain.
-fn crashed_before_receipt(fixture: &NexusFixture) -> QueuedRequest {
+fn crashed_before_receipt(fixture: &NexusFixture) -> TestRequest {
     use crate::store::queue_delivery::{
         AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
     };
@@ -1943,7 +1943,7 @@ fn a_completion_on_another_thread_drains_nothing() {
 /// app-server and the fixture.
 fn codex_resolved_absent(
     first_event: crate::codex_turns::TurnEvent,
-) -> (NexusFixture, FakeAppServer, QueuedRequest) {
+) -> (NexusFixture, FakeAppServer, TestRequest) {
     use crate::Dispatches;
     use crate::DispatchesSerially;
     use crate::codex_turns::TracksCodexTurns;

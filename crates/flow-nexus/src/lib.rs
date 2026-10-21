@@ -1495,6 +1495,21 @@ mod tests {
         }
     }
 
+    fn configure_existing_binding_model(fixture: &NexusFixture) {
+        use crate::store::ManagesMetaflowState;
+        fixture
+            .nexus
+            .store
+            .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
+                meta_signal_flow::ConfigureModel {
+                    layer: Layer::Secondary,
+                    aspect: Aspect::Mind,
+                    native: "gpt-sol".into(),
+                },
+            ]))
+            .expect("existing binding model declared");
+    }
+
     /// Herdr and the Codex rollouts as they show `bindings` live, for the
     /// one MetaBindExisting `run` performs: the pane in the snapshot with
     /// its harness, this test process in its foreground, and a Codex session
@@ -1506,6 +1521,7 @@ mod tests {
         run: impl FnOnce() -> T,
     ) -> T {
         use crate::herdr::launch::NamesHerdrHarness;
+        configure_existing_binding_model(fixture);
         let agents = bindings
             .iter()
             .map(|binding| {
@@ -1591,6 +1607,7 @@ mod tests {
         fixture: &NexusFixture,
         binding: meta_signal_flow::FlowBinding,
     ) -> meta_signal_flow::FlowBindingResult {
+        configure_existing_binding_model(fixture);
         let socket_path = fixture.directory.path().join("herdr-verify.sock");
         let _ = fs::remove_file(&socket_path);
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
@@ -1781,6 +1798,7 @@ mod tests {
 
         /// A fixture whose store at `flow.sema` is first prepared by `seed`.
         fn with_store(seed: impl FnOnce(&Path)) -> Self {
+            use crate::store::SetsNativeOwnerEnvironmentForTests;
             let directory = tempfile::tempdir().expect("temporary nexus fixture");
             seed(&directory.path().join("flow.sema"));
             let flows_root = directory.path().join("flows");
@@ -1813,8 +1831,14 @@ mod tests {
                 timeout: Duration::from_secs(1),
                 workspace_root: directory.path().to_path_buf(),
             };
+            let mut store =
+                FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store");
+            store.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
+                host_id: "isolated-test-host".into(),
+                boot_id: "isolated-test-boot".into(),
+            });
             let nexus = RunningNexus {
-                store: FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store"),
+                store,
                 codex_endpoints: codex_endpoints.clone(),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
                     .with_codex_endpoints(codex_endpoints),

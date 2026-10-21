@@ -404,6 +404,39 @@ struct NativeOwnerProof {
     native_session_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeOwnerEnvironment {
+    pub(crate) host_id: String,
+    pub(crate) boot_id: String,
+}
+
+trait ReadsNativeOwnerEnvironment {
+    fn native_owner_environment(&self) -> Option<NativeOwnerEnvironment>;
+    fn system() -> Option<NativeOwnerEnvironment>
+    where
+        Self: Sized;
+}
+
+impl ReadsNativeOwnerEnvironment for NativeOwnerEnvironment {
+    fn native_owner_environment(&self) -> Option<NativeOwnerEnvironment> {
+        Self::system()
+    }
+
+    fn system() -> Option<NativeOwnerEnvironment> {
+        Some(Self {
+            host_id: fs::read_to_string("/etc/machine-id")
+                .ok()?
+                .trim()
+                .to_owned(),
+            boot_id: fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .ok()?
+                .trim()
+                .to_owned(),
+        })
+        .filter(|environment| !environment.host_id.is_empty() && !environment.boot_id.is_empty())
+    }
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct NativeOwnerProofRecord {
     flow_id: String,
@@ -441,41 +474,42 @@ impl DescribesNativeOwnerProofTable for NativeOwnerProofRecord {
 }
 
 trait DerivesNativeOwnerProof {
-    fn from_binding(binding: &meta_signal_flow::FlowBinding) -> Option<Self>
+    fn from_binding(
+        binding: &meta_signal_flow::FlowBinding,
+        environment: &NativeOwnerEnvironment,
+    ) -> Option<Self>
     where
         Self: Sized;
-    fn current_process_state(&self) -> NativeOwnerState;
+    fn current_process_state(
+        &self,
+        environment: Option<&NativeOwnerEnvironment>,
+    ) -> NativeOwnerState;
 }
 
 impl DerivesNativeOwnerProof for NativeOwnerProof {
-    fn from_binding(binding: &meta_signal_flow::FlowBinding) -> Option<Self> {
-        let host_id = fs::read_to_string("/etc/machine-id")
-            .ok()?
-            .trim()
-            .to_owned();
-        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
-            .ok()?
-            .trim()
-            .to_owned();
-        (!host_id.is_empty() && !boot_id.is_empty()).then(|| Self {
+    fn from_binding(
+        binding: &meta_signal_flow::FlowBinding,
+        environment: &NativeOwnerEnvironment,
+    ) -> Option<Self> {
+        (!environment.host_id.is_empty() && !environment.boot_id.is_empty()).then(|| Self {
             process_id: binding.process_identity.process_id,
             process_user_id: binding.process_identity.process_user_id,
             process_start_token: binding.process_identity.process_start_token.clone(),
-            host_id,
-            boot_id,
+            host_id: environment.host_id.clone(),
+            boot_id: environment.boot_id.clone(),
             harness_kind: binding.harness_kind.clone(),
             native_session_id: binding.native_session_id.clone(),
         })
     }
 
-    fn current_process_state(&self) -> NativeOwnerState {
-        let Ok(host_id) = fs::read_to_string("/etc/machine-id") else {
+    fn current_process_state(
+        &self,
+        environment: Option<&NativeOwnerEnvironment>,
+    ) -> NativeOwnerState {
+        let Some(environment) = environment else {
             return NativeOwnerState::Unknown;
         };
-        let Ok(boot_id) = fs::read_to_string("/proc/sys/kernel/random/boot_id") else {
-            return NativeOwnerState::Unknown;
-        };
-        if host_id.trim() != self.host_id || boot_id.trim() != self.boot_id {
+        if environment.host_id != self.host_id || environment.boot_id != self.boot_id {
             return NativeOwnerState::Unknown;
         }
         let Ok(process_id) = u32::try_from(self.process_id) else {
@@ -544,6 +578,14 @@ impl ReadsNativeOwnerProof for FlowStore {
         Ok(self
             .native_owner_proof_record(flow_id)?
             .map(|record| record.proof))
+    }
+}
+
+impl ReadsNativeOwnerEnvironment for FlowStore {
+    fn native_owner_environment(&self) -> Option<NativeOwnerEnvironment> {
+        self.native_owner_environment_override
+            .clone()
+            .or_else(|| NativeOwnerEnvironment::system())
     }
 }
 
@@ -3145,6 +3187,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
 
 pub struct FlowStore {
     engine: Engine,
+    native_owner_environment_override: Option<NativeOwnerEnvironment>,
     flows: TableReference<FlowRecord>,
     native_owner_proofs: TableReference<NativeOwnerProofRecord>,
     state: TableReference<FlowStoreState>,
@@ -3176,6 +3219,18 @@ pub struct FlowStore {
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
     pub opening_settlements: Vec<LaunchAttemptSettlement>,
+}
+
+#[cfg(test)]
+pub(crate) trait SetsNativeOwnerEnvironmentForTests {
+    fn set_native_owner_environment_for_tests(&mut self, environment: NativeOwnerEnvironment);
+}
+
+#[cfg(test)]
+impl SetsNativeOwnerEnvironmentForTests for FlowStore {
+    fn set_native_owner_environment_for_tests(&mut self, environment: NativeOwnerEnvironment) {
+        self.native_owner_environment_override = Some(environment);
+    }
 }
 
 /// The one-request configuration listener's view of the same Sema store.
@@ -3890,6 +3945,7 @@ impl OpensFlowStore for FlowStore {
             LogicalDeliveryTables::register(&mut engine, logical_delivery_descriptors)?;
         let store = Self {
             engine,
+            native_owner_environment_override: None,
             flows,
             native_owner_proofs,
             state,
@@ -5069,7 +5125,7 @@ impl RegistersExistingFlow for FlowStore {
                 {
                     return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
                 }
-                match proof.current_process_state() {
+                match proof.current_process_state(self.native_owner_environment().as_ref()) {
                     NativeOwnerState::Live => {
                         return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerLive));
                     }
@@ -5124,7 +5180,10 @@ impl RegistersExistingFlow for FlowStore {
             lifecycle,
             generation: existing_flow.as_ref().map_or(1, |flow| flow.generation),
         };
-        let Some(owner_proof) = NativeOwnerProof::from_binding(binding) else {
+        let Some(environment) = self.native_owner_environment() else {
+            return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
+        };
+        let Some(owner_proof) = NativeOwnerProof::from_binding(binding, &environment) else {
             return Ok(ExistingSeatAdoption::Refused(Refusal::AddressOwnerUnknown));
         };
         let owner_proof = NativeOwnerProofRecord {
@@ -6816,6 +6875,10 @@ pub(crate) trait ReadsFlowMemory {
                 context::FLOW_CONTEXT_SIZE_FAMILY,
                 context::FLOW_CONTEXT_SIZE_SCHEMA,
             ),
+            "flow_nexus_native_owner_proofs" => (
+                "flow-nexus-native-owner-proof",
+                "flow-nexus-native-owner-proof-v1",
+            ),
             "flow_nexus_address_holds" => (
                 address_hold::ADDRESS_HOLD_FAMILY,
                 address_hold::ADDRESS_HOLD_SCHEMA,
@@ -6840,6 +6903,10 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
                 "flow-nexus-queue-delivery-attempt-v6",
+            ),
+            "flow_nexus_native_owner_proofs" => (
+                "flow-nexus-native-owner-proof",
+                NativeOwnerProofRecord::schema_hash(),
             ),
             _ => return None,
         };
@@ -7540,7 +7607,7 @@ mod tests {
         RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
         RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsRestartedFlow,
         RegistersExistingFlow, RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
-        StoredLaunchOutcomeV2,
+        SetsNativeOwnerEnvironmentForTests, StoredLaunchOutcomeV2,
     };
 
     #[test]
@@ -7554,46 +7621,49 @@ mod tests {
             .nth(19)
             .expect("process start token")
             .to_owned();
-        let host_id = fs::read_to_string("/etc/machine-id").expect("host identity");
-        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot identity");
+        let environment = NativeOwnerEnvironment {
+            host_id: "test-host".into(),
+            boot_id: "test-boot".into(),
+        };
         let proof = NativeOwnerProof {
             process_id: i64::from(process_id),
             process_user_id: i64::from(metadata.uid()),
             process_start_token: start_token.clone(),
-            host_id: host_id.trim().to_owned(),
-            boot_id: boot_id.trim().to_owned(),
+            host_id: environment.host_id.clone(),
+            boot_id: environment.boot_id.clone(),
             harness_kind: HarnessKind::Codex,
             native_session_id: "native-session".into(),
         };
-        assert_eq!(proof.current_process_state(), NativeOwnerState::Live);
+        assert_eq!(
+            proof.current_process_state(Some(&environment)),
+            NativeOwnerState::Live
+        );
+        assert_eq!(proof.current_process_state(None), NativeOwnerState::Unknown);
         let mut reused = proof.clone();
         reused.process_start_token = "not-the-recorded-start".into();
-        assert_eq!(reused.current_process_state(), NativeOwnerState::Dead);
+        assert_eq!(
+            reused.current_process_state(Some(&environment)),
+            NativeOwnerState::Dead
+        );
         let mut another_boot = proof.clone();
         another_boot.boot_id = "another-boot".into();
         assert_eq!(
-            another_boot.current_process_state(),
+            another_boot.current_process_state(Some(&environment)),
             NativeOwnerState::Unknown
         );
         let mut another_host = proof;
         another_host.host_id = "another-host".into();
         assert_eq!(
-            another_host.current_process_state(),
+            another_host.current_process_state(Some(&environment)),
             NativeOwnerState::Unknown
         );
         // An unavailable process observation is not evidence of death.
         let mut unavailable = another_host;
-        unavailable.host_id = fs::read_to_string("/etc/machine-id")
-            .expect("host identity")
-            .trim()
-            .to_owned();
-        unavailable.boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
-            .expect("boot identity")
-            .trim()
-            .to_owned();
+        unavailable.host_id = environment.host_id.clone();
+        unavailable.boot_id = environment.boot_id.clone();
         unavailable.process_id = -1;
         assert_eq!(
-            unavailable.current_process_state(),
+            unavailable.current_process_state(Some(&environment)),
             NativeOwnerState::Unknown
         );
     }
@@ -7604,7 +7674,21 @@ mod tests {
 
         let fixture = StoreFixture::new();
         fixture.configured();
-        let store = fixture.store();
+        let mut store = <FlowStore as OpensFlowStore>::open_configured(&fixture.path())
+            .expect("configured store opens");
+        store.set_native_owner_environment_for_tests(NativeOwnerEnvironment {
+            host_id: "isolated-test-host".into(),
+            boot_id: "isolated-test-boot".into(),
+        });
+        store
+            .configure_change(ConfigurationChange::Models(vec![
+                meta_signal_flow::ConfigureModel {
+                    layer: Layer::Secondary,
+                    aspect: Aspect::Mind,
+                    native: "gpt-sol".into(),
+                },
+            ]))
+            .expect("owner model configured");
         let mut incumbent_process = Command::new("sleep")
             .arg("30")
             .stdin(Stdio::null())
@@ -8446,8 +8530,14 @@ mod tests {
 
     impl OpensFixtureStore for StoreFixture {
         fn store(&self) -> FlowStore {
-            <FlowStore as OpensFlowStore>::open(&self.directory.path().join("flow.sema"))
-                .expect("store opens")
+            let mut store =
+                <FlowStore as OpensFlowStore>::open(&self.directory.path().join("flow.sema"))
+                    .expect("store opens");
+            store.set_native_owner_environment_for_tests(NativeOwnerEnvironment {
+                host_id: "isolated-test-host".into(),
+                boot_id: "isolated-test-boot".into(),
+            });
+            store
         }
     }
 

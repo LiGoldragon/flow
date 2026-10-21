@@ -1796,9 +1796,10 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
 
 #[test]
 fn deliver_all_reports_empty_and_retained_queue_truthfully() {
+    use crate::metaflow::DispatchesMetaflowPeer;
     use crate::sending::SendsRequests;
     use crate::store::metaflow::TakesLaunchAddress;
-    use crate::store::{FlowStore, ManagesMetaflowState};
+    use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory};
     use signal_flow::{
         Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
         HerdrRouteSelection, Origin, PowerLevel, Response,

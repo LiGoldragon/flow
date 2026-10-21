@@ -256,9 +256,7 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
         let claimed_native_identity = self
             .claimed_native_identity(&binding.flow_id, &binding.harness_kind)
             .map_err(|_| FlowBindingRefusalReason::NativeIdentityMismatch)?;
-        if claimed_native_identity
-            != ClaimsNativeIdentity::canonical_native_identity(&binding.native_session_id)
-        {
+        if claimed_native_identity != Self::canonical_native_identity(&binding.native_session_id) {
             return Err(FlowBindingRefusalReason::NativeIdentityMismatch);
         }
         let processes = self

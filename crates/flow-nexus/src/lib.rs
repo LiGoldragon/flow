@@ -1516,7 +1516,9 @@ mod tests {
     ) {
         use crate::herdr::launch::{ClaimsNativeIdentity, NamesHerdrHarness};
         let harness = binding.harness_kind.expected_harness();
-        let identity = ClaimsNativeIdentity::canonical_native_identity(&binding.native_session_id);
+        let identity = <crate::herdr::HerdrCli as ClaimsNativeIdentity>::canonical_native_identity(
+            &binding.native_session_id,
+        );
         let version = if binding.harness_kind == HarnessKind::Claude {
             "uuid-version=uuid-v4\n"
         } else {

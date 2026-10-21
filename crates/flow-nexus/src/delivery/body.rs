@@ -71,7 +71,14 @@ pub trait RecognizesLetter {
 
 impl RecognizesLetter for str {
     fn opens_a_letter(&self) -> bool {
-        ["HardAbrupt.{ m-", "MiddleAbrupt.{ m-", "Soft.{ m-"]
+        [
+            "HardAbrupt.{ m-",
+            "MiddleAbrupt.{ m-",
+            "Soft.{ m-",
+            "HardAbrupt.{ send-",
+            "MiddleAbrupt.{ send-",
+            "Soft.{ send-",
+        ]
             .iter()
             .any(|head| self.starts_with(head))
     }
@@ -183,7 +190,7 @@ impl ReadsCommandLine for HarnessProfile {
 
 #[cfg(test)]
 mod tests {
-    use super::{RendersPaneText, VetsBody};
+    use super::{RecognizesLetter, RendersPaneText, VetsBody};
     use crate::delivery::body::ShowsPaneText;
     use crate::store::delivery::DefaultsHarnessProfile;
     use meta_signal_flow::{BodyRefusal, Content, Letter, Message, Psyche_Data, Sender};
@@ -219,6 +226,14 @@ mod tests {
                 .as_str()
                 .starts_with("HardAbrupt.{ m-81b0e4 Owner ")
         );
+    }
+
+    #[test]
+    fn recognizes_flow_minted_abrupt_send_letters() {
+        for prefix in ["HardAbrupt", "MiddleAbrupt"] {
+            let text = format!("{prefix}.{{ send-19a2-3 Owner Text.«work» }}");
+            assert!(text.as_str().opens_a_letter(), "{text}");
+        }
     }
 
     #[test]

@@ -78,9 +78,10 @@ use signal_flow::{
 use std::{
     fs,
     io::{Read, Write},
+    net::Shutdown,
     os::unix::{
         fs::PermissionsExt,
-        net::{Shutdown, UnixListener, UnixStream},
+        net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
     sync::{
@@ -1218,7 +1219,7 @@ mod tests {
     mod submission;
     mod waking;
 
-    use super::{Dispatches, ReconcilesListedFlows, RunningNexus};
+    use super::{Arc, Connection, Dispatches, ReconcilesListedFlows, RunningNexus, UnixStream};
     use crate::caller::{
         CallerPane, CallerProcess, IdentifiesPeer, LocatesCallerPane, ReadsProcess, ResolvesCaller,
     };

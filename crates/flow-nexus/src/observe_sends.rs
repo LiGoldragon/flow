@@ -56,6 +56,7 @@ impl ObservesLogicalSends for RunningNexus {
         &self,
         sender: &Address,
         mut cursor: Option<i64>,
+        disconnected: &AtomicBool,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String> {
         let changes = self.store.launch_changes.clone();

@@ -229,10 +229,10 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
 
 /// The seat's main turn ended while a background agent still runs: its
 /// sidechain rows follow the main `end_turn` and Herdr shows Working. Its
-/// own Stop starts its oldest request's hand-over; without a native user
-/// history receipt both entries remain queued. A foreign Stop does nothing.
+/// its own Stop hands over its oldest request; the Prompted fixture records
+/// the exact native user row. A foreign Stop does nothing.
 #[test]
-fn a_claude_main_end_turn_with_a_running_sidechain_keeps_unreceived_work() {
+fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![working_claude_agent(&fixture)],
@@ -265,7 +265,7 @@ fn a_claude_main_end_turn_with_a_running_sidechain_keeps_unreceived_work() {
             .unwrap_or_default()
             .contains("Sender.{ Psyche core Secondary }")
     );
-    assert_eq!(queue(&fixture), vec![first, second]);
+    assert_eq!(queue(&fixture), vec![second]);
     assert_eq!(
         stored(&fixture, Layer::Secondary).state,
         State::Awake(CLAUDE_SEAT.into())
@@ -336,7 +336,8 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
         &fixture,
         &[
             serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-first",
-            "message":{"content":typed_text(&first)}}),
+            "message":{"content":format!("\n\n<pasted_content id=\"04ee\">\n{}\n</pasted_content id=\"04ee\">\n", typed_text(&first))}}),
+            end_turn("first-received"),
         ],
     );
     report(&fixture, claude_stop(&fixture));
@@ -522,8 +523,8 @@ fn a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_t
 }
 
 /// A hand-over Herdr refuses before any text reaches the pane is proved
-/// absent, authorizing one retry. That retry remains queued until its native
-/// history receipt.
+/// absent, authorizing one retry. The Prompted fixture records its native
+/// USER row, so the retry settles exactly once.
 #[test]
 fn a_hand_over_refused_before_input_is_absent_and_handed_over_again() {
     let fixture = NexusFixture::new();
@@ -549,11 +550,7 @@ fn a_hand_over_refused_before_input_is_absent_and_handed_over_again() {
     );
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![first]);
-    assert!(matches!(
-        standings(&fixture).as_slice(),
-        [QueueDeliveryStanding::Uncertain(_)]
-    ));
+    assert_eq!(queue(&fixture), vec![]);
 }
 
 /// A Stop of the seat's own session recorded before its launch was

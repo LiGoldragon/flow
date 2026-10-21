@@ -460,9 +460,7 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
         .unsent()
     );
     assert!(!closes(&fixture), "it keeps its pane");
-    let typed = fixture.typed().expect("typed into the pane");
-    assert!(!typed.contains("first"), "the request is not yet accepted");
-    assert!(!typed.contains("second"), "one request per Stop");
+    assert_eq!(fixture.typed(), None, "the working seat receives no input");
 }
 
 /// An explicit all-queue delivery preserves the durable queue until each

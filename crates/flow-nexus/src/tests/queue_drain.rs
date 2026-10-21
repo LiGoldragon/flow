@@ -382,7 +382,11 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
         settled,
         "duplicate exact native receipt changes neither state nor cursor"
     );
-    assert_eq!(typed_count(&fixture, "second-request-body"), 0);
+    assert_eq!(
+        typed_count(&fixture, "second-request-body"),
+        1,
+        "the ended first turn offers the next request, which still awaits its own receipt"
+    );
 
     // The first request's own turn runs and ends.
     append_main_rows(&fixture, &[end_turn("first-answered")]);

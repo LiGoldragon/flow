@@ -72,6 +72,31 @@ enum RequestState {
     /// Its attempt was proved never to have reached the seat; the request
     /// is still queued and a later attempt carries it.
     Unsent,
+    /// Native history could not resolve this request. It remains in the
+    /// delivery journal as Uncertain, but is no longer an active queue item
+    /// and must never be handed over again automatically.
+    Parked,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum RequestStateV4 {
+    Queued,
+    Settled,
+    Unsent,
+}
+
+trait UpgradesRequestState {
+    fn upgrade(self) -> RequestState;
+}
+
+impl UpgradesRequestState for RequestStateV4 {
+    fn upgrade(self) -> RequestState {
+        match self {
+            Self::Queued => RequestState::Queued,
+            Self::Settled => RequestState::Settled,
+            Self::Unsent => RequestState::Unsent,
+        }
+    }
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -90,11 +115,48 @@ impl EngineRecord for StoredDeliveryRequest {
 
 impl MemoryDefinition for StoredDeliveryRequest {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-queue-delivery-request-v5")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredDeliveryRequestV4 {
+    request_id: String,
+    address: Address,
+    queue_evidence: QueueEvidence,
+    state: RequestStateV4,
+}
+
+impl EngineRecord for StoredDeliveryRequestV4 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredDeliveryRequestV4 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(4)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-queue-delivery-request-v4")
+    }
+}
+
+impl UpgradeFrom<StoredDeliveryRequestV4> for StoredDeliveryRequest {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredDeliveryRequestV4) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            request_id: previous.request_id,
+            address: previous.address,
+            queue_evidence: previous.queue_evidence,
+            state: previous.state.upgrade(),
+        })
     }
 }
 
@@ -106,7 +168,7 @@ pub(crate) struct StoredDeliveryRequestV2 {
     request_id: String,
     address: Address,
     queued: super::QueuedRequestBeforeFlow,
-    state: RequestState,
+    state: RequestStateV4,
 }
 
 impl EngineRecord for StoredDeliveryRequestV2 {
@@ -138,7 +200,7 @@ impl UpgradeFrom<StoredDeliveryRequestV2> for StoredDeliveryRequest {
                     super::SentByBeforeFlow::Unknown => SentBy::Unknown,
                 },
             ),
-            state: previous.state,
+            state: previous.state.upgrade(),
         })
     }
 }
@@ -148,7 +210,7 @@ pub(crate) struct StoredDeliveryRequestV3 {
     request_id: String,
     address: Address,
     queued: super::QueuedRequestBeforeLogicalId,
-    state: RequestState,
+    state: RequestStateV4,
 }
 impl EngineRecord for StoredDeliveryRequestV3 {
     fn record_key(&self) -> RecordKey {
@@ -173,7 +235,7 @@ impl UpgradeFrom<StoredDeliveryRequestV3> for StoredDeliveryRequest {
                 .queued
                 .request
                 .with_legacy_sender(previous.queued.sent_by),
-            state: previous.state,
+            state: previous.state.upgrade(),
         })
     }
 }
@@ -407,7 +469,20 @@ pub(crate) trait DeclaresQueueDeliveryTables: Sized {
         engine: &mut Engine,
         descriptor: TableDescriptor<StoredDeliveryRequest>,
     ) -> Result<TableReference<StoredDeliveryRequest>, StoreError> {
-        let from_v2 = descriptor.clone();
+        let from_v4 = descriptor.clone();
+        match engine
+            .upgrade_table::<StoredDeliveryRequestV4, StoredDeliveryRequest>(descriptor.clone())
+        {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")));
+            }
+        }
+        let from_v2 = from_v4;
         match engine.upgrade_table::<StoredDeliveryRequestV3, StoredDeliveryRequest>(descriptor) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
@@ -475,7 +550,8 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
                 StoredDeliveryRequest::schema_hash(),
             )
             .with_predecessor::<StoredDeliveryRequestV2>()
-            .with_predecessor::<StoredDeliveryRequestV3>(),
+            .with_predecessor::<StoredDeliveryRequestV3>()
+            .with_predecessor::<StoredDeliveryRequestV4>(),
             TableDescriptor::new(
                 DELIVERY_ATTEMPT_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-attempt"),
@@ -523,6 +599,10 @@ pub trait AccountsQueueDelivery {
     /// Atomically removes the request if it remains oldest and retains the
     /// settled attempt, so a duplicate completion is idempotent.
     fn settle_recorded_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
+
+    /// Removes an unresolved request from active queue processing without
+    /// changing its Uncertain delivery record or permitting automatic retry.
+    fn park_uncertain_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
 
     /// Native submission returned without an exactly correlated receipt.
     /// The request stays queued and this attempt can only be reconciled,
@@ -585,6 +665,7 @@ trait ReadsQueueDelivery {
         &self,
         address: &Address,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError>;
+    fn request_state(&self, request_id: &str) -> Result<Option<RequestState>, StoreError>;
 }
 
 impl ReadsQueueDelivery for FlowStore {
@@ -600,15 +681,30 @@ impl ReadsQueueDelivery for FlowStore {
         &self,
         address: &Address,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError> {
-        let mut matching = self
-            .delivery_attempts()?
-            .into_iter()
-            .filter(|attempt| &attempt.address == address && !attempt.phase.is_finished());
-        let found = matching.next();
-        if matching.next().is_some() {
+        let attempts = self.delivery_attempts()?;
+        let mut matching = attempts.into_iter().filter_map(|attempt| {
+            if &attempt.address != address || attempt.phase.is_finished() {
+                return None;
+            }
+            match self.request_state(&attempt.request_id) {
+                Ok(Some(RequestState::Parked)) => None,
+                Ok(_) => Some(Ok(attempt)),
+                Err(error) => Some(Err(error)),
+            }
+        });
+        let first = matching.next().transpose()?;
+        if matching.next().transpose()?.is_some() {
             return Err(StoreError::StateInvariant);
         }
-        Ok(found)
+        return Ok(first);
+    }
+
+    fn request_state(&self, request_id: &str) -> Result<Option<RequestState>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(request_id),
+        ))?;
+        Ok(rows.records().first().map(|request| request.state.clone()))
     }
 }
 
@@ -779,7 +875,8 @@ impl AccountsQueueDelivery for FlowStore {
             native_session_id: attempt.thread_id.clone(),
             native_prompt_id: receipt.turn_id.clone(),
         };
-        if metaflow.metaflow.queue.first() != Some(logical_entry) {
+        let is_parked = self.request_state(&attempt.request_id)? == Some(RequestState::Parked);
+        if !is_parked && metaflow.metaflow.queue.first() != Some(logical_entry) {
             return Ok(false);
         }
         let requests = self
@@ -795,13 +892,16 @@ impl AccountsQueueDelivery for FlowStore {
         };
         if request.address != attempt.address
             || request.queue_evidence != attempt.queue_evidence
-            || request.state != RequestState::Queued
+            || (!is_parked && request.state != RequestState::Queued)
+            || (is_parked && request.state != RequestState::Parked)
         {
             return Err(StoreError::StateInvariant);
         }
         let mut request = request.clone();
         request.state = RequestState::Settled;
-        metaflow.metaflow.queue.remove(0);
+        if !is_parked {
+            metaflow.metaflow.queue.remove(0);
+        }
         attempt.phase = QueueDeliveryPhase::Settled(receipt);
         let commit = self
             .engine
@@ -814,6 +914,47 @@ impl AccountsQueueDelivery for FlowStore {
             DeliveryState::Delivered(native_receipt),
             commit,
         )?;
+        Ok(true)
+    }
+
+    fn park_uncertain_delivery(&self, attempt_id: &str) -> Result<bool, StoreError> {
+        let Some(attempt) = self.queue_delivery_attempt(attempt_id)? else {
+            return Ok(false);
+        };
+        if !matches!(attempt.phase, QueueDeliveryPhase::Uncertain(_)) {
+            return Ok(false);
+        }
+        let QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+            return Ok(false);
+        };
+        let Some(mut metaflow) = self.stored_metaflow(&attempt.address)? else {
+            return Ok(false);
+        };
+        if metaflow.metaflow.queue.first() != Some(entry) {
+            return Ok(false);
+        }
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(attempt.request_id.clone()),
+        ))?;
+        let [request] = rows.records() else {
+            return Err(StoreError::StateInvariant);
+        };
+        if request.address != attempt.address
+            || request.queue_evidence != attempt.queue_evidence
+            || request.state != RequestState::Queued
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let mut parked = request.clone();
+        parked.state = RequestState::Parked;
+        metaflow.metaflow.queue.remove(0);
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, metaflow)
+            .mutate(self.queue_delivery.requests, parked);
+        self.engine.commit_atomic(commit)?;
         Ok(true)
     }
 
@@ -1554,7 +1695,7 @@ mod tests {
     #[test]
     fn owner_delivered_resolution_requires_native_receipt_and_changes_nothing() {
         use ResolveQueueDeliveryRejected_Data as Rejected;
-        let (fixture, store) = Fixture::new();
+        let (_fixture, store) = Fixture::new();
         let attempt = prepare_claude(&store);
         let record = resolution(QueueResolutionOutcome::Delivered, "seen in the pane");
         assert_eq!(
@@ -1581,6 +1722,82 @@ mod tests {
                 .unwrap()
                 .map(|outstanding| outstanding.attempt_id),
             Some(attempt.attempt_id)
+        );
+    }
+
+    #[test]
+    fn parked_uncertain_request_unblocks_queue_and_late_receipt_still_settles() {
+        let (fixture, store) = Fixture::new();
+        let first = prepare_claude(&store);
+        assert!(store.park_uncertain_delivery(&first.attempt_id).unwrap());
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("second")]
+        );
+        assert!(store.outstanding_delivery(&address()).unwrap().is_none());
+        assert_eq!(
+            store
+                .queue_delivery_attempt(&first.attempt_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            QueueDeliveryPhase::Uncertain(Some(Undecided::AbsenceUnprovable))
+        );
+        drop(store);
+
+        let reopened = fixture.reopen();
+        assert_eq!(
+            reopened.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("second")]
+        );
+        assert!(reopened.outstanding_delivery(&address()).unwrap().is_none());
+        assert_eq!(
+            reopened.recover_outstanding_deliveries().unwrap(),
+            vec![first.clone()],
+            "parked uncertainty remains observable after restart"
+        );
+        let PrepareQueueDelivery::Prepared(second) = reopened
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-7",
+                HarnessKind::Claude,
+                NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                    device: 1,
+                    inode: 2,
+                    offset: 9,
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("the later queued request is eligible")
+        };
+        let exact = receipt(&first);
+        assert!(
+            reopened
+                .record_delivery_receipt(&first.attempt_id, exact)
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .settle_recorded_delivery(&first.attempt_id)
+                .unwrap()
+        );
+        assert_eq!(
+            reopened
+                .queue_delivery_attempt(&first.attempt_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            QueueDeliveryPhase::Settled(receipt(&first))
+        );
+        assert_eq!(
+            reopened.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("second")]
+        );
+        assert_eq!(
+            reopened.outstanding_delivery(&address()).unwrap(),
+            Some(second)
         );
     }
 
@@ -1976,7 +2193,14 @@ mod tests {
                                 QueueEvidence::Logical(entry) => before_flow(entry),
                                 QueueEvidence::Legacy(_) => unreachable!(),
                             },
-                            state: request.state.clone(),
+                            state: match request.state {
+                                RequestState::Queued => RequestStateV4::Queued,
+                                RequestState::Settled => RequestStateV4::Settled,
+                                RequestState::Unsent => RequestStateV4::Unsent,
+                                RequestState::Parked => {
+                                    unreachable!("old fixture has no parked row")
+                                }
+                            },
                         },
                     ))
                     .expect("v2 request persists");

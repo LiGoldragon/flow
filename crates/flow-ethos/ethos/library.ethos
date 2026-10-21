@@ -26,6 +26,15 @@ Library
             Psyches.Vector<Said>
             Result.String
             Notice.String ]
+  ; A logical delivery keeps one identity across queue retries and native
+  ; submission; the id names the living's request, not a delivery attempt.
+  LogicalDeliveryId.String
+  ; The selected request kind and routing policy are common to every
+  ; consumer of Flow messages.
+  Message.[ HardAbrupt.Request
+            MiddleAbrupt.Request
+            Soft.Request ]
+  Delivery.[ Queue Wake ]
   Aspect.[ Psyche Mind Field ]
   Address.{ Aspect Topic Layer }
   Recipient.[ Address Up ]
@@ -35,13 +44,17 @@ Library
   ; for one Flow raised itself (a landing's orders, a compaction's
   ; investigation).
   SentBy.[ Sender Unknown Flow ]
-  QueuedRequest.{ SentBy Request }
+  ; The durable queue entry is the identity-bearing logical request.
+  QueueEntry.{ LogicalDeliveryId SentBy Delivery Message }
+  ; What the native surface receives after selection: identity and origin
+  ; remain observable, but policy and delivery-attempt metadata do not.
+  NativeInput.{ LogicalDeliveryId SentBy Message }
   ; A metaflow is Awake as its current flow or Asleep: a topic never dies,
   ; it goes idle, its flows turned off.
   Metaflow.{ Address
              State.[ Awake.FlowId Asleep ]
              Past.Vector<FlowId>
-             Queue.Vector<QueuedRequest> }
+             Queue.Vector<QueueEntry> }
   Lock.{ Sender Address Until.Integer }
   Process.{ Pid.Integer Started.Integer }
   Sender.Address

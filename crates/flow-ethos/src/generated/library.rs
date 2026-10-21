@@ -71,6 +71,35 @@ pub enum Request {
     Notice(String),
 }
 #[rustfmt::skip]
+pub type LogicalDeliveryId = String;
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum Message {
+    HardAbrupt(Request),
+    MiddleAbrupt(Request),
+    Soft(Request),
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+#[rkyv(
+    serialize_bounds(
+        __S:rkyv::ser::Writer+rkyv::ser::Allocator,
+        __S::Error:rkyv::rancor::Source
+    )
+)]
+#[rkyv(deserialize_bounds(__D::Error:rkyv::rancor::Source))]
+#[rkyv(
+    bytecheck(
+        bounds(__C:rkyv::validation::ArchiveContext, __C::Error:rkyv::rancor::Source)
+    )
+)]
+pub enum Delivery {
+    Queue(#[rkyv(omit_bounds)] Queue),
+    Wake,
+}
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Aspect {
@@ -104,9 +133,32 @@ pub enum SentBy {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct QueuedRequest {
+#[rkyv(
+    serialize_bounds(
+        __S:rkyv::ser::Writer+rkyv::ser::Allocator,
+        __S::Error:rkyv::rancor::Source
+    )
+)]
+#[rkyv(deserialize_bounds(__D::Error:rkyv::rancor::Source))]
+#[rkyv(
+    bytecheck(
+        bounds(__C:rkyv::validation::ArchiveContext, __C::Error:rkyv::rancor::Source)
+    )
+)]
+pub struct QueueEntry {
+    pub logical_delivery_id: LogicalDeliveryId,
     pub sent_by: SentBy,
-    pub request: Request,
+    #[rkyv(omit_bounds)]
+    pub delivery: Delivery,
+    pub message: Message,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct NativeInput {
+    pub logical_delivery_id: LogicalDeliveryId,
+    pub sent_by: SentBy,
+    pub message: Message,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -118,7 +170,7 @@ pub enum State {
 #[rustfmt::skip]
 pub type Past = std::vec::Vec<FlowId>;
 #[rustfmt::skip]
-pub type Queue = std::vec::Vec<QueuedRequest>;
+pub type Queue = std::vec::Vec<QueueEntry>;
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]

@@ -874,13 +874,15 @@ pub(crate) mod tests {
         use super::RendersQueuedWork;
         use signal_flow::{QueueEntry, Request, SentBy};
         let order = QueueEntry {
+            logical_delivery_id: "logical-delivery-0000000000000001".into(),
             sent_by: SentBy::Flow,
-            request: Request::Order("investigate".into()),
+            delivery: signal_flow::Delivery::Queue,
+            message: signal_flow::Message::Soft(Request::Order("investigate".into())),
         };
         assert!(
             [order]
                 .prompt_text()
-                .ends_with("{ Flow Order.investigate }")
+                .ends_with("{ logical-delivery-0000000000000001 Flow Soft.Order.investigate }")
         );
     }
 

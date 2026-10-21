@@ -1794,6 +1794,123 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     );
 }
 
+#[test]
+fn deliver_all_reports_empty_and_retained_queue_truthfully() {
+    use crate::sending::SendsRequests;
+    use crate::store::metaflow::TakesLaunchAddress;
+    use crate::store::{FlowStore, ManagesMetaflowState};
+    use signal_flow::{
+        Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
+        HerdrRouteSelection, Origin, PowerLevel, Response,
+    };
+
+    let fixture = NexusFixture::new();
+    let (_message_child, message) = message_peer(&fixture);
+    let sender_address = Address {
+        aspect: Aspect::Field,
+        topic: "flow".into(),
+        layer: Layer::Quaternary,
+    };
+    let route = HerdrRoute {
+        herdr_session_name: "messaging-build".into(),
+        herdr_agent_name: "sender-agent".into(),
+        herdr_pane_id: "w5:p1".into(),
+        herdr_terminal_id: "term-sender".into(),
+    };
+    fixture
+        .nexus
+        .store
+        .register_flow_in_role(
+            FlowNode {
+                flow_id: "deliver-all-sender".into(),
+                session_id: "deliver-all-sender-session".into(),
+                harness_kind: HarnessKind::Claude,
+                endpoint_selection: EndpointSelection::Unavailable,
+                herdr_route_selection: HerdrRouteSelection::Available(route),
+                origin: Origin::Flow(FlowOrigin {
+                    flow_id: "parent".into(),
+                    session_id: "parent-session".into(),
+                }),
+                flow_lifecycle: FlowLifecycle::Active,
+            },
+            Caller {
+                flow_id: "deliver-all-sender".into(),
+                aspect: Aspect::Field,
+                power_level: PowerLevel::UltraLow,
+                model_name: "haiku".into(),
+            },
+        )
+        .expect("sender registered");
+    fixture
+        .nexus
+        .store
+        .address_taking(&sender_address, "deliver-all-sender", None, 0)
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .awaken_metaflow(&sender_address, "deliver-all-sender", 0)
+        .unwrap();
+    let snapshot = fs::read_to_string(&fixture.snapshot_program).unwrap();
+    let sender_agent = r#"{"agent":"claude","agent_status":"working","name":"sender-agent","pane_id":"w5:p1","terminal_id":"term-sender","workspace_id":"w5"}"#;
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&snapshot.replace(r#""agents":[]"#, &format!(r#""agents":[{sender_agent}]"#)));
+    let sender = super::MarkedProcess::spawn("sleep", &["30"], "w5:p1");
+    let sender_process = FlowStore::process_identity_for_pid(sender.0.id()).unwrap();
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::Identify(sender_process.clone()),
+                Some(&message)
+            )
+            .response,
+        Response::Identified(sender_address),
+    );
+
+    let empty = address(Layer::Secondary);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Layer::Secondary, State::Asleep, vec![], vec![]));
+    assert_eq!(
+        fixture.nexus.deliver_all(empty, Some(&sender_process)),
+        Response::Delivered
+    );
+
+    // With no launch record the sleeping seat cannot be woken. DeliverAll
+    // must preserve its queued work and report that it remains queued.
+    let queued = address(Layer::Tertiary);
+    let request = Request::Order("retain this request".into());
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Tertiary,
+        State::Asleep,
+        vec![],
+        vec![request.clone()],
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .deliver_all(queued.clone(), Some(&sender_process)),
+        Response::Queued
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&queued)
+            .unwrap()
+            .unwrap()
+            .queue,
+        vec![signal_flow::QueuedRequest {
+            sent_by: signal_flow::SentBy::Unknown,
+            request,
+        }],
+    );
+}
+
 /// A process spawned for a test, killed when it is dropped.
 pub(super) struct SpawnedProcess(pub(super) std::process::Child);
 

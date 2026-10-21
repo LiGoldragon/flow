@@ -278,7 +278,11 @@ mod tests {
             first_address_option: None,
             second_address_option: None,
             request_digest: "abc".into(),
-            ordinary_send_outcome: OrdinarySendOutcome::Delivered,
+            ordinary_send_outcome: OrdinarySendOutcome::Accepted(signal_flow::SendAcceptance {
+                logical_delivery_id: "logical-delivery-0000000000000001".into(),
+                delivery_cursor: 1,
+                delivery_state: signal_flow::DeliveryState::Queued,
+            }),
         };
         {
             let descriptors = SendOutcomeTables::descriptors();

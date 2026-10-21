@@ -1318,7 +1318,7 @@ mod tests {
         use crate::store::send_outcome::RecordsSendOutcomes;
         use meta_signal_flow::OrdinarySendOutcome;
         let fixture = NexusFixture::new();
-        let send = signal_flow::Send_Data {
+        let send = signal_flow::SendRequest {
             recipient: signal_flow::Recipient::Address(signal_flow::Address {
                 aspect: Aspect::Psyche,
                 topic: "core".into(),

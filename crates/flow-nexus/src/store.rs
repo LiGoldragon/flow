@@ -443,51 +443,60 @@ struct MetaflowBeforeLogicalIds {
     past: Vec<String>,
     queue: Vec<QueuedRequestBeforeLogicalId>,
 }
-fn carry_legacy_queue(
-    address: &Address,
-    queue: Vec<QueuedRequestBeforeLogicalId>,
-) -> Vec<flow_ethos::QueueEntry> {
-    queue
-        .into_iter()
-        .enumerate()
-        .map(|(index, old)| flow_ethos::QueueEntry {
-            logical_delivery_id: format!(
-                "legacy:{}:{index:016x}",
-                FlowStore::address_record_key(address)
-            ),
-            sent_by: old.sent_by,
-            delivery: flow_ethos::Delivery::Queue,
-            message: flow_ethos::Message::Soft(old.request),
-        })
-        .collect()
+trait LogicalQueueConvertible {
+    fn into_logical_queue(self, address: &Address) -> Vec<flow_ethos::QueueEntry>;
 }
-fn carry_legacy_metaflow(old: MetaflowBeforeLogicalIds) -> Metaflow {
-    let queue = carry_legacy_queue(&old.address, old.queue);
-    Metaflow {
-        address: old.address,
-        state: old.state,
-        past: old.past,
-        queue,
+impl LogicalQueueConvertible for Vec<QueuedRequestBeforeLogicalId> {
+    fn into_logical_queue(self, address: &Address) -> Vec<flow_ethos::QueueEntry> {
+        self.into_iter()
+            .enumerate()
+            .map(|(index, old)| flow_ethos::QueueEntry {
+                logical_delivery_id: format!(
+                    "legacy:{}:{index:016x}",
+                    FlowStore::address_record_key(address)
+                ),
+                sent_by: old.sent_by,
+                delivery: flow_ethos::Delivery::Queue,
+                message: flow_ethos::Message::Soft(old.request),
+            })
+            .collect()
     }
 }
-fn carry_before_flow(old: MetaflowBeforeFlow) -> Metaflow {
-    let queue = old
-        .queue
-        .into_iter()
-        .map(|entry| QueuedRequestBeforeLogicalId {
-            sent_by: match entry.sent_by {
-                SentByBeforeFlow::Sender(sender) => flow_ethos::SentBy::Sender(sender),
-                SentByBeforeFlow::Unknown => flow_ethos::SentBy::Unknown,
-            },
-            request: entry.request,
-        })
-        .collect();
-    carry_legacy_metaflow(MetaflowBeforeLogicalIds {
-        address: old.address,
-        state: old.state,
-        past: old.past,
-        queue,
-    })
+trait LogicalMetaflowConvertible {
+    fn into_logical_metaflow(self) -> Metaflow;
+}
+impl LogicalMetaflowConvertible for MetaflowBeforeLogicalIds {
+    fn into_logical_metaflow(self) -> Metaflow {
+        let queue = self.queue.into_logical_queue(&self.address);
+        Metaflow {
+            address: self.address,
+            state: self.state,
+            past: self.past,
+            queue,
+        }
+    }
+}
+impl LogicalMetaflowConvertible for MetaflowBeforeFlow {
+    fn into_logical_metaflow(self) -> Metaflow {
+        let queue = self
+            .queue
+            .into_iter()
+            .map(|entry| QueuedRequestBeforeLogicalId {
+                sent_by: match entry.sent_by {
+                    SentByBeforeFlow::Sender(sender) => flow_ethos::SentBy::Sender(sender),
+                    SentByBeforeFlow::Unknown => flow_ethos::SentBy::Unknown,
+                },
+                request: entry.request,
+            })
+            .collect();
+        MetaflowBeforeLogicalIds {
+            address: self.address,
+            state: self.state,
+            past: self.past,
+            queue,
+        }
+        .into_logical_metaflow()
+    }
 }
 
 /// The last metaflow shape before stable logical identities, stored at
@@ -519,7 +528,7 @@ impl UpgradeFrom<StoredMetaflowV3> for StoredMetaflow {
 
     fn upgrade_from(previous: StoredMetaflowV3) -> Decision<Self, Self::Refusal> {
         Decision::Ready(Self {
-            metaflow: carry_before_flow(previous.metaflow),
+            metaflow: (previous.metaflow).into_logical_metaflow(),
         })
     }
 }
@@ -545,7 +554,7 @@ impl UpgradeFrom<StoredMetaflowV4> for StoredMetaflow {
     type Refusal = std::convert::Infallible;
     fn upgrade_from(previous: StoredMetaflowV4) -> Decision<Self, Self::Refusal> {
         Decision::Ready(Self {
-            metaflow: carry_legacy_metaflow(previous.metaflow),
+            metaflow: (previous.metaflow).into_logical_metaflow(),
         })
     }
 }
@@ -582,12 +591,13 @@ pub(crate) struct MetaflowBeforeIdle {
 
 impl From<MetaflowBeforeIdle> for Metaflow {
     fn from(previous: MetaflowBeforeIdle) -> Self {
-        carry_before_flow(MetaflowBeforeFlow {
+        (MetaflowBeforeFlow {
             address: previous.address,
             state: previous.state.into(),
             past: previous.past,
             queue: previous.queue,
         })
+        .into_logical_metaflow()
     }
 }
 
@@ -606,7 +616,7 @@ pub(crate) struct MetaflowBeforeSenders {
 /// Unknown, and an ended metaflow Asleep; nothing else changes.
 impl From<MetaflowBeforeSenders> for Metaflow {
     fn from(previous: MetaflowBeforeSenders) -> Self {
-        carry_before_flow(MetaflowBeforeFlow {
+        (MetaflowBeforeFlow {
             address: previous.address,
             state: previous.state.into(),
             past: previous.past,
@@ -619,6 +629,7 @@ impl From<MetaflowBeforeSenders> for Metaflow {
                 })
                 .collect(),
         })
+        .into_logical_metaflow()
     }
 }
 
@@ -9887,7 +9898,21 @@ mod tests {
         let idle = carried(Layer::Tertiary);
         assert_eq!(idle.state, flow_ethos::State::Asleep);
         assert_eq!(idle.past, vec!["a1a1a1".to_owned()]);
-        assert_eq!(idle.queue, queued);
+        assert_eq!(idle.queue.len(), queued.len());
+        assert_eq!(
+            idle.queue[0].logical_delivery_id,
+            format!(
+                "legacy:{}:{:016x}",
+                FlowStore::address_record_key(&at(Layer::Tertiary)),
+                0
+            )
+        );
+        assert_eq!(idle.queue[0].sent_by, flow_ethos::SentBy::Unknown);
+        assert_eq!(idle.queue[0].delivery, flow_ethos::Delivery::Queue);
+        assert_eq!(
+            idle.queue[0].message,
+            flow_ethos::Message::Soft(Request::Order("kept".into()))
+        );
         assert_eq!(
             carried(Layer::Secondary).state,
             flow_ethos::State::Awake("b2b2b2".into())

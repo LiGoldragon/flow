@@ -18,6 +18,7 @@ use crate::caller::{
     CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
 };
 use crate::codex::SelectsCodexEndpoint;
+use crate::composition::RendersQueuedWork;
 use crate::delivery::DeliversMessages;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
@@ -31,12 +32,46 @@ use crate::waking::{PerformsWakeAndDrain, RestsEndedAwake, SleepsAndWakesSeats, 
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind, HerdrRoute,
-    Delivery, HerdrRouteSelection, Launch_Data, LaunchProfile, Layer, Message, Origin, Process,
+    Address, Aspect, Caller, Delivery, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind,
+    HerdrRoute, HerdrRouteSelection, Launch_Data, LaunchProfile, Layer, Message, Origin, Process,
     QueuedRequest, Recipient, Refusal, RememberedFlow, Request, Response, RouteReadiness,
-    Send_Data, SentBy, StartRejection, Unknown_Data,
+    Send_Data, SendPayloadSize, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Flow's maximum UTF-8 byte length for one rendered native Send prompt.
+pub const MAX_SEND_PAYLOAD_BYTES: usize = 64 * 1024;
+
+/// Measures a Request as it would appear in the recipient's native prompt.
+pub trait MeasuresSendPayload {
+    fn native_prompt_bytes(&self, sender: &Address) -> usize;
+}
+
+impl MeasuresSendPayload for Request {
+    fn native_prompt_bytes(&self, sender: &Address) -> usize {
+        [QueuedRequest {
+            sent_by: SentBy::Sender(sender.clone()),
+            request: self.clone(),
+        }]
+        .prompt_text()
+        .len()
+    }
+}
+
+/// Refuses a Send whose complete native prompt rendering exceeds Flow's budget.
+pub trait AdmitsSendPayload {
+    fn oversized_refusal(&self, sender: &Address) -> Option<Refusal>;
+}
+
+impl AdmitsSendPayload for Request {
+    fn oversized_refusal(&self, sender: &Address) -> Option<Refusal> {
+        let actual_bytes = self.native_prompt_bytes(sender);
+        (actual_bytes > MAX_SEND_PAYLOAD_BYTES).then_some(Refusal::Oversized(SendPayloadSize {
+            actual_bytes: i64::try_from(actual_bytes).unwrap_or(i64::MAX),
+            maximum_bytes: MAX_SEND_PAYLOAD_BYTES as i64,
+        }))
+    }
+}
 
 /// Names the metaflow the calling process runs in.
 pub trait IdentifiesSender {
@@ -153,6 +188,14 @@ impl SendsRequests for RunningNexus {
             Ok(sender) => sender,
             Err(refusal) => return (*refusal).into(),
         };
+        let request = match &send.message {
+            Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request) => request,
+        };
+        if let Some(refusal) = request.oversized_refusal(&sender) {
+            return Response::Refused(refusal).into();
+        }
         let delivery = send.delivery;
         let recipient = match send.recipient {
             Recipient::Address(address) => address,
@@ -179,7 +222,9 @@ impl SendsRequests for RunningNexus {
             return response.into();
         }
         let answer = match self.store.queue_sent(&sender, &recipient, request, now) {
-            Ok(Response::Queued) => SendAnswer { response: Response::Queued },
+            Ok(Response::Queued) => SendAnswer {
+                response: Response::Queued,
+            },
             Ok(response) => response.into(),
             Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
         };

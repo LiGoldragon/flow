@@ -76,10 +76,10 @@ impl RecognizesLetter for str {
     fn opens_a_letter(&self) -> bool {
         let logical_input = self
             .strip_prefix("{ logical-delivery-")
-            .and_then(|tail| tail.get(..17))
+            .and_then(|tail| tail.get(..21))
             .map(|identity| {
-                identity.as_bytes()[..16].iter().all(u8::is_ascii_hexdigit)
-                    && identity.as_bytes()[16] == b' '
+                identity.as_bytes()[..20].iter().all(u8::is_ascii_digit)
+                    && identity.as_bytes()[20] == b' '
             })
             .unwrap_or(false);
         logical_input
@@ -249,6 +249,17 @@ mod tests {
             let text = format!("{prefix}.{{ send-19a2-3 Owner Text.«work» }}");
             assert!(text.as_str().opens_a_letter(), "{text}");
         }
+    }
+
+    #[test]
+    fn recognizes_the_actual_durable_logical_identity_shape() {
+        assert!("{ logical-delivery-00000000000000000001 Owner Soft.Order.work }".opens_a_letter());
+        assert!(
+            !"{ logical-delivery-0000000000000000000x Owner Soft.Order.work }".opens_a_letter()
+        );
+        assert!(
+            !"{ logical-delivery-000000000000000000010 Owner Soft.Order.work }".opens_a_letter()
+        );
     }
 
     #[test]

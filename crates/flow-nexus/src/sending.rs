@@ -100,7 +100,8 @@ impl IdentifiesSender for RunningNexus {
         let Some(thread) = (CallerProcess { process_id }).codex_thread(&app_servers) else {
             return Err(unidentified());
         };
-        match self.store.thread_sender(&thread) {
+        let root_thread = self.codex_endpoints.root_thread(&thread);
+        match self.store.thread_sender(&root_thread) {
             Ok(Ok(address)) => Ok(address),
             Ok(Err(_)) => Err(unidentified()),
             Err(error) => Err(Box::new(Response::Refused(Refusal::Store(

@@ -9,7 +9,7 @@
 use super::NexusFixture;
 use super::waking::SpawnedProcess;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-use crate::sending::BindsSeats;
+use crate::sending::{BindsSeats, IdentifiesSender};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory};
 use signal_flow::{Address, Aspect, Layer, Refusal, Response};
@@ -142,6 +142,7 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
         fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
         Response::Bound("877549".into())
     );
+    assert_eq!(fixture.nexus.sending_address(&subagent).unwrap(), address);
     let awake = fixture.nexus.store.metaflow_awake_as("877549").unwrap();
     assert_eq!(awake.map(|metaflow| metaflow.address), Some(address));
 }

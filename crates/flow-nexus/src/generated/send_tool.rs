@@ -15,8 +15,18 @@ pub type Body = String;
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum SendPriority {
+    HardAbrupt,
+    MiddleAbrupt,
+    Soft,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct SendArguments {
     pub target: Target,
+    pub delivery: signal_flow::Delivery,
+    pub send_priority: SendPriority,
     pub send_kind: SendKind,
     pub body: Body,
 }
@@ -66,7 +76,15 @@ pub enum SendRefusal {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Queued_Data {
+pub struct Accepted_Data {
+    pub sender: signal_flow::Sender,
+    pub target: Target,
+    pub send_acceptance: signal_flow::SendAcceptance,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct LegacyUnknown_Data {
     pub sender: signal_flow::Sender,
     pub target: Target,
 }
@@ -74,7 +92,8 @@ pub struct Queued_Data {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum SendOutcome {
-    Queued(Queued_Data),
+    Accepted(Accepted_Data),
+    LegacyUnknown(LegacyUnknown_Data),
     Refused(SendRefusal),
 }
 #[rustfmt::skip]

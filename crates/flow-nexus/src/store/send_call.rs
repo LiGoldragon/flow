@@ -19,18 +19,18 @@ use super::{
     opened_thread::RecordsOpenedThreads,
 };
 use crate::generated::send_tool::{
-    Queued_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,
+    LegacyUnknown_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Assertion, Decision, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan,
     RecordKey, SchemaHash, TableDescriptor, TableName, UpgradeFrom,
 };
-use signal_flow::{Address, HarnessKind, QueuedRequest, Request, SentBy};
+use signal_flow::{Address, HarnessKind, SendPayloadSize};
 
 pub(super) const SEND_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_send_calls");
 pub(super) const SEND_CALL_FAMILY: &str = "flow-nexus-send-call";
-pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v3";
+pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v4";
 
 /// The record key of a call: each part prefixed by its length, so no two
 /// keys of different parts read alike.
@@ -60,11 +60,85 @@ impl EngineRecord for SendCall {
 
 impl MemoryDefinition for SendCall {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(SEND_CALL_SCHEMA)
+    }
+}
+
+/// The immediately preceding call format, whose successful calls had no
+/// durable logical-delivery identity.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SendCallV3 {
+    tool_call_key: ToolCallKey,
+    content_sha256: String,
+    send_outcome: SendOutcomeV3,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum SendOutcomeV3 {
+    Queued(LegacyQueuedData),
+    Refused(SendRefusalV3),
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum SendRefusalV3 {
+    UnknownTool,
+    Malformed,
+    ThreadUnowned,
+    FlowEnded,
+    NotAwake,
+    KeyReused,
+    UnknownRecipient(Target),
+    Held,
+    Oversized(SendPayloadSize),
+    Store,
+}
+
+impl EngineRecord for SendCallV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.tool_call_key.record_key_text())
+    }
+}
+
+impl MemoryDefinition for SendCallV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-call-v3")
+    }
+}
+
+impl UpgradeFrom<SendCallV3> for SendCall {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: SendCallV3) -> Decision<Self, Self::Refusal> {
+        let send_outcome = match previous.send_outcome {
+            SendOutcomeV3::Queued(queued) => SendOutcome::LegacyUnknown(LegacyUnknown_Data {
+                sender: queued.sender,
+                target: queued.target,
+            }),
+            SendOutcomeV3::Refused(refusal) => SendOutcome::Refused(match refusal {
+                SendRefusalV3::UnknownTool => SendRefusal::UnknownTool,
+                SendRefusalV3::Malformed => SendRefusal::Malformed,
+                SendRefusalV3::ThreadUnowned => SendRefusal::ThreadUnowned,
+                SendRefusalV3::FlowEnded => SendRefusal::FlowEnded,
+                SendRefusalV3::NotAwake => SendRefusal::NotAwake,
+                SendRefusalV3::KeyReused => SendRefusal::KeyReused,
+                SendRefusalV3::UnknownRecipient(target) => SendRefusal::UnknownRecipient(target),
+                SendRefusalV3::Held => SendRefusal::Held,
+                SendRefusalV3::Oversized(size) => SendRefusal::Oversized(size),
+                SendRefusalV3::Store => SendRefusal::Store,
+            }),
+        };
+        Decision::Ready(Self {
+            tool_call_key: previous.tool_call_key,
+            content_sha256: previous.content_sha256,
+            send_outcome,
+        })
     }
 }
 
@@ -78,7 +152,7 @@ pub struct SendCallV2 {
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 enum SendOutcomeV2 {
-    Queued(Queued_Data),
+    Queued(LegacyQueuedData),
     Refused(SendRefusalV2),
 }
 
@@ -93,6 +167,12 @@ enum SendRefusalV2 {
     UnknownRecipient(Target),
     Held,
     Store,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct LegacyQueuedData {
+    sender: signal_flow::Sender,
+    target: Target,
 }
 
 impl EngineRecord for SendCallV2 {
@@ -116,7 +196,10 @@ impl UpgradeFrom<SendCallV2> for SendCall {
 
     fn upgrade_from(previous: SendCallV2) -> Decision<Self, Self::Refusal> {
         let send_outcome = match previous.send_outcome {
-            SendOutcomeV2::Queued(queued) => SendOutcome::Queued(queued),
+            SendOutcomeV2::Queued(queued) => SendOutcome::LegacyUnknown(LegacyUnknown_Data {
+                sender: queued.sender,
+                target: queued.target,
+            }),
             SendOutcomeV2::Refused(refusal) => SendOutcome::Refused(match refusal {
                 SendRefusalV2::UnknownTool => SendRefusal::UnknownTool,
                 SendRefusalV2::Malformed => SendRefusal::Malformed,
@@ -147,7 +230,7 @@ pub struct SendCallV1 {
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 enum SendOutcomeV1 {
-    Queued(Queued_Data),
+    Queued(LegacyQueuedData),
     Refused(SendRefusalV1),
 }
 
@@ -192,7 +275,10 @@ impl UpgradeFrom<SendCallV1> for SendCall {
 
     fn upgrade_from(previous: SendCallV1) -> Decision<Self, Self::Refusal> {
         let send_outcome = match previous.send_outcome {
-            SendOutcomeV1::Queued(queued) => SendOutcome::Queued(queued),
+            SendOutcomeV1::Queued(queued) => SendOutcome::LegacyUnknown(LegacyUnknown_Data {
+                sender: queued.sender,
+                target: queued.target,
+            }),
             SendOutcomeV1::Refused(refusal) => SendOutcome::Refused(match refusal {
                 SendRefusalV1::UnknownTool => SendRefusal::UnknownTool,
                 SendRefusalV1::Malformed => SendRefusal::Malformed,
@@ -227,6 +313,7 @@ impl DescribesSendCallTable for SendCall {
             FamilyName::new(SEND_CALL_FAMILY),
             SchemaHash::for_label(SEND_CALL_SCHEMA),
         )
+        .with_predecessor::<SendCallV3>()
         .with_predecessor::<SendCallV1>()
         .with_predecessor::<SendCallV2>()
     }
@@ -249,19 +336,6 @@ pub(crate) trait KeepsSendCalls {
     fn send_call(&self, key: &ToolCallKey) -> Result<Option<SendCall>, StoreError>;
     /// Records a call refused before anything was queued.
     fn record_send_call(&self, call: SendCall) -> Result<(), StoreError>;
-    /// Queues a call's request for its target under the rules a Lock and a
-    /// Deliver follow, and records the call with its outcome in the same
-    /// commit: an absent target is UnknownRecipient, one Message holds an
-    /// unexpired lock on is Held; a refused call is recorded alone.
-    fn queue_send(
-        &self,
-        key: &ToolCallKey,
-        content_sha256: &str,
-        sender: Address,
-        target: &Target,
-        request: Request,
-        now: i64,
-    ) -> Result<SendOutcome, StoreError>;
 }
 
 impl KeepsSendCalls for FlowStore {
@@ -343,63 +417,17 @@ impl KeepsSendCalls for FlowStore {
         self.engine.assert(Assertion::new(self.send_calls, call))?;
         Ok(())
     }
-
-    fn queue_send(
-        &self,
-        key: &ToolCallKey,
-        content_sha256: &str,
-        sender: Address,
-        target: &Target,
-        request: Request,
-        now: i64,
-    ) -> Result<SendOutcome, StoreError> {
-        let call = |send_outcome| SendCall {
-            tool_call_key: key.clone(),
-            content_sha256: content_sha256.to_owned(),
-            send_outcome,
-        };
-        let refused = |refusal| -> Result<SendOutcome, StoreError> {
-            let outcome = SendOutcome::Refused(refusal);
-            self.record_send_call(call(outcome.clone()))?;
-            Ok(outcome)
-        };
-        let Some(mut stored) = self.stored_metaflow(target)? else {
-            return refused(SendRefusal::UnknownRecipient(target.clone()));
-        };
-        // Message holds the target while it delivers; Lock refuses another
-        // sender then, and so does the send tool.
-        if self
-            .stored_metaflow_lock(target)?
-            .is_some_and(|held| held.lock.until > now)
-        {
-            return refused(SendRefusal::Held);
-        }
-        stored.metaflow.queue.push(QueuedRequest {
-            sent_by: SentBy::Sender(sender.clone()),
-            request,
-        });
-        let outcome = SendOutcome::Queued(Queued_Data {
-            sender,
-            target: target.clone(),
-        });
-        let commit = self
-            .engine
-            .begin_atomic_commit()
-            .mutate(self.metaflows, stored)
-            .assert(self.send_calls, call(outcome.clone()));
-        self.engine.commit_atomic(commit)?;
-        // This is durable enqueue, never a claim of native delivery or wake.
-        Ok(outcome)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        KeepsSendCalls, SendCallV1, SendCallV2, SendOutcomeV1, SendOutcomeV2, SendRefusalV1,
-        SendRefusalV2,
+        KeepsSendCalls, LegacyQueuedData, SendCallV1, SendCallV2, SendCallV3, SendOutcomeV1,
+        SendOutcomeV2, SendOutcomeV3, SendRefusalV1, SendRefusalV2, SendRefusalV3,
     };
-    use crate::generated::send_tool::{SendCall, SendOutcome, SendRefusal, ToolCallKey};
+    use crate::generated::send_tool::{
+        LegacyUnknown_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,
+    };
     use crate::store::{FlowStore, OpensFlowStore};
     use sema_engine::{
         Assertion, Engine, EngineOpen, FamilyName, SchemaHash, SchemaVersion, TableDescriptor,
@@ -448,8 +476,25 @@ mod tests {
         }
     }
 
+    fn seed_v3(path: &std::path::Path, calls: Vec<SendCallV3>) {
+        let mut engine =
+            Engine::open(EngineOpen::new(path, SchemaVersion::new(1))).expect("store opens");
+        let table = engine
+            .register_table(TableDescriptor::new(
+                TableName::new("flow_nexus_send_calls"),
+                FamilyName::new("flow-nexus-send-call"),
+                SchemaHash::for_label("flow-nexus-send-call-v3"),
+            ))
+            .expect("v3 send call family registers");
+        for call in calls {
+            engine
+                .assert(Assertion::new(table, call))
+                .expect("v3 call persists");
+        }
+    }
+
     #[test]
-    fn v2_send_calls_upgrade_unchanged_to_v3() {
+    fn v2_send_calls_upgrade_unchanged_to_v4() {
         let directory = tempfile::tempdir().expect("store directory");
         let path = directory.path().join("flow.sema");
         seed_v2(
@@ -467,6 +512,48 @@ mod tests {
                 tool_call_key: key("held"),
                 content_sha256: "digest".into(),
                 send_outcome: SendOutcome::Refused(SendRefusal::Held),
+            })
+        );
+    }
+
+    #[test]
+    fn v3_queued_call_migrates_as_legacy_unknown_without_fabricated_id() {
+        let directory = tempfile::tempdir().expect("store directory");
+        let path = directory.path().join("flow.sema");
+        let target = Target {
+            aspect: signal_flow::Aspect::Mind,
+            topic: "target".into(),
+            layer: signal_flow::Layer::Primary,
+        };
+        seed_v3(
+            &path,
+            vec![SendCallV3 {
+                tool_call_key: key("legacy"),
+                content_sha256: "digest".into(),
+                send_outcome: SendOutcomeV3::Queued(LegacyQueuedData {
+                    sender: signal_flow::Address {
+                        aspect: signal_flow::Aspect::Psyche,
+                        topic: "sender".into(),
+                        layer: signal_flow::Layer::Secondary,
+                    },
+                    target: target.clone(),
+                }),
+            }],
+        );
+        let store = FlowStore::open(&path).expect("store opens");
+        assert_eq!(
+            store
+                .send_call(&key("legacy"))
+                .unwrap()
+                .unwrap()
+                .send_outcome,
+            SendOutcome::LegacyUnknown(LegacyUnknown_Data {
+                sender: signal_flow::Address {
+                    aspect: signal_flow::Aspect::Psyche,
+                    topic: "sender".into(),
+                    layer: signal_flow::Layer::Secondary,
+                },
+                target,
             })
         );
     }

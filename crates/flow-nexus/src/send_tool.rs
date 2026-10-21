@@ -23,16 +23,14 @@
 //! Flow holds on the calling thread, and the metaflow Awake as it; before
 //! that flow is Awake, the Address of the unsettled launch that opened the
 //! thread, while no other flow or launch holds it. Its
-//! request is queued for the target as a Lock and a Deliver from Message
-//! would queue it, and the call and its outcome are recorded in the commit
-//! that queues it (`store::send_call`), so a replayed call is answered from
-//! its record and queued once. The answer is the outcome as a datom.
+//! request is durably admitted with its explicit delivery and priority, and
+//! the accepted call and logical-delivery identity are recorded in the same
+//! commit. A replay is answered from its record and cannot create another
+//! logical delivery. The answer is the typed acceptance as a datom.
 //!
-//! Whether the target wakes is never carried by the answer. Once a call's
-//! outcome is Queued, a new one or a replayed one, the target's wake is
-//! decided from Flow's records (`SleepsAndWakesSeats::wake_due`), whether
-//! the answer was written or not; a Nexus that died before it is replaced
-//! by one whose start wakes every metaflow so left.
+//! Whether the target wakes is persisted in the queue entry's explicit
+//! Delivery policy, never inferred from the answer. A Nexus checks that
+//! policy after admission and on restart.
 
 use crate::caller::NamesRootThread;
 use crate::codex::{
@@ -43,10 +41,11 @@ use crate::codex_turns::{ReadsThreadStatus, ReadsTurnEvent, SettlesRestingCodexS
 use crate::compacting::{ReadsCodexContextSignal, WatchesCompactions};
 use crate::generated::send_tool::{
     AnswersToolCall, DeclaresSendTool, HandlesSendCall, ParamsCarrying, ReadsSendArguments,
-    ReadsToolCall, SendArguments, SendCall, SendInvocation, SendKind, SendOutcome, SendRefusal,
-    ToolCall, ToolCallCarrying, ToolCallKey, ToolName,
+    ReadsToolCall, SendArguments, SendCall, SendInvocation, SendKind, SendOutcome, SendPriority,
+    SendRefusal, ToolCall, ToolCallCarrying, ToolCallKey, ToolName,
 };
 use crate::sending::{AdmitsSendPayload, MintsId};
+use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
@@ -54,7 +53,7 @@ use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
-use signal_flow::{Address, Aspect, HarnessKind, Layer, Request};
+use signal_flow::{Address, Aspect, Delivery, HarnessKind, Layer, Message, Request};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::mpsc,
@@ -74,7 +73,7 @@ impl DeclaresSendTool for SendTool {
         serde_json::json!({
             "type": "function",
             "name": Self::tool_name(),
-            "description": "Send one request from this flow to the flow at a metaflow Address. Flow sends it from this flow's own Address, which it reads from its records, and queues it for the target. The answer is the outcome as a datom: Queued, or Refused with the reason.",
+            "description": "Send one request from this flow to the flow at a metaflow Address. Choose whether Flow should wake the recipient or only queue the request, and choose its priority. The answer is a durable logical-delivery acceptance or a typed refusal.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -92,6 +91,16 @@ impl DeclaresSendTool for SendTool {
                         "required": ["aspect", "topic", "layer"],
                         "additionalProperties": false
                     },
+                    "delivery": {
+                        "type": "string",
+                        "enum": ["Wake", "Queue"],
+                        "description": "Wake explicitly wakes the recipient after admission; Queue retains work without requesting a wake."
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["HardAbrupt", "MiddleAbrupt", "Soft"],
+                        "description": "How the admitted message is delivered to the recipient."
+                    },
                     "kind": {
                         "type": "string",
                         "enum": ["Order", "Question", "Result", "Notice"],
@@ -99,7 +108,7 @@ impl DeclaresSendTool for SendTool {
                     },
                     "body": { "type": "string", "minLength": 1 }
                 },
-                "required": ["target", "kind", "body"],
+                "required": ["target", "delivery", "priority", "kind", "body"],
                 "additionalProperties": false
             }
         })
@@ -180,6 +189,8 @@ impl JournalsSendInvocations for RunningNexus {
 trait ReadsSendFields {
     fn aspect(value: &serde_json::Value) -> Option<Aspect>;
     fn layer(value: &serde_json::Value) -> Option<Layer>;
+    fn delivery(value: &serde_json::Value) -> Option<Delivery>;
+    fn priority(value: &serde_json::Value) -> Option<SendPriority>;
     fn kind(value: &serde_json::Value) -> Option<SendKind>;
     fn only_fields(value: &serde_json::Value, fields: &[&str]) -> bool;
 }
@@ -214,6 +225,23 @@ impl ReadsSendFields for ToolCall {
         }
     }
 
+    fn delivery(value: &serde_json::Value) -> Option<Delivery> {
+        match value.as_str()? {
+            "Wake" => Some(Delivery::Wake),
+            "Queue" => Some(Delivery::Queue),
+            _ => None,
+        }
+    }
+
+    fn priority(value: &serde_json::Value) -> Option<SendPriority> {
+        match value.as_str()? {
+            "HardAbrupt" => Some(SendPriority::HardAbrupt),
+            "MiddleAbrupt" => Some(SendPriority::MiddleAbrupt),
+            "Soft" => Some(SendPriority::Soft),
+            _ => None,
+        }
+    }
+
     fn only_fields(value: &serde_json::Value, fields: &[&str]) -> bool {
         value
             .as_object()
@@ -224,7 +252,10 @@ impl ReadsSendFields for ToolCall {
 impl ReadsSendArguments for ToolCall {
     fn send_arguments(&self) -> Option<SendArguments> {
         let arguments = serde_json::from_str::<serde_json::Value>(&self.arguments).ok()?;
-        if !Self::only_fields(&arguments, &["target", "kind", "body"]) {
+        if !Self::only_fields(
+            &arguments,
+            &["target", "delivery", "priority", "kind", "body"],
+        ) {
             return None;
         }
         let target = arguments.get("target")?;
@@ -245,6 +276,8 @@ impl ReadsSendArguments for ToolCall {
                 topic: topic.to_owned(),
                 layer: Self::layer(target.get("layer")?)?,
             },
+            delivery: Self::delivery(arguments.get("delivery")?)?,
+            send_priority: Self::priority(arguments.get("priority")?)?,
             send_kind: Self::kind(arguments.get("kind")?)?,
             body: body.to_owned(),
         })
@@ -271,7 +304,7 @@ pub trait BecomesRequest {
 impl BecomesRequest for SendArguments {
     fn request(&self) -> Request {
         let body = self.body.clone();
-        match self.send_kind {
+        match &self.send_kind {
             SendKind::Order => Request::Order(body),
             SendKind::Question => Request::Question(body),
             SendKind::Result => Request::Result(body),
@@ -280,10 +313,25 @@ impl BecomesRequest for SendArguments {
     }
 }
 
+trait BecomesMessage {
+    fn message(&self) -> Message;
+}
+
+impl BecomesMessage for SendArguments {
+    fn message(&self) -> Message {
+        let request = self.request();
+        match &self.send_priority {
+            SendPriority::HardAbrupt => Message::HardAbrupt(request),
+            SendPriority::MiddleAbrupt => Message::MiddleAbrupt(request),
+            SendPriority::Soft => Message::Soft(request),
+        }
+    }
+}
+
 impl AnswersToolCall for SendOutcome {
     fn tool_response(&self) -> serde_json::Value {
         serde_json::json!({
-            "success": matches!(self, SendOutcome::Queued(_)),
+            "success": matches!(self, SendOutcome::Accepted(_)),
             "contentItems": [{
                 "type": "inputText",
                 "text": self.datomize(Vec::new()).protosize().compact()
@@ -311,8 +359,10 @@ impl HandlesSendCall for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.handle_held_send_call(call)
         };
-        if let SendOutcome::Queued(queued) = &outcome {
-            self.wake_due(queued.target.clone());
+        if let SendOutcome::Accepted(accepted) = &outcome {
+            if accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued {
+                self.wake_due(accepted.target.clone());
+            }
         }
         outcome
     }
@@ -365,8 +415,8 @@ impl HandlesSendCall for RunningNexus {
             else {
                 return Self::refused(SendRefusal::Store);
             };
-            let request = arguments.request();
-            if let Some(signal_flow::Refusal::Oversized(size)) = request.oversized_refusal(&sender)
+            let message = arguments.message();
+            if let Some(signal_flow::Refusal::Oversized(size)) = message.oversized_refusal(&sender)
             {
                 let outcome = SendOutcome::Refused(SendRefusal::Oversized(size));
                 return match self.store.record_send_call(SendCall {
@@ -378,19 +428,24 @@ impl HandlesSendCall for RunningNexus {
                     Err(error) => store_refused(error),
                 };
             }
-            // Queued for a metaflow left Awake as an ended flow, the request
-            // wakes it as it would an Asleep one.
-            self.rest_ended_awake(&arguments.target);
-            self.store
-                .queue_send(
+            let outcome = self
+                .store
+                .accept_tool_send(
                     key,
                     &content_sha256,
                     sender,
                     &arguments.target,
-                    request,
+                    arguments.delivery,
+                    message,
                     now,
                 )
-                .unwrap_or_else(store_refused)
+                .unwrap_or_else(store_refused);
+            if matches!(outcome, SendOutcome::Accepted(_)) {
+                // Restore a formerly-awake target only after its logical
+                // delivery and exact tool-call result are durable.
+                self.rest_ended_awake(&arguments.target);
+            }
+            outcome
         })();
         self.journal_send_invocation(&call, outcome)
     }
@@ -434,8 +489,8 @@ pub(crate) trait RespondsToSendCalls {
     );
     /// Handles one server request the connection brought, when it is a
     /// tool call, and answers it; then, whether the answer was written or
-    /// not, wakes the target a Queued outcome names when Flow's records
-    /// show it due. Err when the answer could not be written.
+    /// not, asks Flow to wake the target whose persisted delivery policy is
+    /// Wake. Err when the answer could not be written.
     fn answer_request(
         &self,
         subscription: &mut ThreadSubscription,
@@ -550,8 +605,8 @@ impl RespondsToSendCalls for RunningNexus {
             None => Self::refused(SendRefusal::Malformed),
         };
         let answered = subscription.answer(id, outcome.tool_response());
-        if let SendOutcome::Queued(queued) = outcome {
-            self.wake_due(queued.target);
+        if let SendOutcome::Accepted(accepted) = outcome {
+            self.wake_due(accepted.target);
         }
         answered
     }
@@ -565,8 +620,8 @@ impl RespondsToSendCalls for RunningNexus {
 /// calls while it waits (`ServesLaunchCalls::serving_launch_calls`).
 pub(crate) type LaunchResponder = ThreadConnection;
 
-/// The responder of the launch running now, and the targets its calls
-/// queued work for, woken once the launch has given the gate back.
+/// The responder of the launch running now, and the targets whose Wake
+/// policy must be considered once the launch has given the gate back.
 #[derive(Default)]
 pub struct LaunchCalls {
     responder: std::sync::Mutex<Option<LaunchResponder>>,
@@ -597,7 +652,7 @@ pub(crate) trait ServesLaunchCalls {
     /// read, then closes the connection. A later call is the Nexus's
     /// responders' (`ServesSendTool`).
     fn close_launch_responder(&self);
-    /// Off the dispatch gate, schedules every target queued during launch.
+    /// Off the dispatch gate, considers every target admitted during launch.
     fn wake_deferred(&self);
 }
 
@@ -708,12 +763,12 @@ impl ServesLaunchCalls for RunningNexus {
             None => Self::refused(SendRefusal::Malformed),
         };
         let answered = responder.subscription.answer(id, outcome.tool_response());
-        if let SendOutcome::Queued(queued) = outcome {
+        if let SendOutcome::Accepted(accepted) = outcome {
             self.launch_calls
                 .deferred_wakes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(queued.target);
+                .push(accepted.target);
         }
         answered
     }
@@ -769,11 +824,9 @@ pub struct InterruptedCalls {
 
 /// The calls left pending on the thread of a launch an earlier Nexus never
 /// finished, on a connection that resumes the thread (the app-server
-/// replays a pending call to it). Nothing is queued here: a call the
-/// earlier Nexus committed (queued and recorded in one commit) before it
-/// could answer is answered from its record, the request it queued, its
-/// sender and its target's wake obligation left as they stand; any other
-/// call is refused.
+/// replays a pending call to it). Nothing is admitted here: a call the
+/// earlier Nexus committed before it could answer is answered from its
+/// record; any other call is refused.
 pub(crate) trait RefusesInterruptedCalls {
     /// How long the resumed connection is read for replayed calls.
     const REPLAY_WINDOW: Duration = Duration::from_secs(2);

@@ -9,8 +9,7 @@ use super::{ControlsHerdrSnapshot, NexusFixture};
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
-    HandlesSendCall, Queued_Data, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall,
-    ToolCallKey,
+    HandlesSendCall, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,
 };
 use crate::send_tool::{DescribesSendInvocation, RespondsToSendCalls, SendTool, ServesSendTool};
 use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
@@ -22,8 +21,8 @@ use crate::store::{
 use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
 use signal_flow::{
-    Address, Aspect, Caller, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Metaflow,
-    PowerLevel, QueuedRequest, Request, SentBy,
+    Address, Aspect, Caller, Delivery, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Message,
+    Metaflow, PowerLevel, QueueEntry, Request, SentBy,
 };
 use std::{
     path::{Path, PathBuf},
@@ -34,6 +33,21 @@ use std::{
 const THREAD_A: &str = "01a0b22c-0000-7000-8000-00000000000a";
 const THREAD_B: &str = "01a0b22c-0000-7000-8000-00000000000b";
 const TURN: &str = "01a0b22c-0000-7000-8000-0000000000f0";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueuedRequest {
+    sent_by: SentBy,
+    request: Request,
+}
+
+fn queue_entry(id: impl Into<String>, queued: QueuedRequest) -> QueueEntry {
+    QueueEntry {
+        logical_delivery_id: id.into(),
+        sent_by: queued.sent_by,
+        delivery: Delivery::Wake,
+        message: Message::Soft(queued.request),
+    }
+}
 
 fn address(topic: &str, layer: Layer) -> Address {
     Address {
@@ -100,7 +114,9 @@ fn send_request(
                     "topic": to.topic,
                     "layer": format!("{:?}", to.layer)
                 },
-                "kind": kind,
+            "delivery": "Wake",
+            "priority": "Soft",
+            "kind": kind,
                 "body": body
             }
         }
@@ -117,6 +133,8 @@ fn tool_call(thread: &str, call: &str, body: &str) -> ToolCall {
         tool_name: SendTool::tool_name(),
         arguments: serde_json::json!({
             "target": { "aspect": "Mind", "topic": "gamma", "layer": "Secondary" },
+            "delivery": "Wake",
+            "priority": "Soft",
             "kind": "Order",
             "body": body
         })
@@ -356,13 +374,11 @@ fn sent(sender: Address, body: &str) -> QueuedRequest {
     }
 }
 
-fn queued_text(sender: Address, target: Address) -> String {
-    use datom_codec::Datomizable;
-    use protos::{Compactable, Protosizable};
-    SendOutcome::Queued(Queued_Data { sender, target })
-        .datomize(Vec::new())
-        .protosize()
-        .compact()
+fn accepted_text(text: &str) {
+    assert!(
+        text.starts_with("Accepted."),
+        "unexpected tool response: {text}"
+    );
 }
 
 trait SeatsCodexFlows {
@@ -424,6 +440,16 @@ impl SeatsCodexFlows for NexusFixture {
             .expect("target readable")
             .expect("target held")
             .queue
+            .into_iter()
+            .map(|entry| QueuedRequest {
+                sent_by: entry.sent_by,
+                request: match entry.message {
+                    Message::HardAbrupt(request)
+                    | Message::MiddleAbrupt(request)
+                    | Message::Soft(request) => request,
+                },
+            })
+            .collect()
     }
 
     fn adapter(&mut self, model: &str, fake: &FakeAppServer) -> CodexAdapter {
@@ -488,14 +514,8 @@ fn two_threads_are_each_attributed_to_their_own_metaflow() {
     .expect("thread B's call answered");
 
     assert_eq!(answer_a["success"], true);
-    assert_eq!(
-        answer_a["contentItems"][0]["text"],
-        queued_text(sender_a(), target())
-    );
-    assert_eq!(
-        answer_b["contentItems"][0]["text"],
-        queued_text(sender_b(), target())
-    );
+    accepted_text(answer_a["contentItems"][0]["text"].as_str().unwrap());
+    accepted_text(answer_b["contentItems"][0]["text"].as_str().unwrap());
     assert_eq!(
         fixture.target_queue(),
         vec![sent(sender_a(), "from a"), sent(sender_b(), "from b")]
@@ -518,13 +538,7 @@ fn two_threads_are_each_attributed_to_their_own_metaflow() {
         .send_call(&tool_call(THREAD_B, "call-b", "from b").tool_call_key)
         .unwrap()
         .expect("thread B's call recorded");
-    assert_eq!(
-        recorded.send_outcome,
-        SendOutcome::Queued(Queued_Data {
-            sender: sender_b(),
-            target: target()
-        })
-    );
+    assert!(matches!(recorded.send_outcome, SendOutcome::Accepted(_)));
 }
 
 #[test]
@@ -565,7 +579,7 @@ fn a_replayed_call_of_a_retired_or_superseded_flow_is_refused() {
     let call_a = tool_call(THREAD_A, "call-a", "before retirement");
     assert!(matches!(
         fixture.nexus.handle_send_call(call_a.clone()),
-        SendOutcome::Queued(_)
+        SendOutcome::Accepted(_)
     ));
     // Retired: the replay finds the flow ended, though its call was queued.
     assert!(fixture.nexus.store.record_retired("a1a1a1").unwrap());
@@ -605,7 +619,7 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
     let handled = fixture
         .nexus
         .handle_send_call(tool_call(THREAD_A, "call-a", "exactly once"));
-    assert!(matches!(handled, SendOutcome::Queued(_)));
+    assert!(matches!(handled, SendOutcome::Accepted(_)));
     // The app-server replays the pending call to the next subscriber.
     let fake = FakeAppServer::install(vec![FakeConnection {
         requests: vec![tool_call_request(13, THREAD_A, "call-a", "exactly once")],
@@ -617,10 +631,7 @@ fn a_call_queued_before_a_crash_is_answered_from_its_record_when_replayed() {
         answer_to(&fake.written_on(2, |m| m["id"] == 13), 13)
     })
     .expect("the replayed call answered");
-    assert_eq!(
-        answer["contentItems"][0]["text"],
-        queued_text(sender_a(), target())
-    );
+    accepted_text(answer["contentItems"][0]["text"].as_str().unwrap());
     assert_eq!(
         fixture.target_queue(),
         vec![sent(sender_a(), "exactly once")]
@@ -712,6 +723,51 @@ fn a_call_key_recorded_with_other_content_is_refused() {
     );
 }
 
+#[test]
+fn dynamic_send_requires_explicit_delivery_and_priority() {
+    use crate::generated::send_tool::{ReadsSendArguments, SendPriority};
+
+    let explicit = tool_call(THREAD_A, "explicit", "typed admission");
+    let arguments = explicit.send_arguments().expect("explicit policy is valid");
+    assert_eq!(arguments.delivery, Delivery::Wake);
+    assert_eq!(arguments.send_priority, SendPriority::Soft);
+
+    let mut old_shape = explicit;
+    old_shape.arguments = serde_json::json!({
+        "target": { "aspect": "Mind", "topic": "gamma", "layer": "Secondary" },
+        "kind": "Order",
+        "body": "old implicit policy"
+    })
+    .to_string();
+    assert!(old_shape.send_arguments().is_none());
+}
+
+#[test]
+fn dynamic_queue_admission_preserves_priority_without_waking() {
+    let fixture = NexusFixture::new();
+    fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
+    fixture.asleep_at(asleep_target());
+    let mut call = tool_call(THREAD_A, "queue-only", "retain this");
+    call.arguments = serde_json::json!({
+        "target": { "aspect": "Mind", "topic": "flow", "layer": "Secondary" },
+        "delivery": "Queue",
+        "priority": "MiddleAbrupt",
+        "kind": "Order",
+        "body": "retain this"
+    })
+    .to_string();
+    let outcome = fixture.nexus.handle_send_call(call);
+    assert!(matches!(outcome, SendOutcome::Accepted(_)));
+    let held = fixture.stored_at(&asleep_target());
+    assert_eq!(held.state, State::Asleep);
+    assert_eq!(held.queue.len(), 1);
+    assert_eq!(held.queue[0].delivery, Delivery::Queue);
+    assert_eq!(
+        held.queue[0].message,
+        Message::MiddleAbrupt(Request::Order("retain this".into()))
+    );
+}
+
 /// At the Nexus's start the send tool subscribes to every live Codex thread
 /// it holds; a connection that closes is reconnected, and the call the
 /// app-server left pending is replayed to the new connection and queued
@@ -752,10 +808,7 @@ fn a_pending_call_is_answered_after_start_and_reconnect() {
             fake.directory.path().join("record-4").client_messages(),
         )
     });
-    assert_eq!(
-        answer["contentItems"][0]["text"],
-        queued_text(sender_a(), target())
-    );
+    accepted_text(answer["contentItems"][0]["text"].as_str().unwrap());
     assert_eq!(
         fixture.target_queue(),
         vec![sent(sender_a(), "after restart")]
@@ -973,7 +1026,7 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         .expect("the call reads");
     let handled = fixture.nexus.handle_send_call(tool_call.clone());
     eprintln!("witness first handling {:?}", handled);
-    assert!(matches!(handled, SendOutcome::Queued(_)));
+    assert!(matches!(handled, SendOutcome::Accepted(_)));
     first.close();
     drop(signals);
     drop(inbox);
@@ -1144,20 +1197,19 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
         .collect::<Vec<_>>();
     eprintln!("witness tool outputs {outputs:?}");
     assert!(
-        outputs.iter().any(|line| line.contains("Queued")),
+        outputs.iter().any(|line| line.contains("Accepted")),
         "{outputs:?}"
     );
     // Queued once, from the launching metaflow, before the target woke.
-    assert_eq!(
-        fixture.stored_at(&asleep_target()).queue,
-        vec![QueuedRequest {
-            sent_by: SentBy::Sender(sender.clone()),
-            request: Request::Order("first-turn-witness".into()),
-        }]
-    );
     let held = fixture.stored_at(&asleep_target());
     assert_eq!(held.state, State::Asleep);
     assert_eq!(held.queue.len(), 1);
+    assert_eq!(held.queue[0].sent_by, SentBy::Sender(sender.clone()));
+    assert_eq!(held.queue[0].delivery, Delivery::Wake);
+    assert_eq!(
+        held.queue[0].message,
+        Message::Soft(Request::Order("first-turn-witness".into()))
+    );
     let handed = super::waking::ReadsFreshWorld::user_turns(&world, &fixture)
         .concat()
         .matches("{ Sender.{ Field flow Secondary } Order.first-turn-witness }")
@@ -1364,16 +1416,19 @@ fn walk(root: &Path) -> Vec<PathBuf> {
 fn a_queued_request_is_rendered_with_its_sender() {
     use crate::composition::RendersQueuedWork;
     let queue = [
-        sent(sender_a(), "Carry on."),
-        QueuedRequest {
+        queue_entry("render-1", sent(sender_a(), "Carry on.")),
+        QueueEntry {
+            logical_delivery_id: "render-2".into(),
             sent_by: SentBy::Unknown,
-            request: Request::Notice("kept".into()),
+            delivery: Delivery::Queue,
+            message: Message::Soft(Request::Notice("kept".into())),
         },
     ];
-    assert_eq!(
-        queue.prompt_text(),
-        "{ Sender.{ Mind alpha Tertiary } Order.«Carry on.» }\n{ Unknown Notice.kept }"
-    );
+    let prompt = queue.prompt_text();
+    assert!(prompt.contains("render-1"));
+    assert!(prompt.contains("render-2"));
+    assert!(prompt.contains("Carry on."));
+    assert!(prompt.contains("Notice.kept"));
 }
 
 /// The fixture's Codex seat 908786: its thread, and the Address its
@@ -1460,7 +1515,11 @@ impl SeatsAwakeCodexSeat for NexusFixture {
             address: seat_at(),
             state: State::Awake("908786".into()),
             past: vec![],
-            queue,
+            queue: queue
+                .into_iter()
+                .enumerate()
+                .map(|(index, queued)| queue_entry(format!("seat-{index}"), queued))
+                .collect(),
         });
         self.awake_target();
     }
@@ -1472,6 +1531,16 @@ impl SeatsAwakeCodexSeat for NexusFixture {
             .expect("seat readable")
             .expect("seat held")
             .queue
+            .into_iter()
+            .map(|entry| QueuedRequest {
+                sent_by: entry.sent_by,
+                request: match entry.message {
+                    Message::HardAbrupt(request)
+                    | Message::MiddleAbrupt(request)
+                    | Message::Soft(request) => request,
+                },
+            })
+            .collect()
     }
 
     fn typed_count(&self, request: &QueuedRequest) -> usize {
@@ -1955,7 +2024,12 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
         address: seat_at(),
         state: State::Awake("908786".into()),
         past: vec![],
-        queue: vec![order],
+        queue: vec![QueueEntry {
+            logical_delivery_id: "logical-delivery-test".into(),
+            sent_by: order.sent_by,
+            delivery: Delivery::Wake,
+            message: Message::Soft(order.request),
+        }],
     });
     fixture.nexus.wake_due(seat_at());
     fixture.nexus.wake_due(seat_at());

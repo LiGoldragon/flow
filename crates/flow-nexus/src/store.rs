@@ -2784,9 +2784,16 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<crate::generated::send_tool::SendCall>,
     ) -> Result<TableReference<crate::generated::send_tool::SendCall>, StoreError> {
-        match self.upgrade_table::<send_call::SendCallV2, crate::generated::send_tool::SendCall>(
+        match self.upgrade_table::<send_call::SendCallV3, crate::generated::send_tool::SendCall>(
             descriptor.clone(),
         ) {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission =>
+            {
+                match self.upgrade_table::<send_call::SendCallV2, crate::generated::send_tool::SendCall>(descriptor.clone()) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => Err(StoreError::SendCallUpgrade(format!(
@@ -2811,9 +2818,12 @@ impl UpgradesFlowFamilies for Engine {
                     }
                 }
             }
-            UpgradeOutcome::Failed(failure) => {
-                Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
+                    UpgradeOutcome::Failed(failure) => {
+                        Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
+                    }
+                }
             }
+            UpgradeOutcome::Failed(failure) => Err(StoreError::SendCallUpgrade(format!("{failure:?}"))),
         }
     }
 
@@ -6560,6 +6570,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     send_call::SEND_CALL_FAMILY,
                     <send_call::SendCallV2 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    send_call::SEND_CALL_FAMILY,
+                    <send_call::SendCallV3 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_queue_delivery_requests" => &[

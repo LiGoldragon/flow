@@ -3,11 +3,15 @@
 //! a materialized view used for sender-filtered reconnect snapshots.
 
 use super::*;
+use crate::generated::send_tool::{
+    Accepted_Data, SendCall, SendOutcome as ToolSendOutcome, SendRefusal as ToolSendRefusal,
+    Target, ToolCallKey,
+};
 use flow_ethos::{Delivery, Message, QueueEntry};
 use sema_engine::AtomicCommit;
 use signal_flow::{
     Address, DeliverySnapshot, DeliveryState, Lock, LogicalDeliveryId, Refusal, Response,
-    SendAcceptance, SentBy, Unknown_Data,
+    SendAcceptance, SendObservation, SentBy, Unknown_Data,
 };
 
 const COUNTER_KEY: &str = "counter";
@@ -20,6 +24,11 @@ const EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_
 pub(crate) struct VerifiedDeliveryLock {
     pub(crate) lock: Lock,
     pub(crate) now: i64,
+}
+
+struct LogicalCursorAllocation {
+    cursor: i64,
+    existing: bool,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -132,6 +141,16 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
 pub(crate) trait RecordsLogicalDeliveries {
     fn seed_missing_queued_deliveries(&self) -> Result<(), StoreError>;
     fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError>;
+    fn accept_tool_send(
+        &self,
+        key: &ToolCallKey,
+        content_sha256: &str,
+        sender: Address,
+        target: &Target,
+        delivery: Delivery,
+        message: Message,
+        now: i64,
+    ) -> Result<ToolSendOutcome, StoreError>;
     fn accept_logical_delivery(
         &self,
         address: &Address,
@@ -155,9 +174,114 @@ pub(crate) trait RecordsLogicalDeliveries {
         &self,
         sender: &Address,
         after_cursor: Option<i64>,
-    ) -> Result<(i64, Vec<DeliverySnapshot>), StoreError>;
+    ) -> Result<SendObservation, StoreError>;
 }
 impl RecordsLogicalDeliveries for FlowStore {
+    fn accept_tool_send(
+        &self,
+        key: &ToolCallKey,
+        content_sha256: &str,
+        sender: Address,
+        target: &Target,
+        delivery: Delivery,
+        message: Message,
+        now: i64,
+    ) -> Result<ToolSendOutcome, StoreError> {
+        use crate::store::send_call::KeysToolCall;
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let call_key = RecordKey::new(key.record_key_text());
+        let prior = self
+            .engine
+            .match_records(QueryPlan::key(self.send_calls, call_key))?;
+        match prior.records() {
+            [record] if record.content_sha256 == content_sha256 => {
+                return Ok(record.send_outcome.clone());
+            }
+            [_] => return Ok(ToolSendOutcome::Refused(ToolSendRefusal::KeyReused)),
+            [] => {}
+            _ => return Err(StoreError::StateInvariant),
+        }
+        let record = |send_outcome| SendCall {
+            tool_call_key: key.clone(),
+            content_sha256: content_sha256.to_owned(),
+            send_outcome,
+        };
+        let Some(mut stored) = self.stored_metaflow(target)? else {
+            let outcome =
+                ToolSendOutcome::Refused(ToolSendRefusal::UnknownRecipient(target.clone()));
+            self.engine
+                .assert(Assertion::new(self.send_calls, record(outcome.clone())))?;
+            return Ok(outcome);
+        };
+        if self
+            .stored_metaflow_lock(target)?
+            .is_some_and(|held| held.lock.until > now)
+        {
+            let outcome = ToolSendOutcome::Refused(ToolSendRefusal::Held);
+            self.engine
+                .assert(Assertion::new(self.send_calls, record(outcome.clone())))?;
+            return Ok(outcome);
+        }
+        let allocation = self.allocate_logical_cursor()?;
+        let cursor = allocation.cursor;
+        let create_counter = !allocation.existing;
+        let id = format!("logical-delivery-{cursor:020}");
+        stored.metaflow.queue.push(QueueEntry {
+            logical_delivery_id: id.clone(),
+            sent_by: SentBy::Sender(sender.clone()),
+            delivery,
+            message,
+        });
+        let snapshot = DeliverySnapshot {
+            delivery_cursor: cursor,
+            logical_delivery_id: id.clone(),
+            sent_by: SentBy::Sender(sender.clone()),
+            address: stored.metaflow.address.clone(),
+            delivery_state: DeliveryState::Queued,
+        };
+        let acceptance = SendAcceptance {
+            logical_delivery_id: id,
+            delivery_cursor: cursor,
+            delivery_state: DeliveryState::Queued,
+        };
+        let outcome = ToolSendOutcome::Accepted(Accepted_Data {
+            sender: sender.clone(),
+            target: target.clone(),
+            send_acceptance: acceptance,
+        });
+        let next_counter = LogicalDeliveryCounter {
+            next_cursor: cursor.checked_add(1).ok_or(StoreError::StateInvariant)?,
+        };
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, stored);
+        let commit = if create_counter {
+            commit.assert(self.logical_deliveries.counter, next_counter)
+        } else {
+            commit.mutate(self.logical_deliveries.counter, next_counter)
+        };
+        self.engine.commit_atomic(
+            commit
+                .assert(
+                    self.logical_deliveries.current,
+                    CurrentLogicalDelivery {
+                        snapshot: snapshot.clone(),
+                    },
+                )
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent { snapshot },
+                )
+                .assert(self.send_calls, record(outcome.clone())),
+        )?;
+        self.launch_changes.announce();
+        Ok(outcome)
+    }
     fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError> {
         let _guard = self
             .logical_deliveries
@@ -199,7 +323,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             .iter()
             .map(|row| row.snapshot.logical_delivery_id.clone())
             .collect::<std::collections::HashSet<_>>();
-        let (mut cursor, create_counter) = self.next_logical_cursor()?;
+        let allocation = self.allocate_logical_cursor()?;
+        let mut cursor = allocation.cursor;
+        let create_counter = !allocation.existing;
         let mut snapshots = Vec::new();
         for metaflow in metaflows.records() {
             for entry in &metaflow.metaflow.queue {
@@ -283,7 +409,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         } else {
             None
         };
-        let (next, create) = self.next_logical_cursor()?;
+        let allocation = self.allocate_logical_cursor()?;
+        let next = allocation.cursor;
+        let create = !allocation.existing;
         let id = format!("logical-delivery-{next:020}");
         stored.metaflow.queue.push(QueueEntry {
             logical_delivery_id: id.clone(),
@@ -372,7 +500,9 @@ impl RecordsLogicalDeliveries for FlowStore {
             self.launch_changes.announce();
             return Ok(current.snapshot.clone());
         }
-        let (next, create) = self.next_logical_cursor()?;
+        let allocation = self.allocate_logical_cursor()?;
+        let next = allocation.cursor;
+        let create = !allocation.existing;
         let mut snapshot = current.snapshot.clone();
         snapshot.delivery_cursor = next;
         snapshot.delivery_state = state;
@@ -405,7 +535,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         &self,
         sender: &Address,
         after_cursor: Option<i64>,
-    ) -> Result<(i64, Vec<DeliverySnapshot>), StoreError> {
+    ) -> Result<SendObservation, StoreError> {
         let current = self
             .engine
             .match_records(QueryPlan::all(self.logical_deliveries.current))?;
@@ -437,19 +567,32 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .collect()
         };
         snapshots.sort_by_key(|snapshot| snapshot.delivery_cursor);
-        Ok((highwater, snapshots))
+        Ok(SendObservation {
+            delivery_cursor: highwater,
+            delivery_snapshot_vector: snapshots,
+        })
     }
 }
 
-impl FlowStore {
-    fn next_logical_cursor(&self) -> Result<(i64, bool), StoreError> {
+trait AllocatesLogicalCursor {
+    fn allocate_logical_cursor(&self) -> Result<LogicalCursorAllocation, StoreError>;
+}
+
+impl AllocatesLogicalCursor for FlowStore {
+    fn allocate_logical_cursor(&self) -> Result<LogicalCursorAllocation, StoreError> {
         let records = self.engine.match_records(QueryPlan::key(
             self.logical_deliveries.counter,
             RecordKey::new(COUNTER_KEY),
         ))?;
         match records.records() {
-            [] => Ok((1, true)),
-            [counter] => Ok((counter.next_cursor, false)),
+            [] => Ok(LogicalCursorAllocation {
+                cursor: 1,
+                existing: false,
+            }),
+            [counter] => Ok(LogicalCursorAllocation {
+                cursor: counter.next_cursor,
+                existing: true,
+            }),
             _ => Err(StoreError::StateInvariant),
         }
     }

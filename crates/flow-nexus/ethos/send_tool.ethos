@@ -8,21 +8,17 @@
 ; that launching metaflow. The thread is recorded as its launch's when it
 ; is opened, and the connection that opened it, subscribed to its calls,
 ; answers them while the launch holds the gate, so a first turn's call made
-; while the launch submits it is served. The request is queued for the target under the
-; rules a Lock and a Deliver from Message follow, and the call and its
-; outcome are recorded in the commit that queues it, keyed by the thread,
-; the turn and the call, so a replayed call is answered from the record and
-; queued once.
+; while the launch submits it is served. The request is durably admitted
+; with explicit delivery and priority, and its accepted outcome is recorded
+; in the same commit, so a replay cannot admit another logical delivery.
 ;
 ; Every handled invocation, including a replay and any refusal, is written to
 ; the process journal as a typed SendInvocation with its own ID, call key,
 ; content digest and result; the request body is not journaled.
 ;
-; A request queued for an Asleep metaflow wakes it by what Flow's records
-; hold, never by what the answer to the call carries: after the commit
-; that queues it, after a replayed call is answered from its record, and
-; at the Nexus's start, the target is woken when it is Asleep holding work
-; that wakes it and no wake runs for it already.
+; Each accepted request carries Wake or Queue and a priority. Wake policy
+; is persisted with the queue entry; replay and restart do not infer it
+; from the answer.
 ;
 ; Kinds are the requests a flow may send. The living's words (Psyche,
 ; Psyches) are not among them: Flow admits a Lock and a Deliver from the
@@ -34,13 +30,14 @@
 ; a turn on a thread through the app-server socket.
 
 Library
-[ signal_flow:[ Address Sender SendPayloadSize ]
+[ signal_flow:[ Address Delivery Message Sender SendAcceptance SendPayloadSize ]
   serde_json:JsonValue.Value ]
 [ SendKind.[ Order Question Result Notice ]
   Target.Address
   Body.String
   ; What the model passes the tool, typed.
-  SendArguments.{ Target SendKind Body }
+  SendPriority.[ HardAbrupt MiddleAbrupt Soft ]
+  SendArguments.{ Target Delivery SendPriority SendKind Body }
   ThreadId.String
   TurnId.String
   CallId.String
@@ -71,8 +68,10 @@ Library
                 Held
                 Oversized.SendPayloadSize
                 Store ]
-  ; Queued is a durable enqueue for the target, never a claim of delivery.
-  SendOutcome.[ Queued.{ Sender Target }
+  ; Accepted is a durable logical delivery, never a claim of delivery.
+  ; LegacyUnknown preserves historical calls which predate logical IDs.
+  SendOutcome.[ Accepted.{ Sender Target SendAcceptance }
+                LegacyUnknown.{ Sender Target }
                 Refused.SendRefusal ]
   ; A typed journal entry for each handling attempt, including a replay.
   SendInvocationId.String

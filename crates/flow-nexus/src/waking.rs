@@ -866,8 +866,6 @@ impl ReconcilesQueueDelivery for RunningNexus {
     }
 
     fn settle_submitted_prompt(&self, flow_id: &str, prompt: &NativePrompt) {
-        use datom_codec::Datomizable;
-        use protos::{Compactable, Protosizable};
         let _turn = self
             .dispatch_gate
             .lock()
@@ -889,29 +887,11 @@ impl ReconcilesQueueDelivery for RunningNexus {
         {
             return;
         }
-        let Some(prompt_id) = prompt
-            .prompt_id_option
-            .clone()
-            .filter(|prompt_id| !prompt_id.is_empty())
-        else {
-            eprintln!(
-                "flow-nexus: flow {flow_id} took queued delivery {} without a prompt id; its transcript settles it",
-                attempt.attempt_id
-            );
-            return;
-        };
-        let observed = Event::PromptSubmitted(prompt.clone())
-            .datomize(vec![])
-            .protosize()
-            .compact();
-        if let Reconciled::Refused =
-            self.settle_received(&attempt, prompt_id, observed, SeatAfter::InItsTurn)
-        {
-            eprintln!(
-                "flow-nexus: the receipt of queued delivery {} was not recorded",
-                attempt.attempt_id
-            );
-        }
+        // A native hook proves that a submission was observed, not that an
+        // exact USER row has been durably recorded. Reconcile the transcript
+        // after its pre-submit anchor; an unreadable or not-yet-written row
+        // remains explicitly uncertain and cannot remove the logical entry.
+        let _ = self.reconcile_delivery(&attempt);
     }
 
     fn recover_deliveries(&self) {

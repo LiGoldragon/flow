@@ -2,6 +2,7 @@
 
 use crate::store::ManagesMetaflowState;
 use crate::store::ReadsFlowMemory;
+use crate::store::send_outcome::RecordsSendOutcomes;
 // The generated Operation root names the store's own types by this crate's
 // name, as `flow_nexus::LaunchOutcome`; the Memory root is not compiled yet.
 extern crate self as flow_nexus;
@@ -157,12 +158,13 @@ impl Dispatches for RunningNexus {
             Query::Replace(profile) => self.replace(profile, origin),
             // A direct dispatch has no calling process: nothing sends or
             // binds from it, and its Launch starts as an Unbound one would.
-            Query::Send(_) | Query::DeliverAll(_) | Query::BindSeat(_) => {
+            Query::DeliverAll(_) | Query::BindSeat(_) => {
                 Response::Refused(signal_flow::Refusal::Unidentified(signal_flow::Process {
                     pid: 0,
                     started: 0,
                 }))
             }
+            Query::Send(send) => self.send_request(send, None).response,
             Query::Launch(launch) => match self.declared_launch(launch, None) {
                 Ok(query) => self.dispatch_from(query, origin),
                 Err(refusal) => *refusal,
@@ -298,7 +300,7 @@ impl Dispatches for RunningNexus {
                 Ok(Some(snapshot)) => meta_signal_flow::Response::Configuration(snapshot),
                 Ok(None) => meta_signal_flow::Response::Unconfigured,
                 Err(error) => meta_signal_flow::Response::Refused(
-                    meta_signal_flow::Refusal::Store(error.to_string()),
+                    meta_signal_flow::StoreRefusal::Store(error.to_string()),
                 ),
             },
             // A declared family replaces the committed family whole; this
@@ -323,7 +325,7 @@ impl Dispatches for RunningNexus {
                         )
                     }
                     Err(error) => meta_signal_flow::Response::Refused(
-                        meta_signal_flow::Refusal::Store(error.to_string()),
+                        meta_signal_flow::StoreRefusal::Store(error.to_string()),
                     ),
                 }
             }
@@ -507,6 +509,12 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::ReadQueueDeliveries(address) => {
                 self.read_queue_deliveries(address)
             }
+            meta_signal_flow::Query::ReadSendOutcomes => match self.store.read_send_outcomes() {
+                Ok(records) => meta_signal_flow::Response::SendOutcomesRead(records),
+                Err(_) => meta_signal_flow::Response::ReadSendOutcomesRejected(
+                    meta_signal_flow::ReadSendOutcomesRejected_Data::StoreRefused,
+                ),
+            },
             meta_signal_flow::Query::ResolveQueueDelivery(resolution) => match resolver {
                 Some(resolver) => self.resolve_queue_delivery(resolution, resolver),
                 None => meta_signal_flow::Response::MetaRefused(
@@ -1161,6 +1169,7 @@ mod tests {
     mod reservation;
     mod seat_binding;
     mod secondary;
+    mod send_admission;
     mod send_tool;
     mod submission;
     mod waking;
@@ -1211,8 +1220,8 @@ mod tests {
 
     #[test]
     fn metaflows_do_not_advertise_undeclared_sleeping_history() {
-        use crate::store::metaflow::SeedsMetaflow;
         use crate::store::ManagesMetaflowState;
+        use crate::store::metaflow::SeedsMetaflow;
         let fixture = NexusFixture::new();
         let address = signal_flow::Address {
             aspect: Aspect::Psyche,
@@ -1242,6 +1251,74 @@ mod tests {
             panic!("metaflows must be listed");
         };
         assert!(listed.iter().any(|row| row.address == address));
+    }
+
+    #[test]
+    fn every_ordinary_send_answer_is_observable_as_one_durable_outcome() {
+        use crate::store::send_outcome::RecordsSendOutcomes;
+        use meta_signal_flow::OrdinarySendOutcome;
+        let fixture = NexusFixture::new();
+        let send = signal_flow::Send_Data {
+            recipient: signal_flow::Recipient::Address(signal_flow::Address {
+                aspect: Aspect::Psyche,
+                topic: "core".into(),
+                layer: signal_flow::Layer::Secondary,
+            }),
+            delivery: signal_flow::Delivery::Queue,
+            message: signal_flow::Message::Soft(signal_flow::Request::Notice(
+                "ledger witness".into(),
+            )),
+        };
+        let response = fixture.nexus.dispatch(Query::Send(send));
+        assert!(matches!(
+            response,
+            Response::Refused(signal_flow::Refusal::Unidentified(_))
+        ));
+        for response in [Response::Queued, Response::Delivered] {
+            fixture
+                .nexus
+                .store
+                .record_send_outcome(None, None, None, "digest".into(), response)
+                .unwrap();
+        }
+        let records = fixture.nexus.store.read_send_outcomes().unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(
+                    record.ordinary_send_outcome,
+                    OrdinarySendOutcome::Refused(_)
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(
+                    record.ordinary_send_outcome,
+                    OrdinarySendOutcome::Queued
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(
+                    record.ordinary_send_outcome,
+                    OrdinarySendOutcome::Delivered
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::ReadSendOutcomes),
+            meta_signal_flow::Response::SendOutcomesRead(records)
+        );
     }
 
     fn inspected(response: Response, launch_request_id: &str) -> signal_flow::LaunchInspection {

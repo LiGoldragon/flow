@@ -26,6 +26,7 @@ use crate::metaflow::IdentifiesPeerProcess;
 use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::send_call::KeepsSendCalls;
+use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::sent::{NamesCodexAppServers, QueuesSentRequests};
 use crate::store::{FlowRegistration, NamesConfiguredModel, RegistersExistingFlow};
 use crate::waking::{PerformsWakeAndDrain, RestsEndedAwake, SleepsAndWakesSeats, WakePolicy};
@@ -162,6 +163,7 @@ impl From<Response> for SendAnswer {
 pub trait SendsRequests {
     /// Answers a Send from `peer`, under the dispatch gate.
     fn send_request(&self, send: Send_Data, peer: Option<&Process>) -> SendAnswer;
+    fn send_request_inner(&self, send: Send_Data, peer: Option<&Process>) -> SendAnswer;
     /// Delivers every durable request currently queued at `address`.
     fn deliver_all(&self, address: Address, peer: Option<&Process>) -> Response;
     /// The flow the metaflow at `address` is Awake as, when it is live.
@@ -170,6 +172,42 @@ pub trait SendsRequests {
 
 impl SendsRequests for RunningNexus {
     fn send_request(&self, send: Send_Data, peer: Option<&Process>) -> SendAnswer {
+        use sha2::{Digest, Sha256};
+
+        let digest_text = send.datomize(Vec::new()).protosize().compact();
+        let request_digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
+        let recipient = match &send.recipient {
+            Recipient::Address(address) => Some(address.clone()),
+            Recipient::Up => peer
+                .and_then(|peer| self.sending_address(peer).ok())
+                .and_then(|sender| {
+                    sender.layer.above().map(|layer| Address {
+                        aspect: sender.aspect,
+                        topic: sender.topic,
+                        layer,
+                    })
+                }),
+        };
+        let sender = peer.and_then(|peer| self.sending_address(peer).ok());
+        let answer = self.send_request_inner(send, peer);
+        match self.store.record_send_outcome(
+            peer.cloned(),
+            sender,
+            recipient,
+            request_digest,
+            answer.response.clone(),
+        ) {
+            Ok(_) => answer,
+            Err(error) => {
+                eprintln!("send outcome journal failed: {error}");
+                SendAnswer {
+                    response: Response::Refused(Refusal::Store(error.to_string())),
+                }
+            }
+        }
+    }
+
+    fn send_request_inner(&self, send: Send_Data, peer: Option<&Process>) -> SendAnswer {
         let _turn = self
             .dispatch_gate
             .lock()

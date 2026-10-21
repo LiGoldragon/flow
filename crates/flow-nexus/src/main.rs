@@ -261,7 +261,7 @@ trait RunsConfigurationStartup {
                     MetaResponse::ConfigureRejected(ConfigureRejection::LeaveOutNotForHarness)
                 }
                 Err(error) => {
-                    MetaResponse::Refused(meta_signal_flow::Refusal::Store(error.to_string()))
+                    MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string()))
                 }
             },
             _ => {

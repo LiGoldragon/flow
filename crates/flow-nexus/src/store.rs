@@ -17,6 +17,7 @@ pub(crate) mod metaflow_declaration;
 pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
 pub(crate) mod send_call;
+pub(crate) mod send_outcome;
 pub(crate) mod send_server;
 pub(crate) mod sent;
 mod staged_upgrade;
@@ -27,6 +28,7 @@ use flow_ethos::State as MetaflowState;
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
 use queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
 use queue_delivery::{DeclaresQueueDeliveryTables, QueueDeliveryTables};
+use send_outcome::{DeclaresSendOutcomeTables, SendOutcomeTables};
 use staged_upgrade::{StagedUpgrade, StagesUpgrade, UpgradeScope};
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
@@ -173,7 +175,7 @@ const RUNNING_TABLES: &[&str] = &[
 // Codex thread each launch opened from 0.35.6 on, the send tool's calls from 0.35.7
 // on, the cleanup of each interrupted launch from 0.35.11 on, and
 // its trusted send servers and queued-delivery accounting from
-// 0.35.19 on.
+// 0.35.19 on. It records each ordinary Send outcome from 0.38.1 on.
 /// The tables a running store holds once this Flow has opened it.
 const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_flow_context_sizes",
@@ -190,6 +192,8 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_compactions",
+    "flow_nexus_send_outcome_counter",
+    "flow_nexus_send_outcomes",
 ];
 /// The tables a configuration-only store may hold beside its own, each
 /// added by a later Flow.
@@ -2657,7 +2661,7 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<crate::generated::send_tool::SendCall>,
     ) -> Result<TableReference<crate::generated::send_tool::SendCall>, StoreError> {
-        match self.upgrade_table::<send_call::SendCallV1, crate::generated::send_tool::SendCall>(
+        match self.upgrade_table::<send_call::SendCallV2, crate::generated::send_tool::SendCall>(
             descriptor,
         ) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
@@ -2666,6 +2670,24 @@ impl UpgradesFlowFamilies for Engine {
                 "call {:?} was refused for an ended recipient, which no longer exists",
                 refusal.key()
             ))),
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission =>
+            {
+                match self
+                    .upgrade_table::<send_call::SendCallV1, crate::generated::send_tool::SendCall>(
+                        descriptor,
+                    ) {
+                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                    UpgradeOutcome::Refused(refusal) => Err(StoreError::SendCallUpgrade(format!(
+                        "call {:?} was refused for an ended recipient, which no longer exists",
+                        refusal.key()
+                    ))),
+                    UpgradeOutcome::Failed(failure) => {
+                        Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
+                    }
+                }
+            }
             UpgradeOutcome::Failed(failure) => {
                 Err(StoreError::SendCallUpgrade(format!("{failure:?}")))
             }
@@ -2844,6 +2866,7 @@ pub struct FlowStore {
     launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
     compactions: TableReference<compaction::Compaction>,
     queue_delivery: QueueDeliveryTables,
+    send_outcomes: SendOutcomeTables,
     pub launch_changes: LaunchChanges,
     /// What opening did with launch-attempt rows older than 0.34's shape;
     /// each is also logged.
@@ -3472,6 +3495,7 @@ impl OpensFlowStore for FlowStore {
         let launch_cleanups_descriptor =
             <launch_cleanup::LaunchCleanup as launch_cleanup::DescribesLaunchCleanupTable>::descriptor();
         let queue_delivery_descriptors = QueueDeliveryTables::descriptors();
+        let send_outcome_descriptors = SendOutcomeTables::descriptors();
         let mut engine = Engine::open(
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&flows_descriptor)
@@ -3507,7 +3531,9 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&launch_cleanups_descriptor)
                 .with_family(&queue_delivery_descriptors.0)
                 .with_family(&queue_delivery_descriptors.1)
-                .with_family(&queue_delivery_descriptors.2),
+                .with_family(&queue_delivery_descriptors.2)
+                .with_family(&send_outcome_descriptors.counter)
+                .with_family(&send_outcome_descriptors.outcomes),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
@@ -3537,6 +3563,7 @@ impl OpensFlowStore for FlowStore {
         let compactions = engine.register_table(compactions_descriptor)?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
+        let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
         let store = Self {
             engine,
             flows,
@@ -3563,6 +3590,7 @@ impl OpensFlowStore for FlowStore {
             launch_cleanups,
             compactions,
             queue_delivery,
+            send_outcomes,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -3698,6 +3726,8 @@ impl OpensFlowStore for FlowStore {
         )?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, QueueDeliveryTables::descriptors())?;
+        let send_outcomes =
+            SendOutcomeTables::register(&mut engine, SendOutcomeTables::descriptors())?;
         let store = Self {
             engine,
             flows,
@@ -3724,6 +3754,7 @@ impl OpensFlowStore for FlowStore {
             launch_cleanups,
             compactions,
             queue_delivery,
+            send_outcomes,
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
@@ -6364,10 +6395,16 @@ pub(crate) trait ReadsFlowMemory {
                     <address_hold::AddressHoldV3 as MemoryDefinition>::schema_hash(),
                 ),
             ],
-            "flow_nexus_send_calls" => &[(
-                send_call::SEND_CALL_FAMILY,
-                <send_call::SendCallV1 as MemoryDefinition>::schema_hash(),
-            )],
+            "flow_nexus_send_calls" => &[
+                (
+                    send_call::SEND_CALL_FAMILY,
+                    <send_call::SendCallV1 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    send_call::SEND_CALL_FAMILY,
+                    <send_call::SendCallV2 as MemoryDefinition>::schema_hash(),
+                ),
+            ],
             "flow_nexus_queue_delivery_requests" => &[(
                 "flow-nexus-queue-delivery-request",
                 <queue_delivery::StoredDeliveryRequestV2 as MemoryDefinition>::schema_hash(),

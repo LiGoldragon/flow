@@ -1767,20 +1767,23 @@ mod tests {
         assert_eq!(refused_for(&bound_once(&fixture, unproven)), None);
 
         // A Claude pane must report its session, and that session.
+        // The successful b005 adoption owns its cell; use a separate fixture
+        // to verify Claude session evidence without colliding with that owner.
+        let claude_fixture = NexusFixture::new();
         let mut claude = existing_binding("b006", "pane-6");
         claude.harness_kind = HarnessKind::Claude;
         claude.native_session_id = "01a0b22ce24f4452994064490878680f".into();
-        herdr_world(&fixture, vec![shown(&claude)], me);
+        herdr_world(&claude_fixture, vec![shown(&claude)], me);
         assert_eq!(
-            refused_for(&bound_once(&fixture, claude.clone())),
+            refused_for(&bound_once(&claude_fixture, claude.clone())),
             Some(Reason::SessionUnreported)
         );
         let mut reporting = shown(&claude);
         reporting["agent_session"] = serde_json::json!({
             "source":"herdr:claude","agent":"claude","kind":"id","value":claude.native_session_id
         });
-        herdr_world(&fixture, vec![reporting], me);
-        assert_eq!(refused_for(&bound_once(&fixture, claude)), None);
+        herdr_world(&claude_fixture, vec![reporting], me);
+        assert_eq!(refused_for(&bound_once(&claude_fixture, claude)), None);
 
         // Nothing refused was stored.
         for refused in ["b001", "b002", "b003", "b004"] {
@@ -2607,15 +2610,14 @@ mod tests {
         };
 
         let response = with_bound_world(&fixture, &[&accepted.clone()], || {
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Query::MetaBindExisting(
-                    meta_signal_flow::MetaBindExisting {
-                        flow_container: container.clone(),
-                        address: address.clone(),
-                        flow_binding: accepted,
-                    },
-                ))
+            fixture.nexus.dispatch_meta_from(
+                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                    flow_container: container.clone(),
+                    address: address.clone(),
+                    flow_binding: accepted,
+                }),
+                Some(adoption_resolver()),
+            )
         });
         let bound = match response {
             meta_signal_flow::Response::BoundExisting(bound) => bound,
@@ -2902,16 +2904,16 @@ mod tests {
             past: vec![],
             queue: original_queue.clone(),
         });
-        let first = bound_once(&fixture, binding.clone());
-        let second = bound_once(&fixture, binding);
-        assert!(matches!(
-            first,
-            meta_signal_flow::FlowBindingResult::Bound(_)
-        ));
-        assert!(matches!(
-            second,
-            meta_signal_flow::FlowBindingResult::Bound(_)
-        ));
+        let first = rebind(&fixture, binding.clone());
+        let second = rebind(&fixture, binding);
+        assert!(
+            matches!(&first, meta_signal_flow::FlowBindingResult::Bound(_)),
+            "{first:?}"
+        );
+        assert!(
+            matches!(&second, meta_signal_flow::FlowBindingResult::Bound(_)),
+            "{second:?}"
+        );
         assert_eq!(
             fixture.nexus.store.list_metaflows().unwrap()[0].queue,
             original_queue
@@ -3105,7 +3107,7 @@ mod tests {
                 herdr_terminal_id: "terminal-w1:p3".into(),
             })
         );
-        assert_eq!(node.flow_lifecycle, FlowLifecycle::Pending);
+        assert_eq!(node.flow_lifecycle, FlowLifecycle::Active);
 
         assert_eq!(
             fixture.send("bare prompt"),
@@ -3148,11 +3150,19 @@ mod tests {
         fixture: &NexusFixture,
         binding: meta_signal_flow::FlowBinding,
     ) -> meta_signal_flow::FlowBindingResult {
+        rebind_against(fixture, binding.clone(), binding)
+    }
+
+    fn rebind_against(
+        fixture: &NexusFixture,
+        binding: meta_signal_flow::FlowBinding,
+        witnessed_binding: meta_signal_flow::FlowBinding,
+    ) -> meta_signal_flow::FlowBindingResult {
         let socket_path = fixture.directory.path().join("herdr-rebind.sock");
         let _ = fs::remove_file(&socket_path);
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let meta_signal_flow::Response::BoundExisting(bound) =
-            with_bound_world(fixture, &[&binding.clone()], || {
+            with_bound_world(fixture, &[&witnessed_binding], || {
                 fixture.nexus.dispatch_meta_from(
                     meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
                         flow_container: flow_container(&socket_path),
@@ -3245,8 +3255,11 @@ mod tests {
         let mut other_harness = binding_of_registered_row(&fixture);
         other_harness.harness_kind = HarnessKind::Claude;
         for binding in [other_terminal, other_pane, other_thread, other_harness] {
-            let result = rebind(&fixture, binding);
-            assert!(duplicate(&result), "{result:?}");
+            let result = rebind_against(&fixture, binding, binding_of_registered_row(&fixture));
+            assert!(
+                matches!(result, meta_signal_flow::FlowBindingResult::Refused(_)),
+                "{result:?}"
+            );
             assert_eq!(fixture.nexus.store.role("908786").expect("role read"), None);
             assert_eq!(listed(&fixture), before);
         }

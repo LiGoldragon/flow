@@ -1,7 +1,11 @@
 //! What MetaBindExisting checks of a container and each flow it binds
 //! before any binding reaches the store.
 
-use crate::{RunningNexus, herdr::launch::ClaimsNativeIdentity, store::NamesConfiguredModel};
+use crate::{
+    RunningNexus,
+    herdr::launch::ClaimsNativeIdentity,
+    store::{NamesConfiguredModel, ReadsFlowRows},
+};
 use meta_signal_flow::{
     FlowBinding, FlowBindingRefusalReason, FlowBindingResult, FlowContainer, ProcessIdentity,
     RefusedFlowBinding,
@@ -164,10 +168,22 @@ impl VerifiesAdoptedSeat for RunningNexus {
         self.herdr
             .verify_existing_binding(herdr_session_name, binding)?;
         // Configuration names an endpoint that may serve this model; it does
-        // not witness that the existing native flow is connected to it.
-        // Keep endpoint readiness unavailable until a live connection is
-        // independently observed.
-        let endpoint_selection = EndpointSelection::Unavailable;
+        // not witness that a newly imported native flow is connected to it.
+        // A verified refresh of the same native session preserves independent
+        // endpoint and origin observations already held for that session.
+        let previous = self
+            .store
+            .flow_node(&binding.flow_id)
+            .map_err(|_| FlowBindingRefusalReason::HerdrUnreadable)?
+            .filter(|node| {
+                node.session_id == binding.native_session_id
+                    && node.harness_kind == binding.harness_kind
+            });
+        let endpoint_selection = previous
+            .as_ref()
+            .map(|node| node.endpoint_selection.clone())
+            .unwrap_or(EndpointSelection::Unavailable);
+        let origin = previous.map(|node| node.origin).unwrap_or(Origin::Unbound);
         Ok(FlowNode {
             flow_id: binding.flow_id.clone(),
             session_id: binding.native_session_id.clone(),
@@ -179,7 +195,7 @@ impl VerifiesAdoptedSeat for RunningNexus {
                 herdr_pane_id: binding.herdr_pane_id.clone(),
                 herdr_terminal_id: binding.herdr_terminal_id.clone(),
             }),
-            origin: Origin::Unbound,
+            origin,
             flow_lifecycle: FlowLifecycle::Active,
         })
     }

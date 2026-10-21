@@ -665,7 +665,7 @@ fn the_meta_socket_admits_the_owner_and_refuses_an_unreadable_peer() {
 #[test]
 fn a_flow_outside_meta_aspects_is_refused_the_meta_socket() {
     let fixture = NexusFixture::new();
-    super::bind_existing_caller(&fixture, "mind-live", "pane-1");
+    super::bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![super::codex_agent_in("pane-1", "terminal-pane-1")]);
     let peer = PanePeer::spawn("pane-1");
     let refusal = fixture

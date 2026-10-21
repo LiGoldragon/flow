@@ -3271,7 +3271,20 @@ mod tests {
         )));
         let mut other_role = binding_of_registered_row(&fixture);
         other_role.power_level = PowerLevel::High;
-        assert!(duplicate(&rebind(&fixture, other_role)));
+        let refused_role = rebind(&fixture, other_role);
+        assert!(
+            matches!(
+                &refused_role,
+                meta_signal_flow::FlowBindingResult::Refused(
+                    meta_signal_flow::RefusedFlowBinding {
+                        flow_binding_refusal_reason:
+                            meta_signal_flow::FlowBindingRefusalReason::RoleMismatch,
+                        ..
+                    }
+                )
+            ),
+            "{refused_role:?}"
+        );
         assert_eq!(
             fixture
                 .nexus

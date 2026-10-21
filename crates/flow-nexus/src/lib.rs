@@ -80,11 +80,11 @@ use std::{
     io::{Read, Write},
     os::unix::{
         fs::PermissionsExt,
-        net::{UnixListener, UnixStream},
+        net::{Shutdown, UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -572,6 +572,12 @@ pub trait ServesConnection: Sized {
     const READ_TIMEOUT: Duration = Duration::from_secs(5);
     const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
     fn accepted(peer: UnixStream) -> Result<Self, String>;
+    fn serve_sends(
+        &mut self,
+        nexus: &RunningNexus,
+        sender: &signal_flow::Address,
+        cursor: Option<i64>,
+    ) -> Result<(), String>;
     fn serve_ordinary(self, nexus: &RunningNexus) -> Result<(), String>;
     fn serve_meta(self, nexus: &RunningNexus) -> Result<(), String>;
 }
@@ -585,6 +591,44 @@ impl ServesConnection for Connection {
             .peer_process()
             .and_then(|peer| FlowStore::process_identity_for_pid(peer.process_id));
         Ok(Self { peer, process })
+    }
+
+    fn serve_sends(
+        &mut self,
+        nexus: &RunningNexus,
+        sender: &signal_flow::Address,
+        cursor: Option<i64>,
+    ) -> Result<(), String> {
+        let mut reader = self.peer.try_clone().map_err(|error| error.to_string())?;
+        reader
+            .set_read_timeout(None)
+            .map_err(|error| error.to_string())?;
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let watch_disconnected = Arc::clone(&disconnected);
+        let changes = nexus.store.launch_changes.clone();
+        let watcher = std::thread::Builder::new()
+            .name("flow-send-observer-peer".into())
+            .spawn(move || {
+                let mut bytes = [0_u8; 256];
+                loop {
+                    match reader.read(&mut bytes) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                watch_disconnected.store(true, Ordering::Release);
+                changes.announce();
+            })
+            .map_err(|error| error.to_string())?;
+
+        let result = nexus.observe_sends(sender, cursor, &disconnected, &mut |response| {
+            self.peer.write_response(response)
+        });
+        let _ = self.peer.shutdown(Shutdown::Both);
+        let watcher_result = watcher
+            .join()
+            .map_err(|_| "peer-disconnect watcher panicked".to_owned());
+        result.and(watcher_result)
     }
 
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
@@ -613,9 +657,7 @@ impl ServesConnection for Connection {
                     Ok(sender) => sender,
                     Err(refusal) => return self.peer.write_response(&refusal),
                 };
-                return nexus.observe_sends(&sender, cursor, &mut |response| {
-                    self.peer.write_response(response)
-                });
+                return self.serve_sends(nexus, &sender, cursor);
             }
             Query::ObserveSender(forwarded) => {
                 let Some(process) = self.process.as_ref() else {
@@ -627,11 +669,7 @@ impl ServesConnection for Connection {
                     Ok(sender) => sender,
                     Err(refusal) => return self.peer.write_response(&refusal),
                 };
-                return nexus.observe_sends(
-                    &sender,
-                    forwarded.delivery_cursor_option,
-                    &mut |response| self.peer.write_response(response),
-                );
+                return self.serve_sends(nexus, &sender, forwarded.delivery_cursor_option);
             }
             // A hook's Report never waits behind a running launch: the
             // launch may itself be waiting on the harness whose hook this is.
@@ -3451,6 +3489,84 @@ mod tests {
     /// `Report.{ FlowId Event }`, recorded in the flow's Memory and answered
     /// Reported; a FlowId Flow does not hold is refused and never adopted.
     /// The owner reads the events back with ReadEvents.
+    #[test]
+    fn a_quiet_sender_observer_exits_on_peer_close_and_resume_reads_new_state() {
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        use crate::store::metaflow::SeedsMetaflow;
+
+        let fixture = NexusFixture::new();
+        let sender = signal_flow::Address {
+            aspect: Aspect::Field,
+            topic: "core".into(),
+            layer: Layer::Tertiary,
+        };
+        let recipient = signal_flow::Address {
+            aspect: Aspect::Mind,
+            topic: "message".into(),
+            layer: Layer::Secondary,
+        };
+        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            address: recipient.clone(),
+            state: flow_ethos::State::Asleep,
+            past: vec![],
+            queue: vec![],
+        });
+
+        let nexus = Arc::new(fixture.nexus);
+        let (server, mut client) = UnixStream::pair().expect("observer socket pair");
+        let connection = Connection {
+            peer: server,
+            process: None,
+        };
+        let thread_nexus = Arc::clone(&nexus);
+        let thread_sender = sender.clone();
+        let observer = std::thread::spawn(move || {
+            let mut connection = connection;
+            connection.serve_sends(&thread_nexus, &thread_sender, None)
+        });
+
+        let Response::SendsObserved(initial) = client
+            .read_response()
+            .expect("initial subscription snapshot")
+        else {
+            panic!("subscription begins with its snapshot")
+        };
+        assert!(initial.delivery_snapshot_vector.is_empty());
+        drop(client);
+        let result = observer.join().expect("quiet observer exits after close");
+        assert!(result.is_err(), "a closed subscription is not kept alive");
+
+        let Response::SendAccepted(accepted) = nexus
+            .store
+            .accept_logical_delivery(
+                &recipient,
+                signal_flow::SentBy::Sender(sender.clone()),
+                signal_flow::Delivery::Queue,
+                signal_flow::Message::Soft(signal_flow::Request::Order(
+                    "resume from durable state".into(),
+                )),
+                None,
+            )
+            .expect("logical send accepted after observer disconnect")
+        else {
+            panic!("queued admission has an acceptance cursor")
+        };
+        let resumed = nexus
+            .store
+            .read_logical_delivery_snapshots(&sender, Some(initial.delivery_cursor))
+            .expect("resume reads changes after the last cursor");
+        assert_eq!(resumed.delivery_cursor, accepted.delivery_cursor);
+        assert_eq!(resumed.delivery_snapshot_vector.len(), 1);
+        assert_eq!(
+            resumed.delivery_snapshot_vector[0].logical_delivery_id,
+            accepted.logical_delivery_id
+        );
+        assert_eq!(
+            resumed.delivery_snapshot_vector[0].delivery_state,
+            signal_flow::DeliveryState::Queued
+        );
+    }
+
     #[test]
     fn a_report_is_recorded_for_a_held_flow_and_refused_for_an_unknown_one() {
         use signal_flow::{Event, Report_Data};

@@ -6,6 +6,7 @@ use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::MutatesMetaflows;
 use crate::{HoldsStopRequest, RunningNexus};
 use signal_flow::{Address, ObserveSender_Data, Process, Refusal, Response};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) trait ObservesLogicalSends {
     fn observation_sender(
@@ -17,6 +18,7 @@ pub(crate) trait ObservesLogicalSends {
         &self,
         sender: &Address,
         cursor: Option<i64>,
+        disconnected: &AtomicBool,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String>;
 }
@@ -60,6 +62,9 @@ impl ObservesLogicalSends for RunningNexus {
         let mut opened = false;
         loop {
             let seen = changes.current();
+            if disconnected.load(Ordering::Acquire) {
+                return Err("the observing peer disconnected".into());
+            }
             if self.stopping.requested() {
                 return Err("the Nexus is stopping".into());
             }
@@ -68,6 +73,9 @@ impl ObservesLogicalSends for RunningNexus {
                 Err(error) => return send(&Response::Refused(Refusal::Store(error.to_string()))),
             };
             cursor = Some(observation.delivery_cursor);
+            if disconnected.load(Ordering::Acquire) {
+                return Err("the observing peer disconnected".into());
+            }
             if !opened {
                 send(&Response::SendsObserved(observation))?;
                 opened = true;

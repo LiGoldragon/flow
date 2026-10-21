@@ -261,10 +261,30 @@ impl Dispatches for RunningNexus {
             | Query::Lock(_)
             | Query::Deliver(_)
             | Query::Release(_) => Response::Refused(signal_flow::Refusal::NotMessage),
-            Query::Metaflows => self.store.list_metaflows().map_or_else(
-                |error| Response::Refused(signal_flow::Refusal::Store(error.to_string())),
-                Response::Listed,
-            ),
+            Query::Metaflows => {
+                use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+                let listed = self.store.list_metaflows().and_then(|metaflows| {
+                    let mut available = Vec::new();
+                    for metaflow in metaflows {
+                        // An undeclared sleeping row is history, not an address
+                        // an ordinary caller can launch. Keep its durable past
+                        // without advertising it as an available metaflow.
+                        if matches!(metaflow.state, signal_flow::MetaflowState::Awake(_))
+                            || self
+                                .store
+                                .metaflow_declaration(&metaflow.address)?
+                                .is_some()
+                        {
+                            available.push(metaflow);
+                        }
+                    }
+                    Ok(available)
+                });
+                listed.map_or_else(
+                    |error| Response::Refused(signal_flow::Refusal::Store(error.to_string())),
+                    Response::Listed,
+                )
+            }
         }
     }
 
@@ -1187,6 +1207,40 @@ mod tests {
         /// `messaging-build`: the test process listens on it, standing as
         /// that server, and every marked fixture process descends from it.
         _herdr_server: UnixListener,
+    }
+
+    #[test]
+    fn metaflows_do_not_advertise_undeclared_sleeping_history() {
+        use crate::store::metaflow::SeedsMetaflow;
+        let fixture = NexusFixture::new();
+        let address = signal_flow::Address {
+            aspect: Aspect::Psyche,
+            topic: "retiredTest".into(),
+            layer: signal_flow::Layer::Quaternary,
+        };
+        let history = signal_flow::Metaflow {
+            address: address.clone(),
+            state: signal_flow::MetaflowState::Asleep,
+            past: vec!["abcdef".into()],
+            queue: vec![],
+        };
+        fixture.nexus.store.seed_metaflow(history.clone());
+        let Response::Listed(listed) = fixture.nexus.dispatch(Query::Metaflows) else {
+            panic!("metaflows must be listed");
+        };
+        assert!(!listed.iter().any(|row| row.address == address));
+        assert_eq!(
+            fixture.nexus.store.list_metaflows().unwrap(),
+            vec![history.clone()]
+        );
+        fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
+            state: signal_flow::MetaflowState::Awake("123abc".into()),
+            ..history
+        });
+        let Response::Listed(listed) = fixture.nexus.dispatch(Query::Metaflows) else {
+            panic!("metaflows must be listed");
+        };
+        assert!(listed.iter().any(|row| row.address == address));
     }
 
     fn inspected(response: Response, launch_request_id: &str) -> signal_flow::LaunchInspection {

@@ -412,16 +412,19 @@ pub(crate) struct NativeOwnerEnvironment {
 
 trait ReadsNativeOwnerEnvironment {
     fn native_owner_environment(&self) -> Option<NativeOwnerEnvironment>;
-    fn system() -> Option<NativeOwnerEnvironment>
-    where
-        Self: Sized;
+}
+
+trait ReadsSystemNativeOwnerEnvironment {
+    fn system() -> Option<NativeOwnerEnvironment>;
 }
 
 impl ReadsNativeOwnerEnvironment for NativeOwnerEnvironment {
     fn native_owner_environment(&self) -> Option<NativeOwnerEnvironment> {
         Self::system()
     }
+}
 
+impl ReadsSystemNativeOwnerEnvironment for NativeOwnerEnvironment {
     fn system() -> Option<NativeOwnerEnvironment> {
         Some(Self {
             host_id: fs::read_to_string("/etc/machine-id")
@@ -585,7 +588,7 @@ impl ReadsNativeOwnerEnvironment for FlowStore {
     fn native_owner_environment(&self) -> Option<NativeOwnerEnvironment> {
         self.native_owner_environment_override
             .clone()
-            .or_else(|| NativeOwnerEnvironment::system())
+            .or_else(NativeOwnerEnvironment::system)
     }
 }
 
@@ -4117,6 +4120,7 @@ impl OpensFlowStore for FlowStore {
             LogicalDeliveryTables::register(&mut engine, LogicalDeliveryTables::descriptors())?;
         let store = Self {
             engine,
+            native_owner_environment_override: None,
             flows,
             native_owner_proofs,
             state,
@@ -6906,7 +6910,7 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_native_owner_proofs" => (
                 "flow-nexus-native-owner-proof",
-                NativeOwnerProofRecord::schema_hash(),
+                "flow-nexus-native-owner-proof-v1",
             ),
             _ => return None,
         };
@@ -7602,11 +7606,12 @@ mod tests {
     use super::{
         AppliesFlowQuery, AuthorizesFlowRestart, ConfigurationOnlyStore, ConfiguresFlowStore,
         ConfirmsStartedFlow, DerivesNativeOwnerProof, FlowStore, LaunchOutcome, LaunchOutcomeV2,
-        ManagesMetaflowState, NativeOwnerProof, NativeOwnerState, OpensFlowStore, ReadsFlowRoles,
-        ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
-        RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
-        RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RecordsRestartedFlow,
-        RegistersExistingFlow, RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
+        ManagesMetaflowState, NativeOwnerEnvironment, NativeOwnerProof, NativeOwnerState,
+        OpensFlowStore, ReadsFlowRoles, ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome,
+        RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPendingThread,
+        RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
+        RecordsRegistrationAcknowledgement, RecordsRestartedFlow, RegistersExistingFlow,
+        RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
         SetsNativeOwnerEnvironmentForTests, StoredLaunchOutcomeV2,
     };
 
@@ -7681,7 +7686,7 @@ mod tests {
             boot_id: "isolated-test-boot".into(),
         });
         store
-            .configure_change(ConfigurationChange::Models(vec![
+            .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
                 meta_signal_flow::ConfigureModel {
                     layer: Layer::Secondary,
                     aspect: Aspect::Mind,

@@ -1514,10 +1514,9 @@ mod tests {
         fixture: &NexusFixture,
         binding: &meta_signal_flow::FlowBinding,
     ) {
-        use crate::herdr::launch::ClaimsNativeIdentity;
+        use crate::herdr::launch::{ClaimsNativeIdentity, NamesHerdrHarness};
         let harness = binding.harness_kind.expected_harness();
-        let identity =
-            crate::herdr::HerdrCli::canonical_native_identity(&binding.native_session_id);
+        let identity = ClaimsNativeIdentity::canonical_native_identity(&binding.native_session_id);
         let version = if binding.harness_kind == HarnessKind::Claude {
             "uuid-version=uuid-v4\n"
         } else {
@@ -3180,7 +3179,7 @@ mod tests {
     /// and roleless, as 5f38bc is live) under a newer agent name.
     fn binding_of_registered_row(fixture: &NexusFixture) -> meta_signal_flow::FlowBinding {
         let mut binding = existing_binding("908786", "w1:p3");
-        binding.native_session_id = node.session_id;
+        binding.native_session_id = fixture.node().session_id;
         binding.herdr_terminal_id = "term_65bb7f87270cb3".into();
         binding.herdr_agent_name = "field-astra-908786".into();
         binding

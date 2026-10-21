@@ -1,7 +1,7 @@
 //! What MetaBindExisting checks of a container and each flow it binds
 //! before any binding reaches the store.
 
-use crate::{RunningNexus, store::NamesConfiguredModel};
+use crate::{RunningNexus, herdr::launch::ClaimsNativeIdentity, store::NamesConfiguredModel};
 use meta_signal_flow::{
     FlowBinding, FlowBindingRefusalReason, FlowBindingResult, FlowContainer, ProcessIdentity,
     RefusedFlowBinding,
@@ -257,7 +257,7 @@ impl VerifiesExistingBinding for crate::herdr::HerdrCli {
             .claimed_native_identity(&binding.flow_id, &binding.harness_kind)
             .map_err(|_| FlowBindingRefusalReason::NativeIdentityMismatch)?;
         if claimed_native_identity
-            != crate::herdr::launch::HerdrCli::canonical_native_identity(&binding.native_session_id)
+            != ClaimsNativeIdentity::canonical_native_identity(&binding.native_session_id)
         {
             return Err(FlowBindingRefusalReason::NativeIdentityMismatch);
         }

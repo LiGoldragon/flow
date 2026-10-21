@@ -12,12 +12,12 @@ fn sender() -> Address {
 #[test]
 fn rendered_native_prompt_budget_accepts_exact_boundary_and_refuses_one_byte_over() {
     let sender = sender();
-    let base = Request::Order(String::new()).native_prompt_bytes(&sender);
-    let exact = Request::Order("a".repeat(MAX_SEND_PAYLOAD_BYTES - base));
+    let overhead = Request::Order("a".into()).native_prompt_bytes(&sender) - 1;
+    let exact = Request::Order("a".repeat(MAX_SEND_PAYLOAD_BYTES - overhead));
     assert_eq!(exact.native_prompt_bytes(&sender), MAX_SEND_PAYLOAD_BYTES);
     assert_eq!(exact.oversized_refusal(&sender), None);
 
-    let over = Request::Order("a".repeat(MAX_SEND_PAYLOAD_BYTES - base + 1));
+    let over = Request::Order("a".repeat(MAX_SEND_PAYLOAD_BYTES - overhead + 1));
     assert_eq!(
         over.native_prompt_bytes(&sender),
         MAX_SEND_PAYLOAD_BYTES + 1
@@ -35,15 +35,16 @@ fn rendered_native_prompt_budget_accepts_exact_boundary_and_refuses_one_byte_ove
 #[test]
 fn rendered_native_prompt_budget_counts_multibyte_utf8_bytes() {
     let sender = sender();
-    let base = Request::Order(String::new()).native_prompt_bytes(&sender);
-    let at_boundary = Request::Order("a".repeat(MAX_SEND_PAYLOAD_BYTES - base - 2) + "é");
+    let overhead = Request::Order("a".into()).native_prompt_bytes(&sender) - 1;
+    let payload_bytes = MAX_SEND_PAYLOAD_BYTES - overhead;
+    let at_boundary = Request::Order("a".repeat(payload_bytes - 2) + "é");
     assert_eq!(
         at_boundary.native_prompt_bytes(&sender),
         MAX_SEND_PAYLOAD_BYTES
     );
     assert_eq!(at_boundary.oversized_refusal(&sender), None);
 
-    let over = Request::Order("a".repeat(MAX_SEND_PAYLOAD_BYTES - base - 1) + "é");
+    let over = Request::Order("a".repeat(payload_bytes - 1) + "é");
     assert_eq!(
         over.native_prompt_bytes(&sender),
         MAX_SEND_PAYLOAD_BYTES + 1

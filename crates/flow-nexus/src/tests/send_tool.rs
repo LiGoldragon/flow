@@ -795,8 +795,8 @@ fn an_oversized_dynamic_send_is_typed_durable_and_not_queued() {
     let fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.awake_target();
-    let base = Request::Order(String::new()).native_prompt_bytes(&sender_a());
-    let body = "x".repeat(MAX_SEND_PAYLOAD_BYTES - base + 1);
+    let overhead = Request::Order("x".into()).native_prompt_bytes(&sender_a()) - 1;
+    let body = "x".repeat(MAX_SEND_PAYLOAD_BYTES - overhead + 1);
     let request = Request::Order(body.clone());
     assert_eq!(
         request.native_prompt_bytes(&sender_a()),

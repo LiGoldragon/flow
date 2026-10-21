@@ -234,7 +234,7 @@ impl MutatesMetaflows for FlowStore {
         if held.lock.until <= now {
             return Ok(Response::Refused(Refusal::Lapsed));
         }
-        let Some(mut stored) = self.stored_metaflow(&request.lock.address)? else {
+        let Some(stored) = self.stored_metaflow(&request.lock.address)? else {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
                 request.lock.address,
             ))));
@@ -252,7 +252,7 @@ impl MutatesMetaflows for FlowStore {
             request.delivery,
             request.message,
             Some(VerifiedDeliveryLock {
-                lock: request.lock,
+                lock: request.lock.clone(),
                 now,
             }),
         )

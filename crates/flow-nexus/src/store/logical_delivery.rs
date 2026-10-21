@@ -386,7 +386,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let Some(stored) = self.stored_metaflow(address)? else {
+        let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
                 address.clone(),
             ))));

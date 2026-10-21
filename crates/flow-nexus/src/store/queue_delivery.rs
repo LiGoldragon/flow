@@ -818,11 +818,7 @@ impl AccountsQueueDelivery for FlowStore {
                 let commit = self
                     .engine
                     .begin_atomic_commit()
-                    .mutate_keyed(KeyedMutation::new(
-                        self.queue_delivery.attempts,
-                        RecordKey::new(attempt_id),
-                        attempt,
-                    ));
+                    .mutate(self.queue_delivery.attempts, attempt);
                 commit_attempt_state(self, &evidence, DeliveryState::Uncertain, commit)?;
                 Ok(true)
             }
@@ -857,11 +853,7 @@ impl AccountsQueueDelivery for FlowStore {
         let commit = self
             .engine
             .begin_atomic_commit()
-            .mutate_keyed(KeyedMutation::new(
-                self.queue_delivery.attempts,
-                RecordKey::new(attempt_id),
-                attempt,
-            ));
+            .mutate(self.queue_delivery.attempts, attempt);
         commit_attempt_state(self, &evidence, DeliveryState::Uncertain, commit)?;
         Ok(true)
     }

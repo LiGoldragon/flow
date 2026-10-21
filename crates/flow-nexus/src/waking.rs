@@ -53,6 +53,7 @@ use crate::codex::{
 };
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{FreshSeat, RendersQueuedWork};
+use crate::delivery::body::RendersNativeContent;
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{
     DeliversMessages, FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal,
@@ -726,9 +727,7 @@ impl RendersAttemptInput for QueueDeliveryAttempt {
     fn prompt_text(&self) -> String {
         match &self.queue_evidence {
             meta_signal_flow::QueueEvidence::Logical(entry) => [entry.clone()].prompt_text(),
-            meta_signal_flow::QueueEvidence::Legacy(legacy) => {
-                legacy.datomize(Vec::new()).protosize().compact()
-            }
+            meta_signal_flow::QueueEvidence::Legacy(legacy) => legacy.request.native_content(),
         }
     }
     fn as_settled(&self, seat_after: SeatAfter) -> Reconciled {

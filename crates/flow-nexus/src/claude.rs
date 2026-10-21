@@ -468,7 +468,7 @@ mod tests {
         let transcript = directory.path().join("receipt.jsonl");
         fs::write(&transcript, "").unwrap();
         let cursor = transcript.claude_cursor().unwrap();
-        let text = "{ Sender.{ Psyche core Secondary } Order.do }";
+        let text = "same «verbatim» {words}\nsecond line";
         let pasted =
             format!("\n\n<pasted_content id=\"04ee\">\n{text}\n</pasted_content id=\"04ee\">\n");
         let mut append = fs::OpenOptions::new()

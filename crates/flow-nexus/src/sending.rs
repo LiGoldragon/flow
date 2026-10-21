@@ -21,6 +21,7 @@ use crate::caller::{
 use crate::codex::SelectsCodexEndpoint;
 use crate::composition::RendersQueuedWork;
 use crate::delivery::DeliversMessages;
+use crate::delivery::body::RendersNativeContent;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::metaflow::IdentifiesPeerProcess;
@@ -36,9 +37,9 @@ use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Caller, Delivery, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, Launch_Data, LaunchProfile, Layer, Message, NativeInput,
-    Origin, Process, QueueEntry, Recipient, Refusal, RememberedFlow, Request, Response,
-    RouteReadiness, SendPayloadSize, SendRequest, SentBy, StartRejection, Unknown_Data,
+    HerdrRoute, HerdrRouteSelection, Launch_Data, LaunchProfile, Layer, Message, Origin, Process,
+    QueueEntry, Recipient, Refusal, RememberedFlow, Request, Response, RouteReadiness,
+    SendPayloadSize, SendRequest, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -58,15 +59,8 @@ impl MeasuresSendPayload for Request {
 
 impl MeasuresSendPayload for Message {
     fn native_prompt_bytes(&self, sender: &Address) -> usize {
-        NativeInput {
-            logical_delivery_id: "logical-delivery-0000000000000000".into(),
-            sent_by: SentBy::Sender(sender.clone()),
-            message: self.clone(),
-        }
-        .datomize(Vec::new())
-        .protosize()
-        .compact()
-        .len()
+        let _ = sender;
+        self.native_content().len()
     }
 }
 

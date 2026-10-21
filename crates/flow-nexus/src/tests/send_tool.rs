@@ -667,17 +667,10 @@ impl SeatsAsleepTargets for NexusFixture {
     }
 }
 
-/// The Order a woken seat was handed, with its sender, counted in the user
-/// turns of its fresh session.
+/// The Order a woken seat was handed, counted by its recipient-facing text.
 fn handed_orders(fixture: &NexusFixture, world: &super::waking::FreshWorld, body: &str) -> usize {
     use super::waking::ReadsFreshWorld;
-    world
-        .user_turns(fixture)
-        .concat()
-        .matches(&format!(
-            "{{ Sender.{{ Mind alpha Tertiary }} Order.{body} }}"
-        ))
-        .count()
+    world.user_turns(fixture).concat().matches(body).count()
 }
 
 /// A call queued for an Asleep metaflow wakes it although the answer to the
@@ -1211,7 +1204,7 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     );
     let handed = super::waking::ReadsFreshWorld::user_turns(&world, &fixture)
         .concat()
-        .matches("{ Sender.{ Field flow Secondary } Order.first-turn-witness }")
+        .matches("first-turn-witness")
         .count();
     eprintln!("witness typed orders {handed}");
     assert_eq!(handed, 0);
@@ -1410,9 +1403,9 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// A woken or drained flow reads each queued request with who sent it.
+/// A woken or drained flow receives only recipient-facing message content.
 #[test]
-fn a_queued_request_is_rendered_with_its_sender() {
+fn a_queued_request_is_rendered_as_recipient_content_only() {
     use crate::composition::RendersQueuedWork;
     let queue = [
         queue_entry("render-1", sent(sender_a(), "Carry on.")),
@@ -1424,10 +1417,7 @@ fn a_queued_request_is_rendered_with_its_sender() {
         },
     ];
     let prompt = queue.prompt_text();
-    assert!(prompt.contains("render-1"));
-    assert!(prompt.contains("render-2"));
-    assert!(prompt.contains("Carry on."));
-    assert!(prompt.contains("Notice.kept"));
+    assert_eq!(prompt, "Carry on.\nkept");
 }
 
 /// The fixture's Codex seat 908786: its thread, and the Address its
@@ -1601,7 +1591,7 @@ fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
         !typed.contains("Your brief."),
         "second not offered before receipt: {typed}"
     );
-    assert!(typed.contains("Sender.{ Psyche core Secondary }"));
+    assert!(!typed.contains("Psyche core Secondary"));
     assert_eq!(fixture.seat_queue(), vec![psyche, brief]);
 }
 

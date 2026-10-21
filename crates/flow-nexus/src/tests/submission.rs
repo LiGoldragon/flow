@@ -449,6 +449,41 @@ fn a_draft_claudes_interrupt_put_back_is_never_taken_out() {
 }
 
 #[test]
+fn a_native_input_matching_a_letter_shaped_draft_is_never_retracted() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.working_agent(FixtureComposer::Claude)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    let text = "{ logical-delivery-00000000000000000001 Owner Soft.Order.same }";
+    fixture.interrupt_restores(FixtureComposer::Claude, text);
+    fixture.register_under(FixtureComposer::Claude);
+    let message = Message::HardAbrupt(Letter {
+        message_id: "logical-delivery-00000000000000000002".into(),
+        sender: Sender::Owner,
+        content: Content::NativeInput(signal_flow::NativeInput {
+            logical_delivery_id: "logical-delivery-00000000000000000002".into(),
+            sent_by: signal_flow::SentBy::Flow,
+            message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(text.into())),
+        }),
+    });
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                delivery_id: "native-letter-shaped-draft".into(),
+                flow_id: "908786".into(),
+                message,
+            })),
+        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
+    );
+    assert_eq!(fixture.key_presses(), ["esc esc"]);
+    assert_eq!(fixture.composer_holds().as_deref(), Some(text));
+    assert_eq!(fixture.typed(), None);
+}
+
+#[test]
 fn a_draft_an_interrupt_put_back_is_never_taken_out() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(

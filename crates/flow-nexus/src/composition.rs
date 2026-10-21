@@ -13,6 +13,7 @@
 //! rest fits.
 
 use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
+use crate::delivery::body::RendersNativeContent;
 pub use crate::generated::starter::{
     AssemblesComposedLaunch, CarriesFlowId, ComposesLaunch, ComposesVerifiedContext,
     ContextRequest, FitsOneMessage, HarnessedProfile, JoinsContextAndBrief, LeanStart,
@@ -502,15 +503,9 @@ impl ComposesLaunch for LaunchComposer {
     }
 }
 
-/// The text a metaflow's queued requests become in a flow's prompt: one
-/// opening line, then each queued request as its own datom, oldest first,
-/// each on a line of its own: who sent it, then the Request, as
-/// `{ Sender.{ Mind flow Tertiary } Order.«...» }`, `{ Flow ... }` for one
-/// Flow raised itself, or `{ Unknown ... }` for one queued before Flow kept
-/// senders. It is typed as the datom it is, as a
-/// Message is; a control character other than LF and TAB is a key to a
-/// harness, not a word, and is typed as U+FFFD. Work that carries the
-/// living's words ends with the presentation line.
+/// The recipient-facing content a metaflow's queued requests become in a
+/// flow's prompt, oldest first. Priority and sender accounting stay in the
+/// durable queue and never enter native user text.
 pub trait RendersQueuedWork {
     fn prompt_text(&self) -> String;
 }
@@ -522,22 +517,7 @@ impl RendersQueuedWork for [QueueEntry] {
             if index > 0 {
                 text.push('\n');
             }
-            text.extend(
-                signal_flow::NativeInput {
-                    logical_delivery_id: request.logical_delivery_id.clone(),
-                    sent_by: request.sent_by.clone(),
-                    message: request.message.clone(),
-                }
-                .datomize(Vec::new())
-                .protosize()
-                .compact()
-                .chars()
-                .map(|glyph| match glyph {
-                    '\n' | '\t' => glyph,
-                    glyph if glyph.is_control() => '\u{fffd}',
-                    glyph => glyph,
-                }),
-            );
+            text.push_str(&request.message.native_content());
         }
         text
     }
@@ -870,7 +850,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_request_flow_raised_names_flow_as_its_sender() {
+    fn native_queue_text_contains_only_the_recipient_facing_content() {
         use super::RendersQueuedWork;
         use signal_flow::{QueueEntry, Request, SentBy};
         let order = QueueEntry {
@@ -879,11 +859,7 @@ pub(crate) mod tests {
             delivery: signal_flow::Delivery::Queue,
             message: signal_flow::Message::Soft(Request::Order("investigate".into())),
         };
-        assert!(
-            [order]
-                .prompt_text()
-                .ends_with("{ logical-delivery-0000000000000001 Flow Soft.Order.investigate }")
-        );
+        assert_eq!([order].prompt_text(), "investigate");
     }
 
     #[test]

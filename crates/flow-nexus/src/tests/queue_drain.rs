@@ -260,10 +260,10 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 0);
     assert!(
-        fixture
+        !fixture
             .typed()
             .unwrap_or_default()
-            .contains("Sender.{ Psyche core Secondary }")
+            .contains("Psyche core Secondary")
     );
     assert_eq!(queue(&fixture), vec![second]);
     assert_eq!(
@@ -411,7 +411,9 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     let typed = fixture.typed().unwrap_or_default();
     assert!(typed.find("first-request-body") < typed.find("second-request-body"));
-    assert_eq!(typed.matches("Sender.{ Psyche core Secondary }").count(), 2);
+    assert_eq!(typed.matches("first-request-body").count(), 1);
+    assert_eq!(typed.matches("second-request-body").count(), 1);
+    assert!(!typed.contains("Psyche core Secondary"));
     assert_eq!(standings(&fixture), vec![]);
 }
 

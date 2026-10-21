@@ -3,16 +3,15 @@
 //!
 //! Three layers. Two make a harness command impossible by construction; the
 //! third reports intent.
-//! 1. Head first: Flow renders the typed Message, so the pane text always
-//!    begins `HardAbrupt.`, `MiddleAbrupt.` or `Soft.`, and no harness reads
-//!    a capital as a command.
+//! 1. Content only: NativeInput is rendered as its recipient-facing content,
+//!    never as a priority, sender, or identity envelope.
 //! 2. No keys in the text: no C0 control but LF and TAB, no DEL, no C1. That
 //!    excludes CR (a submit), ESC (an interrupt, or the `ESC[201~` that ends
 //!    a bracketed paste), Ctrl-C and Ctrl-D. Herdr 0.8.2 `agent prompt` was
 //!    witnessed passing an embedded `ESC[201~` and CR through unchanged
 //!    inside its own paste brackets, so this layer is what keeps them out.
-//! 3. Intent: a Content whose first line is a harness command (a sigil of
-//!    the recipient's profile, then a command word) is refused, telling the
+//! 3. Intent: content whose first line is a harness command (a sigil of the
+//!    recipient's profile, then a command word) is refused, telling the
 //!    sender to use Command. `!` is refused whatever follows it.
 
 use datom_codec::Datomizable;
@@ -36,12 +35,48 @@ impl ShowsPaneText for PaneText {
     }
 }
 
+/// The exact user-facing text carried by one native message, without its
+/// priority, sender, logical identity, or datom wrapper.
+pub trait RendersNativeContent {
+    fn native_content(&self) -> String;
+}
+
+impl RendersNativeContent for signal_flow::Request {
+    fn native_content(&self) -> String {
+        match self {
+            signal_flow::Request::Order(text)
+            | signal_flow::Request::Question(text)
+            | signal_flow::Request::Result(text)
+            | signal_flow::Request::Notice(text) => text.clone(),
+            signal_flow::Request::Psyche(said) if said.context.is_empty() => said.verbatim.clone(),
+            signal_flow::Request::Psyche(said) if said.verbatim.is_empty() => said.context.clone(),
+            signal_flow::Request::Psyche(said) => format!("{}\n{}", said.context, said.verbatim),
+            signal_flow::Request::Psyches(said) => said
+                .iter()
+                .map(
+                    |said| match (said.context.is_empty(), said.verbatim.is_empty()) {
+                        (true, _) => said.verbatim.clone(),
+                        (_, true) => said.context.clone(),
+                        (false, false) => format!("{}\n{}", said.context, said.verbatim),
+                    },
+                )
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
+impl RendersNativeContent for signal_flow::Message {
+    fn native_content(&self) -> String {
+        match self {
+            signal_flow::Message::HardAbrupt(request)
+            | signal_flow::Message::MiddleAbrupt(request)
+            | signal_flow::Message::Soft(request) => request.native_content(),
+        }
+    }
+}
+
 /// Renders a Message as the text typed into a pane.
-///
-/// Exception, noted here: the Nexus thinks in typed values and speaks no
-/// text on its wire, but a pane is a text boundary like a CLI. Flow renders
-/// this one type itself (F6) so that the Priority head is always the first
-/// byte in the pane; the rendering is the Message's own datom.
 pub trait RendersPaneText {
     fn pane_text(&self) -> PaneText;
     fn letter(&self) -> &Letter;
@@ -51,7 +86,7 @@ impl RendersPaneText for Message {
     fn pane_text(&self) -> PaneText {
         PaneText {
             text: match &self.letter().content {
-                Content::NativeInput(input) => input.datomize(Vec::new()).protosize().compact(),
+                Content::NativeInput(input) => input.message.native_content(),
                 _ => self.datomize(Vec::new()).protosize().compact(),
             },
         }
@@ -66,33 +101,24 @@ impl RendersPaneText for Message {
     }
 }
 
-/// Recognises, in text a composer holds, a letter Flow typed: every PaneText
-/// opens with its Priority head and then its MessageId.
+/// Recognises only a typed letter envelope in composer text. Bare NativeInput
+/// content has no such marker and is excluded by its caller.
 pub trait RecognizesLetter {
     fn opens_a_letter(&self) -> bool;
 }
 
 impl RecognizesLetter for str {
     fn opens_a_letter(&self) -> bool {
-        let logical_input = self
-            .strip_prefix("{ logical-delivery-")
-            .and_then(|tail| tail.get(..21))
-            .map(|identity| {
-                identity.as_bytes()[..20].iter().all(u8::is_ascii_digit)
-                    && identity.as_bytes()[20] == b' '
-            })
-            .unwrap_or(false);
-        logical_input
-            || [
-                "HardAbrupt.{ m-",
-                "MiddleAbrupt.{ m-",
-                "Soft.{ m-",
-                "HardAbrupt.{ send-",
-                "MiddleAbrupt.{ send-",
-                "Soft.{ send-",
-            ]
-            .iter()
-            .any(|head| self.starts_with(head))
+        [
+            "HardAbrupt.{ m-",
+            "MiddleAbrupt.{ m-",
+            "Soft.{ m-",
+            "HardAbrupt.{ send-",
+            "MiddleAbrupt.{ send-",
+            "Soft.{ send-",
+        ]
+        .iter()
+        .any(|head| self.starts_with(head))
     }
 }
 
@@ -113,14 +139,14 @@ impl VetsBody for Message {
         content
             .strings()
             .into_iter()
-            .find_map(|text| profile.command_line(text))
+            .find_map(|text| profile.command_line(&text))
             .map(BodyRefusal::HarnessCommand)
     }
 }
 
 trait ReadsContent {
     fn is_empty(&self) -> bool;
-    fn strings(&self) -> Vec<&str>;
+    fn strings(&self) -> Vec<String>;
 }
 
 impl ReadsContent for Content {
@@ -128,18 +154,22 @@ impl ReadsContent for Content {
     /// when the psyche's own words are.
     fn is_empty(&self) -> bool {
         match self {
-            Content::NativeInput(_) => false,
+            Content::NativeInput(input) => input.message.native_content().trim().is_empty(),
             Content::Text(text) => text.trim().is_empty(),
             Content::Psyche(psyche) => psyche.psyche_verbatim.trim().is_empty(),
         }
     }
 
-    fn strings(&self) -> Vec<&str> {
+    fn strings(&self) -> Vec<String> {
         match self {
-            // A declared NativeInput is data, not a raw harness command.
-            Content::NativeInput(_) => vec![],
-            Content::Text(text) => vec![text],
-            Content::Psyche(psyche) => vec![&psyche.psyche_context, &psyche.psyche_verbatim],
+            Content::NativeInput(input) => vec![input.message.native_content()],
+            Content::Text(text) => vec![text.clone()],
+            Content::Psyche(psyche) => {
+                vec![
+                    psyche.psyche_context.clone(),
+                    psyche.psyche_verbatim.clone(),
+                ]
+            }
         }
     }
 }
@@ -205,7 +235,8 @@ impl ReadsCommandLine for HarnessProfile {
 
 #[cfg(test)]
 mod tests {
-    use super::{RecognizesLetter, RendersPaneText, VetsBody};
+    use super::{RecognizesLetter, RendersNativeContent, RendersPaneText, VetsBody};
+    use crate::composition::RendersQueuedWork;
     use crate::delivery::body::ShowsPaneText;
     use crate::store::delivery::DefaultsHarnessProfile;
     use meta_signal_flow::{BodyRefusal, Content, Letter, Message, Psyche_Data, Sender};
@@ -253,12 +284,66 @@ mod tests {
 
     #[test]
     fn recognizes_the_actual_durable_logical_identity_shape() {
-        assert!("{ logical-delivery-00000000000000000001 Owner Soft.Order.work }".opens_a_letter());
+        assert!(
+            !"{ logical-delivery-00000000000000000001 Owner Soft.Order.work }".opens_a_letter()
+        );
         assert!(
             !"{ logical-delivery-0000000000000000000x Owner Soft.Order.work }".opens_a_letter()
         );
         assert!(
             !"{ logical-delivery-000000000000000000010 Owner Soft.Order.work }".opens_a_letter()
+        );
+    }
+
+    #[test]
+    fn native_input_renders_only_exact_recipient_content() {
+        let text = "keep «quotes» and { braces }\nand preserve the second line";
+        let request = signal_flow::Request::Order(text.into());
+        let message = Message::HardAbrupt(Letter {
+            message_id: "logical-delivery-00000000000000000001".into(),
+            sender: Sender::Owner,
+            content: Content::NativeInput(signal_flow::NativeInput {
+                logical_delivery_id: "logical-delivery-00000000000000000001".into(),
+                sent_by: signal_flow::SentBy::Flow,
+                message: signal_flow::Message::HardAbrupt(request.clone()),
+            }),
+        });
+        assert_eq!(request.native_content(), text);
+        assert_eq!(message.pane_text().as_str(), text);
+        assert_eq!(refusal(&message, HarnessKind::Codex), None);
+        assert_eq!(request.native_content().len(), text.len());
+        assert!(!text.opens_a_letter());
+        let entry = signal_flow::QueueEntry {
+            logical_delivery_id: "logical-delivery-00000000000000000001".into(),
+            sent_by: signal_flow::SentBy::Flow,
+            delivery: signal_flow::Delivery::Queue,
+            message: signal_flow::Message::HardAbrupt(request),
+        };
+        assert_eq!([entry].prompt_text(), text);
+    }
+
+    #[test]
+    fn native_content_commands_and_control_keys_are_still_refused() {
+        let native = |text: &str| {
+            Message::HardAbrupt(Letter {
+                message_id: "native-content".into(),
+                sender: Sender::Owner,
+                content: Content::NativeInput(signal_flow::NativeInput {
+                    logical_delivery_id: "native-content".into(),
+                    sent_by: signal_flow::SentBy::Flow,
+                    message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(
+                        text.into(),
+                    )),
+                }),
+            })
+        };
+        assert_eq!(
+            refusal(&native("/compact now"), HarnessKind::Claude),
+            Some(BodyRefusal::HarnessCommand("/compact now".into()))
+        );
+        assert_eq!(
+            refusal(&native("a\u{1b}b"), HarnessKind::Claude),
+            Some(BodyRefusal::ControlCharacter(1))
         );
     }
 

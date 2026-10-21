@@ -143,6 +143,27 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
         Response::Bound("877549".into())
     );
     assert_eq!(fixture.nexus.sending_address(&subagent).unwrap(), address);
+    // Message's authenticated Identify bridge uses the same root-aware
+    // kernel caller resolution as direct Flow Send, never a claimed seat.
+    use crate::metaflow::DispatchesMetaflowPeer;
+    let (_message_child, message) = super::waking::message_peer(&fixture);
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::Identify(subagent.clone()),
+                Some(&message)
+            )
+            .response,
+        Response::Identified(address.clone())
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(signal_flow::Query::Identify(orphan.clone()), Some(&message))
+            .response,
+        Response::Refused(Refusal::Unidentified(orphan.clone()))
+    );
     let awake = fixture.nexus.store.metaflow_awake_as("877549").unwrap();
     assert_eq!(awake.map(|metaflow| metaflow.address), Some(address));
 }

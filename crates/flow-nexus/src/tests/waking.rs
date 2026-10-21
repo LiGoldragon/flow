@@ -1503,7 +1503,7 @@ fn a_launch_takes_its_address_by_binds_rules() {
 /// and wakes that seat, which is handed the Order.
 /// Message, running as its own process and an ancestor of no seat, bound
 /// at Field message Primary as the configured Message Nexus binary.
-fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, signal_flow::Process) {
+pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, signal_flow::Process) {
     use crate::metaflow::DispatchesMetaflowPeer;
     use crate::store::metaflow::MutatesMetaflows;
     use crate::store::{FlowStore, ReadsFlowMemory};

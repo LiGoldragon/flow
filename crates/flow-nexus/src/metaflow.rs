@@ -1,5 +1,6 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
-use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane};
+use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane, NamesRootThread};
+use crate::sending::IdentifiesSender;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
@@ -94,7 +95,8 @@ impl IdentifiesThread for RunningNexus {
             }
             SendServerTrust::Trusted => {}
         }
-        match self.store.thread_metaflow(&native_session_id)? {
+        let root_thread = self.codex_endpoints.root_thread(&native_session_id);
+        match self.store.thread_metaflow(&root_thread)? {
             Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))
             }
@@ -148,7 +150,10 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Err(error) => return Response::Refused(Refusal::Store(error.to_string())).into(),
             }
             match query {
-                Query::Identify(process) => self.identify_peer_process(process),
+                Query::Identify(process) => Ok(match self.sending_address(&process) {
+                    Ok(address) => Response::Identified(address),
+                    Err(response) => *response,
+                }),
                 Query::IdentifyThread(request) => self.identify_thread(request),
                 Query::Lock(request) => self.store.lock_metaflow(request, now),
                 Query::Deliver(request) => {

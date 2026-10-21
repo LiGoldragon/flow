@@ -7580,6 +7580,21 @@ mod tests {
             another_host.current_process_state(),
             NativeOwnerState::Unknown
         );
+        // An unavailable process observation is not evidence of death.
+        let mut unavailable = another_host;
+        unavailable.host_id = fs::read_to_string("/etc/machine-id")
+            .expect("host identity")
+            .trim()
+            .to_owned();
+        unavailable.boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .expect("boot identity")
+            .trim()
+            .to_owned();
+        unavailable.process_id = -1;
+        assert_eq!(
+            unavailable.current_process_state(),
+            NativeOwnerState::Unknown
+        );
     }
 
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};

@@ -2806,6 +2806,71 @@ mod tests {
     }
 
     #[test]
+    fn adoption_refuses_a_different_live_address_owner_without_mutation() {
+        let fixture = NexusFixture::new();
+        let socket_path = fixture.directory.path().join("herdr-live-owner.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
+        let address = signal_flow::Address {
+            aspect: Aspect::Mind,
+            topic: "core".into(),
+            layer: Layer::Secondary,
+        };
+        let incumbent = existing_binding("incumbent-live", "pane-incumbent");
+        let incumbent_result = with_bound_world(&fixture, &[&incumbent], || {
+            fixture.nexus.dispatch_meta_from(
+                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                    flow_container: flow_container(&socket_path),
+                    address: address.clone(),
+                    flow_binding: incumbent.clone(),
+                }),
+                Some(adoption_resolver()),
+            )
+        });
+        assert!(matches!(
+            incumbent_result,
+            meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
+                flow_binding_result: meta_signal_flow::FlowBindingResult::Bound(_),
+                ..
+            })
+        ));
+        let original = fixture.nexus.store.list_metaflows().unwrap();
+
+        let challenger = existing_binding("challenger-live", "pane-challenger");
+        let response = with_bound_world(&fixture, &[&challenger], || {
+            fixture.nexus.dispatch_meta_from(
+                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
+                    flow_container: flow_container(&socket_path),
+                    address: address.clone(),
+                    flow_binding: challenger,
+                }),
+                Some(adoption_resolver()),
+            )
+        });
+        assert!(matches!(
+            response,
+            meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
+                flow_binding_result: meta_signal_flow::FlowBindingResult::Refused(
+                    meta_signal_flow::RefusedFlowBinding {
+                        flow_binding_refusal_reason:
+                            meta_signal_flow::FlowBindingRefusalReason::AddressOwnerLive,
+                        ..
+                    }
+                ),
+                ..
+            })
+        ));
+        assert_eq!(fixture.nexus.store.list_metaflows().unwrap(), original);
+        assert!(matches!(
+            fixture
+                .nexus
+                .dispatch(Query::ResolveRecipient("challenger-live".into())),
+            Response::RecipientResolutionRejected(
+                signal_flow::RecipientResolutionRejection::UnknownFlow
+            )
+        ));
+    }
+
+    #[test]
     fn adoption_refuses_an_address_whose_role_does_not_match_without_partial_rows() {
         use crate::store::ManagesMetaflowState;
         let fixture = NexusFixture::new();

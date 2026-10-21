@@ -2654,7 +2654,7 @@ mod tests {
                 meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
                     flow_container: flow_container(&socket_path),
                     address,
-                    flow_binding: binding,
+                    flow_binding: binding.clone(),
                 }),
                 Some(meta_signal_flow::ResolverIdentity {
                     process_identity: current_process_identity(),
@@ -2730,7 +2730,7 @@ mod tests {
                 meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
                     flow_container: flow_container(&socket_path),
                     address: address.clone(),
-                    flow_binding: binding,
+                    flow_binding: binding.clone(),
                 }),
                 Some(adoption_resolver()),
             )
@@ -2807,6 +2807,7 @@ mod tests {
 
     #[test]
     fn adoption_refuses_a_different_live_address_owner_without_mutation() {
+        use crate::store::ManagesMetaflowState;
         let fixture = NexusFixture::new();
         let socket_path = fixture.directory.path().join("herdr-live-owner.sock");
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");

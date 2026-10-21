@@ -1,9 +1,8 @@
 //! Wake and drain against the fixture Herdr: an idle seat of any layer and
 //! either harness keeps its pane and stays Awake, and work queued for it is
 //! handed into that pane; a seat whose pane is gone is Asleep, and a queued
-//! request wakes a fresh flow composed from the metaflow's last launch, with
-//! the whole queue, oldest first, in its first prompt; what arrives during
-//! the wake is handed to it after.
+//! request wakes a fresh flow composed from the metaflow's last launch;
+//! queued work remains durable until native history receipts it.
 
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::RunningNexus;
@@ -324,6 +323,7 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
 /// A flow whose pane is gone, closed by the living or crashed, is Asleep
 /// once work for it finds the pane gone: its flow is recorded Exited and
 /// joins Past, and the Order wakes a fresh flow on a new native session.
+/// The queued Order remains durable until native history receipts it.
 #[test]
 fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     let mut fixture = NexusFixture::new();
@@ -368,22 +368,13 @@ fn a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh() {
     assert_ne!(flow_id, "abc123", "a new flow");
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert_ne!(world.session(), seat.session, "a new native session");
-    assert!(woken.queue.is_empty());
-    let turns = world.user_turns(&fixture);
-    assert!(
-        queue.iter().all(|request| {
-            let text = vec![request.clone()].unsent().prompt_text();
-            turns.iter().any(|turn| *turn == text)
-        }),
-        "{turns:?}"
-    );
+    assert_eq!(woken.queue, queue.clone().unsent());
 }
 
 /// An Order queued for an Asleep Primary wakes it as it wakes any layer:
 /// a fresh flow on the Primary's configured model, on a new native
-/// session, its first prompt carrying the Order. Its Secondary is recorded,
-/// as it is for every Primary once started, so the fresh start is not
-/// refused NoSecondary.
+/// session. The queued Order remains durable until native history receipts
+/// it. Its Secondary is recorded as every Primary starts.
 #[test]
 fn an_order_wakes_an_asleep_primary_fresh() {
     let mut fixture = NexusFixture::new();
@@ -426,23 +417,15 @@ fn an_order_wakes_an_asleep_primary_fresh() {
         );
     };
     assert_ne!(flow_id, "abc123");
-    assert!(woken.queue.is_empty());
+    assert_eq!(woken.queue, queue.clone().unsent());
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
     assert_ne!(world.session(), seat.session);
     let node = fixture.nexus.store.flow_node(flow_id).unwrap().unwrap();
     assert_eq!(node.session_id, world.session());
-    let turns = world.user_turns(&fixture);
-    assert!(
-        queue.iter().all(|request| {
-            let text = vec![request.clone()].unsent().prompt_text();
-            turns.iter().any(|turn| *turn == text)
-        }),
-        "{turns:?}"
-    );
 }
 
-/// A seat that goes idle with work queued is handed the oldest request,
-/// stays awake, and the rest waits for its next Stop.
+/// A seat that goes idle with work queued starts a native hand-over but
+/// keeps the request queued until native history receipts it.
 #[test]
 fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake() {
     let fixture = NexusFixture::new();
@@ -461,22 +444,29 @@ fn a_resting_seat_with_work_queued_is_handed_the_oldest_request_and_stays_awake(
         ],
     ));
 
-    assert_eq!(
+    assert!(matches!(
         fixture.nexus.settle_stopped(CLAUDE_SEAT),
-        AtStop::Drained(Request::Notice("first".into()).unsent())
-    );
+        AtStop::Kept(KeptAtStop::DrainRefused(outcome))
+            if matches!(*outcome, Outcome::WaitingForTurn(_))
+    ));
     let kept = stored(&fixture, Layer::Secondary);
     assert_eq!(kept.state, State::Awake(CLAUDE_SEAT.into()));
-    assert_eq!(kept.queue, vec![Request::Result("second".into())].unsent());
+    assert_eq!(
+        kept.queue,
+        vec![
+            Request::Notice("first".into()),
+            Request::Result("second".into())
+        ]
+        .unsent()
+    );
     assert!(!closes(&fixture), "it keeps its pane");
     let typed = fixture.typed().expect("typed into the pane");
-    assert!(typed.contains("first"));
+    assert!(!typed.contains("first"), "the request is not yet accepted");
     assert!(!typed.contains("second"), "one request per Stop");
 }
 
-/// An explicit all-queue delivery uses each request's native receipt before
-/// advancing, preserving order and emptying the durable queue when every
-/// hand-over is witnessed.
+/// An explicit all-queue delivery preserves the durable queue until each
+/// native history receipt exists.
 #[test]
 fn explicit_delivery_hands_over_every_queued_request_in_order() {
     let fixture = NexusFixture::new();
@@ -496,11 +486,12 @@ fn explicit_delivery_hands_over_every_queued_request_in_order() {
 
     assert_eq!(
         fixture.nexus.drain_all(address(Layer::Secondary)),
-        Outcome::Drained(vec![first, second])
+        Outcome::WaitingForTurn(first.logical_delivery_id.clone())
     );
-    assert!(stored(&fixture, Layer::Secondary).queue.is_empty());
-    let typed = fixture.typed().expect("both requests typed");
-    assert!(typed.find("first") < typed.find("second"));
+    assert_eq!(
+        stored(&fixture, Layer::Secondary).queue,
+        vec![first, second]
+    );
 }
 
 /// A Claude agent Herdr shows Working, as its screen reads while its main
@@ -1173,29 +1164,16 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
         world.calls()
     );
     assert!(!world.calls().contains(&seat.session), "{}", world.calls());
-    let turns = world.user_turns(&fixture);
     let expected = [
         Request::Order("A".into()),
         Request::Notice("B".into()),
         Request::Question("C".into()),
         Request::Order("D".into()),
     ];
-    let positions = expected.map(|request| {
-        let text = vec![request].unsent().prompt_text();
-        turns
-            .iter()
-            .position(|turn| *turn == text)
-            .unwrap_or_else(|| panic!("queued request handed over after wake: {turns:?}"))
-    });
-    assert!(
-        positions.windows(2).all(|pair| pair[0] < pair[1]),
-        "{turns:?}"
-    );
-
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
     assert_eq!(woken.past, vec!["abc123".to_owned()]);
-    assert!(woken.queue.is_empty());
+    assert_eq!(woken.queue, expected.to_vec().unsent());
     let node = fixture.nexus.store.flow_node(&flow_id).unwrap().unwrap();
     assert_eq!(node.session_id, new_session);
     assert_eq!(node.harness_kind, HarnessKind::Claude);
@@ -1226,7 +1204,7 @@ fn a_wake_that_cannot_start_puts_the_work_back_and_stays_asleep() {
 
 /// A wake the last Nexus did not finish left its work queued: the next
 /// Nexus wakes the seat at its start, once, as a fresh flow, and the work
-/// leaves the queue only with the write that records the seat Awake. A
+/// remains queued until native history receipts it. A
 /// metaflow holding only a Result is not due; a Primary holding an Order is
 /// due as any layer is, and with no launch of record to compose from it
 /// keeps its work queued.
@@ -1268,15 +1246,7 @@ fn a_nexus_start_wakes_a_seat_whose_wake_did_not_finish() {
         panic!("the seat wakes: {woken:?}; Herdr calls: {}", world.calls());
     };
     assert_ne!(flow_id, "abc123");
-    assert!(woken.queue.is_empty());
-    let turns = world.user_turns(&fixture);
-    assert!(
-        queue.iter().all(|request| {
-            let text = vec![request.clone()].unsent().prompt_text();
-            turns.iter().any(|turn| *turn == text)
-        }),
-        "{turns:?}"
-    );
+    assert_eq!(woken.queue, queue.clone().unsent());
     assert_eq!(world.claude_starts(), 1, "woken once: {}", world.calls());
     assert_eq!(stored(&fixture, Layer::Tertiary).state, State::Asleep);
     let primary = stored(&fixture, Layer::Primary);
@@ -1801,19 +1771,20 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         );
     };
     assert_ne!(flow_id, "abc123", "a fresh flow");
-    assert!(woken.queue.is_empty());
-    // The woken flow reads the Order with the Sender its Lock named.
+    // The woken flow keeps the Order with the Sender its Lock named until
+    // native history records the exact prompt.
     let sent = QueueEntry {
         logical_delivery_id: acceptance.logical_delivery_id,
         sent_by: SentBy::Sender(sender_address.clone()),
         delivery: Delivery::Wake,
         message: Message::Soft(order.clone()),
     };
+    assert_eq!(woken.queue, vec![sent.clone()]);
     let turns = world.user_turns(&fixture);
     assert!(
         turns
             .iter()
-            .any(|turn| turn.contains(&[sent.clone()].prompt_text())),
+            .all(|turn| !turn.contains(&[sent.clone()].prompt_text())),
         "{turns:?}"
     );
 }
@@ -3377,6 +3348,8 @@ impl SetsUpFirstTurnSend for NexusFixture {
                         "topic": recipient.topic,
                         "layer": format!("{:?}", recipient.layer)
                     },
+                    "delivery": "Wake",
+                    "priority": "Soft",
                     "kind": "Order",
                     "body": FIRST_CALL_BODY
                 }

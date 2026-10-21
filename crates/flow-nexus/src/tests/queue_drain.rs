@@ -229,10 +229,10 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
 
 /// The seat's main turn ended while a background agent still runs: its
 /// sidechain rows follow the main `end_turn` and Herdr shows Working. Its
-/// own Stop hands it the oldest request; a Stop of another session does
-/// nothing.
+/// own Stop starts its oldest request's hand-over; without a native user
+/// history receipt both entries remain queued. A foreign Stop does nothing.
 #[test]
-fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
+fn a_claude_main_end_turn_with_a_running_sidechain_keeps_unreceived_work() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![working_claude_agent(&fixture)],
@@ -265,7 +265,7 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
             .unwrap_or_default()
             .contains("Sender.{ Psyche core Secondary }")
     );
-    assert_eq!(queue(&fixture), vec![second], "settled on its receipt");
+    assert_eq!(queue(&fixture), vec![first, second]);
     assert_eq!(
         stored(&fixture, Layer::Secondary).state,
         State::Awake(CLAUDE_SEAT.into())
@@ -325,8 +325,25 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
     );
     assert_eq!(
         queue(&fixture),
+        vec![first.clone(), second.clone()],
+        "the prompt hook is not native-history receipt"
+    );
+    assert!(matches!(
+        standings(&fixture).as_slice(),
+        [QueueDeliveryStanding::Uncertain(_)]
+    ));
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-first",
+            "message":{"content":typed_text(&first)}}),
+        ],
+    );
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(
+        queue(&fixture),
         vec![second.clone()],
-        "settled on its receipt"
+        "settled only after native history contains the exact prompt"
     );
     let SentBy::Sender(first_sender) = first.sent_by.clone() else {
         panic!("first queued request has a sender")
@@ -359,20 +376,22 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
     assert_eq!(typed_count(&fixture, "second-request-body"), 0);
 
     // The first request's own turn runs and ends.
-    append_main_rows(
-        &fixture,
-        &[
-            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-first",
-                "message":{"content":typed_text(&first)}}),
-            end_turn("first-answered"),
-        ],
-    );
+    append_main_rows(&fixture, &[end_turn("first-answered")]);
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     report(
         &fixture,
         submitted(CLAUDE_SESSION, "prompt-second", &typed_text(&second)),
     );
+    assert_eq!(queue(&fixture), vec![second.clone()]);
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-second",
+            "message":{"content":typed_text(&second)}}),
+        ],
+    );
+    report(&fixture, claude_stop(&fixture));
     assert_eq!(queue(&fixture), vec![]);
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
@@ -503,7 +522,8 @@ fn a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_t
 }
 
 /// A hand-over Herdr refuses before any text reaches the pane is proved
-/// absent: a new attempt carries the request at the next turn end.
+/// absent, authorizing one retry. That retry remains queued until its native
+/// history receipt.
 #[test]
 fn a_hand_over_refused_before_input_is_absent_and_handed_over_again() {
     let fixture = NexusFixture::new();
@@ -529,7 +549,11 @@ fn a_hand_over_refused_before_input_is_absent_and_handed_over_again() {
     );
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![]);
+    assert_eq!(queue(&fixture), vec![first]);
+    assert!(matches!(
+        standings(&fixture).as_slice(),
+        [QueueDeliveryStanding::Uncertain(_)]
+    ));
 }
 
 /// A Stop of the seat's own session recorded before its launch was
@@ -845,10 +869,10 @@ fn a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attemp
             ResolveQueueDeliveryRejected_Data::NativeReceiptRequired
         )
     );
-    assert_eq!(
+    assert!(matches!(
         resolve(&fixture, &attempt, QueueResolutionOutcome::Absent, "again"),
-        MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotUncertain)
-    );
+        MetaResponse::QueueDeliveryResolved(_)
+    ));
 }
 
 /// A resting Claude seat resolved Absent is handed the request at once,
@@ -895,13 +919,13 @@ fn a_working_claude_seat_resolved_absent_waits_for_its_turn_end() {
 }
 
 /// A resting seat cannot advance after an owner asserts Delivered without
-/// an exact native receipt.
+/// an exact native receipt; the uncertain entry remains queued.
 #[test]
 fn a_resting_claude_seat_does_not_advance_after_unwitnessed_delivered_resolution() {
     let fixture = NexusFixture::new();
     let first = from_core("first-request-body");
     let second = from_core("second-request-body");
-    let attempt = stuck_hand_over(&fixture, vec![first, second.clone()]);
+    let attempt = stuck_hand_over(&fixture, vec![first.clone(), second.clone()]);
 
     assert_eq!(
         resolve_served(&fixture, &attempt, QueueResolutionOutcome::Delivered),
@@ -911,5 +935,5 @@ fn a_resting_claude_seat_does_not_advance_after_unwitnessed_delivered_resolution
     );
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 0);
-    assert_eq!(queue(&fixture), vec![second]);
+    assert_eq!(queue(&fixture), vec![first, second]);
 }

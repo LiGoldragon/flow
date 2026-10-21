@@ -4493,7 +4493,7 @@ mod tests {
                 .expect("metaflow held")
                 .queue,
             vec![QueueEntry {
-                logical_delivery_id: "logical-delivery-0000000000000001".into(),
+                logical_delivery_id: "logical-delivery-00000000000000000001".into(),
                 sent_by: SentBy::Sender(sender),
                 delivery: Delivery::Queue,
                 message: Message::Soft(order.clone()),

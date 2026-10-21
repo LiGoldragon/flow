@@ -15,6 +15,7 @@ use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
 use crate::composition::RendersQueuedWork;
 use crate::reporting::RecordsReports;
+use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::SeedsMetaflow;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::waking::{ReconcilesQueueDelivery, SettlesStopsAtConfirmation};
@@ -144,6 +145,84 @@ fn standings(fixture: &NexusFixture) -> Vec<QueueDeliveryStanding> {
     }
 }
 
+#[test]
+fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
+    let fixture = NexusFixture::new();
+    let target = address(Layer::Secondary);
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: target.clone(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let sender = Address {
+        aspect: Aspect::Psyche,
+        topic: "core".into(),
+        layer: Layer::Secondary,
+    };
+    let other_sender = Address {
+        aspect: Aspect::Mind,
+        topic: "core".into(),
+        layer: Layer::Secondary,
+    };
+    let Response::SendAccepted(accepted) = fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &target,
+            SentBy::Sender(sender.clone()),
+            Delivery::Queue,
+            Message::Soft(Request::Notice("cursor witness".into())),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("admission is accepted")
+    };
+
+    let first = fixture
+        .nexus
+        .store
+        .transition_logical_delivery(
+            &accepted.logical_delivery_id,
+            signal_flow::DeliveryState::Attempting,
+        )
+        .unwrap();
+    let duplicate = fixture
+        .nexus
+        .store
+        .transition_logical_delivery(
+            &accepted.logical_delivery_id,
+            signal_flow::DeliveryState::Attempting,
+        )
+        .unwrap();
+    assert_eq!(duplicate, first, "identical transition is idempotent");
+
+    let current = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(&sender, None)
+        .unwrap();
+    assert_eq!(current.delivery_cursor, first.delivery_cursor);
+    assert_eq!(current.delivery_snapshot_vector, vec![first.clone()]);
+
+    let replay = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(&sender, Some(accepted.delivery_cursor))
+        .unwrap();
+    assert_eq!(replay.delivery_cursor, first.delivery_cursor);
+    assert_eq!(replay.delivery_snapshot_vector, vec![first]);
+
+    let filtered = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(&other_sender, None)
+        .unwrap();
+    assert_eq!(filtered.delivery_cursor, current.delivery_cursor);
+    assert!(filtered.delivery_snapshot_vector.is_empty());
+}
+
 /// The seat's main turn ended while a background agent still runs: its
 /// sidechain rows follow the main `end_turn` and Herdr shows Working. Its
 /// own Stop hands it the oldest request; a Stop of another session does
@@ -245,11 +324,34 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
         vec![second.clone()],
         "settled on its receipt"
     );
+    let SentBy::Sender(first_sender) = first.sent_by.clone() else {
+        panic!("first queued request has a sender")
+    };
+    let settled = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(&first_sender, None)
+        .unwrap();
+    assert!(matches!(
+        settled.delivery_snapshot_vector.as_slice(),
+        [snapshot]
+            if snapshot.logical_delivery_id == first.logical_delivery_id
+                && matches!(&snapshot.delivery_state, signal_flow::DeliveryState::Delivered(_))
+    ));
     report(
         &fixture,
         submitted(CLAUDE_SESSION, "prompt-first", &typed_text(&first)),
     );
     assert_eq!(queue(&fixture), vec![second.clone()]);
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .read_logical_delivery_snapshots(&first_sender, None)
+            .unwrap(),
+        settled,
+        "duplicate exact native receipt changes neither state nor cursor"
+    );
     assert_eq!(typed_count(&fixture, "second-request-body"), 0);
 
     // The first request's own turn runs and ends.

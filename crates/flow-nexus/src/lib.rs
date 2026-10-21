@@ -1212,6 +1212,7 @@ mod tests {
     #[test]
     fn metaflows_do_not_advertise_undeclared_sleeping_history() {
         use crate::store::metaflow::SeedsMetaflow;
+        use crate::store::ManagesMetaflowState;
         let fixture = NexusFixture::new();
         let address = signal_flow::Address {
             aspect: Aspect::Psyche,

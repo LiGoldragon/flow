@@ -269,7 +269,7 @@ impl Dispatches for RunningNexus {
                         // An undeclared sleeping row is history, not an address
                         // an ordinary caller can launch. Keep its durable past
                         // without advertising it as an available metaflow.
-                        if matches!(metaflow.state, signal_flow::MetaflowState::Awake(_))
+                        if matches!(metaflow.state, flow_ethos::State::Awake(_))
                             || self
                                 .store
                                 .metaflow_declaration(&metaflow.address)?
@@ -1221,7 +1221,7 @@ mod tests {
         };
         let history = signal_flow::Metaflow {
             address: address.clone(),
-            state: signal_flow::MetaflowState::Asleep,
+            state: flow_ethos::State::Asleep,
             past: vec!["abcdef".into()],
             queue: vec![],
         };
@@ -1235,7 +1235,7 @@ mod tests {
             vec![history.clone()]
         );
         fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
-            state: signal_flow::MetaflowState::Awake("123abc".into()),
+            state: flow_ethos::State::Awake("123abc".into()),
             ..history
         });
         let Response::Listed(listed) = fixture.nexus.dispatch(Query::Metaflows) else {

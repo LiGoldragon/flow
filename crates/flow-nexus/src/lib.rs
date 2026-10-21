@@ -1219,7 +1219,10 @@ mod tests {
     mod submission;
     mod waking;
 
-    use super::{Arc, Connection, Dispatches, ReconcilesListedFlows, RunningNexus, UnixStream};
+    use super::{
+        Arc, CarriesSignalFrames, Connection, Dispatches, ReconcilesListedFlows, RunningNexus,
+        ServesConnection, UnixStream,
+    };
     use crate::caller::{
         CallerPane, CallerProcess, IdentifiesPeer, LocatesCallerPane, ReadsProcess, ResolvesCaller,
     };

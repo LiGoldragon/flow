@@ -190,7 +190,7 @@ impl RecordsReports for RunningNexus {
                     flow_id: attempt.flow_id,
                     native_session_id: attempt.thread_id,
                     harness_kind: attempt.harness_kind,
-                    queued_request: attempt.queued,
+                    queue_evidence: attempt.queue_evidence,
                     queue_delivery_standing,
                 })
             })

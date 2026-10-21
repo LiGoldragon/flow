@@ -23,20 +23,21 @@ use crate::delivery::DeliversMessages;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::metaflow::IdentifiesPeerProcess;
+use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::send_outcome::RecordsSendOutcomes;
-use crate::store::sent::{NamesCodexAppServers, QueuesSentRequests};
+use crate::store::sent::NamesCodexAppServers;
 use crate::store::{FlowRegistration, NamesConfiguredModel, RegistersExistingFlow};
 use crate::waking::{PerformsWakeAndDrain, RestsEndedAwake, SleepsAndWakesSeats, WakePolicy};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Caller, Delivery, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, Launch_Data, LaunchProfile, Layer, Message, Origin, Process,
-    QueuedRequest, Recipient, Refusal, RememberedFlow, Request, Response, RouteReadiness,
-    Send_Data, SendPayloadSize, SentBy, StartRejection, Unknown_Data,
+    HerdrRoute, HerdrRouteSelection, Launch_Data, LaunchProfile, Layer, Message, NativeInput,
+    Origin, Process, QueueEntry, Recipient, Refusal, RememberedFlow, Request, Response,
+    RouteReadiness, SendPayloadSize, SendRequest, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -50,11 +51,20 @@ pub trait MeasuresSendPayload {
 
 impl MeasuresSendPayload for Request {
     fn native_prompt_bytes(&self, sender: &Address) -> usize {
-        [QueuedRequest {
+        Message::Soft(self.clone()).native_prompt_bytes(sender)
+    }
+}
+
+impl MeasuresSendPayload for Message {
+    fn native_prompt_bytes(&self, sender: &Address) -> usize {
+        NativeInput {
+            logical_delivery_id: "logical-delivery-0000000000000000".into(),
             sent_by: SentBy::Sender(sender.clone()),
-            request: self.clone(),
-        }]
-        .prompt_text()
+            message: self.clone(),
+        }
+        .datomize(Vec::new())
+        .protosize()
+        .compact()
         .len()
     }
 }
@@ -65,6 +75,16 @@ pub trait AdmitsSendPayload {
 }
 
 impl AdmitsSendPayload for Request {
+    fn oversized_refusal(&self, sender: &Address) -> Option<Refusal> {
+        let actual_bytes = self.native_prompt_bytes(sender);
+        (actual_bytes > MAX_SEND_PAYLOAD_BYTES).then_some(Refusal::Oversized(SendPayloadSize {
+            actual_bytes: i64::try_from(actual_bytes).unwrap_or(i64::MAX),
+            maximum_bytes: MAX_SEND_PAYLOAD_BYTES as i64,
+        }))
+    }
+}
+
+impl AdmitsSendPayload for Message {
     fn oversized_refusal(&self, sender: &Address) -> Option<Refusal> {
         let actual_bytes = self.native_prompt_bytes(sender);
         (actual_bytes > MAX_SEND_PAYLOAD_BYTES).then_some(Refusal::Oversized(SendPayloadSize {
@@ -150,19 +170,28 @@ impl NamesLayerAbove for Layer {
 }
 
 /// What a Send answers.
+pub struct PendingSend {
+    pub address: Address,
+    pub delivery: Delivery,
+}
+
 pub struct SendAnswer {
     pub response: Response,
+    pub pending: Option<PendingSend>,
 }
 
 impl From<Response> for SendAnswer {
     fn from(response: Response) -> Self {
-        Self { response }
+        Self {
+            response,
+            pending: None,
+        }
     }
 }
 
 pub trait SendsRequests {
     /// Answers a Send from `peer`, under the dispatch gate.
-    fn send_request(&self, send: Send_Data, peer: Option<&Process>) -> SendAnswer;
+    fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer;
     /// Delivers every durable request currently queued at `address`.
     fn deliver_all(&self, address: Address, peer: Option<&Process>) -> Response;
     /// The flow the metaflow at `address` is Awake as, when it is live.
@@ -170,7 +199,7 @@ pub trait SendsRequests {
 }
 
 impl SendsRequests for RunningNexus {
-    fn send_request(&self, send: Send_Data, peer: Option<&Process>) -> SendAnswer {
+    fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
         use sha2::{Digest, Sha256};
 
         let digest_text = send.datomize(Vec::new()).protosize().compact();
@@ -211,15 +240,7 @@ impl SendsRequests for RunningNexus {
                 Ok(sender) => sender,
                 Err(refusal) => return (*refusal).into(),
             };
-            let request = match &send.message {
-                Message::HardAbrupt(request)
-                | Message::MiddleAbrupt(request)
-                | Message::Soft(request) => request,
-            };
-            if let Some(refusal) = request.oversized_refusal(&sender) {
-                return Response::Refused(refusal).into();
-            }
-            let delivery = send.delivery;
+            let delivery = send.delivery.clone();
             let recipient = match send.recipient {
                 Recipient::Address(address) => address,
                 Recipient::Up => match sender.layer.above() {
@@ -231,31 +252,25 @@ impl SendsRequests for RunningNexus {
                     None => return Response::Refused(Refusal::NoneAbove).into(),
                 },
             };
-            // A metaflow left Awake as an ended flow is Asleep for what follows.
             self.rest_ended_awake(&recipient);
-            let (abrupt, request) = match send.message {
-                Message::HardAbrupt(request) => (Some(true), request),
-                Message::MiddleAbrupt(request) => (Some(false), request),
-                Message::Soft(request) => (None, request),
-            };
-            if let Some(hard) = abrupt
-                && let Some(flow_id) = self.live_awake_flow(&recipient)
-                && let Some(response) = self.deliver_abruptly(&sender, &flow_id, hard, &request)
-            {
-                return response.into();
-            }
-            let answer = match self.store.queue_sent(&sender, &recipient, request, now) {
-                Ok(Response::Queued) => SendAnswer {
-                    response: Response::Queued,
-                },
-                Ok(response) => response.into(),
+            let answer = match self.store.accept_logical_delivery(
+                &recipient,
+                SentBy::Sender(sender),
+                delivery.clone(),
+                send.message,
+                None,
+            ) {
+                Ok(response) => {
+                    let pending =
+                        matches!(response, Response::SendAccepted(_)).then(|| PendingSend {
+                            address: recipient.clone(),
+                            delivery: delivery.clone(),
+                        });
+                    SendAnswer { response, pending }
+                }
                 Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
             };
-            let queued = answer.response == Response::Queued;
             drop(_turn);
-            if queued && delivery == Delivery::Wake {
-                self.wake_due(recipient);
-            }
             answer
         })();
         match self.store.record_send_outcome(
@@ -268,9 +283,9 @@ impl SendsRequests for RunningNexus {
             Ok(_) => answer,
             Err(error) => {
                 eprintln!("send outcome journal failed: {error}");
-                SendAnswer {
-                    response: Response::Refused(Refusal::Store(error.to_string())),
-                }
+                // The logical acceptance/event is already durable. Do not
+                // turn an admitted request into a false admission refusal.
+                answer
             }
         }
     }
@@ -302,7 +317,10 @@ impl SendsRequests for RunningNexus {
         let asleep = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => {
                 if metaflow.queue.is_empty() {
-                    return Response::Delivered;
+                    return Response::Drained(signal_flow::DrainOutcome {
+                        address: address.clone(),
+                        drain_state: signal_flow::DrainState::Delivered,
+                    });
                 }
                 metaflow.state == flow_ethos::State::Asleep
             }
@@ -311,6 +329,9 @@ impl SendsRequests for RunningNexus {
             }
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
         };
+        if let Err(error) = self.store.force_queue_wake(&address) {
+            return Response::Refused(Refusal::Store(error.to_string()));
+        }
         if !asleep {
             self.drain_all(address.clone());
         }
@@ -319,73 +340,24 @@ impl SendsRequests for RunningNexus {
             self.wake_due(address.clone());
         }
         match self.store.metaflow(&address) {
-            Ok(Some(metaflow)) if metaflow.queue.is_empty() => Response::Delivered,
-            Ok(Some(_)) => Response::Queued,
+            Ok(Some(metaflow)) if metaflow.queue.is_empty() => {
+                Response::Drained(signal_flow::DrainOutcome {
+                    address: address.clone(),
+                    drain_state: signal_flow::DrainState::Delivered,
+                })
+            }
+            Ok(Some(metaflow)) => Response::Drained(signal_flow::DrainOutcome {
+                address: address.clone(),
+                drain_state: signal_flow::DrainState::Held(
+                    metaflow
+                        .queue
+                        .iter()
+                        .map(|entry| entry.logical_delivery_id.clone())
+                        .collect(),
+                ),
+            }),
             Ok(None) => Response::Refused(Refusal::Unknown(Unknown_Data::Address(address))),
             Err(error) => Response::Refused(Refusal::Store(error.to_string())),
-        }
-    }
-}
-
-trait DeliversAbruptly {
-    /// Types the request into the live flow's pane under its Priority head;
-    /// None when the pane refused it, so the caller queues it instead.
-    fn deliver_abruptly(
-        &self,
-        sender: &Address,
-        flow_id: &str,
-        hard: bool,
-        request: &Request,
-    ) -> Option<Response>;
-}
-
-impl DeliversAbruptly for RunningNexus {
-    fn deliver_abruptly(
-        &self,
-        sender: &Address,
-        flow_id: &str,
-        hard: bool,
-        request: &Request,
-    ) -> Option<Response> {
-        let text = QueuedRequest {
-            sent_by: SentBy::Sender(sender.clone()),
-            request: request.clone(),
-        }
-        .datomize(Vec::new())
-        .protosize()
-        .compact();
-        let sending_flow = self
-            .store
-            .metaflow(sender)
-            .ok()
-            .flatten()
-            .and_then(|metaflow| match metaflow.state {
-                flow_ethos::State::Awake(flow_id) => Some(flow_id),
-                flow_ethos::State::Asleep => None,
-            });
-        let letter = meta_signal_flow::Letter {
-            message_id: "send".minted_id(),
-            sender: match sending_flow {
-                Some(flow_id) => meta_signal_flow::Sender::Flow(flow_id),
-                None => meta_signal_flow::Sender::Owner,
-            },
-            content: meta_signal_flow::Content::Text(text),
-        };
-        let message = if hard {
-            meta_signal_flow::Message::HardAbrupt(letter)
-        } else {
-            meta_signal_flow::Message::MiddleAbrupt(letter)
-        };
-        match self.deliver(meta_signal_flow::DeliveryRequest {
-            delivery_id: "send-delivery".minted_id(),
-            flow_id: flow_id.to_owned(),
-            message,
-        }) {
-            meta_signal_flow::Response::Delivered(_) => Some(Response::Delivered),
-            refused => {
-                eprintln!("flow-nexus: abrupt send to {flow_id} queued instead: {refused:?}");
-                None
-            }
         }
     }
 }

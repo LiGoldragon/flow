@@ -54,7 +54,9 @@ use crate::codex::{
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
 use crate::composition::{FreshSeat, RendersQueuedWork};
 use crate::delivery::lease::LeasesPanes;
-use crate::delivery::{FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal};
+use crate::delivery::{
+    DeliversMessages, FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal,
+};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data,
@@ -78,12 +80,13 @@ use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
+use datom_codec::Datomizable;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Undecided};
+use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Layer, Metaflow, NativePrompt, NativeStop, Origin, PowerLevel, QueuedRequest,
-    Response,
+    Layer, Metaflow, NativePrompt, NativeStop, Origin, PowerLevel, QueueEntry, Response,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -320,7 +323,7 @@ pub enum AtStop {
     /// The seat rested with nothing queued: it stays Awake in its pane.
     Idle,
     /// The seat rested with work queued: the oldest request was typed in.
-    Drained(QueuedRequest),
+    Drained(QueueEntry),
     /// The seat was due a refresh and rested: its pane was closed, it was
     /// recorded Stopped and its metaflow put Asleep, in the same event;
     /// work queued for the metaflow wakes its next, fresh flow. It is due
@@ -588,7 +591,7 @@ impl ReadsClaudeDelivery for RunningNexus {
                 inode: cursor.inode,
                 offset: cursor.offset,
             },
-            &[attempt.queued.clone()].prompt_text(),
+            &attempt.prompt_text(),
         )
     }
 }
@@ -675,7 +678,7 @@ pub enum SeatAfter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reconciled {
     /// Its exact native receipt is recorded and the request left the queue.
-    Settled(QueuedRequest, SeatAfter),
+    Settled(QueueEntry, SeatAfter),
     /// Native history proved it never reached the seat; the request is
     /// still queued and may be handed over again.
     Absent,
@@ -714,6 +717,30 @@ pub(crate) trait ReconcilesQueueDelivery {
     fn recover_deliveries(&self);
 }
 
+trait RendersAttemptInput {
+    fn prompt_text(&self) -> String;
+    fn as_settled(&self, seat_after: SeatAfter) -> Reconciled;
+}
+
+impl RendersAttemptInput for QueueDeliveryAttempt {
+    fn prompt_text(&self) -> String {
+        match &self.queue_evidence {
+            meta_signal_flow::QueueEvidence::Logical(entry) => [entry.clone()].prompt_text(),
+            meta_signal_flow::QueueEvidence::Legacy(legacy) => {
+                legacy.datomize(Vec::new()).protosize().compact()
+            }
+        }
+    }
+    fn as_settled(&self, seat_after: SeatAfter) -> Reconciled {
+        match &self.queue_evidence {
+            meta_signal_flow::QueueEvidence::Logical(entry) => {
+                Reconciled::Settled(entry.clone(), seat_after)
+            }
+            meta_signal_flow::QueueEvidence::Legacy(_) => Reconciled::Refused,
+        }
+    }
+}
+
 impl ReconcilesQueueDelivery for RunningNexus {
     fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled {
         match &attempt.phase {
@@ -723,26 +750,26 @@ impl ReconcilesQueueDelivery for RunningNexus {
                     .settle_recorded_delivery(&attempt.attempt_id)
                     .unwrap_or(false)
                 {
-                    Reconciled::Settled(attempt.queued.clone(), SeatAfter::InItsTurn)
+                    attempt.as_settled(SeatAfter::InItsTurn)
                 } else {
                     Reconciled::Refused
                 };
             }
             QueueDeliveryPhase::Settled(_) => {
-                return Reconciled::Settled(attempt.queued.clone(), SeatAfter::InItsTurn);
+                return attempt.as_settled(SeatAfter::InItsTurn);
             }
             QueueDeliveryPhase::Absent(_) => return Reconciled::Absent,
             QueueDeliveryPhase::Resolved(record) => {
                 return match record.queue_resolution_outcome {
                     meta_signal_flow::QueueResolutionOutcome::Delivered => {
-                        Reconciled::Settled(attempt.queued.clone(), SeatAfter::InItsTurn)
+                        attempt.as_settled(SeatAfter::InItsTurn)
                     }
                     meta_signal_flow::QueueResolutionOutcome::Absent => Reconciled::Absent,
                 };
             }
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {}
         }
-        let text = [attempt.queued.clone()].prompt_text();
+        let text = attempt.prompt_text();
         let found = match attempt.harness_kind {
             HarnessKind::Claude => match self.claude_delivery_history(attempt) {
                 // A Claude seat takes input while its turn runs, into its
@@ -788,29 +815,10 @@ impl ReconcilesQueueDelivery for RunningNexus {
                             SeatAfter::InItsTurn
                         },
                     )),
-                    Some(CodexTurnHistory::Unseen {
-                        resting: true,
-                        observation,
-                    }) => {
-                        return if self
-                            .store
-                            .mark_delivery_absent(
-                                &attempt.attempt_id,
-                                AbsenceRecord {
-                                    proof: AbsenceProof::HistoryAbsent,
-                                    observation,
-                                },
-                            )
-                            .unwrap_or(false)
-                        {
-                            eprintln!(
-                                "flow-nexus: queued delivery {} never reached thread {}; a new attempt is authorised",
-                                attempt.attempt_id, attempt.thread_id
-                            );
-                            Reconciled::Absent
-                        } else {
-                            Reconciled::Refused
-                        };
+                    Some(CodexTurnHistory::Unseen { resting: true, .. }) => {
+                        // An absent row at this instant is not proof that an
+                        // unacknowledged request cannot materialize later.
+                        Err(Undecided::AbsenceUnprovable)
                     }
                     Some(CodexTurnHistory::Unseen { resting: false, .. }) => {
                         Err(Undecided::SeatNotResting)
@@ -851,7 +859,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 .settle_recorded_delivery(&attempt.attempt_id)
                 .unwrap_or(false)
         {
-            Reconciled::Settled(attempt.queued.clone(), seat_after)
+            attempt.as_settled(seat_after)
         } else {
             Reconciled::Refused
         }
@@ -877,7 +885,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 attempt.phase,
                 QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
             )
-            || [attempt.queued.clone()].prompt_text().prompt_sha256() != prompt.prompt_sha256
+            || attempt.prompt_text().prompt_sha256() != prompt.prompt_sha256
         {
             return;
         }
@@ -1013,6 +1021,14 @@ impl SleepsAndWakesSeats for RunningNexus {
                 let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id.clone())));
                 return;
             }
+            if metaflow
+                .queue
+                .first()
+                .is_some_and(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)))
+            {
+                let _ = self.drain_all(address.clone());
+                return;
+            }
             let known_resting = match node.harness_kind {
                 HarnessKind::Codex => self.codex_resting(&flow_id),
                 HarnessKind::Claude => self.claude_main_turn_ended(&node),
@@ -1102,7 +1118,11 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_is_due(&self, metaflow: &Metaflow) -> bool {
-        metaflow.state == flow_ethos::State::Asleep && !metaflow.queue.is_empty()
+        metaflow.state == flow_ethos::State::Asleep
+            && metaflow
+                .queue
+                .iter()
+                .any(|entry| entry.delivery == signal_flow::Delivery::Wake)
     }
 
     fn recover_wakes(&self) {
@@ -1200,7 +1220,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         let Some(oldest) = oldest else {
             return Outcome::Drained(drained);
         };
-        let refused = |drained: Vec<QueuedRequest>, failure| {
+        let refused = |drained: Vec<QueueEntry>, failure| {
             if drained.is_empty() {
                 Outcome::Failed(failure)
             } else {
@@ -1242,36 +1262,88 @@ impl PerformsWakeAndDrain for RunningNexus {
             }
         };
         let text = [oldest.clone()].prompt_text();
+        if !matches!(oldest.message, signal_flow::Message::Soft(_)) {
+            let input = signal_flow::NativeInput {
+                logical_delivery_id: oldest.logical_delivery_id.clone(),
+                sent_by: oldest.sent_by.clone(),
+                message: oldest.message.clone(),
+            };
+            let letter = meta_signal_flow::Letter {
+                message_id: oldest.logical_delivery_id.clone(),
+                sender: meta_signal_flow::Sender::Owner,
+                content: meta_signal_flow::Content::NativeInput(input),
+            };
+            let message = match &oldest.message {
+                signal_flow::Message::HardAbrupt(_) => {
+                    meta_signal_flow::Message::HardAbrupt(letter)
+                }
+                signal_flow::Message::MiddleAbrupt(_) => {
+                    meta_signal_flow::Message::MiddleAbrupt(letter)
+                }
+                signal_flow::Message::Soft(_) => unreachable!(),
+            };
+            let result = self.deliver(meta_signal_flow::DeliveryRequest {
+                delivery_id: attempt.attempt_id.clone(),
+                flow_id: flow_id.clone(),
+                message,
+            });
+            let proved_absent = matches!(&result,
+                meta_signal_flow::Response::DeliveryRejected(rejected)
+                    if matches!(rejected,
+                        meta_signal_flow::DeliveryRejection::UnknownFlow
+                        | meta_signal_flow::DeliveryRejection::FlowStopped
+                        | meta_signal_flow::DeliveryRejection::RouteUnavailable
+                        | meta_signal_flow::DeliveryRejection::RecipientWorking
+                        | meta_signal_flow::DeliveryRejection::RecipientBlocked
+                        | meta_signal_flow::DeliveryRejection::ComposerOccupied));
+            if proved_absent {
+                let _ = self.store.mark_delivery_absent(
+                    &attempt.attempt_id,
+                    AbsenceRecord {
+                        proof: AbsenceProof::HandOverRefused,
+                        observation: format!("{result:?}"),
+                    },
+                );
+            } else {
+                // Placement, interruption and submission are attempt evidence,
+                // never a native USER receipt or a terminal Delivered outcome.
+                let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
+                return match self.reconcile_delivery(&attempt) {
+                    Reconciled::Settled(entry, _) => {
+                        drained.push(entry);
+                        Outcome::Drained(drained)
+                    }
+                    _ => Outcome::AwaitingReceipt(oldest.logical_delivery_id),
+                };
+            }
+            return refused(drained, Failed_Data::HerdrRefused);
+        }
         if let Some(adapter) = model {
-            return match adapter.submit_queued_turn(
+            let submitted = adapter.submit_queued_turn(
                 &node.session_id,
                 &attempt.attempt_id,
                 attempt.native_request_id,
                 &text,
-            ) {
-                Ok(receipt) => match self.settle_received(
-                    &attempt,
-                    receipt.turn_id,
-                    receipt.native_receipt,
-                    SeatAfter::InItsTurn,
-                ) {
-                    Reconciled::Settled(queued, _) => {
-                        self.codex_turns.delivered(&node.session_id);
-                        drained.push(queued);
-                        Outcome::Drained(drained)
-                    }
-                    _ => refused(drained, Failed_Data::StoreRefused),
-                },
-                Err(error) => {
-                    // The request may have reached the app-server: it is
-                    // reconciled from the thread's turns, never resent.
-                    eprintln!(
-                        "flow-nexus: queued turn {} for thread {} not acknowledged: {error:?}",
-                        attempt.attempt_id, node.session_id
-                    );
-                    let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
-                    refused(drained, Failed_Data::CodexRefused)
+            );
+            if let Ok(acknowledgement) = &submitted {
+                eprintln!(
+                    "flow-nexus: logical {} attempt {} submitted as Codex turn {}; native USER receipt pending",
+                    oldest.logical_delivery_id, attempt.attempt_id, acknowledgement.turn_id
+                );
+            } else if let Err(error) = &submitted {
+                eprintln!(
+                    "flow-nexus: logical {} attempt {} Codex submission uncertain: {error:?}",
+                    oldest.logical_delivery_id, attempt.attempt_id
+                );
+            }
+            let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
+            return match self.reconcile_delivery(&attempt) {
+                Reconciled::Settled(entry, _) => {
+                    self.codex_turns.delivered(&node.session_id);
+                    drained.push(entry);
+                    Outcome::Drained(drained)
                 }
+                _ => Outcome::AwaitingReceipt(oldest.logical_delivery_id),
             };
         }
         if let Err(refusal) = self.hand_over(&flow_id, &text) {
@@ -1297,11 +1369,14 @@ impl PerformsWakeAndDrain for RunningNexus {
         // seat's UserPromptSubmit report, or the next reconciliation,
         // settles it. Typed once, it is never typed again.
         if let ClaudeQueuedHistory::Received(receipt) = self.claude_delivery_history(&attempt) {
-            let _ =
-                self.settle_received(&attempt, receipt.turn_id, receipt.row, SeatAfter::InItsTurn);
+            if let Reconciled::Settled(entry, _) =
+                self.settle_received(&attempt, receipt.turn_id, receipt.row, SeatAfter::InItsTurn)
+            {
+                drained.push(entry);
+                return Outcome::Drained(drained);
+            }
         }
-        drained.push(oldest);
-        Outcome::Drained(drained)
+        Outcome::AwaitingReceipt(oldest.logical_delivery_id)
     }
 
     fn drain_all(&self, address: Address) -> Outcome {
@@ -1320,6 +1395,7 @@ impl PerformsWakeAndDrain for RunningNexus {
             let now_removed = queued.len().saturating_sub(remaining);
             if now_removed == removed {
                 return match outcome {
+                    Outcome::AwaitingReceipt(_) => outcome,
                     Outcome::Failed(_) if removed == 0 => outcome,
                     // Only requests whose exact native receipt removed
                     // them from the durable queue are reported drained.

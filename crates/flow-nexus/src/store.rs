@@ -6511,6 +6511,7 @@ pub(crate) trait ReadsFlowMemory {
                 && identity.schema_hash() == schema_hash
         };
         let predecessors: &[(&str, SchemaHash)] = match table_key {
+            "flow_nexus_send_outcomes" => &[(send_outcome::OUTCOME_FAMILY, send_outcome::StoredSendOutcomeV1::schema_hash())],
             "flow_nexus_flows" => &[("flow-nexus-flow", FlowRecordV5::schema_hash())],
             "flow_nexus_launch_outcomes" => &[
                 (

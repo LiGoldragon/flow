@@ -64,7 +64,7 @@
 ; the Nexus crate until the Memory root is compiled.
 
 Operation
-[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueuedRequest ContextRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ]
+[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ]
   flow_nexus:[ LaunchOutcome Replacement ] ]
 [ Compose.LaunchProfile
   Reserve.{ ComposedLaunch Origin }
@@ -108,7 +108,8 @@ Operation
   Closed
   Released
   Woken.FlowId
-  Drained.Vector<QueuedRequest>
+  Drained.Vector<QueueEntry>
+  AwaitingReceipt.LogicalDeliveryId
   Failed.[ CompositionRefused
            StoreRefused
            ConflictingBinding

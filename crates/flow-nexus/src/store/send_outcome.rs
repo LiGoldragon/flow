@@ -7,7 +7,7 @@ use signal_flow::{Address, Process, Response};
 pub(super) const COUNTER_FAMILY: &str = "flow-nexus-send-outcome-counter";
 pub(super) const COUNTER_SCHEMA: &str = "flow-nexus-send-outcome-counter-v1";
 pub(super) const OUTCOME_FAMILY: &str = "flow-nexus-send-outcome";
-pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v1";
+pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v2";
 
 const COUNTER_KEY: &str = "counter";
 const SEND_OUTCOME_COUNTER_TABLE_NAME: TableName =
@@ -48,11 +48,69 @@ impl EngineRecord for StoredSendOutcome {
 
 impl MemoryDefinition for StoredSendOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
+        MemoryVersion::new(2)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(OUTCOME_SCHEMA)
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PriorOrdinarySendOutcome {
+    Queued,
+    Delivered,
+    Refused(signal_flow::Refusal),
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SendOutcomeRecordV1 {
+    send_outcome_id: String,
+    process_option: Option<Process>,
+    first_address_option: Option<Address>,
+    second_address_option: Option<Address>,
+    request_digest: String,
+    ordinary_send_outcome: PriorOrdinarySendOutcome,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredSendOutcomeV1 {
+    record: SendOutcomeRecordV1,
+}
+impl EngineRecord for StoredSendOutcomeV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.record.send_outcome_id.clone())
+    }
+}
+impl MemoryDefinition for StoredSendOutcomeV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-outcome-v1")
+    }
+}
+impl UpgradeFrom<StoredSendOutcomeV1> for StoredSendOutcome {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredSendOutcomeV1) -> Decision<Self, Self::Refusal> {
+        let old = previous.record;
+        let outcome = match old.ordinary_send_outcome {
+            PriorOrdinarySendOutcome::Queued => {
+                OrdinarySendOutcome::PriorAdmission(meta_signal_flow::PriorSendOutcome::Queued)
+            }
+            PriorOrdinarySendOutcome::Delivered => {
+                OrdinarySendOutcome::PriorAdmission(meta_signal_flow::PriorSendOutcome::Delivered)
+            }
+            PriorOrdinarySendOutcome::Refused(refusal) => OrdinarySendOutcome::Refused(refusal),
+        };
+        Decision::Ready(Self {
+            record: SendOutcomeRecord {
+                send_outcome_id: old.send_outcome_id,
+                process_option: old.process_option,
+                first_address_option: old.first_address_option,
+                second_address_option: old.second_address_option,
+                request_digest: old.request_digest,
+                ordinary_send_outcome: outcome,
+            },
+        })
     }
 }
 
@@ -87,7 +145,8 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
                 SEND_OUTCOME_TABLE_NAME,
                 FamilyName::new(OUTCOME_FAMILY),
                 StoredSendOutcome::schema_hash(),
-            ),
+            )
+            .with_predecessor::<StoredSendOutcomeV1>(),
         }
     }
 
@@ -97,7 +156,18 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
     ) -> Result<SendOutcomeTables, StoreError> {
         Ok(SendOutcomeTables {
             counter: engine.register_table(descriptors.counter)?,
-            outcomes: engine.register_table(descriptors.outcomes)?,
+            outcomes: match engine
+                .upgrade_table::<StoredSendOutcomeV1, StoredSendOutcome>(descriptors.outcomes)
+            {
+                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                UpgradeOutcome::AlreadyCurrent(table) => table,
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::QueueDeliveryUpgrade(format!(
+                        "sender outcome upgrade: {failure:?}"
+                    )));
+                }
+            },
             write_gate: Mutex::new(()),
         })
     }
@@ -138,8 +208,7 @@ impl RecordsSendOutcomes for FlowStore {
             .records()
             .to_vec();
         let ordinary_send_outcome = match response {
-            Response::Queued => OrdinarySendOutcome::Queued,
-            Response::Delivered => OrdinarySendOutcome::Delivered,
+            Response::SendAccepted(acceptance) => OrdinarySendOutcome::Accepted(acceptance),
             Response::Refused(refusal) => OrdinarySendOutcome::Refused(refusal),
             _ => return Err(StoreError::StateInvariant),
         };

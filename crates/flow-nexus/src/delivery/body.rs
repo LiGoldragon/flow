@@ -50,7 +50,10 @@ pub trait RendersPaneText {
 impl RendersPaneText for Message {
     fn pane_text(&self) -> PaneText {
         PaneText {
-            text: self.datomize(Vec::new()).protosize().compact(),
+            text: match &self.letter().content {
+                Content::NativeInput(input) => input.datomize(Vec::new()).protosize().compact(),
+                _ => self.datomize(Vec::new()).protosize().compact(),
+            },
         }
     }
 
@@ -71,14 +74,23 @@ pub trait RecognizesLetter {
 
 impl RecognizesLetter for str {
     fn opens_a_letter(&self) -> bool {
-        [
-            "HardAbrupt.{ m-",
-            "MiddleAbrupt.{ m-",
-            "Soft.{ m-",
-            "HardAbrupt.{ send-",
-            "MiddleAbrupt.{ send-",
-            "Soft.{ send-",
-        ]
+        let logical_input = self
+            .strip_prefix("{ logical-delivery-")
+            .and_then(|tail| tail.get(..17))
+            .map(|identity| {
+                identity.as_bytes()[..16].iter().all(u8::is_ascii_hexdigit)
+                    && identity.as_bytes()[16] == b' '
+            })
+            .unwrap_or(false);
+        logical_input
+            || [
+                "HardAbrupt.{ m-",
+                "MiddleAbrupt.{ m-",
+                "Soft.{ m-",
+                "HardAbrupt.{ send-",
+                "MiddleAbrupt.{ send-",
+                "Soft.{ send-",
+            ]
             .iter()
             .any(|head| self.starts_with(head))
     }
@@ -116,6 +128,7 @@ impl ReadsContent for Content {
     /// when the psyche's own words are.
     fn is_empty(&self) -> bool {
         match self {
+            Content::NativeInput(_) => false,
             Content::Text(text) => text.trim().is_empty(),
             Content::Psyche(psyche) => psyche.psyche_verbatim.trim().is_empty(),
         }
@@ -123,6 +136,8 @@ impl ReadsContent for Content {
 
     fn strings(&self) -> Vec<&str> {
         match self {
+            // A declared NativeInput is data, not a raw harness command.
+            Content::NativeInput(_) => vec![],
             Content::Text(text) => vec![text],
             Content::Psyche(psyche) => vec![&psyche.psyche_context, &psyche.psyche_verbatim],
         }

@@ -56,7 +56,10 @@ impl CallsFlowNexus for FlowClient {
         peer.write_all(&(bytes.len() as u32).to_be_bytes())
             .map_err(|e| e.to_string())?;
         peer.write_all(&bytes).map_err(|e| e.to_string())?;
-        let streams = matches!(query, Query::Observe(_));
+        let streams = matches!(
+            query,
+            Query::Observe(_) | Query::ObserveSends(_) | Query::ObserveSender(_)
+        );
         loop {
             let mut length = [0; 4];
             match peer.read_exact(&mut length) {
@@ -147,23 +150,26 @@ mod tests {
             socket: "unused".into(),
         };
         let Query::Send(send) = client
-            .parse_command([
-                "Send.{ Address.{ Mind core Secondary } Wake Soft.Order.«Review.» }".into(),
-            ]
-            .into_iter())
+            .parse_command(
+                ["Send.{ Address.{ Mind core Secondary } Wake Soft.Order.«Review.» }".into()]
+                    .into_iter(),
+            )
             .expect("current Send parses")
         else {
             panic!("fixture must remain a Send")
         };
         assert!(matches!(send.recipient, Recipient::Address(_)));
         assert_eq!(send.delivery, Delivery::Wake);
-        assert_eq!(send.message, Message::Soft(Request::Order("Review.".into())));
+        assert_eq!(
+            send.message,
+            Message::Soft(Request::Order("Review.".into()))
+        );
         assert!(
             client
-                .parse_command([
-                    "Send.{ Address.{ Mind core Secondary } Soft.Order.«Review.» }".into(),
-                ]
-                .into_iter())
+                .parse_command(
+                    ["Send.{ Address.{ Mind core Secondary } Soft.Order.«Review.» }".into(),]
+                        .into_iter()
+                )
                 .is_err(),
             "the former two-position Send is not the live wire"
         );

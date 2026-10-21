@@ -43,6 +43,7 @@ pub mod generated;
 pub mod herdr;
 pub mod launching;
 pub mod observe_agent;
+mod observe_sends;
 pub mod peer;
 pub mod performing;
 pub mod reporting;
@@ -67,6 +68,7 @@ use generated::operation::{Operation, Outcome, Record_Data};
 use generated::starter::DerivesOrigin;
 use launching::{LaunchesFlows, ObservesLaunch};
 use observe_agent::ObservesAgent;
+use observe_sends::ObservesLogicalSends;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
@@ -652,6 +654,36 @@ impl ServesConnection for Connection {
                 return nexus
                     .observe_agent(&flow_id, &mut |response| peer.write_response(response));
             }
+            Query::ObserveSends(cursor) => {
+                let Some(process) = self.process.as_ref() else {
+                    return self.peer.write_response(&Response::Refused(
+                        signal_flow::Refusal::Unidentified(Process { pid: 0, started: 0 }),
+                    ));
+                };
+                let sender = match nexus.observation_sender(process, None) {
+                    Ok(sender) => sender,
+                    Err(refusal) => return self.peer.write_response(&refusal),
+                };
+                return nexus.observe_sends(&sender, cursor, &mut |response| {
+                    self.peer.write_response(response)
+                });
+            }
+            Query::ObserveSender(forwarded) => {
+                let Some(process) = self.process.as_ref() else {
+                    return self
+                        .peer
+                        .write_response(&Response::Refused(signal_flow::Refusal::NotMessage));
+                };
+                let sender = match nexus.observation_sender(process, Some(&forwarded)) {
+                    Ok(sender) => sender,
+                    Err(refusal) => return self.peer.write_response(&refusal),
+                };
+                return nexus.observe_sends(
+                    &sender,
+                    forwarded.delivery_cursor_option,
+                    &mut |response| self.peer.write_response(response),
+                );
+            }
             // A hook's Report never waits behind a running launch: the
             // launch may itself be waiting on the harness whose hook this is.
             // What the report sets going runs after the hook has its answer
@@ -678,7 +710,6 @@ impl ServesConnection for Connection {
             | Query::Identify(_)
             | Query::IdentifyThread(_)
             | Query::Lock(_)
-            | Query::Deliver(_)
             | Query::Release(_)) => {
                 // A queued request is durable: the recipient's wake is read
                 // from Flow's records after the answer, whether or not the
@@ -686,11 +717,37 @@ impl ServesConnection for Connection {
                 let answer = nexus.dispatch_metaflow_peer(query, self.process.as_ref());
                 return self.peer.write_response(&answer.response);
             }
+            Query::Deliver(request) => {
+                let address = request.lock.address.clone();
+                let delivery = request.delivery.clone();
+                let answer =
+                    nexus.dispatch_metaflow_peer(Query::Deliver(request), self.process.as_ref());
+                let accepted = matches!(answer.response, Response::SendAccepted(_));
+                let written = self.peer.write_response(&answer.response);
+                drop(self);
+                if accepted {
+                    if delivery == signal_flow::Delivery::Wake {
+                        nexus.wake_due(address);
+                    } else {
+                        nexus.drain_awake(&address);
+                    }
+                }
+                return written;
+            }
             // A flow's own Send: its sender is the calling process. A queued
             // request's wake is read after the answer, off the gate.
             Query::Send(send) => {
                 let answer = nexus.send_request(send, self.process.as_ref());
-                return self.peer.write_response(&answer.response);
+                let written = self.peer.write_response(&answer.response);
+                drop(self);
+                if let Some(pending) = answer.pending {
+                    if pending.delivery == signal_flow::Delivery::Wake {
+                        nexus.wake_due(pending.address);
+                    } else {
+                        nexus.drain_awake(&pending.address);
+                    }
+                }
+                return written;
             }
             Query::DeliverAll(address) => {
                 let response = nexus.deliver_all(address, self.process.as_ref());
@@ -2862,10 +2919,6 @@ mod tests {
         assert_eq!(listed(&fixture), before);
     }
 
-
-
-
-
     /// A seat Flow never stopped can still be gone: its pane leaves Herdr and
     /// nothing can reach it. List used to answer such a flow Pending on the
     /// route it was bound to, which is what made a gone seat look launchable.
@@ -3650,8 +3703,6 @@ mod tests {
         }
     }
 
-
-
     #[test]
     fn a_refused_reap_leaves_neither_flow_routable_until_it_is_retried() {
         let fixture = NexusFixture::new();
@@ -3957,7 +4008,6 @@ mod tests {
     /// it: the launch is StartRejected, its pane closed, its flow Stopped
     /// and its Address given back, rather than left ambiguous.
 
-
     /// A launch names the Address of its seat: the write acknowledging the
     /// seat's witnessed binding records that metaflow Awake as the launched
     /// flow and holds it, confirmation keeps it in the write that makes the
@@ -4139,13 +4189,9 @@ mod tests {
     /// Start waits for that settlement and answers it. The caller sees
     /// Started; StartAmbiguous is left for a seat that never answers.
 
-
     /// 88475f: Start answered StartAmbiguous, the receipt landed half a
     /// minute later, and nobody subscribed or sent Start again. The
     /// Nexus's own watch promotes it.
-
-
-
 
     /// Asserts the Herdr call log shows no typed prompt. The Codex first
     /// prompt travels over its app-server and carries the brief; once the
@@ -4355,8 +4401,8 @@ mod tests {
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
         use signal_flow::{
-            Address, Delivery, Layer, Message, Metaflow, QueuedRequest, Recipient, Refusal, Request,
-            Send_Data, SentBy, Unknown_Data,
+            Address, Delivery, Layer, Message, Metaflow, QueuedRequest, Recipient, Refusal,
+            Request, Send_Data, SentBy, Unknown_Data,
         };
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "mind-live", "pane-1");

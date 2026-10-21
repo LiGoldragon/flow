@@ -26,7 +26,7 @@ use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     Address, Aspect, ComposedLaunch, ContextRefusal, FirstPromptPayload, HarnessKind,
-    LaunchProfile, LeaveOut, LeaveOutRefusal, PowerLevel, PromptPart, QueuedRequest, SystemPrompt,
+    LaunchProfile, LeaveOut, LeaveOutRefusal, PowerLevel, PromptPart, QueueEntry, SystemPrompt,
     TargetReceiptRequest,
 };
 use std::collections::HashSet;
@@ -515,7 +515,7 @@ pub trait RendersQueuedWork {
     fn prompt_text(&self) -> String;
 }
 
-impl RendersQueuedWork for [QueuedRequest] {
+impl RendersQueuedWork for [QueueEntry] {
     fn prompt_text(&self) -> String {
         let mut text = String::new();
         for (index, request) in self.iter().enumerate() {
@@ -523,16 +523,20 @@ impl RendersQueuedWork for [QueuedRequest] {
                 text.push('\n');
             }
             text.extend(
-                request
-                    .datomize(Vec::new())
-                    .protosize()
-                    .compact()
-                    .chars()
-                    .map(|glyph| match glyph {
-                        '\n' | '\t' => glyph,
-                        glyph if glyph.is_control() => '\u{fffd}',
-                        glyph => glyph,
-                    }),
+                signal_flow::NativeInput {
+                    logical_delivery_id: request.logical_delivery_id.clone(),
+                    sent_by: request.sent_by.clone(),
+                    message: request.message.clone(),
+                }
+                .datomize(Vec::new())
+                .protosize()
+                .compact()
+                .chars()
+                .map(|glyph| match glyph {
+                    '\n' | '\t' => glyph,
+                    glyph if glyph.is_control() => '\u{fffd}',
+                    glyph => glyph,
+                }),
             );
         }
         text
@@ -671,9 +675,7 @@ pub(crate) mod tests {
         let body = &composed.first_prompt_payload.first_prompt_body;
         assert!(body.starts_with("These are your skills, given here; do not reload them.\n\nModule IDs: operation-main-flow, knowledge-flow\n"));
         assert!(body.contains("\n<!-- module: knowledge-flow -->\nKnowledge body.\n<!-- end-module: knowledge-flow -->\n"));
-        assert!(body.ends_with(
-            "<!-- end-module: knowledge-flow -->\n\nCarry the bounded task."
-        ));
+        assert!(body.ends_with("<!-- end-module: knowledge-flow -->\n\nCarry the bounded task."));
         assert_eq!(body.matches("Main flow body.").count(), 1);
         assert!(!body.contains("Spirit body."));
         assert_eq!(composed.first_prompt_payload.prompt_part_vector.len(), 1);
@@ -867,13 +869,11 @@ pub(crate) mod tests {
         assert!(composed.system_prompt.system_prompt_text.len() > 140_000);
     }
 
-
-
     #[test]
     fn a_request_flow_raised_names_flow_as_its_sender() {
         use super::RendersQueuedWork;
-        use signal_flow::{QueuedRequest, Request, SentBy};
-        let order = QueuedRequest {
+        use signal_flow::{QueueEntry, Request, SentBy};
+        let order = QueueEntry {
             sent_by: SentBy::Flow,
             request: Request::Order("investigate".into()),
         };

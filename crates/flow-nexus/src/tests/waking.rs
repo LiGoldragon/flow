@@ -1169,7 +1169,10 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
             .position(|turn| *turn == text)
             .unwrap_or_else(|| panic!("queued request handed over after wake: {turns:?}"))
     });
-    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{turns:?}");
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{turns:?}"
+    );
 
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id.clone()));
@@ -1571,8 +1574,10 @@ fn a_metaflow_left_awake_as_an_ended_flow_is_woken_by_an_order() {
 
 fn identifies_and_wakes_by_an_order(recipient: State) {
     use crate::metaflow::DispatchesMetaflowPeer;
+    use crate::sending::MeasuresSendPayload;
     use crate::store::metaflow::TakesLaunchAddress;
-    use crate::store::{FlowStore, ReadsFlowMemory};
+    use crate::store::send_outcome::RecordsSendOutcomes;
+    use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory};
     use signal_flow::{Deliver_Data, Lock_Data, Recipient, Response};
 
     let mut fixture = NexusFixture::new();
@@ -1690,6 +1695,69 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         .response
     else {
         panic!("the identified sender locks the recipient")
+    };
+    let oversized = Request::Order("x".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES));
+    let expected_size = oversized.native_prompt_bytes(&sender_address);
+    let refusal = Response::Refused(signal_flow::Refusal::Oversized(
+        signal_flow::SendPayloadSize {
+            actual_bytes: expected_size as i64,
+            maximum_bytes: crate::sending::MAX_SEND_PAYLOAD_BYTES as i64,
+        },
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_metaflow_peer(
+                signal_flow::Query::Deliver(Deliver_Data {
+                    lock: lock.clone(),
+                    request: oversized,
+                }),
+                Some(&message),
+            )
+            .response,
+        refusal
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&at)
+            .unwrap()
+            .unwrap()
+            .queue
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .stored_metaflow_lock(&at)
+            .unwrap()
+            .is_none()
+    );
+    let send_outcomes = fixture.nexus.store.read_send_outcomes().unwrap();
+    assert!(matches!(
+        send_outcomes.last().map(|record| &record.ordinary_send_outcome),
+        Some(meta_signal_flow::OrdinarySendOutcome::Refused(
+            signal_flow::Refusal::Oversized(signal_flow::SendPayloadSize {
+                actual_bytes,
+                maximum_bytes,
+            })
+        )) if *actual_bytes == expected_size as i64
+            && *maximum_bytes == crate::sending::MAX_SEND_PAYLOAD_BYTES as i64
+    ));
+    let Response::Locked(lock) = fixture
+        .nexus
+        .dispatch_metaflow_peer(
+            signal_flow::Query::Lock(Lock_Data {
+                sender: sender_address.clone(),
+                recipient: Recipient::Address(at.clone()),
+            }),
+            Some(&message),
+        )
+        .response
+    else {
+        panic!("the rejected request releases its verified lock")
     };
     let order = Request::Order("Run the tier tests.".into());
     let answer = fixture.nexus.dispatch_metaflow_peer(
@@ -2280,7 +2348,6 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
 /// A fabricated Codex Stop before confirmation never stands in for an
 /// app-server completion. Confirmation releases the Address hold, but the
 /// queued request waits for an authentic native turn event.
-
 
 /// A topic never dies: the Stop of the flow its metaflow is Awake as
 /// records the metaflow Asleep in the same write, the flow in Past, so a
@@ -3340,7 +3407,6 @@ impl ShowsCodexLaunchOrder for FirstTurnSend {
 /// since `thread/start`, answers the call while Submit runs; the request is
 /// queued once, sent from the launching metaflow; the launch completes; and
 /// the sleeping recipient wakes fresh once.
-
 
 /// A first turn that runs far longer than Herdr's start waits refuses
 /// nothing: Herdr's start, waiting for an idle seat as Herdr 0.8.2 does,

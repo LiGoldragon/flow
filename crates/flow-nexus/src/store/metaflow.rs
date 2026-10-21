@@ -1,6 +1,7 @@
 //! Ordinary metaflow mutations. The connection supplies the witnessed peer;
 //! the serial dispatcher holds exclusion across authorization and mutation.
 use super::*;
+use crate::sending::AdmitsSendPayload;
 use signal_flow::{
     Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, QueuedRequest, Recipient, Refusal,
     SentBy, StartRejection, Unknown_Data,
@@ -237,6 +238,13 @@ impl MutatesMetaflows for FlowStore {
                 request.lock.address,
             ))));
         };
+        if let Some(refusal) = request.request.oversized_refusal(&request.lock.sender) {
+            let released = self.release_metaflow_lock(request.lock.clone(), now)?;
+            if released != Response::Released {
+                return Ok(released);
+            }
+            return Ok(Response::Refused(refusal));
+        }
         // The request is queued with the Sender its Lock named, which the
         // bound Message peer asserted.
         stored.metaflow.queue.push(QueuedRequest {

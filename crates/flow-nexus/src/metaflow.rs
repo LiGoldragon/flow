@@ -1,10 +1,14 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane};
 use crate::store::metaflow::SleepsMetaflows;
+use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
 use crate::waking::RestsEndedAwake;
 use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
+use datom_codec::Datomizable;
+use protos::{Compactable, Protosizable};
+use sha2::{Digest, Sha256};
 use signal_flow::{IdentifyThread_Data, Process, Query, Refusal, Response};
 
 /// A metaflow dispatch's answer.
@@ -148,9 +152,23 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Query::IdentifyThread(request) => self.identify_thread(request),
                 Query::Lock(request) => self.store.lock_metaflow(request, now),
                 Query::Deliver(request) => {
+                    let digest_text = request.datomize(Vec::new()).protosize().compact();
+                    let digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
+                    let sender = request.lock.sender.clone();
+                    let recipient = request.lock.address.clone();
                     self.rest_ended_awake(&request.lock.address);
-                    return match self.store.queue_metaflow(request, now) {
+                    let response = match self.store.queue_metaflow(request, now) {
                         Ok(response) => response.into(),
+                        Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
+                    };
+                    return match self.store.record_send_outcome(
+                        Some(peer.clone()),
+                        Some(sender),
+                        Some(recipient),
+                        digest,
+                        response.response.clone(),
+                    ) {
+                        Ok(_) => response,
                         Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
                     };
                 }

@@ -2841,7 +2841,7 @@ mod tests {
                 meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
                     flow_container: flow_container(&socket_path),
                     address: address.clone(),
-                    flow_binding: challenger,
+                    flow_binding: challenger.clone(),
                 }),
                 Some(adoption_resolver()),
             )
@@ -2886,7 +2886,7 @@ mod tests {
                         topic: "message".into(),
                         layer: Layer::Primary,
                     },
-                    flow_binding: binding,
+                    flow_binding: binding.clone(),
                 }),
                 Some(adoption_resolver()),
             )

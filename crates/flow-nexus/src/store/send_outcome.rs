@@ -210,6 +210,8 @@ impl RecordsSendOutcomes for FlowStore {
         let ordinary_send_outcome = match response {
             Response::SendAccepted(acceptance) => OrdinarySendOutcome::Accepted(acceptance),
             Response::Refused(refusal) => OrdinarySendOutcome::Refused(refusal),
+            Response::Sent(receipt) => OrdinarySendOutcome::Sent(receipt),
+            Response::Failed(failure) => OrdinarySendOutcome::Failed(failure),
             _ => return Err(StoreError::StateInvariant),
         };
         let existing_counter = match counters.as_slice() {

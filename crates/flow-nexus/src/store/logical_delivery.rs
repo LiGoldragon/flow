@@ -231,6 +231,10 @@ pub(crate) trait RecordsLogicalDeliveries {
         state: DeliveryState,
         commit: AtomicCommit,
     ) -> Result<DeliverySnapshot, StoreError>;
+    fn logical_delivery_snapshot(
+        &self,
+        id: &LogicalDeliveryId,
+    ) -> Result<Option<DeliverySnapshot>, StoreError>;
     fn read_logical_delivery_snapshots(
         &self,
         sender: &Address,
@@ -816,6 +820,20 @@ impl RecordsLogicalDeliveries for FlowStore {
         self.engine.commit_atomic(commit)?;
         self.launch_changes.announce();
         Ok(snapshot)
+    }
+    fn logical_delivery_snapshot(
+        &self,
+        id: &LogicalDeliveryId,
+    ) -> Result<Option<DeliverySnapshot>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.current,
+            RecordKey::new(id.clone()),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            [current] => Ok(Some(current.snapshot.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
     }
     fn read_logical_delivery_snapshots(
         &self,

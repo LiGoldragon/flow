@@ -22,14 +22,20 @@ use crate::delivery::body::RendersNativeContent;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::metaflow::IdentifiesPeerProcess;
+use crate::store::address_hold::HoldsLaunchAddress;
+use crate::store::context::JudgesThreshold;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::sent::NamesCodexAppServers;
 use crate::store::{ExistingSeatAdoption, NamesConfiguredModel, RegistersExistingFlow};
-use crate::waking::{PerformsWakeAndDrain, RestsEndedAwake, SleepsAndWakesSeats, WakePolicy};
+use crate::waking::{
+    HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
+    SleepsAndWakesSeats, WakePolicy,
+};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
@@ -193,6 +199,8 @@ impl SendsRequests for RunningNexus {
     fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
         use sha2::{Digest, Sha256};
 
+        let direct = send.delivery == Delivery::Wake;
+        let abrupt = !matches!(&send.message, Message::Soft(_));
         let digest_text = send.datomize(Vec::new()).protosize().compact();
         let request_digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
         let recipient = match &send.recipient {
@@ -208,7 +216,7 @@ impl SendsRequests for RunningNexus {
                 }),
         };
         let sender = peer.and_then(|peer| self.sending_address(peer).ok());
-        let answer = (|| -> SendAnswer {
+        let mut answer = (|| -> SendAnswer {
             let _turn = self
                 .dispatch_gate
                 .lock()
@@ -243,27 +251,98 @@ impl SendsRequests for RunningNexus {
                     None => return Response::Refused(Refusal::NoneAbove).into(),
                 },
             };
+            if abrupt && delivery == Delivery::Queue {
+                return Response::Failed(signal_flow::SendFailure {
+                    logical_delivery_id_option: None,
+                    send_failure_reason: signal_flow::SendFailureReason::QueueNotPermitted,
+                })
+                .into();
+            }
             self.rest_ended_awake(&recipient);
-            let answer = match self.store.accept_logical_delivery(
+            // Own the address until the direct call has a receipt or a
+            // durable non-retryable failure. Background drain/wake may not
+            // submit this same request independently.
+            let _direct_lease = if direct {
+                let Some(lease) = self.waking.hold(&recipient) else {
+                    return Response::Failed(signal_flow::SendFailure {
+                        logical_delivery_id_option: None,
+                        send_failure_reason: signal_flow::SendFailureReason::RecipientBusy(
+                            recipient,
+                        ),
+                    })
+                    .into();
+                };
+                let Some(flow_id) = self.live_awake_flow(&recipient) else {
+                    return Response::Failed(signal_flow::SendFailure {
+                        logical_delivery_id_option: None,
+                        send_failure_reason: signal_flow::SendFailureReason::RecipientUnavailable(
+                            recipient,
+                        ),
+                    })
+                    .into();
+                };
+                match self.store.metaflow(&recipient) {
+                    Ok(Some(metaflow)) if metaflow.queue.is_empty() => {}
+                    Ok(_) => {
+                        return Response::Failed(signal_flow::SendFailure {
+                            logical_delivery_id_option: None,
+                            send_failure_reason: signal_flow::SendFailureReason::RecipientBusy(
+                                recipient,
+                            ),
+                        })
+                        .into();
+                    }
+                    Err(error) => {
+                        return Response::Refused(Refusal::Store(error.to_string())).into();
+                    }
+                }
+                if !matches!(self.store.address_hold(&flow_id), Ok(None))
+                    || !matches!(self.store.outstanding_delivery(&recipient), Ok(None))
+                    || !matches!(self.store.past_threshold(&flow_id), Ok(false))
+                {
+                    return Response::Failed(signal_flow::SendFailure {
+                        logical_delivery_id_option: None,
+                        send_failure_reason: signal_flow::SendFailureReason::RecipientBusy(
+                            recipient,
+                        ),
+                    })
+                    .into();
+                }
+                Some(lease)
+            } else {
+                None
+            };
+            let admitted = self.store.accept_logical_delivery(
                 &recipient,
                 SentBy::Sender(sender),
                 delivery.clone(),
                 send.message,
                 None,
-            ) {
+            );
+            drop(_turn);
+            match admitted {
+                Ok(Response::SendAccepted(acceptance)) if direct => {
+                    self.complete_direct_send(&recipient, acceptance.logical_delivery_id)
+                }
                 Ok(response) => {
                     let pending =
                         matches!(response, Response::SendAccepted(_)).then(|| PendingSend {
-                            address: recipient.clone(),
-                            delivery: delivery.clone(),
+                            address: recipient,
+                            delivery,
                         });
                     SendAnswer { response, pending }
                 }
                 Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
-            };
-            drop(_turn);
-            answer
+            }
         })();
+        if (direct || abrupt)
+            && let Response::Refused(refusal) = &answer.response
+        {
+            answer.response = Response::Failed(signal_flow::SendFailure {
+                logical_delivery_id_option: None,
+                send_failure_reason: signal_flow::SendFailureReason::Refused(refusal.clone()),
+            });
+        }
         match self.store.record_send_outcome(
             peer.cloned(),
             sender,
@@ -698,5 +777,79 @@ impl BindsSeats for RunningNexus {
                 Err(error) => Response::Refused(Refusal::Store(error.to_string())),
             },
         }
+    }
+}
+
+/// A direct reply is based on native receipt evidence, never admission,
+/// placement, an interrupt, or a successful bridge submission.
+trait CompletesDirectSends {
+    fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer;
+}
+
+impl CompletesDirectSends for RunningNexus {
+    fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer {
+        use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
+        use std::time::{Duration, Instant};
+        let outcome = {
+            let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+            self.drain_all(address.clone())
+        };
+        // This budget bounds waiting, not evidence. Expiry is uncertainty,
+        // never proof of absence and never permission for a new attempt.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let state = {
+                let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+                if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
+                    let _ = self.reconcile_delivery(&attempt);
+                }
+                self.store.logical_delivery_snapshot(&logical_id)
+            };
+            match state {
+                Ok(Some(snapshot)) => match snapshot.delivery_state {
+                    DeliveryState::Delivered(native_receipt) => {
+                        return Response::Sent(SendReceipt {
+                            logical_delivery_id: logical_id,
+                            native_receipt,
+                        })
+                        .into();
+                    }
+                    DeliveryState::Attempting | DeliveryState::Uncertain
+                        if Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                    _ => {}
+                },
+                Ok(None) | Err(_) => {}
+            }
+            break;
+        }
+        let observed = format!("{outcome:?}");
+        let state = {
+            let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+            self.store
+                .finish_failed_direct(address, &logical_id, &observed)
+        };
+        let reason = match state {
+            Ok(DeliveryState::Delivered(native_receipt)) => {
+                return Response::Sent(SendReceipt {
+                    logical_delivery_id: logical_id,
+                    native_receipt,
+                })
+                .into();
+            }
+            Ok(DeliveryState::Uncertain | DeliveryState::Attempting) => {
+                SendFailureReason::ReceiptUncertain
+            }
+            Ok(_) => SendFailureReason::NotSent(observed),
+            Err(error) => SendFailureReason::Refused(Refusal::Store(error.to_string())),
+        };
+        Response::Failed(SendFailure {
+            logical_delivery_id_option: Some(logical_id),
+            send_failure_reason: reason,
+        })
+        .into()
     }
 }

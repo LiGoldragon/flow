@@ -717,10 +717,15 @@ mod tests {
             first
         );
         assert!(fixture.store.message_peer(&fixture.peer).unwrap());
-        let target = Address { layer: Layer::Secondary, ..fixture.message.clone() };
+        let target = Address {
+            layer: Layer::Secondary,
+            ..fixture.message.clone()
+        };
         fixture.store.seed_metaflow(Metaflow {
-            address: target.clone(), state: MetaflowState::Asleep,
-            past: vec![], queue: vec![],
+            address: target.clone(),
+            state: MetaflowState::Asleep,
+            past: vec![],
+            queue: vec![],
         });
         let request = Lock_Data {
             sender: fixture.message.clone(),
@@ -755,7 +760,15 @@ mod tests {
                 .unwrap(),
             Response::Refused(Refusal::Unknown(_))
         ));
-        assert!(fixture.store.metaflow(&target).unwrap().unwrap().queue.is_empty());
+        assert!(
+            fixture
+                .store
+                .metaflow(&target)
+                .unwrap()
+                .unwrap()
+                .queue
+                .is_empty()
+        );
         assert!(matches!(
             fixture
                 .store

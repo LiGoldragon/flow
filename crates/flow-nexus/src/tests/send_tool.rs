@@ -1489,7 +1489,7 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
     assert_eq!(queued[0].sent_by, SentBy::Sender(core()));
     assert_eq!(
         queued[0].message,
-        Message::Soft(Request::Order("source".into()))
+        Message::Soft(Request::Question("source".into()))
     );
 }
 

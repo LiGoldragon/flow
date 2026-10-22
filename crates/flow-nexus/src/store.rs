@@ -7840,7 +7840,7 @@ mod tests {
         let second_sender = Address {
             aspect: Aspect::Field,
             topic: "review".into(),
-            layer: Layer::Primary,
+            layer: Layer::Secondary,
         };
         store.seed_metaflow(Metaflow {
             address: second_sender.clone(),

@@ -694,13 +694,12 @@ mod tests {
 
     #[test]
     fn lock_queue_is_atomic_exact_and_never_claims_native_delivery() {
-        let mut fixture = Fixture::new(
+        let fixture = Fixture::new(
             std::env::current_exe()
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
         );
-        fixture.message.layer = Layer::Secondary;
         let binding = Bind_Data {
             address: fixture.message.clone(),
             process: fixture.peer.clone(),
@@ -718,9 +717,14 @@ mod tests {
             first
         );
         assert!(fixture.store.message_peer(&fixture.peer).unwrap());
+        let target = Address { layer: Layer::Secondary, ..fixture.message.clone() };
+        fixture.store.seed_metaflow(Metaflow {
+            address: target.clone(), state: MetaflowState::Asleep,
+            past: vec![], queue: vec![],
+        });
         let request = Lock_Data {
             sender: fixture.message.clone(),
-            recipient: Recipient::Address(fixture.message.clone()),
+            recipient: Recipient::Address(target.clone()),
         };
         let Response::Locked(lock) = fixture.store.lock_metaflow(request.clone(), 100).unwrap()
         else {
@@ -751,7 +755,7 @@ mod tests {
                 .unwrap(),
             Response::Refused(Refusal::Unknown(_))
         ));
-        assert!(fixture.store.list_metaflows().unwrap()[0].queue.is_empty());
+        assert!(fixture.store.metaflow(&target).unwrap().unwrap().queue.is_empty());
         assert!(matches!(
             fixture
                 .store
@@ -768,11 +772,11 @@ mod tests {
         ));
         // Queued with the Sender its Lock named.
         assert_eq!(
-            fixture.store.list_metaflows().unwrap()[0].queue[0].sent_by,
+            fixture.store.metaflow(&target).unwrap().unwrap().queue[0].sent_by,
             SentBy::Sender(lock.sender.clone())
         );
         assert_eq!(
-            fixture.store.list_metaflows().unwrap()[0].queue[0].message,
+            fixture.store.metaflow(&target).unwrap().unwrap().queue[0].message,
             flow_ethos::Message::Soft(body)
         );
         assert!(

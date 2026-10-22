@@ -147,6 +147,13 @@ unchanged as one Order to `Psyche book Tertiary`; Secondary receives only a
 notification. Completion and both queues commit atomically, so replayed
 Stop hooks create no second publication path.
 
+The core presentation launch reads its final literal authored role from
+`FLOW_CORE_PRESENTATION_PROMPT`. The declared service supplies that file;
+missing, unreadable or empty content refuses the launch. Its bytes follow
+the composed modules and identity metadata, and the final text is hashed.
+Claude Code receives the whole authored text through
+`--system-prompt-file`; this makes no claim about hidden vendor context.
+
 `flow-meta reset <idempotency-key>` asks the Codex app-server to consume the
 next eligible reset credit. `flow-meta reset <idempotency-key> <credit-id>`
 selects a specific credit. Reusing the key makes a retry stable. It sends the

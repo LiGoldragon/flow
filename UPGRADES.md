@@ -16,6 +16,9 @@ declarations carry both, and NativeStop carries an optional final answer.
 - `Psyche core Primary` admits only its own Secondary. Its simplified
   presentation source goes unchanged to `Psyche book Tertiary`, with only
   a notification to Secondary; no duplicate generic result is sent.
+- Declare `FLOW_CORE_PRESENTATION_PROMPT` in the service environment for
+  core Primary's final literal authored role. Other addresses do not read
+  it. Missing or empty content refuses the core presentation launch.
 - Initializers must supply the new declaration positions. The managed
   initializer renders regular declarations as `Regular Default` and reads
   `:flow-kind :Simplified :tools []` for a tool-free judgment.

@@ -66,9 +66,9 @@ Library
                 KeyReused
                 UnknownRecipient.Target
                 Held
-                OffRoute
                 Oversized.SendPayloadSize
-                Store ]
+                Store
+                OffRoute ]
   ; Accepted is a durable logical delivery, never a claim of delivery.
   ; LegacyUnknown preserves historical calls which predate logical IDs.
   SendOutcome.[ Accepted.{ Sender Target SendAcceptance }

@@ -70,9 +70,9 @@ pub enum SendRefusal {
     KeyReused,
     UnknownRecipient(Target),
     Held,
-    OffRoute,
     Oversized(signal_flow::SendPayloadSize),
     Store,
+    OffRoute,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

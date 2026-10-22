@@ -69,7 +69,7 @@ fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "Stop\tReport.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» } }\t0\tReported\n"
+        "Stop\tReport.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» None } }\t0\tReported\n"
     );
     assert!(!runtime.join("flow/flow.sock").exists());
 }

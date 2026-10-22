@@ -267,52 +267,10 @@ impl SendsRequests for RunningNexus {
             // durable non-retryable failure. Background drain/wake may not
             // submit this same request independently.
             let _direct_lease = if direct {
-                let Some(lease) = self.waking.hold(&recipient) else {
-                    return Response::Failed(signal_flow::SendFailure {
-                        logical_delivery_id_option: None,
-                        send_failure_reason: signal_flow::SendFailureReason::RecipientBusy(
-                            recipient,
-                        ),
-                    })
-                    .into();
-                };
-                let Some(flow_id) = self.live_awake_flow(&recipient) else {
-                    return Response::Failed(signal_flow::SendFailure {
-                        logical_delivery_id_option: None,
-                        send_failure_reason: signal_flow::SendFailureReason::RecipientUnavailable(
-                            recipient,
-                        ),
-                    })
-                    .into();
-                };
-                match self.store.metaflow(&recipient) {
-                    Ok(Some(metaflow)) if metaflow.queue.is_empty() => {}
-                    Ok(_) => {
-                        return Response::Failed(signal_flow::SendFailure {
-                            logical_delivery_id_option: None,
-                            send_failure_reason: signal_flow::SendFailureReason::RecipientBusy(
-                                recipient,
-                            ),
-                        })
-                        .into();
-                    }
-                    Err(error) => {
-                        return Response::Refused(Refusal::Store(error.to_string())).into();
-                    }
+                match self.direct_send_lease(&recipient) {
+                    Ok(lease) => Some(lease),
+                    Err(refusal) => return (*refusal).into(),
                 }
-                if !matches!(self.store.address_hold(&flow_id), Ok(None))
-                    || !matches!(self.store.outstanding_delivery(&recipient), Ok(None))
-                    || !matches!(self.store.past_threshold(&flow_id), Ok(false))
-                {
-                    return Response::Failed(signal_flow::SendFailure {
-                        logical_delivery_id_option: None,
-                        send_failure_reason: signal_flow::SendFailureReason::RecipientBusy(
-                            recipient,
-                        ),
-                    })
-                    .into();
-                }
-                Some(lease)
             } else {
                 None
             };
@@ -803,11 +761,51 @@ impl BindsSeats for RunningNexus {
 
 /// A direct reply is based on native receipt evidence, never admission,
 /// placement, an interrupt, or a successful bridge submission.
-trait CompletesDirectSends {
+pub(crate) trait CompletesDirectSends {
+    /// The caller holds the dispatch gate until admission completes.
+    fn direct_send_lease(
+        &self,
+        address: &Address,
+    ) -> Result<crate::waking::WakingLease<'_>, Box<Response>>;
     fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer;
 }
 
 impl CompletesDirectSends for RunningNexus {
+    fn direct_send_lease(
+        &self,
+        address: &Address,
+    ) -> Result<crate::waking::WakingLease<'_>, Box<Response>> {
+        use signal_flow::{SendFailure, SendFailureReason};
+        let failed = |reason| {
+            Box::new(Response::Failed(SendFailure {
+                logical_delivery_id_option: None,
+                send_failure_reason: reason,
+            }))
+        };
+        let lease = self
+            .waking
+            .hold(address)
+            .ok_or_else(|| failed(SendFailureReason::RecipientBusy(address.clone())))?;
+        let flow_id = self
+            .live_awake_flow(address)
+            .ok_or_else(|| failed(SendFailureReason::RecipientUnavailable(address.clone())))?;
+        match self.store.metaflow(address) {
+            Ok(Some(metaflow)) if metaflow.queue.is_empty() => {}
+            Ok(_) => return Err(failed(SendFailureReason::RecipientBusy(address.clone()))),
+            Err(error) => {
+                return Err(failed(SendFailureReason::Refused(Refusal::Store(
+                    error.to_string(),
+                ))));
+            }
+        }
+        if !matches!(self.store.address_hold(&flow_id), Ok(None))
+            || !matches!(self.store.outstanding_delivery(address), Ok(None))
+            || !matches!(self.store.past_threshold(&flow_id), Ok(false))
+        {
+            return Err(failed(SendFailureReason::RecipientBusy(address.clone())));
+        }
+        Ok(lease)
+    }
     fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};

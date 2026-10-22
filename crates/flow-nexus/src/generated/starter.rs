@@ -312,7 +312,7 @@ pub trait ComposesVerifiedContext {
         input_0: N,
         input_1: O,
         input_2: P,
-    ) -> signal_flow::SystemPrompt;
+    ) -> std::result::Result<signal_flow::SystemPrompt, flow_nexus::CompositionError>;
 }
 #[rustfmt::skip]
 pub trait AssemblesComposedLaunch {

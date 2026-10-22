@@ -7,7 +7,7 @@
 use super::model::{configure, seat};
 use super::{NexusFixture, pane_unopened};
 use crate::Dispatches;
-use signal_flow::{Address, Aspect, Layer, Query, Response};
+use signal_flow::{Aspect, Layer, Query, Response};
 use std::fs;
 
 #[test]

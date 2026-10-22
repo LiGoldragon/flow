@@ -5,7 +5,6 @@
 use super::NexusFixture;
 use crate::store::ManagesMetaflowState as _;
 use signal_flow::{Address, Aspect, LaunchProfile, Layer};
-use std::fs;
 
 /// Declares the Models family whole: one model per layer and aspect.
 pub(super) fn configure(fixture: &NexusFixture, models: &[(Layer, Aspect, &str)]) {

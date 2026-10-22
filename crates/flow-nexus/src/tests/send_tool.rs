@@ -1760,10 +1760,6 @@ fn a_working_codex_seat_is_not_drained() {
 /// registration or Bind still running) finds the seat only holding its
 /// Address and keeps its work; the confirmation hands that work over.
 
-fn fs_text(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_default()
-}
-
 /// A turn of the seat's thread as `thread/turns/list` answers it with
 /// `itemsView: full`; `text` is its user message, when it has one.
 fn history_turn(id: &str, status: &str, text: Option<&str>) -> serde_json::Value {

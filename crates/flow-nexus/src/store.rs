@@ -3451,7 +3451,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
-            metaflows: engine.register_table(meta_metaflows_descriptor)?,
+            metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
         };
         if !recognized {
             engine.assert(Assertion::new(

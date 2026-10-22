@@ -603,7 +603,7 @@ fn explicit_wake_does_not_judge_message_kind() {
 }
 
 #[test]
-fn the_store_sleeps_and_awakens_exactly_removing_only_what_the_woken_flow_was_handed() {
+fn the_store_sleeps_and_awakens_without_consuming_address_pending_work() {
     let fixture = NexusFixture::new();
     let store = &fixture.nexus.store;
     let at = address(Layer::Tertiary);
@@ -632,9 +632,10 @@ fn the_store_sleeps_and_awakens_exactly_removing_only_what_the_woken_flow_was_ha
     store.seed_metaflow(asleep);
     assert!(
         !store.awaken_metaflow(&at, "aaaaaa", 4).unwrap(),
-        "more handed over than queued"
+        "binding cannot claim a delivery"
     );
-    assert!(store.awaken_metaflow(&at, "bbbbbb", 2).unwrap());
+    assert!(!store.awaken_metaflow(&at, "bbbbbb", 2).unwrap());
+    assert!(store.awaken_metaflow(&at, "bbbbbb", 0).unwrap());
     let woken = store.metaflow(&at).unwrap().unwrap();
     assert_eq!(woken.state, State::Awake("bbbbbb".into()));
     assert_eq!(
@@ -644,20 +645,27 @@ fn the_store_sleeps_and_awakens_exactly_removing_only_what_the_woken_flow_was_ha
     );
     assert_eq!(
         woken.queue,
-        vec![Request::Order("C".into())].unsent(),
-        "what arrived after the wake read the queue stays"
+        vec![
+            Request::Order("A".into()),
+            Request::Order("B".into()),
+            Request::Order("C".into())
+        ]
+        .unsent(),
+        "every pending request belongs to the Address, not the seat"
     );
     assert!(
         !store
-            .remove_oldest_queued(&at, &Request::Order("A".into()).unsent())
+            .remove_oldest_queued(&at, &Request::Order("C".into()).unsent())
             .unwrap(),
         "only the oldest, as typed, is removed"
     );
-    assert!(
-        store
-            .remove_oldest_queued(&at, &Request::Order("C".into()).unsent())
-            .unwrap()
-    );
+    for body in ["A", "B", "C"] {
+        assert!(
+            store
+                .remove_oldest_queued(&at, &Request::Order(body.into()).unsent())
+                .unwrap()
+        );
+    }
     assert!(store.metaflow(&at).unwrap().unwrap().queue.is_empty());
     assert_eq!(
         store.metaflow_awake_as("bbbbbb").unwrap().unwrap().address,
@@ -1570,11 +1578,12 @@ fn a_launch_takes_its_address_by_binds_rules() {
         vec!["dddddd"],
         vec![Request::Order("A".into())],
     ));
-    assert!(store.awaken_metaflow(&at, "dddddd", 1).unwrap());
+    assert!(!store.awaken_metaflow(&at, "dddddd", 1).unwrap());
+    assert!(store.awaken_metaflow(&at, "dddddd", 0).unwrap());
     let taken_by = stored(&fixture, Layer::Tertiary);
     assert_eq!(taken_by.state, State::Awake("dddddd".into()));
     assert!(taken_by.past.is_empty());
-    assert!(taken_by.queue.is_empty());
+    assert_eq!(taken_by.queue, vec![Request::Order("A".into())].unsent());
 }
 
 /// A seat Flow launched sends through Message: Message names the sending

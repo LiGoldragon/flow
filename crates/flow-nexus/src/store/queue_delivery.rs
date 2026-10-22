@@ -584,6 +584,10 @@ pub trait AccountsQueueDelivery {
     fn observe_legacy_archive(
         &self,
     ) -> Result<Vec<meta_signal_flow::LegacyArchiveEntry>, StoreError>;
+    /// Kept archive identities are not eligible pending sender deliveries.
+    /// Their original lifecycle events and native evidence remain unchanged.
+    fn archived_legacy_request_ids(&self)
+    -> Result<std::collections::BTreeSet<String>, StoreError>;
 
     /// Gives the oldest queued request distinct durable request, attempt and
     /// native request identities before any native send occurs.
@@ -816,6 +820,24 @@ impl AccountsQueueDelivery for FlowStore {
             .collect::<Vec<_>>();
         archive.sort_by(|left, right| left.queue_request_id.cmp(&right.queue_request_id));
         Ok(archive)
+    }
+
+    fn archived_legacy_request_ids(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        let rows = self
+            .engine
+            .match_records(QueryPlan::all(self.queue_delivery.requests))?;
+        Ok(rows
+            .records()
+            .iter()
+            .filter(|request| {
+                request.state == RequestState::Parked
+                    && (matches!(request.queue_evidence, QueueEvidence::Legacy(_))
+                        || request.request_id.starts_with("legacy:"))
+            })
+            .map(|request| request.request_id.clone())
+            .collect())
     }
 
     fn prepare_oldest_delivery(
@@ -1425,6 +1447,215 @@ mod tests {
             turn_id: "turn-9".into(),
             native_receipt: r#"{"id":3,"result":{}}"#.into(),
         }
+    }
+
+    #[test]
+    fn binding_a_successor_preserves_address_pending_until_a_native_receipt() {
+        let (_fixture, store) = Fixture::new();
+        let before = store.metaflow(&address()).unwrap().unwrap();
+        // A launch's administrative count must never stand in for delivery.
+        assert!(!store.awaken_metaflow(&address(), "successor", 1).unwrap());
+        assert_eq!(store.metaflow(&address()).unwrap(), Some(before.clone()));
+        assert!(store.awaken_metaflow(&address(), "successor", 0).unwrap());
+        let rebound = store.metaflow(&address()).unwrap().unwrap();
+        assert_eq!(rebound.address, before.address);
+        assert_eq!(rebound.queue, before.queue);
+        assert_eq!(rebound.state, State::Awake("successor".into()));
+        let PrepareQueueDelivery::Prepared(attempt) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "successor",
+                "successor-native",
+                HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(None),
+            )
+            .unwrap()
+        else {
+            panic!("the successor prepares the original pending request")
+        };
+        assert_eq!(attempt.request_id, before.queue[0].logical_delivery_id);
+        assert_eq!(attempt.address, before.address);
+        assert_eq!(attempt.flow_id, "successor");
+        assert_eq!(attempt.thread_id, "successor-native");
+        assert_eq!(
+            attempt.queue_evidence,
+            QueueEvidence::Logical(before.queue[0].clone())
+        );
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            before.queue
+        );
+    }
+
+    #[test]
+    fn proved_unsent_work_rebinds_without_retargeting_the_predecessor_attempt() {
+        let (_fixture, store) = Fixture::new();
+        let old_id = prepare_claude(&store).attempt_id;
+        // This store-only fixture has performed no native I/O; the transport
+        // refusal is explicit evidence, not inferred from replacement.
+        assert!(
+            store
+                .mark_delivery_absent(
+                    &old_id,
+                    AbsenceRecord {
+                        proof: AbsenceProof::HandOverRefused,
+                        observation: "fixture transport refused before native I/O".into(),
+                    }
+                )
+                .unwrap()
+        );
+        let old = store.queue_delivery_attempt(&old_id).unwrap().unwrap();
+        assert!(store.awaken_metaflow(&address(), "successor", 0).unwrap());
+        let PrepareQueueDelivery::Prepared(new) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "successor",
+                "new-native",
+                HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(None),
+            )
+            .unwrap()
+        else {
+            panic!("proved-unsent work can be attempted at the current Address binding")
+        };
+        assert_eq!(new.request_id, old.request_id);
+        assert_eq!(new.address, old.address);
+        assert_eq!(new.queue_evidence, old.queue_evidence);
+        assert_ne!(new.attempt_id, old.attempt_id);
+        assert_eq!(new.flow_id, "successor");
+        assert_eq!(new.thread_id, "new-native");
+        assert_eq!(store.queue_delivery_attempt(&old_id).unwrap(), Some(old));
+    }
+
+    #[test]
+    fn a_predecessor_receipt_settles_its_address_request_without_retargeting_it() {
+        let (_fixture, store) = Fixture::new();
+        let old = prepare_claude(&store);
+        let native_receipt = receipt(&old);
+        assert!(
+            store
+                .record_delivery_receipt(&old.attempt_id, native_receipt.clone())
+                .unwrap()
+        );
+        assert!(store.awaken_metaflow(&address(), "successor", 0).unwrap());
+        assert!(store.settle_recorded_delivery(&old.attempt_id).unwrap());
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![queued("second")]
+        );
+        let kept = store
+            .queue_delivery_attempt(&old.attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.flow_id, old.flow_id);
+        assert_eq!(kept.thread_id, old.thread_id);
+        assert_eq!(kept.queue_evidence, old.queue_evidence);
+        assert_eq!(kept.phase, QueueDeliveryPhase::Settled(native_receipt));
+        let PrepareQueueDelivery::Prepared(next) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "successor",
+                "successor-native",
+                HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(None),
+            )
+            .unwrap()
+        else {
+            panic!("the next request belongs to the current binding")
+        };
+        assert_eq!(next.request_id, queued("second").logical_delivery_id);
+        assert_eq!(next.flow_id, "successor");
+        assert_eq!(next.thread_id, "successor-native");
+    }
+
+    #[test]
+    fn replacement_and_restart_do_not_turn_uncertainty_into_permission_to_retry() {
+        let (fixture, store) = Fixture::new();
+        let old_id = prepare_claude(&store).attempt_id;
+        let old = store.queue_delivery_attempt(&old_id).unwrap().unwrap();
+        let queue = store.metaflow(&address()).unwrap().unwrap().queue;
+        assert!(store.awaken_metaflow(&address(), "successor", 0).unwrap());
+        assert_eq!(
+            store
+                .prepare_oldest_delivery(
+                    &address(),
+                    "successor",
+                    "new-native",
+                    HarnessKind::Codex,
+                    NativeHistoryAnchor::CodexTurns(None)
+                )
+                .unwrap(),
+            PrepareQueueDelivery::Outstanding(old.clone())
+        );
+        drop(store);
+        let reopened = fixture.reopen();
+        assert_eq!(
+            reopened
+                .prepare_oldest_delivery(
+                    &address(),
+                    "successor",
+                    "new-native",
+                    HarnessKind::Codex,
+                    NativeHistoryAnchor::CodexTurns(None)
+                )
+                .unwrap(),
+            PrepareQueueDelivery::Outstanding(old.clone())
+        );
+        assert_eq!(reopened.queue_delivery_attempt(&old_id).unwrap(), Some(old));
+        assert_eq!(reopened.metaflow(&address()).unwrap().unwrap().queue, queue);
+    }
+
+    #[test]
+    fn kept_legacy_archive_is_not_a_pending_sender_snapshot_or_cursor_replay() {
+        use super::super::logical_delivery::RecordsLogicalDeliveries;
+        let (fixture, store) = Fixture::new();
+        let mut legacy = queued("legacy-body-kept-whole");
+        legacy.logical_delivery_id = "legacy:address:0".into();
+        let mut metaflow = store.metaflow(&address()).unwrap().unwrap();
+        metaflow.queue.insert(0, legacy.clone());
+        store.seed_metaflow(metaflow);
+        let SentBy::Sender(sender) = legacy.sent_by.clone() else {
+            unreachable!()
+        };
+        let before = store
+            .read_logical_delivery_snapshots(&sender, None)
+            .unwrap();
+        assert!(
+            before
+                .delivery_snapshot_vector
+                .iter()
+                .any(|snapshot| snapshot.logical_delivery_id == legacy.logical_delivery_id)
+        );
+        store.archive_legacy_queue().unwrap();
+        let after = store
+            .read_logical_delivery_snapshots(&sender, None)
+            .unwrap();
+        assert_eq!(after.delivery_cursor, before.delivery_cursor);
+        assert_eq!(after.delivery_snapshot_vector.len(), 2);
+        assert!(
+            after
+                .delivery_snapshot_vector
+                .iter()
+                .all(|snapshot| !snapshot.logical_delivery_id.starts_with("legacy:"))
+        );
+        assert_eq!(
+            store
+                .read_logical_delivery_snapshots(&sender, Some(0))
+                .unwrap(),
+            after
+        );
+        let archive = store.observe_legacy_archive().unwrap();
+        assert_eq!(archive.len(), 1);
+        assert_eq!(archive[0].queue_evidence, QueueEvidence::Logical(legacy));
+        drop(store);
+        let reopened = fixture.reopen();
+        assert_eq!(reopened.observe_legacy_archive().unwrap(), archive);
+        assert_eq!(
+            reopened
+                .read_logical_delivery_snapshots(&sender.clone(), None)
+                .unwrap(),
+            after
+        );
     }
 
     #[test]

@@ -1210,7 +1210,12 @@ impl PerformsWakeAndDrain for RunningNexus {
             Ok(Some(attempt)) => match self.reconcile_delivery(&attempt) {
                 Reconciled::Settled(queued, SeatAfter::Resting) => drained.push(queued),
                 Reconciled::Settled(queued, SeatAfter::InItsTurn) => {
-                    if node.harness_kind == HarnessKind::Codex {
+                    if attempt.flow_id == flow_id
+                        && attempt.thread_id == node.session_id
+                        && node.harness_kind == HarnessKind::Codex
+                    {
+                        // Only this bound seat's turn can hold its work.
+                        // A predecessor's receipt never marks its successor busy.
                         // The settled turn may still run: what follows waits
                         // for its end.
                         self.codex_turns.delivered(&node.session_id);

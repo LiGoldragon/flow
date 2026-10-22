@@ -31,10 +31,9 @@ pub(crate) trait SleepsMetaflows {
     fn sleep_metaflow(&self, address: &Address, flow_id: &str) -> Result<bool, StoreError>;
     /// The metaflow becomes Awake as the started flow, under the rules a
     /// launch takes its Address by (see [`TakesLaunchAddress`]); a fresh
-    /// wake's launch already took it at its confirmation. The `delivered`
-    /// oldest queued requests, which the started flow was handed, leave the
-    /// queue in the same write. Refused when the Address is not the
-    /// flow's to take or fewer are queued.
+    /// wake's launch already took it at its confirmation. Pending requests
+    /// belong to the Address, not either seat. The delivery count must be
+    /// zero: only an exactly correlated native receipt can consume work.
     fn awaken_metaflow(
         &self,
         address: &Address,
@@ -343,8 +342,8 @@ pub(crate) struct TakenAddress {
 /// live or not, and a flow already Awake there keeps it. A taken flow is
 /// never also Past.
 pub(crate) trait TakesLaunchAddress {
-    /// What taking `address` as `flow_id` does, with the `delivered`
-    /// oldest queued requests leaving the queue.
+    /// Taking `address` binds a seat and preserves every pending request.
+    /// A nonzero delivery count refuses: a binding is not a native receipt.
     fn address_taking(
         &self,
         address: &Address,
@@ -398,14 +397,13 @@ impl TakesLaunchAddress for FlowStore {
             }
             MetaflowState::Asleep => {}
         }
-        if metaflow.queue.len() < delivered {
+        if delivered != 0 {
             return Ok(AddressTaking::Refused(
                 StartRejection::LaunchPersistenceRefused,
             ));
         }
         metaflow.past.retain(|past| past != flow_id);
         metaflow.state = MetaflowState::Awake(flow_id.to_owned());
-        metaflow.queue.drain(..delivered);
         Ok(AddressTaking::Takes(TakenAddress {
             metaflow: StoredMetaflow { metaflow },
             new: existing.is_none(),

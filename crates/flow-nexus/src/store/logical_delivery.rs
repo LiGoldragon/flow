@@ -851,6 +851,11 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .map(|r| r.snapshot.clone())
                 .collect()
         };
+        // Archive is a separate, typed observation, not an active queue.
+        // Filter both reconnect snapshots and cursor replay; keep historical
+        // events and the global high-water cursor intact, including uncertainty.
+        let archived = self.archived_legacy_request_ids()?;
+        snapshots.retain(|snapshot| !archived.contains(&snapshot.logical_delivery_id));
         snapshots.sort_by_key(|snapshot| snapshot.delivery_cursor);
         Ok(SendObservation {
             delivery_cursor: highwater,

@@ -532,6 +532,7 @@ trait WakesInParts {
 }
 
 pub(crate) trait ReadsClaudeDelivery {
+    fn simplified_first_input_ready(&self, node: &FlowNode) -> bool;
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf>;
     fn claude_main_turn_ended(&self, node: &FlowNode) -> bool;
     fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor>;
@@ -541,7 +542,7 @@ pub(crate) trait ReadsClaudeDelivery {
     fn claude_delivery_history(&self, attempt: &QueueDeliveryAttempt) -> ClaudeQueuedHistory;
 }
 
-impl RunningNexus {
+impl ReadsClaudeDelivery for RunningNexus {
     fn simplified_first_input_ready(&self, node: &FlowNode) -> bool {
         if node.harness_kind != HarnessKind::Claude
             || node.flow_lifecycle != signal_flow::FlowLifecycle::Active
@@ -567,9 +568,7 @@ impl RunningNexus {
         self.claude_transcript(node)
             .is_none_or(|path| path.main_turn_unstarted(&node.session_id))
     }
-}
 
-impl ReadsClaudeDelivery for RunningNexus {
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf> {
         self.herdr
             .native_transcript_root(&HarnessKind::Claude, "")

@@ -189,7 +189,13 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
     use signal_flow::{Delivery, Message, Metaflow, Recipient, Response, SendRequest};
     use std::io::Write;
     use std::time::{Duration, Instant};
-    for (hard, duplicate) in [(true, false), (false, false), (true, true)] {
+    for (hard, duplicate, privileged) in [
+        (true, false, false),
+        (false, false, false),
+        (true, true, false),
+        (true, false, true),
+        (false, false, true),
+    ] {
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
         claude_seat(&fixture, 40_000);
@@ -240,34 +246,70 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             .unwrap();
         });
         let request = Request::Notice("real direct receipt".into());
-        let answer = fixture.nexus.send_request(
-            SendRequest {
-                recipient: Recipient::Address(target.clone()),
-                delivery: Delivery::Wake,
-                message: if hard {
-                    Message::HardAbrupt(request)
-                } else {
-                    Message::MiddleAbrupt(request)
+        let message = if hard {
+            Message::HardAbrupt(request)
+        } else {
+            Message::MiddleAbrupt(request)
+        };
+        let answer = if privileged {
+            use crate::metaflow::DispatchesMetaflowPeer;
+            let (_message_child, message_peer) = super::waking::message_peer(&fixture);
+            let Response::Locked(lock) = fixture
+                .nexus
+                .dispatch_metaflow_peer(
+                    signal_flow::Query::Lock(signal_flow::Lock_Data {
+                        sender: Address {
+                            aspect: Aspect::Mind,
+                            topic: "core".into(),
+                            layer: Layer::Secondary,
+                        },
+                        recipient: Recipient::Address(target.clone()),
+                    }),
+                    Some(&message_peer),
+                )
+                .response
+            else {
+                panic!("authenticated Message lease")
+            };
+            fixture
+                .nexus
+                .dispatch_metaflow_peer(
+                    signal_flow::Query::Deliver(signal_flow::Deliver_Data {
+                        lock,
+                        delivery: Delivery::Wake,
+                        message,
+                    }),
+                    Some(&message_peer),
+                )
+                .response
+        } else {
+            let answer = fixture.nexus.send_request(
+                SendRequest {
+                    recipient: Recipient::Address(target.clone()),
+                    delivery: Delivery::Wake,
+                    message,
                 },
-            },
-            Some(&peer),
-        );
+                Some(&peer),
+            );
+            assert!(answer.pending.is_none());
+            answer.response
+        };
         writer.join().unwrap();
         if duplicate {
             assert!(
                 matches!(
-                    answer.response,
+                    answer,
                     Response::Failed(signal_flow::SendFailure {
                         send_failure_reason: signal_flow::SendFailureReason::ReceiptUncertain,
                         ..
                     })
                 ),
                 "{:?}",
-                answer.response
+                answer
             );
             continue;
         }
-        let Response::Sent(receipt) = answer.response else {
+        let Response::Sent(receipt) = answer else {
             use crate::store::queue_delivery::AccountsQueueDelivery;
             use crate::waking::ReadsClaudeDelivery;
             let attempts = fixture.nexus.store.unsettled_deliveries(&target).unwrap();
@@ -277,7 +319,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 .collect();
             panic!(
                 "direct reply {:?}; attempts {attempts:?}; native {histories:?}",
-                answer.response
+                answer
             )
         };
         assert_eq!(receipt.native_receipt.native_session_id, CLAUDE_SESSION);
@@ -286,7 +328,6 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             "direct-native-receipt"
         );
         assert!(!receipt.logical_delivery_id.is_empty());
-        assert!(answer.pending.is_none());
         assert!(
             fixture
                 .nexus

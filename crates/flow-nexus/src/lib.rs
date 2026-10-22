@@ -11,7 +11,6 @@ use crate::codex::SelectsCodexEndpoint;
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
-use crate::store::AnswersLaunchOutcome;
 pub use caller::CallerProcess;
 pub use composition::CompositionError;
 pub use context::VerifiedContext;
@@ -55,7 +54,7 @@ pub mod title;
 pub mod values;
 pub mod waking;
 
-use binding::{ChecksFlowBinding, ChecksFlowContainer, ChecksProcessIdentity, VerifiesAdoptedSeat};
+use binding::{ChecksFlowContainer, ChecksProcessIdentity, VerifiesAdoptedSeat};
 use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchComposer, OpensLaunchComposer};
@@ -1211,7 +1210,6 @@ impl CarriesSignalFrames for UnixStream {
 
 #[cfg(test)]
 mod tests {
-    use crate::DispatchesSerially;
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
     mod configuring;
@@ -4702,13 +4700,6 @@ mod tests {
     /// 88475f: Start answered StartAmbiguous, the receipt landed half a
     /// minute later, and nobody subscribed or sent Start again. The
     /// Nexus's own watch promotes it.
-
-    /// Asserts the Herdr call log shows no typed prompt. The Codex first
-    /// prompt travels over its app-server and carries the brief; once the
-    /// launch is witnessed nothing more is typed into the seat's pane.
-    fn nothing_was_typed_after_the_first_prompt(calls: &str) {
-        assert_eq!(calls.matches("agent prompt").count(), 0, "{calls}");
-    }
 
     fn bind_existing_caller(fixture: &NexusFixture, flow_id: &str, pane: &str) {
         let socket_path = fixture

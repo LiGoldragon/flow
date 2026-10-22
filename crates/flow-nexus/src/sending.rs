@@ -19,8 +19,6 @@ use crate::caller::{
     CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
 };
 use crate::codex::SelectsCodexEndpoint;
-use crate::composition::RendersQueuedWork;
-use crate::delivery::DeliversMessages;
 use crate::delivery::body::RendersNativeContent;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
@@ -36,10 +34,9 @@ use crate::waking::{PerformsWakeAndDrain, RestsEndedAwake, SleepsAndWakesSeats, 
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Aspect, Caller, Delivery, EndpointSelection, FlowLifecycle, FlowNode, HarnessKind,
-    HerdrRoute, HerdrRouteSelection, Launch_Data, LaunchProfile, Layer, Message, Origin, Process,
-    QueueEntry, Recipient, Refusal, RememberedFlow, Request, Response, RouteReadiness,
-    SendPayloadSize, SendRequest, SentBy, StartRejection, Unknown_Data,
+    Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data, LaunchProfile, Layer,
+    Message, Process, Recipient, Refusal, RememberedFlow, Request, Response, SendPayloadSize,
+    SendRequest, SentBy, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -221,7 +218,7 @@ impl SendsRequests for RunningNexus {
                 return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }))
                     .into();
             };
-            let Some(now) = std::time::SystemTime::now()
+            let Some(_now) = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()
                 .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
@@ -684,25 +681,6 @@ impl BindsSeats for RunningNexus {
             herdr_agent_name: herdr_agent_name.clone(),
             process_identity,
             working_directory: working_directory.to_string_lossy().into_owned(),
-        };
-        let endpoint_selection = match harness_kind {
-            HarnessKind::Codex => match self.codex_endpoints.endpoint_for(&model_name) {
-                Ok(endpoint) => EndpointSelection::Available(signal_flow::Available_Data {
-                    endpoint_path: endpoint.socket.clone(),
-                    route_readiness: RouteReadiness::Ready,
-                }),
-                Err(_) => EndpointSelection::Unavailable,
-            },
-            HarnessKind::Claude => EndpointSelection::Unavailable,
-        };
-        let node = FlowNode {
-            flow_id: flow_id.clone(),
-            session_id: native_session_id,
-            harness_kind,
-            endpoint_selection,
-            herdr_route_selection: HerdrRouteSelection::Available(route),
-            origin: Origin::Unbound,
-            flow_lifecycle: FlowLifecycle::Pending,
         };
         let role = Caller {
             flow_id: flow_id.clone(),

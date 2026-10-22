@@ -3,7 +3,7 @@
 //! recipient Message holds an unexpired lock on is Held, and the request is
 //! queued with the sender Flow read from the calling process.
 
-use super::{FlowStore, ManagesMetaflowState, StoreError};
+use super::{FlowStore, StoreError};
 use sema_engine::QueryPlan;
 
 use std::{collections::BTreeSet, fs, path::PathBuf};

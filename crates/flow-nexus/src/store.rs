@@ -1131,10 +1131,6 @@ impl EngineRecord for StoredMetaLeaveOutConfigurationV1 {
 pub(crate) trait NamesConfiguredModel {
     /// The model configured for the Address's layer and aspect, if any.
     fn configured_model(&self, address: &Address) -> Result<Option<String>, StoreError>;
-    /// Why a launch profile's model may not launch: none is configured for
-    /// its Address's layer and aspect, or the configured one is another
-    /// name. None when the profile names the configured model.
-    fn model_refusal(&self, profile: &LaunchProfile) -> Result<Option<ModelRefusal>, StoreError>;
 }
 
 impl NamesConfiguredModel for FlowStore {
@@ -1146,14 +1142,6 @@ impl NamesConfiguredModel for FlowStore {
             .records()
             .first()
             .map(|stored| stored.model.native.clone()))
-    }
-
-    fn model_refusal(&self, profile: &LaunchProfile) -> Result<Option<ModelRefusal>, StoreError> {
-        Ok(match self.configured_model(&profile.address)? {
-            None => Some(ModelRefusal::Unconfigured),
-            Some(configured) if configured == profile.model_name => None,
-            Some(configured) => Some(ModelRefusal::Differs(configured)),
-        })
     }
 }
 
@@ -1205,22 +1193,6 @@ impl UpgradeFrom<StoredMetaLeaveOutConfigurationV1> for StoredMetaLeaveOutConfig
                 leave_outs,
             },
         })
-    }
-}
-
-/// The store's commit marker, which every write moves: a test's witness
-/// that nothing was written.
-#[cfg(test)]
-pub(crate) trait MarksCommits {
-    fn commit_marker(&self) -> sema_engine::DatabaseMarker;
-}
-
-#[cfg(test)]
-impl MarksCommits for FlowStore {
-    fn commit_marker(&self) -> sema_engine::DatabaseMarker {
-        self.engine
-            .current_database_marker()
-            .expect("commit marker reads")
     }
 }
 
@@ -3677,7 +3649,7 @@ pub trait RegistersFlowIdentity {
 }
 
 /// Imports one already-running native flow without claiming a launch receipt.
-pub trait RegistersExistingFlow {
+pub(crate) trait RegistersExistingFlow {
     fn adopt_existing_flow(
         &self,
         flow_node: FlowNode,
@@ -4360,8 +4332,6 @@ pub(crate) trait ManagesMetaflowState: Sized {
         &self,
         model_name: &str,
     ) -> Result<Option<ConfigureThreshold>, StoreError>;
-    /// The Address of the Investigation seat, if one is configured.
-    fn configured_investigation(&self) -> Result<Option<Address>, StoreError>;
     /// The leave-outs a metaflow's Start on one harness takes when it names
     /// none; empty when none are configured for that harness.
     fn default_leave_outs(
@@ -4412,17 +4382,6 @@ impl ManagesMetaflowState for FlowStore {
         match rows.records() {
             [] => Ok(None),
             [stored] => Ok(Some(stored.threshold.clone())),
-            _ => Err(StoreError::StateInvariant),
-        }
-    }
-
-    fn configured_investigation(&self) -> Result<Option<Address>, StoreError> {
-        let rows = self
-            .engine
-            .match_records(QueryPlan::all(self.meta_configuration_tables.investigation))?;
-        match rows.records() {
-            [] => Ok(None),
-            [stored] => Ok(Some(stored.investigation.clone())),
             _ => Err(StoreError::StateInvariant),
         }
     }
@@ -4773,18 +4732,6 @@ impl ConfiguresFlowStore for FlowStore {
 }
 
 trait RegistersBindings {
-    /// A binding that names a flow already in the store asserts only its
-    /// role, and only when the stored flow is that binding: not Stopped, the
-    /// same native thread and harness, and a route on the same Herdr session,
-    /// pane and terminal (the agent name may have changed since). A role
-    /// already recorded must be the same one. Nothing else is written: the
-    /// flow keeps its lifecycle, endpoint, route and origin.
-    fn assert_role_of_matching_binding(
-        &self,
-        flow: FlowRecord,
-        binding: &FlowNode,
-        role: Caller,
-    ) -> Result<FlowRegistration, StoreError>;
     fn register_flow_as(
         &self,
         flow_node: FlowNode,
@@ -4794,43 +4741,6 @@ trait RegistersBindings {
 }
 
 impl RegistersBindings for FlowStore {
-    fn assert_role_of_matching_binding(
-        &self,
-        flow: FlowRecord,
-        binding: &FlowNode,
-        role: Caller,
-    ) -> Result<FlowRegistration, StoreError> {
-        let HerdrRouteSelection::Available(bound_route) = &binding.herdr_route_selection else {
-            return Ok(FlowRegistration::ConflictingBinding);
-        };
-        let same_route = self.herdr_route(&flow.flow_id)?.is_some_and(|stored| {
-            stored.route.herdr_session_name == bound_route.herdr_session_name
-                && stored.route.herdr_pane_id == bound_route.herdr_pane_id
-                && stored.route.herdr_terminal_id == bound_route.herdr_terminal_id
-        });
-        if !flow.lifecycle.is_live()
-            || flow.thread_id.as_deref() != Some(binding.session_id.as_str())
-            || flow.harness_kind != binding.harness_kind
-            || !same_route
-        {
-            return Ok(FlowRegistration::ConflictingBinding);
-        }
-        match self.role(&flow.flow_id)? {
-            Some(existing) if existing != role => {
-                return Ok(FlowRegistration::ConflictingBinding);
-            }
-            Some(_) => {}
-            None => {
-                self.engine
-                    .assert(Assertion::new(self.roles, StoredRole { caller: role }))?;
-            }
-        }
-        match self.flow_node(&flow.flow_id)? {
-            Some(stored) => Ok(FlowRegistration::Registered(Box::new(stored))),
-            None => Err(StoreError::StateInvariant),
-        }
-    }
-
     fn register_flow_as(
         &self,
         flow_node: FlowNode,

@@ -406,6 +406,7 @@ impl<R> Write for ProxyWebSocketIo<R> {
 
 pub(crate) enum ProxyEvent {
     Upgraded,
+    #[allow(dead_code)] // WebSocket control frame retained for protocol vocabulary.
     Ping(Vec<u8>),
     Reply(Result<serde_json::Value, CodexAdapterUnavailable>),
 }

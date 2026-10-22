@@ -14,7 +14,7 @@
 //! what it said.
 
 use super::{
-    FlowStore, ManagesMetaflowState, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, StoreError,
+    FlowStore, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, StoreError,
     metaflow::{SleepsMetaflows, TakesLaunchAddress},
     opened_thread::RecordsOpenedThreads,
 };
@@ -423,7 +423,7 @@ impl KeepsSendCalls for FlowStore {
 mod tests {
     use super::{
         KeepsSendCalls, LegacyQueuedData, SendCallV1, SendCallV2, SendCallV3, SendOutcomeV1,
-        SendOutcomeV2, SendOutcomeV3, SendRefusalV1, SendRefusalV2, SendRefusalV3,
+        SendOutcomeV2, SendOutcomeV3, SendRefusalV1, SendRefusalV2,
     };
     use crate::generated::send_tool::{
         LegacyUnknown_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,

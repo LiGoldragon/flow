@@ -4,30 +4,11 @@
 //! one recorded, Awake or Asleep, at the Secondary of the Primary's aspect
 //! and topic.
 
-use super::model::{configure, seat, untouched};
+use super::model::{configure, seat};
 use super::{NexusFixture, pane_unopened};
-use crate::Dispatches;
-use crate::store::ReadsLaunchAttempt as _;
-use crate::store::metaflow::{SeedsMetaflow as _, SleepsMetaflows as _};
-use signal_flow::{Address, Aspect, Layer, Query, Response, StartRejection};
+use signal_flow::{Address, Aspect, Layer, Query, Response};
 use std::fs;
 
-/// The metaflow of one seat, Asleep with nothing past or queued.
-fn asleep(aspect: Aspect, topic: &str, layer: Layer) -> signal_flow::Metaflow {
-    signal_flow::Metaflow {
-        address: Address {
-            aspect,
-            topic: topic.into(),
-            layer,
-        },
-        state: flow_ethos::State::Asleep,
-        past: vec![],
-        queue: vec![],
-    }
-}
-
-/// A Secondary, or any layer below the Primary, needs no seat above or
-/// beside it to start.
 #[test]
 fn a_secondary_start_needs_no_other_seat() {
     let fixture = NexusFixture::new();

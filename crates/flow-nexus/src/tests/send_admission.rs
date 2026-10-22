@@ -189,7 +189,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
     use signal_flow::{Delivery, Message, Metaflow, Recipient, Response, SendRequest};
     use std::io::Write;
     use std::time::{Duration, Instant};
-    for hard in [true, false] {
+    for (hard, duplicate) in [(true, false), (false, false), (true, true)] {
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
         claude_seat(&fixture, 40_000);
@@ -198,7 +198,11 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 codex_agent_in("pane-1", "terminal-pane-1"),
                 claude_agent(&fixture),
             ],
-            PromptFixture::Prompted("w1:p3"),
+            if duplicate {
+                PromptFixture::Prompted("w1:p3")
+            } else {
+                PromptFixture::PromptedUnrecorded("w1:p3")
+            },
         );
         let target = Address {
             aspect: Aspect::Mind,
@@ -249,6 +253,20 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             Some(&peer),
         );
         writer.join().unwrap();
+        if duplicate {
+            assert!(
+                matches!(
+                    answer.response,
+                    Response::Failed(signal_flow::SendFailure {
+                        send_failure_reason: signal_flow::SendFailureReason::ReceiptUncertain,
+                        ..
+                    })
+                ),
+                "{:?}",
+                answer.response
+            );
+            continue;
+        }
         let Response::Sent(receipt) = answer.response else {
             use crate::store::queue_delivery::AccountsQueueDelivery;
             use crate::waking::ReadsClaudeDelivery;

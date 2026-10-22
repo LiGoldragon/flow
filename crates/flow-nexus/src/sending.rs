@@ -762,6 +762,7 @@ impl BindsSeats for RunningNexus {
 /// A direct reply is based on native receipt evidence, never admission,
 /// placement, an interrupt, or a successful bridge submission.
 pub(crate) trait CompletesDirectSends {
+    fn direct_receipt_watch(&self, address: &Address) -> Option<notify::RecommendedWatcher>;
     /// The caller holds the dispatch gate until admission completes.
     fn direct_send_lease(
         &self,
@@ -771,6 +772,38 @@ pub(crate) trait CompletesDirectSends {
 }
 
 impl CompletesDirectSends for RunningNexus {
+    fn direct_receipt_watch(&self, address: &Address) -> Option<notify::RecommendedWatcher> {
+        use crate::claude::ReadsClaudeTurns;
+        use crate::store::AnnouncesLaunchChanges;
+        use notify::Watcher;
+        let flow_id = self.live_awake_flow(address)?;
+        let node = self.store.flow_node(&flow_id).ok()??;
+        if node.harness_kind != HarnessKind::Claude {
+            return None;
+        }
+        let transcript = self.claude_transcript(&node)?;
+        let directory = transcript.parent()?.to_path_buf();
+        let changes = self.store.launch_changes.clone();
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event
+                    && matches!(
+                        event.kind,
+                        notify::EventKind::Create(_)
+                            | notify::EventKind::Modify(_)
+                            | notify::EventKind::Remove(_)
+                    )
+                    && event.paths.iter().any(|path| path == &transcript)
+                {
+                    changes.announce();
+                }
+            })
+            .ok()?;
+        watcher
+            .watch(&directory, notify::RecursiveMode::NonRecursive)
+            .ok()?;
+        Some(watcher)
+    }
     fn direct_send_lease(
         &self,
         address: &Address,
@@ -810,6 +843,9 @@ impl CompletesDirectSends for RunningNexus {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
         use std::time::{Duration, Instant};
+        // Subscribe before input. File events only schedule the existing
+        // exact session/inode/cursor/content correlation, never delivery.
+        let _receipt_watch = self.direct_receipt_watch(address);
         let outcome = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
             self.drain_all(address.clone())

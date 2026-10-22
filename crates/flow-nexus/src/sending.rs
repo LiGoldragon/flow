@@ -806,8 +806,8 @@ impl CompletesDirectSends for RunningNexus {
                 }
                 self.store.logical_delivery_snapshot(&logical_id)
             };
-            match state {
-                Ok(Some(snapshot)) => match snapshot.delivery_state {
+            if let Ok(Some(snapshot)) = state {
+                match snapshot.delivery_state {
                     DeliveryState::Delivered(native_receipt) => {
                         return Response::Sent(SendReceipt {
                             logical_delivery_id: logical_id,
@@ -816,15 +816,12 @@ impl CompletesDirectSends for RunningNexus {
                         .into();
                     }
                     DeliveryState::Attempting | DeliveryState::Uncertain
-                        if Instant::now() < deadline =>
+                        if Instant::now() < deadline && changes.until(seen, deadline) =>
                     {
-                        if changes.until(seen, deadline) {
-                            continue;
-                        }
+                        continue;
                     }
                     _ => {}
-                },
-                Ok(None) | Err(_) => {}
+                }
             }
             break;
         }

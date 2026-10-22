@@ -45,11 +45,12 @@ use signal_flow::{
     StartRejection, StopRejection,
 };
 
-trait CountsReportedStops {
+trait InterpretsLaunchObservations {
     fn stops_reported(&self, flow_id: &str) -> i64;
+    fn composition_refused(outcome: Outcome) -> Response;
 }
 
-impl CountsReportedStops for RunningNexus {
+impl InterpretsLaunchObservations for RunningNexus {
     fn stops_reported(&self, flow_id: &str) -> i64 {
         let session = self
             .store

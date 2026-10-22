@@ -1,7 +1,7 @@
-use datom_codec::{Actualizing, Budget, Datomizable, Potential};
+use datom_codec::{Budget, Composable, DatomForming, Datomizable, Form};
 use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
-use protos::{Compactable, Protosizable, ReaderBudget};
-use signal_flow::{Query, Response};
+use protos::{BoundedProtosizable, Compactable, Protosizable, ReaderBudget};
+use signal_flow::{Delivery, Message, Query, Recipient, Response, SendRequest};
 use std::{
     env,
     io::{Read, Write},
@@ -43,8 +43,30 @@ impl ParsesFlowCommand for FlowClient {
             depth: 0,
             maximum_depth: 1_024,
         };
-        Potential::<Query>::from(value)
-            .actualize(&mut budget)
+        let parsed = value
+            .protosize_with(&mut budget.reader)
+            .map_err(|error| format!("invalid Flow query: {error:?}"))?;
+        let datom = parsed
+            .datom_form(vec![])
+            .map_err(|error| format!("invalid Flow query: {error:?}"))?;
+        // The CLI accepts omitted delivery as Wake. The Nexus wire
+        // remains the explicit, typed three-position SendRequest.
+        // Compose the original positions so errors retain input paths.
+        if let Form::Variant(head, body) = &datom.form
+            && head.0 == "Send"
+            && matches!(&body.form, Form::Struct(fields) if fields.len() == 2)
+        {
+            let (recipient, message): (Recipient, Message) = body
+                .compose(&mut budget)
+                .map_err(|error| format!("invalid Flow query: {error:?}"))?;
+            return Ok(Query::Send(SendRequest {
+                recipient,
+                delivery: Delivery::Wake,
+                message,
+            }));
+        }
+        datom
+            .compose(&mut budget)
             .map_err(|error| format!("invalid Flow query: {error:?}"))
     }
 }
@@ -164,21 +186,65 @@ mod tests {
             send.message,
             Message::Soft(Request::Order("Review.".into()))
         );
-        assert!(
+        assert_eq!(
             client
                 .parse_command(
-                    ["Send.{ Address.{ Mind core Secondary } Soft.Order.«Review.» }".into(),]
+                    ["Send.{ Address.{ Mind core Secondary } Soft.Order.«Review.» }".into()]
                         .into_iter()
                 )
-                .is_err(),
-            "the former two-position Send is not the live wire"
+                .expect("omitted delivery defaults to Wake"),
+            Query::Send(send)
         );
+        let Query::Send(queued) = client
+            .parse_command(["Send.{ Up Queue Soft.Result.«Ready.» }".into()].into_iter())
+            .expect("explicit Queue parses")
+        else {
+            panic!("fixture must remain a Send")
+        };
+        assert_eq!(queued.recipient, Recipient::Up);
+        assert_eq!(queued.delivery, Delivery::Queue);
         assert!(matches!(
             client
                 .parse_command(["DeliverAll.{ Mind core Secondary }".into()].into_iter())
                 .expect("DeliverAll parses"),
             Query::DeliverAll(_)
         ));
+    }
+
+    #[test]
+    fn default_send_keeps_message_content_and_validates_positions() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        for message in [
+            "Soft.Result.«Wake Send.{ is content }»",
+            "MiddleAbrupt.Notice.«Check the source.»",
+            "HardAbrupt.Question.«Which revision?»",
+            "Soft.Psyche.{ «context» «verbatim» }",
+            "Soft.Psyches.[ { «context» «verbatim» } ]",
+        ] {
+            let defaulted = client
+                .parse_command([format!("Send.{{ Up {message} }}")].into_iter())
+                .expect("defaulted Send parses");
+            let explicit = client
+                .parse_command([format!("Send.{{ Up Wake {message} }}")].into_iter())
+                .expect("explicit Wake parses");
+            assert_eq!(defaulted, explicit);
+        }
+        for invalid in [
+            "Send.{}",
+            "Send.{ Up }",
+            "Send.{ Up Wake Soft.Order.«Review.» extra }",
+            "Send.{ Up Unknown Soft.Order.«Review.» }",
+            "Send.{ Up Wake }",
+            "Send.{ Unknown Soft.Order.«Review.» }",
+            "Send.[ Up Soft.Order.«Review.» ]",
+        ] {
+            assert!(
+                client.parse_command([invalid.into()].into_iter()).is_err(),
+                "must reject {invalid}"
+            );
+        }
     }
 
     #[test]

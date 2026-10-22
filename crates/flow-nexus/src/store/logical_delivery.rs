@@ -23,7 +23,7 @@ const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
 
 pub(crate) trait CorePresentationRoute {
     fn is_core_presentation(&self) -> bool;
-    fn accepts_presentation_sender(&self, sender: &SentBy) -> bool;
+    fn accepts_primary_request(&self, sender: &SentBy, message: &Message) -> bool;
 }
 
 impl CorePresentationRoute for Address {
@@ -33,12 +33,34 @@ impl CorePresentationRoute for Address {
             && self.layer == signal_flow::Layer::Primary
     }
 
-    fn accepts_presentation_sender(&self, sender: &SentBy) -> bool {
-        !self.is_core_presentation()
-            || matches!(sender, SentBy::Sender(address)
-                if address.aspect == signal_flow::Aspect::Psyche
-                    && address.topic == "core"
-                    && address.layer == signal_flow::Layer::Secondary)
+    fn accepts_primary_request(&self, sender: &SentBy, message: &Message) -> bool {
+        use signal_flow::{Aspect, Layer};
+        if self.layer != Layer::Primary {
+            return true;
+        }
+        let request = match message {
+            Message::HardAbrupt(request)
+            | Message::MiddleAbrupt(request)
+            | Message::Soft(request) => request,
+        };
+        if !matches!(request, Request::Question(_)) {
+            return false;
+        }
+        let SentBy::Sender(sender) = sender else {
+            return false;
+        };
+        if sender.topic != self.topic {
+            return false;
+        }
+        (sender.aspect == self.aspect && sender.layer == Layer::Secondary)
+            || (sender.layer == Layer::Primary
+                && matches!(
+                    (&sender.aspect, &self.aspect),
+                    (Aspect::Psyche, Aspect::Mind)
+                        | (Aspect::Mind, Aspect::Psyche)
+                        | (Aspect::Mind, Aspect::Field)
+                        | (Aspect::Field, Aspect::Mind)
+                ))
     }
 }
 
@@ -490,7 +512,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             content_sha256: content_sha256.to_owned(),
             send_outcome,
         };
-        if !target.accepts_presentation_sender(&SentBy::Sender(sender.clone())) {
+        if !target.accepts_primary_request(&SentBy::Sender(sender.clone()), &message) {
             let outcome = ToolSendOutcome::Refused(ToolSendRefusal::OffRoute);
             self.engine
                 .assert(Assertion::new(self.send_calls, record(outcome.clone())))?;
@@ -667,7 +689,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
     ) -> Result<Response, StoreError> {
-        if !address.accepts_presentation_sender(&sent_by) {
+        if !address.accepts_primary_request(&sent_by, &message) {
             return Ok(Response::Refused(Refusal::OffRoute));
         }
         let _guard = self

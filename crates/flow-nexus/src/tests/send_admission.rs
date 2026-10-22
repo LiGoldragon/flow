@@ -299,3 +299,77 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         );
     }
 }
+
+#[test]
+fn primary_admission_is_exact_address_layer_and_question_for_every_tier() {
+    use crate::store::logical_delivery::CorePresentationRoute;
+    use signal_flow::{Message, Said, SentBy};
+    for target_aspect in [Aspect::Psyche, Aspect::Mind, Aspect::Field] {
+        let target = Address {
+            aspect: target_aspect.clone(),
+            topic: "decision".into(),
+            layer: Layer::Primary,
+        };
+        for aspect in [Aspect::Psyche, Aspect::Mind, Aspect::Field] {
+            for layer in [
+                Layer::Primary,
+                Layer::Secondary,
+                Layer::Tertiary,
+                Layer::Quaternary,
+            ] {
+                for same_topic in [true, false] {
+                    let sender = SentBy::Sender(Address {
+                        aspect: aspect.clone(),
+                        topic: if same_topic { "decision" } else { "other" }.into(),
+                        layer: layer.clone(),
+                    });
+                    let own_secondary = aspect == target_aspect && layer == Layer::Secondary;
+                    let adjacent_primary = layer == Layer::Primary
+                        && matches!(
+                            (&aspect, &target_aspect),
+                            (Aspect::Psyche, Aspect::Mind)
+                                | (Aspect::Mind, Aspect::Psyche)
+                                | (Aspect::Mind, Aspect::Field)
+                                | (Aspect::Field, Aspect::Mind)
+                        );
+                    for request in [
+                        Request::Question("decision with context".into()),
+                        Request::Order("x".into()),
+                        Request::Result("x".into()),
+                        Request::Notice("x".into()),
+                        Request::Psyche(Said {
+                            context: "x".into(),
+                            verbatim: "x".into(),
+                        }),
+                        Request::Psyches(vec![]),
+                    ] {
+                        let expected = same_topic
+                            && (own_secondary || adjacent_primary)
+                            && matches!(&request, Request::Question(_));
+                        for message in [
+                            Message::HardAbrupt(request.clone()),
+                            Message::MiddleAbrupt(request.clone()),
+                            Message::Soft(request.clone()),
+                        ] {
+                            assert_eq!(
+                                target.accepts_primary_request(&sender, &message),
+                                expected,
+                                "target {target:?} sender {sender:?} message {message:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(!target.accepts_primary_request(
+            &SentBy::Unknown,
+            &Message::Soft(Request::Question("x".into()))
+        ));
+        assert!(
+            !target.accepts_primary_request(
+                &SentBy::Flow,
+                &Message::Soft(Request::Question("x".into()))
+            )
+        );
+    }
+}

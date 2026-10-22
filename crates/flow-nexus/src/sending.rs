@@ -24,7 +24,7 @@ use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::metaflow::IdentifiesPeerProcess;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
-use crate::store::logical_delivery::RecordsLogicalDeliveries;
+use crate::store::logical_delivery::{CorePresentationRoute, RecordsLogicalDeliveries};
 use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::queue_delivery::AccountsQueueDelivery;
@@ -251,6 +251,12 @@ impl SendsRequests for RunningNexus {
                     None => return Response::Refused(Refusal::NoneAbove).into(),
                 },
             };
+            if !recipient.accepts_primary_request(
+                &signal_flow::SentBy::Sender(sender.clone()),
+                &send.message,
+            ) {
+                return Response::Refused(Refusal::OffRoute).into();
+            }
             if abrupt && delivery == Delivery::Queue {
                 return Response::Failed(signal_flow::SendFailure {
                     logical_delivery_id_option: None,
@@ -753,7 +759,7 @@ pub(crate) trait CompletesDirectSends {
 impl CompletesDirectSends for RunningNexus {
     fn direct_receipt_watch(&self, address: &Address) -> Option<notify::RecommendedWatcher> {
         use crate::claude::ReadsClaudeTurns;
-        use crate::store::AnnouncesLaunchChanges;
+        use crate::store::{AnnouncesLaunchChanges, ReadsFlowRows};
         use notify::Watcher;
         let flow_id = self.live_awake_flow(address)?;
         let node = self.store.flow_node(&flow_id).ok()??;

@@ -577,6 +577,14 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
 /// Durable queue/native-delivery accounting.  Callers serialize preparation
 /// with queue mutation (the Nexus dispatch gate does so in production).
 pub trait AccountsQueueDelivery {
+    /// Quarantine pre-logical-identity queue data before any native I/O.
+    /// Original request and attempt records are kept, never reclassified
+    /// as delivered or absent and never correlated by matching bodies.
+    fn archive_legacy_queue(&self) -> Result<(), StoreError>;
+    fn observe_legacy_archive(
+        &self,
+    ) -> Result<Vec<meta_signal_flow::LegacyArchiveEntry>, StoreError>;
+
     /// Gives the oldest queued request distinct durable request, attempt and
     /// native request identities before any native send occurs.
     fn prepare_oldest_delivery(
@@ -709,6 +717,107 @@ impl ReadsQueueDelivery for FlowStore {
 }
 
 impl AccountsQueueDelivery for FlowStore {
+    fn archive_legacy_queue(&self) -> Result<(), StoreError> {
+        let requests = self
+            .engine
+            .match_records(QueryPlan::all(self.queue_delivery.requests))?
+            .records()
+            .to_vec();
+        let mut commit = self.engine.begin_atomic_commit();
+        let mut changed = false;
+        // These request records retain their own original identities and
+        // evidence. They cannot safely be paired to a migrated queue slot.
+        for request in &requests {
+            if matches!(request.queue_evidence, QueueEvidence::Legacy(_))
+                && matches!(request.state, RequestState::Queued | RequestState::Unsent)
+            {
+                let mut archived = request.clone();
+                archived.state = RequestState::Parked;
+                commit = commit.mutate(self.queue_delivery.requests, archived);
+                changed = true;
+            }
+        }
+        for metaflow in self.list_metaflows()? {
+            let mut stored = self
+                .stored_metaflow(&metaflow.address)?
+                .ok_or(StoreError::StateInvariant)?;
+            let mut kept = Vec::new();
+            let mut removed = false;
+            for entry in metaflow.queue {
+                // This namespace is assigned only by the pre-logical-ID
+                // metaflow migration, never by ordinary send admission.
+                if !entry.logical_delivery_id.starts_with("legacy:") {
+                    kept.push(entry);
+                    continue;
+                }
+                let id = entry.logical_delivery_id.clone();
+                let evidence = QueueEvidence::Logical(entry);
+                match requests.iter().find(|request| request.request_id == id) {
+                    Some(request)
+                        if request.address == metaflow.address
+                            && request.queue_evidence == evidence =>
+                    {
+                        let mut archived = request.clone();
+                        archived.state = RequestState::Parked;
+                        commit = commit.mutate(self.queue_delivery.requests, archived);
+                    }
+                    Some(_) => return Err(StoreError::StateInvariant),
+                    None => {
+                        commit = commit.assert(
+                            self.queue_delivery.requests,
+                            StoredDeliveryRequest {
+                                request_id: id,
+                                address: metaflow.address.clone(),
+                                queue_evidence: evidence,
+                                state: RequestState::Parked,
+                            },
+                        );
+                    }
+                }
+                removed = true;
+            }
+            if removed {
+                stored.metaflow.queue = kept;
+                commit = commit.mutate(self.metaflows, stored);
+                changed = true;
+            }
+        }
+        if changed {
+            self.engine.commit_atomic(commit)?;
+        }
+        Ok(())
+    }
+
+    fn observe_legacy_archive(
+        &self,
+    ) -> Result<Vec<meta_signal_flow::LegacyArchiveEntry>, StoreError> {
+        let requests = self
+            .engine
+            .match_records(QueryPlan::all(self.queue_delivery.requests))?;
+        let attempts = self.delivery_attempts()?;
+        let mut archive = requests
+            .records()
+            .iter()
+            .filter(|request| {
+                request.state == RequestState::Parked
+                    && (matches!(request.queue_evidence, QueueEvidence::Legacy(_))
+                        || request.request_id.starts_with("legacy:"))
+            })
+            .map(|request| meta_signal_flow::LegacyArchiveEntry {
+                queue_request_id: request.request_id.clone(),
+                address: request.address.clone(),
+                queue_evidence: request.queue_evidence.clone(),
+                queue_attempt_id_vector: attempts
+                    .iter()
+                    .filter(|attempt| attempt.request_id == request.request_id)
+                    .map(|attempt| attempt.attempt_id.clone())
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        archive.sort_by(|left, right| left.queue_request_id.cmp(&right.queue_request_id));
+        Ok(archive)
+    }
+
     fn prepare_oldest_delivery(
         &self,
         address: &Address,
@@ -717,6 +826,8 @@ impl AccountsQueueDelivery for FlowStore {
         harness_kind: HarnessKind,
         history_anchor: NativeHistoryAnchor,
     ) -> Result<PrepareQueueDelivery, StoreError> {
+        // Also protects callers that encounter migrated data after opening.
+        self.archive_legacy_queue()?;
         if let Some(attempt) = self.outstanding_for(address)? {
             return Ok(PrepareQueueDelivery::Outstanding(attempt));
         }
@@ -869,6 +980,11 @@ impl AccountsQueueDelivery for FlowStore {
         let QueueEvidence::Logical(logical_entry) = &attempt.queue_evidence else {
             return Ok(false);
         };
+        if logical_entry.logical_delivery_id.starts_with("legacy:") {
+            // A late receipt is retained on its original attempt, but the
+            // kept legacy archive never becomes a delivered lifecycle.
+            return Ok(false);
+        }
         let logical_id = logical_entry.logical_delivery_id.clone();
         let native_receipt = NativeReceipt {
             harness_kind: attempt.harness_kind.clone(),
@@ -1165,6 +1281,12 @@ impl AccountsQueueDelivery for FlowStore {
     fn recover_outstanding_deliveries(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
         let mut outstanding = Vec::new();
         for mut attempt in self.delivery_attempts()? {
+            if self.request_state(&attempt.request_id)? == Some(RequestState::Parked)
+                && (matches!(attempt.queue_evidence, QueueEvidence::Legacy(_))
+                    || attempt.request_id.starts_with("legacy:"))
+            {
+                continue;
+            }
             match attempt.phase.clone() {
                 QueueDeliveryPhase::Prepared => {
                     attempt.phase = QueueDeliveryPhase::Uncertain(None);
@@ -1808,7 +1930,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_resolution_refuses_legacy_attempt_without_logical_lineage() {
+    fn legacy_attempt_is_archived_without_fabricated_resolution_or_replay() {
         use ResolveQueueDeliveryRejected_Data as Rejected;
         let (_fixture, store) = Fixture::new();
         let attempt = prepare_claude(&store);
@@ -1847,6 +1969,17 @@ mod tests {
             )
             .unwrap();
 
+        store.archive_legacy_queue().unwrap();
+        assert!(store.outstanding_delivery(&address()).unwrap().is_none());
+        assert!(store.recover_outstanding_deliveries().unwrap().is_empty());
+        let archive = store.observe_legacy_archive().unwrap();
+        assert_eq!(archive.len(), 1);
+        assert_eq!(archive[0].queue_request_id, attempt.request_id);
+        assert_eq!(archive[0].queue_evidence, attempt.queue_evidence);
+        assert_eq!(
+            archive[0].queue_attempt_id_vector,
+            vec![attempt.attempt_id.clone()]
+        );
         assert_eq!(
             store
                 .resolve_uncertain_delivery(
@@ -1856,13 +1989,108 @@ mod tests {
                 .unwrap(),
             Err(Rejected::LegacyUncorrelated)
         );
+        store.archive_legacy_queue().unwrap();
+        assert_eq!(store.observe_legacy_archive().unwrap(), archive);
         assert_eq!(
             store.queue_delivery_attempt(&attempt.attempt_id).unwrap(),
-            Some(attempt)
+            Some(attempt.clone())
         );
         assert_eq!(
             store.metaflow(&address()).unwrap().unwrap().queue,
             vec![queued("first"), queued("second")]
+        );
+        assert!(
+            store
+                .record_delivery_receipt(&attempt.attempt_id, receipt(&attempt))
+                .unwrap()
+        );
+        assert!(!store.settle_recorded_delivery(&attempt.attempt_id).unwrap());
+        assert_eq!(store.observe_legacy_archive().unwrap(), archive);
+        assert!(store.recover_outstanding_deliveries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_archive_keeps_every_queue_slot_across_addresses_and_restart() {
+        let (fixture, store) = Fixture::new();
+        let mut expected = Vec::new();
+        for topic in ["delivery-accounting", "other"] {
+            let mut metaflow = store.metaflow(&address()).unwrap().unwrap();
+            metaflow.address.topic = topic.into();
+            metaflow.queue = (0..3)
+                .map(|index| {
+                    let mut entry = queued("same body");
+                    entry.logical_delivery_id = format!("legacy:{topic}:{index}");
+                    entry
+                })
+                .collect();
+            expected.extend(
+                metaflow
+                    .queue
+                    .iter()
+                    .cloned()
+                    .map(|entry| (metaflow.address.clone(), entry)),
+            );
+            let stored = super::super::StoredMetaflow { metaflow };
+            if topic == "delivery-accounting" {
+                store
+                    .engine
+                    .mutate_keyed(KeyedMutation::new(
+                        store.metaflows,
+                        stored.record_key(),
+                        stored,
+                    ))
+                    .unwrap();
+            } else {
+                store
+                    .engine
+                    .assert(Assertion::new(store.metaflows, stored))
+                    .unwrap();
+            }
+        }
+        store.archive_legacy_queue().unwrap();
+        let archive = store.observe_legacy_archive().unwrap();
+        assert_eq!(archive.len(), expected.len());
+        // The read-only wire shape carries the full archive, not a body
+        // digest or a projection from which the original cannot be read.
+        {
+            use datom_codec::{Actualizing, Budget, Datomizable, Path, Potential};
+            use protos::{Compactable, Protosizable, ReaderBudget};
+            let response = meta_signal_flow::Response::LegacyArchiveObserved(archive.clone());
+            let text = response.datomize(Path::new()).protosize().compact();
+            let mut budget = Budget {
+                remaining: 65536,
+                reader: ReaderBudget { remaining: 65536 },
+                depth: 0,
+                maximum_depth: 1024,
+            };
+            assert_eq!(
+                Potential::<meta_signal_flow::Response>::from(text)
+                    .actualize(&mut budget)
+                    .unwrap(),
+                response
+            );
+            assert_eq!(
+                Potential::<meta_signal_flow::Query>::from("ObserveLegacyArchive")
+                    .actualize(&mut budget)
+                    .unwrap(),
+                meta_signal_flow::Query::ObserveLegacyArchive
+            );
+        }
+        for (address, entry) in &expected {
+            assert!(store.metaflow(address).unwrap().unwrap().queue.is_empty());
+            assert!(archive.iter().any(|record| record.address == *address
+                && record.queue_evidence == QueueEvidence::Logical(entry.clone())));
+        }
+        drop(store);
+        let reopened = fixture.reopen();
+        assert_eq!(reopened.observe_legacy_archive().unwrap(), archive);
+        reopened.archive_legacy_queue().unwrap();
+        assert_eq!(reopened.observe_legacy_archive().unwrap(), archive);
+        assert!(
+            reopened
+                .recover_outstanding_deliveries()
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -2241,6 +2469,16 @@ mod tests {
         }
 
         let reopened = fixture.reopen();
+        let archive = reopened.observe_legacy_archive().unwrap();
+        for entry in &migrated_metaflow.queue {
+            assert!(
+                archive
+                    .iter()
+                    .any(|record| record.address == migrated_metaflow.address
+                        && record.queue_evidence == QueueEvidence::Logical(entry.clone()))
+            );
+        }
+        migrated_metaflow.queue.clear();
         assert_eq!(
             reopened.metaflow(&address()).unwrap(),
             Some(migrated_metaflow)
@@ -2251,7 +2489,9 @@ mod tests {
         };
         let old_entry = before_flow(old_entry);
         let mut migrated_attempt = prepared.clone();
-        migrated_attempt.phase = QueueDeliveryPhase::Uncertain(None);
+        // Archiving preserves the original attempt phase and native anchor:
+        // no native replay, false receipt or false absence is synthesized.
+        migrated_attempt.phase = prepared.phase.clone();
         migrated_attempt.queue_evidence =
             old_entry
                 .request
@@ -2265,6 +2505,7 @@ mod tests {
                 unreachable!()
             };
             let legacy = before_flow(entry);
+            request.state = RequestState::Parked;
             request.queue_evidence = legacy.request.with_legacy_sender(match legacy.sent_by {
                 super::super::SentByBeforeFlow::Sender(sender) => SentBy::Sender(sender),
                 super::super::SentByBeforeFlow::Unknown => SentBy::Unknown,
@@ -2276,15 +2517,13 @@ mod tests {
                 .unwrap(),
             Some(migrated_attempt)
         );
-        assert_eq!(
-            reopened
-                .engine
-                .match_records(QueryPlan::all(reopened.queue_delivery.requests))
-                .unwrap()
-                .records()
-                .to_vec(),
-            migrated_requests
-        );
+        let archived_requests = reopened
+            .engine
+            .match_records(QueryPlan::all(reopened.queue_delivery.requests))
+            .unwrap();
+        for original in &migrated_requests {
+            assert!(archived_requests.records().contains(original));
+        }
         // A request Flow raised is kept, and kept across an open.
         let raised = QueueEntry {
             logical_delivery_id: "flow-raised".into(),

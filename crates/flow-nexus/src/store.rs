@@ -3987,6 +3987,7 @@ impl OpensFlowStore for FlowStore {
         // these reads require the complete committed configuration before any
         // runtime adapter is constructed by RunningNexus.
         store.state()?;
+        store.archive_legacy_queue()?;
         store.seed_missing_queued_deliveries()?;
         store
             .configuration_snapshot()?
@@ -4151,6 +4152,7 @@ impl OpensFlowStore for FlowStore {
             launch_changes: LaunchChanges::default(),
             opening_settlements,
         };
+        store.archive_legacy_queue()?;
         store.seed_missing_queued_deliveries()?;
         if store
             .engine
@@ -7528,6 +7530,7 @@ impl ReadsFlowMemory for FlowStore {}
 #[cfg(test)]
 mod tests {
     use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
+    use crate::store::queue_delivery::AccountsQueueDelivery;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
     #[test]
@@ -10402,31 +10405,35 @@ mod tests {
             .expect("the metaflow is carried");
         assert_eq!(metaflow.state, flow_ethos::State::Asleep);
         assert_eq!(metaflow.past, vec!["a1a1a1".to_owned()]);
-        assert_eq!(
-            metaflow.queue,
-            vec![
-                flow_ethos::QueueEntry {
-                    logical_delivery_id: format!(
-                        "legacy:{}:{:016x}",
-                        FlowStore::address_record_key(&address),
-                        0
-                    ),
-                    sent_by: flow_ethos::SentBy::Unknown,
-                    delivery: flow_ethos::Delivery::Queue,
-                    message: flow_ethos::Message::Soft(Request::Order("first".into())),
-                },
-                flow_ethos::QueueEntry {
-                    logical_delivery_id: format!(
-                        "legacy:{}:{:016x}",
-                        FlowStore::address_record_key(&address),
-                        1
-                    ),
-                    sent_by: flow_ethos::SentBy::Unknown,
-                    delivery: flow_ethos::Delivery::Queue,
-                    message: flow_ethos::Message::Soft(Request::Notice("second".into())),
-                },
-            ]
-        );
+        assert!(metaflow.queue.is_empty());
+        let expected = vec![
+            flow_ethos::QueueEntry {
+                logical_delivery_id: format!(
+                    "legacy:{}:{:016x}",
+                    FlowStore::address_record_key(&address),
+                    0
+                ),
+                sent_by: flow_ethos::SentBy::Unknown,
+                delivery: flow_ethos::Delivery::Queue,
+                message: flow_ethos::Message::Soft(Request::Order("first".into())),
+            },
+            flow_ethos::QueueEntry {
+                logical_delivery_id: format!(
+                    "legacy:{}:{:016x}",
+                    FlowStore::address_record_key(&address),
+                    1
+                ),
+                sent_by: flow_ethos::SentBy::Unknown,
+                delivery: flow_ethos::Delivery::Queue,
+                message: flow_ethos::Message::Soft(Request::Notice("second".into())),
+            },
+        ];
+        let archive = store.observe_legacy_archive().unwrap();
+        for entry in expected {
+            assert!(archive.iter().any(|record| record.address == address
+                && record.queue_evidence
+                    == meta_signal_flow::QueueEvidence::Logical(entry.clone())));
+        }
     }
 
     /// A topic never dies: a 0.35.21 store's ended metaflow opens Asleep,
@@ -10509,19 +10516,18 @@ mod tests {
         let idle = carried(Layer::Tertiary);
         assert_eq!(idle.state, flow_ethos::State::Asleep);
         assert_eq!(idle.past, vec!["a1a1a1".to_owned()]);
-        assert_eq!(idle.queue.len(), queued.len());
+        assert!(idle.queue.is_empty());
+        let archive = store.observe_legacy_archive().unwrap();
+        let archived = archive
+            .iter()
+            .find(|record| record.address == at(Layer::Tertiary))
+            .expect("legacy queue is archived");
+        let meta_signal_flow::QueueEvidence::Logical(entry) = &archived.queue_evidence else {
+            panic!("the full migrated queue slot is kept")
+        };
+        assert_eq!(entry.sent_by, flow_ethos::SentBy::Unknown);
         assert_eq!(
-            idle.queue[0].logical_delivery_id,
-            format!(
-                "legacy:{}:{:016x}",
-                FlowStore::address_record_key(&at(Layer::Tertiary)),
-                0
-            )
-        );
-        assert_eq!(idle.queue[0].sent_by, flow_ethos::SentBy::Unknown);
-        assert_eq!(idle.queue[0].delivery, flow_ethos::Delivery::Queue);
-        assert_eq!(
-            idle.queue[0].message,
+            entry.message,
             flow_ethos::Message::Soft(Request::Order("kept".into()))
         );
         assert_eq!(

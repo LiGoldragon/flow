@@ -461,6 +461,15 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::ReadQueueDeliveries(address) => {
                 self.read_queue_deliveries(address)
             }
+            meta_signal_flow::Query::ObserveLegacyArchive => {
+                use store::queue_delivery::AccountsQueueDelivery;
+                match self.store.observe_legacy_archive() {
+                    Ok(archive) => meta_signal_flow::Response::LegacyArchiveObserved(archive),
+                    Err(error) => meta_signal_flow::Response::ObserveLegacyArchiveRejected(
+                        meta_signal_flow::StoreRefusal::Store(error.to_string()),
+                    ),
+                }
+            }
             meta_signal_flow::Query::ReadSendOutcomes => match self.store.read_send_outcomes() {
                 Ok(records) => meta_signal_flow::Response::SendOutcomesRead(records),
                 Err(_) => meta_signal_flow::Response::ReadSendOutcomesRejected(

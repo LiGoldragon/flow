@@ -5460,6 +5460,7 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         &self,
         intent: PromptDeliveryIntent,
     ) -> Result<bool, StoreError> {
+        use sha2::{Digest, Sha256};
         let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
             return Ok(false);
         };
@@ -5475,8 +5476,19 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         };
         // The first part is the one about to be submitted; no Stop count
         // can be negative.
+        let empty_simplified_start = native_intent.prompt_sha256_vector.is_empty()
+            && native_intent.prompt_sha256 == format!("{:x}", Sha256::digest([]))
+            && intent.prompt_sha256 == native_intent.prompt_sha256
+            && stored.attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
+            && matches!(&stored.attempt.launch_profile.tool_set,
+                signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
+            && stored.attempt.launch_profile.instruction_prompt.is_empty();
         let valid_parts = intent.prompt_sha256_vector == native_intent.prompt_sha256_vector
-            && intent.parts_submitted == 1
+            && if native_intent.prompt_sha256_vector.is_empty() {
+                empty_simplified_start && intent.parts_submitted == 0
+            } else {
+                intent.parts_submitted == 1
+            }
             && intent.stops_reported >= 0;
         let valid_boundary = match &intent.native_transcript_boundary {
             signal_flow::NativeTranscriptBoundary::Existing(cursor) => {

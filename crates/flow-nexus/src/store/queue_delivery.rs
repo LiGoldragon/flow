@@ -614,6 +614,16 @@ pub trait AccountsQueueDelivery {
     /// changing its Uncertain delivery record or permitting automatic retry.
     fn park_uncertain_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
 
+    /// Ends a synchronous direct call without leaving a request eligible
+    /// for a later automatic send. Keeps its complete original request;
+    /// native uncertainty and all predecessor evidence stay unchanged.
+    fn finish_failed_direct(
+        &self,
+        address: &Address,
+        id: &str,
+        reason: &str,
+    ) -> Result<DeliveryState, StoreError>;
+
     /// Native submission returned without an exactly correlated receipt.
     /// The request stays queued and this attempt can only be reconciled,
     /// never submitted again by assumption.
@@ -925,6 +935,85 @@ impl AccountsQueueDelivery for FlowStore {
             commit,
         )?;
         Ok(true)
+    }
+
+    fn finish_failed_direct(
+        &self,
+        address: &Address,
+        id: &str,
+        reason: &str,
+    ) -> Result<DeliveryState, StoreError> {
+        let logical_id = id.to_owned();
+        let snapshot = self
+            .logical_delivery_snapshot(&logical_id)?
+            .ok_or(StoreError::StateInvariant)?;
+        if matches!(snapshot.delivery_state, DeliveryState::Delivered(_)) {
+            return Ok(snapshot.delivery_state);
+        }
+        if let Some(attempt) = self.outstanding_delivery(address)? {
+            if !matches!(&attempt.queue_evidence,
+                QueueEvidence::Logical(entry) if entry.logical_delivery_id == id)
+            {
+                return Err(StoreError::StateInvariant);
+            }
+            if matches!(attempt.phase, QueueDeliveryPhase::ReceiptRecorded(_)) {
+                self.settle_recorded_delivery(&attempt.attempt_id)?;
+                return self
+                    .logical_delivery_snapshot(&logical_id)?
+                    .map(|snapshot| snapshot.delivery_state)
+                    .ok_or(StoreError::StateInvariant);
+            }
+            // A prepared hand-over is potentially native input. Losing its
+            // response never licenses absence, a new attempt, or retry.
+            self.mark_delivery_uncertain(&attempt.attempt_id)?;
+            if self.park_uncertain_delivery(&attempt.attempt_id)? {
+                return Ok(DeliveryState::Uncertain);
+            }
+            return Err(StoreError::StateInvariant);
+        }
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Err(StoreError::StateInvariant);
+        };
+        let Some(index) = stored
+            .metaflow
+            .queue
+            .iter()
+            .position(|entry| entry.logical_delivery_id == id)
+        else {
+            return Ok(snapshot.delivery_state);
+        };
+        let entry = stored.metaflow.queue.remove(index);
+        let evidence = QueueEvidence::Logical(entry);
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(id.to_owned()),
+        ))?;
+        let request = match rows.records() {
+            [] => StoredDeliveryRequest {
+                request_id: id.to_owned(),
+                address: address.clone(),
+                queue_evidence: evidence.clone(),
+                state: RequestState::Parked,
+            },
+            [request] if request.address == *address && request.queue_evidence == evidence => {
+                let mut request = request.clone();
+                request.state = RequestState::Parked;
+                request
+            }
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, stored);
+        let commit = if rows.records().is_empty() {
+            commit.assert(self.queue_delivery.requests, request)
+        } else {
+            commit.mutate(self.queue_delivery.requests, request)
+        };
+        let state = DeliveryState::Failed(signal_flow::Refusal::Direct(reason.into()));
+        self.commit_logical_transition(&logical_id, state.clone(), commit)?;
+        Ok(state)
     }
 
     fn park_uncertain_delivery(&self, attempt_id: &str) -> Result<bool, StoreError> {

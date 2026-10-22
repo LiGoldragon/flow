@@ -7983,6 +7983,114 @@ mod tests {
             Message::Soft(Request::Result("second answer".into()))
         );
     }
+
+    #[test]
+    fn core_presentation_is_queued_as_is_once_and_secondary_gets_only_a_notice() {
+        use signal_flow::{
+            Address, Aspect, DeliveryState, Layer, Message, Metaflow, NativeReceipt, Request,
+            Response, SentBy,
+        };
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let source = Address {
+            aspect: Aspect::Psyche,
+            topic: "core".into(),
+            layer: Layer::Primary,
+        };
+        let sender = Address {
+            aspect: Aspect::Psyche,
+            topic: "core".into(),
+            layer: Layer::Secondary,
+        };
+        let book = Address {
+            aspect: Aspect::Psyche,
+            topic: "book".into(),
+            layer: Layer::Tertiary,
+        };
+        for address in [&source, &sender, &book] {
+            store.seed_metaflow(Metaflow {
+                address: address.clone(),
+                state: flow_ethos::State::Asleep,
+                past: Vec::new(),
+                queue: Vec::new(),
+            });
+        }
+        let Response::SendAccepted(input) = store
+            .accept_logical_delivery(
+                &source,
+                SentBy::Sender(sender.clone()),
+                flow_ethos::Delivery::Wake,
+                Message::Soft(Request::Order("review this book source".into())),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("core Secondary may wake core Primary")
+        };
+        store
+            .bind_simplified_reply(SimplifiedReplyBinding {
+                flow_id: "simplified-core-primary".into(),
+                input_delivery_id: input.logical_delivery_id.clone(),
+                source: source.clone(),
+                recipient: sender.clone(),
+                completed: false,
+            })
+            .unwrap();
+        store
+            .transition_logical_delivery(
+                &input.logical_delivery_id,
+                DeliveryState::Delivered(NativeReceipt {
+                    harness_kind: flow_ethos::HarnessKind::Claude,
+                    native_session_id: "claude-core-primary".into(),
+                    native_prompt_id: "prompt-core".into(),
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .deliver_simplified_reply(
+                    "simplified-core-primary",
+                    &input.logical_delivery_id,
+                    "claude-core-primary",
+                    "prompt-core",
+                    "verbatim presentation body",
+                )
+                .unwrap(),
+            Some(book.clone())
+        );
+        assert_eq!(
+            store
+                .deliver_simplified_reply(
+                    "simplified-core-primary",
+                    &input.logical_delivery_id,
+                    "claude-core-primary",
+                    "prompt-core",
+                    "verbatim presentation body",
+                )
+                .unwrap(),
+            None,
+            "replayed Stop cannot create another book order or notice"
+        );
+        let book_queue = store.metaflow(&book).unwrap().unwrap().queue;
+        assert_eq!(book_queue.len(), 1);
+        assert_eq!(book_queue[0].sent_by, SentBy::Sender(source.clone()));
+        assert_eq!(
+            book_queue[0].message,
+            Message::Soft(Request::Order("verbatim presentation body".into()))
+        );
+        let secondary_queue = store.metaflow(&sender).unwrap().unwrap().queue;
+        assert_eq!(secondary_queue.len(), 1);
+        assert_eq!(secondary_queue[0].sent_by, SentBy::Sender(source));
+        let Message::Soft(Request::Notice(notice)) = &secondary_queue[0].message else {
+            panic!("the core Secondary gets a Notice, not a duplicate body")
+        };
+        assert!(
+            notice.contains("queued"),
+            "queued is not delivered: {notice}"
+        );
+        assert!(!notice.contains("handed"));
+        assert!(!notice.contains("verbatim presentation body"));
+    }
     #[test]
     fn created_pane_survives_reopen_and_a_second_failed_binding_is_orphaned() {
         let fixture = StoreFixture::new();

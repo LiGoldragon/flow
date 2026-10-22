@@ -21,6 +21,27 @@ const EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
 
+pub(crate) trait CorePresentationRoute {
+    fn is_core_presentation(&self) -> bool;
+    fn accepts_presentation_sender(&self, sender: &SentBy) -> bool;
+}
+
+impl CorePresentationRoute for Address {
+    fn is_core_presentation(&self) -> bool {
+        self.aspect == signal_flow::Aspect::Psyche
+            && self.topic == "core"
+            && self.layer == signal_flow::Layer::Primary
+    }
+
+    fn accepts_presentation_sender(&self, sender: &SentBy) -> bool {
+        !self.is_core_presentation()
+            || matches!(sender, SentBy::Sender(address)
+                if address.aspect == signal_flow::Aspect::Psyche
+                    && address.topic == "core"
+                    && address.layer == signal_flow::Layer::Secondary)
+    }
+}
+
 /// A lock that the caller has authenticated and checked for expiry while
 /// holding the serial dispatch gate. The store consumes it with admission.
 pub(crate) struct VerifiedDeliveryLock {
@@ -325,7 +346,17 @@ impl RecordsLogicalDeliveries for FlowStore {
         if !consumed {
             return Ok(None);
         }
-        let Some(mut target) = self.stored_metaflow(&binding.recipient)? else {
+        let core_presentation = binding.source.is_core_presentation();
+        let destination = if core_presentation {
+            Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "book".into(),
+                layer: signal_flow::Layer::Tertiary,
+            }
+        } else {
+            binding.recipient.clone()
+        };
+        let Some(mut target) = self.stored_metaflow(&destination)? else {
             return Ok(None);
         };
         let allocation = self.allocate_logical_cursor()?;
@@ -336,29 +367,69 @@ impl RecordsLogicalDeliveries for FlowStore {
             logical_delivery_id: id.clone(),
             sent_by: SentBy::Sender(source.clone()),
             delivery: Delivery::Wake,
-            message: Message::Soft(Request::Result(body.to_owned())),
+            message: Message::Soft(if core_presentation {
+                Request::Order(body.to_owned())
+            } else {
+                Request::Result(body.to_owned())
+            }),
         });
         let snapshot = DeliverySnapshot {
             delivery_cursor: cursor,
             logical_delivery_id: id,
             sent_by: SentBy::Sender(source),
-            address: binding.recipient.clone(),
+            address: destination.clone(),
             delivery_state: DeliveryState::Queued,
         };
         binding.completed = true;
-        let counter = LogicalDeliveryCounter {
-            next_cursor: cursor.checked_add(1).ok_or(StoreError::StateInvariant)?,
-        };
         let mut commit = self
             .engine
             .begin_atomic_commit()
             .mutate(self.metaflows, target);
+        let mut next_cursor = cursor.checked_add(1).ok_or(StoreError::StateInvariant)?;
+        if core_presentation {
+            let Some(mut notification) = self.stored_metaflow(&binding.recipient)? else {
+                return Err(StoreError::StateInvariant);
+            };
+            let notice_id = format!("simplified-publication-notice-{flow_id}-{input_delivery_id}");
+            notification.metaflow.queue.push(QueueEntry {
+                logical_delivery_id: notice_id.clone(),
+                sent_by: SentBy::Sender(binding.source.clone()),
+                delivery: Delivery::Wake,
+                message: Message::Soft(Request::Notice(
+                    "The native presentation source was queued for Psyche book Tertiary as the sole artifact source. Publication is not yet witnessed.".into(),
+                )),
+            });
+            let notice_snapshot = DeliverySnapshot {
+                delivery_cursor: next_cursor,
+                logical_delivery_id: notice_id,
+                sent_by: SentBy::Sender(binding.source.clone()),
+                address: binding.recipient.clone(),
+                delivery_state: DeliveryState::Queued,
+            };
+            commit = commit
+                .mutate(self.metaflows, notification)
+                .assert(
+                    self.logical_deliveries.current,
+                    CurrentLogicalDelivery {
+                        snapshot: notice_snapshot.clone(),
+                    },
+                )
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent {
+                        snapshot: notice_snapshot,
+                    },
+                );
+            next_cursor = next_cursor
+                .checked_add(1)
+                .ok_or(StoreError::StateInvariant)?;
+        }
+        let counter = LogicalDeliveryCounter { next_cursor };
         commit = if allocation.existing {
             commit.mutate(self.logical_deliveries.counter, counter)
         } else {
             commit.assert(self.logical_deliveries.counter, counter)
         };
-        let recipient = binding.recipient.clone();
         self.engine.commit_atomic(
             commit
                 .mutate(self.logical_deliveries.simplified_replies, binding)
@@ -374,7 +445,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 ),
         )?;
         self.launch_changes.announce();
-        Ok(Some(recipient))
+        Ok(Some(destination))
     }
 
     fn accept_tool_send(
@@ -410,6 +481,12 @@ impl RecordsLogicalDeliveries for FlowStore {
             content_sha256: content_sha256.to_owned(),
             send_outcome,
         };
+        if !target.accepts_presentation_sender(&SentBy::Sender(sender.clone())) {
+            let outcome = ToolSendOutcome::Refused(ToolSendRefusal::OffRoute);
+            self.engine
+                .assert(Assertion::new(self.send_calls, record(outcome.clone())))?;
+            return Ok(outcome);
+        }
         let Some(mut stored) = self.stored_metaflow(target)? else {
             let outcome =
                 ToolSendOutcome::Refused(ToolSendRefusal::UnknownRecipient(target.clone()));
@@ -581,6 +658,9 @@ impl RecordsLogicalDeliveries for FlowStore {
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
     ) -> Result<Response, StoreError> {
+        if !address.accepts_presentation_sender(&sent_by) {
+            return Ok(Response::Refused(Refusal::OffRoute));
+        }
         let _guard = self
             .logical_deliveries
             .write_gate

@@ -141,6 +141,12 @@ receipt, rather than whichever sender wrote most recently.
 Artifact, ArtifactComments and ArtifactData are disabled on Claude flows
 except the exact `Psyche book Tertiary` address.
 
+`Psyche core Primary` accepts requests only from `Psyche core Secondary`.
+For its simplified presentation, the witnessed final source is queued
+unchanged as one Order to `Psyche book Tertiary`; Secondary receives only a
+notification. Completion and both queues commit atomically, so replayed
+Stop hooks create no second publication path.
+
 `flow-meta reset <idempotency-key>` asks the Codex app-server to consume the
 next eligible reset credit. `flow-meta reset <idempotency-key> <credit-id>`
 selects a specific credit. Reusing the key makes a retry stable. It sends the

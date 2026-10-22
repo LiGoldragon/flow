@@ -66,6 +66,7 @@ Library
                 KeyReused
                 UnknownRecipient.Target
                 Held
+                OffRoute
                 Oversized.SendPayloadSize
                 Store ]
   ; Accepted is a durable logical delivery, never a claim of delivery.

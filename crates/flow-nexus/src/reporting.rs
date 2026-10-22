@@ -20,7 +20,7 @@ use crate::performing::Performs;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::ReadsFlowRows;
 use crate::store::events::RecordsHarnessEvents;
-use crate::store::logical_delivery::RecordsLogicalDeliveries;
+use crate::store::logical_delivery::{CorePresentationRoute, RecordsLogicalDeliveries};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
 use crate::waking::{
@@ -128,6 +128,12 @@ impl RecordsReports for RunningNexus {
                                     Ok(Some(recipient)) => {
                                         self.wake_due(recipient.clone());
                                         self.drain_awake(&recipient);
+                                        if binding.source.is_core_presentation()
+                                            && binding.recipient != recipient
+                                        {
+                                            self.wake_due(binding.recipient.clone());
+                                            self.drain_awake(&binding.recipient);
+                                        }
                                     }
                                     Ok(None) => {}
                                     Err(error) => eprintln!(

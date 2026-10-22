@@ -70,6 +70,7 @@ pub enum SendRefusal {
     KeyReused,
     UnknownRecipient(Target),
     Held,
+    OffRoute,
     Oversized(signal_flow::SendPayloadSize),
     Store,
 }

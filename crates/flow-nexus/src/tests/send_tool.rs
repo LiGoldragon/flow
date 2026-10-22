@@ -13,6 +13,7 @@ use crate::generated::send_tool::{
 };
 use crate::send_tool::{DescribesSendInvocation, RespondsToSendCalls, SendTool, ServesSendTool};
 use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
+use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
@@ -1435,6 +1436,73 @@ fn core() -> Address {
         topic: "core".into(),
         layer: Layer::Secondary,
     }
+}
+
+fn core_primary() -> Address {
+    Address {
+        aspect: Aspect::Psyche,
+        topic: "core".into(),
+        layer: Layer::Primary,
+    }
+}
+
+#[test]
+fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
+    let fixture = NexusFixture::new();
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: core_primary(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    let key = |call: &str| ToolCallKey {
+        thread_id: THREAD_A.into(),
+        turn_id: TURN.into(),
+        call_id: call.into(),
+    };
+    let authorized = fixture
+        .nexus
+        .store
+        .accept_tool_send(
+            &key("authorized"),
+            "authorized-content",
+            core(),
+            &core_primary(),
+            Delivery::Wake,
+            Message::Soft(Request::Order("source".into())),
+            0,
+        )
+        .unwrap();
+    assert!(matches!(authorized, SendOutcome::Accepted(_)));
+
+    let unauthorized_sender = address("not-core", Layer::Secondary);
+    let unauthorized = fixture
+        .nexus
+        .store
+        .accept_tool_send(
+            &key("unauthorized"),
+            "unauthorized-content",
+            unauthorized_sender,
+            &core_primary(),
+            Delivery::Wake,
+            Message::Soft(Request::Order("must not enter".into())),
+            0,
+        )
+        .unwrap();
+    assert_eq!(unauthorized, SendOutcome::Refused(SendRefusal::OffRoute));
+    let queued = fixture
+        .nexus
+        .store
+        .metaflow(&core_primary())
+        .unwrap()
+        .unwrap()
+        .queue;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].sent_by, SentBy::Sender(core()));
+    assert_eq!(
+        queued[0].message,
+        Message::Soft(Request::Order("source".into()))
+    );
 }
 
 fn from_core(request: Request) -> TestRequest {

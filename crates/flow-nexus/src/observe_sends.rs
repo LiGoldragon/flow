@@ -13,7 +13,7 @@ pub(crate) trait ObservesLogicalSends {
         &self,
         peer: &Process,
         forwarded: Option<&ObserveSender_Data>,
-    ) -> Result<Address, Response>;
+    ) -> Result<Address, Box<Response>>;
     fn observe_sends(
         &self,
         sender: &Address,
@@ -28,14 +28,18 @@ impl ObservesLogicalSends for RunningNexus {
         &self,
         peer: &Process,
         forwarded: Option<&ObserveSender_Data>,
-    ) -> Result<Address, Response> {
+    ) -> Result<Address, Box<Response>> {
         let Some(forwarded) = forwarded else {
-            return self.sending_address(peer).map_err(|response| *response);
+            return self.sending_address(peer);
         };
         match self.store.message_peer(peer) {
             Ok(true) => {}
-            Ok(false) => return Err(Response::Refused(Refusal::NotMessage)),
-            Err(error) => return Err(Response::Refused(Refusal::Store(error.to_string()))),
+            Ok(false) => return Err(Box::new(Response::Refused(Refusal::NotMessage))),
+            Err(error) => {
+                return Err(Box::new(Response::Refused(Refusal::Store(
+                    error.to_string(),
+                ))));
+            }
         }
         if let Some(thread) = &forwarded.native_session_id_option {
             match self.identify_thread(signal_flow::IdentifyThread_Data {
@@ -43,12 +47,13 @@ impl ObservesLogicalSends for RunningNexus {
                 native_session_id: thread.clone(),
             }) {
                 Ok(Response::Identified(address)) => Ok(address),
-                Ok(refusal) => Err(refusal),
-                Err(error) => Err(Response::Refused(Refusal::Store(error.to_string()))),
+                Ok(refusal) => Err(Box::new(refusal)),
+                Err(error) => Err(Box::new(Response::Refused(Refusal::Store(
+                    error.to_string(),
+                )))),
             }
         } else {
             self.sending_address(&forwarded.process)
-                .map_err(|response| *response)
         }
     }
 

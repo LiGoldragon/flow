@@ -359,10 +359,10 @@ impl HandlesSendCall for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.handle_held_send_call(call)
         };
-        if let SendOutcome::Accepted(accepted) = &outcome {
-            if accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued {
-                self.wake_due(accepted.target.clone());
-            }
+        if let SendOutcome::Accepted(accepted) = &outcome
+            && accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued
+        {
+            self.wake_due(accepted.target.clone());
         }
         outcome
     }

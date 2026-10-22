@@ -5119,7 +5119,7 @@ impl RegistersExistingFlow for FlowStore {
             .records()
             .iter()
             .any(|stored| {
-                &stored.metaflow.address != &address
+                stored.metaflow.address != address
                     && matches!(
                         &stored.metaflow.state,
                         MetaflowState::Awake(current) if current == &flow_node.flow_id

@@ -5350,14 +5350,22 @@ impl ReservesLaunchAttempt for FlowStore {
 
 impl RecordsNativeLaunchIntent for FlowStore {
     fn record_native_launch_intent(&self, intent: NativeLaunchIntent) -> Result<bool, StoreError> {
+        use sha2::{Digest, Sha256};
         let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
             return Ok(false);
         };
+        let empty_simplified_start = intent.prompt_sha256_vector.is_empty()
+            && intent.harness_kind == HarnessKind::Claude
+            && stored.attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
+            && matches!(&stored.attempt.launch_profile.tool_set,
+                signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
+            && stored.attempt.launch_profile.instruction_prompt.is_empty()
+            && intent.prompt_sha256 == format!("{:x}", Sha256::digest([]));
         if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::Reserved
             || stored.attempt.prompt_sha256 != intent.prompt_sha256
             || stored.attempt.launch_profile.model_name != intent.model_name
             || stored.attempt.launch_profile.effort != intent.effort
-            || intent.prompt_sha256_vector.is_empty()
+            || (intent.prompt_sha256_vector.is_empty() && !empty_simplified_start)
             || !intent
                 .prompt_sha256_vector
                 .iter()
@@ -8617,6 +8625,60 @@ mod tests {
                 herdr_pane_id: "w1:p1".into(),
                 herdr_terminal_id: "fixture-terminal".into(),
             }
+        }
+    }
+
+    #[test]
+    fn zero_part_intent_requires_a_proven_empty_tool_free_claude_judgment() {
+        use sha2::{Digest, Sha256};
+        let empty_hash = format!("{:x}", Sha256::digest([]));
+        for case in 0..6 {
+            let fixture = StoreFixture::new();
+            let store = fixture.store();
+            let mut launch = fixture.composed_launch("idle-judgment", &empty_hash);
+            launch.harness_kind = HarnessKind::Claude;
+            launch.launch_profile.flow_kind = signal_flow::FlowKind::Simplified;
+            launch.launch_profile.tool_set = signal_flow::ToolSet::Explicit(Vec::new());
+            launch.launch_profile.instruction_prompt.clear();
+            launch.first_prompt_payload.first_prompt_body.clear();
+            launch.first_prompt_payload.prompt_part_vector.clear();
+            match case {
+                1 => launch.launch_profile.flow_kind = signal_flow::FlowKind::Regular,
+                2 => launch.launch_profile.instruction_prompt = "Actual request".into(),
+                3 => launch.launch_profile.tool_set = signal_flow::ToolSet::Default,
+                4 => launch.harness_kind = HarnessKind::Codex,
+                5 => launch.first_prompt_payload.prompt_sha256 = "1".repeat(64),
+                _ => {}
+            }
+            assert!(matches!(
+                store
+                    .reserve_launch_attempt(&launch, fixture.origin())
+                    .unwrap(),
+                LaunchAttemptReservation::Reserved(_)
+            ));
+            let intent = NativeLaunchIntent {
+                launch_request_id: launch.launch_profile.launch_request_id.clone(),
+                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: launch.harness_kind.clone(),
+                model_name: launch.launch_profile.model_name.clone(),
+                effort: launch.launch_profile.effort.clone(),
+                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: Vec::new(),
+            };
+            assert_eq!(
+                store.record_native_launch_intent(intent).unwrap(),
+                case == 0,
+                "only the proven empty simplified startup is admitted, case {case}"
+            );
+            let attempt = store.launch_attempt("idle-judgment").unwrap().unwrap();
+            assert_eq!(
+                attempt.launch_attempt_phase,
+                if case == 0 {
+                    LaunchAttemptPhase::NativeLaunchIntentRecorded
+                } else {
+                    LaunchAttemptPhase::Reserved
+                }
+            );
         }
     }
 

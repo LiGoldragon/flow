@@ -930,7 +930,7 @@ fn launched_claude_ended_by_with(
         launch_request_id: "launched-request".into(),
         system_modules: vec!["spirit-core".into(), "intent-flow".into()],
         user_modules: vec!["operation-main-flow".into()],
-        flow_kind,
+        flow_kind: flow_kind.clone(),
         tool_set: if flow_kind == signal_flow::FlowKind::Simplified {
             signal_flow::ToolSet::Explicit(Vec::new())
         } else {
@@ -3071,6 +3071,8 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         system_modules: profile.system_modules.clone(),
         user_modules: profile.user_modules.clone(),
         leave_outs_option: None,
+        flow_kind: signal_flow::FlowKind::Regular,
+        tool_set: signal_flow::ToolSet::Default,
         prompt: queue.clone().unsent().prompt_text(),
     }
     .fresh_profile();

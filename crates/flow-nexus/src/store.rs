@@ -7665,7 +7665,7 @@ impl ReadsFlowMemory for FlowStore {}
 mod tests {
     use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
     use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
-    use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow};
+    use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow, SleepsMetaflows};
     use crate::store::queue_delivery::AccountsQueueDelivery;
     use std::fs;
     use std::os::unix::fs::MetadataExt;

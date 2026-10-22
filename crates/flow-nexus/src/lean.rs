@@ -111,24 +111,24 @@ impl RendersLeanStart for LeanStart {
             arguments.push("--disallowedTools".into());
             arguments.push(tools.join(","));
         }
-        if self.harness_kind == HarnessKind::Claude {
-            if let ToolSet::Explicit(tools) = &self.tool_set {
-                arguments.push("--tools".into());
-                arguments.push(
-                    tools
-                        .iter()
-                        .filter(|tool| {
-                            self.artifact_tools_allowed
-                                || !matches!(
-                                    tool.as_str(),
-                                    "Artifact" | "ArtifactComments" | "ArtifactData"
-                                )
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(","),
-                );
-            }
+        if self.harness_kind == HarnessKind::Claude
+            && let ToolSet::Explicit(tools) = &self.tool_set
+        {
+            arguments.push("--tools".into());
+            arguments.push(
+                tools
+                    .iter()
+                    .filter(|tool| {
+                        self.artifact_tools_allowed
+                            || !matches!(
+                                tool.as_str(),
+                                "Artifact" | "ArtifactComments" | "ArtifactData"
+                            )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
         arguments
     }

@@ -358,6 +358,7 @@ mod tests {
         assert_eq!(
             start.environment(),
             [
+                "CLAUDE_CODE_ARTIFACT=0",
                 "CLAUDE_CODE_DISABLE_WORKFLOWS=1",
                 "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1",
                 "ENABLE_CLAUDEAI_MCP_SERVERS=false",
@@ -365,7 +366,13 @@ mod tests {
             ]
         );
         assert!(start.attribution_off() && start.skill_listing_off());
-        assert!(lean(HarnessKind::Claude, &[]).arguments().is_empty());
+        assert_eq!(
+            lean(HarnessKind::Claude, &[]).arguments(),
+            [
+                "--disallowedTools",
+                "Artifact,ArtifactComments,ArtifactData"
+            ]
+        );
     }
 
     #[test]

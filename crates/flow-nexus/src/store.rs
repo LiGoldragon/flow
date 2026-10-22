@@ -7678,7 +7678,8 @@ mod tests {
         };
         use super::{MemoryDefinition, StoredLaunchAttemptV2};
         let fixture = StoreFixture::new();
-        drop(fixture.store());
+        fixture.configured();
+        drop(fixture.configured_store());
         let tables = [
             "flow_nexus_launch_attempts",
             "flow_nexus_flow_events",
@@ -7759,7 +7760,7 @@ mod tests {
             .unwrap();
         drop(engine);
         for _ in 0..2 {
-            let store = fixture.store();
+            let store = fixture.configured_store();
             let declaration = store.metaflow_declaration(&address).unwrap().unwrap();
             assert_eq!(declaration.system_modules, ["system"]);
             assert_eq!(declaration.user_modules, ["user"]);

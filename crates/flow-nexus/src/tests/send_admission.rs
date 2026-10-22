@@ -252,7 +252,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         let Response::Sent(receipt) = answer.response else {
             use crate::store::queue_delivery::AccountsQueueDelivery;
             use crate::waking::ReadsClaudeDelivery;
-            let attempts = fixture.nexus.store.delivery_attempts().unwrap();
+            let attempts = fixture.nexus.store.unsettled_deliveries(&target).unwrap();
             let histories: Vec<_> = attempts
                 .iter()
                 .map(|attempt| fixture.nexus.claude_delivery_history(attempt))

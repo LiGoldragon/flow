@@ -103,6 +103,7 @@ fn foreign_stop() -> Event {
     Event::Stopped(NativeStop {
         native_session_id_option: Some("0ther000-0000-4000-8000-000000000009".into()),
         transcript_path_option: Some("/elsewhere/other.jsonl".into()),
+        last_assistant_message_option: None,
     })
 }
 

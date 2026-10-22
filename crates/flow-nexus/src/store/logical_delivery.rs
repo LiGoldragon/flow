@@ -10,14 +10,16 @@ use crate::generated::send_tool::{
 use flow_ethos::{Delivery, Message, QueueEntry};
 use sema_engine::AtomicCommit;
 use signal_flow::{
-    Address, DeliverySnapshot, DeliveryState, Lock, LogicalDeliveryId, Refusal, Response,
-    SendAcceptance, SendObservation, SentBy, Unknown_Data,
+    Address, DeliverySnapshot, DeliveryState, Lock, LogicalDeliveryId, NativeReceipt, Refusal,
+    Request, Response, SendAcceptance, SendObservation, SentBy, Unknown_Data,
 };
 
 const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
 const CURRENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_current");
 const EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_events");
+const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_simplified_reply_bindings");
 
 /// A lock that the caller has authenticated and checked for expiry while
 /// holding the serial dispatch gate. The store consumes it with admission.
@@ -85,16 +87,43 @@ impl MemoryDefinition for LogicalDeliveryEvent {
     }
 }
 
+/// The one request whose wake is being judged by a simplified flow, and the
+/// exact sender to receive that judgment. It is keyed by the woken FlowId,
+/// never by a mutable metaflow-wide last sender.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SimplifiedReplyBinding {
+    pub flow_id: String,
+    pub input_delivery_id: String,
+    pub source: Address,
+    pub recipient: Address,
+    pub completed: bool,
+}
+impl EngineRecord for SimplifiedReplyBinding {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+impl MemoryDefinition for SimplifiedReplyBinding {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-simplified-reply-binding-v1")
+    }
+}
+
 pub(crate) struct LogicalDeliveryTables {
     pub(crate) counter: TableReference<LogicalDeliveryCounter>,
     pub(crate) current: TableReference<CurrentLogicalDelivery>,
     pub(crate) events: TableReference<LogicalDeliveryEvent>,
+    pub(crate) simplified_replies: TableReference<SimplifiedReplyBinding>,
     pub(crate) write_gate: Mutex<()>,
 }
 pub(crate) struct LogicalDeliveryDescriptors {
     pub(crate) counter: TableDescriptor<LogicalDeliveryCounter>,
     pub(crate) current: TableDescriptor<CurrentLogicalDelivery>,
     pub(crate) events: TableDescriptor<LogicalDeliveryEvent>,
+    pub(crate) simplified_replies: TableDescriptor<SimplifiedReplyBinding>,
 }
 pub(crate) trait DeclaresLogicalDeliveryTables {
     fn descriptors() -> LogicalDeliveryDescriptors;
@@ -121,6 +150,11 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 FamilyName::new("flow-nexus-logical-delivery-event"),
                 LogicalDeliveryEvent::schema_hash(),
             ),
+            simplified_replies: TableDescriptor::new(
+                SIMPLIFIED_REPLY_TABLE_NAME,
+                FamilyName::new("flow-nexus-simplified-reply-binding"),
+                SimplifiedReplyBinding::schema_hash(),
+            ),
         }
     }
     fn register(
@@ -131,6 +165,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
             counter: engine.register_table(descriptors.counter)?,
             current: engine.register_table(descriptors.current)?,
             events: engine.register_table(descriptors.events)?,
+            simplified_replies: engine.register_table(descriptors.simplified_replies)?,
             write_gate: Mutex::new(()),
         })
     }
@@ -175,8 +210,173 @@ pub(crate) trait RecordsLogicalDeliveries {
         sender: &Address,
         after_cursor: Option<i64>,
     ) -> Result<SendObservation, StoreError>;
+    fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError>;
+    fn simplified_reply_receipt(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<(SimplifiedReplyBinding, NativeReceipt)>, StoreError>;
+    fn deliver_simplified_reply(
+        &self,
+        flow_id: &str,
+        input_delivery_id: &str,
+        native_session_id: &str,
+        native_prompt_id: &str,
+        body: &str,
+    ) -> Result<Option<Address>, StoreError>;
 }
 impl RecordsLogicalDeliveries for FlowStore {
+    fn bind_simplified_reply(&self, binding: SimplifiedReplyBinding) -> Result<(), StoreError> {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let key = RecordKey::new(binding.flow_id.clone());
+        let existing = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.simplified_replies,
+            key.clone(),
+        ))?;
+        if let [record] = existing.records() {
+            if record == &binding {
+                return Ok(());
+            }
+            if record.completed {
+                let commit = self
+                    .engine
+                    .begin_atomic_commit()
+                    .mutate(self.logical_deliveries.simplified_replies, binding);
+                self.engine.commit_atomic(commit)?;
+                return Ok(());
+            }
+            return Err(StoreError::StateInvariant);
+        }
+        self.engine.assert(Assertion::new(
+            self.logical_deliveries.simplified_replies,
+            binding,
+        ))?;
+        Ok(())
+    }
+
+    fn simplified_reply_receipt(
+        &self,
+        flow_id: &str,
+    ) -> Result<Option<(SimplifiedReplyBinding, NativeReceipt)>, StoreError> {
+        let binding = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.simplified_replies,
+            RecordKey::new(flow_id.to_owned()),
+        ))?;
+        let Some(binding) = binding.records().first().cloned() else {
+            return Ok(None);
+        };
+        if binding.completed {
+            return Ok(None);
+        }
+        let input = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.current,
+            RecordKey::new(binding.input_delivery_id.clone()),
+        ))?;
+        let receipt =
+            input
+                .records()
+                .first()
+                .and_then(|record| match &record.snapshot.delivery_state {
+                    DeliveryState::Delivered(receipt) => Some(receipt.clone()),
+                    _ => None,
+                });
+        Ok(receipt.map(|receipt| (binding, receipt)))
+    }
+
+    fn deliver_simplified_reply(
+        &self,
+        flow_id: &str,
+        input_delivery_id: &str,
+        native_session_id: &str,
+        native_prompt_id: &str,
+        body: &str,
+    ) -> Result<Option<Address>, StoreError> {
+        let _guard = self
+            .logical_deliveries
+            .write_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let key = RecordKey::new(flow_id.to_owned());
+        let binding = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.simplified_replies,
+            key.clone(),
+        ))?;
+        let Some(mut binding) = binding.records().first().cloned() else {
+            return Ok(None);
+        };
+        if binding.completed || binding.input_delivery_id != input_delivery_id || body.is_empty() {
+            return Ok(None);
+        }
+        let input = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.current,
+            RecordKey::new(binding.input_delivery_id.clone()),
+        ))?;
+        let consumed = input.records().first().is_some_and(|record| {
+            matches!(
+                &record.snapshot.delivery_state,
+                DeliveryState::Delivered(receipt)
+                    if receipt.native_session_id == native_session_id
+                        && receipt.native_prompt_id == native_prompt_id
+            )
+        });
+        if !consumed {
+            return Ok(None);
+        }
+        let Some(mut target) = self.stored_metaflow(&binding.recipient)? else {
+            return Ok(None);
+        };
+        let allocation = self.allocate_logical_cursor()?;
+        let cursor = allocation.cursor;
+        let id = format!("simplified-result-{flow_id}-{}", binding.input_delivery_id);
+        let source = binding.source.clone();
+        target.metaflow.queue.push(QueueEntry {
+            logical_delivery_id: id.clone(),
+            sent_by: SentBy::Sender(source.clone()),
+            delivery: Delivery::Wake,
+            message: Message::Soft(Request::Result(body.to_owned())),
+        });
+        let snapshot = DeliverySnapshot {
+            delivery_cursor: cursor,
+            logical_delivery_id: id,
+            sent_by: SentBy::Sender(source),
+            address: binding.recipient.clone(),
+            delivery_state: DeliveryState::Queued,
+        };
+        binding.completed = true;
+        let counter = LogicalDeliveryCounter {
+            next_cursor: cursor.checked_add(1).ok_or(StoreError::StateInvariant)?,
+        };
+        let mut commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, target);
+        commit = if allocation.existing {
+            commit.mutate(self.logical_deliveries.counter, counter)
+        } else {
+            commit.assert(self.logical_deliveries.counter, counter)
+        };
+        let recipient = binding.recipient.clone();
+        self.engine.commit_atomic(
+            commit
+                .mutate(self.logical_deliveries.simplified_replies, binding)
+                .assert(
+                    self.logical_deliveries.current,
+                    CurrentLogicalDelivery {
+                        snapshot: snapshot.clone(),
+                    },
+                )
+                .assert(
+                    self.logical_deliveries.events,
+                    LogicalDeliveryEvent { snapshot },
+                ),
+        )?;
+        self.launch_changes.announce();
+        Ok(Some(recipient))
+    }
+
     fn accept_tool_send(
         &self,
         key: &ToolCallKey,

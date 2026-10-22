@@ -2121,6 +2121,8 @@ mod tests {
                 remembered_flow_vector: vec![],
                 herdr_session_name: "session".into(),
                 leave_outs_option: None,
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
                 instruction_prompt: "body".into(),
             },
             system_prompt: signal_flow::SystemPrompt {

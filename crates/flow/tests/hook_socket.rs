@@ -63,6 +63,7 @@ fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
             event: signal_flow::Event::Stopped(signal_flow::NativeStop {
                 native_session_id_option: Some("s".into()),
                 transcript_path_option: Some("/t/s.jsonl".into()),
+                last_assistant_message_option: None,
             }),
         })
     );

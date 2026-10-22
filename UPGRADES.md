@@ -1,3 +1,22 @@
+# Flow 0.39.0
+
+Pins signal-flow 28.0.0 and meta-signal-flow 37.0.0. Every ordinary and meta
+peer repins: launch profiles carry FlowKind and ToolSet, metaflow
+declarations carry both, and NativeStop carries an optional final answer.
+
+- Declare a simplified Claude judgment with `Simplified Explicit.[]` after
+  its system and user module lists. It starts idle with its own system
+  prompt and an explicit empty tool set; the queued request is its first
+  submitted turn. Its final answer returns as a Result to that request's
+  sender, tied to the consumed native request rather than a later sender.
+- Existing stored launch profiles and metaflow declarations upgrade to
+  `Regular Default`. Event records retain their former data with no final
+  answer attached. The reply binding and its completion are durable.
+- Claude artifact tools are enabled only for `Psyche book Tertiary`.
+- Initializers must supply the new declaration positions. The managed
+  initializer renders regular declarations as `Regular Default` and reads
+  `:flow-kind :Simplified :tools []` for a tool-free judgment.
+
 # Flow 0.38.1
 
 Pins signal-flow 26.0.0 (10bc29be) and meta-signal-flow 33.0.0

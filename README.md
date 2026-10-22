@@ -104,7 +104,8 @@ as gone. `Retire` refuses `AlreadyGone` for a flow that has already ended.
 `Start` carries a typed `LaunchProfile` alone. A profile names the module
 identities of its system prompt and of its first USER message, the launched
 flow's Address (aspect, topic, layer), model, effort, predecessor, remembered
-flows, Herdr target session, leave-outs, and first instruction. The Nexus
+flows, Herdr target session, leave-outs, flow kind, tool set, and first
+instruction. The Nexus
 derives the rest: the origin from the calling process, as Identify reads a
 caller (the one flow bound in its Herdr pane, with that flow's native
 session, or `Unbound` for any other caller, which is recorded and not
@@ -127,6 +128,18 @@ anything is written. Profile producers should use the
 generated `signal-flow` Datom types rather than assembling positional text.
 The old `flow start ...`, `flow restart ...`, and `flow resolve ...` argument
 forms are rejected.
+
+A metaflow declaration sets `FlowKind` (`Regular` or `Simplified`) and
+`ToolSet` (`Default` or `Explicit.[ ... ]`). A simplified flow requires an
+explicit empty tool set and its own system modules. Claude receives that
+empty set as `--tools ""`; its first queued request is submitted after
+the idle native seat is bound, without a synthetic startup turn. The Stop
+hook's `last_assistant_message` becomes a `Result` to the sender of the
+consumed request. The response binding follows that request's native
+receipt, rather than whichever sender wrote most recently.
+
+Artifact, ArtifactComments and ArtifactData are disabled on Claude flows
+except the exact `Psyche book Tertiary` address.
 
 `flow-meta reset <idempotency-key>` asks the Codex app-server to consume the
 next eligible reset credit. `flow-meta reset <idempotency-key> <credit-id>`

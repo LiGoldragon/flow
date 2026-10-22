@@ -439,6 +439,8 @@ impl LaunchesDeclared for RunningNexus {
                 .collect(),
             herdr_session_name,
             leave_outs_option: None,
+            flow_kind: declaration.flow_kind,
+            tool_set: declaration.tool_set,
             instruction_prompt: launch.instruction_prompt,
         };
         Ok(match predecessor {

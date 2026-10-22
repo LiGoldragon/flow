@@ -27,7 +27,7 @@ use std::sync::Mutex;
 
 pub(super) const FLOW_EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_flow_events");
 pub(super) const FLOW_EVENT_FAMILY: &str = "flow-nexus-flow-events";
-pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v2";
+pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v3";
 
 /// One flow's harness events, oldest first.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -44,7 +44,7 @@ impl EngineRecord for FlowEvents {
 
 impl MemoryDefinition for FlowEvents {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
+        MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -85,6 +85,65 @@ impl MemoryDefinition for FlowEventsV1 {
     }
 }
 
+/// The signal-flow 9 event archive immediately before Stop began carrying
+/// Claude's final assistant message.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FlowEventsV2 {
+    pub flow_id: String,
+    pub event_vector: Vec<EventV2>,
+}
+impl EngineRecord for FlowEventsV2 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+impl MemoryDefinition for FlowEventsV2 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-flow-events-v2")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub enum EventV2 {
+    Started,
+    ToolUsed(String),
+    Stopped(NativeStopV2),
+    PromptSubmitted(signal_flow::NativePrompt),
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NativeStopV2 {
+    pub native_session_id_option: Option<String>,
+    pub transcript_path_option: Option<String>,
+}
+
+impl From<EventV2> for Event {
+    fn from(event: EventV2) -> Self {
+        match event {
+            EventV2::Started => Event::Started,
+            EventV2::ToolUsed(tool) => Event::ToolUsed(tool),
+            EventV2::PromptSubmitted(prompt) => Event::PromptSubmitted(prompt),
+            EventV2::Stopped(stop) => Event::Stopped(NativeStop {
+                native_session_id_option: stop.native_session_id_option,
+                transcript_path_option: stop.transcript_path_option,
+                last_assistant_message_option: None,
+            }),
+        }
+    }
+}
+
+impl UpgradeFrom<FlowEventsV2> for FlowEvents {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: FlowEventsV2) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            flow_id: previous.flow_id,
+            event_vector: previous.event_vector.into_iter().map(Event::from).collect(),
+        })
+    }
+}
+
 impl From<EventBeforeIdentity> for Event {
     fn from(event: EventBeforeIdentity) -> Self {
         match event {
@@ -93,6 +152,7 @@ impl From<EventBeforeIdentity> for Event {
             EventBeforeIdentity::Stopped => Event::Stopped(NativeStop {
                 native_session_id_option: None,
                 transcript_path_option: None,
+                last_assistant_message_option: None,
             }),
         }
     }
@@ -121,6 +181,7 @@ impl DescribesEventTable for FlowEvents {
             SchemaHash::for_label(FLOW_EVENT_SCHEMA),
         )
         .with_predecessor::<FlowEventsV1>()
+        .with_predecessor::<FlowEventsV2>()
     }
 }
 
@@ -138,12 +199,24 @@ pub trait RegistersEventTables: Sized {
 
 impl RegistersEventTables for EventTables {
     fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError> {
-        let events = match engine.upgrade_table::<FlowEventsV1, FlowEvents>(
-            <FlowEvents as DescribesEventTable>::descriptor(),
-        ) {
+        let descriptor = <FlowEvents as DescribesEventTable>::descriptor();
+        let from_v1 = descriptor.clone();
+        let events = match engine.upgrade_table::<FlowEventsV2, FlowEvents>(descriptor) {
             UpgradeOutcome::Upgraded(receipt) => receipt.table(),
             UpgradeOutcome::AlreadyCurrent(table) => table,
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission =>
+            {
+                match engine.upgrade_table::<FlowEventsV1, FlowEvents>(from_v1) {
+                    UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                    UpgradeOutcome::AlreadyCurrent(table) => table,
+                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                    UpgradeOutcome::Failed(failure) => {
+                        return Err(StoreError::EventUpgrade(format!("{failure:?}")));
+                    }
+                }
+            }
             UpgradeOutcome::Failed(failure) => {
                 return Err(StoreError::EventUpgrade(format!("{failure:?}")));
             }
@@ -277,8 +350,11 @@ impl RecordsHarnessEvents for FlowStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventRecording, RecordsHarnessEvents};
+    use super::{
+        EventRecording, EventV2, FlowEvents, FlowEventsV2, NativeStopV2, RecordsHarnessEvents,
+    };
     use crate::store::{FlowStore, OpensFlowStore, RegistersFlowIdentity};
+    use sema_engine::{Decision, UpgradeFrom};
     use signal_flow::{
         EndpointSelection, Event, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
         HerdrRouteSelection, Origin,
@@ -308,7 +384,47 @@ mod tests {
         Event::Stopped(signal_flow::NativeStop {
             native_session_id_option: Some("c0ffee00-0000-4000-8000-000000000001".into()),
             transcript_path_option: Some("/t/c0ffee00.jsonl".into()),
+            last_assistant_message_option: None,
         })
+    }
+
+    #[test]
+    fn v2_event_upgrade_preserves_order_and_every_event_with_empty_new_stop_field() {
+        let old_stop = NativeStopV2 {
+            native_session_id_option: Some("session".into()),
+            transcript_path_option: Some("/tmp/session.jsonl".into()),
+        };
+        let prompt = signal_flow::NativePrompt {
+            native_session_id_option: Some("session".into()),
+            prompt_id_option: Some("prompt-1".into()),
+            prompt_sha256: "sha256".into(),
+        };
+        let upgraded = match FlowEvents::upgrade_from(FlowEventsV2 {
+            flow_id: "flow".into(),
+            event_vector: vec![
+                EventV2::Started,
+                EventV2::ToolUsed("Bash".into()),
+                EventV2::PromptSubmitted(prompt.clone()),
+                EventV2::Stopped(old_stop.clone()),
+            ],
+        }) {
+            Decision::Ready(upgraded) => upgraded,
+            Decision::Refused(never) => match never {},
+        };
+        assert_eq!(upgraded.flow_id, "flow");
+        assert_eq!(
+            upgraded.event_vector,
+            vec![
+                Event::Started,
+                Event::ToolUsed("Bash".into()),
+                Event::PromptSubmitted(prompt),
+                Event::Stopped(signal_flow::NativeStop {
+                    native_session_id_option: old_stop.native_session_id_option,
+                    transcript_path_option: old_stop.transcript_path_option,
+                    last_assistant_message_option: None,
+                }),
+            ]
+        );
     }
 
     /// The events are the flow's Memory: kept in report order, kept across

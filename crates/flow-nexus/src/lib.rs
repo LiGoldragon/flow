@@ -3616,6 +3616,7 @@ mod tests {
         let stop = Event::Stopped(signal_flow::NativeStop {
             native_session_id_option: Some("other-session".into()),
             transcript_path_option: None,
+            last_assistant_message_option: None,
         });
         assert_eq!(report("908786", stop.clone()), Response::Reported);
         assert_eq!(
@@ -3854,6 +3855,8 @@ mod tests {
                 launch_request_id: launch_request_id.into(),
                 system_modules: vec!["spirit-core".into(), "intent-flow".into()],
                 user_modules: vec!["operation-main-flow".into()],
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
                 // Each staged launch is the seat of its own Address.
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
@@ -5031,6 +5034,8 @@ mod tests {
                         address: declared.clone(),
                         system_modules: vec!["spirit-core".into()],
                         user_modules: vec!["knowledge-flow".into()],
+                        flow_kind: signal_flow::FlowKind::Regular,
+                        tool_set: signal_flow::ToolSet::Default,
                     }])
                 )),
             meta_signal_flow::Response::Configured(_)

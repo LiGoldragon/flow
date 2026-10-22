@@ -37,32 +37,48 @@ use crate::{
     },
 };
 use signal_flow::{
-    BindingRefusal, ComposedLaunch, EndpointSelection, Event, FlowLifecycle,
-    FlowNode, HarnessKind, HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase,
-    LaunchAttemptReservation, LaunchInspection, LaunchProfile, LaunchStatusRejection, Launched,
-    NativeLaunchFailure, NativeLaunchIntent, NativeLaunchRefusal, NativeLaunchStage, Origin,
-    RegistrationAcknowledgement, RegistrationRefusal,
-    ReplaceRejection, Replaced, Response, StartRejection, StopRejection,
+    BindingRefusal, ComposedLaunch, EndpointSelection, Event, FlowLifecycle, FlowNode, HarnessKind,
+    HerdrRoute, HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
+    LaunchInspection, LaunchProfile, LaunchStatusRejection, Launched, NativeLaunchFailure,
+    NativeLaunchIntent, NativeLaunchRefusal, NativeLaunchStage, Origin,
+    RegistrationAcknowledgement, RegistrationRefusal, ReplaceRejection, Replaced, Response,
+    StartRejection, StopRejection,
 };
-
 
 impl RunningNexus {
     fn stops_reported(&self, flow_id: &str) -> i64 {
-        let session = self.store.flow_node(flow_id).ok().flatten()
-            .map(|node| node.session_id).unwrap_or_default();
-        self.store.events(flow_id).ok().flatten().map(|events| {
-            events.iter().filter(|event| matches!(event, Event::Stopped(stop)
+        let session = self
+            .store
+            .flow_node(flow_id)
+            .ok()
+            .flatten()
+            .map(|node| node.session_id)
+            .unwrap_or_default();
+        self.store
+            .events(flow_id)
+            .ok()
+            .flatten()
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|event| {
+                        matches!(event, Event::Stopped(stop)
                 if session.is_empty() || stop.native_session_id_option.as_deref()
-                    .is_none_or(|stopped| stopped == session))).count()
-        }).unwrap_or_default() as i64
+                    .is_none_or(|stopped| stopped == session))
+                    })
+                    .count()
+            })
+            .unwrap_or_default() as i64
     }
 
     fn composition_refused(outcome: Outcome) -> Response {
         match outcome {
-            Outcome::Failed(Failed_Data::ContextRefused(refusal)) =>
-                Response::StartRejected(StartRejection::ContextRefused(refusal)),
-            Outcome::Failed(Failed_Data::LeaveOutRefused(refusal)) =>
-                Response::StartRejected(StartRejection::LeaveOutRefused(refusal)),
+            Outcome::Failed(Failed_Data::ContextRefused(refusal)) => {
+                Response::StartRejected(StartRejection::ContextRefused(refusal))
+            }
+            Outcome::Failed(Failed_Data::LeaveOutRefused(refusal)) => {
+                Response::StartRejected(StartRejection::LeaveOutRefused(refusal))
+            }
             _ => Response::StartRejected(StartRejection::CompositionRefused),
         }
     }
@@ -418,14 +434,24 @@ impl LaunchesFlows for RunningNexus {
         {
             return Response::StartRejected(StartRejection::IntentPersistenceRefused);
         }
+        // A simplified seat has no synthetic startup turn. It is ready after
+        // registration and title; its first model turn must be the queued
+        // request, submitted by the ordinary wake/drain path.
+        if launch.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
+            && launch
+                .first_prompt_payload
+                .first_prompt_body
+                .trim()
+                .is_empty()
+        {
+            return self.confirmed(&binding.flow_id);
+        }
         match self.perform(Operation::Submit(Submit_Data {
             composed_launch: launch,
             prompt_delivery_intent: delivery_intent.clone(),
         })) {
             Outcome::Submitted(_) => self.confirmed(&binding.flow_id),
-            outcome => {
-                Self::native_refused(NativeLaunchStage::Confirm, outcome)
-            }
+            outcome => Self::native_refused(NativeLaunchStage::Confirm, outcome),
         }
     }
 
@@ -1035,7 +1061,6 @@ impl ResumesReplacement for RunningNexus {
         }
     }
 }
-
 
 pub trait ObservesLaunch {
     fn observe_launch(

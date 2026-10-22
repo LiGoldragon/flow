@@ -214,7 +214,10 @@ fn hard_abrupt_interrupts_before_it_refuses_an_occupied_composer() {
         operations.starts_with("--session messaging-build pane send-keys w1:p3 esc\n"),
         "interrupt first: {operations}"
     );
-    assert!(!operations.contains("agent prompt"), "draft preserved: {operations}");
+    assert!(
+        !operations.contains("agent prompt"),
+        "draft preserved: {operations}"
+    );
 }
 
 #[test]

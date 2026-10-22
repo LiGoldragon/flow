@@ -1057,6 +1057,11 @@ impl ChecksComposedLaunch for ComposedLaunch {
         LeanStart {
             harness_kind: self.harness_kind.clone(),
             leave_outs: self.leave_outs.clone(),
+            flow_kind: self.launch_profile.flow_kind.clone(),
+            tool_set: self.launch_profile.tool_set.clone(),
+            artifact_tools_allowed: crate::composition::artifact_tools_allowed(
+                &self.launch_profile.address,
+            ),
         }
     }
 
@@ -2527,6 +2532,9 @@ impl ReadsStartupRecord for StartupReading {
                 let lean = LeanStart {
                     harness_kind: intent.harness_kind.clone(),
                     leave_outs: intent.leave_outs.clone(),
+                    flow_kind: signal_flow::FlowKind::Regular,
+                    tool_set: signal_flow::ToolSet::Default,
+                    artifact_tools_allowed: false,
                 };
                 let removed = lean.disallowed_tools();
                 let used_removed = row
@@ -2840,6 +2848,8 @@ pub(crate) mod tests {
                 herdr_session_name: "flowlaunch42".into(),
                 leave_outs_option: None,
                 instruction_prompt: "do the work".into(),
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
             },
             system_prompt: SystemPrompt {
                 system_prompt_text: SYSTEM_TEXT.into(),

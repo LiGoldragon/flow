@@ -18,7 +18,14 @@
 ; a generated type's fields are public.
 
 Library
-[ signal_flow:[ Address HarnessKind PowerLevel LaunchProfile PromptDeliveryIntent NativeTargetReceipt FlowId SessionId Origin SystemModules UserModules HerdrSessionName LeaveOuts LeaveOutRefusal ComposedLaunch ContextRefusal SystemPrompt HerdrPaneBinding PromptDeliveryResult Response Launched NativeLaunchFailure ]
+[ signal_flow:[ Address HarnessKind PowerLevel LaunchProfile
+                 PromptDeliveryIntent NativeTargetReceipt FlowId
+                 SessionId Origin SystemModules UserModules
+                 HerdrSessionName LeaveOuts FlowKind ToolSet
+                 ArtifactToolsAllowed LeaveOutRefusal ComposedLaunch
+                 ContextRefusal SystemPrompt HerdrPaneBinding
+                 PromptDeliveryResult Response Launched
+                 NativeLaunchFailure ]
   flow_nexus:[ StartupSelection StartupComposition ContextProvenance CurriculumQuery CurriculumOutcome CompositionError VerifiedContext OperationOutcome CallerProcess ]
   serde_json:JsonValue.Value ]
 [ ; What a launch asks of the context composer.
@@ -26,7 +33,7 @@ Library
   ; A launch profile with the harness the Nexus derived for its model.
   HarnessedProfile.{ LaunchProfile HarnessKind }
   ; What a fresh wake takes from the metaflow's last launch.
-  FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> }
+  FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> FlowKind ToolSet }
   ; A Started launch as its outcome row keeps it; the flow's route is read
   ; from the flow's own row when the reply is made.
   LaunchedRecord.{ FlowId SessionId Origin }
@@ -62,7 +69,7 @@ Library
   PartTurn.String
   StartupReading.{ SeenParts LastPartAnswered Option<NativeTurn> Option<PartTurn> }
   ; A harness start and the parts it leaves out.
-  LeanStart.{ HarnessKind LeaveOuts } ]
+  LeanStart.{ HarnessKind LeaveOuts FlowKind ToolSet ArtifactToolsAllowed } ]
 [ ; The values capabilities read, each through the trait that yields it.
   Textual.[ text.[ String ] ]
   Profiled.[ profile.[ LaunchProfile ]

@@ -23,6 +23,8 @@ pub struct FreshContext {
     pub system_modules: signal_flow::SystemModules,
     pub user_modules: signal_flow::UserModules,
     pub leave_outs_option: std::option::Option<signal_flow::LeaveOuts>,
+    pub flow_kind: signal_flow::FlowKind,
+    pub tool_set: signal_flow::ToolSet,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -140,6 +142,9 @@ pub struct StartupReading {
 pub struct LeanStart {
     pub harness_kind: signal_flow::HarnessKind,
     pub leave_outs: signal_flow::LeaveOuts,
+    pub flow_kind: signal_flow::FlowKind,
+    pub tool_set: signal_flow::ToolSet,
+    pub artifact_tools_allowed: signal_flow::ArtifactToolsAllowed,
 }
 #[rustfmt::skip]
 pub trait Textual {

@@ -76,4 +76,3 @@ pub(super) fn untouched(fixture: &NexusFixture) -> Untouched {
         marker: fixture.nexus.store.commit_marker(),
     }
 }
-

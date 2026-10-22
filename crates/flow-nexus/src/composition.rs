@@ -227,6 +227,14 @@ impl ValidatesLaunchProfile for LaunchProfile {
         if profile.effort.is_empty() || profile.effort.contains(['\r', '\n']) {
             return Err(CompositionError::InvalidProfileField("effort"));
         }
+        if profile.flow_kind == signal_flow::FlowKind::Simplified
+            && !matches!(
+                &profile.tool_set,
+                signal_flow::ToolSet::Explicit(tools) if tools.is_empty()
+            )
+        {
+            return Err(CompositionError::InvalidProfileField("simplified_tool_set"));
+        }
         if profile.herdr_session_name.is_empty()
             || profile.herdr_session_name.contains(['\r', '\n'])
         {
@@ -298,12 +306,21 @@ impl ResolvesLeaveOuts for HarnessedProfile {
         let lean = LeanStart {
             harness_kind: self.harness_kind.clone(),
             leave_outs: leave_outs.clone(),
+            flow_kind: self.launch_profile.flow_kind.clone(),
+            tool_set: self.launch_profile.tool_set.clone(),
+            artifact_tools_allowed: artifact_tools_allowed(&self.launch_profile.address),
         };
         match lean.refusal() {
             Some(refusal) => Err(CompositionError::LeaveOut(refusal)),
             None => Ok(leave_outs),
         }
     }
+}
+
+pub(crate) fn artifact_tools_allowed(address: &signal_flow::Address) -> bool {
+    address.aspect == signal_flow::Aspect::Psyche
+        && address.topic == "book"
+        && address.layer == signal_flow::Layer::Tertiary
 }
 
 /// The profile's context, composed and verified, and the system prompt it
@@ -504,6 +521,8 @@ pub struct FreshSeat {
     pub system_modules: Vec<String>,
     pub user_modules: Vec<String>,
     pub leave_outs_option: Option<Vec<LeaveOut>>,
+    pub flow_kind: signal_flow::FlowKind,
+    pub tool_set: signal_flow::ToolSet,
     pub prompt: String,
 }
 
@@ -523,6 +542,8 @@ impl ProfilesFreshSeat for FreshSeat {
             remembered_flow_vector: Vec::new(),
             herdr_session_name: self.herdr_session_name.clone(),
             leave_outs_option: self.leave_outs_option.clone(),
+            flow_kind: self.flow_kind.clone(),
+            tool_set: self.tool_set.clone(),
             instruction_prompt: self.prompt.clone(),
         }
     }
@@ -560,8 +581,24 @@ pub(crate) mod tests {
             }],
             herdr_session_name: "messaging-build".into(),
             leave_outs_option: None,
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: signal_flow::ToolSet::Default,
             instruction_prompt: "Carry the bounded task.".into(),
         }
+    }
+
+    #[test]
+    fn artifact_tools_are_enabled_only_for_psyche_book_tertiary() {
+        assert!(super::artifact_tools_allowed(&Address {
+            aspect: Aspect::Psyche,
+            topic: "book".into(),
+            layer: Layer::Tertiary,
+        }));
+        assert!(!super::artifact_tools_allowed(&Address {
+            aspect: Aspect::Psyche,
+            topic: "book".into(),
+            layer: Layer::Secondary,
+        }));
     }
 
     pub(crate) fn fixture_composer() -> LaunchComposer {

@@ -160,6 +160,13 @@ pub trait ReadsClaudeTurns {
     /// True only when the last main user/assistant activity is an assistant
     /// completion with `end_turn`.
     fn main_turn_ended(&self, session_id: &str) -> bool;
+    fn main_turn_unstarted(&self, session_id: &str) -> bool;
+    fn assistant_answer_after(
+        &self,
+        session_id: &str,
+        native_prompt_id: &str,
+        answer: &str,
+    ) -> bool;
     /// The exact file and byte boundary before native submission.
     fn claude_cursor(&self) -> Option<ClaudeTranscriptCursor>;
     /// What the transcript after `cursor` shows of `text` in `session_id`'s
@@ -174,6 +181,74 @@ pub trait ReadsClaudeTurns {
 }
 
 impl ReadsClaudeTurns for Path {
+    fn main_turn_unstarted(&self, session_id: &str) -> bool {
+        fs::read_to_string(self).ok().is_some_and(|text| {
+            text.lines().all(|line| {
+                serde_json::from_str::<Value>(line).ok().is_some_and(|row| {
+                    row.get("sessionId").and_then(Value::as_str) != Some(session_id)
+                        || row.get("isSidechain").and_then(Value::as_bool) == Some(true)
+                        || !matches!(
+                            row.get("type").and_then(Value::as_str),
+                            Some("user" | "assistant")
+                        )
+                })
+            })
+        })
+    }
+
+    fn assistant_answer_after(
+        &self,
+        session_id: &str,
+        native_prompt_id: &str,
+        answer: &str,
+    ) -> bool {
+        let Ok(text) = fs::read_to_string(self) else {
+            return false;
+        };
+        if !text.ends_with('\n') {
+            return false;
+        }
+        let mut active = false;
+        let mut matched = false;
+        for line in text.lines() {
+            let Ok(row) = serde_json::from_str::<Value>(line) else {
+                return false;
+            };
+            if row.get("sessionId").and_then(Value::as_str) != Some(session_id)
+                || row.get("isSidechain").and_then(Value::as_bool) == Some(true)
+            {
+                continue;
+            }
+            match row.get("type").and_then(Value::as_str) {
+                Some("user") => {
+                    active = row.get("uuid").and_then(Value::as_str) == Some(native_prompt_id);
+                    matched = false;
+                }
+                Some("assistant") if active => {
+                    let content = row
+                        .pointer("/message/content")
+                        .and_then(Value::as_array)
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .filter_map(|part| {
+                                    (part.get("type").and_then(Value::as_str) == Some("text"))
+                                        .then(|| part.get("text").and_then(Value::as_str))
+                                        .flatten()
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        });
+                    matched = row.pointer("/message/stop_reason").and_then(Value::as_str)
+                        == Some("end_turn")
+                        && content.as_deref() == Some(answer);
+                }
+                _ => {}
+            }
+        }
+        active && matched
+    }
+
     fn main_turn_ended(&self, session_id: &str) -> bool {
         fs::read_to_string(self).ok().is_some_and(|transcript| {
             transcript.lines().fold(None, |state, line| {
@@ -218,8 +293,8 @@ impl ReadsClaudeTurns for Path {
         let Ok(metadata) = file.metadata() else {
             return ClaudeQueuedHistory::Unreadable;
         };
-        if metadata.dev() != cursor.device
-            || metadata.ino() != cursor.inode
+        if (!(cursor.device == 0 && cursor.inode == 0 && cursor.offset == 0)
+            && (metadata.dev() != cursor.device || metadata.ino() != cursor.inode))
             || metadata.len() < cursor.offset
         {
             return ClaudeQueuedHistory::Replaced;
@@ -695,5 +770,75 @@ mod tests {
         let empty = directory.path().join("empty.jsonl");
         fs::write(&empty, "{\"type\":\"user\"}\n").unwrap();
         assert_eq!(empty.context_tokens(), None);
+    }
+}
+
+#[cfg(test)]
+mod simplified_answer_tests {
+    use super::{ClaudeQueuedHistory, ClaudeTranscriptCursor, ReadsClaudeTurns};
+    #[test]
+    fn answer_is_witnessed_only_after_exact_native_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let user = |id| {
+            serde_json::json!({"type":"user", "sessionId":"session", "uuid":id,
+            "message":{"content":"question"}})
+            .to_string()
+        };
+        let answer = |side| {
+            serde_json::json!({"type":"assistant", "sessionId":"session", "isSidechain":side,
+            "message":{"stop_reason":"end_turn", "content":[{"type":"text","text":"answer"}]}})
+            .to_string()
+        };
+        std::fs::write(&path, format!("{}\n{}\n", user("prompt-1"), answer(false))).unwrap();
+        assert!(path.assistant_answer_after("session", "prompt-1", "answer"));
+        assert!(!path.assistant_answer_after("session", "wrong", "answer"));
+        assert!(!path.assistant_answer_after("session", "prompt-1", "different"));
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n{}\n",
+                user("prompt-1"),
+                answer(false),
+                user("prompt-2")
+            ),
+        )
+        .unwrap();
+        assert!(!path.assistant_answer_after("session", "prompt-2", "answer"));
+        assert!(!path.assistant_answer_after("session", "prompt-1", "answer"));
+        std::fs::write(&path, format!("{}\n{}\n", user("prompt-2"), answer(true))).unwrap();
+        assert!(!path.assistant_answer_after("session", "prompt-2", "answer"));
+        std::fs::write(&path, format!("{}\n{{partial", user("prompt-2"))).unwrap();
+        assert!(!path.assistant_answer_after("session", "prompt-2", "answer"));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!path.assistant_answer_after("session", "prompt-2", "answer"));
+    }
+    #[test]
+    fn first_input_can_be_witnessed_from_a_new_transcript() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        std::fs::write(&path, "").unwrap();
+        assert!(path.main_turn_unstarted("session"));
+        std::fs::write(
+            &path,
+            serde_json::json!({"type":"user", "sessionId":"session", "uuid":"prompt-1",
+            "message":{"content":"question"}})
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+        assert!(!path.main_turn_unstarted("session"));
+        assert!(matches!(
+            path.queued_history_after(
+                "session",
+                &ClaudeTranscriptCursor {
+                    device: 0,
+                    inode: 0,
+                    offset: 0
+                },
+                "question"
+            ),
+            ClaudeQueuedHistory::Received(_)
+        ));
     }
 }

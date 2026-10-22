@@ -12,7 +12,7 @@
 //! launches.
 
 use crate::generated::starter::{LeanStart, RendersLeanStart};
-use signal_flow::{HarnessKind, LeaveOut, LeaveOutRefusal};
+use signal_flow::{HarnessKind, LeaveOut, LeaveOutRefusal, ToolSet};
 
 /// The tools Claude Code defers to ToolSearch, each named once in the
 /// listing: leaving them out removes their names.
@@ -57,10 +57,7 @@ impl BelongsToHarness for LeaveOut {
 impl RendersLeanStart for LeanStart {
     fn refusal(&self) -> Option<LeaveOutRefusal> {
         for leave_out in &self.leave_outs {
-            if matches!(
-                leave_out,
-                LeaveOut::ToolSearch | LeaveOut::BashTool | LeaveOut::UserSettings
-            ) {
+            if matches!(leave_out, LeaveOut::UserSettings) {
                 return Some(LeaveOutRefusal::Indispensable(leave_out.clone()));
             }
             if leave_out.harness() != self.harness_kind {
@@ -101,16 +98,56 @@ impl RendersLeanStart for LeanStart {
             };
             arguments.extend(switches.iter().map(|switch| (*switch).to_owned()));
         }
+        if self.harness_kind == HarnessKind::Claude
+            && self.flow_kind == signal_flow::FlowKind::Simplified
+            && !arguments
+                .iter()
+                .any(|argument| argument == "--strict-mcp-config")
+        {
+            arguments.push("--strict-mcp-config".into());
+        }
         let tools = self.disallowed_tools();
         if !tools.is_empty() {
             arguments.push("--disallowedTools".into());
             arguments.push(tools.join(","));
+        }
+        if self.harness_kind == HarnessKind::Claude {
+            if let ToolSet::Explicit(tools) = &self.tool_set {
+                arguments.push("--tools".into());
+                arguments.push(
+                    tools
+                        .iter()
+                        .filter(|tool| {
+                            self.artifact_tools_allowed
+                                || !matches!(
+                                    tool.as_str(),
+                                    "Artifact" | "ArtifactComments" | "ArtifactData"
+                                )
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
         }
         arguments
     }
 
     fn environment(&self) -> Vec<String> {
         let mut environment = Vec::new();
+        if self.harness_kind == HarnessKind::Claude {
+            environment.push(format!(
+                "CLAUDE_CODE_ARTIFACT={}",
+                if self.artifact_tools_allowed {
+                    "1"
+                } else {
+                    "0"
+                }
+            ));
+            if self.flow_kind == signal_flow::FlowKind::Simplified {
+                environment.push("ENABLE_CLAUDEAI_MCP_SERVERS=false".into());
+            }
+        }
         for leave_out in &self.leave_outs {
             let variable = match leave_out {
                 LeaveOut::ClaudeAiConnectors => "ENABLE_CLAUDEAI_MCP_SERVERS=false",
@@ -133,6 +170,8 @@ impl RendersLeanStart for LeanStart {
         let mut tools: Vec<String> = Vec::new();
         for leave_out in &self.leave_outs {
             let named: &[&str] = match leave_out {
+                LeaveOut::BashTool => &["Bash"],
+                LeaveOut::ToolSearch => &["ToolSearch"],
                 LeaveOut::AgentTool => &["Agent"],
                 LeaveOut::FileTools => &["Read", "Edit", "Write"],
                 LeaveOut::WorkflowTool => &["Workflow"],
@@ -147,6 +186,13 @@ impl RendersLeanStart for LeanStart {
             for tool in named {
                 if !tools.iter().any(|known| known == tool) {
                     tools.push((*tool).to_owned());
+                }
+            }
+        }
+        if self.harness_kind == HarnessKind::Claude && !self.artifact_tools_allowed {
+            for tool in ["Artifact", "ArtifactComments", "ArtifactData"] {
+                if !tools.iter().any(|known| known == tool) {
+                    tools.push(tool.to_owned());
                 }
             }
         }
@@ -165,18 +211,66 @@ impl RendersLeanStart for LeanStart {
 #[cfg(test)]
 mod tests {
     use crate::generated::starter::{LeanStart, RendersLeanStart};
-    use signal_flow::{HarnessKind, LeaveOut, LeaveOutRefusal};
+    use signal_flow::{HarnessKind, LeaveOut, LeaveOutRefusal, ToolSet};
 
     fn lean(harness_kind: HarnessKind, leave_outs: &[LeaveOut]) -> LeanStart {
         LeanStart {
             harness_kind,
             leave_outs: leave_outs.to_vec(),
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: ToolSet::Default,
+            artifact_tools_allowed: false,
         }
     }
 
+    #[test]
+    fn explicit_empty_claude_tool_set_is_passed_to_harness() {
+        let launch = LeanStart {
+            harness_kind: HarnessKind::Claude,
+            leave_outs: Vec::new(),
+            flow_kind: signal_flow::FlowKind::Simplified,
+            tool_set: ToolSet::Explicit(Vec::new()),
+            artifact_tools_allowed: false,
+        };
+        assert!(launch.refusal().is_none());
+        assert!(
+            launch
+                .arguments()
+                .windows(2)
+                .any(|args| args == ["--tools", ""])
+        );
+        assert!(
+            launch
+                .environment()
+                .contains(&"CLAUDE_CODE_ARTIFACT=0".into())
+        );
+    }
+
+    #[test]
+    fn book_tertiary_artifact_exception_keeps_artifacts() {
+        let launch = LeanStart {
+            harness_kind: HarnessKind::Claude,
+            leave_outs: Vec::new(),
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: ToolSet::Default,
+            artifact_tools_allowed: true,
+        };
+        assert!(!launch.disallowed_tools().iter().any(|tool| {
+            matches!(
+                tool.as_str(),
+                "Artifact" | "ArtifactComments" | "ArtifactData"
+            )
+        }));
+        assert!(
+            launch
+                .environment()
+                .contains(&"CLAUDE_CODE_ARTIFACT=1".into())
+        );
+    }
+
     /// Leaving out the user settings drops Herdr's SessionStart hook, on
-    /// which Flow binds the flow, so it is refused as ToolSearch and Bash
-    /// are; the Agent tool may go, since a leaf role may need no subflows.
+    /// which Flow binds the flow; tool allow-lists can leave out Bash and
+    /// ToolSearch, and the Agent tool may go for a leaf role.
     #[test]
     fn user_settings_are_indispensable_and_the_agent_tool_is_not() {
         assert_eq!(
@@ -190,14 +284,24 @@ mod tests {
     }
 
     #[test]
-    fn indispensable_parts_skills_with_workflow_and_other_harness_parts_are_refused() {
+    fn only_settings_are_indispensable_and_other_parts_are_checked() {
         assert_eq!(
             lean(HarnessKind::Claude, &[LeaveOut::ToolSearch]).refusal(),
-            Some(LeaveOutRefusal::Indispensable(LeaveOut::ToolSearch))
+            None
         );
         assert_eq!(
             lean(HarnessKind::Claude, &[LeaveOut::BashTool]).refusal(),
-            Some(LeaveOutRefusal::Indispensable(LeaveOut::BashTool))
+            None
+        );
+        assert!(
+            lean(HarnessKind::Claude, &[LeaveOut::BashTool])
+                .disallowed_tools()
+                .contains(&"Bash".to_owned())
+        );
+        assert!(
+            lean(HarnessKind::Claude, &[LeaveOut::ToolSearch])
+                .disallowed_tools()
+                .contains(&"ToolSearch".to_owned())
         );
         assert_eq!(
             lean(HarnessKind::Claude, &[LeaveOut::SkillTool]).refusal(),
@@ -235,6 +339,11 @@ mod tests {
                 LeaveOut::DeferredTools,
                 LeaveOut::AttributionReminder,
             ],
+        );
+        assert!(
+            start
+                .environment()
+                .contains(&"CLAUDE_CODE_ARTIFACT=0".into())
         );
         assert_eq!(start.refusal(), None);
         let arguments = start.arguments();

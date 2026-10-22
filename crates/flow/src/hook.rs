@@ -7,7 +7,7 @@
 //!   SessionStart     -> Report.{ «FLOW_ID» Started }
 //!   PostToolUse      -> Report.{ «FLOW_ID» ToolUsed.«tool_name» }
 //!   UserPromptSubmit -> Report.{ «FLOW_ID» PromptSubmitted.{ Some.«session_id» Some.«prompt_id» SHA256 } }
-//!   Stop             -> Report.{ «FLOW_ID» Stopped.{ Some.«session_id» Some.«transcript_path» } }
+//!   Stop             -> Report.{ «FLOW_ID» Stopped.{ Some.«session_id» Some.«transcript_path» Some.«last_assistant_message» } }
 //!
 //! A Stop and a submitted prompt carry the native identity Claude Code gave
 //! the hook, so the Nexus acts on them only when they are the flow's own
@@ -136,9 +136,10 @@ impl ChoosesHookCall for HarnessHook {
                 }
             }
             "Stop" => format!(
-                "Stopped.{{ {} {} }}",
+                "Stopped.{{ {} {} {} }}",
                 self.optional("session_id"),
-                self.optional("transcript_path")
+                self.optional("transcript_path"),
+                self.optional("last_assistant_message")
             ),
             _ => return HookCall::Nothing("no Report for this event"),
         };
@@ -216,11 +217,14 @@ mod tests {
         assert_eq!(
             hook(
                 serde_json::json!({"hook_event_name": "Stop", "prompt_id": "p",
-                    "session_id": "s", "transcript_path": "/t/s.jsonl"}),
+                    "session_id": "s", "transcript_path": "/t/s.jsonl",
+                    "last_assistant_message": "answer"}),
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» } }".into())
+            HookCall::Report(
+                "Report.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» Some.«answer» } }".into()
+            )
         );
         assert_eq!(
             hook(
@@ -228,7 +232,16 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Stopped.{ None None } }".into())
+            HookCall::Report("Report.{ «5a4d0b» Stopped.{ None None None } }".into())
+        );
+        assert_eq!(
+            hook(
+                serde_json::json!({"hook_event_name": "Stop",
+                    "last_assistant_message": ""}),
+                Some("5a4d0b")
+            )
+            .call(),
+            HookCall::Report("Report.{ «5a4d0b» Stopped.{ None None Some.«» } }".into())
         );
     }
 
@@ -311,6 +324,7 @@ mod tests {
                 event: signal_flow::Event::Stopped(signal_flow::NativeStop {
                     native_session_id_option: Some("s".into()),
                     transcript_path_option: Some("/t/a »b».jsonl".into()),
+                    last_assistant_message_option: None,
                 }),
             })
         );

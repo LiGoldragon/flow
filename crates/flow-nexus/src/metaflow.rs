@@ -1,6 +1,6 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane, NamesRootThread};
-use crate::sending::IdentifiesSender;
+use crate::sending::{CompletesDirectSends, IdentifiesSender};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
@@ -162,10 +162,46 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     let sender = request.lock.sender.clone();
                     let recipient = request.lock.address.clone();
                     self.rest_ended_awake(&request.lock.address);
-                    let response: MetaflowAnswer = match self.store.queue_metaflow(request, now) {
+                    let abrupt = !matches!(&request.message, signal_flow::Message::Soft(_));
+                    if abrupt && request.delivery == signal_flow::Delivery::Queue {
+                        return Response::Failed(signal_flow::SendFailure {
+                            logical_delivery_id_option: None,
+                            send_failure_reason: signal_flow::SendFailureReason::QueueNotPermitted,
+                        })
+                        .into();
+                    }
+                    let direct = abrupt && request.delivery == signal_flow::Delivery::Wake;
+                    let _direct_lease = if direct {
+                        match self.direct_send_lease(&recipient) {
+                            Ok(lease) => Some(lease),
+                            Err(refusal) => return (*refusal).into(),
+                        }
+                    } else {
+                        None
+                    };
+                    let mut response: MetaflowAnswer = match self.store.queue_metaflow(request, now)
+                    {
                         Ok(response) => response.into(),
                         Err(error) => Response::Refused(Refusal::Store(error.to_string())).into(),
                     };
+                    drop(_turn);
+                    if direct {
+                        response.response = match response.response {
+                            Response::SendAccepted(accepted) => {
+                                self.complete_direct_send(&recipient, accepted.logical_delivery_id)
+                                    .response
+                            }
+                            Response::Refused(refusal) => {
+                                Response::Failed(signal_flow::SendFailure {
+                                    logical_delivery_id_option: None,
+                                    send_failure_reason: signal_flow::SendFailureReason::Refused(
+                                        refusal,
+                                    ),
+                                })
+                            }
+                            other => other,
+                        };
+                    }
                     return match self.store.record_send_outcome(
                         Some(peer.clone()),
                         Some(sender),

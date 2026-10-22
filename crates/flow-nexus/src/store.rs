@@ -5355,7 +5355,6 @@ impl RecordsNativeLaunchIntent for FlowStore {
             return Ok(false);
         };
         let empty_simplified_start = intent.prompt_sha256_vector.is_empty()
-            && intent.harness_kind == HarnessKind::Claude
             && stored.attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
             && matches!(&stored.attempt.launch_profile.tool_set,
                 signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
@@ -8629,7 +8628,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_part_intent_requires_a_proven_empty_tool_free_claude_judgment() {
+    fn zero_part_intent_requires_a_proven_empty_tool_free_simplified_launch() {
         use sha2::{Digest, Sha256};
         let empty_hash = format!("{:x}", Sha256::digest([]));
         for case in 0..6 {
@@ -8667,13 +8666,13 @@ mod tests {
             };
             assert_eq!(
                 store.record_native_launch_intent(intent).unwrap(),
-                case == 0,
+                case == 0 || case == 4,
                 "only the proven empty simplified startup is admitted, case {case}"
             );
             let attempt = store.launch_attempt("idle-judgment").unwrap().unwrap();
             assert_eq!(
                 attempt.launch_attempt_phase,
-                if case == 0 {
+                if case == 0 || case == 4 {
                     LaunchAttemptPhase::NativeLaunchIntentRecorded
                 } else {
                     LaunchAttemptPhase::Reserved

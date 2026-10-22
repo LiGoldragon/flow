@@ -557,7 +557,11 @@ impl ComposesLaunch for LaunchComposer {
         };
         let leave_outs = harnessed.effective_leave_outs(input_1)?;
         let verified = self.verified_context(&harnessed)?;
-        let brief = harnessed.brief();
+        let brief = if harnessed.launch_profile.flow_kind == signal_flow::FlowKind::Simplified {
+            harnessed.launch_profile.instruction_prompt.clone()
+        } else {
+            harnessed.brief()
+        };
         let mut segments = verified.user_segments();
         if harnessed.launch_profile.flow_kind == signal_flow::FlowKind::Simplified {
             // A simplified flow must not receive a context-only startup turn:
@@ -1130,6 +1134,25 @@ pub(crate) mod tests {
             composed.first_prompt_payload.first_prompt_body,
             "Carry the bounded task."
         );
+    }
+
+    #[test]
+    fn simplified_codex_launch_does_not_turn_an_empty_instruction_into_metadata() {
+        let mut profile = fixture_profile();
+        profile.flow_kind = signal_flow::FlowKind::Simplified;
+        profile.tool_set = signal_flow::ToolSet::Explicit(Vec::new());
+        profile.instruction_prompt.clear();
+        let composed = fixture_composer()
+            .compose(
+                HarnessedProfile {
+                    harness_kind: HarnessKind::Codex,
+                    launch_profile: profile,
+                },
+                Vec::<LeaveOut>::new(),
+            )
+            .unwrap();
+        assert!(composed.first_prompt_payload.first_prompt_body.is_empty());
+        assert!(composed.first_prompt_payload.prompt_part_vector.is_empty());
     }
 
     #[test]

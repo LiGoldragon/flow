@@ -1092,8 +1092,10 @@ impl ChecksComposedLaunch for ComposedLaunch {
             || intent.effort != launch.launch_profile.effort
             || intent.prompt_sha256_vector != launch.part_hashes()
             || intent.leave_outs != launch.leave_outs
-            || !usize::try_from(intent.parts_submitted)
-                .is_ok_and(|parts| (1..=intent.prompt_sha256_vector.len()).contains(&parts))
+            || !usize::try_from(intent.parts_submitted).is_ok_and(|parts| {
+                (intent.prompt_sha256_vector.is_empty() && parts == 0)
+                    || (1..=intent.prompt_sha256_vector.len()).contains(&parts)
+            })
             || !intent.boundary_matches_intent()
         {
             return Err("durable prompt intent does not belong to this composed launch".into());
@@ -2420,9 +2422,13 @@ impl AcceptsLaunchRegistration for HerdrCli {
             model_name: launch.launch_profile.model_name.clone(),
             effort: launch.launch_profile.effort.clone(),
             prompt_sha256_vector: launch.part_hashes(),
-            // The first part is the one about to be submitted. The caller
-            // sets the Stop count its flow has reported so far.
-            parts_submitted: 1,
+            // The first part is the one about to be submitted. An empty
+            // startup has no native user turn; queued work is its first one.
+            parts_submitted: if launch.first_prompt_payload.prompt_part_vector.is_empty() {
+                0
+            } else {
+                1
+            },
             stops_reported: 0,
             leave_outs: launch.leave_outs.clone(),
             native_transcript_boundary,

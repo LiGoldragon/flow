@@ -55,7 +55,6 @@ use sema_engine::{
     SchemaVersion, TableDescriptor, TableName, TableReference, TableRegistration, UpgradeFrom,
     UpgradeOutcome,
 };
-use signal_flow::ModelRefusal;
 use signal_flow::{
     Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute,
@@ -7594,7 +7593,7 @@ impl ReadsFlowMemory for FlowStore {}
 mod tests {
     use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
     use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
-    use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow, SleepsMetaflows};
+    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::queue_delivery::AccountsQueueDelivery;
     use std::fs;
     use std::os::unix::fs::MetadataExt;

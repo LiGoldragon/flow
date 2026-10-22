@@ -708,7 +708,7 @@ impl ReadsQueueDelivery for FlowStore {
         if matching.next().transpose()?.is_some() {
             return Err(StoreError::StateInvariant);
         }
-        return Ok(first);
+        Ok(first)
     }
 
     fn request_state(&self, request_id: &str) -> Result<Option<RequestState>, StoreError> {

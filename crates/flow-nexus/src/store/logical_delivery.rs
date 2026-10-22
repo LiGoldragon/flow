@@ -215,6 +215,7 @@ pub(crate) trait RecordsLogicalDeliveries {
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
     ) -> Result<Response, StoreError>;
+    #[cfg(test)]
     fn transition_logical_delivery(
         &self,
         id: &LogicalDeliveryId,
@@ -747,6 +748,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             delivery_state: DeliveryState::Queued,
         }))
     }
+    #[cfg(test)]
     fn transition_logical_delivery(
         &self,
         id: &LogicalDeliveryId,
@@ -839,7 +841,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .iter()
                 .filter(|r| {
                     r.snapshot.delivery_cursor > cursor
-                        && &r.snapshot.sent_by == &signal_flow::SentBy::Sender(sender.clone())
+                        && r.snapshot.sent_by == signal_flow::SentBy::Sender(sender.clone())
                 })
                 .map(|r| r.snapshot.clone())
                 .collect()
@@ -847,7 +849,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             current
                 .records()
                 .iter()
-                .filter(|r| &r.snapshot.sent_by == &signal_flow::SentBy::Sender(sender.clone()))
+                .filter(|r| r.snapshot.sent_by == signal_flow::SentBy::Sender(sender.clone()))
                 .map(|r| r.snapshot.clone())
                 .collect()
         };

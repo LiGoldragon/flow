@@ -233,7 +233,7 @@ impl MutatesMetaflows for FlowStore {
         if held.lock.until <= now {
             return Ok(Response::Refused(Refusal::Lapsed));
         }
-        let Some(stored) = self.stored_metaflow(&request.lock.address)? else {
+        let Some(_) = self.stored_metaflow(&request.lock.address)? else {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
                 request.lock.address,
             ))));
@@ -544,6 +544,7 @@ impl ForgetsEndedBindings for FlowStore {
 
 /// One metaflow row written back in its own atomic commit.
 /// Queues a request Flow itself raises for a metaflow it holds.
+#[cfg(test)]
 pub(crate) trait QueuesFlowRequest {
     /// Appends the request to the metaflow's queue; false when Flow holds
     /// no such metaflow.
@@ -554,6 +555,7 @@ pub(crate) trait QueuesFlowRequest {
     ) -> Result<bool, StoreError>;
 }
 
+#[cfg(test)]
 impl QueuesFlowRequest for FlowStore {
     fn queue_flow_request(
         &self,

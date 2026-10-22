@@ -1666,7 +1666,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     use crate::sending::MeasuresSendPayload;
     use crate::store::metaflow::TakesLaunchAddress;
     use crate::store::send_outcome::RecordsSendOutcomes;
-    use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory};
+    use crate::store::{FlowStore, ReadsFlowMemory};
     use signal_flow::{Deliver_Data, Lock_Data, Recipient, Response};
 
     let mut fixture = NexusFixture::new();
@@ -1895,7 +1895,7 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
     use crate::metaflow::DispatchesMetaflowPeer;
     use crate::sending::SendsRequests;
     use crate::store::metaflow::TakesLaunchAddress;
-    use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory};
+    use crate::store::{FlowStore, ReadsFlowMemory};
     use signal_flow::{
         Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
         HerdrRouteSelection, Origin, PowerLevel, Response,
@@ -2569,10 +2569,6 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
         "{calls}"
     );
 }
-
-/// A fabricated Codex Stop before confirmation never stands in for an
-/// app-server completion. Confirmation releases the Address hold, but the
-/// queued request waits for an authentic native turn event.
 
 /// A topic never dies: the Stop of the flow its metaflow is Awake as
 /// records the metaflow Asleep in the same write, the flow in Past, so a
@@ -3542,35 +3538,6 @@ fn turn_started_when_requested(
     })
 }
 
-/// Stands for the model's first turn: once the answer to the tool call is
-/// written on the launch responder's connection, the one that opened the
-/// thread (record-2), the turn ends
-/// and Herdr shows the seat idle. Returns that answer.
-fn first_turn_ends_when_answered(
-    state: std::path::PathBuf,
-) -> std::thread::JoinHandle<Option<serde_json::Value>> {
-    use super::send_tool::ReadsClientFrames;
-    std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while std::time::Instant::now() < deadline {
-            let answer = state
-                .join("record-2")
-                .client_messages()
-                .into_iter()
-                .find(|message| {
-                    message.get("id") == Some(&serde_json::json!(FIRST_CALL_REQUEST))
-                        && message.get("result").is_some()
-                });
-            if let Some(answer) = answer {
-                fs::write(state.join("turn-done"), "").unwrap();
-                return Some(answer);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        None
-    })
-}
-
 /// The order of a fresh Codex launch as the app-server and Herdr saw it:
 /// the connection that opened the thread is logged before the Codex
 /// `agent start`, and the connection that carried the first `turn/start`
@@ -3632,14 +3599,6 @@ impl ShowsCodexLaunchOrder for FirstTurnSend {
         );
     }
 }
-
-/// A fresh Codex launch whose first turn calls `send` while the launch
-/// submits it, with Herdr's start waiting for an idle seat as Herdr 0.8.2
-/// does: the thread is opened, named and idle when the TUI attaches, the
-/// first turn starts only after; the launch's own responder, subscribed
-/// since `thread/start`, answers the call while Submit runs; the request is
-/// queued once, sent from the launching metaflow; the launch completes; and
-/// the sleeping recipient wakes fresh once.
 
 /// A first turn that runs far longer than Herdr's start waits refuses
 /// nothing: Herdr's start, waiting for an idle seat as Herdr 0.8.2 does,

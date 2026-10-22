@@ -82,10 +82,8 @@ use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
-use datom_codec::Datomizable;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Undecided};
-use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
     Layer, Metaflow, NativePrompt, NativeStop, Origin, PowerLevel, QueueEntry, Response,
@@ -496,11 +494,8 @@ impl StartsUnbound for RunningNexus {
         self.wake_deferred();
         // The gate is released before the wait: the launch is settled by the
         // Nexus's own promoter, which needs the gate to do it.
-        let response = match response {
-            response => Some(response),
-        };
         match response {
-            Some(Response::Started(launched)) => Ok(launched.flow_id),
+            Response::Started(launched) => Ok(launched.flow_id),
             _ => Err(Failed_Data::Unstarted),
         }
     }
@@ -1300,18 +1295,17 @@ impl PerformsWakeAndDrain for RunningNexus {
             && self
                 .last_launch_profile(&flow_id)
                 .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified)
+            && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
         {
-            if let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by {
-                let binding = SimplifiedReplyBinding {
-                    flow_id: flow_id.clone(),
-                    input_delivery_id: oldest.logical_delivery_id.clone(),
-                    source: address.clone(),
-                    recipient: recipient.clone(),
-                    completed: false,
-                };
-                if self.store.bind_simplified_reply(binding).is_err() {
-                    return Outcome::WaitingForTurn(oldest.logical_delivery_id);
-                }
+            let binding = SimplifiedReplyBinding {
+                flow_id: flow_id.clone(),
+                input_delivery_id: oldest.logical_delivery_id.clone(),
+                source: address.clone(),
+                recipient: recipient.clone(),
+                completed: false,
+            };
+            if self.store.bind_simplified_reply(binding).is_err() {
+                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
             }
         }
         if matches!(oldest.message, signal_flow::Message::Soft(_)) {
@@ -1471,13 +1465,12 @@ impl PerformsWakeAndDrain for RunningNexus {
         // The receipt may already be in the transcript; otherwise the
         // seat's UserPromptSubmit report, or the next reconciliation,
         // settles it. Typed once, it is never typed again.
-        if let ClaudeQueuedHistory::Received(receipt) = self.claude_delivery_history(&attempt) {
-            if let Reconciled::Settled(entry, _) =
+        if let ClaudeQueuedHistory::Received(receipt) = self.claude_delivery_history(&attempt)
+            && let Reconciled::Settled(entry, _) =
                 self.settle_received(&attempt, receipt.turn_id, receipt.row, SeatAfter::InItsTurn)
-            {
-                drained.push(entry);
-                return Outcome::Drained(drained);
-            }
+        {
+            drained.push(entry);
+            return Outcome::Drained(drained);
         }
         Outcome::AwaitingReceipt(oldest.logical_delivery_id)
     }

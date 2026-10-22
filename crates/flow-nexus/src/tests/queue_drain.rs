@@ -23,9 +23,9 @@ use crate::waking::{PerformsWakeAndDrain, ReconcilesQueueDelivery, SettlesStopsA
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{
-    ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueDeliveryResolved_Data,
-    QueueDeliveryStanding, QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data,
-    ResolverIdentity, Response as MetaResponse, Undecided,
+    ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueDeliveryStanding,
+    QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data, ResolverIdentity,
+    Response as MetaResponse, Undecided,
 };
 use signal_flow::{
     Address, Aspect, Delivery, Event, Layer, Message, Metaflow, NativePrompt, NativeStop,

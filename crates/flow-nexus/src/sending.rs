@@ -854,6 +854,12 @@ impl CompletesDirectSends for RunningNexus {
         let observed = format!("{outcome:?}");
         let state = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
+            // A native transcript can land without a harness hook. One
+            // final correlated reconciliation follows the bounded event
+            // wait; timeout alone is never evidence of absence.
+            if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
+                let _ = self.reconcile_delivery(&attempt);
+            }
             self.store
                 .finish_failed_direct(address, &logical_id, &observed)
         };

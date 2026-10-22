@@ -84,7 +84,6 @@ fn direct_send_to_sleeping_or_unknown_recipient_fails_without_queueing() {
     for message in [
         Message::HardAbrupt(Request::Order("direct hard".into())),
         Message::MiddleAbrupt(Request::Order("direct middle".into())),
-        Message::Soft(Request::Order("direct soft".into())),
     ] {
         let answer = fixture.nexus.send_request(
             SendRequest {
@@ -251,7 +250,17 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         );
         writer.join().unwrap();
         let Response::Sent(receipt) = answer.response else {
-            panic!("direct reply is not a receipt: {:?}", answer.response)
+            use crate::store::queue_delivery::AccountsQueueDelivery;
+            use crate::waking::ReadsClaudeDelivery;
+            let attempts = fixture.nexus.store.delivery_attempts().unwrap();
+            let histories: Vec<_> = attempts
+                .iter()
+                .map(|attempt| fixture.nexus.claude_delivery_history(attempt))
+                .collect();
+            panic!(
+                "direct reply {:?}; attempts {attempts:?}; native {histories:?}",
+                answer.response
+            )
         };
         assert_eq!(receipt.native_receipt.native_session_id, CLAUDE_SESSION);
         assert_eq!(

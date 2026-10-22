@@ -199,8 +199,8 @@ impl SendsRequests for RunningNexus {
     fn send_request(&self, send: SendRequest, peer: Option<&Process>) -> SendAnswer {
         use sha2::{Digest, Sha256};
 
-        let direct = send.delivery == Delivery::Wake;
         let abrupt = !matches!(&send.message, Message::Soft(_));
+        let direct = abrupt && send.delivery == Delivery::Wake;
         let digest_text = send.datomize(Vec::new()).protosize().compact();
         let request_digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
         let recipient = match &send.recipient {
@@ -788,6 +788,7 @@ trait CompletesDirectSends {
 
 impl CompletesDirectSends for RunningNexus {
     fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer {
+        use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
         use std::time::{Duration, Instant};
         let outcome = {
@@ -797,7 +798,9 @@ impl CompletesDirectSends for RunningNexus {
         // This budget bounds waiting, not evidence. Expiry is uncertainty,
         // never proof of absence and never permission for a new attempt.
         let deadline = Instant::now() + Duration::from_secs(10);
+        let changes = self.store.launch_changes.clone();
         loop {
+            let seen = changes.current();
             let state = {
                 let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
                 if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
@@ -817,8 +820,9 @@ impl CompletesDirectSends for RunningNexus {
                     DeliveryState::Attempting | DeliveryState::Uncertain
                         if Instant::now() < deadline =>
                     {
-                        std::thread::sleep(Duration::from_millis(50));
-                        continue;
+                        if changes.until(seen, deadline) {
+                            continue;
+                        }
                     }
                     _ => {}
                 },

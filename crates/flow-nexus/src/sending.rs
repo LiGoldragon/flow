@@ -773,8 +773,8 @@ pub(crate) trait CompletesDirectSends {
 
 impl CompletesDirectSends for RunningNexus {
     fn direct_receipt_watch(&self, address: &Address) -> Option<notify::RecommendedWatcher> {
-        use crate::claude::ReadsClaudeTurns;
-        use crate::store::AnnouncesLaunchChanges;
+        use crate::store::{AnnouncesLaunchChanges, ReadsFlowRows};
+        use crate::waking::ReadsClaudeDelivery;
         use notify::Watcher;
         let flow_id = self.live_awake_flow(address)?;
         let node = self.store.flow_node(&flow_id).ok()??;

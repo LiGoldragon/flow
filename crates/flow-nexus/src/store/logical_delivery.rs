@@ -197,6 +197,10 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
 pub(crate) trait RecordsLogicalDeliveries {
     fn seed_missing_queued_deliveries(&self) -> Result<(), StoreError>;
     fn force_queue_wake(&self, address: &Address) -> Result<(), StoreError>;
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the existing atomic tool-admission boundary during the delivery repair; its inputs remain individually typed."
+    )]
     fn accept_tool_send(
         &self,
         key: &ToolCallKey,

@@ -4512,10 +4512,6 @@ mod tests {
         );
     }
 
-    /// A receipt that contradicts the launch, here another model, refuses
-    /// it: the launch is StartRejected, its pane closed, its flow Stopped
-    /// and its Address given back, rather than left ambiguous.
-
     /// A launch names the Address of its seat: the write acknowledging the
     /// seat's witnessed binding records that metaflow Awake as the launched
     /// flow and holds it, confirmation keeps it in the write that makes the
@@ -4689,17 +4685,6 @@ mod tests {
         assert_eq!(fixture.lifecycle("fac697"), FlowLifecycle::Active);
         // Replaced is answered by the replacement fixture above.
     }
-
-    /// e167d8: a plain Start first answered StartAmbiguous and only the
-    /// watcher promoted it later, so every caller of a launch that was in
-    /// fact succeeding had to handle a non-failure. The ambiguity is not
-    /// intrinsic — the Nexus is already watching the seat's transcript — so
-    /// Start waits for that settlement and answers it. The caller sees
-    /// Started; StartAmbiguous is left for a seat that never answers.
-
-    /// 88475f: Start answered StartAmbiguous, the receipt landed half a
-    /// minute later, and nobody subscribed or sent Start again. The
-    /// Nexus's own watch promotes it.
 
     fn bind_existing_caller(fixture: &NexusFixture, flow_id: &str, pane: &str) {
         let socket_path = fixture

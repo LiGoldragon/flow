@@ -674,18 +674,6 @@ fn handed_orders(fixture: &NexusFixture, world: &super::waking::FreshWorld, body
     world.user_turns(fixture).concat().matches(body).count()
 }
 
-/// A call queued for an Asleep metaflow wakes it although the answer to the
-/// call is never written: the connection stopped reading before it. The
-/// app-server replays the call to the next connection, which is answered
-/// from its record, queues nothing more and wakes nothing more.
-
-/// A call the last Nexus queued and recorded for an Asleep metaflow, then
-/// died before answering or waking, wakes the target when it is replayed.
-
-/// A Result or a Notice for an Asleep Secondary is queued and wakes
-/// nothing; an Order for an Asleep Primary wakes it fresh, as an Order
-/// wakes every layer.
-
 #[test]
 fn a_call_key_recorded_with_other_content_is_refused() {
     let fixture = NexusFixture::new();
@@ -1755,10 +1743,6 @@ fn a_working_codex_seat_is_not_drained() {
     assert_eq!(fixture.typed_count(&psyche), 0);
     assert_eq!(fixture.seat_queue(), vec![psyche, brief]);
 }
-
-/// A first turn that completes while the launch is not yet confirmed (its
-/// registration or Bind still running) finds the seat only holding its
-/// Address and keeps its work; the confirmation hands that work over.
 
 /// A turn of the seat's thread as `thread/turns/list` answers it with
 /// `itemsView: full`; `text` is its user message, when it has one.

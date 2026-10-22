@@ -32,20 +32,30 @@ impl CarriesLegacySender for Request {
         })
     }
 }
-fn commit_attempt_state(
-    store: &FlowStore,
-    evidence: &QueueEvidence,
-    state: DeliveryState,
-    commit: AtomicCommit,
-) -> Result<(), StoreError> {
-    if let QueueEvidence::Logical(entry) = evidence {
-        store.commit_logical_transition(&entry.logical_delivery_id, state, commit)?;
-    } else {
-        // Legacy attempts predate stable logical identity; retain their
-        // attempt history without fabricating a lifecycle link.
-        store.engine.commit_atomic(commit)?;
+trait CommitsAttemptState {
+    fn commit_attempt_state(
+        &self,
+        evidence: &QueueEvidence,
+        state: DeliveryState,
+        commit: AtomicCommit,
+    ) -> Result<(), StoreError>;
+}
+
+impl CommitsAttemptState for FlowStore {
+    fn commit_attempt_state(
+        &self,
+        evidence: &QueueEvidence,
+        state: DeliveryState,
+        commit: AtomicCommit,
+    ) -> Result<(), StoreError> {
+        if let QueueEvidence::Logical(entry) = evidence {
+            self.commit_logical_transition(&entry.logical_delivery_id, state, commit)?;
+        } else {
+            // Legacy attempts retain history without a fabricated lifecycle link.
+            self.engine.commit_atomic(commit)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 const DELIVERY_COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_queue_delivery_counter");
@@ -970,7 +980,7 @@ impl AccountsQueueDelivery for FlowStore {
                     .engine
                     .begin_atomic_commit()
                     .mutate(self.queue_delivery.attempts, attempt);
-                commit_attempt_state(self, &evidence, DeliveryState::Uncertain, commit)?;
+                self.commit_attempt_state(&evidence, DeliveryState::Uncertain, commit)?;
                 Ok(true)
             }
             QueueDeliveryPhase::Uncertain(_) => Ok(true),
@@ -1005,7 +1015,7 @@ impl AccountsQueueDelivery for FlowStore {
             .engine
             .begin_atomic_commit()
             .mutate(self.queue_delivery.attempts, attempt);
-        commit_attempt_state(self, &evidence, DeliveryState::Uncertain, commit)?;
+        self.commit_attempt_state(&evidence, DeliveryState::Uncertain, commit)?;
         Ok(true)
     }
 
@@ -1049,8 +1059,7 @@ impl AccountsQueueDelivery for FlowStore {
             .begin_atomic_commit()
             .mutate(self.queue_delivery.requests, request)
             .mutate(self.queue_delivery.attempts, attempt);
-        commit_attempt_state(
-            self,
+        self.commit_attempt_state(
             &evidence,
             DeliveryState::Retryable(RetryCause::HistoryAbsent),
             commit,
@@ -1128,8 +1137,7 @@ impl AccountsQueueDelivery for FlowStore {
             .begin_atomic_commit()
             .mutate(self.queue_delivery.requests, request)
             .mutate(self.queue_delivery.attempts, attempt.clone());
-        commit_attempt_state(
-            self,
+        self.commit_attempt_state(
             &evidence,
             DeliveryState::Retryable(RetryCause::OwnerResolvedAbsent),
             commit,
@@ -1173,7 +1181,7 @@ impl AccountsQueueDelivery for FlowStore {
                         .engine
                         .begin_atomic_commit()
                         .mutate(self.queue_delivery.attempts, attempt.clone());
-                    commit_attempt_state(self, &evidence, DeliveryState::Uncertain, commit)?;
+                    self.commit_attempt_state(&evidence, DeliveryState::Uncertain, commit)?;
                     outstanding.push(attempt);
                 }
                 QueueDeliveryPhase::Uncertain(_) | QueueDeliveryPhase::ReceiptRecorded(_) => {

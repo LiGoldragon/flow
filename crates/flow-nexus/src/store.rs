@@ -7715,7 +7715,7 @@ mod tests {
         let source = Address {
             aspect: Aspect::Mind,
             topic: "judgment".into(),
-            layer: Layer::Primary,
+            layer: Layer::Secondary,
         };
         let recipient = Address {
             aspect: Aspect::Psyche,
@@ -7949,7 +7949,7 @@ mod tests {
                 &source,
                 SentBy::Sender(sender.clone()),
                 flow_ethos::Delivery::Wake,
-                Message::Soft(Request::Order("review this book source".into())),
+                Message::Soft(Request::Question("review this book source".into())),
                 None,
             )
             .unwrap()

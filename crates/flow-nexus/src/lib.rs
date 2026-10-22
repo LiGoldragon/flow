@@ -4891,13 +4891,13 @@ mod tests {
     /// routes between aspects is refused, and a process in no bound pane
     /// sends nothing.
     #[test]
-    fn a_send_is_queued_from_the_callers_metaflow_without_a_route_gate() {
+    fn a_send_is_authenticated_and_primary_coordination_is_refused() {
         use crate::sending::SendsRequests;
         use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
         use signal_flow::{
             Address, Delivery, Layer, Message, Metaflow, QueueEntry, Recipient, Refusal, Request,
-            SendRequest, SentBy, Unknown_Data,
+            SendRequest, SentBy,
         };
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
@@ -4958,11 +4958,7 @@ mod tests {
         ));
         assert_eq!(
             send(Recipient::Up, Request::Result("done".into()), &peer),
-            Response::Refused(Refusal::Unknown(Unknown_Data::Address(address(
-                Aspect::Mind,
-                "core",
-                Layer::Primary
-            ))))
+            Response::Refused(Refusal::OffRoute)
         );
         assert_eq!(
             fixture

@@ -694,12 +694,13 @@ mod tests {
 
     #[test]
     fn lock_queue_is_atomic_exact_and_never_claims_native_delivery() {
-        let fixture = Fixture::new(
+        let mut fixture = Fixture::new(
             std::env::current_exe()
                 .unwrap()
                 .to_string_lossy()
                 .into_owned(),
         );
+        fixture.message.layer = Layer::Secondary;
         let binding = Bind_Data {
             address: fixture.message.clone(),
             process: fixture.peer.clone(),

@@ -1457,7 +1457,7 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
             core(),
             &core_primary(),
             Delivery::Wake,
-            Message::Soft(Request::Order("source".into())),
+            Message::Soft(Request::Question("source".into())),
             0,
         )
         .unwrap();
@@ -1473,7 +1473,7 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
             unauthorized_sender,
             &core_primary(),
             Delivery::Wake,
-            Message::Soft(Request::Order("must not enter".into())),
+            Message::Soft(Request::Question("must not enter".into())),
             0,
         )
         .unwrap();

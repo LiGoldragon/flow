@@ -4240,7 +4240,7 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
 
     // The Nexus exits: the store as it lies on disk opens in a new one.
     let app_server = fixture.nexus.codex_endpoints.stable.client_path.clone();
-    let written = fixture.directory.path().join("flow.sema");
+    let written = fixture.directory.path().join("flow.memory");
     let mut restarted = NexusFixture::with_store(|store| {
         fs::copy(&written, store).expect("the store as written");
     });

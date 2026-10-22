@@ -404,7 +404,7 @@ fn a_delivery_a_crash_left_under_its_lease_settles_uncertain_and_is_never_retrie
     use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
     use crate::store::{FlowStore, OpensFlowStore};
     let directory = tempfile::tempdir().expect("store directory");
-    let path = directory.path().join("flow.sema");
+    let path = directory.path().join("flow.memory");
     {
         let store = FlowStore::open(&path).expect("store");
         store

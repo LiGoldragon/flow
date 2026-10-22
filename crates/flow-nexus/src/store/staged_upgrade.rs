@@ -1,6 +1,6 @@
 //! An open that changes a store's families lands whole or not at all.
 //!
-//! Sema Engine lands each family upgrade, each re-keying and each new
+//! Memory Engine lands each family upgrade, each re-keying and each new
 //! family registration in a write transaction of its own, and offers no
 //! transaction that spans families; one open of an older store is therefore
 //! several commits. Such an open runs first on a copy beside the store, and
@@ -12,11 +12,11 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use redb::{ReadableDatabase as _, ReadableTable as _, TableHandle as _};
-use sema_engine::TableRegistration;
+use memory_engine::TableRegistration;
 
 use super::{
     ADDED_LATER_TABLES, CONFIGURATION_ONLY_ADDED_TABLES, CONFIGURATION_ONLY_TABLES, FlowStore,
-    RETIRED_TABLES, RUNNING_TABLES, ReadsFlowMemory, SEMA_CATALOG_TABLE, StoreError,
+    RETIRED_TABLES, RUNNING_TABLES, ReadsFlowMemory, MEMORY_CATALOG_TABLE, StoreError,
 };
 
 /// The tables one entry point registers, and so may add or upgrade.
@@ -266,7 +266,7 @@ impl ReadsPendingUpgrade for FlowStore {
             return Ok(true);
         }
         let catalog = read
-            .open_table(SEMA_CATALOG_TABLE)
+            .open_table(MEMORY_CATALOG_TABLE)
             .map_err(|error| failed(&error))?;
         let mut current = std::collections::BTreeSet::new();
         for entry in catalog.iter().map_err(|error| failed(&error))? {

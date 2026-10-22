@@ -62,7 +62,7 @@ impl ConfiguredStore {
         let start = flow_ethos::Start {
             ordinary_socket_path: path("ordinary.sock"),
             meta_socket_path: path("meta.sock"),
-            store_path: path("flow.sema"),
+            store_path: path("flow.memory"),
             landing_watch_option: None,
         };
         let configuration = ConfigurationOnlyStore::open(std::path::Path::new(&start.store_path))
@@ -648,7 +648,7 @@ fn a_fresh_store_takes_its_first_nexus_declaration() {
         home: directory.path().join("home"),
         runtime_directory: directory.path().join("runtime"),
     };
-    let path = directory.path().join("flow.sema");
+    let path = directory.path().join("flow.memory");
     let store = ConfigurationOnlyStore::open(&path).expect("fresh store");
     assert_eq!(store.configuration_snapshot().expect("reads"), None);
     let declared = ConfiguredStore::nexus(&defaults, &[SOL, LUNA], 45);

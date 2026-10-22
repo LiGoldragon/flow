@@ -12,7 +12,7 @@
 
 use super::{FlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
+use memory_engine::{
     Assertion, EngineRecord, FamilyName, QueryPlan, RecordKey, SchemaHash, TableDescriptor,
     TableName,
 };

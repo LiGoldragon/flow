@@ -467,16 +467,16 @@ pub(crate) trait WritesTakenAddress {
     fn written(
         self,
         store: &FlowStore,
-        commit: sema_engine::AtomicCommit,
-    ) -> sema_engine::AtomicCommit;
+        commit: memory_engine::AtomicCommit,
+    ) -> memory_engine::AtomicCommit;
 }
 
 impl WritesTakenAddress for TakenAddress {
     fn written(
         self,
         store: &FlowStore,
-        commit: sema_engine::AtomicCommit,
-    ) -> sema_engine::AtomicCommit {
+        commit: memory_engine::AtomicCommit,
+    ) -> memory_engine::AtomicCommit {
         let key = FlowStore::address_record_key(&self.metaflow.metaflow.address);
         let commit = if self.new {
             commit.assert(store.metaflows, self.metaflow)
@@ -629,7 +629,7 @@ mod tests {
     impl Fixture {
         fn new(binary: String) -> Self {
             let directory = tempfile::tempdir().expect("private fixture");
-            let path = directory.path().join("flow.sema");
+            let path = directory.path().join("flow.memory");
             let defaults = DefaultConfiguration {
                 home: directory.path().join("home"),
                 runtime_directory: directory.path().join("runtime"),

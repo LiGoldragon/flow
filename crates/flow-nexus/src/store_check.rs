@@ -31,7 +31,7 @@ impl CopiesStore for StoreCopy {
             fs::remove_dir_all(&directory)?;
         }
         fs::DirBuilder::new().mode(0o700).create(&directory)?;
-        let path = directory.join("flow.sema");
+        let path = directory.join("flow.memory");
         let copy = Self { directory, path };
         fs::copy(store, &copy.path)?;
         Ok(copy)
@@ -108,7 +108,7 @@ mod tests {
     /// Nexus once.
     fn configured_store(directory: &Path) -> PathBuf {
         use crate::store::{ConfigurationOnlyStore, ConfiguresOnlyStore, SeedsConfiguration};
-        let path = directory.join("flow.sema");
+        let path = directory.join("flow.memory");
         let settings = DefaultConfiguration {
             home: directory.join("home"),
             runtime_directory: directory.join("runtime"),
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn no_store_is_absent() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("flow.sema");
+        let path = directory.path().join("flow.memory");
         assert_eq!(
             request(&path).check(),
             StoreCheck::Absent(path.to_string_lossy().into_owned())
@@ -167,7 +167,7 @@ mod tests {
     /// give, and left untouched.
     #[test]
     fn a_store_a_later_flow_wrote_is_refused() {
-        use sema_engine::{
+        use memory_engine::{
             Engine, EngineOpen, EngineRecord, FamilyName, RecordKey, SchemaHash, SchemaVersion,
             TableDescriptor, TableName,
         };

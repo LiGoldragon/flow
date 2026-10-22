@@ -12,7 +12,7 @@
 use super::{FlowStore, ManagesMetaflowState, ReadsFlowRoles, ReadsLaunchAttempt, StoreError};
 use meta_signal_flow::{CompactionRefusal, ContextBelowThreshold};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
+use memory_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, SchemaHash,
     TableDescriptor, TableName, TableReference,
 };
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn a_flow_context_size_is_rewritten_at_each_stop_and_kept_across_a_reopen() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("flow.sema");
+        let path = directory.path().join("flow.memory");
         {
             let store = FlowStore::open(&path).unwrap();
             assert_eq!(store.context_size("5a4d0b").unwrap(), None);

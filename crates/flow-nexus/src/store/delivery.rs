@@ -15,7 +15,7 @@ use meta_signal_flow::{
     MetaAspects,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
+use memory_engine::{
     Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, Retraction,
     SchemaHash, TableDescriptor, TableName, TableReference,
 };
@@ -52,7 +52,7 @@ pub enum LeaseStep {
     Submitted,
 }
 
-/// The Sema row of a delivery under the lease.
+/// The Memory row of a delivery under the lease.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PaneLease {
     pub delivery_id: DeliveryId,
@@ -166,11 +166,11 @@ pub struct DeliveryTables {
 }
 
 pub trait RegistersDeliveryTables: Sized {
-    fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError>;
+    fn register(engine: &mut memory_engine::Engine) -> Result<Self, StoreError>;
 }
 
 impl RegistersDeliveryTables for DeliveryTables {
-    fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError> {
+    fn register(engine: &mut memory_engine::Engine) -> Result<Self, StoreError> {
         Ok(Self {
             deliveries: engine.register_table(TableDescriptor::new(
                 DELIVERY_TABLE_NAME,

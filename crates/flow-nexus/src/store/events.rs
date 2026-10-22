@@ -17,7 +17,7 @@
 
 use super::{FlowStore, ReadsFlowStore, StoreError};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
+use memory_engine::{
     Assertion, Decision, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryUpgrades,
     MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash, TableDescriptor, TableName,
     TableReference, UpgradeFrom, UpgradeOutcome,
@@ -194,11 +194,11 @@ pub struct EventTables {
 }
 
 pub trait RegistersEventTables: Sized {
-    fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError>;
+    fn register(engine: &mut memory_engine::Engine) -> Result<Self, StoreError>;
 }
 
 impl RegistersEventTables for EventTables {
-    fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError> {
+    fn register(engine: &mut memory_engine::Engine) -> Result<Self, StoreError> {
         let descriptor = <FlowEvents as DescribesEventTable>::descriptor();
         let from_v1 = descriptor.clone();
         let events = match engine.upgrade_table::<FlowEventsV2, FlowEvents>(descriptor) {
@@ -206,7 +206,7 @@ impl RegistersEventTables for EventTables {
             UpgradeOutcome::AlreadyCurrent(table) => table,
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
             UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
+                if failure.phase() == memory_engine::StoragePhase::Admission =>
             {
                 match engine.upgrade_table::<FlowEventsV1, FlowEvents>(from_v1) {
                     UpgradeOutcome::Upgraded(receipt) => receipt.table(),
@@ -354,7 +354,7 @@ mod tests {
         EventRecording, EventV2, FlowEvents, FlowEventsV2, NativeStopV2, RecordsHarnessEvents,
     };
     use crate::store::{FlowStore, OpensFlowStore, RegistersFlowIdentity};
-    use sema_engine::{Decision, UpgradeFrom};
+    use memory_engine::{Decision, UpgradeFrom};
     use signal_flow::{
         EndpointSelection, Event, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
         HerdrRouteSelection, Origin,
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn a_flow_keeps_its_reported_events_in_order_across_a_reopen() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("flow.sema");
+        let path = directory.path().join("flow.memory");
         {
             let store = FlowStore::open(&path).unwrap();
             assert!(matches!(
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn a_released_reserved_flow_is_no_longer_held() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("flow.sema");
+        let path = directory.path().join("flow.memory");
         {
             let store = FlowStore::open(&path).unwrap();
             store.hold_reserved_flow("0b0b0b").unwrap();

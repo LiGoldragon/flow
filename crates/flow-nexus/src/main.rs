@@ -391,7 +391,7 @@ mod tests {
         let expected = flow_ethos::Start {
             ordinary_socket_path: "/run/user/test/flow.sock".into(),
             meta_socket_path: "/run/user/test/flow-meta.sock".into(),
-            store_path: "/home/test/.local/state/flow-next/flow.sema".into(),
+            store_path: "/home/test/.local/state/flow-next/flow.memory".into(),
             landing_watch_option: Some(flow_ethos::LandingWatch {
                 context_repository: "/git/psyche-context".into(),
                 deploy_binary: "/nix/store/x-context-deploy/bin/context-deploy".into(),
@@ -412,27 +412,27 @@ mod tests {
         let expected = flow_ethos::Start {
             ordinary_socket_path: "/run/flow.sock".into(),
             meta_socket_path: "/run/flow-meta.sock".into(),
-            store_path: "/state/flow.sema".into(),
+            store_path: "/state/flow.memory".into(),
             landing_watch_option: None,
         };
         for literal in [
-            "{ /run/flow.sock /run/flow-meta.sock /state/flow.sema None }",
-            "{ «/run/flow.sock» «/run/flow-meta.sock» «/state/flow.sema» None }",
+            "{ /run/flow.sock /run/flow-meta.sock /state/flow.memory None }",
+            "{ «/run/flow.sock» «/run/flow-meta.sock» «/state/flow.memory» None }",
         ] {
             assert_eq!([literal.to_owned()].parse_start().unwrap(), expected);
         }
         assert!(
-            ["Start.{ /run/flow.sock /run/flow-meta.sock /state/flow.sema None }".into()]
+            ["Start.{ /run/flow.sock /run/flow-meta.sock /state/flow.memory None }".into()]
                 .parse_start()
                 .is_err()
         );
         assert!(
-            ["{ /run/flow.sock /run/flow-meta.sock /state/flow.sema }".into()]
+            ["{ /run/flow.sock /run/flow-meta.sock /state/flow.memory }".into()]
                 .parse_start()
                 .is_err(),
             "every position is written, the landing watch included"
         );
-        let watched = ["{ /run/flow.sock /run/flow-meta.sock /state/flow.sema Some.{ /git/psyche-context /nix/store/x/bin/context-deploy } }".to_owned()]
+        let watched = ["{ /run/flow.sock /run/flow-meta.sock /state/flow.memory Some.{ /git/psyche-context /nix/store/x/bin/context-deploy } }".to_owned()]
             .parse_start()
             .expect("a landing watch parses");
         assert_eq!(
@@ -475,8 +475,8 @@ mod tests {
     #[test]
     fn unrecognized_store_refusal_is_one_typed_datom_with_its_path_and_reason() {
         let refusal = ConfigurationStartup::start_store_refusal_datom(
-            "/home/test/old flow.sema",
-            "Sema schema version is Some(1), expected 2",
+            "/home/test/old flow.memory",
+            "Memory schema version is Some(1), expected 2",
         )
         .expect("Start refusal is an authored Flow datom");
         let mut budget = Budget {
@@ -528,7 +528,7 @@ mod tests {
                 .into_owned(),
             store_path: directory
                 .path()
-                .join("custom/flow.sema")
+                .join("custom/flow.memory")
                 .to_string_lossy()
                 .into_owned(),
             landing_watch_option: None,
@@ -589,7 +589,7 @@ mod tests {
                 .into_owned(),
             store_path: directory
                 .path()
-                .join("store/configured.flow.sema")
+                .join("store/configured.flow.memory")
                 .to_string_lossy()
                 .into_owned(),
             landing_watch_option: None,

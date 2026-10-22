@@ -4,7 +4,7 @@ Flow Nexus starts, restarts, delivers to, stops, lists, and resolves flows,
 and is the only writer into their panes. `flow-nexus` is the
 no-argument long-running process, `flow` is its ordinary client, and
 `flow-meta` is its privileged client. The Nexus persists Flow identity and
-policy in one Sema store, and its sockets carry only length-prefixed rkyv
+policy in one Memory store, and its sockets carry only length-prefixed rkyv
 Signal archives.
 
 The wire contracts are independent repositories:
@@ -178,7 +178,7 @@ control socket, and worker process on every request. It reports `Parked` when
 that evidence no longer matches, when a permission wait is recorded, or when
 the lifecycle is terminal. An ordinary `blocked` lifecycle remains routable.
 
-Herdr routes live in a separate table in the same Flow Sema store, keyed by
+Herdr routes live in a separate table in the same Flow Memory store, keyed by
 Flow ID, so the existing v5 Flow rows retain their exact layout. Registration
 requires a valid `flow-id` claim marker for the Flow ID and harness, then binds
 the current native session to the exact Herdr agent, pane, terminal, and
@@ -195,7 +195,7 @@ an unavailable Herdr route.
 The binary starts with no arguments and derives every default from two
 anchors, `HOME` and `XDG_RUNTIME_DIR` (`flow-defaults` is their one home):
 
-- store: `$HOME/.local/state/flow/flow.sema`
+- store: `$HOME/.local/state/flow/flow.memory`
 - ordinary socket: `$XDG_RUNTIME_DIR/flow/flow.sock`
 - meta socket: `$XDG_RUNTIME_DIR/flow/flow-meta.sock`
 - source root: `$HOME/primary`

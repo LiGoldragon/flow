@@ -92,7 +92,7 @@ impl ReadsAnchors for DefaultConfiguration {
 /// names a particular user.
 pub trait LaysOutDefaults {
     const STATE_DIRECTORY: &str = ".local/state/flow";
-    const STORE_FILE: &str = "flow.sema";
+    const STORE_FILE: &str = "flow.memory";
     const SOCKET_DIRECTORY: &str = "flow";
     const ORDINARY_SOCKET: &str = "flow.sock";
     const META_SOCKET: &str = "flow-meta.sock";
@@ -193,7 +193,7 @@ mod tests {
         );
         assert_eq!(
             defaults.store_path(),
-            Path::new("/home/someone/.local/state/flow/flow.sema")
+            Path::new("/home/someone/.local/state/flow/flow.memory")
         );
         assert_eq!(
             defaults.stable_codex().socket,

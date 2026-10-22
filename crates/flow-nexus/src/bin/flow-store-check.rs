@@ -1,5 +1,5 @@
 //! Whether this Flow opens the store at a path, before a deploy activates
-//! it: `flow-store-check '{ /home/li/.local/state/flow-03521/flow.sema }'`
+//! it: `flow-store-check '{ /home/li/.local/state/flow-03521/flow.memory }'`
 //! answers `Opens.<path>`, `Absent.<path>` or `Refused.{ <path> «reason» }`,
 //! and exits non-zero only on a refusal.
 

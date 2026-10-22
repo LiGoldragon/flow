@@ -1,7 +1,7 @@
 //! Durable Flow Nexus identity and dispatch state.
 //!
 //! The ordinary Signal contract remains the public boundary.  This module
-//! owns its single `.sema` store and lowers a closed `signal_flow::Query`
+//! owns its single `.memory` store and lowers a closed `signal_flow::Query`
 //! into its typed, durable records.
 
 use crate::store::delivery::RegistersDeliveryTables;
@@ -49,7 +49,7 @@ use meta_signal_flow::{
     ConfigureOutcome, ConfigureThreshold,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
+use memory_engine::{
     Assertion, Decision, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation,
     MemoryDefinition, MemoryUpgrades, MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash,
     SchemaVersion, TableDescriptor, TableName, TableReference, TableRegistration, UpgradeFrom,
@@ -217,7 +217,7 @@ const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
     "flow_nexus_meta_metaflow_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
-// separate from the generic Sema layout version: the registered state-family
+// separate from the generic Memory layout version: the registered state-family
 // identity and its identity record must both match before a path is resumed.
 const FLOW_SCHEMA_VERSION: u32 = 2;
 const FLOW_MEMORY_SCHEMA_VERSION: u64 = 2;
@@ -225,16 +225,16 @@ const STATE_KEY: &str = "identity";
 const CONFIGURATION_KEY: &str = "configured";
 const RUNTIME_CONFIGURATION_KEY: &str = "runtime";
 
-const SEMA_META_TABLE: redb::TableDefinition<&str, u64> = redb::TableDefinition::new("__sema_meta");
-const SEMA_CATALOG_TABLE: redb::TableDefinition<&str, &[u8]> =
-    redb::TableDefinition::new("__sema_engine_catalog");
-const SEMA_ENGINE_COUNTERS_TABLE: redb::TableDefinition<&str, &[u8]> =
-    redb::TableDefinition::new("__sema_engine_counters");
+const MEMORY_META_TABLE: redb::TableDefinition<&str, u64> = redb::TableDefinition::new("__memory_meta");
+const MEMORY_CATALOG_TABLE: redb::TableDefinition<&str, &[u8]> =
+    redb::TableDefinition::new("__memory_engine_catalog");
+const MEMORY_ENGINE_COUNTERS_TABLE: redb::TableDefinition<&str, &[u8]> =
+    redb::TableDefinition::new("__memory_engine_counters");
 const FLOW_STATE_RAW_TABLE: redb::TableDefinition<String, &[u8]> =
     redb::TableDefinition::new("flow_nexus_state");
-const SEMA_SCHEMA_VERSION_KEY: &str = "schema_version";
-const SEMA_ENGINE_STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";
-// This authored Memory candidate is pinned to sema-engine 9884905, whose
+const MEMORY_SCHEMA_VERSION_KEY: &str = "schema_version";
+const MEMORY_ENGINE_STORAGE_LAYOUT_KEY: &str = "engine_storage_layout";
+// This authored Memory candidate is pinned to memory-engine 9884905, whose
 // Engine storage layout is 7. A later Engine layout needs an explicit Memory
 // compatibility decision; Engine::open must not silently refold an occupant.
 const FLOW_ENGINE_STORAGE_LAYOUT: u64 = 7;
@@ -315,7 +315,7 @@ impl From<flow_defaults::DefaultCodexEndpoint> for CodexEndpointConfiguration {
     }
 }
 
-/// Launch configuration held in the Nexus's Sema store beside the socket
+/// Launch configuration held in the Nexus's Memory store beside the socket
 /// paths. Together they are the meta `Configuration`: seeded from
 /// `DefaultConfiguration` and replaced only by meta `Configure`.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -2759,8 +2759,8 @@ impl AnnouncesLaunchChanges for LaunchChanges {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("sema-engine operation failed: {0}")]
-    Engine(#[from] sema_engine::Error),
+    #[error("memory-engine operation failed: {0}")]
+    Engine(#[from] memory_engine::Error),
     #[error("launch outcome family upgrade failed: {0}")]
     LaunchOutcomeUpgrade(String),
     #[error("flow family upgrade failed: {0}")]
@@ -2979,7 +2979,7 @@ impl UpgradesFlowFamilies for Engine {
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
             UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                if failure.phase() == memory_engine::StoragePhase::Admission => {}
             UpgradeOutcome::Failed(failure) => {
                 return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
             }
@@ -2991,7 +2991,7 @@ impl UpgradesFlowFamilies for Engine {
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
             UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                if failure.phase() == memory_engine::StoragePhase::Admission => {}
             UpgradeOutcome::Failed(failure) => {
                 return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
             }
@@ -3001,7 +3001,7 @@ impl UpgradesFlowFamilies for Engine {
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
             UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
+                if failure.phase() == memory_engine::StoragePhase::Admission =>
             {
                 match self.upgrade_table::<StoredMetaflowV1, StoredMetaflow>(from_v1) {
                     UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
@@ -3031,7 +3031,7 @@ impl UpgradesFlowFamilies for Engine {
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
             UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+                if failure.phase() == memory_engine::StoragePhase::Admission => {}
             UpgradeOutcome::Failed(failure) => {
                 return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
             }
@@ -3042,7 +3042,7 @@ impl UpgradesFlowFamilies for Engine {
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
             UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
+                if failure.phase() == memory_engine::StoragePhase::Admission =>
             {
                 match self.upgrade_table::<address_hold::AddressHoldV1, address_hold::AddressHold>(
                     from_v1,
@@ -3072,7 +3072,7 @@ impl UpgradesFlowFamilies for Engine {
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
             UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
+                if failure.phase() == memory_engine::StoragePhase::Admission =>
             {
                 match self.upgrade_table::<send_call::SendCallV2, crate::generated::send_tool::SendCall>(descriptor.clone()) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
@@ -3082,7 +3082,7 @@ impl UpgradesFlowFamilies for Engine {
                 refusal.key()
             ))),
             UpgradeOutcome::Failed(failure)
-                if failure.phase() == sema_engine::StoragePhase::Admission =>
+                if failure.phase() == memory_engine::StoragePhase::Admission =>
             {
                 match self
                     .upgrade_table::<send_call::SendCallV1, crate::generated::send_tool::SendCall>(
@@ -3135,8 +3135,8 @@ impl UpgradesFlowFamilies for Engine {
                 "launch {key:?} was refused for an ended Address, which no longer exists"
             ))
         };
-        let admission = |failure: &sema_engine::StorageFailure| {
-            failure.phase() == sema_engine::StoragePhase::Admission
+        let admission = |failure: &memory_engine::StorageFailure| {
+            failure.phase() == memory_engine::StoragePhase::Admission
         };
         let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
@@ -3318,7 +3318,7 @@ impl SetsNativeOwnerEnvironmentForTests for FlowStore {
     }
 }
 
-/// The one-request configuration listener's view of the same Sema store.
+/// The one-request configuration listener's view of the same Memory store.
 /// It registers only the rows Configure owns and never seeds the rest of
 /// Flow state or settles launches/deliveries; of the stored families it
 /// upgrades only the leave-out defaults it serves.
@@ -3628,7 +3628,7 @@ pub trait RecordsRestartedFlow {
     -> Result<Response, StoreError>;
 }
 
-/// Configuration is durable policy and shares the Nexus's sole `.sema` store.
+/// Configuration is durable policy and shares the Nexus's sole `.memory` store.
 pub trait ConfiguresFlowStore {
     fn configuration(&self) -> Result<Configuration, StoreError>;
     fn configure(&self, configuration: Configuration) -> Result<(), StoreError>;
@@ -4943,7 +4943,7 @@ impl SettlesLaunchAttempts for Engine {
                 }
                 Ok(rows)
             })
-            .map_err(sema_engine::Error::from)?)
+            .map_err(memory_engine::Error::from)?)
     }
 
     fn quarantined_launch_attempts_of(
@@ -6716,7 +6716,7 @@ impl RestoresZeroThirtyFourFamily for StoredLaunchAttemptV1 {
         let database = redb::Database::open(path).expect("store opens directly");
         let write = database.begin_write().expect("catalog transaction starts");
         {
-            let mut catalog = write.open_table(SEMA_CATALOG_TABLE).expect("catalog opens");
+            let mut catalog = write.open_table(MEMORY_CATALOG_TABLE).expect("catalog opens");
             catalog
                 .insert(FLOW_LAUNCH_ATTEMPT_TABLE_NAME.as_str(), bytes.as_slice())
                 .expect("0.34 identity written");
@@ -7109,7 +7109,7 @@ pub(crate) trait ReadsFlowMemory {
         let mut dropped = false;
         {
             let mut catalog = write
-                .open_table(SEMA_CATALOG_TABLE)
+                .open_table(MEMORY_CATALOG_TABLE)
                 .map_err(|error| failed(error.to_string()))?;
             for (table, _, _) in RETIRED_TABLES {
                 if catalog
@@ -7174,7 +7174,7 @@ pub(crate) trait ReadsFlowMemory {
             reason,
         };
         // ReadOnlyDatabase refuses an active writer and never runs redb recovery.
-        // In particular, do not use Database::open here: Sema's normal writer open
+        // In particular, do not use Database::open here: Memory's normal writer open
         // can stamp schema/layout metadata before a caller discovers this is an
         // old or foreign occupant.
         match redb::ReadOnlyDatabase::open(path) {
@@ -7241,25 +7241,25 @@ pub(crate) trait ReadsFlowMemory {
             .map_err(|error| reject(error.to_string()))?;
         let version = {
             let table = read
-                .open_table(SEMA_META_TABLE)
+                .open_table(MEMORY_META_TABLE)
                 .map_err(|error| reject(error.to_string()))?;
             table
-                .get(SEMA_SCHEMA_VERSION_KEY)
+                .get(MEMORY_SCHEMA_VERSION_KEY)
                 .map_err(|error| reject(error.to_string()))?
                 .map(|value| value.value())
         };
         if version != Some(u64::from(FLOW_SCHEMA_VERSION)) {
             return Err(reject(format!(
-                "Sema schema version is {version:?}, expected {FLOW_SCHEMA_VERSION}"
+                "Memory schema version is {version:?}, expected {FLOW_SCHEMA_VERSION}"
             )));
         }
 
         let storage_layout = {
             let counters = read
-                .open_table(SEMA_ENGINE_COUNTERS_TABLE)
+                .open_table(MEMORY_ENGINE_COUNTERS_TABLE)
                 .map_err(|error| reject(error.to_string()))?;
             counters
-                .get(SEMA_ENGINE_STORAGE_LAYOUT_KEY)
+                .get(MEMORY_ENGINE_STORAGE_LAYOUT_KEY)
                 .map_err(|error| reject(error.to_string()))?
                 .map(|value| rkyv::from_bytes::<u64, rkyv::rancor::Error>(value.value()))
                 .transpose()
@@ -7267,13 +7267,13 @@ pub(crate) trait ReadsFlowMemory {
         };
         if storage_layout != Some(FLOW_ENGINE_STORAGE_LAYOUT) {
             return Err(reject(format!(
-                "Sema Engine storage layout is {storage_layout:?}, expected {FLOW_ENGINE_STORAGE_LAYOUT}"
+                "Memory Engine storage layout is {storage_layout:?}, expected {FLOW_ENGINE_STORAGE_LAYOUT}"
             )));
         }
 
         let catalog_is_current = {
             let catalog = read
-                .open_table(SEMA_CATALOG_TABLE)
+                .open_table(MEMORY_CATALOG_TABLE)
                 .map_err(|error| reject(error.to_string()))?;
             let mut registered_tables = std::collections::BTreeSet::new();
             for entry in catalog.iter().map_err(|error| reject(error.to_string()))? {
@@ -7413,7 +7413,7 @@ pub(crate) trait ReadsFlowMemory {
         declared: Vec<T>,
     ) -> Result<ConfigureOutcome, StoreError>
     where
-        T: sema_engine::EngineStoredRecord + PartialEq + Clone + Send + Sync + 'static,
+        T: memory_engine::EngineStoredRecord + PartialEq + Clone + Send + Sync + 'static,
         <T as rkyv::Archive>::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>
             + for<'validation> rkyv::bytecheck::CheckBytes<
                 rkyv::rancor::Strategy<
@@ -7616,7 +7616,7 @@ mod tests {
         let database = redb::Database::open(fixture.path()).unwrap();
         let write = database.begin_write().unwrap();
         {
-            let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
+            let mut catalog = write.open_table(super::MEMORY_CATALOG_TABLE).unwrap();
             for name in tables {
                 catalog.remove(name).unwrap();
             }
@@ -8315,7 +8315,7 @@ mod tests {
     use crate::store::delivery::RecordsDeliveries;
     use crate::store::delivery::{LeaseStep, PaneLease};
     use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-    use sema_engine::{
+    use memory_engine::{
         Assertion, Engine, EngineOpen, EngineRecord, FamilyName, QueryPlan, SchemaHash,
         SchemaVersion, TableDescriptor, TableName,
     };
@@ -8344,7 +8344,7 @@ mod tests {
         }
 
         fn path(&self) -> std::path::PathBuf {
-            self.directory.path().join("flow.sema")
+            self.directory.path().join("flow.memory")
         }
 
         /// Replaces the store's model family with its v1 shape, one model
@@ -8354,7 +8354,7 @@ mod tests {
             let write = database.begin_write().expect("catalog transaction starts");
             {
                 let mut catalog = write
-                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .open_table(super::MEMORY_CATALOG_TABLE)
                     .expect("catalog opens");
                 catalog
                     .remove("flow_nexus_meta_model_configuration")
@@ -8428,7 +8428,7 @@ mod tests {
             let write = database.begin_write().expect("catalog transaction starts");
             {
                 let mut catalog = write
-                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .open_table(super::MEMORY_CATALOG_TABLE)
                     .expect("catalog opens");
                 for table in Self::ADDED_IN_0_35_19 {
                     catalog.remove(*table).expect("added family removes");
@@ -8451,7 +8451,7 @@ mod tests {
                         .to_string_lossy()
                         .into_owned()
                 })
-                .filter(|name| name.starts_with(".flow.sema.upgrade-"))
+                .filter(|name| name.starts_with(".flow.memory.upgrade-"))
                 .collect()
         }
 
@@ -8470,7 +8470,7 @@ mod tests {
             let write = database.begin_write().expect("catalog transaction starts");
             {
                 let mut catalog = write
-                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .open_table(super::MEMORY_CATALOG_TABLE)
                     .expect("catalog opens");
                 catalog
                     .remove("flow_nexus_meta_leave_out_configuration")
@@ -8515,7 +8515,7 @@ mod tests {
             let write = database.begin_write().expect("catalog transaction starts");
             {
                 let mut catalog = write
-                    .open_table(super::SEMA_CATALOG_TABLE)
+                    .open_table(super::MEMORY_CATALOG_TABLE)
                     .expect("catalog opens");
                 catalog
                     .remove("flow_nexus_flow_events")
@@ -9082,7 +9082,7 @@ mod tests {
     impl OpensFixtureStore for StoreFixture {
         fn store(&self) -> FlowStore {
             let mut store =
-                <FlowStore as OpensFlowStore>::open(&self.directory.path().join("flow.sema"))
+                <FlowStore as OpensFlowStore>::open(&self.directory.path().join("flow.memory"))
                     .expect("store opens");
             store.set_native_owner_environment_for_tests(NativeOwnerEnvironment {
                 host_id: "isolated-test-host".into(),
@@ -9225,7 +9225,7 @@ mod tests {
             home: std::path::PathBuf::from("/home/someone"),
             runtime_directory: std::path::PathBuf::from("/run/user/4242"),
         };
-        let path = fixture.directory.path().join("seeded.sema");
+        let path = fixture.directory.path().join("seeded.memory");
         let store = FlowStore::open_seeded(&path, &defaults).expect("store opens");
         let configuration = store.configuration().expect("configuration");
         assert_eq!(configuration, defaults.configuration());
@@ -9253,7 +9253,7 @@ mod tests {
         assert_eq!(runtime.next_codex.home, "/home/someone/.codex-next");
         assert_eq!(
             defaults.store_path(),
-            std::path::Path::new("/home/someone/.local/state/flow/flow.sema")
+            std::path::Path::new("/home/someone/.local/state/flow/flow.memory")
         );
         drop(store);
 
@@ -9279,7 +9279,7 @@ mod tests {
             home: std::path::PathBuf::from("/home/configuration-only"),
             runtime_directory: std::path::PathBuf::from("/run/user/4243"),
         };
-        let path = fixture.directory.path().join("configuration-only.sema");
+        let path = fixture.directory.path().join("configuration-only.memory");
         let store = ConfigurationOnlyStore::open(&path).expect("configuration store opens");
         assert_eq!(
             store
@@ -9342,7 +9342,7 @@ mod tests {
             home: std::path::PathBuf::from("/home/configuration-only"),
             runtime_directory: std::path::PathBuf::from("/run/user/4244"),
         };
-        let path = fixture.directory.path().join("partial-configuration.sema");
+        let path = fixture.directory.path().join("partial-configuration.memory");
         let store = ConfigurationOnlyStore::open(&path).expect("configuration store opens");
         let initial = defaults.configuration();
         store
@@ -9481,7 +9481,7 @@ mod tests {
         let write = database.begin_write().expect("catalog transaction starts");
         {
             let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
+                .open_table(super::MEMORY_CATALOG_TABLE)
                 .expect("catalog opens");
             assert!(
                 catalog
@@ -9512,8 +9512,8 @@ mod tests {
     }
 
     impl EngineRecord for RetiredRow {
-        fn record_key(&self) -> sema_engine::RecordKey {
-            sema_engine::RecordKey::new(self.key.clone())
+        fn record_key(&self) -> memory_engine::RecordKey {
+            memory_engine::RecordKey::new(self.key.clone())
         }
     }
 
@@ -9576,7 +9576,7 @@ mod tests {
             let database = redb::ReadOnlyDatabase::open(&path).expect("store reads directly");
             let read = database.begin_read().expect("read starts");
             let registered = read
-                .open_table(super::SEMA_CATALOG_TABLE)
+                .open_table(super::MEMORY_CATALOG_TABLE)
                 .expect("catalog opens")
                 .iter()
                 .expect("catalog iterates")
@@ -9651,7 +9651,7 @@ mod tests {
         let write = database.begin_write().expect("catalog transaction starts");
         {
             let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
+                .open_table(super::MEMORY_CATALOG_TABLE)
                 .expect("catalog opens");
             assert!(
                 catalog
@@ -9857,14 +9857,14 @@ mod tests {
             .expect("layout fixture transaction starts");
         {
             let mut counters = write
-                .open_table(super::SEMA_ENGINE_COUNTERS_TABLE)
+                .open_table(super::MEMORY_ENGINE_COUNTERS_TABLE)
                 .expect("engine counters open");
             let foreign_layout =
                 rkyv::to_bytes::<rkyv::rancor::Error>(&(super::FLOW_ENGINE_STORAGE_LAYOUT + 1))
                     .expect("foreign layout encodes with the engine counter representation");
             counters
                 .insert(
-                    super::SEMA_ENGINE_STORAGE_LAYOUT_KEY,
+                    super::MEMORY_ENGINE_STORAGE_LAYOUT_KEY,
                     foreign_layout.as_slice(),
                 )
                 .expect("foreign layout is planted");
@@ -9880,7 +9880,7 @@ mod tests {
         assert_eq!(
             std::fs::read(&path).expect("foreign layout bytes reread"),
             before,
-            "a different Sema Engine layout is rejected without repair or restamping"
+            "a different Memory Engine layout is rejected without repair or restamping"
         );
     }
 
@@ -10073,7 +10073,7 @@ mod tests {
             QueryPlan, ReadsFlowRows,
         };
         let fixture = StoreFixture::new();
-        let path = fixture.directory.path().join("flow.sema");
+        let path = fixture.directory.path().join("flow.memory");
         let rows = EarlierLaunchAttemptRows {
             bound_flow_id: "launched-earlier".into(),
         };
@@ -10201,7 +10201,7 @@ mod tests {
             let database = redb::ReadOnlyDatabase::open(self).expect("store reads directly");
             let read = database.begin_read().expect("read starts");
             let catalog = read
-                .open_table(super::SEMA_CATALOG_TABLE)
+                .open_table(super::MEMORY_CATALOG_TABLE)
                 .expect("catalog opens");
             let names = catalog
                 .iter()
@@ -10484,7 +10484,7 @@ mod tests {
             .map(std::path::PathBuf::from)
             .expect("FLOW_0_34_STORE names the 0.34.4 store to copy");
         let directory = tempfile::tempdir().expect("copy directory");
-        let path = directory.path().join("flow.sema");
+        let path = directory.path().join("flow.memory");
         std::fs::copy(&source, &path).expect("0.34.4 store copied");
         let mut permissions = std::fs::metadata(&path)
             .expect("copy metadata")
@@ -10584,7 +10584,7 @@ mod tests {
             LaunchSource, Layer, NativeSkill, OriginClue,
         };
         let fixture = StoreFixture::new();
-        let path = fixture.directory.path().join("flow.sema");
+        let path = fixture.directory.path().join("flow.memory");
         let rows = EarlierLaunchAttemptRows {
             bound_flow_id: "launched-earlier".into(),
         };
@@ -10828,7 +10828,7 @@ mod tests {
         let write = database.begin_write().expect("catalog transaction starts");
         {
             let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
+                .open_table(super::MEMORY_CATALOG_TABLE)
                 .expect("catalog opens");
             catalog
                 .remove("flow_nexus_flow_events")
@@ -10901,7 +10901,7 @@ mod tests {
         let write = database.begin_write().expect("catalog transaction starts");
         {
             let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
+                .open_table(super::MEMORY_CATALOG_TABLE)
                 .expect("catalog opens");
             catalog
                 .remove("flow_nexus_metaflows")
@@ -10999,7 +10999,7 @@ mod tests {
         let write = database.begin_write().expect("catalog transaction starts");
         {
             let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
+                .open_table(super::MEMORY_CATALOG_TABLE)
                 .expect("catalog opens");
             catalog
                 .remove("flow_nexus_metaflows")
@@ -11106,7 +11106,7 @@ mod tests {
         let write = database.begin_write().expect("catalog transaction starts");
         {
             let mut catalog = write
-                .open_table(super::SEMA_CATALOG_TABLE)
+                .open_table(super::MEMORY_CATALOG_TABLE)
                 .expect("catalog opens");
             catalog
                 .remove("flow_nexus_flows")
@@ -11641,8 +11641,8 @@ mod tests {
     }
 
     impl EngineRecord for CorruptOutcomeRow {
-        fn record_key(&self) -> sema_engine::RecordKey {
-            sema_engine::RecordKey::new(self.launch_request_id.clone())
+        fn record_key(&self) -> memory_engine::RecordKey {
+            memory_engine::RecordKey::new(self.launch_request_id.clone())
         }
     }
 
@@ -12123,7 +12123,7 @@ mod tests {
         drop(fixture.configured_store());
         let leave = |fixture: &StoreFixture| {
             std::fs::write(
-                fixture.directory.path().join(".flow.sema.upgrade-1-2"),
+                fixture.directory.path().join(".flow.memory.upgrade-1-2"),
                 b"x",
             )
             .expect("copy planted");
@@ -12256,7 +12256,7 @@ mod tests {
             .expect("FLOW_0_35_11_STORE names the 0.35.11 store to copy");
         for configuration_first in [false, true] {
             let directory = tempfile::tempdir().expect("copy directory");
-            let path = directory.path().join("flow.sema");
+            let path = directory.path().join("flow.memory");
             std::fs::copy(&source, &path).expect("0.35.11 store copied");
             let mut permissions = std::fs::metadata(&path)
                 .expect("copy metadata")

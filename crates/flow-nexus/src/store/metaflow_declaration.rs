@@ -7,7 +7,7 @@
 use super::{FlowStore, ReadsFlowMemory, StoreError};
 use meta_signal_flow::ConfigureMetaflow;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
+use memory_engine::{
     Decision, Engine, EngineRecord, FamilyName, MemoryDefinition, MemoryUpgrades, MemoryVersion,
     QueryPlan, RecordKey, SchemaHash, TableDescriptor, TableName, TableReference, UpgradeFrom,
     UpgradeOutcome,
@@ -167,7 +167,7 @@ mod tests {
     use super::{
         ConfigureMetaflowV1, StoredMetaMetaflowConfiguration, StoredMetaMetaflowConfigurationV1,
     };
-    use sema_engine::{Decision, UpgradeFrom};
+    use memory_engine::{Decision, UpgradeFrom};
     use signal_flow::{Address, Aspect, FlowKind, Layer, ToolSet};
 
     #[test]

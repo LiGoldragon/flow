@@ -23,7 +23,7 @@ use super::{
     FlowStore, ManagesMetaflowState, MetaflowState, ReadsFlowMemory, StoreError, StoredMetaflow,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
+use memory_engine::{
     AtomicCommit, Decision, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan,
     RecordKey, SchemaHash, TableDescriptor, TableName, UpgradeFrom,
 };

@@ -34,7 +34,7 @@ fn start(runtime: &Path, state: &Path) -> Start {
             .join("flow/flow-meta.sock")
             .to_string_lossy()
             .into_owned(),
-        store_path: state.join("flow.sema").to_string_lossy().into_owned(),
+        store_path: state.join("flow.memory").to_string_lossy().into_owned(),
         landing_watch_option: None,
     }
 }
@@ -156,9 +156,9 @@ fn configure_only_commits_before_normal_start_uses_the_declared_store() {
     let start = start(runtime.path(), state.path());
     configure_fresh(home.path(), runtime.path(), &start);
 
-    assert!(state.path().join("flow.sema").exists());
+    assert!(state.path().join("flow.memory").exists());
     assert!(
-        !home.path().join(".local/state/flow/flow.sema").exists(),
+        !home.path().join(".local/state/flow/flow.memory").exists(),
         "typed Start does not open the HOME-derived store"
     );
 
@@ -228,7 +228,7 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
     );
     assert_eq!(stored.stable_codex.client_path, "/opt/stable-client");
     assert!(
-        !home.path().join(".local/state/flow/flow.sema").exists(),
+        !home.path().join(".local/state/flow/flow.memory").exists(),
         "FLOW_ variables and defaults do not redirect typed StorePath"
     );
 }
@@ -344,7 +344,7 @@ fn a_live_nexus_socket_is_never_taken_over() {
         &Start {
             store_path: other_state
                 .path()
-                .join("flow.sema")
+                .join("flow.memory")
                 .to_string_lossy()
                 .into_owned(),
             ..start.clone()

@@ -22,7 +22,7 @@ use crate::generated::send_tool::{
     LegacyUnknown_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
+use memory_engine::{
     Assertion, Decision, EngineRecord, FamilyName, MemoryDefinition, MemoryVersion, QueryPlan,
     RecordKey, SchemaHash, TableDescriptor, TableName, UpgradeFrom,
 };
@@ -429,7 +429,7 @@ mod tests {
         LegacyUnknown_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,
     };
     use crate::store::{FlowStore, OpensFlowStore};
-    use sema_engine::{
+    use memory_engine::{
         Assertion, Engine, EngineOpen, FamilyName, SchemaHash, SchemaVersion, TableDescriptor,
         TableName,
     };
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn v2_send_calls_upgrade_unchanged_to_v4() {
         let directory = tempfile::tempdir().expect("store directory");
-        let path = directory.path().join("flow.sema");
+        let path = directory.path().join("flow.memory");
         seed_v2(
             &path,
             vec![SendCallV2 {
@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn v3_queued_call_migrates_as_legacy_unknown_without_fabricated_id() {
         let directory = tempfile::tempdir().expect("store directory");
-        let path = directory.path().join("flow.sema");
+        let path = directory.path().join("flow.memory");
         let target = Target {
             aspect: signal_flow::Aspect::Mind,
             topic: "target".into(),
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn v1_send_calls_upgrade_without_the_ended_recipient() {
         let directory = tempfile::tempdir().expect("store directory");
-        let path = directory.path().join("flow.sema");
+        let path = directory.path().join("flow.memory");
         let v1 = |call_id: &str, refusal| SendCallV1 {
             tool_call_key: key(call_id),
             content_sha256: "digest".into(),
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn a_v1_call_refused_for_an_ended_recipient_refuses_the_open() {
         let directory = tempfile::tempdir().expect("store directory");
-        let path = directory.path().join("flow.sema");
+        let path = directory.path().join("flow.memory");
         seed_v1(
             &path,
             vec![SendCallV1 {

@@ -1306,8 +1306,8 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
         "the call is unanswered"
     );
     std::fs::copy(
-        fixture.directory.path().join("flow.sema"),
-        state.join("flow.sema"),
+        fixture.directory.path().join("flow.memory"),
+        state.join("flow.memory"),
     )
     .expect("store copied");
     std::fs::write(state.join("thread"), &thread).unwrap();
@@ -1330,7 +1330,7 @@ fn witness_interrupted_launch_second_half_is_reconciled_at_restart() {
         PathBuf::from(std::env::var_os("FLOW_INTERRUPTED_LAUNCH_STATE").expect("state directory"));
     let thread = std::fs::read_to_string(state.join("thread")).expect("thread");
     let mut fixture = NexusFixture::with_store(|store| {
-        std::fs::copy(state.join("flow.sema"), store).expect("store restored");
+        std::fs::copy(state.join("flow.memory"), store).expect("store restored");
     });
     fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
     fixture.nexus.codex_endpoints.next.socket = socket;

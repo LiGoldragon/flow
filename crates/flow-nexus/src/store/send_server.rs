@@ -14,7 +14,7 @@ use super::metaflow::SleepsMetaflows;
 use super::{FlowStore, NamesLiveFlow, ReadsFlowMemory, ReadsFlowRows, StoreError};
 use meta_signal_flow::ConfigureSendServer;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use sema_engine::{
+use memory_engine::{
     EngineRecord, FamilyName, QueryPlan, RecordKey, SchemaHash, TableDescriptor, TableName,
 };
 use signal_flow::{HarnessKind, Metaflow, Process};

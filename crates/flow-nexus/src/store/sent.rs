@@ -4,7 +4,7 @@
 //! queued with the sender Flow read from the calling process.
 
 use super::{FlowStore, StoreError};
-use sema_engine::QueryPlan;
+use memory_engine::QueryPlan;
 
 use std::{collections::BTreeSet, fs, path::PathBuf};
 

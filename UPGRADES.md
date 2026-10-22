@@ -74,7 +74,7 @@ carried unchanged; a Flow before 0.38.0 refuses the store from then on.
   Bind claims it and before its first turn; the first USER message is
   unchanged for both.
 - **`flow-store-check` judges a store before a deploy activates this
-  Flow.** `flow-store-check '{ /home/li/.local/state/flow-03521/flow.sema
+  Flow.** `flow-store-check '{ /home/li/.local/state/flow-03521/flow.memory
   }'` opens a private copy of the store as the Nexus would, upgrades
   included, and answers `Opens.<path>`, `Absent.<path>` or
   `Refused.{ <path> «reason» }`, exiting non-zero only on a refusal. The
@@ -359,7 +359,7 @@ or the configuration-only listener, in this order: the model family
 `flow-nexus-flow-events` v1 to v2, each older `Stopped` read as
 `Stopped.{ None None }`. The tables `flow_nexus_meta_send_server_configuration`
 and the queue-delivery counter (v1), request (v2) and attempt (v4) families
-are added holding none; Sema registers each and redb creates its table at
+are added holding none; Memory registers each and redb creates its table at
 the first row written to it. The whole open lands at once: it runs on a copy
 beside the store, which replaces the store by one rename only once every
 family is carried. A leave-out default that cannot be carried, any other
@@ -1448,7 +1448,7 @@ the changed CLI.
 # Flow 0.24.0
 
 No wire change (signal-flow and meta-signal-flow unchanged). The store opens
-as it is: sema-engine moves from 0.16.0 to 0.18.0, whose changes are
+as it is: memory-engine moves from 0.16.0 to 0.18.0, whose changes are
 additive for Flow (Flow declared no `with_prior`), and a copy of the
 production store taken 2026-10-03 opened under 0.24.0 with its
 configuration and 26 flow rows read back. Rebuild and restart the Nexus;
@@ -1614,7 +1614,7 @@ other's frames.
 - **Not adopted: the exchange layer.** signal 7.0.0's greeting and
   exchanges (`Contracted`, `Handshake`, `Dispatch`, `Delivery`) are not yet
   spoken on Flow's sockets; the frames are 0.18.0's `Signal` frames.
-- sema-engine stays at 0.16.0 (516f01fe): the build does not require 0.18.0.
+- memory-engine stays at 0.16.0 (516f01fe): the build does not require 0.18.0.
 
 # Flow 0.18.0
 

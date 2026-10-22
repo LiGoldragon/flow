@@ -358,4 +358,72 @@ mod tests {
             })
         );
     }
+    #[test]
+    fn thirty_one_printed_metaflows_roundtrip_without_head_whitespace() {
+        use super::ParsesMetaDatom;
+        use meta_signal_flow::{ConfigurationSnapshot, ConfigureMetaflow, Response};
+        use signal_flow::{Address, Aspect, FlowKind, Layer, ToolSet};
+        let endpoint = || meta_signal_flow::CodexEndpoint {
+            client_path: "/opt/codex".into(),
+            home: "/tmp/codex".into(),
+            control_socket_path: "/tmp/codex.sock".into(),
+            model_name_vector: vec!["fixture".into()],
+        };
+        let rows: Vec<_> = (0..31)
+            .map(|index| ConfigureMetaflow {
+                address: Address {
+                    aspect: Aspect::Mind,
+                    topic: format!("printer{index}"),
+                    layer: Layer::Secondary,
+                },
+                system_modules: vec!["spirit-core".into()],
+                user_modules: vec![],
+                flow_kind: FlowKind::Regular,
+                tool_set: match index % 3 {
+                    0 => ToolSet::Default,
+                    1 => ToolSet::Explicit(vec![]),
+                    _ => ToolSet::Explicit(vec!["Bash".into(), "ToolSearch".into()]),
+                },
+            })
+            .collect();
+        let snapshot = ConfigurationSnapshot {
+            nexus: ConfigureNexus {
+                source_root: "/source".into(),
+                stable_codex: endpoint(),
+                next_codex: endpoint(),
+                harness_profiles: vec![],
+                meta_aspects: vec![Aspect::Psyche],
+                message_nexus_path: "/run/message.sock".into(),
+                message_nexus_binary: "/opt/message-nexus".into(),
+                lease: 60,
+            },
+            models: vec![],
+            thresholds: vec![],
+            default_leave_outs: vec![],
+            send_servers: vec![],
+            metaflows: rows.clone(),
+            investigation: None,
+        };
+        let printed = Response::Configuration(snapshot)
+            .datomize(vec![])
+            .protosize()
+            .compact();
+        assert!(!printed.contains("Explicit. ["), "{printed}");
+        let Response::Configuration(parsed) =
+            FlowMetaClient::parse_datom::<Response>(printed, "printed configuration").unwrap()
+        else {
+            panic!("wrong response")
+        };
+        let query = Query::Configure(ConfigurationChange::Metaflows(parsed.metaflows));
+        let text = query.datomize(vec![]).protosize().compact();
+        let client = FlowMetaClient {
+            socket: "unused".into(),
+        };
+        let Query::Configure(ConfigurationChange::Metaflows(actual)) =
+            client.parse_command([text].into_iter()).unwrap()
+        else {
+            panic!("wrong configure")
+        };
+        assert_eq!(actual, rows);
+    }
 }

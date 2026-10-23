@@ -14,26 +14,6 @@
 use crate::generated::starter::{LeanStart, RendersLeanStart};
 use signal_flow::{HarnessKind, LeaveOut, LeaveOutRefusal};
 
-/// The tools Claude Code defers to ToolSearch, each named once in the
-/// listing: leaving them out removes their names.
-const CLAUDE_DEFERRED_TOOLS: [&str; 15] = [
-    "CronCreate",
-    "CronDelete",
-    "CronList",
-    "DesignSync",
-    "EnterWorktree",
-    "ExitWorktree",
-    "LSP",
-    "Monitor",
-    "NotebookEdit",
-    "PushNotification",
-    "RemoteTrigger",
-    "SendMessage",
-    "TaskStop",
-    "WebFetch",
-    "WebSearch",
-];
-
 /// Which harness a leave-out belongs to: the one a Start may take it on,
 /// and the one a configured default naming it must be keyed by.
 pub(crate) trait BelongsToHarness {
@@ -148,36 +128,13 @@ impl RendersLeanStart for LeanStart {
     }
 
     fn disallowed_tools(&self) -> Vec<String> {
-        let mut tools: Vec<String> = Vec::new();
-        for leave_out in &self.leave_outs {
-            let named: &[&str] = match leave_out {
-                LeaveOut::BashTool => &["Bash"],
-                LeaveOut::ToolSearch => &["ToolSearch"],
-                LeaveOut::AgentTool => &["Agent"],
-                LeaveOut::FileTools => &["Read", "Edit", "Write"],
-                LeaveOut::WorkflowTool => &["Workflow"],
-                LeaveOut::ScheduleWakeupTool => &["ScheduleWakeup"],
-                LeaveOut::ReportFindingsTool => &["ReportFindings"],
-                LeaveOut::ListAgentsTool => &["ListAgents"],
-                LeaveOut::WebTools => &["WebFetch", "WebSearch"],
-                LeaveOut::DeferredTools => &CLAUDE_DEFERRED_TOOLS,
-                LeaveOut::SkillTool => &["Skill"],
-                _ => &[],
-            };
-            for tool in named {
-                if !tools.iter().any(|known| known == tool) {
-                    tools.push((*tool).to_owned());
-                }
-            }
-        }
         if self.harness_kind == HarnessKind::Claude && !self.artifact_tools_allowed {
-            for tool in ["Artifact", "ArtifactComments", "ArtifactData"] {
-                if !tools.iter().any(|known| known == tool) {
-                    tools.push(tool.to_owned());
-                }
-            }
+            return ["Artifact", "ArtifactComments", "ArtifactData"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
         }
-        tools
+        Vec::new()
     }
 
     fn attribution_off(&self) -> bool {
@@ -267,11 +224,45 @@ mod tests {
                 "Artifact" | "ArtifactComments" | "ArtifactData"
             )
         }));
+        assert!(!launch
+            .arguments()
+            .iter()
+            .any(|argument| argument == "--disallowedTools"));
         assert!(
             launch
                 .environment()
                 .contains(&"CLAUDE_CODE_ARTIFACT=1".into())
         );
+    }
+
+    #[test]
+    fn claude_profile_leave_outs_do_not_expand_the_exact_artifact_deny_list() {
+        let launch = lean(
+            HarnessKind::Claude,
+            &[
+                LeaveOut::AgentTool,
+                LeaveOut::FileTools,
+                LeaveOut::WorkflowTool,
+                LeaveOut::SkillTool,
+                LeaveOut::ScheduleWakeupTool,
+                LeaveOut::ReportFindingsTool,
+                LeaveOut::ListAgentsTool,
+                LeaveOut::WebTools,
+                LeaveOut::DeferredTools,
+                LeaveOut::CronTools,
+            ],
+        );
+        assert_eq!(
+            launch.disallowed_tools(),
+            ["Artifact", "ArtifactComments", "ArtifactData"]
+        );
+        let arguments = launch.arguments();
+        let deny = arguments
+            .windows(2)
+            .find(|pair| pair[0] == "--disallowedTools")
+            .expect("the exact normal Claude artifact deny list");
+        assert_eq!(deny[1], "Artifact,ArtifactComments,ArtifactData");
+        assert!(!arguments.iter().any(|argument| argument == "--tools"));
     }
 
     /// Leaving out the user settings drops Herdr's SessionStart hook, on
@@ -299,15 +290,13 @@ mod tests {
             lean(HarnessKind::Claude, &[LeaveOut::BashTool]).refusal(),
             None
         );
-        assert!(
-            lean(HarnessKind::Claude, &[LeaveOut::BashTool])
-                .disallowed_tools()
-                .contains(&"Bash".to_owned())
+        assert_eq!(
+            lean(HarnessKind::Claude, &[LeaveOut::BashTool]).disallowed_tools(),
+            ["Artifact", "ArtifactComments", "ArtifactData"]
         );
-        assert!(
-            lean(HarnessKind::Claude, &[LeaveOut::ToolSearch])
-                .disallowed_tools()
-                .contains(&"ToolSearch".to_owned())
+        assert_eq!(
+            lean(HarnessKind::Claude, &[LeaveOut::ToolSearch]).disallowed_tools(),
+            ["Artifact", "ArtifactComments", "ArtifactData"]
         );
         assert_eq!(
             lean(HarnessKind::Claude, &[LeaveOut::SkillTool]).refusal(),
@@ -359,8 +348,7 @@ mod tests {
             .position(|argument| argument == "--disallowedTools")
             .expect("disallowed tools")
             + 1];
-        assert!(tools.starts_with("Skill,Workflow,WebFetch,WebSearch,CronCreate"));
-        assert_eq!(tools.matches("WebFetch").count(), 1, "each tool once");
+        assert_eq!(tools, "Artifact,ArtifactComments,ArtifactData");
         assert_eq!(
             start.environment(),
             [

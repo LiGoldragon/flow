@@ -25,7 +25,7 @@ use crate::metaflow::IdentifiesPeerProcess;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::logical_delivery::{CorePresentationRoute, RecordsLogicalDeliveries};
-use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
+use crate::store::metaflow::{PreparesDeclaredMetaflow, SleepsMetaflows, TakesLaunchAddress};
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::send_call::KeepsSendCalls;
@@ -821,9 +821,28 @@ impl CompletesDirectSends for RunningNexus {
             .waking
             .hold(address)
             .ok_or_else(|| failed(SendFailureReason::RecipientBusy(address.clone())))?;
-        let flow_id = self
-            .live_awake_flow(address)
-            .ok_or_else(|| failed(SendFailureReason::RecipientUnavailable(address.clone())))?;
+        if !self
+            .store
+            .prepare_declared_metaflow(address)
+            .map_err(|error| {
+                failed(SendFailureReason::Refused(Refusal::Store(
+                    error.to_string(),
+                )))
+            })?
+        {
+            return Err(failed(SendFailureReason::RecipientUnavailable(
+                address.clone(),
+            )));
+        }
+        let flow_id = self.live_awake_flow(address);
+        if flow_id.is_none()
+            && (!matches!(self.store.metaflow_declaration(address), Ok(Some(_)))
+                || !matches!(self.store.configured_model(address), Ok(Some(_))))
+        {
+            return Err(failed(SendFailureReason::RecipientUnavailable(
+                address.clone(),
+            )));
+        }
         match self.store.metaflow(address) {
             Ok(Some(metaflow)) if metaflow.queue.is_empty() => {}
             Ok(_) => return Err(failed(SendFailureReason::RecipientBusy(address.clone()))),
@@ -833,9 +852,11 @@ impl CompletesDirectSends for RunningNexus {
                 ))));
             }
         }
-        if !matches!(self.store.address_hold(&flow_id), Ok(None))
-            || !matches!(self.store.outstanding_delivery(address), Ok(None))
-            || !matches!(self.store.past_threshold(&flow_id), Ok(false))
+        if !matches!(self.store.outstanding_delivery(address), Ok(None))
+            || flow_id.as_ref().is_some_and(|flow_id| {
+                !matches!(self.store.address_hold(flow_id), Ok(None))
+                    || !matches!(self.store.past_threshold(flow_id), Ok(false))
+            })
         {
             return Err(failed(SendFailureReason::RecipientBusy(address.clone())));
         }
@@ -845,6 +866,12 @@ impl CompletesDirectSends for RunningNexus {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
         use std::time::{Duration, Instant};
+        // A configured sleeping recipient starts through the existing
+        // fresh Curriculum composition. The Address lease prevents another
+        // wake or submission while this direct operation owns its request.
+        if self.live_awake_flow(address).is_none() {
+            let _ = self.wake(address.clone());
+        }
         // Subscribe before input. File events only schedule the existing
         // exact session/inode/cursor/content correlation, never delivery.
         let _receipt_watch = self.direct_receipt_watch(address);

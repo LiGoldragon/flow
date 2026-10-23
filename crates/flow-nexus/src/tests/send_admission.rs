@@ -414,3 +414,56 @@ fn primary_admission_is_exact_address_layer_and_question_for_every_tier() {
         );
     }
 }
+
+#[test]
+fn direct_start_preflight_materializes_only_configured_working_state() {
+    use super::NexusFixture;
+    use crate::sending::CompletesDirectSends;
+    use crate::store::ManagesMetaflowState;
+    let fixture = NexusFixture::new();
+    let target = Address {
+        aspect: Aspect::Mind,
+        topic: "new-configured-direct".into(),
+        layer: Layer::Secondary,
+    };
+    assert!(fixture.nexus.direct_send_lease(&target).is_err());
+    assert!(fixture.nexus.store.metaflow(&target).unwrap().is_none());
+    let declaration = meta_signal_flow::ConfigureMetaflow {
+        address: target.clone(),
+        system_modules: vec!["spirit-core".into()],
+        user_modules: vec![],
+        flow_kind: signal_flow::FlowKind::Regular,
+        tool_set: signal_flow::ToolSet::Default,
+    };
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Models(vec![
+            meta_signal_flow::ConfigureModel {
+                layer: Layer::Secondary,
+                aspect: Aspect::Mind,
+                native: "gpt-6-sol".into(),
+            },
+        ]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            declaration.clone(),
+        ]))
+        .unwrap();
+    let lease = fixture
+        .nexus
+        .direct_send_lease(&target)
+        .expect("configured address can start");
+    let working = fixture.nexus.store.metaflow(&target).unwrap().unwrap();
+    assert_eq!(working.state, flow_ethos::State::Asleep);
+    assert!(working.queue.is_empty());
+    use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+    assert_eq!(
+        fixture.nexus.store.metaflow_declaration(&target).unwrap(),
+        Some(declaration)
+    );
+    drop(lease);
+}

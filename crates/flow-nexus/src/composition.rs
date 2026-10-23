@@ -721,6 +721,14 @@ pub(crate) mod tests {
             }
             .artifact_tools_allowed()
         );
+        assert!(
+            !Address {
+                aspect: Aspect::Psyche,
+                topic: "core".into(),
+                layer: Layer::Primary,
+            }
+            .artifact_tools_allowed()
+        );
     }
 
     pub(crate) fn fixture_composer() -> LaunchComposer {

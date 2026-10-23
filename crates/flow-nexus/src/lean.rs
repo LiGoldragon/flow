@@ -12,7 +12,7 @@
 //! launches.
 
 use crate::generated::starter::{LeanStart, RendersLeanStart};
-use signal_flow::{HarnessKind, LeaveOut, LeaveOutRefusal, ToolSet};
+use signal_flow::{HarnessKind, LeaveOut, LeaveOutRefusal};
 
 /// The tools Claude Code defers to ToolSearch, each named once in the
 /// listing: leaving them out removes their names.
@@ -111,25 +111,6 @@ impl RendersLeanStart for LeanStart {
             arguments.push("--disallowedTools".into());
             arguments.push(tools.join(","));
         }
-        if self.harness_kind == HarnessKind::Claude
-            && let ToolSet::Explicit(tools) = &self.tool_set
-        {
-            arguments.push("--tools".into());
-            arguments.push(
-                tools
-                    .iter()
-                    .filter(|tool| {
-                        self.artifact_tools_allowed
-                            || !matches!(
-                                tool.as_str(),
-                                "Artifact" | "ArtifactComments" | "ArtifactData"
-                            )
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-        }
         arguments
     }
 
@@ -224,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_empty_claude_tool_set_is_passed_to_harness() {
+    fn claude_tool_sets_keep_the_default_tools() {
         let launch = LeanStart {
             harness_kind: HarnessKind::Claude,
             leave_outs: Vec::new(),
@@ -233,17 +214,42 @@ mod tests {
             artifact_tools_allowed: false,
         };
         assert!(launch.refusal().is_none());
-        assert!(
-            launch
-                .arguments()
-                .windows(2)
-                .any(|args| args == ["--tools", ""])
-        );
+        assert!(!launch
+            .arguments()
+            .iter()
+            .any(|argument| argument == "--tools"));
+        assert!(launch.arguments().windows(2).any(|args| {
+            args == [
+                "--disallowedTools",
+                "Artifact,ArtifactComments,ArtifactData",
+            ]
+        }));
         assert!(
             launch
                 .environment()
                 .contains(&"CLAUDE_CODE_ARTIFACT=0".into())
         );
+    }
+
+    #[test]
+    fn explicit_nonempty_claude_tool_set_also_keeps_the_default_tools() {
+        let launch = LeanStart {
+            harness_kind: HarnessKind::Claude,
+            leave_outs: Vec::new(),
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: ToolSet::Explicit(vec!["Bash".into(), "Skill".into()]),
+            artifact_tools_allowed: false,
+        };
+        assert!(!launch
+            .arguments()
+            .iter()
+            .any(|argument| argument == "--tools"));
+        assert!(launch.arguments().windows(2).any(|args| {
+            args == [
+                "--disallowedTools",
+                "Artifact,ArtifactComments,ArtifactData",
+            ]
+        }));
     }
 
     #[test]

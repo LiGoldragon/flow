@@ -3275,7 +3275,9 @@ printf '%s\n' "$alias"
             .expect("started");
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(calls.contains(" --disable-slash-commands"));
-        assert!(calls.contains(" --disallowedTools Skill,Workflow"));
+        assert!(calls.contains(
+            " --disallowedTools Artifact,ArtifactComments,ArtifactData"
+        ));
         assert!(calls.contains(r#""attribution":{"commit":"","pr":""}"#));
         let prepared = calls
             .lines()
@@ -3286,7 +3288,7 @@ printf '%s\n' "$alias"
     }
 
     #[test]
-    fn a_receipt_showing_a_removed_tool_refuses_the_launch() {
+    fn a_receipt_showing_a_profile_left_out_tool_accepts_the_exact_artifact_policy() {
         use signal_flow::LeaveOut;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let mut launch = launch(HarnessKind::Claude);
@@ -3316,10 +3318,10 @@ printf '%s\n' "$alias"
             .open(&transcript)
             .unwrap();
         writeln!(append, "{user}\n{skill_call}").unwrap();
-        assert!(
-            adapter.observe_native_target_receipt(&intent).unwrap_err()
-                == super::TranscriptRefusal::Contradicted(NativeLaunchFailure::LeaveOutShown)
-        );
+        assert!(matches!(
+            adapter.observe_native_target_receipt(&intent),
+            Ok(StartupProgress::Received(_))
+        ));
     }
 
     #[test]

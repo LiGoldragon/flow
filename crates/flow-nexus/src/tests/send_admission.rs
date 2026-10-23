@@ -340,7 +340,6 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         );
     }
 }
-}
 
 #[test]
 fn direct_start_preflight_materializes_only_configured_working_state() {

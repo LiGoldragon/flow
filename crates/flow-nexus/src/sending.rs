@@ -31,7 +31,9 @@ use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::sent::NamesCodexAppServers;
-use crate::store::{ExistingSeatAdoption, NamesConfiguredModel, RegistersExistingFlow};
+use crate::store::{
+    ExistingSeatAdoption, FlowStore, NamesConfiguredModel, ReadsFlowMemory, RegistersExistingFlow,
+};
 use crate::waking::{
     HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
     SleepsAndWakesSeats, WakePolicy,
@@ -632,6 +634,21 @@ impl BindsSeats for RunningNexus {
             return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }));
         };
         let unidentified = || Response::Refused(Refusal::Unidentified(peer.clone()));
+        if !FlowStore::process_is_live(peer) {
+            return unidentified();
+        }
+        // A seat Flow already knows binds idempotently through the same
+        // kernel-authenticated resolver as Send. Claude children do not
+        // carry a Codex thread or resume command.
+        match self.identify_peer_process(peer.clone()) {
+            Ok(Response::Identified(known)) if known == address => {
+                if let Some(flow_id) = self.live_awake_flow(&address) {
+                    return Response::Bound(flow_id);
+                }
+            }
+            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+            _ => {}
+        }
         let Some(process_id) = u32::try_from(peer.pid).ok() else {
             return unidentified();
         };

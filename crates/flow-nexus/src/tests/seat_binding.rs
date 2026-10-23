@@ -179,3 +179,68 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
     let awake = fixture.nexus.store.metaflow_awake_as("877549").unwrap();
     assert_eq!(awake.map(|metaflow| metaflow.address), Some(address));
 }
+
+#[test]
+fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
+    use super::waking::{CLAUDE_SEAT, claude_agent, claude_seat, metaflow};
+    use super::{ControlsHerdrSnapshot, MarkedProcess};
+    use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::{ReadsFlowRows, RegistersExistingFlow};
+    let fixture = NexusFixture::new();
+    claude_seat(&fixture, 100);
+    let mut role = super::mind_live();
+    role.flow_id = CLAUDE_SEAT.into();
+    let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
+    fixture
+        .nexus
+        .store
+        .register_flow_in_role(node, role)
+        .unwrap();
+    fixture.set_agents(vec![claude_agent(&fixture)]);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        flow_ethos::State::Awake(CLAUDE_SEAT.into()),
+        vec![],
+        vec![],
+    ));
+    let address = Address {
+        aspect: Aspect::Mind,
+        topic: "flow".into(),
+        layer: Layer::Secondary,
+    };
+    let child_file = fixture.directory.path().join("claude-command-child");
+    let script = format!("sleep 30 & echo $! > {}; wait; :", child_file.display());
+    let root = MarkedProcess::spawn("sh", &["-c", &script], "w1:p3");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let child_pid = loop {
+        if let Ok(text) = fs::read_to_string(&child_file)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            break pid;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    };
+    for pid in [root.0.id(), child_pid] {
+        let peer = FlowStore::process_identity_for_pid(pid).unwrap();
+        assert_eq!(
+            fixture.nexus.bind_seat(address.clone(), Some(&peer)),
+            Response::Bound(CLAUDE_SEAT.into())
+        );
+        let mut forged = peer;
+        forged.started += 1;
+        assert!(matches!(
+            fixture.nexus.bind_seat(address.clone(), Some(&forged)),
+            Response::Refused(Refusal::Unidentified(_))
+        ));
+    }
+    let stranger = MarkedProcess::spawn("sleep", &["30"], "unknown-pane");
+    let unknown = FlowStore::process_identity_for_pid(stranger.0.id()).unwrap();
+    assert!(matches!(
+        fixture.nexus.bind_seat(address, Some(&unknown)),
+        Response::Refused(Refusal::Unidentified(_))
+    ));
+    let _ = std::process::Command::new("kill")
+        .arg(child_pid.to_string())
+        .status();
+}

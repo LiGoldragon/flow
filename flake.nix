@@ -42,7 +42,7 @@
           commonArgs = {
             inherit src;
             pname = "flow-workspace";
-            version = "0.39.0";
+            version = "0.39.2";
             strictDeps = true;
           };
           flowEthosSource = pkgs.lib.cleanSourceWith {
@@ -356,8 +356,10 @@
             "tests::a_flow_whose_pane_left_herdr_is_listed_exited_and_keeps_its_row";
           flow-claude-retract-is-one-ctrl-c = context.exactTest "flow-nexus"
             "tests::submission::a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c";
-          flow-claude-draft-is-never-retracted = context.exactTest "flow-nexus"
-            "tests::submission::a_draft_claudes_interrupt_put_back_is_never_taken_out";
+          flow-claude-draft-refuses-hard-before-any-key = context.exactTest "flow-nexus"
+            "tests::submission::a_draft_already_in_claudes_composer_refuses_a_hard_abrupt_before_any_key";
+          flow-claude-cancelled-prompt-submitted-again = context.exactTest "flow-nexus"
+            "tests::submission::a_prompt_claudes_interrupt_put_back_is_submitted_again_and_the_hard_abrupt_follows";
           flow-caller-pane-from-marks-or-ancestry = context.exactTest "flow-nexus"
             "tests::a_process_in_a_pane_is_found_by_its_own_marks_or_its_ancestors";
           flow-caller-pane-ambiguous-session-refused = context.exactTest "flow-nexus"

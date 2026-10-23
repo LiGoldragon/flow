@@ -71,7 +71,10 @@ carries the byte offset in the pane text), and a first line that is a harness
 command is refused as `HarnessCommand`: use `Command`. Every tier needs the
 recipient bound, not Blocked, and its composer blank; `Soft` also needs it Idle
 or Done. `HardAbrupt` presses the harness profile's interrupt keys when the
-recipient is Working and reports whether it was seen leaving Working. A write
+recipient is Working and reports whether it was seen leaving Working; it reads
+the composer first, and a draft there refuses it before any key. A prompt the
+interrupt puts back into the blank composer is the cancelled turn's, and it is
+submitted again before the letter. A write
 holds the pane's lease from its first key to its last, so two writes never
 interleave. `Presented` means the recipient was seen reacting on the exact pane
 — Herdr's own `agent_prompted` reply after it waited, naming the pane and

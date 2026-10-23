@@ -1,3 +1,17 @@
+# Flow 0.39.2
+
+Cut from 0.39.0 on the `release-0.39` branch; pins signal-flow 28.0.0 and
+meta-signal-flow 37.0.0 unchanged, so no peer repins.
+
+- A HardAbrupt reads the recipient's composer before it presses any key.
+  A draft there refuses it as `ComposerOccupied` with no interrupt, so the
+  recipient's turn goes on; formerly every queued HardAbrupt cancelled the
+  recipient's newest turn and was refused all the same, and its next Send
+  cancelled the next turn. A prompt the interrupt puts back into a composer
+  that was blank is the cancelled turn's own: it is submitted again, never
+  deleted, and the letter follows it. Formerly it held the composer, and
+  every later letter to the pane was refused.
+
 # Flow 0.39.0
 
 Pins signal-flow 28.0.0 and meta-signal-flow 37.0.0. Every ordinary and meta

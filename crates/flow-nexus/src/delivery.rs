@@ -341,6 +341,11 @@ trait RunsLeasedDelivery<'run> {
     /// Empties the composer of a letter an interrupt put back into it; a
     /// text that is not a letter is a person's and is never touched.
     fn retracted_restored_letter(&self) -> bool;
+    /// Submits again the prompt an interrupt put back into a composer that
+    /// was blank when the interrupt was pressed: the prompt of the turn the
+    /// interrupt cancelled, which its writer had already submitted. It is
+    /// never deleted; the letter follows it.
+    fn resubmitted_cancelled_prompt(&self) -> bool;
     fn run(&self) -> Result<Delivery, DeliveryRejection>;
 }
 
@@ -441,14 +446,25 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             && herdr.submission(route, harness_kind) == Submission::Seen
     }
 
+    fn resubmitted_cancelled_prompt(&self) -> bool {
+        let herdr = &self.nexus.herdr;
+        let route = &self.target.route;
+        let harness_kind = &self.target.node.harness_kind;
+        herdr.submit(route, harness_kind)
+            && herdr.submission(route, harness_kind) == Submission::Seen
+    }
+
     fn run(&self) -> Result<Delivery, DeliveryRejection> {
         let hard = matches!(self.request.message, Message::HardAbrupt(_));
-        // A hard delivery interrupts before inspecting the composer. The
-        // interrupt itself can restore Flow's previous letter to the
-        // composer; that letter is retracted below, while any other draft
-        // still refuses the delivery without being overwritten.
+        // A hard delivery reads the composer before it presses any key. A
+        // text there that is not Flow's own letter refuses it untouched: an
+        // interrupt would cancel the recipient's turn and still leave the
+        // letter nowhere to go, so every later hard letter would cancel the
+        // next turn too. A blank composer, or one holding Flow's letter, is
+        // interrupted; what the interrupt puts back is settled below.
+        let mut composer_was_blank = false;
         let mut agent_state = if hard {
-            match self.nexus.herdr.pane_agent(&self.target.node) {
+            let agent_state = match self.nexus.herdr.pane_agent(&self.target.node) {
                 PaneAgent::Present {
                     agent_state,
                     ready: true,
@@ -457,7 +473,18 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
                     return Err(DeliveryRejection::RouteUnavailable);
                 }
                 PaneAgent::Absent => return Err(DeliveryRejection::RouteUnavailable),
+            };
+            match self
+                .nexus
+                .herdr
+                .composer_text(&self.target.route, &self.target.node.harness_kind)
+            {
+                Some(text) if text.is_empty() => composer_was_blank = true,
+                Some(text) if text.opens_a_letter() => {}
+                Some(_) => return Err(DeliveryRejection::ComposerOccupied),
+                None => return Err(DeliveryRejection::NotDelivered),
             }
+            agent_state
         } else {
             self.nexus.writable_state(self.target)?
         };
@@ -486,10 +513,16 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             // The interrupt may have raised a dialog or put a queued prompt
             // back into the composer: the pane is read again. A letter it
             // put back is Flow's own and is taken out; left there, it
-            // refused this letter and every later one to the pane.
+            // refused this letter and every later one to the pane. Any
+            // other text it put back into a blank composer is the prompt of
+            // the turn it cancelled: that prompt is submitted again, never
+            // left behind to hold the pane and never deleted.
             agent_state = match self.nexus.writable_state(self.target) {
                 Ok(agent_state) => agent_state,
-                Err(PaneRefusal::ComposerOccupied) if self.retracted_restored_letter() => {
+                Err(PaneRefusal::ComposerOccupied)
+                    if self.retracted_restored_letter()
+                        || (composer_was_blank && self.resubmitted_cancelled_prompt()) =>
+                {
                     match self.nexus.writable_state(self.target) {
                         Ok(agent_state) => agent_state,
                         Err(refusal) => return self.refuse(refusal.into()),

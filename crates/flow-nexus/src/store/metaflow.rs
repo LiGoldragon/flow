@@ -8,6 +8,39 @@ use signal_flow::{
     StartRejection, Unknown_Data,
 };
 
+/// Materializes working state for a configured Address, never policy.
+pub(crate) trait PreparesDeclaredMetaflow {
+    fn prepare_declared_metaflow(&self, address: &Address) -> Result<bool, StoreError>;
+}
+
+impl PreparesDeclaredMetaflow for FlowStore {
+    fn prepare_declared_metaflow(&self, address: &Address) -> Result<bool, StoreError> {
+        use super::metaflow_declaration::ReadsMetaflowDeclarations;
+        if self.stored_metaflow(address)?.is_some() {
+            return Ok(true);
+        }
+        if self.metaflow_declaration(address)?.is_none()
+            || self.configured_model(address)?.is_none()
+        {
+            return Ok(false);
+        }
+        let row = StoredMetaflow {
+            metaflow: Metaflow {
+                address: address.clone(),
+                state: MetaflowState::Asleep,
+                past: vec![],
+                queue: vec![],
+            },
+        };
+        self.engine.commit_atomic(
+            self.engine
+                .begin_atomic_commit()
+                .assert(self.metaflows, row),
+        )?;
+        Ok(true)
+    }
+}
+
 pub(crate) trait MutatesMetaflows {
     fn message_peer(&self, peer: &Process) -> Result<bool, StoreError>;
     /// Binds the peer to its Address. `launched` is the FlowId of the
@@ -183,7 +216,7 @@ impl MutatesMetaflows for FlowStore {
                 }
             }
         };
-        if self.stored_metaflow(&address)?.is_none() {
+        if !self.prepare_declared_metaflow(&address)? {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
                 address,
             ))));

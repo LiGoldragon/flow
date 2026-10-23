@@ -2848,7 +2848,7 @@ pub(crate) mod tests {
                 model_name: ModelName::from("model-current"),
                 effort: Effort::from("high"),
                 flow_id_option: None,
-                remembered_flow_vector: vec![],
+                remembering: signal_flow::Remembering::Predecessors(0),
                 herdr_session_name: "flowlaunch42".into(),
                 leave_outs_option: None,
                 instruction_prompt: "do the work".into(),

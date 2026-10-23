@@ -42,8 +42,8 @@ use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data, LaunchProfile, Layer,
-    Message, Process, Recipient, Refusal, RememberedFlow, Request, Response, SendPayloadSize,
-    SendRequest, SentBy, StartRejection, Unknown_Data,
+    Message, Process, Recipient, Refusal, Request, Response, SendPayloadSize, SendRequest, SentBy,
+    StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -471,13 +471,7 @@ impl LaunchesDeclared for RunningNexus {
             model_name,
             effort: Self::effort_of(&address).to_owned(),
             flow_id_option: predecessor.clone(),
-            remembered_flow_vector: predecessor
-                .iter()
-                .map(|flow_id| RememberedFlow {
-                    flow_id: flow_id.clone(),
-                    remembering_depth: 1,
-                })
-                .collect(),
+            remembering: launch.remembering,
             herdr_session_name,
             leave_outs_option: None,
             flow_kind: declaration.flow_kind,

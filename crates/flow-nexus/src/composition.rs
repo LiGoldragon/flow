@@ -196,14 +196,14 @@ impl RendersLaunchSection for LaunchProfile {
         if let Some(predecessor) = &self.flow_id_option {
             section.push_str(&format!("Predecessor: {predecessor}\n"));
         }
-        if !self.remembered_flow_vector.is_empty() {
-            let remembered = self
-                .remembered_flow_vector
-                .iter()
-                .map(|flow| flow.flow_id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            section.push_str(&format!("Remembered: {remembered}\n"));
+        match &self.remembering {
+            signal_flow::Remembering::Predecessors(0) => {}
+            signal_flow::Remembering::Predecessors(depth) => {
+                section.push_str(&format!("Remembering: predecessors, {depth} deep\n"));
+            }
+            signal_flow::Remembering::Custom(flows) => {
+                section.push_str(&format!("Remembering: {}\n", flows.join(", ")));
+            }
         }
         section
     }
@@ -375,14 +375,14 @@ impl ValidatesLaunchProfile for LaunchProfile {
         {
             return Err(CompositionError::InvalidProfileField("user_modules"));
         }
-        if profile
-            .remembered_flow_vector
-            .iter()
-            .any(|remembered| remembered.remembering_depth < 0)
-        {
-            return Err(CompositionError::InvalidProfileField(
-                "remembered_flow_vector",
-            ));
+        let remembering_valid = match &profile.remembering {
+            signal_flow::Remembering::Predecessors(depth) => *depth >= 0,
+            signal_flow::Remembering::Custom(flows) => {
+                !flows.is_empty() && flows.iter().all(|flow| !flow.is_empty())
+            }
+        };
+        if !remembering_valid {
+            return Err(CompositionError::InvalidProfileField("remembering"));
         }
         Ok(())
     }
@@ -654,7 +654,7 @@ impl ProfilesFreshSeat for FreshSeat {
             model_name: self.model_name.clone(),
             effort: self.effort.clone(),
             flow_id_option: None,
-            remembered_flow_vector: Vec::new(),
+            remembering: signal_flow::Remembering::Predecessors(0),
             herdr_session_name: self.herdr_session_name.clone(),
             leave_outs_option: self.leave_outs_option.clone(),
             flow_kind: self.flow_kind.clone(),
@@ -673,8 +673,7 @@ pub(crate) mod tests {
     };
     use crate::context::FixtureComposer;
     use signal_flow::{
-        Address, Aspect, ContextRefusal, HarnessKind, LaunchProfile, Layer, LeaveOut,
-        RememberedFlow,
+        Address, Aspect, ContextRefusal, HarnessKind, LaunchProfile, Layer, LeaveOut, Remembering,
     };
 
     /// A launch profile and a composer holding its modules, for tests.
@@ -691,10 +690,7 @@ pub(crate) mod tests {
             model_name: "gpt-6-astra".into(),
             effort: "medium".into(),
             flow_id_option: Some("1b8ac0".into()),
-            remembered_flow_vector: vec![RememberedFlow {
-                flow_id: "836818".into(),
-                remembering_depth: 1,
-            }],
+            remembering: Remembering::Custom(vec!["836818".into()]),
             herdr_session_name: "messaging-build".into(),
             leave_outs_option: None,
             flow_kind: signal_flow::FlowKind::Regular,
@@ -887,7 +883,7 @@ pub(crate) mod tests {
         let system = &composed.system_prompt.system_prompt_text;
         assert!(system.contains("<!-- module: spirit-core -->\nSpirit body.\n"));
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembered: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
         assert!(!system.contains("Knowledge body."));
         let body = &composed.first_prompt_payload.first_prompt_body;
@@ -909,13 +905,13 @@ pub(crate) mod tests {
         let carried = composed.carrying_flow_id("a1b2c3");
         let system = &carried.system_prompt.system_prompt_text;
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembered: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
         ));
         assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
         // A launch with no predecessor and no memory gains the section.
         let mut profile = fixture_profile();
         profile.flow_id_option = None;
-        profile.remembered_flow_vector = vec![];
+        profile.remembering = Remembering::Predecessors(0);
         let bare = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {

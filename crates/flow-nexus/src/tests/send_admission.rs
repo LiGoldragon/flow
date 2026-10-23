@@ -434,6 +434,9 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         user_modules: vec![],
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
+        continuity: meta_signal_flow::Continuity::OnDemand,
+        purpose: String::new(),
+        records: vec![],
     };
     fixture
         .nexus

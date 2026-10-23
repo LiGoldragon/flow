@@ -62,7 +62,7 @@ use signal_flow::{
     LaunchProfile, Launched, Layer, LeaveOut, Lock, Metaflow, NativeLaunchBinding,
     NativeLaunchIntent, NativeTranscriptBoundary, Origin, PowerLevel, Process,
     PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
-    RegistrationAcknowledgement, RememberedFlow, ReplaceRejection, Replaced, Request, Response,
+    RegistrationAcknowledgement, Remembering, ReplaceRejection, Replaced, Request, Response,
     RestartRejection, Restarted, RouteReadiness, StartRejection,
 };
 
@@ -1465,11 +1465,127 @@ impl EngineRecord for StoredLaunchAttempt {
 
 impl MemoryDefinition for StoredLaunchAttempt {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-attempt-v4")
+    }
+}
+
+/// A remembered flow as signal-flow 30.0.0 and earlier archived it in a
+/// launch profile, before a launch named its remembering as `Remembering`.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RememberedFlow {
+    pub(crate) flow_id: String,
+    pub(crate) remembering_depth: i64,
+}
+
+/// The remembering an archived launch named: the flows it named, one by
+/// one, or none.
+pub(crate) trait RemembersArchivedFlows {
+    fn remembering(self) -> Remembering;
+}
+
+impl RemembersArchivedFlows for Vec<RememberedFlow> {
+    fn remembering(self) -> Remembering {
+        if self.is_empty() {
+            return Remembering::Predecessors(0);
+        }
+        Remembering::Custom(self.into_iter().map(|flow| flow.flow_id).collect())
+    }
+}
+
+/// The v3 attempt layout, before the launch profile named its remembering
+/// as `Remembering`.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchAttemptV3 {
+    attempt: LaunchAttemptV3,
+    context: LaunchContext,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct LaunchAttemptV3 {
+    launch_request_id: String,
+    launch_profile: LaunchProfileV3,
+    prompt_sha256: String,
+    origin: Origin,
+    launch_attempt_phase: LaunchAttemptPhase,
+    native_launch_intent_option: Option<NativeLaunchIntent>,
+    native_launch_binding_option: Option<NativeLaunchBinding>,
+    registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
+    prompt_delivery_intent_option: Option<PromptDeliveryIntent>,
+    prompt_delivery_result_option: Option<PromptDeliveryResult>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct LaunchProfileV3 {
+    launch_request_id: String,
+    system_modules: Vec<String>,
+    user_modules: Vec<String>,
+    address: Address,
+    model_name: String,
+    effort: String,
+    flow_id_option: Option<String>,
+    remembered_flow_vector: Vec<RememberedFlow>,
+    herdr_session_name: String,
+    leave_outs_option: Option<Vec<LeaveOut>>,
+    flow_kind: signal_flow::FlowKind,
+    tool_set: signal_flow::ToolSet,
+    instruction_prompt: String,
+}
+
+impl EngineRecord for StoredLaunchAttemptV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.attempt.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchAttemptV3 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-launch-attempt-v3")
+    }
+}
+
+impl UpgradeFrom<StoredLaunchAttemptV3> for StoredLaunchAttempt {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredLaunchAttemptV3) -> Decision<Self, Self::Refusal> {
+        let attempt = previous.attempt;
+        let profile = attempt.launch_profile;
+        Decision::Ready(Self {
+            attempt: LaunchAttempt {
+                launch_request_id: attempt.launch_request_id,
+                launch_profile: LaunchProfile {
+                    launch_request_id: profile.launch_request_id,
+                    system_modules: profile.system_modules,
+                    user_modules: profile.user_modules,
+                    remembering: profile.remembered_flow_vector.remembering(),
+                    address: profile.address,
+                    model_name: profile.model_name,
+                    effort: profile.effort,
+                    flow_id_option: profile.flow_id_option,
+                    herdr_session_name: profile.herdr_session_name,
+                    leave_outs_option: profile.leave_outs_option,
+                    flow_kind: profile.flow_kind,
+                    tool_set: profile.tool_set,
+                    instruction_prompt: profile.instruction_prompt,
+                },
+                prompt_sha256: attempt.prompt_sha256,
+                origin: attempt.origin,
+                launch_attempt_phase: attempt.launch_attempt_phase,
+                native_launch_intent_option: attempt.native_launch_intent_option,
+                native_launch_binding_option: attempt.native_launch_binding_option,
+                registration_acknowledgement_option: attempt.registration_acknowledgement_option,
+                prompt_delivery_intent_option: attempt.prompt_delivery_intent_option,
+                prompt_delivery_result_option: attempt.prompt_delivery_result_option,
+            },
+            context: previous.context,
+        })
     }
 }
 
@@ -1539,11 +1655,11 @@ impl UpgradeFrom<StoredLaunchAttemptV2> for StoredLaunchAttempt {
                     launch_request_id: profile.launch_request_id,
                     system_modules: profile.system_modules,
                     user_modules: profile.user_modules,
+                    remembering: profile.remembered_flow_vector.remembering(),
                     address: profile.address,
                     model_name: profile.model_name,
                     effort: profile.effort,
                     flow_id_option: profile.flow_id_option,
-                    remembered_flow_vector: profile.remembered_flow_vector,
                     herdr_session_name: profile.herdr_session_name,
                     leave_outs_option: profile.leave_outs_option,
                     flow_kind: signal_flow::FlowKind::Regular,
@@ -1768,11 +1884,11 @@ impl UpgradeFrom<StoredLaunchAttemptV1> for StoredLaunchAttempt {
                     launch_request_id: profile.launch_request_id,
                     system_modules: Vec::new(),
                     user_modules: Vec::new(),
+                    remembering: profile.remembered_flow_vector.remembering(),
                     address: profile.address,
                     model_name: profile.model_name,
                     effort: profile.effort,
                     flow_id_option: profile.flow_id_option,
-                    remembered_flow_vector: profile.remembered_flow_vector,
                     herdr_session_name: profile.herdr_session_name,
                     leave_outs_option: Some(Vec::new()),
                     flow_kind: signal_flow::FlowKind::Regular,
@@ -3187,10 +3303,16 @@ impl UpgradesFlowFamilies for Engine {
             StoredLaunchAttemptV1::schema_hash(),
         )
         .family_identity();
-        let current_predecessor = TableDescriptor::<StoredLaunchAttemptV2>::new(
+        let second_predecessor = TableDescriptor::<StoredLaunchAttemptV2>::new(
             FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-attempt"),
             StoredLaunchAttemptV2::schema_hash(),
+        )
+        .family_identity();
+        let current_predecessor = TableDescriptor::<StoredLaunchAttemptV3>::new(
+            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-attempt"),
+            StoredLaunchAttemptV3::schema_hash(),
         )
         .family_identity();
         let family = self
@@ -3211,6 +3333,8 @@ impl UpgradesFlowFamilies for Engine {
         };
         let upgrade = if family.as_ref() == Some(&predecessor) {
             self.upgrade_table::<StoredLaunchAttemptV1, StoredLaunchAttempt>(descriptor)
+        } else if family.as_ref() == Some(&second_predecessor) {
+            self.upgrade_table::<StoredLaunchAttemptV2, StoredLaunchAttempt>(descriptor)
         } else {
             debug_assert!(
                 family.is_none()
@@ -3218,7 +3342,7 @@ impl UpgradesFlowFamilies for Engine {
                     || family.as_ref() == Some(&descriptor.family_identity()),
                 "launch-attempt family has an undeclared identity"
             );
-            self.upgrade_table::<StoredLaunchAttemptV2, StoredLaunchAttempt>(descriptor)
+            self.upgrade_table::<StoredLaunchAttemptV3, StoredLaunchAttempt>(descriptor)
         };
         let table = match upgrade {
             UpgradeOutcome::Upgraded(receipt) => receipt.table(),
@@ -3883,7 +4007,8 @@ impl OpensFlowStore for FlowStore {
             StoredLaunchAttempt::schema_hash(),
         )
         .with_predecessor::<StoredLaunchAttemptV1>()
-        .with_predecessor::<StoredLaunchAttemptV2>();
+        .with_predecessor::<StoredLaunchAttemptV2>()
+        .with_predecessor::<StoredLaunchAttemptV3>();
         let launch_panes_descriptor = TableDescriptor::<StoredLaunchPane>::new(
             FLOW_LAUNCH_PANE_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-pane"),
@@ -4172,7 +4297,8 @@ impl OpensFlowStore for FlowStore {
                 StoredLaunchAttempt::schema_hash(),
             )
             .with_predecessor::<StoredLaunchAttemptV1>()
-            .with_predecessor::<StoredLaunchAttemptV2>(),
+            .with_predecessor::<StoredLaunchAttemptV2>()
+            .with_predecessor::<StoredLaunchAttemptV3>(),
             quarantined_launch_attempts,
         )?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
@@ -8586,7 +8712,7 @@ mod tests {
                 model_name: "fixture-model".into(),
                 effort: "medium".into(),
                 flow_id_option: None,
-                remembered_flow_vector: Vec::new(),
+                remembering: signal_flow::Remembering::Predecessors(0),
                 herdr_session_name: "fixture-session".into(),
                 leave_outs_option: None,
                 instruction_prompt: "fixture instruction".into(),
@@ -10636,10 +10762,7 @@ mod tests {
                 model_name: "gpt-sol".into(),
                 effort: "medium".into(),
                 flow_id_option: Some("predecessor-34".into()),
-                remembered_flow_vector: vec![signal_flow::RememberedFlow {
-                    flow_id: "e51411".into(),
-                    remembering_depth: 2,
-                }],
+                remembering: signal_flow::Remembering::Custom(vec!["e51411".into()]),
                 herdr_session_name: "messaging-build".into(),
                 leave_outs_option: Some(Vec::new()),
                 flow_kind: signal_flow::FlowKind::Regular,

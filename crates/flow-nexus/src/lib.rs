@@ -3864,7 +3864,7 @@ mod tests {
                 model_name: "fixture-model".into(),
                 effort: "medium".into(),
                 flow_id_option: predecessor.map(str::to_owned),
-                remembered_flow_vector: Vec::new(),
+                remembering: signal_flow::Remembering::Predecessors(0),
                 herdr_session_name: "fixture-session".into(),
                 leave_outs_option: None,
                 instruction_prompt: "fixture instruction".into(),
@@ -5008,6 +5008,9 @@ mod tests {
                         user_modules: vec!["knowledge-flow".into()],
                         flow_kind: signal_flow::FlowKind::Regular,
                         tool_set: signal_flow::ToolSet::Default,
+                        continuity: meta_signal_flow::Continuity::OnDemand,
+                        purpose: String::new(),
+                        records: vec![],
                     }])
                 )),
             meta_signal_flow::Response::Configured(_)
@@ -5026,6 +5029,7 @@ mod tests {
         ));
         let launch = |address: Address| Launch_Data {
             address,
+            remembering: signal_flow::Remembering::Predecessors(1),
             instruction_prompt: "Publish the newest edition.".into(),
         };
         let Ok(Query::Start(profile)) = fixture

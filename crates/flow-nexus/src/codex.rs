@@ -2119,7 +2119,7 @@ mod tests {
                 model_name: "gpt-5.6".into(),
                 effort: "medium".into(),
                 flow_id_option: None,
-                remembered_flow_vector: vec![],
+                remembering: signal_flow::Remembering::Predecessors(0),
                 herdr_session_name: "session".into(),
                 leave_outs_option: None,
                 flow_kind: signal_flow::FlowKind::Regular,

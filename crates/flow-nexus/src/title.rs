@@ -96,7 +96,7 @@ mod tests {
             model_name: model.into(),
             effort: "high".into(),
             flow_id_option: None,
-            remembered_flow_vector: vec![],
+            remembering: signal_flow::Remembering::Predecessors(0),
             herdr_session_name: "session".into(),
             leave_outs_option: None,
             flow_kind: signal_flow::FlowKind::Regular,

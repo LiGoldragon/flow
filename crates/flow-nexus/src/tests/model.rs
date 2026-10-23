@@ -40,7 +40,7 @@ pub(super) fn seat(
         },
         model_name: model.into(),
         flow_id_option: None,
-        remembered_flow_vector: Vec::new(),
+        remembering: signal_flow::Remembering::Predecessors(0),
         herdr_session_name: "fixture-session".into(),
         ..crate::composition::tests::fixture_profile()
     }

@@ -384,6 +384,9 @@ mod tests {
                     1 => ToolSet::Explicit(vec![]),
                     _ => ToolSet::Explicit(vec!["Bash".into(), "ToolSearch".into()]),
                 },
+                continuity: meta_signal_flow::Continuity::OnDemand,
+                purpose: format!("Prints page {index}."),
+                records: vec![],
             })
             .collect();
         let snapshot = ConfigurationSnapshot {

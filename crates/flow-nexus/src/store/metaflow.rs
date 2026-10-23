@@ -315,7 +315,12 @@ impl SleepsMetaflows for FlowStore {
         else {
             return Ok(false);
         };
-        let commit = taken.written(self, self.engine.begin_atomic_commit());
+        use super::successor::OwesSuccessors;
+        // A woken flow is the successor a Maintained metaflow was owed.
+        let commit = self.successor_given(
+            address,
+            taken.written(self, self.engine.begin_atomic_commit()),
+        )?;
         self.engine.commit_atomic(commit)?;
         Ok(true)
     }
@@ -497,6 +502,8 @@ impl TakesLaunchAddress for FlowStore {
 
 /// Adds the writes that take an Address to an atomic commit.
 pub(crate) trait WritesTakenAddress {
+    /// The writes that take the Address: the metaflow Awake as the flow and
+    /// a stale binding retracted.
     fn written(
         self,
         store: &FlowStore,

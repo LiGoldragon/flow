@@ -206,10 +206,18 @@ pub(crate) trait HoldsLaunchAddress {
     /// goes. Without a hold nothing is written.
     fn given_back(&self, flow_id: &str, commit: AtomicCommit) -> Result<AtomicCommit, StoreError>;
     /// `flow_id` ended: its hold is given back when it has one; otherwise a
-    /// metaflow Awake as it is recorded Asleep, the flow joining Past.
+    /// metaflow Awake as it is recorded Asleep, the flow joining Past, and
+    /// every lock that metaflow holds as a sender is retracted, so a
+    /// recipient is never held by a sender that has ended.
     fn ended_at_address(
         &self,
         flow_id: &str,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError>;
+    /// Retracts every lock the metaflow at `sender` holds as a sender.
+    fn sender_locks_released(
+        &self,
+        sender: &Address,
         commit: AtomicCommit,
     ) -> Result<AtomicCommit, StoreError>;
     /// The hold `flow_id` has, if any.
@@ -254,8 +262,13 @@ impl HoldsLaunchAddress for FlowStore {
     }
 
     fn kept(&self, flow_id: &str, commit: AtomicCommit) -> Result<AtomicCommit, StoreError> {
+        use super::successor::OwesSuccessors;
+        // A confirmed flow is the successor its Address was owed, if any.
         Ok(match self.address_hold(flow_id)? {
-            Some(_) => commit.retract(self.address_holds, RecordKey::new(flow_id)),
+            Some(hold) => self.successor_given(
+                &hold.address,
+                commit.retract(self.address_holds, RecordKey::new(flow_id)),
+            )?,
             None => commit,
         })
     }
@@ -309,10 +322,33 @@ impl HoldsLaunchAddress for FlowStore {
         let Some(mut metaflow) = self.metaflow_awake_as(flow_id)? else {
             return Ok(commit);
         };
+        let address = metaflow.address.clone();
         metaflow.state = MetaflowState::Asleep;
         metaflow.past.retain(|past| past != flow_id);
         metaflow.past.push(flow_id.to_owned());
-        Ok(commit.mutate(self.metaflows, StoredMetaflow { metaflow }))
+        let commit = commit.mutate(self.metaflows, StoredMetaflow { metaflow });
+        self.sender_locks_released(&address, commit)
+    }
+
+    fn sender_locks_released(
+        &self,
+        sender: &Address,
+        commit: AtomicCommit,
+    ) -> Result<AtomicCommit, StoreError> {
+        let held = self
+            .engine
+            .match_records(QueryPlan::all(self.metaflow_locks))?
+            .records()
+            .iter()
+            .filter(|row| &row.lock.sender == sender)
+            .map(|row| row.lock.address.clone())
+            .collect::<Vec<_>>();
+        Ok(held.into_iter().fold(commit, |commit, recipient| {
+            commit.retract(
+                self.metaflow_locks,
+                RecordKey::new(FlowStore::address_record_key(&recipient)),
+            )
+        }))
     }
 
     fn address_hold(&self, flow_id: &str) -> Result<Option<AddressHold>, StoreError> {

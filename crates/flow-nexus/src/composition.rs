@@ -643,7 +643,8 @@ pub struct FreshSeat {
 
 /// The launch profile of a fresh wake: the queued work is its brief, and
 /// its context is the module identities the metaflow's last launch named,
-/// composed again through the same route as any Start.
+/// composed again through the same route as any Start. It remembers its
+/// predecessor: the raw records of the metaflow's last flow.
 impl ProfilesFreshSeat for FreshSeat {
     fn fresh_profile(&self) -> LaunchProfile {
         LaunchProfile {
@@ -654,7 +655,7 @@ impl ProfilesFreshSeat for FreshSeat {
             model_name: self.model_name.clone(),
             effort: self.effort.clone(),
             flow_id_option: None,
-            remembering: signal_flow::Remembering::Predecessors(0),
+            remembering: signal_flow::Remembering::Predecessors(1),
             herdr_session_name: self.herdr_session_name.clone(),
             leave_outs_option: self.leave_outs_option.clone(),
             flow_kind: self.flow_kind.clone(),

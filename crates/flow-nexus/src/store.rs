@@ -22,6 +22,7 @@ pub(crate) mod send_outcome;
 pub(crate) mod send_server;
 pub(crate) mod sent;
 mod staged_upgrade;
+pub(crate) mod successor;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -200,6 +201,7 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_compactions",
+    "flow_nexus_successor_intents",
     "flow_nexus_send_outcome_counter",
     "flow_nexus_send_outcomes",
     "flow_nexus_logical_delivery_counter",
@@ -3421,6 +3423,7 @@ pub struct FlowStore {
     send_calls: TableReference<crate::generated::send_tool::SendCall>,
     launch_cleanups: TableReference<launch_cleanup::LaunchCleanup>,
     compactions: TableReference<compaction::Compaction>,
+    successor_intents: TableReference<successor::SuccessorIntent>,
     queue_delivery: QueueDeliveryTables,
     send_outcomes: SendOutcomeTables,
     logical_deliveries: LogicalDeliveryTables,
@@ -4064,6 +4067,8 @@ impl OpensFlowStore for FlowStore {
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
         let compactions_descriptor =
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor();
+        let successor_intents_descriptor =
+            <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let events_descriptor = <events::FlowEvents as events::DescribesEventTable>::descriptor();
         let context_sizes_descriptor =
@@ -4106,6 +4111,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&compactions_descriptor)
+                .with_family(&successor_intents_descriptor)
                 .with_family(&<metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor())
                 .with_family(&events_descriptor)
                 .with_family(&context_sizes_descriptor)
@@ -4150,6 +4156,7 @@ impl OpensFlowStore for FlowStore {
         let send_calls = engine.upgraded_send_calls(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let compactions = engine.register_table(compactions_descriptor)?;
+        let successor_intents = engine.register_table(successor_intents_descriptor)?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
@@ -4182,6 +4189,7 @@ impl OpensFlowStore for FlowStore {
             send_calls,
             launch_cleanups,
             compactions,
+            successor_intents,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -4324,6 +4332,9 @@ impl OpensFlowStore for FlowStore {
         let compactions = engine.register_table(
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor(),
         )?;
+        let successor_intents = engine.register_table(
+            <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor(),
+        )?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, QueueDeliveryTables::descriptors())?;
         let send_outcomes =
@@ -4357,6 +4368,7 @@ impl OpensFlowStore for FlowStore {
             send_calls,
             launch_cleanups,
             compactions,
+            successor_intents,
             queue_delivery,
             send_outcomes,
             logical_deliveries,
@@ -6305,9 +6317,33 @@ impl RecordsFlowLifecycle for FlowStore {
             return Ok(false);
         }
         flow.lifecycle = FlowLifecycle::Exited;
+        // A Maintained metaflow whose flow went without Flow or an owner
+        // ending it is owed a successor, in the same write.
+        let owed = match self.address_hold(flow_id)? {
+            Some(_) => None,
+            None => metaflow::SleepsMetaflows::metaflow_awake_as(self, flow_id)?,
+        };
         // A flow that ends before its launch was confirmed gives back the
         // Address it held; a confirmed one puts its metaflow to sleep.
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        let commit = match owed {
+            Some(metaflow)
+                if successor::ReadsContinuity::continuity(self, &metaflow.address)?
+                    == meta_signal_flow::Continuity::Maintained =>
+            {
+                successor::OwesSuccessors::owing_successor(
+                    self,
+                    successor::SuccessorIntent {
+                        address: metaflow.address,
+                        predecessor: flow_id.to_owned(),
+                        cause: successor::SuccessionCause::Exit,
+                        launch_request_id: String::new(),
+                    },
+                    commit,
+                )?
+            }
+            _ => commit,
+        };
         self.engine
             .commit_atomic(self.ended_at_address(flow_id, commit)?)?;
         self.launch_changes.announce();
@@ -6409,10 +6445,12 @@ impl WritesFlowStore for FlowStore {
         // the same write that makes it Active; a launch that held it since
         // its binding keeps it and drops the hold.
         let mut taken = None;
+        let mut taken_address = None;
         if let Some(launch_request_id) = self.launch_requests_bound_to(flow_id)?.pop()
             && let Some(attempt) = self.launch_attempt(&launch_request_id)?
         {
             let profile = attempt.launch_profile;
+            taken_address = Some(profile.address.clone());
             match self.address_taking(
                 &profile.address,
                 flow_id,
@@ -6440,6 +6478,11 @@ impl WritesFlowStore for FlowStore {
         if self.address_hold(flow_id)?.is_some() {
             commit = self.kept(flow_id, commit)?;
             written = true;
+        } else if let Some(address) = &taken_address
+            && written
+        {
+            // A confirmed flow is the successor its Address was owed, if any.
+            commit = successor::OwesSuccessors::successor_given(self, address, commit)?;
         }
         if written {
             self.engine.commit_atomic(commit)?;
@@ -7034,6 +7077,10 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_compactions" => {
                 (compaction::COMPACTION_FAMILY, compaction::COMPACTION_SCHEMA)
             }
+            "flow_nexus_successor_intents" => (
+                successor::SUCCESSOR_INTENT_FAMILY,
+                successor::SUCCESSOR_INTENT_SCHEMA,
+            ),
             "flow_nexus_meta_leave_out_configuration" => {
                 return Some((
                     "flow-nexus-meta-leave-out-configuration",
@@ -10587,6 +10634,14 @@ mod tests {
                     engine
                         .match_records(QueryPlan::all(self.compactions))
                         .expect("compactions read")
+                        .records()
+                        .len(),
+                ),
+                read(
+                    "flow_nexus_successor_intents",
+                    engine
+                        .match_records(QueryPlan::all(self.successor_intents))
+                        .expect("successor intents read")
                         .records()
                         .len(),
                 ),

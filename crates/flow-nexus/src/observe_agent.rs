@@ -5,6 +5,11 @@
 //! socket (newline-delimited JSON): `pane.agent_status_changed` for the
 //! flow's pane, and `pane.closed` / `pane.exited`. Nothing is re-read on a
 //! timer; a flow whose agent does not change sends nothing.
+//!
+//! A pane Herdr shows gone, or announces closed, is a witness of the flow's
+//! fate: a live flow whose pane is gone is recorded Exited, which puts its
+//! metaflow Asleep and retracts every lock it holds as a sender, and a
+//! Maintained metaflow so ended is woken into its successor.
 
 use crate::herdr::HerdrCli;
 use crate::herdr::pane::ReadsAgentStatus;
@@ -30,6 +35,48 @@ pub trait ObservesAgent {
         flow_id: &str,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String>;
+}
+
+/// A live flow whose pane Herdr witnessed gone has exited.
+trait RecordsWitnessedExit {
+    /// Records the flow Exited, under the dispatch gate, when it is still
+    /// live; then wakes its metaflow when Flow's records show it due.
+    fn exited_as_witnessed(&self, flow_id: &str);
+}
+
+impl RecordsWitnessedExit for RunningNexus {
+    fn exited_as_witnessed(&self, flow_id: &str) {
+        use crate::generated::operation::{Operation, Outcome, Record_Data};
+        use crate::performing::Performs;
+        use crate::store::metaflow::SleepsMetaflows;
+        use crate::waking::SleepsAndWakesSeats;
+        let address = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !matches!(self.store.flow_node(flow_id), Ok(Some(node)) if node.flow_lifecycle.is_live())
+            {
+                return;
+            }
+            let address = self
+                .store
+                .metaflow_awake_as(flow_id)
+                .ok()
+                .flatten()
+                .map(|metaflow| metaflow.address);
+            if self.perform(Operation::Record(Record_Data::Exited(flow_id.to_owned())))
+                != Outcome::Recorded
+            {
+                eprintln!("flow-nexus: flow {flow_id} seen gone but not recorded Exited");
+                return;
+            }
+            address
+        };
+        if let Some(address) = address {
+            self.wake_due(address);
+        }
+    }
 }
 
 /// An agent state is observed of one flow.
@@ -71,7 +118,10 @@ impl ObservesAgent for RunningNexus {
         };
         let agent_state = match self.herdr.pane_agent(&node) {
             PaneAgent::Present { agent_state, .. } => agent_state,
-            PaneAgent::Absent => AgentState::Gone,
+            PaneAgent::Absent => {
+                self.exited_as_witnessed(flow_id);
+                AgentState::Gone
+            }
             PaneAgent::Unreadable => AgentState::Unknown,
         };
         agent_state.observed_of(flow_id)
@@ -104,7 +154,13 @@ impl ObservesAgent for RunningNexus {
         let mut events = HerdrEvents::subscribe(&socket, &route.herdr_pane_id)?;
         loop {
             let Some(event) = events.next_event(&|| self.stopping.requested())? else {
-                // Herdr closed the subscription: the session is gone.
+                // Herdr closed the subscription: the session is gone. The
+                // pane is read once more before the flow is recorded ended.
+                if let Some((node, _)) = self.observable(flow_id)
+                    && matches!(self.herdr.pane_agent(&node), PaneAgent::Absent)
+                {
+                    self.exited_as_witnessed(flow_id);
+                }
                 return send(&AgentState::Gone.observed_of(flow_id));
             };
             let agent_state = match event {
@@ -116,6 +172,7 @@ impl ObservesAgent for RunningNexus {
             }
             send(&agent_state.clone().observed_of(flow_id))?;
             if agent_state == AgentState::Gone {
+                self.exited_as_witnessed(flow_id);
                 return Ok(());
             }
             last = agent_state;

@@ -100,6 +100,27 @@ impl Unsent for Vec<Request> {
     }
 }
 
+/// Declares the metaflow at `address` Maintained: it always has a flow, and
+/// an idle seat keeps its harness.
+pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            meta_signal_flow::ConfigureMetaflow {
+                address,
+                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+                user_modules: vec!["operation-main-flow".into()],
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                continuity: meta_signal_flow::Continuity::Maintained,
+                purpose: String::new(),
+                records: vec![],
+            },
+        ]))
+        .expect("metaflow declared Maintained");
+}
+
 pub(super) fn stored(fixture: &NexusFixture, layer: Layer) -> Metaflow {
     fixture
         .nexus
@@ -200,11 +221,11 @@ pub(super) fn claude_stop(fixture: &NexusFixture) -> signal_flow::Event {
     })
 }
 
-/// An idle Claude flow of any layer keeps its pane and stays Awake: its
-/// Stop writes its context size and, with nothing queued, leaves the seat
-/// as it is.
+/// An idle Maintained Claude flow of any layer keeps its pane and stays
+/// Awake: its Stop writes its context size and, with nothing queued, leaves
+/// the seat as it is.
 #[test]
-fn an_idle_claude_flow_keeps_its_pane_and_stays_awake() {
+fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
     use crate::store::NamesLiveFlow;
     for layer in [Layer::Primary, Layer::Secondary, Layer::Tertiary] {
         let fixture = NexusFixture::new();
@@ -219,6 +240,7 @@ fn an_idle_claude_flow_keeps_its_pane_and_stays_awake() {
             vec![],
             vec![],
         ));
+        maintain(&fixture, address(layer.clone()));
 
         fixture
             .nexus
@@ -244,11 +266,11 @@ fn an_idle_claude_flow_keeps_its_pane_and_stays_awake() {
     }
 }
 
-/// An idle Codex flow keeps its pane and stays Awake: its thread coming to
-/// rest with nothing queued settles nothing, and a turn end read then
-/// leaves the seat as it is.
+/// An idle Maintained Codex flow keeps its pane and stays Awake: its thread
+/// coming to rest with nothing queued settles nothing, and a turn end read
+/// then leaves the seat as it is.
 #[test]
-fn an_idle_codex_flow_keeps_its_pane_and_stays_awake() {
+fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
     use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
@@ -262,6 +284,7 @@ fn an_idle_codex_flow_keeps_its_pane_and_stays_awake() {
         vec![],
         vec![],
     ));
+    maintain(&fixture, address(Layer::Secondary));
     assert_eq!(
         fixture.nexus.settle_stopped("908786"),
         AtStop::Kept(KeptAtStop::ThreadNotResting)
@@ -285,6 +308,86 @@ fn an_idle_codex_flow_keeps_its_pane_and_stays_awake() {
     assert_eq!(node.flow_lifecycle, FlowLifecycle::Active);
 }
 
+/// An idle OnDemand Claude flow, its turn ended with nothing queued, sleeps:
+/// its harness is closed, its flow recorded Stopped and its metaflow Asleep
+/// with the flow in Past, its Address and the flow's row and transcript
+/// kept. A metaflow no declaration names is OnDemand.
+#[test]
+fn an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 40_000);
+    append_main_rows(&fixture, &[end_turn("last-turn")]);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake(CLAUDE_SEAT.into()),
+        vec![],
+        vec![],
+    ));
+
+    assert_eq!(
+        fixture.nexus.settle_stopped(CLAUDE_SEAT),
+        AtStop::Slept(address(Layer::Secondary))
+    );
+    assert!(closes(&fixture), "the idle seat's harness is closed");
+    assert!(fixture.typed().is_none(), "nothing is typed");
+    let slept = stored(&fixture, Layer::Secondary);
+    assert_eq!(slept.state, State::Asleep);
+    assert_eq!(slept.past, vec![CLAUDE_SEAT.to_owned()]);
+    let node = fixture
+        .nexus
+        .store
+        .flow_node(CLAUDE_SEAT)
+        .unwrap()
+        .expect("the flow's row is kept");
+    assert_eq!(node.flow_lifecycle, FlowLifecycle::Stopped);
+    assert_eq!(
+        node.session_id, CLAUDE_SESSION,
+        "its transcript stays named"
+    );
+    assert!(claude_transcript(&fixture).exists(), "its transcript stays");
+}
+
+/// An idle OnDemand Codex flow sleeps once its app-server shows its thread
+/// resting with nothing queued.
+#[test]
+fn an_idle_on_demand_codex_flow_closes_its_harness() {
+    use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("908786".into()),
+        vec![],
+        vec![],
+    ));
+    let thread = fixture.node().session_id;
+    fixture
+        .nexus
+        .codex_events(&thread, vec![TurnEvent::Status(ThreadStatus::Idle)]);
+    // The thread's rest may already have settled the seat; either way it
+    // sleeps.
+    let at_stop = fixture.nexus.settle_stopped("908786");
+    assert!(
+        matches!(
+            &at_stop,
+            AtStop::Slept(_) | AtStop::Kept(KeptAtStop::NotAwake)
+        ),
+        "{at_stop:?}"
+    );
+    assert!(closes(&fixture), "the idle seat's harness is closed");
+    let slept = stored(&fixture, Layer::Secondary);
+    assert_eq!(slept.state, State::Asleep);
+    assert_eq!(slept.past, vec!["908786".to_owned()]);
+}
+
 /// An Order queued for an idle Awake Claude flow is handed into its live
 /// pane at once: no Stop is awaited, no pane is opened, and the metaflow
 /// stays Awake as the same flow.
@@ -303,6 +406,7 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
         vec![],
         vec![],
     ));
+    maintain(&fixture, address(Layer::Secondary));
     assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert!(fixture.typed().is_none(), "nothing typed while idle");
 
@@ -1260,9 +1364,15 @@ fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
 
     fixture.nexus.wake_due(at.clone());
 
+    // The woken OnDemand seat answers its one request and, with nothing
+    // queued, sleeps at its rest: its flow is the metaflow's last.
     let woken = stored(&fixture, Layer::Secondary);
-    let State::Awake(flow_id) = woken.state else {
-        panic!("simplified flow is awake: {woken:?}; {}", world.calls())
+    let flow_id = match &woken.state {
+        State::Awake(flow_id) => flow_id.clone(),
+        State::Asleep => match woken.past.last() {
+            Some(flow_id) if flow_id != "abc123" => flow_id.clone(),
+            _ => panic!("simplified flow was woken: {woken:?}; {}", world.calls()),
+        },
     };
     assert!(woken.queue.is_empty(), "the first request was submitted");
     let turns = world.user_turns(&fixture);
@@ -2454,6 +2564,7 @@ fn a_seat_herdr_shows_working_at_its_stop_is_idle_once_herdr_shows_it_done() {
         vec![],
         vec![],
     ));
+    maintain(&fixture, address(Layer::Secondary));
 
     assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert_eq!(
@@ -4282,5 +4393,210 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     assert!(
         restarted.nexus.wake_is_due(&target),
         "the target is due the wake the start's recover_wakes takes"
+    );
+}
+
+/// The sender seat c1a0de, Awake at { Mind flow Secondary }, holding a
+/// lock on { Mind flow Primary }.
+fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
+    use crate::store::SeedsConfiguration;
+    use crate::store::metaflow::MutatesMetaflows;
+    let settings = crate::store::DefaultConfiguration {
+        home: fixture.directory.path().join("home"),
+        runtime_directory: fixture.directory.path().join("runtime"),
+    }
+    .configuration();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
+            meta_signal_flow::ConfigureNexus {
+                source_root: settings.source_root,
+                stable_codex: settings.stable_codex,
+                next_codex: settings.next_codex,
+                harness_profiles: settings.harness_profile_vector,
+                meta_aspects: settings.meta_aspects,
+                message_nexus_path: settings.message_nexus_path,
+                message_nexus_binary: "/fixture/bin/message-nexus".into(),
+                lease: 30,
+            },
+        ))
+        .expect("Nexus configured");
+    claude_seat(fixture, 40_000);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake(CLAUDE_SEAT.into()),
+        vec![],
+        vec![],
+    ));
+    let recipient = address(Layer::Primary);
+    fixture
+        .nexus
+        .store
+        .seed_metaflow(metaflow(Layer::Primary, State::Asleep, vec![], vec![]));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let locked = fixture
+        .nexus
+        .store
+        .lock_metaflow(
+            signal_flow::Lock_Data {
+                sender: address(Layer::Secondary),
+                recipient: signal_flow::Recipient::Address(recipient.clone()),
+            },
+            now,
+        )
+        .expect("lock written");
+    assert!(
+        matches!(locked, signal_flow::Response::Locked(_)),
+        "{locked:?}"
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .stored_metaflow_lock(&recipient)
+            .unwrap()
+            .is_some()
+    );
+    recipient
+}
+
+/// A lock is retracted in the write that ends its sender's flow, however
+/// it ended: Stopped, Exited or Retired. The recipient is never held by a
+/// sender that has ended.
+#[test]
+fn a_terminal_sender_retracts_its_locks() {
+    use crate::generated::operation::Record_Data;
+    for end in [
+        Record_Data::Stopped(CLAUDE_SEAT.into()),
+        Record_Data::Exited(CLAUDE_SEAT.into()),
+        Record_Data::Retired(CLAUDE_SEAT.into()),
+    ] {
+        let fixture = NexusFixture::new();
+        let recipient = sender_holding_a_lock(&fixture);
+        assert_eq!(
+            fixture.nexus.perform(Operation::Record(end.clone())),
+            Outcome::Recorded,
+            "{end:?}"
+        );
+        assert!(
+            fixture
+                .nexus
+                .store
+                .stored_metaflow_lock(&recipient)
+                .unwrap()
+                .is_none(),
+            "{end:?}: the ended sender's lock is retracted"
+        );
+        assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
+    }
+}
+
+/// A flow Observe sees Gone, its pane absent from a readable Herdr, is
+/// recorded Exited, and the lock it held as a sender goes with it.
+#[test]
+fn a_sender_observe_reports_gone_is_exited_and_its_lock_released() {
+    use crate::observe_agent::ObservesAgent;
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(vec![], PromptFixture::Prompted("w1:p3"));
+    let recipient = sender_holding_a_lock(&fixture);
+
+    assert_eq!(
+        fixture.nexus.agent_observation(CLAUDE_SEAT),
+        signal_flow::Response::AgentObserved(signal_flow::AgentObservation {
+            flow_id: CLAUDE_SEAT.into(),
+            agent_state: signal_flow::AgentState::Gone,
+        })
+    );
+    let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
+    assert_eq!(node.flow_lifecycle, FlowLifecycle::Exited);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .stored_metaflow_lock(&recipient)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A Maintained metaflow whose flow exits with its pane gone is owed a
+/// successor in the write that records the exit, and is due a wake with
+/// nothing queued; an OnDemand one is owed none and is not due.
+#[test]
+fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
+    use crate::generated::operation::Record_Data;
+    use crate::store::successor::{OwesSuccessors, SuccessionCause};
+    for maintained in [true, false] {
+        let fixture = NexusFixture::new();
+        claude_seat(&fixture, 40_000);
+        fixture.nexus.store.seed_metaflow(metaflow(
+            Layer::Secondary,
+            State::Awake(CLAUDE_SEAT.into()),
+            vec![],
+            vec![],
+        ));
+        if maintained {
+            maintain(&fixture, address(Layer::Secondary));
+        }
+        assert_eq!(
+            fixture
+                .nexus
+                .perform(Operation::Record(Record_Data::Exited(CLAUDE_SEAT.into()))),
+            Outcome::Recorded
+        );
+        let intent = fixture
+            .nexus
+            .store
+            .successor_intent(&address(Layer::Secondary))
+            .unwrap();
+        let asleep = stored(&fixture, Layer::Secondary);
+        assert_eq!(asleep.state, State::Asleep);
+        if maintained {
+            let intent = intent.expect("a successor is owed");
+            assert_eq!(intent.predecessor, CLAUDE_SEAT);
+            assert_eq!(intent.cause, SuccessionCause::Exit);
+            assert!(
+                fixture.nexus.wake_is_due(&asleep),
+                "due with nothing queued"
+            );
+        } else {
+            assert_eq!(intent, None);
+            assert!(!fixture.nexus.wake_is_due(&asleep));
+        }
+    }
+}
+
+/// A Stop the owner asks for is not an unexpected exit: a Maintained
+/// metaflow so stopped is owed no successor.
+#[test]
+fn a_maintained_metaflow_stopped_deliberately_is_owed_no_successor() {
+    use crate::generated::operation::Record_Data;
+    use crate::store::successor::OwesSuccessors;
+    let fixture = NexusFixture::new();
+    claude_seat(&fixture, 40_000);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake(CLAUDE_SEAT.into()),
+        vec![],
+        vec![],
+    ));
+    maintain(&fixture, address(Layer::Secondary));
+    for end in [
+        Record_Data::Stopped(CLAUDE_SEAT.into()),
+        Record_Data::Retired(CLAUDE_SEAT.into()),
+    ] {
+        let _ = fixture.nexus.perform(Operation::Record(end));
+    }
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .successor_intent(&address(Layer::Secondary))
+            .unwrap(),
+        None
     );
 }

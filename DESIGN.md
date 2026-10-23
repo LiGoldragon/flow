@@ -338,9 +338,32 @@ answered from its record and queued nothing more; with another digest it is
 datom, `Queued.{ Sender Target }` or `Refused.SendRefusal`, with `success`
 true only when queued.
 
-A metaflow stays Awake as its flow while that flow's pane runs, busy or
-idle: no pane is closed because its flow went idle. It is Asleep only once
-its flow has ended, its pane closed by the living, crashed, or replaced.
+A metaflow continues as its declaration's `Continuity.[ OnDemand
+Maintained ]` names; a metaflow no declaration names is OnDemand, and a
+declaration archived before Continuity opens Maintained for { Psyche core
+Primary } alone. When a seat's turn ends and it rests with nothing queued,
+an OnDemand seat sleeps: its harness is closed under the pane's lease (a
+Claude seat only once Herdr shows it Idle or Done, so background agents are
+not ended) and its flow recorded Stopped, its metaflow Asleep, its Address
+and the flow's transcript kept. A Maintained seat stays Awake in its pane.
+A metaflow is Asleep once its flow has ended: slept, its pane closed by the
+living, crashed, or replaced.
+
+A Maintained metaflow always has a flow. When its flow is refreshed, or
+ends with its pane gone (recorded Exited, by a Deliver, a drain or an
+Observe that witnesses the pane absent), Flow records a successor intent
+(`flow_nexus_successor_intents`, one per Address), the exit's in the same
+write as the Exited record, and starts the successor with no queued request
+needed. The intent is given in the write in which a flow takes the Address:
+a wake's Awoken record, or the confirmation of a launch. A Stop or a Retire
+is an act, not an exit, and owes nothing. At its start the Nexus takes up
+every intent: a predecessor still Awake is refreshed again, under the
+launch request the intent names; an Asleep metaflow is woken; an intent a
+flow already took the Address for is forgotten.
+
+Every lock a metaflow holds as a sender is retracted in the write that ends
+its flow, Stopped, Exited or Retired, so a recipient is never held by a
+sender that has ended.
 Whether a target wakes is read from Flow's records, never carried with the
 answer. A metaflow of any layer is due a wake when it is Asleep and holds an
 Order, a Question or the living's words. After every commit that queues a request, from a send-tool call
@@ -371,7 +394,7 @@ work is queued for a seat whose thread rests, the seat is settled as a Stop
 settles a Claude seat: under the dispatch gate the oldest queued request is
 handed to its thread, sender first, and the thread then holds that work
 until a turn that began after it completes; with nothing queued the seat
-stays Awake in its pane. A seat
+sleeps or stays Awake as its metaflow's Continuity names. A seat
 whose thread is in a turn is never drained, whatever its screen shows, and
 work queued meanwhile waits for the completion. A seat that only holds its
 Address is settled at its confirmation when its thread rests. The state is
@@ -475,8 +498,16 @@ is measured at each Claude Stop from the transcript, and for Codex from each
 threshold is told nothing and writes no handover; it is given no new message
 (a Drain hands it nothing, a Deliver is refused), so what is queued stays for
 the metaflow's next flow. At its rest it is a seat due a refresh, the same
-predicate a landing sets: its pane is closed under its lease, it is recorded
-Stopped and its metaflow Asleep, and queued work wakes a fresh flow.
+predicate a landing sets. A Maintained metaflow, or one holding a request
+that wakes it, is owed its successor: the intent is recorded, the
+successor is started and confirmed through Replace, remembering its
+predecessor (`Predecessors.1`), and only then is the predecessor recorded
+Stopped and its pane closed, in the replacement's reaping; work queued
+meanwhile is then handed to the successor. A successor whose launch is
+refused leaves the predecessor Awake, the intent forgotten, and the next rest
+tries again. Any other seat due a refresh has its pane closed under its
+lease, is recorded Stopped and its metaflow Asleep, its queue kept for the
+next flow.
 
 A flow that keeps working without being given more work may compact; its
 harness's own compaction raises a warning and an investigation. Flow reads a

@@ -3,8 +3,9 @@
 //! A launch's effective leave-outs are its Start's, or else its metaflow's
 //! configured default. Each turns into the harness's own switch, as Claude
 //! Code 2.1.294 and codex-next 0.158.0-alpha.9 were measured to take them
-//! (the lean-start catalogue of 2026-10-16): a tool left out is named in
-//! `--disallowedTools`, a block or feature is turned off by its flag,
+//! (the lean-start catalogue of 2026-10-16): a Claude flow keeps every tool
+//! but Artifact, unless allowed artifacts; a block or feature is turned off
+//! by its flag,
 //! environment variable or setting. A leave-out the flow cannot go without
 //! (ToolSearch, Bash, and the user settings, which carry Herdr's SessionStart
 //! hook that Flow's binding relies on), a skill leave-out with Workflow kept,
@@ -12,27 +13,7 @@
 //! launches.
 
 use crate::generated::starter::{LeanStart, RendersLeanStart};
-use signal_flow::{HarnessKind, LeaveOut, LeaveOutRefusal, ToolSet};
-
-/// The tools Claude Code defers to ToolSearch, each named once in the
-/// listing: leaving them out removes their names.
-const CLAUDE_DEFERRED_TOOLS: [&str; 15] = [
-    "CronCreate",
-    "CronDelete",
-    "CronList",
-    "DesignSync",
-    "EnterWorktree",
-    "ExitWorktree",
-    "LSP",
-    "Monitor",
-    "NotebookEdit",
-    "PushNotification",
-    "RemoteTrigger",
-    "SendMessage",
-    "TaskStop",
-    "WebFetch",
-    "WebSearch",
-];
+use signal_flow::{HarnessKind, LeaveOut, LeaveOutRefusal};
 
 /// Which harness a leave-out belongs to: the one a Start may take it on,
 /// and the one a configured default naming it must be keyed by.
@@ -111,25 +92,6 @@ impl RendersLeanStart for LeanStart {
             arguments.push("--disallowedTools".into());
             arguments.push(tools.join(","));
         }
-        if self.harness_kind == HarnessKind::Claude
-            && let ToolSet::Explicit(tools) = &self.tool_set
-        {
-            arguments.push("--tools".into());
-            arguments.push(
-                tools
-                    .iter()
-                    .filter(|tool| {
-                        self.artifact_tools_allowed
-                            || !matches!(
-                                tool.as_str(),
-                                "Artifact" | "ArtifactComments" | "ArtifactData"
-                            )
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-        }
         arguments
     }
 
@@ -167,36 +129,13 @@ impl RendersLeanStart for LeanStart {
     }
 
     fn disallowed_tools(&self) -> Vec<String> {
-        let mut tools: Vec<String> = Vec::new();
-        for leave_out in &self.leave_outs {
-            let named: &[&str] = match leave_out {
-                LeaveOut::BashTool => &["Bash"],
-                LeaveOut::ToolSearch => &["ToolSearch"],
-                LeaveOut::AgentTool => &["Agent"],
-                LeaveOut::FileTools => &["Read", "Edit", "Write"],
-                LeaveOut::WorkflowTool => &["Workflow"],
-                LeaveOut::ScheduleWakeupTool => &["ScheduleWakeup"],
-                LeaveOut::ReportFindingsTool => &["ReportFindings"],
-                LeaveOut::ListAgentsTool => &["ListAgents"],
-                LeaveOut::WebTools => &["WebFetch", "WebSearch"],
-                LeaveOut::DeferredTools => &CLAUDE_DEFERRED_TOOLS,
-                LeaveOut::SkillTool => &["Skill"],
-                _ => &[],
-            };
-            for tool in named {
-                if !tools.iter().any(|known| known == tool) {
-                    tools.push((*tool).to_owned());
-                }
-            }
-        }
         if self.harness_kind == HarnessKind::Claude && !self.artifact_tools_allowed {
-            for tool in ["Artifact", "ArtifactComments", "ArtifactData"] {
-                if !tools.iter().any(|known| known == tool) {
-                    tools.push(tool.to_owned());
-                }
-            }
+            ["Artifact", "ArtifactComments", "ArtifactData"]
+                .map(str::to_owned)
+                .to_vec()
+        } else {
+            Vec::new()
         }
-        tools
     }
 
     fn attribution_off(&self) -> bool {
@@ -224,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_empty_claude_tool_set_is_passed_to_harness() {
+    fn claude_flow_keeps_every_tool_but_artifact() {
         let launch = LeanStart {
             harness_kind: HarnessKind::Claude,
             leave_outs: Vec::new(),
@@ -233,11 +172,13 @@ mod tests {
             artifact_tools_allowed: false,
         };
         assert!(launch.refusal().is_none());
-        assert!(
-            launch
-                .arguments()
-                .windows(2)
-                .any(|args| args == ["--tools", ""])
+        assert_eq!(
+            launch.arguments(),
+            [
+                "--strict-mcp-config",
+                "--disallowedTools",
+                "Artifact,ArtifactComments,ArtifactData"
+            ]
         );
         assert!(
             launch
@@ -293,16 +234,6 @@ mod tests {
             lean(HarnessKind::Claude, &[LeaveOut::BashTool]).refusal(),
             None
         );
-        assert!(
-            lean(HarnessKind::Claude, &[LeaveOut::BashTool])
-                .disallowed_tools()
-                .contains(&"Bash".to_owned())
-        );
-        assert!(
-            lean(HarnessKind::Claude, &[LeaveOut::ToolSearch])
-                .disallowed_tools()
-                .contains(&"ToolSearch".to_owned())
-        );
         assert_eq!(
             lean(HarnessKind::Claude, &[LeaveOut::SkillTool]).refusal(),
             Some(LeaveOutRefusal::NeedsWorkflowLeftOut(LeaveOut::SkillTool))
@@ -348,13 +279,10 @@ mod tests {
         assert_eq!(start.refusal(), None);
         let arguments = start.arguments();
         assert!(arguments.contains(&"--disable-slash-commands".to_owned()));
-        let tools = &arguments[arguments
-            .iter()
-            .position(|argument| argument == "--disallowedTools")
-            .expect("disallowed tools")
-            + 1];
-        assert!(tools.starts_with("Skill,Workflow,WebFetch,WebSearch,CronCreate"));
-        assert_eq!(tools.matches("WebFetch").count(), 1, "each tool once");
+        assert!(arguments.ends_with(&[
+            "--disallowedTools".into(),
+            "Artifact,ArtifactComments,ArtifactData".into()
+        ]));
         assert_eq!(
             start.environment(),
             [

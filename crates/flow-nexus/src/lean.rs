@@ -150,6 +150,14 @@ impl RendersLeanStart for LeanStart {
                 }
             }
         }
+        // Claude starts with its complete default tool set. Artifact is the
+        // sole exception for every Flow seat; leave-outs add to that policy
+        // rather than replacing it with an allow-list.
+        if self.harness_kind == HarnessKind::Claude
+            && !tools.iter().any(|known| known == "Artifact")
+        {
+            tools.push("Artifact".to_owned());
+        }
         tools
     }
 
@@ -246,6 +254,7 @@ mod tests {
             + 1];
         assert!(tools.starts_with("Skill,Workflow,WebFetch,WebSearch,CronCreate"));
         assert_eq!(tools.matches("WebFetch").count(), 1, "each tool once");
+        assert!(tools.ends_with(",Artifact"));
         assert_eq!(
             start.environment(),
             [
@@ -256,7 +265,9 @@ mod tests {
             ]
         );
         assert!(start.attribution_off() && start.skill_listing_off());
-        assert!(lean(HarnessKind::Claude, &[]).arguments().is_empty());
+        let default = lean(HarnessKind::Claude, &[]).arguments();
+        assert_eq!(default, ["--disallowedTools", "Artifact"]);
+        assert!(default.iter().all(|argument| argument != "--tools"));
     }
 
     #[test]
@@ -276,5 +287,9 @@ mod tests {
             ]
         );
         assert!(start.environment().is_empty());
+        assert!(start
+            .arguments()
+            .iter()
+            .all(|argument| argument != "Artifact"));
     }
 }

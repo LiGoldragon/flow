@@ -185,7 +185,7 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
     use super::waking::{CLAUDE_SEAT, claude_agent, claude_seat, metaflow};
     use super::{ControlsHerdrSnapshot, MarkedProcess};
     use crate::store::metaflow::SeedsMetaflow;
-    use crate::store::{ReadsFlowRows, RegistersExistingFlow};
+    use crate::store::{ReadsFlowRows, RegistersFlowIdentity};
     let fixture = NexusFixture::new();
     claude_seat(&fixture, 100);
     let mut role = super::mind_live();

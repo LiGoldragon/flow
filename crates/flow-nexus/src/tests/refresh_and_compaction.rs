@@ -6,16 +6,20 @@ use super::waking::{
     CLAUDE_SEAT, append_main_rows, claude_agent, claude_seat, claude_stop, claude_transcript,
     end_turn,
 };
-use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
+use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture, StagedLaunch};
 use crate::compacting::{CodexContextSignal, WatchesCompactions, WritesTranscriptTime};
+use crate::composition::{ComposesLaunch, HarnessedProfile};
 use crate::reporting::RecordsReports;
 use crate::store::compaction::{Investigation, RecordsCompactions};
 use crate::store::context::{JudgesThreshold, RecordsContextSize, ThresholdStanding};
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
-use crate::store::{ManagesMetaflowState, ReadsFlowRows, SeedsRole};
+use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+use crate::store::{ManagesMetaflowState, NamesConfiguredModel, ReadsFlowRows, SeedsRole};
 use crate::waking::{AtStop, SleepsAndWakesSeats};
 use flow_ethos::State;
-use meta_signal_flow::{ConfigurationChange, ConfigureThreshold};
+use meta_signal_flow::{
+    ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold,
+};
 use signal_flow::{
     Address, Aspect, Caller, Delivery, FlowLifecycle, Layer, Message, Metaflow, PowerLevel,
     Request, SentBy,
@@ -80,9 +84,56 @@ fn seat_metaflow_now(fixture: &NexusFixture) -> Metaflow {
 }
 
 fn closed(fixture: &NexusFixture) -> bool {
-    fs::read_to_string(fixture.directory.path().join("herdr-operations.log"))
-        .unwrap_or_default()
-        .contains("pane close w1:p3")
+    ["herdr-operations.log", "herdr-calls.log"]
+        .into_iter()
+        .any(|name| {
+            fs::read_to_string(fixture.directory.path().join(name))
+                .unwrap_or_default()
+                .contains("pane close w1:p3")
+        })
+}
+
+fn declare_refresh_successor(fixture: &NexusFixture) {
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            address: seat_address(),
+            system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+            user_modules: vec!["operation-main-flow".into()],
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: signal_flow::ToolSet::Default,
+        }]))
+        .expect("metaflow declared");
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Models(vec![ConfigureModel {
+            layer: Layer::Secondary,
+            aspect: Aspect::Mind,
+            native: "fixture-model".into(),
+        }]))
+        .expect("successor model configured");
+}
+
+fn staged_refresh_successor(fixture: &NexusFixture) -> StagedLaunch {
+    let mut successor = fixture.staged_launch("refresh-c1a0de", Some(CLAUDE_SEAT));
+    successor.profile.address = seat_address();
+    successor.profile.model_name = "fixture-model".into();
+    successor.profile.herdr_session_name = "default".into();
+    successor.profile.instruction_prompt.clear();
+    successor.composed = fixture
+        .nexus
+        .composer
+        .compose(
+            HarnessedProfile {
+                harness_kind: signal_flow::HarnessKind::Codex,
+                launch_profile: successor.profile.clone(),
+            },
+            Vec::new(),
+        )
+        .expect("refresh successor composes");
+    successor
 }
 
 /// The threshold belongs to the model: a flow's last measured context is
@@ -129,17 +180,11 @@ fn a_flow_s_context_is_judged_against_its_model_s_threshold() {
     );
 }
 
-/// A seat that rests past its model's threshold is told nothing and handed
-/// nothing: its pane is closed and its flow recorded Stopped, its metaflow
-/// Asleep with the flow in Past, in the same event, and the request queued
-/// for it stays queued for the metaflow's next flow.
+/// Work already queued at refresh stays durable while the successor starts;
+/// the predecessor receives none of it.
 #[test]
 fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_flow() {
     let fixture = NexusFixture::new();
-    fixture.accept_pane_operations(
-        vec![claude_agent(&fixture)],
-        PromptFixture::Prompted("w1:p3"),
-    );
     claude_seat(&fixture, 230_000);
     append_main_rows(&fixture, &[end_turn("last-turn")]);
     seat_refreshing_at(&fixture, 200_000);
@@ -147,6 +192,32 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
         &fixture,
         vec![Request::Order("Held for the next flow.".into())],
     );
+    let mut successor = staged_refresh_successor(&fixture);
+    successor.stage_to_ambiguity(&fixture.nexus);
+    successor.write_receipt();
+    declare_refresh_successor(&fixture);
+    seat_metaflow(
+        &fixture,
+        vec![Request::Order("Held for the next flow.".into())],
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow_declaration(&seat_address())
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .configured_model(&seat_address())
+            .unwrap()
+            .as_deref(),
+        Some("fixture-model")
+    );
+    fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);
 
     fixture
         .nexus
@@ -156,10 +227,10 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
         Some(230_000)
     );
 
-    assert!(closed(&fixture), "the seat's pane is closed");
+    assert!(closed(&fixture), "the predecessor's pane is closed");
     assert!(
         fixture.typed().is_none(),
-        "nothing is typed into a seat past its threshold"
+        "nothing is typed into the predecessor past its threshold"
     );
     let node = fixture
         .nexus
@@ -169,7 +240,7 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
         .expect("the flow's row is kept");
     assert_eq!(node.flow_lifecycle, FlowLifecycle::Stopped);
     let metaflow = seat_metaflow_now(&fixture);
-    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(metaflow.state, State::Awake("908786".into()));
     assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
     assert_eq!(
         metaflow
@@ -186,21 +257,30 @@ fn a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_fl
     );
 }
 
-/// An idle seat past its threshold is replaced as it goes idle, with
-/// nothing queued: it is reaped, and its metaflow sleeps until work wakes
-/// its next flow. Below the threshold the same seat keeps its pane.
+/// An idle seat past its threshold starts and confirms its successor even
+/// with nothing queued. Only then is the predecessor stopped and closed.
+/// Below the threshold the same seat keeps its pane.
 #[test]
 fn an_idle_seat_is_refreshed_only_past_its_threshold() {
     for (tokens, refreshed) in [(199_999, false), (200_000, true)] {
         let fixture = NexusFixture::new();
-        fixture.accept_pane_operations(
-            vec![claude_agent(&fixture)],
-            PromptFixture::Prompted("w1:p3"),
-        );
         claude_seat(&fixture, tokens);
         append_main_rows(&fixture, &[end_turn("last-turn")]);
         seat_refreshing_at(&fixture, 200_000);
         seat_metaflow(&fixture, vec![]);
+        if refreshed {
+            let mut successor = staged_refresh_successor(&fixture);
+            successor.stage_to_ambiguity(&fixture.nexus);
+            successor.write_receipt();
+            declare_refresh_successor(&fixture);
+            seat_metaflow(&fixture, vec![]);
+            fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);
+        } else {
+            fixture.accept_pane_operations(
+                vec![claude_agent(&fixture)],
+                PromptFixture::Prompted("w1:p3"),
+            );
+        }
         fixture
             .nexus
             .store
@@ -209,7 +289,20 @@ fn an_idle_seat_is_refreshed_only_past_its_threshold() {
         let at_stop = fixture.nexus.settle_stopped(CLAUDE_SEAT);
         if refreshed {
             assert_eq!(at_stop, AtStop::Refreshed(seat_address()));
-            assert_eq!(seat_metaflow_now(&fixture).state, State::Asleep);
+            assert_eq!(
+                seat_metaflow_now(&fixture).state,
+                State::Awake("908786".into())
+            );
+            assert_eq!(
+                fixture
+                    .nexus
+                    .store
+                    .flow_node(CLAUDE_SEAT)
+                    .unwrap()
+                    .unwrap()
+                    .flow_lifecycle,
+                FlowLifecycle::Stopped
+            );
         } else {
             assert_eq!(at_stop, AtStop::Idle);
             assert_eq!(
@@ -219,6 +312,109 @@ fn an_idle_seat_is_refreshed_only_past_its_threshold() {
         }
         assert_eq!(closed(&fixture), refreshed, "{tokens}");
     }
+}
+
+#[test]
+fn a_refused_refresh_launch_preserves_the_predecessor() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 200_000);
+    append_main_rows(&fixture, &[end_turn("last-turn")]);
+    seat_refreshing_at(&fixture, 200_000);
+    seat_metaflow(&fixture, vec![]);
+    // The declared module is absent from the verified fixture context, so
+    // the successor launch is refused before any native seat starts.
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Metaflows(vec![ConfigureMetaflow {
+            address: seat_address(),
+            system_modules: vec!["missing-module".into()],
+            user_modules: Vec::new(),
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: signal_flow::ToolSet::Default,
+        }]))
+        .unwrap();
+    fixture
+        .nexus
+        .store
+        .configure_change(ConfigurationChange::Models(vec![ConfigureModel {
+            layer: Layer::Secondary,
+            aspect: Aspect::Mind,
+            native: CLAUDE_MODEL.into(),
+        }]))
+        .unwrap();
+
+    assert!(matches!(
+        fixture.nexus.settle_stopped(CLAUDE_SEAT),
+        AtStop::Kept(crate::waking::KeptAtStop::RefreshLaunchRefused(_))
+    ));
+    assert!(!closed(&fixture));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .flow_node(CLAUDE_SEAT)
+            .unwrap()
+            .unwrap()
+            .flow_lifecycle,
+        FlowLifecycle::Active
+    );
+    assert_eq!(
+        seat_metaflow_now(&fixture).state,
+        State::Awake(CLAUDE_SEAT.into())
+    );
+}
+
+#[test]
+fn startup_recovery_resumes_one_refresh_and_repeated_stop_is_idempotent() {
+    let fixture = NexusFixture::new();
+    claude_seat(&fixture, 200_000);
+    append_main_rows(&fixture, &[end_turn("last-turn")]);
+    seat_refreshing_at(&fixture, 200_000);
+    seat_metaflow(&fixture, vec![]);
+    let mut successor = staged_refresh_successor(&fixture);
+    successor.reserve(&fixture.nexus);
+    successor.record_native_intent(&fixture.nexus);
+    successor.bind(&fixture.nexus);
+    successor.register_and_acknowledge(&fixture.nexus);
+    declare_refresh_successor(&fixture);
+    seat_metaflow(&fixture, vec![]);
+    fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);
+
+    assert!(matches!(
+        fixture.nexus.settle_stopped(CLAUDE_SEAT),
+        AtStop::Kept(crate::waking::KeptAtStop::RefreshLaunchRefused(_))
+    ));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .flow_node(CLAUDE_SEAT)
+            .unwrap()
+            .unwrap()
+            .flow_lifecycle,
+        FlowLifecycle::Active,
+        "an incomplete successor leaves its predecessor intact"
+    );
+
+    successor.record_prompt_intent(&fixture.nexus);
+    successor.record_ambiguity(&fixture.nexus);
+    successor.write_receipt();
+    fixture.nexus.recover_wakes();
+    assert_eq!(
+        seat_metaflow_now(&fixture).state,
+        State::Awake("908786".into())
+    );
+    assert_eq!(
+        fixture.nexus.settle_stopped(CLAUDE_SEAT),
+        AtStop::Kept(crate::waking::KeptAtStop::NotAwake)
+    );
+    let operations = fs::read_to_string(fixture.directory.path().join("herdr-calls.log")).unwrap();
+    assert_eq!(operations.matches("pane close w1:p3").count(), 1);
 }
 
 /// A Codex thread's context is measured from its app-server's token usage,

@@ -324,10 +324,10 @@ pub enum AtStop {
     Idle,
     /// The seat rested with work queued: the oldest request was typed in.
     Drained(QueueEntry),
-    /// The seat was due a refresh and rested: its pane was closed, it was
-    /// recorded Stopped and its metaflow put Asleep, in the same event;
-    /// work queued for the metaflow wakes its next, fresh flow. It is due
-    /// when its last measured context passed its model's refresh threshold.
+    /// The seat was due a refresh and rested: its successor was confirmed,
+    /// then the predecessor was recorded Stopped and its pane closed by the
+    /// replacement transaction. It is due when its last measured context
+    /// passed its model's refresh threshold.
     Refreshed(Address),
     /// The seat stays as it is, for the reason named.
     Kept(KeptAtStop),
@@ -356,11 +356,11 @@ pub enum KeptAtStop {
     ThreadNotResting,
     /// Work is queued and the Drain did not type it.
     DrainRefused(Box<Outcome>),
-    /// The seat is due a refresh and has no Herdr route to close.
-    RefreshUnrouted,
-    /// The seat is due a refresh and its close or its Stopped record was
-    /// refused; it stays due and is taken up at its next rest.
-    RefreshRefused(Box<Outcome>),
+    /// No declared fresh successor can be composed for the seat.
+    RefreshUnplaceable,
+    /// The successor launch or its replacement transaction was refused;
+    /// the predecessor remains the Awake seat.
+    RefreshLaunchRefused(Box<Response>),
 }
 
 /// Why work was not typed into a live flow's pane. Each is logged by name;
@@ -525,10 +525,10 @@ trait WakesInParts {
     /// The body of `settle_stopped`: waits, boundedly and off the dispatch
     /// gate, for Herdr to show the seat resting, then drains it.
     fn settle_rested(&self, flow_id: &str) -> AtStop;
-    /// Ends a seat due a refresh that rests, under the dispatch gate the
-    /// caller holds: its pane is closed under the pane's lease and it is
-    /// recorded Stopped (its metaflow Asleep).
-    fn refresh_at_rest(&self, flow_id: &str, node: &FlowNode, address: Address) -> AtStop;
+    /// Replaces a threshold-due resting seat. The caller has released the
+    /// dispatch gate but retains the address's waking lease: the successor
+    /// is confirmed before Replace stops and closes the predecessor.
+    fn refresh_at_rest(&self, flow_id: &str, metaflow: &Metaflow) -> AtStop;
 }
 
 pub(crate) trait ReadsClaudeDelivery {
@@ -989,10 +989,9 @@ impl SleepsAndWakesSeats for RunningNexus {
             AtStop::Kept(reason) => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
             }
-            // The refreshed seat's work wakes the fresh flow, once the gate
-            // the refresh ran under is given back; with nothing queued the
-            // metaflow sleeps until an Order, a Question or the living's
-            // words.
+            // Once replacement released the address lease, queued work is
+            // drained into the confirmed successor. An empty queue changes
+            // nothing: the successor is already Awake.
             AtStop::Refreshed(address) => {
                 eprintln!("flow-nexus: flow {flow_id} refreshed at its rest");
                 self.wake_due(address.clone());
@@ -1143,6 +1142,36 @@ impl SleepsAndWakesSeats for RunningNexus {
 
     fn recover_wakes(&self) {
         self.recover_deliveries();
+        // A refresh is owed independently of queued work. Retake a
+        // threshold-due seat after a Nexus restart: settle_stopped verifies
+        // that it is still Awake and resting before resuming the same,
+        // deterministic replacement.
+        let refreshes = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match self.store.list_metaflows() {
+                Ok(metaflows) => metaflows
+                    .into_iter()
+                    .filter_map(|metaflow| match metaflow.state {
+                        flow_ethos::State::Awake(flow_id)
+                            if matches!(self.store.past_threshold(&flow_id), Ok(true)) =>
+                        {
+                            Some(flow_id)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                Err(_) => {
+                    eprintln!("flow-nexus: metaflows unreadable; no refresh recovered");
+                    Vec::new()
+                }
+            }
+        };
+        for flow_id in refreshes {
+            self.settle_stopped(&flow_id);
+        }
         let due = {
             let _turn = self
                 .dispatch_gate
@@ -1702,22 +1731,42 @@ impl WakesInParts for RunningNexus {
         Ok(())
     }
 
-    fn refresh_at_rest(&self, flow_id: &str, node: &FlowNode, address: Address) -> AtStop {
-        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
-            return AtStop::Kept(KeptAtStop::RefreshUnrouted);
+    fn refresh_at_rest(&self, flow_id: &str, metaflow: &Metaflow) -> AtStop {
+        let mut successor_lineage = metaflow.clone();
+        successor_lineage.past.push(flow_id.to_owned());
+        let WakePlan::Fresh(fresh) = self.wake_plan(&successor_lineage) else {
+            return AtStop::Kept(KeptAtStop::RefreshUnplaceable);
         };
-        let closed = {
-            let _lease = self.pane_leases.hold(route);
-            self.perform(Operation::Close(node.clone()))
+        let model = match self.store.configured_model(&metaflow.address) {
+            Ok(Some(model)) => model,
+            Ok(None) | Err(_) => return AtStop::Kept(KeptAtStop::RefreshUnplaceable),
         };
-        if closed != Outcome::Closed {
-            return AtStop::Kept(KeptAtStop::RefreshRefused(Box::new(closed)));
+        let seat = FreshSeat {
+            address: metaflow.address.clone(),
+            launch_request_id: format!("refresh-{flow_id}"),
+            model_name: model,
+            effort: <Self as crate::sending::ChoosesEffort>::effort_of(&metaflow.address).into(),
+            herdr_session_name: fresh.herdr_session_name,
+            system_modules: fresh.system_modules,
+            user_modules: fresh.user_modules,
+            leave_outs_option: fresh.leave_outs_option,
+            flow_kind: fresh.flow_kind,
+            tool_set: fresh.tool_set,
+            prompt: String::new(),
+        };
+        let mut profile = seat.fresh_profile();
+        profile.flow_id_option = Some(flow_id.to_owned());
+        let response = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.replace(profile, Origin::Unbound)
+        };
+        match response {
+            Response::Replaced(_) => AtStop::Refreshed(metaflow.address.clone()),
+            response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
         }
-        let recorded = self.perform(Operation::Record(Record_Data::Stopped(flow_id.to_owned())));
-        if recorded != Outcome::Recorded {
-            return AtStop::Kept(KeptAtStop::RefreshRefused(Box::new(recorded)));
-        }
-        AtStop::Refreshed(address)
     }
 
     fn settle_rested(&self, flow_id: &str) -> AtStop {
@@ -1740,7 +1789,7 @@ impl WakesInParts for RunningNexus {
                 self.herdr.rested(route);
             }
         }
-        let _turn = self
+        let turn = self
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1805,7 +1854,17 @@ impl WakesInParts for RunningNexus {
             }
         }
         if refresh_due {
-            return self.refresh_at_rest(flow_id, &node, address);
+            let Some(refreshing) = self.waking.hold(&address) else {
+                return AtStop::Kept(KeptAtStop::Waking);
+            };
+            // Replace takes the dispatch gate around its own durable launch
+            // and reaping steps. The address lease prevents a concurrent
+            // wake or drain while the gate is released.
+            drop(turn);
+            let refreshed = self.refresh_at_rest(flow_id, &metaflow);
+            drop(refreshing);
+            self.wake_deferred();
+            return refreshed;
         }
         if !metaflow.queue.is_empty() {
             return match self.perform(Operation::Drain(address)) {

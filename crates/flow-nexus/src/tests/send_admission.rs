@@ -423,7 +423,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
     let fixture = NexusFixture::new();
     let target = Address {
         aspect: Aspect::Mind,
-        topic: "new-configured-direct".into(),
+        topic: "newConfiguredDirect".into(),
         layer: Layer::Secondary,
     };
     assert!(fixture.nexus.direct_send_lease(&target).is_err());

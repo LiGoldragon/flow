@@ -260,6 +260,9 @@ trait RunsConfigurationStartup {
                 Err(StoreError::LeaveOutNotForHarness) => {
                     MetaResponse::ConfigureRejected(ConfigureRejection::LeaveOutNotForHarness)
                 }
+                Err(StoreError::TopicRefused(topic)) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::TopicRefused(topic))
+                }
                 Err(error) => {
                     MetaResponse::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string()))
                 }

@@ -62,7 +62,7 @@ use context::{CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
 use generated::operation::{Operation, Outcome, Record_Data};
 use generated::starter::DerivesOrigin;
-use launching::{LaunchesFlows, ObservesLaunch};
+use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch};
 use observe_agent::ObservesAgent;
 use observe_sends::ObservesLogicalSends;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
@@ -72,7 +72,7 @@ use send_tool::ServesLaunchCalls;
 use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRouteSelection, ObserveSelection, Origin,
-    Process, Query, Response, RestartRejection,
+    Process, Query, Response, RestartRejection, StartRejection,
 };
 use std::{
     fs,
@@ -150,10 +150,27 @@ impl Dispatches for RunningNexus {
                 if let Some(settled) = self.settled(&profile, &origin) {
                     return settled;
                 }
+                // A caller's new launch is admitted before anything of it is
+                // written: a camelCase topic, and a Primary's Secondary Awake.
+                match self.admission_refusal(&profile) {
+                    Ok(None) => {}
+                    Ok(Some(rejection)) => return Response::StartRejected(rejection),
+                    Err(_) => {
+                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                    }
+                }
                 let response = self.start(profile, origin);
                 self.settle(&launch_request_id, response)
             }
-            Query::Replace(profile) => self.replace(profile, origin),
+            Query::Replace(profile) => match self.admission_refusal(&profile) {
+                Ok(None) => self.replace(profile, origin),
+                Ok(Some(rejection)) => Response::ReplaceRejected(
+                    signal_flow::ReplaceRejection::LaunchRefused(rejection),
+                ),
+                Err(_) => Response::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
+                    StartRejection::LaunchPersistenceRefused,
+                )),
+            },
             // A direct dispatch has no calling process: nothing sends or
             // binds from it, and its Launch starts as an Unbound one would.
             Query::DeliverAll(_)
@@ -323,6 +340,11 @@ impl Dispatches for RunningNexus {
                     Err(store::StoreError::LeaveOutNotForHarness) => {
                         meta_signal_flow::Response::ConfigureRejected(
                             meta_signal_flow::ConfigureRejection::LeaveOutNotForHarness,
+                        )
+                    }
+                    Err(store::StoreError::TopicRefused(topic)) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::TopicRefused(topic),
                         )
                     }
                     Err(error) => meta_signal_flow::Response::Refused(
@@ -3855,10 +3877,11 @@ mod tests {
                 user_modules: vec!["operation-main-flow".into()],
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
-                // Each staged launch is the seat of its own Address.
+                // Each staged launch is the seat of its own Address, its
+                // topic the request id with its hyphens taken out.
                 address: signal_flow::Address {
                     aspect: Aspect::Field,
-                    topic: launch_request_id.into(),
+                    topic: launch_request_id.replace('-', ""),
                     layer: signal_flow::Layer::Secondary,
                 },
                 model_name: "fixture-model".into(),

@@ -89,6 +89,79 @@ impl InterpretsLaunchObservations for RunningNexus {
     }
 }
 
+/// A topic as written: an uncapitalized camelCase identifier, an ASCII
+/// lowercase letter then ASCII letters and digits. It is kept exactly as
+/// written; its capitals are never lowered.
+pub(crate) trait NamesTopic {
+    fn is_camel_case_topic(&self) -> bool;
+}
+
+impl NamesTopic for str {
+    fn is_camel_case_topic(&self) -> bool {
+        let mut characters = self.chars();
+        characters
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase())
+            && characters.all(|rest| rest.is_ascii_alphanumeric())
+    }
+}
+
+/// What a launch a caller asks for must be before anything of it is
+/// written. These are checks of input: a wake or a successor Flow starts
+/// itself continues a metaflow already admitted, and a request already
+/// attempted is resumed as it was.
+pub(crate) trait AdmitsLaunch {
+    /// The refusal of a new launch whose topic is not camelCase, or of a
+    /// Primary whose Secondary of the same aspect and topic is not Awake
+    /// as a live flow (short term, a Primary is not started without its
+    /// Secondary). A Primary that replaces a flow, or that its metaflow is
+    /// owed as a successor, continues one already admitted.
+    fn admission_refusal(
+        &self,
+        profile: &LaunchProfile,
+    ) -> Result<Option<StartRejection>, crate::store::StoreError>;
+}
+
+impl AdmitsLaunch for RunningNexus {
+    fn admission_refusal(
+        &self,
+        profile: &LaunchProfile,
+    ) -> Result<Option<StartRejection>, crate::store::StoreError> {
+        use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
+        use crate::store::successor::OwesSuccessors;
+        if self
+            .store
+            .launch_attempt(&profile.launch_request_id)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let address = &profile.address;
+        if !address.topic.as_str().is_camel_case_topic() {
+            return Ok(Some(StartRejection::TopicRefused(address.topic.clone())));
+        }
+        if address.layer != signal_flow::Layer::Primary
+            || profile.flow_id_option.is_some()
+            || self.store.successor_intent(address)?.is_some()
+        {
+            return Ok(None);
+        }
+        let secondary = signal_flow::Address {
+            aspect: address.aspect.clone(),
+            topic: address.topic.clone(),
+            layer: signal_flow::Layer::Secondary,
+        };
+        let awake = match self.store.metaflow(&secondary)? {
+            Some(metaflow) => match metaflow.state {
+                flow_ethos::State::Awake(flow_id) => self.store.flow_is_live(&flow_id)?,
+                flow_ethos::State::Asleep => false,
+            },
+            None => false,
+        };
+        Ok((!awake).then_some(StartRejection::NoSecondary))
+    }
+}
+
 /// The launch verbs of the running Nexus. `start` is the one Start path;
 /// `settle` records what a launch came to and, for a replacement, stops and
 /// reaps the predecessor before the successor becomes routable.

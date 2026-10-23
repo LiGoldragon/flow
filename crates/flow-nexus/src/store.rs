@@ -2919,6 +2919,8 @@ pub enum StoreError {
     CodexModelsOverlap,
     #[error("a leave-out default names a leave-out of another harness than its own")]
     LeaveOutNotForHarness,
+    #[error("the topic {0} is not an uncapitalized camelCase identifier")]
+    TopicRefused(String),
     #[error("the leave-out default of {entry} cannot be carried under one harness: {reason:?}")]
     LeaveOutUpgrade {
         entry: String,
@@ -7652,6 +7654,25 @@ pub(crate) trait ReadsFlowMemory {
         tables: &MetaConfigurationTables,
         change: ConfigurationChange,
     ) -> Result<ConfigureOutcome, StoreError> {
+        use crate::launching::NamesTopic;
+        // Every Address a declaration names has a camelCase topic, checked
+        // before anything is written.
+        let addresses: Vec<&Address> = match &change {
+            ConfigurationChange::LeaveOuts(entries) => {
+                entries.iter().map(|entry| &entry.address).collect()
+            }
+            ConfigurationChange::Metaflows(entries) => {
+                entries.iter().map(|entry| &entry.address).collect()
+            }
+            ConfigurationChange::Investigation(address) => vec![address],
+            _ => Vec::new(),
+        };
+        if let Some(refused) = addresses
+            .into_iter()
+            .find(|address| !address.topic.as_str().is_camel_case_topic())
+        {
+            return Err(StoreError::TopicRefused(refused.topic.clone()));
+        }
         match change {
             ConfigurationChange::Nexus(nexus) => {
                 if nexus

@@ -35,7 +35,8 @@ pub(super) fn seat(
         launch_request_id: launch_request_id.into(),
         address: Address {
             aspect,
-            topic: launch_request_id.into(),
+            // A topic is camelCase: the request id with its hyphens taken out.
+            topic: launch_request_id.replace('-', ""),
             layer,
         },
         model_name: model.into(),

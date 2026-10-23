@@ -111,11 +111,13 @@ impl RendersLeanStart for LeanStart {
             arguments.push("--disallowedTools".into());
             arguments.push(tools.join(","));
         }
-        if self.harness_kind == HarnessKind::Claude
-            && let ToolSet::Explicit(tools) = &self.tool_set
-        {
-            arguments.push("--tools".into());
-            arguments.push(
+        // A simplified flow is made for judgment alone and has no regular
+        // tool: whatever tool set it names, it starts with an explicit
+        // empty one. Any other flow names its tools only when it declares
+        // them.
+        let tools = match (&self.flow_kind, &self.tool_set) {
+            (signal_flow::FlowKind::Simplified, _) => Some(Vec::new()),
+            (_, ToolSet::Explicit(tools)) => Some(
                 tools
                     .iter()
                     .filter(|tool| {
@@ -126,9 +128,15 @@ impl RendersLeanStart for LeanStart {
                             )
                     })
                     .cloned()
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
+                    .collect::<Vec<_>>(),
+            ),
+            (_, ToolSet::Default) => None,
+        };
+        if self.harness_kind == HarnessKind::Claude
+            && let Some(tools) = tools
+        {
+            arguments.push("--tools".into());
+            arguments.push(tools.join(","));
         }
         arguments
     }
@@ -244,6 +252,42 @@ mod tests {
                 .environment()
                 .contains(&"CLAUDE_CODE_ARTIFACT=0".into())
         );
+    }
+
+    /// A simplified flow has no regular tool: it starts with an explicit
+    /// empty tool set whatever tool set its declaration names, while a
+    /// regular flow with the default set names none.
+    #[test]
+    fn a_simplified_flow_passes_an_explicit_empty_tool_set_whatever_it_names() {
+        for tool_set in [
+            ToolSet::Default,
+            ToolSet::Explicit(Vec::new()),
+            ToolSet::Explicit(vec!["Bash".into(), "Read".into()]),
+        ] {
+            let launch = LeanStart {
+                harness_kind: HarnessKind::Claude,
+                leave_outs: Vec::new(),
+                flow_kind: signal_flow::FlowKind::Simplified,
+                tool_set: tool_set.clone(),
+                artifact_tools_allowed: false,
+            };
+            let arguments = launch.arguments();
+            let named = arguments
+                .windows(2)
+                .filter(|pair| pair[0] == "--tools")
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(named, [String::new()], "{tool_set:?}: {arguments:?}");
+            assert!(arguments.contains(&"--strict-mcp-config".to_owned()));
+        }
+        let regular = LeanStart {
+            harness_kind: HarnessKind::Claude,
+            leave_outs: Vec::new(),
+            flow_kind: signal_flow::FlowKind::Regular,
+            tool_set: ToolSet::Default,
+            artifact_tools_allowed: false,
+        };
+        assert!(!regular.arguments().contains(&"--tools".to_owned()));
     }
 
     #[test]

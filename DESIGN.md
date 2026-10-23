@@ -437,10 +437,17 @@ letters, digits and hyphens; any other model is not composed. A seat runs
 the model configured for its Address's layer and aspect (`Models` holds one
 per Layer and Aspect): a Start or Replace naming another is refused
 `ModelRefused` before the Nexus writes, claims, composes or opens anything,
-and a fresh wake takes that model. Short term a Primary is not started
-without its Secondary: a Start of a Primary is refused `NoSecondary`, at the
-same point, unless a metaflow is recorded, Awake or Asleep, at the Secondary
-of its aspect and topic, so a recorded Secondary is one that has started. A metaflow is never ended:
+and a fresh wake takes that model. A launch a caller asks for (Start, Replace,
+Launch) is admitted before anything of it is written: a topic that is not
+an uncapitalized camelCase identifier is refused `TopicRefused.Topic`,
+carrying the topic as written, never lowered; and, short term, a Primary is
+not started without its Secondary: a Start of a Primary is refused
+`NoSecondary` unless the Secondary of its aspect and topic is Awake as a
+live flow. A Primary that replaces a flow, a successor a Maintained
+metaflow is owed, a wake Flow starts itself, and a request already
+attempted continue a metaflow already admitted. Configure refuses an
+Address with such a topic `ConfigureRejected.TopicRefused`. A simplified
+flow starts with an explicit empty tool set whatever tool set it names. A metaflow is never ended:
 it is Awake or Asleep. No environment variable is laid over the stored values;
 `Configure` is their only way in. The adapter is outside the Signal wire boundary: the
 Codex app-server conversation is WebSocket/JSON-RPC through the configured

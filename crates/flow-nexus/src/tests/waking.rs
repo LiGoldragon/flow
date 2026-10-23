@@ -3482,7 +3482,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
             tool_set: signal_flow::ToolSet::Default,
             address: Address {
                 aspect: Aspect::Field,
-                topic: "send-proof".into(),
+                topic: "sendProof".into(),
                 layer: Layer::Tertiary,
             },
             model_name: "fixture-model".into(),

@@ -141,9 +141,25 @@ impl NexusFixture {
     /// Makes the fixture's interrupt put `restored` back into the composer,
     /// as Claude Code does with the prompt of a turn cancelled before its
     /// first response, and the harness's own retract key take it out.
+    /// `enter` submits what the composer holds, recorded as resubmitted,
+    /// unless `enter_lost` says the key never reaches it.
     fn interrupt_restores(&self, harness: FixtureComposer, restored: &str) {
+        self.interrupt_restores_with(harness, restored, false);
+    }
+
+    fn interrupt_restores_with(&self, harness: FixtureComposer, restored: &str, enter_lost: bool) {
         let held = self.directory.path().join("composer.txt");
+        let resubmitted = self.directory.path().join("resubmitted.txt");
         let log = self.directory.path().join("herdr-operations.log");
+        let on_enter = if enter_lost {
+            ":".to_owned()
+        } else {
+            format!(
+                "if [ -f '{0}' ]; then cat '{0}' >> '{1}'; rm -f '{0}'; fi",
+                held.display(),
+                resubmitted.display()
+            )
+        };
         let body = fs::read_to_string(&self.snapshot_program).expect("Herdr fixture");
         let body = body
             .replacen(
@@ -158,11 +174,12 @@ impl NexusFixture {
             .replacen(
                 "  \"pane close\"|",
                 &format!(
-                    "  \"pane send-keys\") printf '%s\\n' \"$*\" >> '{1}'; case \"$6\" in esc) printf '%s' '{3}' > '{0}' ;; {2}) rm -f '{0}' ;; esac ;;\n  \"pane close\"|",
+                    "  \"pane send-keys\") printf '%s\\n' \"$*\" >> '{1}'; case \"$6\" in esc) printf '%s' '{3}' > '{0}' ;; {2}) rm -f '{0}' ;; enter) {4} ;; esac ;;\n  \"pane close\"|",
                     held.display(),
                     log.display(),
                     harness.empties_on(),
                     restored,
+                    on_enter,
                 ),
                 1,
             );
@@ -170,6 +187,10 @@ impl NexusFixture {
             path: self.snapshot_program.clone(),
         }
         .install(&body);
+    }
+
+    fn resubmitted(&self) -> Option<String> {
+        fs::read_to_string(self.directory.path().join("resubmitted.txt")).ok()
     }
 
     fn composer_holds(&self) -> Option<String> {
@@ -417,18 +438,98 @@ fn a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c() {
     );
 }
 
-/// A second `ctrl+c` into an empty Claude composer quits Claude, so the key
-/// goes in only while the composer is seen holding a letter of Flow's own.
-/// A text that is not a letter is the person's: the HardAbrupt is refused
-/// and nothing is pressed after the interrupt.
+/// A second `ctrl+c` into an empty Claude composer quits Claude, so the
+/// retract key goes in only while the composer is seen holding a letter of
+/// Flow's own. Any other text the interrupt put back into the blank
+/// composer is the prompt of the turn it cancelled (Psyche core Tertiary
+/// 4201a3, 2026-10-23: the living's prompt, submitted at 17:35:55, came
+/// back to the composer when a queued HardAbrupt interrupted it, and every
+/// later letter to the pane was refused). It is submitted again, never
+/// taken out, and the HardAbrupt follows it.
 #[test]
-fn a_draft_claudes_interrupt_put_back_is_never_taken_out() {
+fn a_prompt_claudes_interrupt_put_back_is_submitted_again_and_the_hard_abrupt_follows() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.working_agent(FixtureComposer::Claude)],
         PromptFixture::Prompted("w1:p3"),
     );
-    fixture.interrupt_restores(FixtureComposer::Claude, "half a thought of my own");
+    fixture.interrupt_restores(FixtureComposer::Claude, "why are you not answering me");
+    fixture.register_under(FixtureComposer::Claude);
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                delivery_id: "claude-cancelled".into(),
+                flow_id: "908786".into(),
+                message: hard_abrupt("stop"),
+            })),
+        MetaResponse::Delivered(Delivery {
+            delivery_id: "claude-cancelled".into(),
+            flow_id: "908786".into(),
+            interrupt_witness: InterruptWitness::Observed,
+            delivery_grade: DeliveryGrade::Transported,
+        })
+    );
+    assert_eq!(
+        fixture.key_presses(),
+        ["esc esc", "enter", "enter"],
+        "Claude's interrupt, the cancelled prompt submitted again, then the letter's submit"
+    );
+    assert_eq!(
+        fixture.resubmitted().as_deref(),
+        Some("why are you not answering me")
+    );
+    assert_eq!(fixture.composer_holds(), None, "the pane is free again");
+    assert_eq!(
+        fixture.typed().as_deref(),
+        Some("HardAbrupt.{ m-7f3a2c Owner Text.stop }")
+    );
+}
+
+/// A cancelled prompt that will not submit again stays where the interrupt
+/// put it: it is never deleted, and the letter is refused.
+#[test]
+fn a_cancelled_prompt_that_will_not_submit_is_left_in_place() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.working_agent(FixtureComposer::Claude)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.interrupt_restores_with(FixtureComposer::Claude, "half a thought of my own", true);
+    fixture.register_under(FixtureComposer::Claude);
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                delivery_id: "claude-stuck".into(),
+                flow_id: "908786".into(),
+                message: hard_abrupt("stop"),
+            })),
+        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
+    );
+    assert_eq!(fixture.key_presses(), ["esc esc", "enter"]);
+    assert_eq!(
+        fixture.composer_holds().as_deref(),
+        Some("half a thought of my own")
+    );
+    assert_eq!(fixture.typed(), None);
+}
+
+/// A draft already in the composer is a person's: a HardAbrupt is refused
+/// before any key, so the turn the recipient is in goes on.
+#[test]
+fn a_draft_already_in_claudes_composer_refuses_a_hard_abrupt_before_any_key() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![fixture.working_agent(FixtureComposer::Claude)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.interrupt_restores(FixtureComposer::Claude, "never shown");
+    fs::write(
+        fixture.directory.path().join("composer.txt"),
+        "half a thought of my own",
+    )
+    .expect("fixture draft");
     fixture.register_under(FixtureComposer::Claude);
     assert_eq!(
         fixture
@@ -440,7 +541,7 @@ fn a_draft_claudes_interrupt_put_back_is_never_taken_out() {
             })),
         MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
     );
-    assert_eq!(fixture.key_presses(), ["esc esc"]);
+    assert!(fixture.key_presses().is_empty(), "no interrupt");
     assert_eq!(
         fixture.composer_holds().as_deref(),
         Some("half a thought of my own")
@@ -448,8 +549,11 @@ fn a_draft_claudes_interrupt_put_back_is_never_taken_out() {
     assert_eq!(fixture.typed(), None);
 }
 
+/// A NativeInput carries no letter marker, so a restored text is never
+/// matched against it and retracted; put back into a blank composer, it is
+/// the cancelled prompt and is submitted again.
 #[test]
-fn a_native_input_matching_a_letter_shaped_draft_is_never_retracted() {
+fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retracted() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.working_agent(FixtureComposer::Claude)],
@@ -468,23 +572,23 @@ fn a_native_input_matching_a_letter_shaped_draft_is_never_retracted() {
         }),
     });
 
-    assert_eq!(
+    assert!(matches!(
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                delivery_id: "native-letter-shaped-draft".into(),
+                delivery_id: "native-letter-shaped-prompt".into(),
                 flow_id: "908786".into(),
                 message,
             })),
-        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
-    );
-    assert_eq!(fixture.key_presses(), ["esc esc"]);
-    assert_eq!(fixture.composer_holds().as_deref(), Some(text));
-    assert_eq!(fixture.typed(), None);
+        MetaResponse::Delivered(_)
+    ));
+    assert_eq!(fixture.key_presses(), ["esc esc", "enter", "enter"]);
+    assert_eq!(fixture.resubmitted().as_deref(), Some(text));
+    assert_eq!(fixture.composer_holds(), None);
 }
 
 #[test]
-fn a_draft_an_interrupt_put_back_is_never_taken_out() {
+fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.current_agent()],
@@ -492,20 +596,23 @@ fn a_draft_an_interrupt_put_back_is_never_taken_out() {
     );
     fixture.interrupt_restores(FixtureComposer::Codex, "half a thought of my own");
     fixture.register_under(FixtureComposer::Codex);
-    assert_eq!(
+    assert!(matches!(
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                delivery_id: "hard-draft".into(),
+                delivery_id: "hard-cancelled".into(),
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),
             })),
-        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
-    );
-    assert_eq!(fixture.key_presses(), ["esc"]);
+        MetaResponse::Delivered(_)
+    ));
+    assert_eq!(fixture.key_presses(), ["esc", "enter"]);
     assert_eq!(
-        fixture.composer_holds().as_deref(),
+        fixture.resubmitted().as_deref(),
         Some("half a thought of my own")
     );
-    assert_eq!(fixture.typed(), None);
+    assert_eq!(
+        fixture.typed().as_deref(),
+        Some("HardAbrupt.{ m-7f3a2c Owner Text.stop }")
+    );
 }

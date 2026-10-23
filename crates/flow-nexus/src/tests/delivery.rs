@@ -196,8 +196,12 @@ fn a_draft_in_the_composer_is_never_appended_to() {
     assert_eq!(fixture.typed(), None);
 }
 
+/// A draft in a working recipient's composer refuses a HardAbrupt before
+/// any key: an interrupt would only cancel the turn the recipient is in
+/// (Psyche core Secondary cdbe86, 2026-10-23: each queued HardAbrupt
+/// cancelled the living's newest prompt and was refused all the same).
 #[test]
-fn hard_abrupt_interrupts_before_it_refuses_an_occupied_composer() {
+fn hard_abrupt_refuses_an_occupied_composer_before_any_key() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.current_agent()],
@@ -211,8 +215,8 @@ fn hard_abrupt_interrupts_before_it_refuses_an_occupied_composer() {
     );
     let operations = fixture.operations();
     assert!(
-        operations.starts_with("--session messaging-build pane send-keys w1:p3 esc\n"),
-        "interrupt first: {operations}"
+        !operations.contains("send-keys"),
+        "no interrupt: {operations}"
     );
     assert!(
         !operations.contains("agent prompt"),

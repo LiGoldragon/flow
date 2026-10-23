@@ -1,3 +1,16 @@
+# Flow 0.39.1 (unreleased)
+
+- A HardAbrupt reads the recipient's composer before it presses any key.
+  A draft there refuses it as `ComposerOccupied` with no interrupt, so the
+  recipient's turn goes on; formerly every queued HardAbrupt cancelled the
+  recipient's newest turn and was refused all the same, and its next Send
+  cancelled the next turn. A prompt the interrupt puts back into a composer
+  that was blank is the cancelled turn's own: it is submitted again, never
+  deleted, and the letter follows it. Formerly it held the composer, and
+  every later letter to the pane was refused.
+- Released alone on 0.39.0's contracts as 0.39.2, from the `release-0.39`
+  branch.
+
 # Flow 0.39.0
 
 Pins signal-flow 28.0.0 and meta-signal-flow 37.0.0. Every ordinary and meta

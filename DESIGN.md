@@ -146,7 +146,10 @@ head first), refuses a body carrying a control character or a harness command
 (`delivery::body`), refuses a Blocked recipient and an occupied composer, and
 for `Soft` a recipient that is not Idle or Done. `HardAbrupt` presses the
 profile's interrupt keys when the recipient is Working and records whether it
-was seen leaving Working. Grades are exact: `NotDelivered` (nothing typed),
+was seen leaving Working; the composer is read before any key, so a draft
+refuses it without cancelling the recipient's turn, and a prompt the
+interrupt returns to the blank composer is that turn's own and is submitted
+again before the letter. Grades are exact: `NotDelivered` (nothing typed),
 `Transported` (Herdr took the text for the exact binding), `Presented` (a
 settled agent observed reacting on the exact pane, the route still matching
 afterward) and `Uncertain` (typed, reaction unobserved). Each step is written

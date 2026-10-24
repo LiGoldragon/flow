@@ -212,7 +212,7 @@ produces, and answers it. `StartAmbiguous` is what a seat that never answers
 at all comes to, once the wait's bound has passed.
 
 A metaflow's declaration (`ConfigureMetaflow`) names, beside its modules,
-its `Continuity`, its `Purpose` and the `Records` of the living it rests
+its `Availability`, its `Purpose` and the `Records` of the living it rests
 on. Its purpose is composed ahead of the brief of a Launch, a wake and a
 successor. Its records are stored but not yet composed: Curriculum's
 `StartupSelection` names flows, not record paths.
@@ -354,18 +354,18 @@ answered from its record and queued nothing more; with another digest it is
 datom, `Queued.{ Sender Target }` or `Refused.SendRefusal`, with `success`
 true only when queued.
 
-A metaflow continues as its declaration's `Continuity.[ OnDemand
-Maintained ]` names; a metaflow no declaration names is OnDemand, and a
-declaration archived before Continuity opens Maintained for { Psyche core
+A metaflow is as available as its declaration's `Availability.[ Required
+OnDemand ]` names; a metaflow no declaration names is OnDemand, and a
+declaration archived before Availability opens Required for { Psyche core
 Primary } alone. When a seat's turn ends and it rests with nothing queued,
 an OnDemand seat sleeps: its harness is closed under the pane's lease (a
 Claude seat only once Herdr shows it Idle or Done, so background agents are
 not ended) and its flow recorded Stopped, its metaflow Asleep, its Address
-and the flow's transcript kept. A Maintained seat stays Awake in its pane.
+and the flow's transcript kept. A Required seat stays Awake in its pane.
 A metaflow is Asleep once its flow has ended: slept, its pane closed by the
 living, crashed, or replaced.
 
-A Maintained metaflow always has a flow. When its flow is refreshed, or
+A Required metaflow always has a flow. When its flow is refreshed, or
 ends with its pane gone (recorded Exited, by a Deliver, a drain or an
 Observe that witnesses the pane absent), Flow records a successor intent
 (`flow_nexus_successor_intents`, one per Address), the exit's in the same
@@ -410,7 +410,7 @@ work is queued for a seat whose thread rests, the seat is settled as a Stop
 settles a Claude seat: under the dispatch gate the oldest queued request is
 handed to its thread, sender first, and the thread then holds that work
 until a turn that began after it completes; with nothing queued the seat
-sleeps or stays Awake as its metaflow's Continuity names. A seat
+sleeps or stays Awake as its metaflow's Availability names. A seat
 whose thread is in a turn is never drained, whatever its screen shows, and
 work queued meanwhile waits for the completion. A seat that only holds its
 Address is settled at its confirmation when its thread rests. The state is
@@ -459,7 +459,7 @@ an uncapitalized camelCase identifier is refused `TopicRefused.Topic`,
 carrying the topic as written, never lowered; and, short term, a Primary is
 not started without its Secondary: a Start of a Primary is refused
 `NoSecondary` unless the Secondary of its aspect and topic is Awake as a
-live flow. A Primary that replaces a flow, a successor a Maintained
+live flow. A Primary that replaces a flow, a successor a Required
 metaflow is owed, a wake Flow starts itself, and a request already
 attempted continue a metaflow already admitted. Configure refuses an
 Address with such a topic `ConfigureRejected.TopicRefused`. A simplified
@@ -521,7 +521,7 @@ is measured at each Claude Stop from the transcript, and for Codex from each
 threshold is told nothing and writes no handover; it is given no new message
 (a Drain hands it nothing, a Deliver is refused), so what is queued stays for
 the metaflow's next flow. At its rest it is a seat due a refresh, the same
-predicate a landing sets. A Maintained metaflow, or one holding a request
+predicate a landing sets. A Required metaflow, or one holding a request
 that wakes it, is owed its successor: the intent is recorded, the
 successor is started and confirmed through Replace, remembering its
 predecessor (`Predecessors.1`), and only then is the predecessor recorded

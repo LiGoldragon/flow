@@ -3,12 +3,12 @@
 //! Launch of that Address composes into the system prompt and into the first
 //! user message. A store written before metaflows were declared opens with
 //! the table added and holds none. A declaration archived before it named
-//! its continuity, purpose and records opens Maintained when it declares
+//! its availability, purpose and records opens Required when it declares
 //! { Psyche core Primary } and OnDemand otherwise, with no purpose and no
 //! records.
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
-use meta_signal_flow::{ConfigureMetaflow, Continuity};
+use meta_signal_flow::{Availability, ConfigureMetaflow};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Decision, Engine, EngineRecord, FamilyName, MemoryDefinition, MemoryUpgrades, MemoryVersion,
@@ -46,26 +46,26 @@ impl MemoryDefinition for StoredMetaMetaflowConfiguration {
     }
 }
 
-/// How a declaration archived before Continuity continues: the Address the
-/// living is never left without is Maintained, every other OnDemand.
-pub(crate) trait DefaultsContinuity {
-    fn default_continuity(&self) -> Continuity;
+/// How a declaration archived before Availability continues: the Address the
+/// living is never left without is Required, every other OnDemand.
+pub(crate) trait DefaultsAvailability {
+    fn default_availability(&self) -> Availability;
 }
 
-impl DefaultsContinuity for Address {
-    fn default_continuity(&self) -> Continuity {
-        let maintained = self.aspect == signal_flow::Aspect::Psyche
+impl DefaultsAvailability for Address {
+    fn default_availability(&self) -> Availability {
+        let required = self.aspect == signal_flow::Aspect::Psyche
             && self.topic == "core"
             && self.layer == signal_flow::Layer::Primary;
-        if maintained {
-            Continuity::Maintained
+        if required {
+            Availability::Required
         } else {
-            Continuity::OnDemand
+            Availability::OnDemand
         }
     }
 }
 
-/// The archived declaration before continuity, purpose and records.
+/// The archived declaration before availability, purpose and records.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConfigureMetaflowV2 {
     pub(super) address: Address,
@@ -103,7 +103,7 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV2> for StoredMetaMetaflowConfig
         let previous = previous.metaflow;
         Decision::Ready(Self {
             metaflow: ConfigureMetaflow {
-                continuity: previous.address.default_continuity(),
+                availability: previous.address.default_availability(),
                 address: previous.address,
                 system_modules: previous.system_modules,
                 user_modules: previous.user_modules,
@@ -152,7 +152,7 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV1> for StoredMetaMetaflowConfig
         let previous = previous.metaflow;
         Decision::Ready(Self {
             metaflow: ConfigureMetaflow {
-                continuity: previous.address.default_continuity(),
+                availability: previous.address.default_availability(),
                 address: previous.address,
                 system_modules: previous.system_modules,
                 user_modules: previous.user_modules,
@@ -259,7 +259,7 @@ mod tests {
         ConfigureMetaflowV1, ConfigureMetaflowV2, StoredMetaMetaflowConfiguration,
         StoredMetaMetaflowConfigurationV1, StoredMetaMetaflowConfigurationV2,
     };
-    use meta_signal_flow::Continuity;
+    use meta_signal_flow::Availability;
     use sema_engine::{Decision, UpgradeFrom};
     use signal_flow::{Address, Aspect, FlowKind, Layer, ToolSet};
 
@@ -281,16 +281,16 @@ mod tests {
         assert_eq!(upgraded.metaflow.user_modules, ["vision-book"]);
         assert_eq!(upgraded.metaflow.flow_kind, FlowKind::Regular);
         assert_eq!(upgraded.metaflow.tool_set, ToolSet::Default);
-        assert_eq!(upgraded.metaflow.continuity, Continuity::OnDemand);
+        assert_eq!(upgraded.metaflow.availability, Availability::OnDemand);
     }
 
-    /// A declaration archived before continuity opens Maintained for
+    /// A declaration archived before availability opens Required for
     /// { Psyche core Primary } and OnDemand for every other Address.
     #[test]
-    fn v2_declaration_upgrade_maintains_only_the_psyche_core_primary() {
-        for (layer, continuity) in [
-            (Layer::Primary, Continuity::Maintained),
-            (Layer::Secondary, Continuity::OnDemand),
+    fn v2_declaration_upgrade_requires_only_the_psyche_core_primary() {
+        for (layer, availability) in [
+            (Layer::Primary, Availability::Required),
+            (Layer::Secondary, Availability::OnDemand),
         ] {
             let previous = StoredMetaMetaflowConfigurationV2 {
                 metaflow: ConfigureMetaflowV2 {
@@ -306,7 +306,7 @@ mod tests {
                 },
             };
             let Decision::Ready(upgraded) = StoredMetaMetaflowConfiguration::upgrade_from(previous);
-            assert_eq!(upgraded.metaflow.continuity, continuity);
+            assert_eq!(upgraded.metaflow.availability, availability);
             assert_eq!(upgraded.metaflow.flow_kind, FlowKind::Simplified);
             assert!(upgraded.metaflow.purpose.is_empty());
             assert!(upgraded.metaflow.records.is_empty());

@@ -9,12 +9,12 @@ schema.
   `Custom.[ FlowId … ]`) in place of its remembered-flow list; `Launch` is
   `Launch.{ Address Remembering InstructionPrompt }`. Stored launch
   attempts upgrade v3 to v4; an archived list becomes `Custom` of its flows.
-- A metaflow declaration appends `Continuity.[ OnDemand Maintained ]`,
+- A metaflow declaration appends `Availability.[ Required OnDemand ]`,
   `Purpose` and `Records`. Stored declarations upgrade v2 to v3: { Psyche
-  core Primary } opens Maintained, every other OnDemand, with no purpose
+  core Primary } opens Required, every other OnDemand, with no purpose
   and no records. Initializers supply the new positions.
 - An OnDemand seat whose turn ends with nothing queued closes its harness
-  and sleeps; a Maintained one keeps its pane and is always followed by a
+  and sleeps; a Required one keeps its pane and is always followed by a
   successor when refreshed or ended by an exit. The store gains
   `flow_nexus_successor_intents`.
 - Locks held by a sender whose flow ends are retracted with the end.

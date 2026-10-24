@@ -6299,7 +6299,7 @@ impl RecordsFlowLifecycle for FlowStore {
             return Ok(false);
         }
         flow.lifecycle = FlowLifecycle::Exited;
-        // A Maintained metaflow whose flow went without Flow or an owner
+        // A Required metaflow whose flow went without Flow or an owner
         // ending it is owed a successor, in the same write.
         let owed = match self.address_hold(flow_id)? {
             Some(_) => None,
@@ -6310,8 +6310,8 @@ impl RecordsFlowLifecycle for FlowStore {
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         let commit = match owed {
             Some(metaflow)
-                if successor::ReadsContinuity::continuity(self, &metaflow.address)?
-                    == meta_signal_flow::Continuity::Maintained =>
+                if successor::ReadsAvailability::availability(self, &metaflow.address)?
+                    == meta_signal_flow::Availability::Required =>
             {
                 successor::OwesSuccessors::owing_successor(
                     self,

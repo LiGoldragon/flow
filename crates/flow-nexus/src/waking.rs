@@ -1,7 +1,7 @@
 //! Wake and drain: a metaflow's seat stays in its pane while it runs, and a
 //! seat whose pane is gone wakes fresh.
 //!
-//! A metaflow continues as its declaration's `Continuity` names. When its
+//! A metaflow continues as its declaration's `Availability` names. When its
 //! flow's turn ends, Flow reads whether its seat rests. A Claude seat
 //! reports `Stopped` naming its own native session and transcript; one
 //! whose transcript records its main turn's `end_turn` is ready for work
@@ -12,16 +12,16 @@
 //! request is handed over (`Operation::Drain`). With nothing queued, an
 //! OnDemand seat sleeps: its harness is closed under the pane's lease and
 //! its flow recorded Stopped, its metaflow Asleep, keeping its Address and
-//! the flow's transcript; a Maintained seat stays Awake in its pane. Work
+//! the flow's transcript; a Required seat stays Awake in its pane. Work
 //! queued later for an Awake seat known resting, by the same evidence, is
 //! handed over at once.
 //!
 //! A seat past its model's refresh threshold is replaced at its rest. A
-//! Maintained metaflow, or one holding work that wakes it, is owed its
+//! Required metaflow, or one holding work that wakes it, is owed its
 //! successor: the intent is recorded, the successor is started and
 //! confirmed through Replace, and only then is the predecessor recorded
 //! Stopped and its pane closed, in the replacement's reaping. Any other is
-//! closed and put Asleep, its queue kept for the next flow. A Maintained
+//! closed and put Asleep, its queue kept for the next flow. A Required
 //! metaflow whose flow ends with its pane gone is owed a successor in the
 //! write that records the exit, and woken with no queued request needed.
 //!
@@ -89,13 +89,15 @@ use crate::store::queue_delivery::{
     AbsenceRecord, AccountsQueueDelivery, NativeDeliveryReceipt, NativeHistoryAnchor,
     NativeTranscriptCursor, PrepareQueueDelivery, QueueDeliveryAttempt, QueueDeliveryPhase,
 };
-use crate::store::successor::{OwesSuccessors, ReadsContinuity, SuccessionCause, SuccessorIntent};
+use crate::store::successor::{
+    OwesSuccessors, ReadsAvailability, SuccessionCause, SuccessorIntent,
+};
 use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
 use flow_native::DigestsPrompt;
-use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
+use meta_signal_flow::{AbsenceProof, Availability, Undecided};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
     Layer, Metaflow, NativePrompt, NativeStop, Origin, PowerLevel, QueueEntry, Response,
@@ -332,7 +334,7 @@ pub use crate::generated::starter::FreshContext;
 /// What a flow's Stop did to its seat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtStop {
-    /// A Maintained seat rested with nothing queued: it stays Awake in its
+    /// A Required seat rested with nothing queued: it stays Awake in its
     /// pane.
     Idle,
     /// An OnDemand seat rested with nothing queued: its harness was closed
@@ -342,7 +344,7 @@ pub enum AtStop {
     /// The seat rested with work queued: the oldest request was typed in.
     Drained(QueueEntry),
     /// The seat was due a refresh and rested, its last measured context past
-    /// its model's refresh threshold. A Maintained metaflow, or one holding
+    /// its model's refresh threshold. A Required metaflow, or one holding
     /// work that wakes it, had its successor started and confirmed first,
     /// then the predecessor recorded Stopped and its pane closed in the
     /// replacement's reaping. Any other had its pane closed and was recorded
@@ -1919,8 +1921,8 @@ impl WakesInParts for RunningNexus {
         // A seat past its model's refresh threshold is ended at its rest
         // rather than handed work; it is told nothing and writes no handover.
         let refresh_due = matches!(self.store.past_threshold(flow_id), Ok(true));
-        let continuity = match self.store.continuity(&address) {
-            Ok(continuity) => continuity,
+        let availability = match self.store.availability(&address) {
+            Ok(availability) => availability,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
         // Whether the harness may be closed now: a Claude seat only once
@@ -1969,9 +1971,9 @@ impl WakesInParts for RunningNexus {
                 .queue
                 .iter()
                 .any(|entry| entry.delivery == signal_flow::Delivery::Wake);
-            // A Maintained metaflow, or one holding work that wakes it, is
+            // A Required metaflow, or one holding work that wakes it, is
             // owed its successor, started before the predecessor rests.
-            if continuity == Continuity::Maintained || wakes {
+            if availability == Availability::Required || wakes {
                 let Some(refreshing) = self.waking.hold(&address) else {
                     return AtStop::Kept(KeptAtStop::Waking);
                 };
@@ -2003,13 +2005,13 @@ impl WakesInParts for RunningNexus {
             };
         }
         // With nothing queued, how the metaflow continues decides: a
-        // Maintained seat stays Awake in its pane; an OnDemand seat closes
+        // Required seat stays Awake in its pane; an OnDemand seat closes
         // its harness, its Address and transcript kept, once it can be
         // closed without ending work its harness still runs.
-        match continuity {
-            Continuity::Maintained => AtStop::Idle,
-            Continuity::OnDemand if !closable => AtStop::Idle,
-            Continuity::OnDemand => match self.close_at_rest(flow_id, &node) {
+        match availability {
+            Availability::Required => AtStop::Idle,
+            Availability::OnDemand if !closable => AtStop::Idle,
+            Availability::OnDemand => match self.close_at_rest(flow_id, &node) {
                 Ok(()) => AtStop::Slept(address),
                 Err(outcome) => AtStop::Kept(KeptAtStop::SleepRefused(outcome)),
             },

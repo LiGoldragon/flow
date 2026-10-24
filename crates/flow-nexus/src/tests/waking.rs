@@ -100,9 +100,9 @@ impl Unsent for Vec<Request> {
     }
 }
 
-/// Declares the metaflow at `address` Maintained: it always has a flow, and
+/// Declares the metaflow at `address` Required: it always has a flow, and
 /// an idle seat keeps its harness.
-pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
+pub(super) fn require(fixture: &NexusFixture, address: Address) {
     fixture
         .nexus
         .store
@@ -113,12 +113,12 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
                 user_modules: vec!["operation-main-flow".into()],
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
-                continuity: meta_signal_flow::Continuity::Maintained,
+                availability: meta_signal_flow::Availability::Required,
                 purpose: String::new(),
                 records: vec![],
             },
         ]))
-        .expect("metaflow declared Maintained");
+        .expect("metaflow declared Required");
 }
 
 pub(super) fn stored(fixture: &NexusFixture, layer: Layer) -> Metaflow {
@@ -221,11 +221,11 @@ pub(super) fn claude_stop(fixture: &NexusFixture) -> signal_flow::Event {
     })
 }
 
-/// An idle Maintained Claude flow of any layer keeps its pane and stays
+/// An idle Required Claude flow of any layer keeps its pane and stays
 /// Awake: its Stop writes its context size and, with nothing queued, leaves
 /// the seat as it is.
 #[test]
-fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
+fn an_idle_required_claude_flow_keeps_its_pane_and_stays_awake() {
     use crate::store::NamesLiveFlow;
     for layer in [Layer::Primary, Layer::Secondary, Layer::Tertiary] {
         let fixture = NexusFixture::new();
@@ -240,7 +240,7 @@ fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
             vec![],
             vec![],
         ));
-        maintain(&fixture, address(layer.clone()));
+        require(&fixture, address(layer.clone()));
 
         fixture
             .nexus
@@ -266,11 +266,11 @@ fn an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake() {
     }
 }
 
-/// An idle Maintained Codex flow keeps its pane and stays Awake: its thread
+/// An idle Required Codex flow keeps its pane and stays Awake: its thread
 /// coming to rest with nothing queued settles nothing, and a turn end read
 /// then leaves the seat as it is.
 #[test]
-fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
+fn an_idle_required_codex_flow_keeps_its_pane_and_stays_awake() {
     use crate::codex_turns::{SettlesRestingCodexSeats, ThreadStatus, TurnEvent};
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
@@ -284,7 +284,7 @@ fn an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake() {
         vec![],
         vec![],
     ));
-    maintain(&fixture, address(Layer::Secondary));
+    require(&fixture, address(Layer::Secondary));
     assert_eq!(
         fixture.nexus.settle_stopped("908786"),
         AtStop::Kept(KeptAtStop::ThreadNotResting)
@@ -406,7 +406,7 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
         vec![],
         vec![],
     ));
-    maintain(&fixture, address(Layer::Secondary));
+    require(&fixture, address(Layer::Secondary));
     assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert!(fixture.typed().is_none(), "nothing typed while idle");
 
@@ -2567,7 +2567,7 @@ fn a_seat_herdr_shows_working_at_its_stop_is_idle_once_herdr_shows_it_done() {
         vec![],
         vec![],
     ));
-    maintain(&fixture, address(Layer::Secondary));
+    require(&fixture, address(Layer::Secondary));
 
     assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert_eq!(
@@ -4530,14 +4530,14 @@ fn a_sender_observe_reports_gone_is_exited_and_its_lock_released() {
     );
 }
 
-/// A Maintained metaflow whose flow exits with its pane gone is owed a
+/// A Required metaflow whose flow exits with its pane gone is owed a
 /// successor in the write that records the exit, and is due a wake with
 /// nothing queued; an OnDemand one is owed none and is not due.
 #[test]
-fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
+fn a_required_metaflow_ended_by_an_exit_is_owed_a_successor() {
     use crate::generated::operation::Record_Data;
     use crate::store::successor::{OwesSuccessors, SuccessionCause};
-    for maintained in [true, false] {
+    for required in [true, false] {
         let fixture = NexusFixture::new();
         claude_seat(&fixture, 40_000);
         fixture.nexus.store.seed_metaflow(metaflow(
@@ -4546,8 +4546,8 @@ fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
             vec![],
             vec![],
         ));
-        if maintained {
-            maintain(&fixture, address(Layer::Secondary));
+        if required {
+            require(&fixture, address(Layer::Secondary));
         }
         assert_eq!(
             fixture
@@ -4562,7 +4562,7 @@ fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
             .unwrap();
         let asleep = stored(&fixture, Layer::Secondary);
         assert_eq!(asleep.state, State::Asleep);
-        if maintained {
+        if required {
             let intent = intent.expect("a successor is owed");
             assert_eq!(intent.predecessor, CLAUDE_SEAT);
             assert_eq!(intent.cause, SuccessionCause::Exit);
@@ -4577,10 +4577,10 @@ fn a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor() {
     }
 }
 
-/// A Stop the owner asks for is not an unexpected exit: a Maintained
+/// A Stop the owner asks for is not an unexpected exit: a Required
 /// metaflow so stopped is owed no successor.
 #[test]
-fn a_maintained_metaflow_stopped_deliberately_is_owed_no_successor() {
+fn a_required_metaflow_stopped_deliberately_is_owed_no_successor() {
     use crate::generated::operation::Record_Data;
     use crate::store::successor::OwesSuccessors;
     let fixture = NexusFixture::new();
@@ -4591,7 +4591,7 @@ fn a_maintained_metaflow_stopped_deliberately_is_owed_no_successor() {
         vec![],
         vec![],
     ));
-    maintain(&fixture, address(Layer::Secondary));
+    require(&fixture, address(Layer::Secondary));
     for end in [
         Record_Data::Stopped(CLAUDE_SEAT.into()),
         Record_Data::Retired(CLAUDE_SEAT.into()),

@@ -1,4 +1,4 @@
-//! The successors Flow owes. A metaflow whose declaration is Maintained
+//! The successors Flow owes. A metaflow whose declaration is Required
 //! always has a flow: when its flow is refreshed, or ends without Flow or
 //! an owner ending it (its pane gone), Flow records that the metaflow is
 //! owed a successor, in the write that ends the flow or before a refresh
@@ -11,7 +11,7 @@
 //! were owed opens with the table added and holding none.
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
-use meta_signal_flow::Continuity;
+use meta_signal_flow::Availability;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     AtomicCommit, EngineRecord, FamilyName, QueryPlan, RecordKey, SchemaHash, TableDescriptor,
@@ -24,7 +24,7 @@ pub(super) const SUCCESSOR_INTENT_TABLE_NAME: TableName =
 pub(super) const SUCCESSOR_INTENT_FAMILY: &str = "flow-nexus-successor-intent";
 pub(super) const SUCCESSOR_INTENT_SCHEMA: &str = "flow-nexus-successor-intent-v1";
 
-/// Why a Maintained metaflow is owed its successor.
+/// Why a Required metaflow is owed its successor.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SuccessionCause {
     /// Its flow passed its model's refresh threshold and rested.
@@ -68,17 +68,17 @@ impl DescribesSuccessorIntentTable for SuccessorIntent {
 
 /// How a metaflow continues, as its declaration names it; a metaflow no
 /// declaration names is OnDemand.
-pub(crate) trait ReadsContinuity {
-    fn continuity(&self, address: &Address) -> Result<Continuity, StoreError>;
+pub(crate) trait ReadsAvailability {
+    fn availability(&self, address: &Address) -> Result<Availability, StoreError>;
 }
 
-impl ReadsContinuity for FlowStore {
-    fn continuity(&self, address: &Address) -> Result<Continuity, StoreError> {
+impl ReadsAvailability for FlowStore {
+    fn availability(&self, address: &Address) -> Result<Availability, StoreError> {
         use super::metaflow_declaration::ReadsMetaflowDeclarations;
         Ok(self
             .metaflow_declaration(address)?
-            .map(|declared| declared.continuity)
-            .unwrap_or(Continuity::OnDemand))
+            .map(|declared| declared.availability)
+            .unwrap_or(Availability::OnDemand))
     }
 }
 

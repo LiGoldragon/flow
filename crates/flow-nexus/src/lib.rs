@@ -5035,7 +5035,7 @@ mod tests {
                         user_modules: vec!["knowledge-flow".into()],
                         flow_kind: signal_flow::FlowKind::Regular,
                         tool_set: signal_flow::ToolSet::Default,
-                        continuity: meta_signal_flow::Continuity::OnDemand,
+                        availability: meta_signal_flow::Availability::OnDemand,
                         purpose: "Publishes the books.".into(),
                         records: vec!["flows/a68420/vision/flow.md".into()],
                     }])

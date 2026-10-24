@@ -271,12 +271,34 @@ impl LaunchesFlows for RunningNexus {
                         StartRejection::LaunchPersistenceRefused,
                     ));
             }
+            // A launch whose first prompt was submitted is confirmed only
+            // by its receipt: the bound session's transcript showing the
+            // first message and the flow's first answer. Until then it is
+            // pending, and a replacement's predecessor is not reaped.
             if matches!(
                 attempt.launch_attempt_phase,
                 LaunchAttemptPhase::PromptIntentRecorded | LaunchAttemptPhase::PromptAmbiguous
-            ) && let Some(binding) = attempt.native_launch_binding_option
+            ) && let Some(binding) = attempt.native_launch_binding_option.clone()
             {
-                return self.confirmed(&binding.flow_id);
+                use crate::generated::starter::StartupProgress;
+                use crate::herdr::launch::ObservesNativeTargetReceipt;
+                let Some(intent) = attempt.prompt_delivery_intent_option.clone() else {
+                    return Response::LaunchPending(attempt);
+                };
+                return match self.herdr.observe_native_target_receipt(&intent) {
+                    Ok(StartupProgress::Received(receipt)) => {
+                        if self.perform(Operation::Record(Record_Data::Delivered(
+                            signal_flow::PromptDeliveryResult::Observed(receipt),
+                        ))) != Outcome::Recorded
+                        {
+                            return Response::StartRejected(
+                                StartRejection::LaunchPersistenceRefused,
+                            );
+                        }
+                        self.confirmed(&binding.flow_id)
+                    }
+                    _ => Response::LaunchPending(attempt),
+                };
             }
             return Response::LaunchPending(attempt);
         }

@@ -172,3 +172,28 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
         .expect("a camelCase topic is admitted");
     assert_eq!(attempt.launch_profile.address.topic, "primaryCommitting");
 }
+
+/// A Launch naming a topic that is not camelCase is refused TopicRefused,
+/// as Start and Configure refuse it.
+#[test]
+fn launch_with_a_bad_topic_is_topic_refused() {
+    use crate::Dispatches;
+    use signal_flow::{Address, Launch_Data, Remembering};
+    let fixture = NexusFixture::new();
+    fixture.claims_flow_ids();
+    let _ = fs::remove_file(&fixture.snapshot_program);
+    configure(&fixture, &[(Layer::Secondary, Aspect::Mind, "gpt-6-sol")]);
+    let response = fixture.nexus.dispatch(Query::Launch(Launch_Data {
+        address: Address {
+            aspect: Aspect::Mind,
+            topic: "PrimaryCommitting".into(),
+            layer: Layer::Secondary,
+        },
+        remembering: Remembering::Predecessors(0),
+        instruction_prompt: String::new(),
+    }));
+    assert_eq!(
+        response,
+        Response::StartRejected(StartRejection::TopicRefused("PrimaryCommitting".into())),
+    );
+}

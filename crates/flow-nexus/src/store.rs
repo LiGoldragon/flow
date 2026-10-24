@@ -12533,3 +12533,109 @@ mod tests {
         }
     }
 }
+
+/// A v3 launch attempt row, written in its old shape, reads as v4 with its
+/// remembered flows as Custom.
+#[cfg(test)]
+mod v3_attempts {
+    use super::{
+        LaunchAttemptV3, LaunchContext, LaunchProfileV3, MemoryDefinition, OpensFlowStore,
+        ReadsLaunchAttempt, RememberedFlow, StoredLaunchAttemptV3,
+    };
+    use sema_engine::{
+        Assertion, Engine, EngineOpen, FamilyName, SchemaVersion, TableDescriptor, TableName,
+    };
+    use signal_flow::{Address, Aspect, LaunchAttemptPhase, Layer, Origin, Remembering};
+
+    fn v3_attempt(request: &str, remembered: Vec<RememberedFlow>) -> StoredLaunchAttemptV3 {
+        StoredLaunchAttemptV3 {
+            attempt: LaunchAttemptV3 {
+                launch_request_id: request.into(),
+                launch_profile: LaunchProfileV3 {
+                    launch_request_id: request.into(),
+                    system_modules: vec!["spirit-core".into()],
+                    user_modules: vec!["operation-main-flow".into()],
+                    address: Address {
+                        aspect: Aspect::Mind,
+                        topic: "flow".into(),
+                        layer: Layer::Secondary,
+                    },
+                    model_name: "gpt-6-sol".into(),
+                    effort: "medium".into(),
+                    flow_id_option: None,
+                    remembered_flow_vector: remembered,
+                    herdr_session_name: "default".into(),
+                    leave_outs_option: None,
+                    flow_kind: signal_flow::FlowKind::Regular,
+                    tool_set: signal_flow::ToolSet::Default,
+                    instruction_prompt: "Carry on.".into(),
+                },
+                prompt_sha256: "0".repeat(64),
+                origin: Origin::Unbound,
+                launch_attempt_phase: LaunchAttemptPhase::Reserved,
+                native_launch_intent_option: None,
+                native_launch_binding_option: None,
+                registration_acknowledgement_option: None,
+                prompt_delivery_intent_option: None,
+                prompt_delivery_result_option: None,
+            },
+            context: LaunchContext::Modules,
+        }
+    }
+
+    #[test]
+    fn a_v3_launch_attempt_upgrades_to_v4_with_its_remembering() {
+        let directory = tempfile::tempdir().expect("store directory");
+        let path = directory.path().join("flow.sema");
+        {
+            let mut engine =
+                Engine::open(EngineOpen::new(&path, SchemaVersion::new(1))).expect("store opens");
+            let attempts = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_launch_attempts"),
+                    FamilyName::new("flow-nexus-launch-attempt"),
+                    StoredLaunchAttemptV3::schema_hash(),
+                ))
+                .expect("v3 attempt family registers");
+            engine
+                .assert(Assertion::new(attempts, v3_attempt("v3-none", vec![])))
+                .expect("v3 attempt persists");
+            engine
+                .assert(Assertion::new(
+                    attempts,
+                    v3_attempt(
+                        "v3-named",
+                        vec![
+                            RememberedFlow {
+                                flow_id: "36b71b".into(),
+                                remembering_depth: 1,
+                            },
+                            RememberedFlow {
+                                flow_id: "e3c8c1".into(),
+                                remembering_depth: 2,
+                            },
+                        ],
+                    ),
+                ))
+                .expect("v3 attempt persists");
+        }
+        let store = <super::FlowStore as OpensFlowStore>::open(&path).expect("store reopens");
+        let none = store
+            .launch_attempt("v3-none")
+            .expect("upgraded attempt reads")
+            .expect("the v3 attempt is kept");
+        assert_eq!(
+            none.launch_profile.remembering,
+            Remembering::Predecessors(0)
+        );
+        let named = store
+            .launch_attempt("v3-named")
+            .expect("upgraded attempt reads")
+            .expect("the v3 attempt is kept");
+        assert_eq!(
+            named.launch_profile.remembering,
+            Remembering::Custom(vec!["36b71b".into(), "e3c8c1".into()])
+        );
+        assert_eq!(named.launch_profile.address.topic, "flow");
+    }
+}

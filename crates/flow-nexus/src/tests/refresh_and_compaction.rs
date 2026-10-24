@@ -573,3 +573,53 @@ fn a_codex_compaction_is_raised_unless_a_compact_asked_for_it() {
         ["item-own"]
     );
 }
+
+/// A successor that is never confirmed leaves its predecessor Active, its
+/// pane open and its metaflow Awake as it, the successor still owed.
+#[test]
+fn unconfirmed_successor_keeps_predecessor_unreaped() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 200_000);
+    append_main_rows(&fixture, &[end_turn("last-turn")]);
+    seat_refreshing_at(&fixture, 200_000);
+    seat_metaflow(&fixture, vec![]);
+    let mut successor = staged_refresh_successor(&fixture);
+    successor.stage_to_ambiguity(&fixture.nexus);
+    // No write_receipt: the successor's first turn is never authenticated.
+    declare_seat(
+        &fixture,
+        Availability::Required,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
+    seat_metaflow(&fixture, vec![]);
+    owe_staged_successor(&fixture);
+    fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);
+
+    let at_stop = fixture.nexus.settle_stopped(CLAUDE_SEAT);
+    assert!(
+        matches!(
+            at_stop,
+            AtStop::Kept(crate::waking::KeptAtStop::RefreshLaunchRefused(_))
+        ),
+        "{at_stop:?}"
+    );
+    assert!(!closed(&fixture), "the predecessor's pane stays open");
+    assert_eq!(lifecycle(&fixture, CLAUDE_SEAT), FlowLifecycle::Active);
+    assert_eq!(
+        seat_metaflow_now(&fixture).state,
+        State::Awake(CLAUDE_SEAT.into())
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .successor_intent(&seat_address())
+            .unwrap()
+            .is_some(),
+        "the successor stays owed"
+    );
+}

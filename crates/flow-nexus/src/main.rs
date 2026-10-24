@@ -8,6 +8,7 @@ use flow_nexus::{
     launching::ReconcilesInterruptedLaunches,
     send_tool::ServesSendTool,
     store::{ConfigurationOnlyStore, DefaultConfiguration, ReadsAnchors, StoreError},
+    waking::SleepsAndWakesSeats,
 };
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
@@ -158,6 +159,10 @@ fn main() -> ExitCode {
         // One connection per live Codex thread answers its send-tool calls.
         let send_tool_nexus = &nexus;
         scope.spawn(move || send_tool_nexus.serve_send_tool(scope));
+        // Work the last Nexus owed is taken up while the sockets serve:
+        // queued deliveries are reconciled, every successor owed is started
+        // or resumed, and every metaflow due a wake is woken.
+        scope.spawn(|| nexus.recover_wakes());
         scope.spawn(|| {
             if signals.watch(&|| nexus.stopping.requested()) {
                 nexus.stop(&sockets);

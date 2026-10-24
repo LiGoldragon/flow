@@ -301,7 +301,14 @@ impl SleepsMetaflows for FlowStore {
         }
         stored.metaflow.state = MetaflowState::Asleep;
         stored.metaflow.past.push(flow_id.to_owned());
-        self.write_metaflow(stored)?;
+        // The ended flow's locks as a sender go in the same write.
+        use super::address_hold::HoldsLaunchAddress;
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, stored);
+        let commit = self.sender_locks_released(address, commit)?;
+        self.engine.commit_atomic(commit)?;
         Ok(true)
     }
 
@@ -338,7 +345,11 @@ impl SleepsMetaflows for FlowStore {
             return Ok(false);
         }
         stored.metaflow.queue.remove(0);
-        self.write_metaflow(stored)?;
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, stored);
+        self.engine.commit_atomic(commit)?;
         Ok(true)
     }
 
@@ -613,21 +624,6 @@ impl QueuesFlowRequest for FlowStore {
             None,
         )?;
         Ok(matches!(response, Response::SendAccepted(_)))
-    }
-}
-
-trait WritesMetaflow {
-    fn write_metaflow(&self, stored: StoredMetaflow) -> Result<(), StoreError>;
-}
-
-impl WritesMetaflow for FlowStore {
-    fn write_metaflow(&self, stored: StoredMetaflow) -> Result<(), StoreError> {
-        let commit = self
-            .engine
-            .begin_atomic_commit()
-            .mutate(self.metaflows, stored);
-        self.engine.commit_atomic(commit)?;
-        Ok(())
     }
 }
 

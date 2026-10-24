@@ -4804,3 +4804,144 @@ fn a_reported_session_end_exits_the_flow_and_owes_a_required_successor() {
         }
     }
 }
+
+/// An owed successor is taken up by the start sequence the daemon runs
+/// (main.rs): interrupted launches reconciled, then, while the sockets
+/// serve, the owed work taken up.
+#[test]
+fn start_sequence_takes_up_an_owed_successor() {
+    use crate::launching::ReconcilesInterruptedLaunches;
+    use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![],
+    ));
+    require(&fixture, address(Layer::Secondary));
+    fixture
+        .nexus
+        .store
+        .owe_successor(SuccessorIntent {
+            address: address(Layer::Secondary),
+            predecessor: "abc123".into(),
+            cause: SuccessionCause::Exit,
+            launch_request_id: String::new(),
+        })
+        .unwrap();
+    let world = fixture.fresh_claude_world();
+
+    fixture.nexus.reconcile_interrupted_launches();
+    fixture.nexus.recover_wakes();
+
+    let started = stored(&fixture, Layer::Secondary);
+    assert!(
+        matches!(started.state, State::Awake(_)),
+        "{started:?}; {}",
+        world.calls()
+    );
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+}
+
+/// The owed successor is taken up by recover_wakes, the start pass that
+/// takes up owed work.
+#[test]
+fn recover_wakes_takes_up_an_owed_successor() {
+    use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![],
+    ));
+    require(&fixture, address(Layer::Secondary));
+    fixture
+        .nexus
+        .store
+        .owe_successor(SuccessorIntent {
+            address: address(Layer::Secondary),
+            predecessor: "abc123".into(),
+            cause: SuccessionCause::Exit,
+            launch_request_id: String::new(),
+        })
+        .unwrap();
+    let world = fixture.fresh_claude_world();
+
+    fixture.nexus.recover_wakes();
+
+    let started = stored(&fixture, Layer::Secondary);
+    assert!(
+        matches!(started.state, State::Awake(_)),
+        "{started:?}; {}",
+        world.calls()
+    );
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+}
+
+/// A Required metaflow whose flow's own session end is reported gets its
+/// successor started, not only owed.
+#[test]
+fn reported_session_end_starts_a_required_successor() {
+    use crate::store::successor::OwesSuccessors;
+    let mut fixture = NexusFixture::new();
+    let seat = launched_claude_ended_by(&fixture, |_| true);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("abc123".into()),
+        vec![],
+        vec![],
+    ));
+    require(&fixture, address(Layer::Secondary));
+    let world = fixture.fresh_claude_world();
+
+    fixture.nexus.after_report(
+        &"abc123".to_owned(),
+        &signal_flow::Event::Ended(Some(seat.session.clone())),
+    );
+
+    let woken = stored(&fixture, Layer::Secondary);
+    let State::Awake(flow_id) = &woken.state else {
+        panic!("the successor starts: {woken:?}; {}", world.calls());
+    };
+    assert_ne!(flow_id, "abc123", "a fresh flow");
+    assert_eq!(world.claude_starts(), 1, "{}", world.calls());
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .successor_intent(&address(Layer::Secondary))
+            .unwrap(),
+        None,
+        "the owed successor is given"
+    );
+}
+
+/// A metaflow left Awake as a flow that has ended is put Asleep, and the
+/// ended flow's locks as a sender are retracted in that write.
+#[test]
+fn a_metaflow_put_asleep_for_an_ended_flow_retracts_its_sender_locks() {
+    use crate::store::metaflow::SleepsMetaflows;
+    let fixture = NexusFixture::new();
+    let recipient = sender_holding_a_lock(&fixture);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .sleep_metaflow(&address(Layer::Secondary), CLAUDE_SEAT)
+            .unwrap()
+    );
+    assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .stored_metaflow_lock(&recipient)
+            .unwrap()
+            .is_none(),
+        "the ended sender's lock is retracted"
+    );
+}

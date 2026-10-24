@@ -438,6 +438,15 @@ impl LaunchesDeclared for RunningNexus {
             Box::new(Response::Refused(Refusal::Store(error.to_string())))
         };
         let address = launch.address;
+        // The topic is input: checked before the declaration is looked up.
+        {
+            use crate::launching::NamesTopic;
+            if !address.topic.as_str().is_camel_case_topic() {
+                return Err(Box::new(Response::StartRejected(
+                    StartRejection::TopicRefused(address.topic.clone()),
+                )));
+            }
+        }
         let Some(declaration) = self
             .store
             .metaflow_declaration(&address)

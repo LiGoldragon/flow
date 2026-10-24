@@ -973,8 +973,7 @@ trait RequeuesToSuccessor {
 impl RequeuesToSuccessor for RunningNexus {
     fn requeue_to_successor(&self, attempt: &QueueDeliveryAttempt, successor: &str) -> bool {
         use crate::binding::ReadsProcessIdentity;
-        let Some(process_identity) =
-            meta_signal_flow::ProcessIdentity::of(std::process::id())
+        let Some(process_identity) = meta_signal_flow::ProcessIdentity::of(std::process::id())
         else {
             return false;
         };

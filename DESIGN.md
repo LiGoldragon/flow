@@ -227,6 +227,12 @@ and its digest, which Flow verifies). The records follow the USER modules in
 the first message, ahead of the brief. A wake, a refresh and an exit's
 successor remember their predecessor, `Predecessors.1`.
 
+A module is placed by its kind, whichever list of the launch names it:
+spirit and intent (`spirit:…`, `intent:…`, or a legacy name before its
+first hyphen) in the system prompt, every other kind in the first message
+with the remembered flows' records. An identity is `type:subject` or a
+hyphenated name not yet in that form.
+
 A start is one model call. Every module the launch names is in the system
 prompt or the first USER message, and the first USER message is sent once:
 when the USER modules and the brief do not fit one message (Herdr's 1 MiB

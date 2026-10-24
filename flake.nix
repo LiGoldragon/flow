@@ -512,6 +512,12 @@
             "lean::tests::a_simplified_flow_passes_an_explicit_empty_tool_set_whatever_it_names";
           flow-remembered-records-composed = context.exactTest "flow-nexus"
             "composition::tests::remembered_flows_raw_records_follow_the_user_modules_in_the_first_message";
+          flow-secondary-starts-first = context.exactTest "flow-nexus"
+            "tests::waking::a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first";
+          flow-session-end-exits = context.exactTest "flow-nexus"
+            "tests::waking::a_reported_session_end_exits_the_flow_and_owes_a_required_successor";
+          flow-modules-placed-by-kind = context.exactTest "flow-nexus"
+            "composition::tests::modules_are_placed_by_kind_spirit_and_intent_in_the_system_prompt";
           flow-idle-claude-request-into-its-pane = context.exactTest "flow-nexus"
             "tests::waking::a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane";
           flow-idle-codex-request-into-its-pane = context.exactTest "flow-nexus"

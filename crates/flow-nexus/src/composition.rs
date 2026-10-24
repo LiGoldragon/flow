@@ -356,12 +356,21 @@ impl ValidatesLaunchProfile for LaunchProfile {
         }
         let identities_valid = |identities: &[String]| {
             let mut seen = HashSet::new();
-            identities.iter().all(|identity| {
-                !identity.is_empty()
-                    && identity.bytes().all(|byte| {
+            // An identity is `type:subject`, or a hyphenated name not yet
+            // in that form: lowercase letters, digits and hyphens on each
+            // side of at most one colon, neither side empty.
+            let part = |part: &str| {
+                !part.is_empty()
+                    && part.bytes().all(|byte| {
                         byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
                     })
-                    && seen.insert(identity)
+            };
+            identities.iter().all(|identity| {
+                let well_formed = match identity.split_once(':') {
+                    Some((kind, subject)) => part(kind) && part(subject),
+                    None => part(identity),
+                };
+                well_formed && seen.insert(identity)
             })
         };
         if profile.system_modules.is_empty() || !identities_valid(&profile.system_modules) {
@@ -438,11 +447,20 @@ impl ComposesVerifiedContext for LaunchComposer {
     fn verified_context<N: Profiled>(&self, input: N) -> Result<VerifiedContext, CompositionError> {
         let profile = input.profile();
         profile.validate()?;
+        // A module is placed by its kind: spirit and intent in the system
+        // prompt, every other kind in the first message, whichever list of
+        // the launch names it; each keeps its order.
+        let (system_modules, user_modules): (Vec<String>, Vec<String>) = profile
+            .system_modules
+            .iter()
+            .chain(profile.user_modules.iter())
+            .cloned()
+            .partition(|identity| identity.as_str().placed_in_system_prompt());
         let request = ContextRequest {
             address: profile.address.clone(),
             harness_kind: input.harness_kind(),
-            system_modules: profile.system_modules.clone(),
-            user_modules: profile.user_modules.clone(),
+            system_modules,
+            user_modules,
             remembered_flows: input.remembered_flows(),
         };
         let composition = self.context.compose_flow_context(&request)?;
@@ -647,6 +665,25 @@ pub struct FreshSeat {
     pub flow_kind: signal_flow::FlowKind,
     pub tool_set: signal_flow::ToolSet,
     pub prompt: String,
+}
+
+/// Where a context module goes, by its kind: the type before the colon of
+/// `type:subject`, or before the first hyphen of a name not yet in that
+/// form. Spirit and intent sit in the system prompt; every other kind
+/// (vision, knowledge, compensation, inquiry, operation, …) goes to the
+/// first message with the raw records of the flows the launch remembers.
+pub(crate) trait PlacesModuleByKind {
+    fn placed_in_system_prompt(&self) -> bool;
+}
+
+impl PlacesModuleByKind for str {
+    fn placed_in_system_prompt(&self) -> bool {
+        let kind = match self.split_once(':') {
+            Some((kind, _)) => kind,
+            None => self.split('-').next().unwrap_or(self),
+        };
+        matches!(kind, "spirit" | "intent")
+    }
 }
 
 /// A brief joined with the purpose its metaflow's declaration names: the
@@ -1302,12 +1339,82 @@ pub(crate) mod tests {
         );
     }
 
+    /// Spirit and intent modules go to the system prompt and every other
+    /// kind to the first message, whichever list a declaration names them
+    /// in: a fresh flow's first prompt carries the context modules relevant
+    /// to it of any kind except spirit and intent.
+    #[test]
+    fn modules_are_placed_by_kind_spirit_and_intent_in_the_system_prompt() {
+        let context = FixtureComposer::from(
+            &[
+                ("spirit:core", "Spirit body."),
+                ("intent:flow", "Intent body."),
+                ("vision:flow", "Vision body."),
+                ("knowledge:flow", "Knowledge body."),
+                ("compensation:truth", "Compensation body."),
+                ("inquiry:flow", "Inquiry body."),
+                ("spirit-legacy", "Legacy spirit body."),
+                ("operation-main-flow", "Main flow body."),
+            ][..],
+        );
+        let composer =
+            LaunchComposer::with_context(crate::context::ContextComposer::Fixture(context));
+        let mut profile = fixture_profile();
+        profile.system_modules = vec![
+            "spirit:core".into(),
+            "vision:flow".into(),
+            "spirit-legacy".into(),
+        ];
+        profile.user_modules = vec![
+            "intent:flow".into(),
+            "knowledge:flow".into(),
+            "compensation:truth".into(),
+            "inquiry:flow".into(),
+            "operation-main-flow".into(),
+        ];
+        let composed = composer
+            .compose(
+                HarnessedProfile {
+                    remembered_flows: Vec::new(),
+                    harness_kind: HarnessKind::Claude,
+                    launch_profile: profile,
+                },
+                Vec::<LeaveOut>::new(),
+            )
+            .unwrap();
+        let system = &composed.system_prompt.system_prompt_text;
+        let first = &composed.first_prompt_payload.first_prompt_body;
+        for body in ["Spirit body.", "Intent body.", "Legacy spirit body."] {
+            assert!(system.contains(body), "{body} in the system prompt");
+            assert!(!first.contains(body), "{body} not in the first message");
+        }
+        for body in [
+            "Vision body.",
+            "Knowledge body.",
+            "Compensation body.",
+            "Inquiry body.",
+            "Main flow body.",
+        ] {
+            assert!(first.contains(body), "{body} in the first message");
+            assert!(!system.contains(body), "{body} not in the system prompt");
+        }
+    }
+
     #[test]
     fn a_system_prompt_past_one_argument_is_composed_whole() {
-        let (composer, names) = large(&[10, 140_000]);
+        let large_intent = "b".repeat(140_000);
+        let composer = LaunchComposer::with_context(crate::context::ContextComposer::Fixture(
+            FixtureComposer::from(
+                &[
+                    ("spirit-core", "Spirit body."),
+                    ("intent-large", large_intent.as_str()),
+                    ("knowledge-small", "Knowledge body."),
+                ][..],
+            ),
+        ));
         let mut profile = fixture_profile();
-        profile.system_modules = vec!["spirit-core".into(), names[1].clone()];
-        profile.user_modules = vec![names[0].clone()];
+        profile.system_modules = vec!["spirit-core".into(), "intent-large".into()];
+        profile.user_modules = vec!["knowledge-small".into()];
         let composed = composer
             .compose(
                 crate::composition::HarnessedProfile {

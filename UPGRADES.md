@@ -1,3 +1,31 @@
+# Flow next (unreleased, branch 0595fb-reimplementation)
+
+Pins signal-flow 31.0.0 and meta-signal-flow 40.0.0 (both on their
+`0595fb-reimplementation` branches) and the Curriculum schema of Curriculum
+4493d1e. Every ordinary and meta peer repins, and Curriculum serves that
+schema.
+
+- A launch profile names its `Remembering` (`Predecessors.<depth>` or
+  `Custom.[ FlowId … ]`) in place of its remembered-flow list; `Launch` is
+  `Launch.{ Address Remembering InstructionPrompt }`. Stored launch
+  attempts upgrade v3 to v4; an archived list becomes `Custom` of its flows.
+- A metaflow declaration appends `Continuity.[ OnDemand Maintained ]`,
+  `Purpose` and `Records`. Stored declarations upgrade v2 to v3: { Psyche
+  core Primary } opens Maintained, every other OnDemand, with no purpose
+  and no records. Initializers supply the new positions.
+- An OnDemand seat whose turn ends with nothing queued closes its harness
+  and sleeps; a Maintained one keeps its pane and is always followed by a
+  successor when refreshed or ended by an exit. The store gains
+  `flow_nexus_successor_intents`.
+- Locks held by a sender whose flow ends are retracted with the end.
+- A caller's Start, Replace or Launch with a topic that is not camelCase is
+  refused `TopicRefused`, as is a Configure naming one; a new Primary needs
+  its Secondary Awake (`NoSecondary`).
+- A simplified Claude flow always starts with an explicit empty tool set.
+- Curriculum is asked for the remembered flows' raw records; it must answer
+  a flow that logged none with nothing, not `record missing`, or every wake
+  and successor of such a flow is refused `ContextRefused.RecordMissing`.
+
 # Flow 0.39.1 (unreleased)
 
 - A HardAbrupt reads the recipient's composer before it presses any key.

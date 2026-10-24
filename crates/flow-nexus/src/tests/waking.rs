@@ -4642,3 +4642,62 @@ fn a_launch_remembers_its_metaflow_s_last_flows_to_its_depth_or_those_it_names()
         );
     }
 }
+
+/// At its start the Nexus takes up every successor owed: one a flow already
+/// took the Address for is forgotten, and an Asleep metaflow owed one is due
+/// a wake.
+#[test]
+fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
+    use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
+    let fixture = NexusFixture::new();
+    claude_seat(&fixture, 40_000);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake(CLAUDE_SEAT.into()),
+        vec!["abc123"],
+        vec![],
+    ));
+    fixture
+        .nexus
+        .store
+        .owe_successor(SuccessorIntent {
+            address: address(Layer::Secondary),
+            predecessor: "abc123".into(),
+            cause: SuccessionCause::Exit,
+            launch_request_id: String::new(),
+        })
+        .unwrap();
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Primary,
+        State::Asleep,
+        vec!["def456"],
+        vec![],
+    ));
+    fixture
+        .nexus
+        .store
+        .owe_successor(SuccessorIntent {
+            address: address(Layer::Primary),
+            predecessor: "def456".into(),
+            cause: SuccessionCause::Exit,
+            launch_request_id: String::new(),
+        })
+        .unwrap();
+
+    fixture.nexus.recover_wakes();
+
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .successor_intent(&address(Layer::Secondary))
+            .unwrap(),
+        None,
+        "the successor Awake as another flow was given"
+    );
+    let owed = stored(&fixture, Layer::Primary);
+    assert!(
+        fixture.nexus.wake_is_due(&owed),
+        "the Asleep metaflow is still owed its successor: {owed:?}"
+    );
+}

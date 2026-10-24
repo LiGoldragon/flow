@@ -489,9 +489,29 @@
           flow-sleeping-claude-wakes-to-new-session = context.exactTest "flow-nexus"
             "tests::waking::a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it";
           flow-idle-codex-keeps-its-pane = context.exactTest "flow-nexus"
-            "tests::waking::an_idle_codex_flow_keeps_its_pane_and_stays_awake";
+            "tests::waking::an_idle_maintained_codex_flow_keeps_its_pane_and_stays_awake";
           flow-idle-claude-keeps-its-pane = context.exactTest "flow-nexus"
-            "tests::waking::an_idle_claude_flow_keeps_its_pane_and_stays_awake";
+            "tests::waking::an_idle_maintained_claude_flow_keeps_its_pane_and_stays_awake";
+          flow-idle-on-demand-claude-sleeps = context.exactTest "flow-nexus"
+            "tests::waking::an_idle_on_demand_claude_flow_closes_its_harness_and_keeps_its_address";
+          flow-maintained-refresh-successor-first = context.exactTest "flow-nexus"
+            "tests::refresh_and_compaction::a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first";
+          flow-waking-refresh-successor-first = context.exactTest "flow-nexus"
+            "tests::refresh_and_compaction::an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first";
+          flow-maintained-exit-owes-successor = context.exactTest "flow-nexus"
+            "tests::waking::a_maintained_metaflow_ended_by_an_exit_is_owed_a_successor";
+          flow-terminal-sender-retracts-locks = context.exactTest "flow-nexus"
+            "tests::waking::a_terminal_sender_retracts_its_locks";
+          flow-observed-gone-releases-lock = context.exactTest "flow-nexus"
+            "tests::waking::a_sender_observe_reports_gone_is_exited_and_its_lock_released";
+          flow-topic-refused = context.exactTest "flow-nexus"
+            "tests::secondary::a_topic_that_is_not_camel_case_is_refused_at_start_and_configure";
+          flow-primary-needs-awake-secondary = context.exactTest "flow-nexus"
+            "tests::secondary::a_primary_start_is_refused_until_its_secondary_is_awake";
+          flow-simplified-empty-tools = context.exactTest "flow-nexus"
+            "lean::tests::a_simplified_flow_passes_an_explicit_empty_tool_set_whatever_it_names";
+          flow-remembered-records-composed = context.exactTest "flow-nexus"
+            "composition::tests::remembered_flows_raw_records_follow_the_user_modules_in_the_first_message";
           flow-idle-claude-request-into-its-pane = context.exactTest "flow-nexus"
             "tests::waking::a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane";
           flow-idle-codex-request-into-its-pane = context.exactTest "flow-nexus"

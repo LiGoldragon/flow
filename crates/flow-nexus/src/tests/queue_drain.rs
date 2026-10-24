@@ -928,3 +928,79 @@ fn a_resting_claude_seat_does_not_advance_after_unwitnessed_delivered_resolution
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     assert_eq!(queue(&fixture), vec![second]);
 }
+
+/// A request handed to a seat that then ended, with no receipt, is handed
+/// by Flow to the seat now holding the metaflow: the ended seat's thread
+/// can never settle it, so it does not hold the queue.
+#[test]
+fn a_request_handed_to_a_seat_that_ended_is_requeued_to_its_successor() {
+    use crate::store::queue_delivery::{NativeHistoryAnchor, PrepareQueueDelivery};
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    let request = from_core("handed-to-the-ended-seat");
+    seat(&fixture, vec![request.clone()]);
+    append_main_rows(&fixture, &[end_turn("resting")]);
+    // The request was handed to the predecessor, which then ended.
+    let predecessor = Metaflow {
+        state: State::Awake("e0ded1".into()),
+        ..stored(&fixture, Layer::Secondary)
+    };
+    fixture.nexus.store.seed_metaflow(predecessor);
+    let PrepareQueueDelivery::Prepared(attempt) = fixture
+        .nexus
+        .store
+        .prepare_oldest_delivery(
+            &address(Layer::Secondary),
+            "e0ded1",
+            "e0ded1-thread",
+            signal_flow::HarnessKind::Codex,
+            NativeHistoryAnchor::CodexTurns(None),
+        )
+        .expect("prepared")
+    else {
+        panic!("the predecessor's attempt is prepared");
+    };
+    assert!(
+        fixture
+            .nexus
+            .store
+            .mark_delivery_uncertain(&attempt.attempt_id)
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .mark_delivery_undecided(&attempt.attempt_id, Undecided::SeatNotResting)
+            .unwrap()
+    );
+    let successor = Metaflow {
+        state: State::Awake(CLAUDE_SEAT.into()),
+        past: vec!["e0ded1".into()],
+        ..stored(&fixture, Layer::Secondary)
+    };
+    fixture.nexus.store.seed_metaflow(successor);
+
+    fixture.nexus.drain(address(Layer::Secondary));
+
+    assert_eq!(
+        typed_count(&fixture, "handed-to-the-ended-seat"),
+        1,
+        "the successor seat is handed the request"
+    );
+    let Some(predecessor_attempt) = fixture
+        .nexus
+        .store
+        .queue_delivery_attempt(&attempt.attempt_id)
+        .unwrap()
+    else {
+        panic!("the predecessor's attempt is kept");
+    };
+    assert!(matches!(
+        predecessor_attempt.phase,
+        crate::store::queue_delivery::QueueDeliveryPhase::Resolved(_)
+    ));
+}

@@ -260,6 +260,8 @@
             "tests::refresh_and_compaction::a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_flow";
           flow-idle-past-threshold-refreshed-on-pressing-work = context.exactTest "flow-nexus"
             "tests::refresh_and_compaction::an_idle_seat_past_its_threshold_is_refreshed_when_pressing_work_arrives";
+          flow-ended-seat-request-requeued-to-successor = context.exactTest "flow-nexus"
+            "tests::queue_drain::a_request_handed_to_a_seat_that_ended_is_requeued_to_its_successor";
           flow-deliver-past-threshold-refused = context.exactTest "flow-nexus"
             "tests::delivery::a_deliver_into_a_flow_past_its_threshold_is_refused";
           flow-compaction-investigated-once = context.exactTest "flow-nexus"

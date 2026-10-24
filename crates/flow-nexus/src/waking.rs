@@ -964,6 +964,62 @@ impl ReconcilesQueueDelivery for RunningNexus {
     }
 }
 
+trait RequeuesToSuccessor {
+    /// Resolves an unreceipted attempt to an ended seat Absent, by this
+    /// Nexus, so its request is handed to `successor`. True when it was.
+    fn requeue_to_successor(&self, attempt: &QueueDeliveryAttempt, successor: &str) -> bool;
+}
+
+impl RequeuesToSuccessor for RunningNexus {
+    fn requeue_to_successor(&self, attempt: &QueueDeliveryAttempt, successor: &str) -> bool {
+        use crate::binding::ReadsProcessIdentity;
+        let Some(process_identity) =
+            meta_signal_flow::ProcessIdentity::of(std::process::id())
+        else {
+            return false;
+        };
+        if attempt.phase == QueueDeliveryPhase::Prepared
+            && !self
+                .store
+                .mark_delivery_uncertain(&attempt.attempt_id)
+                .unwrap_or(false)
+        {
+            return false;
+        }
+        let Some(unix_seconds) = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        else {
+            return false;
+        };
+        let record = meta_signal_flow::QueueResolutionRecord {
+            queue_resolution_outcome: meta_signal_flow::QueueResolutionOutcome::Absent,
+            resolver_identity: meta_signal_flow::ResolverIdentity {
+                process_identity,
+                flow_id_option: Some(successor.to_owned()),
+            },
+            queue_resolution_reason: format!(
+                "seat {} ended before its receipt; requeued to its successor {successor}",
+                attempt.flow_id
+            ),
+            unix_seconds,
+        };
+        let requeued = matches!(
+            self.store
+                .resolve_uncertain_delivery(&attempt.attempt_id, record),
+            Ok(Ok(_))
+        );
+        if requeued {
+            eprintln!(
+                "flow-nexus: queued delivery {} to ended seat {} requeued to {successor}",
+                attempt.attempt_id, attempt.flow_id
+            );
+        }
+        requeued
+    }
+}
+
 trait MarksUndecided {
     fn undecided(&self, attempt: &QueueDeliveryAttempt, undecided: Undecided) -> Reconciled;
 }
@@ -1207,6 +1263,20 @@ impl PerformsWakeAndDrain for RunningNexus {
         let mut drained = Vec::new();
         match self.store.outstanding_delivery(&address) {
             Ok(None) => {}
+            // A request handed to a seat that has since ended, with no
+            // receipt, goes to the seat now holding the metaflow: the ended
+            // seat's history can no longer settle it.
+            Ok(Some(attempt))
+                if attempt.flow_id != flow_id
+                    && matches!(
+                        attempt.phase,
+                        QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
+                    ) =>
+            {
+                if !self.requeue_to_successor(&attempt, &flow_id) {
+                    return Outcome::Failed(Failed_Data::StoreRefused);
+                }
+            }
             Ok(Some(attempt)) => match self.reconcile_delivery(&attempt) {
                 Reconciled::Settled(queued, SeatAfter::Resting) => drained.push(queued),
                 Reconciled::Settled(queued, SeatAfter::InItsTurn) => {

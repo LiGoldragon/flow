@@ -3,8 +3,9 @@
 use crate::store::ManagesMetaflowState;
 use crate::store::ReadsFlowMemory;
 use crate::store::send_outcome::RecordsSendOutcomes;
-// The generated Operation root names the store's own types by this crate's
-// name, as `flow_nexus::LaunchOutcome`; the Memory root is not compiled yet.
+// The generated roots name this crate's types by its name: Operation names
+// the Memory root's `flow_nexus::LaunchOutcome`, and Memory the starter's
+// `flow_nexus::LaunchedRecord`.
 extern crate self as flow_nexus;
 use crate::claude::ProjectsClaudeReadiness;
 use crate::codex::SelectsCodexEndpoint;
@@ -18,8 +19,10 @@ pub use generated::curriculum::{
     ContextProvenance, Outcome as CurriculumOutcome, Query as CurriculumQuery, StartupComposition,
     StartupSelection,
 };
+pub use generated::memory::{LaunchOutcome, Replacement};
 pub use generated::operation::Outcome as OperationOutcome;
-pub use store::{LaunchOutcome, Replacement, StoreError};
+pub use generated::starter::{LaunchedRecord, ReplacedRecord};
+pub use store::StoreError;
 pub mod binding;
 pub mod caller;
 pub mod claude;

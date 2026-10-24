@@ -2180,19 +2180,9 @@ impl std::fmt::Display for LaunchAttemptSettlement {
     }
 }
 
-/// How a launch request settled. It is kept beside the attempt so a
-/// LaunchStatus or an Observe.Launch answers it without re-running the launch.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(
-    feature = "datom",
-    derive(datom_codec::Datomizable, datom_codec::Composing)
-)]
-pub enum LaunchOutcome {
-    Started(LaunchedRecord),
-    Replaced(ReplacedRecord),
-    StartRejected(StartRejection),
-    ReplaceRejected(ReplaceRejection),
-}
+// How a launch request settled, and a replacement under way: the record
+// types the Memory root declares (`ethos/memory.ethos`).
+pub use crate::generated::memory::{LaunchOutcome, Replacement};
 
 use crate::generated::starter::{
     ContextBeforeModules, LaunchContext, LaunchSource, NativeSkill, OriginClue,
@@ -2790,16 +2780,6 @@ impl UpgradeFrom<StoredLaunchOutcomeV2> for StoredLaunchOutcome {
 
 /// A launch request that replaces a predecessor. While it stands without a
 /// Replaced outcome, the flow its launch binds is held out of routing.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(
-    feature = "datom",
-    derive(datom_codec::Datomizable, datom_codec::Composing)
-)]
-pub struct Replacement {
-    pub launch_request_id: String,
-    pub predecessor: String,
-}
-
 impl EngineRecord for Replacement {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.launch_request_id.clone())

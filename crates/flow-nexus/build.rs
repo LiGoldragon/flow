@@ -13,6 +13,7 @@ fn main() {
         "starter",
         "send_tool",
         "landing",
+        "memory",
     ] {
         let source_path = format!("ethos/{name}.ethos");
         let generated_path = format!("src/generated/{name}.rs");

@@ -1,0 +1,14 @@
+; The record types Flow's Memory keeps that Operation names: how a launch
+; request settled, kept beside its attempt so LaunchStatus and
+; Observe.Launch answer it without running the launch again, and a
+; replacement under way, the successor's launch request and the predecessor
+; it reaps.
+
+Memory
+[ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection ]
+  flow_nexus:[ LaunchedRecord ReplacedRecord ] ]
+[ LaunchOutcome.[ Started.LaunchedRecord
+                  Replaced.ReplacedRecord
+                  StartRejected.StartRejection
+                  ReplaceRejected.ReplaceRejection ]
+  Replacement.{ LaunchRequestId Predecessor.String } ]

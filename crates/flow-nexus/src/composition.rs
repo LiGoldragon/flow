@@ -4,14 +4,14 @@
 //! The context is composed by the context composer and verified
 //! ([`crate::context`]); nothing composed is written to disk. A start is one
 //! model call: every module the launch names is in the system prompt or the
-//! first USER message, sent once. The system prompt is the verified system
-//! text, then any USER modules that overflow the first message, followed
-//! after a blank line by the launch's identity section (its Address, Flow ID
-//! state, native-binding state, predecessor and remembered flows). The first
-//! USER message is the verified USER text, then the brief. When it does not
-//! fit one message, its leading modules
-//! join the system prompt, which no process argument carries, until the
-//! rest fits.
+//! first USER message. The system prompt is the verified system text
+//! (spirit and intent), followed after a blank line by the launch's identity
+//! section (its Address, Flow ID state, native-binding state, predecessor
+//! and remembering). The first USER message is the verified USER text, the
+//! remembered flows' records, then the brief; when it does not fit one
+//! message it is sent in as many numbered parts as it takes, one right
+//! after another. A simplified flow keeps its USER modules in its own
+//! system prompt.
 
 use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
 use crate::delivery::body::RendersNativeContent;
@@ -267,24 +267,6 @@ impl SplitsStartupMessage for HarnessKind {
                 "Startup message, part {number} of {count}. More of it follows: do nothing until part {count} of {count} arrives, and answer only that you are waiting for it.\n\n"
             )
         }
-    }
-
-    /// How many leading USER modules join the system prompt so that the
-    /// rest and the brief fit one message: none when the whole fits. A
-    /// brief that does not fit one message alone refuses.
-    fn system_overflow<N: SegmentListing, O: Textual>(
-        &self,
-        input_0: N,
-        input_1: O,
-    ) -> Result<i64, ContextRefusal> {
-        let segments = input_0.segments();
-        let brief = input_1.text();
-        for moved in 0..=segments.len() {
-            if self.fits_one_message(segments[moved..].joined_with(&brief).concat()) {
-                return i64::try_from(moved).map_err(|_| ContextRefusal::ModuleTooLarge);
-            }
-        }
-        Err(ContextRefusal::ModuleTooLarge)
     }
 
     fn startup_parts<N: SegmentListing, O: Textual>(
@@ -612,12 +594,14 @@ impl ComposesLaunch for LaunchComposer {
                 &leave_outs,
             ));
         }
-        let overflow = usize::try_from(harnessed.harness_kind.system_overflow(&segments, &brief)?)
-            .map_err(|_| ContextRefusal::ModuleTooLarge)?;
-        let kept = segments.split_off(overflow);
-        let system_prompt = self.launch_system_prompt(&harnessed, &verified, &segments)?;
-        let body = kept.joined_with(&brief).concat();
-        let parts = harnessed.harness_kind.startup_parts(&kept, &brief)?;
+        // The system prompt holds spirit and intent alone. The rest of the
+        // context and the brief are the first message, split into as many
+        // prompts as it takes when it does not fit one, sent one right after
+        // another, so the start is one model call.
+        let system_prompt =
+            self.launch_system_prompt(&harnessed, &verified, Vec::<String>::new())?;
+        let body = segments.joined_with(&brief).concat();
+        let parts = harnessed.harness_kind.startup_parts(&segments, &brief)?;
         Ok(Self::assembled(
             &harnessed,
             &system_prompt,
@@ -1189,8 +1173,11 @@ pub(crate) mod tests {
         }
     }
 
+    /// A first message too large for one message is sent in as many parts
+    /// as it takes, one right after another; no USER module joins the
+    /// system prompt, which holds spirit and intent alone.
     #[test]
-    fn a_message_too_large_for_one_message_puts_its_leading_modules_in_the_system_prompt() {
+    fn a_message_too_large_for_one_message_is_sent_in_parts_and_never_moves_to_the_system_prompt() {
         let size = 400_000;
         let (composer, names) = large(&[size, size, size]);
         let mut profile = fixture_profile();
@@ -1206,29 +1193,37 @@ pub(crate) mod tests {
                     Vec::<signal_flow::LeaveOut>::new(),
                 )
                 .unwrap();
-            // One message, so one model call: no part waits on an answer.
-            let parts = &composed.first_prompt_payload.prompt_part_vector;
-            assert_eq!(parts.len(), 1, "{harness:?}");
-            let body = &composed.first_prompt_payload.first_prompt_body;
-            assert_eq!(&parts[0].prompt_part_text, body);
-            assert!(harness.fits_one_message(body));
-            assert!(!body.contains("Startup message, part"));
-            assert!(body.contains("<!-- module: knowledge-large-2 -->"));
-            assert!(body.ends_with("Carry the bounded task."));
-            // The leading module joined the system prompt, after the system
-            // text and before the launch section; no module is left out.
             let system = &composed.system_prompt.system_prompt_text;
-            assert!(system.contains("<!-- module: knowledge-large-0 -->"));
-            assert!(!body.contains("<!-- module: knowledge-large-0 -->"));
-            let module = system.find("<!-- module: knowledge-large-0 -->").unwrap();
-            assert!(system.find("<!-- module: intent-flow -->").unwrap() < module);
-            assert!(system.find("Predecessor: 1b8ac0").unwrap() > module);
+            let parts = &composed.first_prompt_payload.prompt_part_vector;
+            assert!(parts.len() > 1, "{harness:?}: sent in parts");
+            for (index, part) in parts.iter().enumerate() {
+                assert!(harness.fits_one_message(&part.prompt_part_text));
+                assert!(part.prompt_part_text.starts_with(&format!(
+                    "Startup message, part {} of {}",
+                    index + 1,
+                    parts.len()
+                )));
+            }
+            assert!(
+                parts
+                    .last()
+                    .unwrap()
+                    .prompt_part_text
+                    .ends_with("Carry the bounded task.")
+            );
             for name in &names {
                 let marker = format!("<!-- module: {name} -->");
+                assert!(
+                    !system.contains(&marker),
+                    "{name} is not in the system prompt"
+                );
                 assert_eq!(
-                    usize::from(system.contains(&marker)) + usize::from(body.contains(&marker)),
+                    parts
+                        .iter()
+                        .filter(|part| part.prompt_part_text.contains(&marker))
+                        .count(),
                     1,
-                    "{name} placed once"
+                    "{name} is sent once"
                 );
             }
         }
@@ -1298,28 +1293,24 @@ pub(crate) mod tests {
         assert!(composed.first_prompt_payload.prompt_part_vector.is_empty());
     }
 
+    /// One USER module larger than one message is not cut and never moved
+    /// into the system prompt: the launch is refused.
     #[test]
-    fn a_module_too_large_for_one_message_starts_in_the_system_prompt() {
+    fn a_module_too_large_for_one_message_refuses_the_launch() {
         let (composer, names) = large(&[1_100_000]);
         let mut profile = fixture_profile();
         profile.user_modules = names;
-        let composed = composer
-            .compose(
+        assert_eq!(
+            composer.compose(
                 crate::composition::HarnessedProfile {
                     remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone(),
                 },
                 Vec::<signal_flow::LeaveOut>::new(),
-            )
-            .unwrap();
-        assert!(
-            composed
-                .system_prompt
-                .system_prompt_text
-                .contains("<!-- module: knowledge-large-0 -->")
+            ),
+            Err(CompositionError::Context(ContextRefusal::ModuleTooLarge))
         );
-        assert_eq!(composed.first_prompt_payload.prompt_part_vector.len(), 1);
     }
 
     #[test]

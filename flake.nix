@@ -239,7 +239,7 @@
           flow-context-verification-refusals = context.exactTest "flow-nexus"
             "context::tests::a_module_body_that_differs_from_its_rendered_hash_is_refused";
           flow-start-is-one-message = context.exactTest "flow-nexus"
-            "composition::tests::a_message_too_large_for_one_message_puts_its_leading_modules_in_the_system_prompt";
+            "composition::tests::a_message_too_large_for_one_message_is_sent_in_parts_and_never_moves_to_the_system_prompt";
           flow-presentation-asked = context.exactTest "flow-nexus"
             "composition::tests::a_first_prompt_and_the_living_s_words_end_asking_for_a_presentation";
           flow-launch-carries-its-flow-id = context.exactTest "flow-nexus"

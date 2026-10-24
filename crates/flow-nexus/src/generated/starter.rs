@@ -284,11 +284,6 @@ pub trait FitsOneMessage {
 #[rustfmt::skip]
 pub trait SplitsStartupMessage {
     fn part_header<N: PartNumbering>(input: N) -> String;
-    fn system_overflow<N: SegmentListing, O: Textual>(
-        &self,
-        input_0: N,
-        input_1: O,
-    ) -> std::result::Result<i64, signal_flow::ContextRefusal>;
     fn startup_parts<N: SegmentListing, O: Textual>(
         &self,
         input_0: N,

@@ -236,9 +236,11 @@ hyphenated name not yet in that form.
 A start is one model call. Every module the launch names is in the system
 prompt or the first USER message, and the first USER message is sent once:
 when the USER modules and the brief do not fit one message (Herdr's 1 MiB
-request line for Claude, the app-server's 1 << 20 characters for Codex), the
-leading USER modules join the end of the system prompt, before the launch's
-own section, until the rest fits. The system prompt travels in no argument:
+request line for Claude, the app-server's 1 << 20 characters for Codex), it
+is sent in as many parts as it takes, one right after another, each part
+headed with its number; no USER module ever joins the system prompt, which
+holds spirit and intent alone. A simplified flow keeps all its modules in
+its own system prompt. The system prompt travels in no argument:
 Claude reads it from the Nexus's in-memory file and a Codex thread is given
 it as its base instructions. A brief that alone does not fit refuses.
 

@@ -1033,10 +1033,16 @@ impl SleepsAndWakesSeats for RunningNexus {
                 let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id.clone())));
                 return;
             }
-            if metaflow
-                .queue
-                .first()
-                .is_some_and(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)))
+            // A seat past its model's refresh threshold is handed nothing,
+            // whatever the tier: it is refreshed at its rest, which only
+            // the rest's settlement does. A resting seat is settled now; one
+            // in its turn is settled at that turn's end.
+            let refresh_due = matches!(self.store.past_threshold(&flow_id), Ok(true));
+            if !refresh_due
+                && metaflow
+                    .queue
+                    .first()
+                    .is_some_and(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)))
             {
                 let _ = self.drain_all(address.clone());
                 return;

@@ -258,6 +258,8 @@
             "store_check::tests::a_store_this_flow_opens_is_checked_open_and_left_untouched";
           flow-refresh-past-model-threshold = context.exactTest "flow-nexus"
             "tests::refresh_and_compaction::a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_flow";
+          flow-idle-past-threshold-refreshed-on-pressing-work = context.exactTest "flow-nexus"
+            "tests::refresh_and_compaction::an_idle_seat_past_its_threshold_is_refreshed_when_pressing_work_arrives";
           flow-deliver-past-threshold-refused = context.exactTest "flow-nexus"
             "tests::delivery::a_deliver_into_a_flow_past_its_threshold_is_refused";
           flow-compaction-investigated-once = context.exactTest "flow-nexus"

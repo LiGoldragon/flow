@@ -221,6 +221,58 @@ fn an_idle_seat_is_refreshed_only_past_its_threshold() {
     }
 }
 
+/// An idle seat past its threshold that is sent a pressing request is
+/// refreshed at once, as its rest would refresh it: no turn end is coming
+/// to settle it, so the send's own settlement reaps it, and the request
+/// stays queued for the metaflow's next flow.
+#[test]
+fn an_idle_seat_past_its_threshold_is_refreshed_when_pressing_work_arrives() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    claude_seat(&fixture, 200_000);
+    append_main_rows(&fixture, &[end_turn("last-turn")]);
+    seat_refreshing_at(&fixture, 200_000);
+    fixture
+        .nexus
+        .store
+        .record_context_size(CLAUDE_SEAT, 200_000)
+        .unwrap();
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: seat_address(),
+        state: State::Awake(CLAUDE_SEAT.into()),
+        past: vec![],
+        queue: vec![signal_flow::QueueEntry {
+            logical_delivery_id: "refresh-test-pressing".into(),
+            sent_by: SentBy::Unknown,
+            delivery: Delivery::Queue,
+            message: Message::MiddleAbrupt(Request::Order("For the next flow.".into())),
+        }],
+    });
+
+    fixture.nexus.wake_due(seat_address());
+
+    assert!(closed(&fixture), "the idle seat's pane is closed");
+    assert!(
+        fixture.typed().is_none(),
+        "nothing is typed into a seat past its threshold"
+    );
+    let metaflow = seat_metaflow_now(&fixture);
+    assert_eq!(metaflow.state, State::Asleep);
+    assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+    assert_eq!(
+        metaflow
+            .queue
+            .iter()
+            .map(|queued| queued.logical_delivery_id.as_str())
+            .collect::<Vec<_>>(),
+        ["refresh-test-pressing"],
+        "the request waits for the next flow"
+    );
+}
+
 /// A Codex thread's context is measured from its app-server's token usage,
 /// as a Claude seat's is from its transcript at each Stop.
 #[test]

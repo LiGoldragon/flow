@@ -2269,6 +2269,7 @@ mod tests {
         let launch = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone(),
                 },
@@ -2433,6 +2434,7 @@ mod tests {
         fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile(),
                 },

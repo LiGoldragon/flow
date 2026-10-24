@@ -144,6 +144,7 @@ fn staged_refresh_successor(fixture: &NexusFixture) -> StagedLaunch {
         .composer
         .compose(
             HarnessedProfile {
+                remembered_flows: Vec::new(),
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: successor.profile.clone(),
             },

@@ -11,8 +11,8 @@ use crate::generated::operation::Outcome;
 use crate::generated::starter::{
     CallerProcessing, ContextRequest, ContextRequesting, CurriculumQuerying, DeliveryIntended,
     HarnessedProfile, JsonRow, LaunchedRecord, LaunchedRecording, LeaveOutListing, OutcomeCarrying,
-    PaneBound, PartNumbering, Profiled, Progressing, ProvenanceListing, SegmentListing,
-    StartupComposing, StartupProgress, SystemPrompted, Textual,
+    PaneBound, PartNumbering, Profiled, Progressing, ProvenanceListing, RememberedFlows,
+    SegmentListing, StartupComposing, StartupProgress, SystemPrompted, Textual,
 };
 use signal_flow::{
     HarnessKind, HerdrPaneBinding, LaunchProfile, LeaveOut, PromptDeliveryIntent, SystemPrompt,
@@ -44,6 +44,10 @@ impl Profiled for HarnessedProfile {
     fn harness_kind(&self) -> HarnessKind {
         self.harness_kind.clone()
     }
+
+    fn remembered_flows(&self) -> RememberedFlows {
+        self.remembered_flows.clone()
+    }
 }
 
 impl<T: Profiled + ?Sized> Profiled for &T {
@@ -53,6 +57,10 @@ impl<T: Profiled + ?Sized> Profiled for &T {
 
     fn harness_kind(&self) -> HarnessKind {
         (**self).harness_kind()
+    }
+
+    fn remembered_flows(&self) -> RememberedFlows {
+        (**self).remembered_flows()
     }
 }
 
@@ -260,5 +268,9 @@ impl<T: crate::generated::starter::ReadsVerifiedContext + ?Sized>
 
     fn user_segments(&self) -> Vec<String> {
         (**self).user_segments()
+    }
+
+    fn records_text(&self) -> String {
+        (**self).records_text()
     }
 }

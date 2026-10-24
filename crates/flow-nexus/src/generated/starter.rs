@@ -1,5 +1,7 @@
 #![allow(dead_code, non_camel_case_types, non_snake_case)]
 #[rustfmt::skip]
+pub type RememberedFlows = std::vec::Vec<signal_flow::FlowId>;
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct ContextRequest {
@@ -7,6 +9,7 @@ pub struct ContextRequest {
     pub harness_kind: signal_flow::HarnessKind,
     pub system_modules: signal_flow::SystemModules,
     pub user_modules: signal_flow::UserModules,
+    pub remembered_flows: RememberedFlows,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -14,6 +17,7 @@ pub struct ContextRequest {
 pub struct HarnessedProfile {
     pub launch_profile: signal_flow::LaunchProfile,
     pub harness_kind: signal_flow::HarnessKind,
+    pub remembered_flows: RememberedFlows,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -154,6 +158,7 @@ pub trait Textual {
 pub trait Profiled {
     fn profile(&self) -> signal_flow::LaunchProfile;
     fn harness_kind(&self) -> signal_flow::HarnessKind;
+    fn remembered_flows(&self) -> RememberedFlows;
 }
 #[rustfmt::skip]
 pub trait LeaveOutListing {
@@ -260,6 +265,7 @@ pub trait ReadsVerifiedContext {
     fn address(&self) -> signal_flow::Address;
     fn system_text(&self) -> String;
     fn user_segments(&self) -> std::vec::Vec<String>;
+    fn records_text(&self) -> String;
 }
 #[rustfmt::skip]
 pub trait CutsRenderedText {

@@ -443,6 +443,7 @@ impl ComposesVerifiedContext for LaunchComposer {
             harness_kind: input.harness_kind(),
             system_modules: profile.system_modules.clone(),
             user_modules: profile.user_modules.clone(),
+            remembered_flows: input.remembered_flows(),
         };
         let composition = self.context.compose_flow_context(&request)?;
         let verified = VerifiedContext::verified(&request, composition)?;
@@ -552,6 +553,7 @@ impl ComposesLaunch for LaunchComposer {
         input_1: O,
     ) -> Result<ComposedLaunch, CompositionError> {
         let harnessed = HarnessedProfile {
+            remembered_flows: input_0.remembered_flows(),
             launch_profile: input_0.profile(),
             harness_kind: input_0.harness_kind(),
         };
@@ -563,6 +565,12 @@ impl ComposesLaunch for LaunchComposer {
             harnessed.brief()
         };
         let mut segments = verified.user_segments();
+        // The raw records of the flows the launch remembers follow its
+        // USER modules, as one segment, ahead of the brief.
+        let records = verified.records_text();
+        if !records.is_empty() {
+            segments.push(records);
+        }
         if harnessed.launch_profile.flow_kind == signal_flow::FlowKind::Simplified {
             // A simplified flow must not receive a context-only startup turn:
             // its first user message belongs to the first queued request.
@@ -733,12 +741,72 @@ pub(crate) mod tests {
         ))
     }
 
+    /// The raw records of the flows a launch remembers are composed into its
+    /// first message after its USER modules and before its brief, and the
+    /// composer is asked for exactly those flows; a launch remembering none
+    /// carries none.
+    #[test]
+    fn remembered_flows_raw_records_follow_the_user_modules_in_the_first_message() {
+        let mut context = FixtureComposer::from(
+            &[
+                ("spirit-core", "Spirit body."),
+                ("intent-flow", "Intent body."),
+                ("operation-main-flow", "Main flow body."),
+                ("knowledge-flow", "Knowledge body."),
+            ][..],
+        );
+        context.records.insert(
+            "36b71b".into(),
+            "## 2026-10-23, living, direct\n\"You can't leave me without a primary.\"\n".into(),
+        );
+        context
+            .records
+            .insert("e3c8c1".into(), "## Notion\nA crazy idea.\n".into());
+        let composer =
+            LaunchComposer::with_context(crate::context::ContextComposer::Fixture(context));
+        let composed = composer
+            .compose(
+                HarnessedProfile {
+                    remembered_flows: vec!["36b71b".into(), "e3c8c1".into()],
+                    harness_kind: HarnessKind::Claude,
+                    launch_profile: fixture_profile(),
+                },
+                Vec::<LeaveOut>::new(),
+            )
+            .unwrap();
+        let body = &composed.first_prompt_payload.first_prompt_body;
+        let user = body.find("Knowledge body.").expect("USER modules");
+        let first = body
+            .find("You can't leave me without a primary.")
+            .expect("the first remembered flow's records");
+        let second = body.find("A crazy idea.").expect("the second's records");
+        let brief = body.find("Carry the bounded task.").expect("the brief");
+        assert!(user < first && first < second && second < brief, "{body}");
+        let forgetting = composer
+            .compose(
+                HarnessedProfile {
+                    remembered_flows: Vec::new(),
+                    harness_kind: HarnessKind::Claude,
+                    launch_profile: fixture_profile(),
+                },
+                Vec::<LeaveOut>::new(),
+            )
+            .unwrap();
+        assert!(
+            !forgetting
+                .first_prompt_payload
+                .first_prompt_body
+                .contains("A crazy idea.")
+        );
+    }
+
     #[test]
     fn presentation_prompt_is_appended_verbatim_after_the_composed_system_prompt() {
         use sha2::{Digest, Sha256};
         let role = "Presentation-maker role\nsecond line\n";
         let composer = fixture_composer();
         let profile = HarnessedProfile {
+            remembered_flows: Vec::new(),
             harness_kind: HarnessKind::Claude,
             launch_profile: fixture_profile(),
         };
@@ -850,6 +918,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: harness.clone(),
                     launch_profile: profile.clone(),
                 },
@@ -875,6 +944,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile().clone(),
                 },
@@ -897,6 +967,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: fixture_profile().clone(),
                 },
@@ -916,6 +987,7 @@ pub(crate) mod tests {
         let bare = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: profile,
                 },
@@ -937,6 +1009,7 @@ pub(crate) mod tests {
         let mut composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: fixture_profile(),
                 },
@@ -946,6 +1019,7 @@ pub(crate) mod tests {
         let role = "Presentation-maker role, unchanged\n";
         let composer = fixture_composer();
         let profile = HarnessedProfile {
+            remembered_flows: Vec::new(),
             harness_kind: HarnessKind::Claude,
             launch_profile: composed.launch_profile.clone(),
         };
@@ -976,6 +1050,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile().clone(),
                 },
@@ -1020,6 +1095,7 @@ pub(crate) mod tests {
                     let composed = fixture_composer()
                         .compose(
                             HarnessedProfile {
+                                remembered_flows: Vec::new(),
                                 harness_kind,
                                 launch_profile: profile,
                             },
@@ -1057,6 +1133,7 @@ pub(crate) mod tests {
             let composed = composer
                 .compose(
                     crate::composition::HarnessedProfile {
+                        remembered_flows: Vec::new(),
                         harness_kind: harness.clone(),
                         launch_profile: profile.clone(),
                     },
@@ -1100,6 +1177,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: profile,
                 },
@@ -1121,6 +1199,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Claude,
                     launch_profile: profile,
                 },
@@ -1142,6 +1221,7 @@ pub(crate) mod tests {
         let composed = fixture_composer()
             .compose(
                 HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile,
                 },
@@ -1160,6 +1240,7 @@ pub(crate) mod tests {
         let composed = composer
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone(),
                 },
@@ -1182,6 +1263,7 @@ pub(crate) mod tests {
         assert_eq!(
             fixture_composer().compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone()
                 },
@@ -1200,6 +1282,7 @@ pub(crate) mod tests {
         let composed = composer
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone(),
                 },
@@ -1244,6 +1327,7 @@ pub(crate) mod tests {
             assert_eq!(
                 composer.compose(
                     crate::composition::HarnessedProfile {
+                        remembered_flows: Vec::new(),
                         harness_kind: HarnessKind::Codex,
                         launch_profile: profile.clone()
                     },
@@ -1261,6 +1345,7 @@ pub(crate) mod tests {
         assert_eq!(
             fixture_composer().compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone()
                 },
@@ -1275,6 +1360,7 @@ pub(crate) mod tests {
         let mut composed = fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile(),
                 },
@@ -1296,6 +1382,7 @@ pub(crate) mod tests {
         let composed = composer
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: harness.clone(),
                     launch_profile: profile.clone(),
                 },
@@ -1308,6 +1395,7 @@ pub(crate) mod tests {
         let composed = composer
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: harness.clone(),
                     launch_profile: profile.clone(),
                 },
@@ -1320,6 +1408,7 @@ pub(crate) mod tests {
             composer
                 .compose(
                     crate::composition::HarnessedProfile {
+                        remembered_flows: Vec::new(),
                         harness_kind: harness.clone(),
                         launch_profile: profile.clone()
                     },
@@ -1335,6 +1424,7 @@ pub(crate) mod tests {
             composer
                 .compose(
                     crate::composition::HarnessedProfile {
+                        remembered_flows: Vec::new(),
                         harness_kind: harness.clone(),
                         launch_profile: profile.clone()
                     },

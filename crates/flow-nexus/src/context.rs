@@ -13,8 +13,9 @@
 //!
 //! The production composer is the Curriculum Nexus, asked over its socket
 //! with `ComposeStartup` from its schema, copied byte for byte into
-//! `ethos/curriculum.ethos` from Curriculum main 691852aa (schema SHA-256
-//! 7450ce7a…382ad). Its answer names no
+//! `ethos/curriculum.ethos` from Curriculum 4493d1ec (schema SHA-256
+//! 26011a94…48e28), whose selection names the flows a launch remembers
+//! and whose composition carries their raw records. Its answer names no
 //! metaflow, so the metaflow check is Flow's own: the request carries the
 //! launch's Address, and the composed launch keeps it with the identities
 //! asked for it.
@@ -118,6 +119,7 @@ impl SelectsStartup for ContextRequest {
             },
             system_modules: self.system_modules.clone(),
             user_modules: self.user_modules.clone(),
+            flow_id_vector: self.remembered_flows.clone(),
         }
     }
 }
@@ -166,6 +168,12 @@ impl ComposesFlowContext for CurriculumComposer {
             input.context_request().startup_selection(),
         )) {
             Ok(CurriculumOutcome::StartupComposed(composition)) => Ok(composition),
+            // Curriculum names a remembered flow whose records it could not
+            // read "record missing".
+            Ok(CurriculumOutcome::Rejected(reason)) if reason.starts_with("record missing") => {
+                eprintln!("flow-nexus: Curriculum found no records: {reason}");
+                Err(ContextRefusal::RecordMissing)
+            }
             Ok(CurriculumOutcome::Rejected(reason)) => {
                 eprintln!("flow-nexus: Curriculum rejected the context request: {reason}");
                 Err(ContextRefusal::ComposerRejected)
@@ -190,6 +198,7 @@ pub struct VerifiedContext {
     address: Address,
     system_text: String,
     user_segments: Vec<String>,
+    records_text: String,
 }
 
 /// Cuts a rendered text back into its modules, checking each module's slice
@@ -248,7 +257,12 @@ impl VerifiesContext for VerifiedContext {
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         if digest(&composition.system_text) != composition.system_payload_sha256
             || digest(&composition.user_text) != composition.user_payload_sha256
+            || digest(&composition.records_text) != composition.records_payload_sha256
         {
+            return Err(ContextRefusal::PayloadMismatch);
+        }
+        // Records are composed only for a launch that remembers flows.
+        if request.remembered_flows.is_empty() && !composition.records_text.is_empty() {
             return Err(ContextRefusal::PayloadMismatch);
         }
         let rows = &composition.context_provenance_vector;
@@ -294,6 +308,7 @@ impl VerifiesContext for VerifiedContext {
             address: request.address.clone(),
             system_text: composition.system_text,
             user_segments,
+            records_text: composition.records_text,
         })
     }
 }
@@ -315,6 +330,12 @@ impl ReadsVerifiedContext for VerifiedContext {
     fn user_segments(&self) -> Vec<String> {
         self.user_segments.clone()
     }
+
+    /// The raw vision and notion records of the flows the launch
+    /// remembers, as the composer read them; empty when it remembers none.
+    fn records_text(&self) -> String {
+        self.records_text.clone()
+    }
 }
 
 /// A composer for tests: each identity's body is held in memory and
@@ -324,6 +345,10 @@ impl ReadsVerifiedContext for VerifiedContext {
 #[derive(Debug, Clone, Default)]
 pub struct FixtureComposer {
     pub bodies: std::collections::BTreeMap<String, String>,
+    /// The raw records of each flow it holds, as the composer reads them
+    /// from the records root; a remembered flow it does not hold logged
+    /// none and composes nothing.
+    pub records: std::collections::BTreeMap<String, String>,
 }
 
 #[cfg(test)]
@@ -334,6 +359,7 @@ impl From<&[(&str, &str)]> for FixtureComposer {
                 .iter()
                 .map(|(identity, body)| ((*identity).to_owned(), (*body).to_owned()))
                 .collect(),
+            records: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -389,11 +415,20 @@ impl ComposesFlowContext for FixtureComposer {
         };
         let system_text = rendered(&request.system_modules);
         let user_text = rendered(&request.user_modules);
+        // A remembered flow that logged no record composes nothing.
+        let records_text = request
+            .remembered_flows
+            .iter()
+            .filter_map(|flow_id| self.records.get(flow_id))
+            .cloned()
+            .collect::<String>();
         Ok(StartupComposition {
             system_payload_sha256: digest(&system_text),
             user_payload_sha256: digest(&user_text),
+            records_payload_sha256: digest(&records_text),
             system_text,
             user_text,
+            records_text,
             context_provenance_vector: rows,
         })
     }
@@ -408,6 +443,43 @@ mod tests {
     use crate::generated::curriculum::Target;
     use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Layer};
 
+    /// The flows a launch remembers reach Curriculum as the selection's
+    /// flow ids, in order.
+    #[test]
+    fn the_startup_selection_names_the_remembered_flows() {
+        let mut remembering = request();
+        remembering.remembered_flows = vec!["36b71b".into(), "e3c8c1".into()];
+        assert_eq!(
+            remembering.startup_selection().flow_id_vector,
+            vec!["36b71b".to_owned(), "e3c8c1".to_owned()]
+        );
+        assert!(request().startup_selection().flow_id_vector.is_empty());
+    }
+
+    /// Records Flow did not ask for, or whose payload digest differs, are
+    /// refused.
+    #[test]
+    fn records_not_asked_for_or_not_matching_their_digest_are_refused() {
+        use sha2::{Digest, Sha256};
+        let composer = fixture();
+        let mut composition = composer.compose_flow_context(request()).unwrap();
+        composition.records_text = "## an unasked record\n".into();
+        composition.records_payload_sha256 =
+            format!("{:x}", Sha256::digest(composition.records_text.as_bytes()));
+        assert_eq!(
+            VerifiedContext::verified(request(), composition.clone()),
+            Err(ContextRefusal::PayloadMismatch)
+        );
+        let mut remembering = request();
+        remembering.remembered_flows = vec!["36b71b".into()];
+        assert!(VerifiedContext::verified(&remembering, composition.clone()).is_ok());
+        composition.records_payload_sha256 = "0".repeat(64);
+        assert_eq!(
+            VerifiedContext::verified(&remembering, composition),
+            Err(ContextRefusal::PayloadMismatch)
+        );
+    }
+
     fn request() -> ContextRequest {
         ContextRequest {
             address: Address {
@@ -418,6 +490,7 @@ mod tests {
             harness_kind: HarnessKind::Claude,
             system_modules: vec!["spirit-core".into(), "intent-flow".into()],
             user_modules: vec!["operation-main-flow".into(), "knowledge-flow".into()],
+            remembered_flows: vec![],
         }
     }
 

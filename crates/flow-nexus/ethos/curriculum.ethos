@@ -17,14 +17,23 @@ Library
   StartupPlacement.[ System User ]
   SystemModules.Vector<ModuleIdentity>
   UserModules.Vector<ModuleIdentity>
+  FlowId.String
   SystemText.String
   UserText.String
+  RecordsText.String
   SystemPayloadSha256.String
   UserPayloadSha256.String
-  StartupSelection.{ CallerMetaflow Target SystemModules UserModules }
+  RecordsPayloadSha256.String
+  StartupSelection.{ CallerMetaflow Target SystemModules UserModules Vector<FlowId> }
   ContextProvenance.{ ModuleIdentity RepositoryName SourceRevision SourceRelativePath SourceSha256 BodySha256 RenderedSha256 StartupPlacement Integer }
-  StartupComposition.{ SystemText UserText SystemPayloadSha256 UserPayloadSha256 Vector<ContextProvenance> }
+  StartupComposition.{ SystemText UserText RecordsText SystemPayloadSha256 UserPayloadSha256 RecordsPayloadSha256 Vector<ContextProvenance> }
   ResolvedModule.{ ModuleIdentity RepositoryName SourceRevision SourceRoot SourceRelativePath ModuleType ModuleSubject DeclaredPlacement SourceSha256 BodySha256 String Vector<String> }
+  DeploymentDestination.String
+  RepositoryRevision.{ RepositoryName SourceRevision }
+  PublishedInventoryDigest.String
+  PublishedContentDigest.String
+  RendererVersion.String
+  ProjectionCandidate.{ DeploymentDestination Vector<RepositoryRevision> PublishedInventoryDigest PublishedContentDigest RendererVersion }
   RoleName.String
   ModelId.String
   DescriptionModule.ModuleIdentity

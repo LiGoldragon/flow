@@ -237,8 +237,18 @@ impl Performs for RunningNexus {
                     .default_leave_outs(&profile.address, &harness_kind)
                     .unwrap_or_default();
                 let request = profile.launch_request_id.clone();
+                // The launch's Remembering, resolved to the flows whose raw
+                // records the composer reads into its first message.
+                let remembered_flows = {
+                    use crate::store::metaflow::ResolvesRemembering;
+                    match self.store.remembered_flows(&profile) {
+                        Ok(flows) => flows,
+                        Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+                    }
+                };
                 match self.composer.compose(
                     HarnessedProfile {
+                        remembered_flows,
                         harness_kind,
                         launch_profile: profile,
                     },

@@ -211,6 +211,16 @@ dispatch gate and waits for the launch's outcome, which the same watch
 produces, and answers it. `StartAmbiguous` is what a seat that never answers
 at all comes to, once the wait's bound has passed.
 
+A launch names its `Remembering`: `Predecessors.<depth>` or
+`Custom.[ FlowId … ]`. At Compose, Flow resolves it to flow ids, the
+metaflow's lineage (its past then the flow it is Awake as, the launch's own
+bound flow never among them) to the depth, oldest first, or the flows named,
+and asks Curriculum to compose those flows' raw vision and notion records
+(`StartupSelection` names them; `StartupComposition` carries `RecordsText`
+and its digest, which Flow verifies). The records follow the USER modules in
+the first message, ahead of the brief. A wake, a refresh and an exit's
+successor remember their predecessor, `Predecessors.1`.
+
 A start is one model call. Every module the launch names is in the system
 prompt or the first USER message, and the first USER message is sent once:
 when the USER modules and the brief do not fit one message (Herdr's 1 MiB

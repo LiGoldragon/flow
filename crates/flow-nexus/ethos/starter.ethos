@@ -28,10 +28,14 @@ Library
                  NativeLaunchFailure ]
   flow_nexus:[ StartupSelection StartupComposition ContextProvenance CurriculumQuery CurriculumOutcome CompositionError VerifiedContext OperationOutcome CallerProcess ]
   serde_json:JsonValue.Value ]
-[ ; What a launch asks of the context composer.
-  ContextRequest.{ Address HarnessKind SystemModules UserModules }
-  ; A launch profile with the harness the Nexus derived for its model.
-  HarnessedProfile.{ LaunchProfile HarnessKind }
+[ ; The flows a launch remembers, as Flow resolved its Remembering: their
+  ; raw vision and notion records are composed into its first message.
+  RememberedFlows.Vector<FlowId>
+  ; What a launch asks of the context composer.
+  ContextRequest.{ Address HarnessKind SystemModules UserModules RememberedFlows }
+  ; A launch profile with the harness the Nexus derived for its model and
+  ; the flows its Remembering resolved to.
+  HarnessedProfile.{ LaunchProfile HarnessKind RememberedFlows }
   ; What a fresh wake takes from the metaflow's last launch.
   FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> FlowKind ToolSet }
   ; A Started launch as its outcome row keeps it; the flow's route is read
@@ -73,7 +77,8 @@ Library
 [ ; The values capabilities read, each through the trait that yields it.
   Textual.[ text.[ String ] ]
   Profiled.[ profile.[ LaunchProfile ]
-             harness_kind.[ HarnessKind ] ]
+             harness_kind.[ HarnessKind ]
+             remembered_flows.[ RememberedFlows ] ]
   LeaveOutListing.[ leave_outs.[ LeaveOuts ] ]
   ContextRequesting.[ context_request.[ ContextRequest ] ]
   StartupComposing.[ composition.[ StartupComposition ] ]
@@ -99,7 +104,8 @@ Library
   VerifiesContext.[ verified:{ [ ContextRequesting StartupComposing ] [ Result<Self ContextRefusal> ] } ]
   ReadsVerifiedContext.[ address.[ Address ]
                          system_text.[ String ]
-                         user_segments.[ Vector<String> ] ]
+                         user_segments.[ Vector<String> ]
+                         records_text.[ String ] ]
   CutsRenderedText.[ rendered_segments.{ [ ProvenanceListing ] [ Option<Vector<String>> ] } ]
   FitsOneMessage.[ fits_one_message.{ [ Textual ] [ Boolean ] } ]
   SplitsStartupMessage.[ part_header:{ [ PartNumbering ] [ String ] }

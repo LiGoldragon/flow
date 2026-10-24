@@ -841,6 +841,7 @@ fn a_fresh_wake_composes_modules_without_queued_work() {
         .composer
         .compose(
             crate::composition::HarnessedProfile {
+                remembered_flows: Vec::new(),
                 harness_kind: HarnessKind::Claude,
                 launch_profile: profile.clone(),
             },
@@ -1067,6 +1068,7 @@ fn launched_claude_ended_by_with(
         .composer
         .compose(
             crate::composition::HarnessedProfile {
+                remembered_flows: Vec::new(),
                 harness_kind: HarnessKind::Claude,
                 launch_profile: profile.clone(),
             },
@@ -3099,6 +3101,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         .composer
         .compose(
             crate::composition::HarnessedProfile {
+                remembered_flows: Vec::new(),
                 harness_kind: HarnessKind::Codex,
                 launch_profile: profile.clone(),
             },
@@ -3198,6 +3201,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         .composer
         .compose(
             crate::composition::HarnessedProfile {
+                remembered_flows: Vec::new(),
                 harness_kind: HarnessKind::Codex,
                 launch_profile: fresh,
             },
@@ -3533,6 +3537,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
             .composer
             .compose(
                 crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
                     launch_profile: sender.clone(),
                 },
@@ -3833,6 +3838,7 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
         .composer
         .compose(
             crate::composition::HarnessedProfile {
+                remembered_flows: Vec::new(),
                 harness_kind: HarnessKind::Codex,
                 launch_profile: setup.sender.clone(),
             },
@@ -4599,4 +4605,39 @@ fn a_maintained_metaflow_stopped_deliberately_is_owed_no_successor() {
             .unwrap(),
         None
     );
+}
+
+/// A launch's Remembering resolves to flows: the metaflow's lineage, its
+/// past then the flow it is Awake as, to the depth, oldest first, or the
+/// flows named one by one.
+#[test]
+fn a_launch_remembers_its_metaflow_s_last_flows_to_its_depth_or_those_it_names() {
+    use crate::store::metaflow::ResolvesRemembering;
+    use signal_flow::Remembering;
+    let fixture = NexusFixture::new();
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Awake("c3c3c3".into()),
+        vec!["a1a1a1", "b2b2b2"],
+        vec![],
+    ));
+    let mut profile = crate::composition::tests::fixture_profile();
+    profile.address = address(Layer::Secondary);
+    profile.launch_request_id = "remember-request".into();
+    for (remembering, expected) in [
+        (Remembering::Predecessors(0), vec![]),
+        (Remembering::Predecessors(2), vec!["b2b2b2", "c3c3c3"]),
+        (
+            Remembering::Predecessors(5),
+            vec!["a1a1a1", "b2b2b2", "c3c3c3"],
+        ),
+        (Remembering::Custom(vec!["36b71b".into()]), vec!["36b71b"]),
+    ] {
+        profile.remembering = remembering.clone();
+        assert_eq!(
+            fixture.nexus.store.remembered_flows(&profile).unwrap(),
+            expected.into_iter().map(String::from).collect::<Vec<_>>(),
+            "{remembering:?}"
+        );
+    }
 }

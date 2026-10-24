@@ -3897,6 +3897,7 @@ mod tests {
                 .composer
                 .compose(
                     crate::composition::HarnessedProfile {
+                        remembered_flows: Vec::new(),
                         harness_kind: HarnessKind::Codex,
                         launch_profile: profile.clone(),
                     },

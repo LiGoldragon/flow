@@ -948,6 +948,7 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     let mut launch = fixture_composer()
         .compose(
             crate::composition::HarnessedProfile {
+                remembered_flows: Vec::new(),
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: profile,
             },
@@ -1087,6 +1088,7 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     let mut launch = fixture_composer()
         .compose(
             crate::composition::HarnessedProfile {
+                remembered_flows: Vec::new(),
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: profile.clone(),
             },
@@ -1234,6 +1236,7 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
     let mut launch = fixture_composer()
         .compose(
             crate::composition::HarnessedProfile {
+                remembered_flows: Vec::new(),
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: profile.clone(),
             },

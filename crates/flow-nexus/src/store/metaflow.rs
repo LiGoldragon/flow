@@ -656,6 +656,50 @@ impl SeedsMetaflow for FlowStore {
     }
 }
 
+/// The flows a launch remembers, as its Remembering names them: the flows
+/// named one by one, or the metaflow's last flows to a depth, oldest first.
+/// The metaflow's lineage is its past then the flow it is Awake as; the flow
+/// the launch itself bound is never its own predecessor, so a launch read
+/// again after its flow took the Address resolves as it first did.
+pub(crate) trait ResolvesRemembering {
+    fn remembered_flows(&self, profile: &LaunchProfile) -> Result<Vec<String>, StoreError>;
+}
+
+impl ResolvesRemembering for FlowStore {
+    fn remembered_flows(&self, profile: &LaunchProfile) -> Result<Vec<String>, StoreError> {
+        let depth = match &profile.remembering {
+            signal_flow::Remembering::Custom(flows) => return Ok(flows.clone()),
+            signal_flow::Remembering::Predecessors(depth) => {
+                usize::try_from(*depth).unwrap_or_default()
+            }
+        };
+        if depth == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(stored) = self.stored_metaflow(&profile.address)? else {
+            return Ok(Vec::new());
+        };
+        let own = self
+            .launch_attempt(&profile.launch_request_id)?
+            .and_then(|attempt| attempt.native_launch_binding_option)
+            .map(|binding| binding.flow_id);
+        let mut lineage: Vec<String> = Vec::new();
+        let awake = match &stored.metaflow.state {
+            MetaflowState::Awake(flow_id) => Some(flow_id.clone()),
+            MetaflowState::Asleep => None,
+        };
+        for flow_id in stored.metaflow.past.iter().cloned().chain(awake) {
+            if Some(&flow_id) == own.as_ref() {
+                continue;
+            }
+            lineage.retain(|known| known != &flow_id);
+            lineage.push(flow_id);
+        }
+        let start = lineage.len().saturating_sub(depth);
+        Ok(lineage.split_off(start))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

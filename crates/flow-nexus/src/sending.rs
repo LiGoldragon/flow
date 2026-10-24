@@ -324,7 +324,14 @@ impl SendsRequests for RunningNexus {
             return Response::Refused(Refusal::Store(error.to_string()));
         }
         if !asleep {
-            self.drain_all(address.clone());
+            match self.drain_all(address.clone()) {
+                crate::generated::operation::Outcome::Drained(_)
+                | crate::generated::operation::Outcome::AwaitingReceipt(_) => {}
+                held => eprintln!(
+                    "flow-nexus: DeliverAll for {:?} {} {:?} held: {held:?}",
+                    address.aspect, address.topic, address.layer
+                ),
+            }
         }
         drop(turn);
         if asleep {

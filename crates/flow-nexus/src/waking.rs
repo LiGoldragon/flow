@@ -1099,7 +1099,13 @@ impl SleepsAndWakesSeats for RunningNexus {
                     .first()
                     .is_some_and(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)))
             {
-                let _ = self.drain_all(address.clone());
+                match self.drain_all(address.clone()) {
+                    Outcome::Drained(_) | Outcome::AwaitingReceipt(_) => {}
+                    held => eprintln!(
+                        "flow-nexus: pressing work for {:?} {} {:?} held at flow {flow_id}: {held:?}",
+                        address.aspect, address.topic, address.layer
+                    ),
+                }
                 return;
             }
             let known_resting = match node.harness_kind {
@@ -1468,6 +1474,10 @@ impl PerformsWakeAndDrain for RunningNexus {
                         | meta_signal_flow::DeliveryRejection::RecipientBlocked
                         | meta_signal_flow::DeliveryRejection::ComposerOccupied));
             if proved_absent {
+                eprintln!(
+                    "flow-nexus: logical {} attempt {} to flow {flow_id} refused before input: {result:?}; it stays queued",
+                    oldest.logical_delivery_id, attempt.attempt_id
+                );
                 let _ = self.store.mark_delivery_absent(
                     &attempt.attempt_id,
                     AbsenceRecord {

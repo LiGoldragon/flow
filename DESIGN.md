@@ -366,8 +366,10 @@ A metaflow is Asleep once its flow has ended: slept, its pane closed by the
 living, crashed, or replaced.
 
 A Required metaflow always has a flow. When its flow is refreshed, or
-ends with its pane gone (recorded Exited, by a Deliver, a drain or an
-Observe that witnesses the pane absent), Flow records a successor intent
+ends unexpectedly (recorded Exited when its Claude hook reports its own
+session's end, `Report.{ FlowId Ended.Some.«session» }` on SessionEnd, or,
+as the fallback, by a Deliver, a drain or an Observe that witnesses the
+pane absent), Flow records a successor intent
 (`flow_nexus_successor_intents`, one per Address), the exit's in the same
 write as the Exited record, and starts the successor with no queued request
 needed. The intent is given in the write in which a flow takes the Address:

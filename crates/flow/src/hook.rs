@@ -1,6 +1,6 @@
 //! `flow-hook`: the Claude Code command hook Flow writes into every Claude
 //! flow it launches. Claude Code runs it on SessionStart, PostToolUse,
-//! UserPromptSubmit and Stop with the event as JSON on stdin; it turns the
+//! UserPromptSubmit, Stop and SessionEnd with the event as JSON on stdin; it turns the
 //! event into one `Report.{ FlowId Event }` datom and hands it to the `flow`
 //! CLI beside it, which is the only thing here that speaks Signal.
 //!
@@ -8,6 +8,7 @@
 //!   PostToolUse      -> Report.{ «FLOW_ID» ToolUsed.«tool_name» }
 //!   UserPromptSubmit -> Report.{ «FLOW_ID» PromptSubmitted.{ Some.«session_id» Some.«prompt_id» SHA256 } }
 //!   Stop             -> Report.{ «FLOW_ID» Stopped.{ Some.«session_id» Some.«transcript_path» Some.«last_assistant_message» } }
+//!   SessionEnd       -> Report.{ «FLOW_ID» Ended.Some.«session_id» }
 //!
 //! A Stop and a submitted prompt carry the native identity Claude Code gave
 //! the hook, so the Nexus acts on them only when they are the flow's own
@@ -135,6 +136,9 @@ impl ChoosesHookCall for HarnessHook {
                     None => return HookCall::Nothing("UserPromptSubmit without a prompt"),
                 }
             }
+            // The session ends: the flow has exited, whether or not
+            // anything looks at its pane.
+            "SessionEnd" => format!("Ended.{}", self.optional("session_id")),
             "Stop" => format!(
                 "Stopped.{{ {} {} {} }}",
                 self.optional("session_id"),
@@ -242,6 +246,15 @@ mod tests {
             )
             .call(),
             HookCall::Report("Report.{ «5a4d0b» Stopped.{ None None Some.«» } }".into())
+        );
+        assert_eq!(
+            hook(
+                serde_json::json!({"hook_event_name": "SessionEnd", "session_id": "s",
+                    "reason": "prompt_input_exit"}),
+                Some("5a4d0b")
+            )
+            .call(),
+            HookCall::Report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
         );
     }
 

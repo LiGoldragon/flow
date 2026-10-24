@@ -1,6 +1,6 @@
 # Flow next (unreleased, branch 0595fb-reimplementation)
 
-Pins signal-flow 31.0.0 and meta-signal-flow 40.0.0 (both on their
+Pins signal-flow 32.0.0 and meta-signal-flow 40.0.0 (both on their
 `0595fb-reimplementation` branches) and the Curriculum schema of Curriculum
 4493d1e. Every ordinary and meta peer repins, and Curriculum serves that
 schema.
@@ -18,6 +18,10 @@ schema.
   successor when refreshed or ended by an exit. The store gains
   `flow_nexus_successor_intents`.
 - Locks held by a sender whose flow ends are retracted with the end.
+- `flow-hook` reports Claude's SessionEnd as `Ended.Option<NativeSessionId>`;
+  a flow whose own session ended is recorded Exited.
+- A new Primary whose declared Secondary is not Awake has that Secondary
+  started first.
 - A caller's Start, Replace or Launch with a topic that is not camelCase is
   refused `TopicRefused`, as is a Configure naming one; a new Primary needs
   its Secondary Awake (`NoSecondary`).

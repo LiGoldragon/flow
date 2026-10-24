@@ -4760,3 +4760,47 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
     assert_eq!(node.flow_lifecycle, FlowLifecycle::Active, "confirmed");
     assert!(world.claude_starts() >= 1, "{}", world.calls());
 }
+
+/// A Claude flow's own SessionEnd, reported by its hook, is its exit as an
+/// event: it is recorded Exited without anything looking at its pane, and
+/// a Required metaflow is owed its successor. A session end naming another
+/// session changes nothing.
+#[test]
+fn a_reported_session_end_exits_the_flow_and_owes_a_required_successor() {
+    use crate::store::NamesLiveFlow;
+    use crate::store::successor::OwesSuccessors;
+    for (session, ends) in [("another-session", false), (CLAUDE_SESSION, true)] {
+        let fixture = NexusFixture::new();
+        claude_seat(&fixture, 40_000);
+        fixture.nexus.store.seed_metaflow(metaflow(
+            Layer::Secondary,
+            State::Awake(CLAUDE_SEAT.into()),
+            vec![],
+            vec![],
+        ));
+        require(&fixture, address(Layer::Secondary));
+
+        fixture.nexus.after_report(
+            &CLAUDE_SEAT.to_owned(),
+            &signal_flow::Event::Ended(Some(session.into())),
+        );
+
+        let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
+        let intent = fixture
+            .nexus
+            .store
+            .successor_intent(&address(Layer::Secondary))
+            .unwrap();
+        if ends {
+            assert_eq!(node.flow_lifecycle, FlowLifecycle::Exited);
+            assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
+            assert_eq!(
+                intent.expect("a successor is owed").predecessor,
+                CLAUDE_SEAT
+            );
+        } else {
+            assert!(node.flow_lifecycle.is_live(), "{:?}", node.flow_lifecycle);
+            assert_eq!(intent, None);
+        }
+    }
+}

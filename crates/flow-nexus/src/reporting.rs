@@ -86,6 +86,29 @@ impl RecordsReports for RunningNexus {
         // at once.
         crate::compacting::WatchesCompactions::watch_claude_compactions(self, flow_id);
         match event {
+            // The flow's own Claude session ended: it has exited, its locks
+            // go with it, and a Required metaflow is owed its successor.
+            // Observe's Gone remains the fallback for an exit no hook
+            // reports.
+            Event::Ended(session) => {
+                let own = self
+                    .store
+                    .flow_node(flow_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|node| {
+                        node.harness_kind == signal_flow::HarnessKind::Claude
+                            && !node.session_id.is_empty()
+                            && session.as_deref() == Some(node.session_id.as_str())
+                    });
+                if own {
+                    crate::observe_agent::RecordsWitnessedExit::exited_as_witnessed(self, flow_id);
+                } else {
+                    eprintln!(
+                        "flow-nexus: flow {flow_id} reported a session end not its own: {session:?}"
+                    );
+                }
+            }
             Event::Stopped(stop) => {
                 // A launch sending its first message in parts waits on a
                 // Stop before its next part.

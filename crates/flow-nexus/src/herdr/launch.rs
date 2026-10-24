@@ -431,9 +431,10 @@ pub(crate) trait PreparesClaudePane {
     /// source names one. Flag settings are such a source: naming the mode the
     /// launch already runs in suppresses the offer without touching any
     /// settings file. They also carry the harness hook: `flow-hook` on
-    /// SessionStart, every PostToolUse, UserPromptSubmit and Stop, so each
-    /// harness event reaches Flow as a Report: a Stop is the flow's turn
-    /// end, and a submitted prompt the receipt of a queued request.
+    /// SessionStart, every PostToolUse, UserPromptSubmit, Stop and
+    /// SessionEnd, so each harness event reaches Flow as a Report: a Stop is
+    /// the flow's turn end, a submitted prompt the receipt of a queued
+    /// request, and a session's end the flow's exit.
     /// A launch that leaves out the attribution reminder sets the
     /// attribution lines empty here.
     fn claude_flag_settings(&self, lean: &LeanStart) -> String;
@@ -474,6 +475,7 @@ impl PreparesClaudePane for HerdrCli {
                 "PostToolUse": every_tool,
                 "UserPromptSubmit": hook,
                 "Stop": hook,
+                "SessionEnd": hook,
             }
         });
         if lean.attribution_off() {
@@ -3573,6 +3575,7 @@ printf '%s\n' "$alias"
             concat!(
                 r#"{"hooks":{"#,
                 r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
+                r#""SessionEnd":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
                 r#""SessionStart":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
                 r#""Stop":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
                 r#""UserPromptSubmit":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
@@ -3581,7 +3584,8 @@ printf '%s\n' "$alias"
         )));
         // The flag settings name the launch's own mode, which suppresses the
         // auto-mode default offer, and carry the harness hook on SessionStart,
-        // every PostToolUse and Stop; no settings file is written.
+        // every PostToolUse, UserPromptSubmit, Stop and SessionEnd; no
+        // settings file is written.
         assert_eq!(start_call.matches(" --settings ").count(), 1);
         // Each flag once in the pane's argv: the installed wrapper execs
         // `.claude-wrapped --dangerously-skip-permissions "$@"`, so Flow's

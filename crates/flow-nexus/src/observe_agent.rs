@@ -37,8 +37,9 @@ pub trait ObservesAgent {
     ) -> Result<(), String>;
 }
 
-/// A live flow whose pane Herdr witnessed gone has exited.
-trait RecordsWitnessedExit {
+/// A live flow whose pane Herdr witnessed gone, or whose harness reported
+/// its own session ended, has exited.
+pub(crate) trait RecordsWitnessedExit {
     /// Records the flow Exited, under the dispatch gate, when it is still
     /// live; then wakes its metaflow when Flow's records show it due.
     fn exited_as_witnessed(&self, flow_id: &str);

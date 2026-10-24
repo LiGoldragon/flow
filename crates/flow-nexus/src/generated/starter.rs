@@ -20,6 +20,8 @@ pub struct HarnessedProfile {
     pub remembered_flows: RememberedFlows,
 }
 #[rustfmt::skip]
+pub type Purpose = String;
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct FreshContext {
@@ -29,6 +31,7 @@ pub struct FreshContext {
     pub leave_outs_option: std::option::Option<signal_flow::LeaveOuts>,
     pub flow_kind: signal_flow::FlowKind,
     pub tool_set: signal_flow::ToolSet,
+    pub purpose: Purpose,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

@@ -211,6 +211,12 @@ dispatch gate and waits for the launch's outcome, which the same watch
 produces, and answers it. `StartAmbiguous` is what a seat that never answers
 at all comes to, once the wait's bound has passed.
 
+A metaflow's declaration (`ConfigureMetaflow`) names, beside its modules,
+its `Continuity`, its `Purpose` and the `Records` of the living it rests
+on. Its purpose is composed ahead of the brief of a Launch, a wake and a
+successor. Its records are stored but not yet composed: Curriculum's
+`StartupSelection` names flows, not record paths.
+
 A launch names its `Remembering`: `Predecessors.<depth>` or
 `Custom.[ FlowId … ]`. At Compose, Flow resolves it to flow ids, the
 metaflow's lineage (its past then the flow it is Awake as, the launch's own

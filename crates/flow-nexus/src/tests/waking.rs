@@ -788,6 +788,7 @@ fn last_launch_context() -> WakePlan {
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         leave_outs_option: None,
+        purpose: String::new(),
     })
 }
 

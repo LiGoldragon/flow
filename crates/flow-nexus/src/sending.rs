@@ -18,6 +18,7 @@ use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
 use crate::caller::{
     CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
 };
+use crate::composition::JoinsPurpose;
 use crate::delivery::body::RendersNativeContent;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
@@ -476,7 +477,8 @@ impl LaunchesDeclared for RunningNexus {
             leave_outs_option: None,
             flow_kind: declaration.flow_kind,
             tool_set: declaration.tool_set,
-            instruction_prompt: launch.instruction_prompt,
+            // The declaration's purpose is composed ahead of the brief.
+            instruction_prompt: launch.instruction_prompt.with_purpose(&declaration.purpose),
         };
         Ok(match predecessor {
             Some(_) => signal_flow::Query::Replace(profile),

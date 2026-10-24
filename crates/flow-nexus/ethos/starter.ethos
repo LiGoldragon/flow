@@ -36,8 +36,9 @@ Library
   ; A launch profile with the harness the Nexus derived for its model and
   ; the flows its Remembering resolved to.
   HarnessedProfile.{ LaunchProfile HarnessKind RememberedFlows }
-  ; What a fresh wake takes from the metaflow's last launch.
-  FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> FlowKind ToolSet }
+  ; What a fresh wake takes from the metaflow's declaration, else its last
+  ; launch: the purpose is the declaration's, composed ahead of the brief.
+  FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> FlowKind ToolSet Purpose.String }
   ; A Started launch as its outcome row keeps it; the flow's route is read
   ; from the flow's own row when the reply is made.
   LaunchedRecord.{ FlowId SessionId Origin }

@@ -5033,8 +5033,8 @@ mod tests {
                         flow_kind: signal_flow::FlowKind::Regular,
                         tool_set: signal_flow::ToolSet::Default,
                         continuity: meta_signal_flow::Continuity::OnDemand,
-                        purpose: String::new(),
-                        records: vec![],
+                        purpose: "Publishes the books.".into(),
+                        records: vec!["flows/a68420/vision/flow.md".into()],
                     }])
                 )),
             meta_signal_flow::Response::Configured(_)
@@ -5068,7 +5068,15 @@ mod tests {
         assert_eq!(profile.model_name, "gpt-6-luna");
         assert_eq!(profile.effort, "low");
         assert_eq!(profile.flow_id_option, None);
-        assert_eq!(profile.instruction_prompt, "Publish the newest edition.");
+        assert_eq!(
+            profile.instruction_prompt,
+            "Publishes the books.\n\nPublish the newest edition."
+        );
+        assert_eq!(
+            profile.remembering,
+            signal_flow::Remembering::Predecessors(1),
+            "the Launch's Remembering is the profile's"
+        );
         assert_eq!(
             fixture.nexus.dispatch(Query::Launch(launch(Address {
                 aspect: Aspect::Mind,

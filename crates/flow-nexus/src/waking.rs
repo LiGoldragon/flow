@@ -63,7 +63,7 @@ use crate::codex::{
     CodexTurnHistory, ReadsCodexTurnHistory, SelectsCodexEndpoint, SubmitsQueuedCodexTurn,
 };
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
-use crate::composition::{FreshSeat, RendersQueuedWork};
+use crate::composition::{FreshSeat, JoinsPurpose, RendersQueuedWork};
 use crate::delivery::body::RendersNativeContent;
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{
@@ -1156,6 +1156,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 system_modules: declared.system_modules,
                 user_modules: declared.user_modules,
                 leave_outs_option: None,
+                purpose: declared.purpose,
             }),
             (_, Some(profile)) => WakePlan::Fresh(FreshContext {
                 herdr_session_name: profile.herdr_session_name,
@@ -1164,6 +1165,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 system_modules: profile.system_modules,
                 user_modules: profile.user_modules,
                 leave_outs_option: profile.leave_outs_option,
+                purpose: String::new(),
             }),
             (_, None) => WakePlan::Unplaceable,
         }
@@ -1683,7 +1685,7 @@ impl WakesInParts for RunningNexus {
             leave_outs_option: fresh.leave_outs_option,
             flow_kind: fresh.flow_kind,
             tool_set: fresh.tool_set,
-            prompt: text.to_owned(),
+            prompt: text.with_purpose(&fresh.purpose),
         };
         self.start_unbound(seat.fresh_profile())
     }
@@ -1841,7 +1843,7 @@ impl WakesInParts for RunningNexus {
             leave_outs_option: fresh.leave_outs_option,
             flow_kind: fresh.flow_kind,
             tool_set: fresh.tool_set,
-            prompt: String::new(),
+            prompt: "".with_purpose(&fresh.purpose),
         };
         let mut profile = seat.fresh_profile();
         profile.flow_id_option = Some(flow_id.to_owned());

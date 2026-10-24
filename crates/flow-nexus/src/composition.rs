@@ -649,6 +649,22 @@ pub struct FreshSeat {
     pub prompt: String,
 }
 
+/// A brief joined with the purpose its metaflow's declaration names: the
+/// purpose first, then the brief; either alone when the other is empty.
+pub(crate) trait JoinsPurpose {
+    fn with_purpose(&self, purpose: &str) -> String;
+}
+
+impl JoinsPurpose for str {
+    fn with_purpose(&self, purpose: &str) -> String {
+        match (purpose.is_empty(), self.is_empty()) {
+            (true, _) => self.to_owned(),
+            (false, true) => purpose.to_owned(),
+            (false, false) => format!("{purpose}\n\n{self}"),
+        }
+    }
+}
+
 /// The launch profile of a fresh wake: the queued work is its brief, and
 /// its context is the module identities the metaflow's last launch named,
 /// composed again through the same route as any Start. It remembers its
@@ -798,6 +814,19 @@ pub(crate) mod tests {
                 .first_prompt_body
                 .contains("A crazy idea.")
         );
+    }
+
+    /// A declaration's purpose goes ahead of the brief; either stands alone
+    /// when the other is empty.
+    #[test]
+    fn a_purpose_is_composed_ahead_of_the_brief() {
+        use super::JoinsPurpose;
+        assert_eq!(
+            "Draft the book.".with_purpose("Flow's design."),
+            "Flow's design.\n\nDraft the book."
+        );
+        assert_eq!("Draft the book.".with_purpose(""), "Draft the book.");
+        assert_eq!("".with_purpose("Flow's design."), "Flow's design.");
     }
 
     #[test]

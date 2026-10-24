@@ -12,6 +12,7 @@ use crate::codex::SelectsCodexEndpoint;
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
+use crate::waking::StartsSecondaryFirst;
 pub use caller::CallerProcess;
 pub use composition::CompositionError;
 pub use context::VerifiedContext;
@@ -146,6 +147,22 @@ pub trait Dispatches {
 }
 
 impl Dispatches for RunningNexus {
+    /// A query no calling process stands behind, taken as a connection
+    /// takes it: a new Primary's Secondary is started first, off the gate.
+    fn dispatch(&self, query: Query) -> Response {
+        match query {
+            Query::Start(profile) => match self.secondary_first(&profile) {
+                Ok(()) => self.dispatch_from(Query::Start(profile), Origin::Unbound),
+                Err(rejection) => Response::StartRejected(rejection),
+            },
+            Query::Launch(launch) => match self.declared_launch(launch, None) {
+                Ok(query) => self.dispatch(query),
+                Err(refusal) => *refusal,
+            },
+            query => self.dispatch_from(query, Origin::Unbound),
+        }
+    }
+
     fn dispatch_from(&self, query: Query, origin: Origin) -> Response {
         match query {
             Query::Start(profile) => {
@@ -790,13 +807,25 @@ impl ServesConnection for Connection {
                     nexus.declared_launch(launch, self.process.as_ref())
                 };
                 match declared {
+                    Ok(Query::Start(profile)) => match nexus.secondary_first(&profile) {
+                        Ok(()) => nexus.dispatch_serially(Query::Start(profile), origin),
+                        Err(rejection) => Response::StartRejected(rejection),
+                    },
                     Ok(query) => nexus.dispatch_serially(query, origin),
                     Err(refusal) => *refusal,
                 }
             }
             // A launch's origin is the calling process, as Identify reads
             // it: its pane's bound flow and that flow's native session.
-            query @ (Query::Start(_) | Query::Replace(_) | Query::Restart(_)) => {
+            // A new Primary's Secondary starts first, off the gate.
+            Query::Start(profile) => {
+                let origin = nexus.origin_of(self.peer.peer_process());
+                match nexus.secondary_first(&profile) {
+                    Ok(()) => nexus.dispatch_serially(Query::Start(profile), origin),
+                    Err(rejection) => Response::StartRejected(rejection),
+                }
+            }
+            query @ (Query::Replace(_) | Query::Restart(_)) => {
                 let origin = nexus.origin_of(self.peer.peer_process());
                 nexus.dispatch_serially(query, origin)
             }

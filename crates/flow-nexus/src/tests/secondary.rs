@@ -1,7 +1,8 @@
 //! Short term, a Primary is not started without its Secondary, and the
-//! Secondary starts first: a Start of a Primary is refused NoSecondary,
-//! before anything is written, claimed or opened, unless the Secondary of
-//! its aspect and topic is Awake as a live flow. A topic is an
+//! Secondary starts first: Flow starts a declared Secondary itself before a
+//! new Primary of its aspect and topic, and refuses the Primary NoSecondary,
+//! before anything is written, claimed or opened, only when that Secondary
+//! has no declaration and is not Awake as a live flow. A topic is an
 //! uncapitalized camelCase identifier, refused by type when it is not.
 
 use super::model::{configure, seat};
@@ -43,8 +44,9 @@ fn awake_secondary(fixture: &NexusFixture, topic: &str) {
     });
 }
 
-/// A Start of { Mind topics Primary } is refused NoSecondary before
-/// anything is written or opened while its Secondary is absent or Asleep:
+/// A Start of { Mind topics Primary } whose Secondary has no declaration is
+/// refused NoSecondary before anything is written or opened while that
+/// Secondary is absent or Asleep:
 /// another topic's Secondary or another aspect's does not count. Once that
 /// Secondary is Awake as a live flow, the Start goes on to launch.
 #[test]

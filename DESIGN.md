@@ -457,9 +457,12 @@ and a fresh wake takes that model. A launch a caller asks for (Start, Replace,
 Launch) is admitted before anything of it is written: a topic that is not
 an uncapitalized camelCase identifier is refused `TopicRefused.Topic`,
 carrying the topic as written, never lowered; and, short term, a Primary is
-not started without its Secondary: a Start of a Primary is refused
-`NoSecondary` unless the Secondary of its aspect and topic is Awake as a
-live flow. A Primary that replaces a flow, a successor a Required
+not started without its Secondary, and the Secondary starts first: before
+a new Primary's launch, off the dispatch gate, Flow starts the declared
+Secondary of its aspect and topic itself when it is not Awake, OnDemand or
+Required, records it Awake once confirmed and hands it its queue; the
+Primary is refused `NoSecondary` only when that Secondary has no
+declaration, or its start was refused. A Primary that replaces a flow, a successor a Required
 metaflow is owed, a wake Flow starts itself, and a request already
 attempted continue a metaflow already admitted. Configure refuses an
 Address with such a topic `ConfigureRejected.TopicRefused`. A simplified

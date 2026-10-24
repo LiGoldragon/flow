@@ -497,6 +497,110 @@ pub trait PerformsWakeAndDrain {
     fn drain_all(&self, address: Address) -> Outcome;
 }
 
+/// Short term, the Secondary starts first: a caller's new Primary whose
+/// Secondary of the same aspect and topic is not Awake has that Secondary
+/// started by Flow itself, OnDemand or Required, from its declaration, and
+/// the Primary's launch goes on once the Secondary is confirmed. A Secondary
+/// with no declaration is not started, and the Primary is then refused
+/// NoSecondary by its admission.
+pub(crate) trait StartsSecondaryFirst {
+    /// Runs off the dispatch gate, taking it per step as a wake does.
+    /// Refuses only when the declared Secondary could not be started.
+    fn secondary_first(&self, profile: &LaunchProfile) -> Result<(), signal_flow::StartRejection>;
+}
+
+impl StartsSecondaryFirst for RunningNexus {
+    fn secondary_first(&self, profile: &LaunchProfile) -> Result<(), signal_flow::StartRejection> {
+        use crate::launching::NamesTopic;
+        use crate::store::ReadsLaunchAttempt;
+        use crate::store::metaflow::TakesLaunchAddress;
+        use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+        let address = &profile.address;
+        if address.layer != Layer::Primary
+            || profile.flow_id_option.is_some()
+            || !address.topic.as_str().is_camel_case_topic()
+        {
+            return Ok(());
+        }
+        let secondary = Address {
+            aspect: address.aspect.clone(),
+            topic: address.topic.clone(),
+            layer: Layer::Secondary,
+        };
+        let Some(lease) = self.waking.hold(&secondary) else {
+            // A wake of the Secondary already runs; the Primary's admission
+            // reads what it came to.
+            return Ok(());
+        };
+        let metaflow = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let new_launch = matches!(
+                self.store.launch_attempt(&profile.launch_request_id),
+                Ok(None)
+            );
+            let owed = matches!(self.store.successor_intent(address), Ok(Some(_)));
+            if !new_launch || owed {
+                return Ok(());
+            }
+            if !matches!(self.store.metaflow_declaration(&secondary), Ok(Some(_))) {
+                return Ok(());
+            }
+            self.rest_ended_awake(&secondary);
+            match self.store.metaflow(&secondary) {
+                Ok(Some(metaflow)) => match &metaflow.state {
+                    flow_ethos::State::Awake(flow_id)
+                        if matches!(self.store.flow_is_live(flow_id), Ok(true)) =>
+                    {
+                        return Ok(());
+                    }
+                    _ => metaflow,
+                },
+                Ok(None) => Metaflow {
+                    address: secondary.clone(),
+                    state: flow_ethos::State::Asleep,
+                    past: vec![],
+                    queue: vec![],
+                },
+                Err(_) => return Err(signal_flow::StartRejection::LaunchPersistenceRefused),
+            }
+        };
+        let WakePlan::Fresh(fresh) = self.wake_plan(&metaflow) else {
+            return Err(signal_flow::StartRejection::NoSecondary);
+        };
+        let flow_id = self.start_fresh(&metaflow, fresh, "").map_err(|failure| {
+            eprintln!(
+                "flow-nexus: the Secondary of {:?} {} did not start: {failure:?}",
+                secondary.aspect, secondary.topic
+            );
+            signal_flow::StartRejection::NoSecondary
+        })?;
+        {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.perform(Operation::Record(Record_Data::Awoken(
+                Record_Data_Awoken_Data {
+                    address: secondary.clone(),
+                    flow_id,
+                    delivered: 0,
+                },
+            ))) != Outcome::Recorded
+            {
+                return Err(signal_flow::StartRejection::LaunchPersistenceRefused);
+            }
+        }
+        // Work queued for the Secondary is handed to it, as to any woken
+        // flow.
+        self.drain_woken(&secondary, lease);
+        self.settle_stops_at_confirmation();
+        Ok(())
+    }
+}
+
 /// A flow the Nexus starts itself, as a wake starts one: no calling flow is
 /// its origin. The start runs under the dispatch gate, which is released
 /// while the launch settles.

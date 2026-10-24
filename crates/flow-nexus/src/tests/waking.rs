@@ -4701,3 +4701,62 @@ fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
         "the Asleep metaflow is still owed its successor: {owed:?}"
     );
 }
+
+/// The Secondary starts first: a Start of { Mind flow Primary } whose
+/// declared Secondary sleeps has Flow start that Secondary fresh, confirmed
+/// and Awake, before the Primary's own launch goes on; the Primary is not
+/// refused NoSecondary.
+#[test]
+fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
+    use crate::Dispatches;
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![],
+    ));
+    let world = fixture.fresh_claude_world();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            meta_signal_flow::ConfigureMetaflow {
+                address: address(Layer::Secondary),
+                system_modules: vec!["spirit-core".into(), "intent-flow".into()],
+                user_modules: vec!["operation-main-flow".into()],
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                availability: meta_signal_flow::Availability::OnDemand,
+                purpose: String::new(),
+                records: vec![],
+            },
+        ]))
+        .expect("the Secondary is declared");
+    let mut primary = crate::composition::tests::fixture_profile();
+    primary.launch_request_id = "primary-request".into();
+    primary.address = address(Layer::Primary);
+    primary.flow_id_option = None;
+    primary.remembering = signal_flow::Remembering::Predecessors(0);
+
+    let response = fixture.nexus.dispatch(signal_flow::Query::Start(primary));
+
+    assert_ne!(
+        response,
+        signal_flow::Response::StartRejected(signal_flow::StartRejection::NoSecondary),
+        "{}",
+        world.calls()
+    );
+    let secondary = stored(&fixture, Layer::Secondary);
+    let State::Awake(flow_id) = &secondary.state else {
+        panic!(
+            "the Secondary started first: {secondary:?}; {}",
+            world.calls()
+        );
+    };
+    assert_ne!(flow_id, "abc123", "a fresh Secondary");
+    let node = fixture.nexus.store.flow_node(flow_id).unwrap().unwrap();
+    assert_eq!(node.flow_lifecycle, FlowLifecycle::Active, "confirmed");
+    assert!(world.claude_starts() >= 1, "{}", world.calls());
+}

@@ -1256,6 +1256,7 @@ mod tests {
     mod model;
     mod queue_drain;
     mod refresh_and_compaction;
+    mod refreshing;
     mod reservation;
     mod seat_binding;
     mod secondary;

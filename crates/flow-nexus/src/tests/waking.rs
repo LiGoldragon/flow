@@ -1022,7 +1022,7 @@ fn ended_simplified_claude(fixture: &NexusFixture) -> LaunchedClaude {
 
 /// The launched Claude flow abc123, ended by `end`. The fixture Herdr logs
 /// every call and lists no agent; a wake replaces it with the fresh world.
-fn launched_claude_ended_by(
+pub(super) fn launched_claude_ended_by(
     fixture: &NexusFixture,
     end: impl FnOnce(&crate::store::FlowStore) -> bool,
 ) -> LaunchedClaude {

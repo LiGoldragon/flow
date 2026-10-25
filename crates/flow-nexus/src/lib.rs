@@ -76,7 +76,7 @@ use send_tool::ServesLaunchCalls;
 use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRouteSelection, ObserveSelection, Origin,
-    Process, Query, Response, RestartRejection, StartRejection,
+    Process, Query, Response, StartRejection,
 };
 use std::{
     fs,
@@ -94,8 +94,8 @@ use std::{
     time::Duration,
 };
 use store::{
-    AppliesFlowQuery, AuthorizesFlowRestart, FlowStore, NamesLiveFlow, OpensFlowStore,
-    ReadsFlowRows, RegistersExistingFlow, RegistersFlowIdentity,
+    AppliesFlowQuery, FlowStore, NamesLiveFlow, OpensFlowStore, ReadsFlowRows,
+    RegistersExistingFlow, RegistersFlowIdentity,
 };
 use waking::SettlesStopsAtConfirmation;
 use waking::SleepsAndWakesSeats;
@@ -214,25 +214,9 @@ impl Dispatches for RunningNexus {
                 self.launch_status(&launch_request_id)
             }
             Query::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id),
-            Query::Restart(flow_id) => {
-                // The restart is authorized by the flow that asks: its
-                // origin is the calling process's bound flow and session.
-                let Origin::Flow(caller) = origin else {
-                    return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
-                };
-                let authorization = self.store.authorize_restart(&flow_id, &caller.flow_id);
-                let Ok(Some(token)) = authorization else {
-                    return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
-                };
-                if caller.session_id != token.thread_id {
-                    return Response::RestartRejected(RestartRejection::ProvenanceMismatch);
-                }
-                // v2 restart does not carry the original model/endpoint. Moving
-                // a thread between stable and next is never inferred from its
-                // current process or from a caller claim. Refresh uses a fresh
-                // typed Start until the replacement contract is deployed.
-                let _ = token;
-                Response::RestartRejected(RestartRejection::ResumeRefused)
+            Query::Refresh(address) => {
+                use crate::waking::RefreshesMetaflows;
+                self.refresh(&address)
             }
             Query::ResolveRecipient(flow_id) => {
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
@@ -825,7 +809,7 @@ impl ServesConnection for Connection {
                     Err(rejection) => Response::StartRejected(rejection),
                 }
             }
-            query @ (Query::Replace(_) | Query::Restart(_)) => {
+            query @ Query::Replace(_) => {
                 let origin = nexus.origin_of(self.peer.peer_process());
                 nexus.dispatch_serially(query, origin)
             }

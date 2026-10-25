@@ -9,7 +9,7 @@ Signal archives.
 
 The wire contracts are independent repositories:
 
-- `signal-flow` defines `Start`, provenance-authorized `Restart`, `Stop`,
+- `signal-flow` defines `Start`, `Refresh`, `Stop`,
   `List`, `ResolveRecipient` for Message Nexus routing, `ResolveCaller`,
   which names the flow, aspect, power and model of the process that calls,
   and `Observe.Agent`, a flow's Herdr agent state on open and on each change.
@@ -346,9 +346,7 @@ session only after the harness has started, too late for the start flag.
 
 The Codex adapter opens `codex app-server proxy`, then sends `initialize`,
 `thread/start`, and `turn/start`. The returned thread is owned by the running
-app-server and remains visible to remote-control clients. Restart resumes that
-thread and starts its next turn only when the caller's provenance Flow ID and
-harness session equal the registered target. The legacy direct Codex starter
+app-server and remains visible to remote-control clients. The legacy direct Codex starter
 injects `FLOW_ID` and `FLOW_DIRECTORY`; typed launches derive their workspace
 from the configured source root.
 

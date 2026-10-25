@@ -3,7 +3,7 @@
 The ordinary and meta sockets are separate Signal edges. Text ends at a CLI:
 the client turns one inline Datom into a typed request, sends an rkyv frame,
 and textualizes the typed reply as Datom. The standalone `signal-flow` repo
-owns `Start`, `Restart`, `ResolveRecipient`, `Stop`, `List`,
+owns `Start`, `Refresh`, `ResolveRecipient`, `Stop`, `List`,
 `Replace`, `LaunchStatus`, `Observe`, and `ResolveCaller`;
 `meta-signal-flow` owns `Configure`, `ConsumeReset`, `Retire`, and the pane
 writes `Deliver`, `Vet`, `Command`, with `ResolvePeer`. Each contract versions

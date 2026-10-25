@@ -25,6 +25,11 @@
 //! metaflow whose flow ends with its pane gone is owed a successor in the
 //! write that records the exit, and woken with no queued request needed.
 //!
+//! A refresh ordered from outside (`Refresh.Address`,
+//! [`RefreshesMetaflows`]) takes the metaflow's hold, closes its flow's
+//! harness without a turn, records the flow Stopped and leaves the metaflow
+//! Asleep, its queue kept; the successor starts on the next waking request.
+//!
 //! A metaflow is Asleep once its flow has ended: its seat slept, its pane
 //! closed by the living, its harness crashed, or the flow replaced. Work queued for an
 //! Awake seat whose pane Herdr shows gone records that flow Exited, which
@@ -1342,6 +1347,88 @@ impl SleepsAndWakesSeats for RunningNexus {
         for address in due {
             self.wake_due(address);
         }
+    }
+}
+
+/// A refresh ordered from outside: the metaflow's current flow ends
+/// without a turn, and its successor runs on the next waking request.
+pub trait RefreshesMetaflows {
+    /// Runs under the dispatch gate. Takes the metaflow's lock, the hold a
+    /// wake takes, so nothing is delivered to it and what arrives queues;
+    /// closes the flow's harness under its pane's lease, typing nothing;
+    /// records the flow Stopped, which puts the metaflow Asleep with the
+    /// flow in Past and its queue kept; releases the lock. The successor's
+    /// context is what any wake composes: the metaflow's declaration, else
+    /// the last launch's modules, remembering this flow.
+    fn refresh(&self, address: &Address) -> Response;
+}
+
+impl RefreshesMetaflows for RunningNexus {
+    fn refresh(&self, address: &Address) -> Response {
+        use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+        use signal_flow::{RefreshRejection, Refreshed, Refusal, StopRejection, Unknown_Data};
+        let Some(lock) = self.waking.hold(address) else {
+            return Response::RefreshRejected(RefreshRejection::Locked);
+        };
+        self.rest_ended_awake(address);
+        let flow_id = match self.store.metaflow(address) {
+            Ok(Some(Metaflow {
+                state: flow_ethos::State::Awake(flow_id),
+                ..
+            })) => flow_id,
+            Ok(Some(_)) => return Response::RefreshRejected(RefreshRejection::NotAwake),
+            Ok(None) => {
+                return match self.store.metaflow_declaration(address) {
+                    Ok(Some(_)) => Response::RefreshRejected(RefreshRejection::NotAwake),
+                    Ok(None) => {
+                        Response::Refused(Refusal::Unknown(Unknown_Data::Address(address.clone())))
+                    }
+                    Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+                };
+            }
+            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+        };
+        // A flow whose launch is not yet confirmed only holds its Address:
+        // the launch that holds it is a waking still running.
+        match self.store.address_hold(&flow_id) {
+            Ok(None) => {}
+            Ok(Some(_)) => return Response::RefreshRejected(RefreshRejection::Locked),
+            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+        }
+        let node = match self.store.flow_node(&flow_id) {
+            Ok(Some(node)) => self.herdr.refresh_route(node),
+            Ok(None) => {
+                return Response::Refused(Refusal::Unknown(Unknown_Data::FlowId(flow_id)));
+            }
+            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+        };
+        match self.herdr.pane_presence(&node) {
+            PanePresence::Present => {}
+            // A flow whose pane is gone has ended on its own: it is recorded
+            // Exited, which puts the metaflow Asleep.
+            PanePresence::Absent | PanePresence::Bare => {
+                let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id)));
+                return Response::RefreshRejected(RefreshRejection::NotAwake);
+            }
+            PanePresence::Unknown => {
+                return Response::StopRejected(StopRejection::RouteUnavailable);
+            }
+        }
+        if let Err(outcome) = self.close_at_rest(&flow_id, &node) {
+            return Response::StopRejected(match *outcome {
+                Outcome::Failed(Failed_Data::HerdrRefused) => StopRejection::CloseRefused,
+                _ => StopRejection::PersistenceRefused,
+            });
+        }
+        drop(lock);
+        eprintln!(
+            "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} sleeps until a waking request",
+            address.aspect, address.topic, address.layer
+        );
+        Response::Refreshed(Refreshed {
+            address: address.clone(),
+            flow_id,
+        })
     }
 }
 

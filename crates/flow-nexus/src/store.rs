@@ -64,7 +64,7 @@ use signal_flow::{
     NativeLaunchIntent, NativeTranscriptBoundary, Origin, PowerLevel, Process,
     PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
     RegistrationAcknowledgement, Remembering, ReplaceRejection, Replaced, Request, Response,
-    RestartRejection, Restarted, RouteReadiness, StartRejection,
+    RouteReadiness, StartRejection,
 };
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -3643,13 +3643,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RestartAuthorization {
-    pub flow_id: String,
-    pub authority_flow_id: String,
-    pub thread_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingLaunch {
     pub flow_id: String,
     pub origin: Origin,
@@ -3720,21 +3713,6 @@ pub trait RecordsPendingThread {
 /// Marks a known pending launch active only after its first turn was accepted.
 pub trait ConfirmsStartedFlow {
     fn confirm_started(&self, flow_id: &str) -> Result<Response, StoreError>;
-}
-
-/// Reads the persisted daemon thread only after checking restart authority.
-pub trait AuthorizesFlowRestart {
-    fn authorize_restart(
-        &self,
-        flow_id: &str,
-        authority_flow_id: &str,
-    ) -> Result<Option<RestartAuthorization>, StoreError>;
-}
-
-/// Advances the generation after the adapter has accepted the resume turn.
-pub trait RecordsRestartedFlow {
-    fn record_restarted(&self, authorization: RestartAuthorization)
-    -> Result<Response, StoreError>;
 }
 
 /// Configuration is durable policy and shares the Nexus's sole `.sema` store.
@@ -3904,7 +3882,6 @@ trait WritesFlowStore {
     fn record_thread(&self, pending: &PendingLaunch, thread_id: String)
     -> Result<bool, StoreError>;
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError>;
-    fn restart(&self, authorization: RestartAuthorization) -> Result<Response, StoreError>;
     /// Writes the attempt's next state, keeping what its row knows of the
     /// context its seat started with.
     fn mutate_launch_attempt(&self, stored: StoredLaunchAttempt) -> Result<(), StoreError>;
@@ -4665,7 +4642,10 @@ impl AppliesFlowQuery for FlowStore {
             Query::Start(_) => Ok(Response::StartRejected(
                 StartRejection::LaunchPersistenceRefused,
             )),
-            Query::Restart(_) => Ok(Response::RestartRejected(RestartRejection::ResumeRefused)),
+            // A refresh closes a pane, which the store alone cannot.
+            Query::Refresh(_) => Ok(Response::Refused(signal_flow::Refusal::Store(
+                "the store alone closes no pane".into(),
+            ))),
             Query::ResolveRecipient(flow_id) => self.resolve_recipient(&flow_id),
             Query::Stop(_) => Ok(Response::StopRejected(
                 signal_flow::StopRejection::PersistenceRefused,
@@ -4720,7 +4700,7 @@ impl ReservesPendingStart for FlowStore {
             Query::Start(_) => self
                 .reserve_start("legacy-test-start".into(), Origin::Unbound)
                 .map(Some),
-            Query::Restart(_)
+            Query::Refresh(_)
             | Query::ResolveRecipient(_)
             | Query::Stop(_)
             | Query::Current(_)
@@ -4759,38 +4739,6 @@ impl RecordsPendingThread for FlowStore {
 impl ConfirmsStartedFlow for FlowStore {
     fn confirm_started(&self, flow_id: &str) -> Result<Response, StoreError> {
         self.confirm_start(flow_id)
-    }
-}
-
-impl AuthorizesFlowRestart for FlowStore {
-    fn authorize_restart(
-        &self,
-        flow_id: &str,
-        authority_flow_id: &str,
-    ) -> Result<Option<RestartAuthorization>, StoreError> {
-        let Some(flow) = self.flow(flow_id)? else {
-            return Ok(None);
-        };
-        if flow.flow_id != authority_flow_id {
-            return Ok(None);
-        }
-        let Some(thread_id) = flow.thread_id else {
-            return Ok(None);
-        };
-        Ok(Some(RestartAuthorization {
-            flow_id: flow.flow_id,
-            authority_flow_id: authority_flow_id.into(),
-            thread_id,
-        }))
-    }
-}
-
-impl RecordsRestartedFlow for FlowStore {
-    fn record_restarted(
-        &self,
-        authorization: RestartAuthorization,
-    ) -> Result<Response, StoreError> {
-        self.restart(authorization)
     }
 }
 
@@ -6478,32 +6426,6 @@ impl WritesFlowStore for FlowStore {
             session_id,
             herdr_route_selection,
             origin,
-        }))
-    }
-
-    fn restart(&self, authorization: RestartAuthorization) -> Result<Response, StoreError> {
-        let Some(mut flow) = self.flow(&authorization.flow_id)? else {
-            return Ok(Response::RestartRejected(RestartRejection::UnknownFlow));
-        };
-        if flow.flow_id != authorization.authority_flow_id
-            || flow.thread_id.as_deref() != Some(&authorization.thread_id)
-        {
-            return Ok(Response::RestartRejected(
-                RestartRejection::ProvenanceMismatch,
-            ));
-        }
-        flow.lifecycle = FlowLifecycle::Active;
-        flow.generation += 1;
-        let generation = flow.generation;
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.flows,
-            RecordKey::new(authorization.flow_id.clone()),
-            flow,
-        ))?;
-        Ok(Response::Restarted(Restarted {
-            flow_id: authorization.flow_id,
-            session_id: authorization.thread_id,
-            generation: generation as i64,
         }))
     }
 }
@@ -8268,13 +8190,12 @@ mod tests {
     }
 
     use super::{
-        AppliesFlowQuery, AuthorizesFlowRestart, ConfigurationOnlyStore, ConfiguresFlowStore,
-        ConfirmsStartedFlow, DerivesNativeOwnerProof, FlowStore, LaunchOutcome, LaunchOutcomeV2,
-        ManagesMetaflowState, NativeOwnerEnvironment, NativeOwnerProof, NativeOwnerState,
-        OpensFlowStore, ReadsFlowRoles, ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome,
-        RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPendingThread,
-        RecordsPromptDeliveryIntent, RecordsPromptDeliveryResult,
-        RecordsRegistrationAcknowledgement, RecordsRestartedFlow, RegistersExistingFlow,
+        AppliesFlowQuery, ConfigurationOnlyStore, ConfiguresFlowStore, ConfirmsStartedFlow,
+        DerivesNativeOwnerProof, FlowStore, LaunchOutcome, LaunchOutcomeV2, ManagesMetaflowState,
+        NativeOwnerEnvironment, NativeOwnerProof, NativeOwnerState, OpensFlowStore, ReadsFlowRoles,
+        ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
+        RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
+        RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersExistingFlow,
         RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,
         SetsNativeOwnerEnvironmentForTests, StoredLaunchOutcomeV2,
     };
@@ -8499,7 +8420,7 @@ mod tests {
         Layer, NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt,
         NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, Origin,
         PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
-        ReplaceRejection, Response, Restarted, StartRejection, StopRejection, TargetReceiptRequest,
+        ReplaceRejection, Response, StartRejection, StopRejection, TargetReceiptRequest,
     };
 
     struct StoreFixture {
@@ -9289,107 +9210,6 @@ mod tests {
             };
             started.flow_id
         }
-    }
-
-    #[test]
-    fn reopen_recovers_origin_and_matching_authority_restarts() {
-        let fixture = StoreFixture::new();
-        let flow_id = fixture.start(&fixture.store());
-        let reopened = fixture.store();
-        assert_eq!(
-            reopened
-                .record_restarted(
-                    reopened
-                        .authorize_restart(&flow_id, &flow_id)
-                        .expect("authorization reads")
-                        .expect("owner is authorized"),
-                )
-                .expect("restart persists"),
-            Response::Restarted(Restarted {
-                flow_id,
-                session_id: "thread-1".into(),
-                generation: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn mismatching_or_unknown_authority_is_rejected() {
-        let fixture = StoreFixture::new();
-        let store = fixture.store();
-        let flow_id = fixture.start(&store);
-        assert_eq!(
-            store
-                .authorize_restart(&flow_id, "9fc62b")
-                .expect("parent authority evaluates"),
-            None
-        );
-        assert_eq!(
-            store
-                .authorize_restart(&flow_id, "another-flow")
-                .expect("authorization evaluates"),
-            None
-        );
-        assert_eq!(
-            store
-                .authorize_restart("flow-unknown", "flow-unknown")
-                .expect("unknown flow evaluates"),
-            None
-        );
-    }
-
-    #[test]
-    fn pending_thread_recovers_and_restart_activates_it_without_second_launch() {
-        let fixture = StoreFixture::new();
-        let store = fixture.store();
-        let pending = store
-            .reserve_pending_start(Query::Start(fixture.launch_profile("legacy-start-2")))
-            .expect("reserve")
-            .expect("accepted flow type");
-        assert!(
-            store
-                .record_pending_thread(&pending, "thread-pending".into())
-                .expect("thread persists")
-        );
-        drop(store);
-        let recovered = fixture.store();
-        let authorization = recovered
-            .authorize_restart(&pending.flow_id, &pending.flow_id)
-            .expect("pending thread reads")
-            .expect("known pending thread is resumable");
-        assert_eq!(authorization.thread_id, "thread-pending");
-        assert_eq!(
-            recovered
-                .authorize_restart(&pending.flow_id, "9fc62b")
-                .expect("parent authority evaluates"),
-            None
-        );
-        assert_eq!(
-            recovered
-                .record_restarted(authorization)
-                .expect("accepted resume activates pending flow"),
-            Response::Restarted(Restarted {
-                flow_id: pending.flow_id,
-                session_id: "thread-pending".into(),
-                generation: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn failed_thread_start_leaves_a_non_resumable_pending_record() {
-        let fixture = StoreFixture::new();
-        let store = fixture.store();
-        let pending = store
-            .reserve_pending_start(Query::Start(fixture.launch_profile("legacy-start-3")))
-            .expect("reserve")
-            .expect("accepted flow type");
-        assert_eq!(
-            store
-                .authorize_restart(&pending.flow_id, &pending.flow_id)
-                .expect("authorization evaluates"),
-            None
-        );
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //! one holding a waking request, has its successor started and confirmed
 //! before the ending flow is reaped; any other is left Asleep with that flow
 //! in Past and its queue kept, and its successor runs on the next waking
-//! request. While the refresh holds the metaflow, nothing reaches the ending
-//! flow.
+//! request. While the metaflow is held, nothing reaches the ending flow and
+//! a Send queues.
 
 use super::refresh_and_compaction::{declare_seat, owe_staged_successor, staged_refresh_successor};
 use super::waking::{
@@ -552,4 +552,55 @@ fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
         );
         assert!(!fixture.nexus.waking.is_waking(&seat_address()));
     }
+}
+
+/// A HardAbrupt Send that asks for a wake, arriving while a refresh, a
+/// threshold refresh or a waking holds the metaflow, is queued on the
+/// metaflow and answered accepted: never RecipientBusy, and never typed
+/// into the pane of the flow the holder is ending or starting.
+#[test]
+fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
+    let fixture = NexusFixture::new();
+    bind_existing_caller(&fixture, "a001", "pane-1");
+    fixture.accept_pane_operations(
+        vec![
+            codex_agent_in("pane-1", "terminal-pane-1"),
+            claude_agent(&fixture),
+        ],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    awake_seat(&fixture, vec![]);
+    declare(&fixture, seat_address());
+    let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
+    let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
+    let request = Request::Order("Arrived under the hold.".into());
+
+    let held = fixture
+        .nexus
+        .waking
+        .hold(&seat_address())
+        .expect("the holder takes the metaflow");
+    let sent = fixture.nexus.send_request(
+        SendRequest {
+            recipient: Recipient::Address(seat_address()),
+            delivery: Delivery::Wake,
+            message: Message::HardAbrupt(request.clone()),
+        },
+        Some(&peer),
+    );
+    assert!(
+        matches!(sent.response, Response::SendAccepted(_)),
+        "{:?}",
+        sent.response
+    );
+    let pending = sent.pending.expect("the queued Send asks for a wake");
+    assert_eq!(pending.delivery, Delivery::Wake);
+    let metaflow = stored(&fixture);
+    assert_eq!(requests(&metaflow), vec![request]);
+    assert!(matches!(metaflow.queue[0].message, Message::HardAbrupt(_)));
+    assert!(fixture.typed().is_none(), "nothing is typed under the hold");
+    // The holder's own drain finds the metaflow held: nothing is typed.
+    fixture.nexus.wake_due(pending.address);
+    assert!(fixture.typed().is_none());
+    drop(held);
 }

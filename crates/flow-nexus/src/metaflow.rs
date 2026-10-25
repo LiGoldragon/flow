@@ -178,14 +178,17 @@ impl DispatchesMetaflowPeer for RunningNexus {
                         .into();
                     }
                     let direct = abrupt && request.delivery == signal_flow::Delivery::Wake;
-                    let _direct_lease = if direct {
+                    // A metaflow another holds takes the request into its
+                    // queue instead.
+                    let direct_lease = if direct {
                         match self.direct_send_lease(&recipient) {
-                            Ok(lease) => Some(lease),
+                            Ok(lease) => lease,
                             Err(refusal) => return (*refusal).into(),
                         }
                     } else {
                         None
                     };
+                    let direct = direct_lease.is_some();
                     let mut response: MetaflowAnswer = match self.store.queue_metaflow(request, now)
                     {
                         Ok(response) => response.into(),

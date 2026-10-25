@@ -270,15 +270,17 @@ impl SendsRequests for RunningNexus {
             self.rest_ended_awake(&recipient);
             // Own the address until the direct call has a receipt or a
             // durable non-retryable failure. Background drain/wake may not
-            // submit this same request independently.
-            let _direct_lease = if direct {
+            // submit this same request independently. A metaflow another
+            // holds takes the request into its queue instead.
+            let direct_lease = if direct {
                 match self.direct_send_lease(&recipient) {
-                    Ok(lease) => Some(lease),
+                    Ok(lease) => lease,
                     Err(refusal) => return (*refusal).into(),
                 }
             } else {
                 None
             };
+            let direct = direct_lease.is_some();
             let admitted = self.store.accept_logical_delivery(
                 &recipient,
                 SentBy::Sender(sender),
@@ -770,11 +772,15 @@ impl BindsSeats for RunningNexus {
 /// placement, an interrupt, or a successful bridge submission.
 pub(crate) trait CompletesDirectSends {
     fn direct_receipt_watch(&self, address: &Address) -> Option<notify::RecommendedWatcher>;
-    /// The caller holds the dispatch gate until admission completes.
+    /// The caller holds the dispatch gate until admission completes. None
+    /// while the metaflow is held, by a refresh, a threshold refresh
+    /// starting its successor or a waking: the request is then queued on
+    /// the metaflow for the flow the holder leaves Awake, never typed into
+    /// an ending or starting pane.
     fn direct_send_lease(
         &self,
         address: &Address,
-    ) -> Result<crate::waking::WakingLease<'_>, Box<Response>>;
+    ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<Response>>;
     fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer;
 }
 
@@ -814,7 +820,7 @@ impl CompletesDirectSends for RunningNexus {
     fn direct_send_lease(
         &self,
         address: &Address,
-    ) -> Result<crate::waking::WakingLease<'_>, Box<Response>> {
+    ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<Response>> {
         use signal_flow::{SendFailure, SendFailureReason};
         let failed = |reason| {
             Box::new(Response::Failed(SendFailure {
@@ -822,10 +828,9 @@ impl CompletesDirectSends for RunningNexus {
                 send_failure_reason: reason,
             }))
         };
-        let lease = self
-            .waking
-            .hold(address)
-            .ok_or_else(|| failed(SendFailureReason::RecipientBusy(address.clone())))?;
+        let Some(lease) = self.waking.hold(address) else {
+            return Ok(None);
+        };
         if !self
             .store
             .prepare_declared_metaflow(address)
@@ -865,7 +870,7 @@ impl CompletesDirectSends for RunningNexus {
         {
             return Err(failed(SendFailureReason::RecipientBusy(address.clone())));
         }
-        Ok(lease)
+        Ok(Some(lease))
     }
     fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer {
         use crate::store::AnnouncesLaunchChanges;

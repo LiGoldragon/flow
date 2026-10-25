@@ -32,7 +32,8 @@
 //! ending flow is reaped, and the queue is handed to it. Any other has its
 //! flow's harness closed and the flow recorded Stopped, the metaflow left
 //! Asleep with its queue kept; its successor starts on the next waking
-//! request.
+//! request. A Send that arrives while any of these holds the metaflow is
+//! queued on it.
 //!
 //! A metaflow is Asleep once its flow has ended: its seat slept, its pane
 //! closed by the living, its harness crashed, or the flow replaced. Work queued for an

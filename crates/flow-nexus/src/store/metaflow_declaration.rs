@@ -1,5 +1,5 @@
 //! The metaflows declared in Flow's configuration: the meta Metaflows
-//! family, one row per Address, each naming the context modules an ordinary
+//! family, one row per Address, each naming the belief modules an ordinary
 //! Launch of that Address composes into the system prompt and into the first
 //! user message. A store written before metaflows were declared opens with
 //! the table added and holds none.

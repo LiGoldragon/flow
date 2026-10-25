@@ -389,3 +389,61 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
     );
     assert_eq!(ended(&fixture), FlowLifecycle::Stopped);
 }
+
+/// The fixture Herdr's answer to `pane close` becomes `answer`, a shell
+/// fragment run in its place.
+fn close_answers(fixture: &NexusFixture, answer: &str) {
+    let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
+    let pattern = "  \"pane close\"|\"pane send-keys\"|\"agent wait\")";
+    assert!(script.contains(pattern), "{script}");
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replacen(
+        pattern,
+        &format!("  \"pane close\") {answer} ;;\n{pattern}"),
+        1,
+    ));
+}
+
+/// A refresh whose close Herdr refuses answers CloseRefused, and one whose
+/// Herdr cannot be read answers HerdrUnavailable: Refresh's own rejections.
+/// Either leaves the flow Awake and live, and releases the lock.
+#[test]
+fn a_refused_close_or_an_unreadable_herdr_answers_refresh_s_own_rejection() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    awake_seat(&fixture, vec![]);
+    declare(&fixture, seat_address());
+    close_answers(&fixture, "exit 1");
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Refresh(seat_address())),
+        Response::RefreshRejected(RefreshRejection::CloseRefused)
+    );
+    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
+    assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+
+    // Herdr lists its sessions, but the snapshot of the flow's own fails.
+    let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
+    let cases = "case \"$3 $4\" in\n";
+    assert!(script.contains(cases), "{script}");
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replacen(
+        cases,
+        &format!("{cases}  \"api snapshot\") echo 'herdr: server unreachable' >&2; exit 1 ;;\n"),
+        1,
+    ));
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Refresh(seat_address())),
+        Response::RefreshRejected(RefreshRejection::HerdrUnavailable)
+    );
+    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
+    assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+}

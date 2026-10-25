@@ -1366,7 +1366,7 @@ pub trait RefreshesMetaflows {
 impl RefreshesMetaflows for RunningNexus {
     fn refresh(&self, address: &Address) -> Response {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-        use signal_flow::{RefreshRejection, Refreshed, Refusal, StopRejection, Unknown_Data};
+        use signal_flow::{RefreshRejection, Refreshed, Refusal, Unknown_Data};
         let Some(lock) = self.waking.hold(address) else {
             return Response::RefreshRejected(RefreshRejection::Locked);
         };
@@ -1396,12 +1396,14 @@ impl RefreshesMetaflows for RunningNexus {
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
         }
         let node = match self.store.flow_node(&flow_id) {
-            Ok(Some(node)) => self.herdr.refresh_route(node),
+            Ok(Some(node)) => node,
             Ok(None) => {
                 return Response::Refused(Refusal::Unknown(Unknown_Data::FlowId(flow_id)));
             }
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
         };
+        // The recorded route is read first: a Herdr that cannot be read
+        // shows no pane, and is never taken for one gone.
         match self.herdr.pane_presence(&node) {
             PanePresence::Present => {}
             // A flow whose pane is gone has ended on its own: it is recorded
@@ -1411,13 +1413,14 @@ impl RefreshesMetaflows for RunningNexus {
                 return Response::RefreshRejected(RefreshRejection::NotAwake);
             }
             PanePresence::Unknown => {
-                return Response::StopRejected(StopRejection::RouteUnavailable);
+                return Response::RefreshRejected(RefreshRejection::HerdrUnavailable);
             }
         }
+        let node = self.herdr.refresh_route(node);
         if let Err(outcome) = self.close_at_rest(&flow_id, &node) {
-            return Response::StopRejected(match *outcome {
-                Outcome::Failed(Failed_Data::HerdrRefused) => StopRejection::CloseRefused,
-                _ => StopRejection::PersistenceRefused,
+            return Response::RefreshRejected(match *outcome {
+                Outcome::Failed(Failed_Data::HerdrRefused) => RefreshRejection::CloseRefused,
+                _ => RefreshRejection::PersistenceRefused,
             });
         }
         drop(lock);

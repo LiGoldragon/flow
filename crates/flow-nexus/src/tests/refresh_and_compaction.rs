@@ -103,7 +103,11 @@ const SUCCESSOR_REQUEST: &str = "refresh-c1a0de";
 
 /// Declares the seat's metaflow, continuing as `availability`, and the model
 /// its layer and aspect run.
-fn declare_seat(fixture: &NexusFixture, availability: Availability, system_modules: Vec<String>) {
+pub(super) fn declare_seat(
+    fixture: &NexusFixture,
+    availability: Availability,
+    system_modules: Vec<String>,
+) {
     fixture
         .nexus
         .store
@@ -132,7 +136,7 @@ fn declare_seat(fixture: &NexusFixture, availability: Availability, system_modul
 /// The successor a refresh of the seat launches, staged as far as its
 /// ambiguous first prompt, whose receipt the fixture then writes: the
 /// refresh's Replace resumes it and finds it confirmed.
-fn staged_refresh_successor(fixture: &NexusFixture) -> StagedLaunch {
+pub(super) fn staged_refresh_successor(fixture: &NexusFixture) -> StagedLaunch {
     let mut successor = fixture.staged_launch(SUCCESSOR_REQUEST, Some(CLAUDE_SEAT));
     successor.profile.address = seat_address();
     successor.profile.model_name = "fixture-model".into();
@@ -155,7 +159,7 @@ fn staged_refresh_successor(fixture: &NexusFixture) -> StagedLaunch {
 }
 
 /// The refresh's successor is owed under the staged launch's request.
-fn owe_staged_successor(fixture: &NexusFixture) {
+pub(super) fn owe_staged_successor(fixture: &NexusFixture) {
     fixture
         .nexus
         .store

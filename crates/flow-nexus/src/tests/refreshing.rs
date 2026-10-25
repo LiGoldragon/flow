@@ -1,9 +1,12 @@
 //! A refresh ordered from outside: `Refresh.Address` ends the flow the
-//! metaflow is Awake as without giving it a turn, leaves the metaflow Asleep
-//! with that flow in Past and its queue kept, and starts nothing; the
-//! successor runs on the next waking request. While the refresh holds the
-//! metaflow, nothing reaches the ending flow.
+//! metaflow is Awake as without giving it a turn. A Required metaflow, or
+//! one holding a waking request, has its successor started and confirmed
+//! before the ending flow is reaped; any other is left Asleep with that flow
+//! in Past and its queue kept, and its successor runs on the next waking
+//! request. While the refresh holds the metaflow, nothing reaches the ending
+//! flow.
 
+use super::refresh_and_compaction::{declare_seat, owe_staged_successor, staged_refresh_successor};
 use super::waking::{
     CLAUDE_SEAT, ReadsFreshWorld, WakesFreshClaude, address, claude_agent, claude_seat,
     launched_claude_ended_by,
@@ -15,6 +18,7 @@ use super::{
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::sending::SendsRequests;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+use crate::store::successor::OwesSuccessors;
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows};
 use crate::waking::{HoldsWakingMetaflows, SleepsAndWakesSeats};
 use crate::{Dispatches, DispatchesSerially};
@@ -446,4 +450,106 @@ fn a_refused_close_or_an_unreadable_herdr_answers_refresh_s_own_rejection() {
     assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
     assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+}
+
+/// The Herdr calls the replacement fixture logged that would type into a
+/// pane.
+fn typing_calls(fixture: &NexusFixture) -> Vec<String> {
+    fs::read_to_string(fixture.directory.path().join("herdr-calls.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|call| {
+            call.contains("agent prompt")
+                || call.contains("send-keys")
+                || call.contains("send-text")
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The Claude seat Awake at the Secondary address, its metaflow declared
+/// as `availability`, holding one Order queued with `delivery`, and its
+/// successor staged so a Replace of `LaunchProfile` resumes it and finds it
+/// confirmed.
+fn refreshable_with_successor(
+    availability: Availability,
+    delivery: Delivery,
+) -> (NexusFixture, signal_flow::LaunchProfile) {
+    let fixture = NexusFixture::new();
+    claude_seat(&fixture, 40_000);
+    let mut successor = staged_refresh_successor(&fixture);
+    successor.stage_to_ambiguity(&fixture.nexus);
+    successor.write_receipt();
+    declare_seat(
+        &fixture,
+        availability,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: seat_address(),
+        state: State::Awake(CLAUDE_SEAT.into()),
+        past: vec![],
+        queue: vec![signal_flow::QueueEntry {
+            logical_delivery_id: "refreshing-successor-0".into(),
+            sent_by: SentBy::Unknown,
+            delivery,
+            message: Message::Soft(Request::Order("For the successor.".into())),
+        }],
+    });
+    owe_staged_successor(&fixture);
+    fixture.herdr_for_replacement_showing(0, vec![claude_agent(&fixture)]);
+    (fixture, successor.request())
+}
+
+/// A refresh of a Required metaflow, or of one whose queue holds a request
+/// that asks for a wake, starts the successor in the same event: it is
+/// started and its receipt confirmed before the ending flow is reaped, the
+/// metaflow is Awake as it, the queue is kept for it, and the answer still
+/// names the flow that ended. Nothing is typed into the ending flow.
+#[test]
+fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
+    for (availability, delivery) in [
+        (Availability::Required, Delivery::Queue),
+        (Availability::OnDemand, Delivery::Wake),
+    ] {
+        let (fixture, _) = refreshable_with_successor(availability.clone(), delivery.clone());
+        assert_eq!(
+            fixture.nexus.dispatch(Query::Refresh(seat_address())),
+            Response::Refreshed(Refreshed {
+                address: seat_address(),
+                flow_id: CLAUDE_SEAT.into(),
+            }),
+            "{availability:?} {delivery:?}"
+        );
+        let metaflow = stored(&fixture);
+        assert_eq!(
+            metaflow.state,
+            State::Awake("908786".into()),
+            "the successor is Awake: {availability:?} {delivery:?}"
+        );
+        assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
+        assert_eq!(
+            requests(&metaflow),
+            vec![Request::Order("For the successor.".into())],
+            "the queue waits for the successor"
+        );
+        assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
+        assert!(
+            fs::read_to_string(fixture.directory.path().join("herdr-calls.log"))
+                .unwrap_or_default()
+                .contains("pane close w1:p3"),
+            "the ending flow's pane is closed"
+        );
+        assert_eq!(typing_calls(&fixture), Vec::<String>::new());
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .successor_intent(&seat_address())
+                .unwrap(),
+            None,
+            "the successor owed is given"
+        );
+        assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+    }
 }

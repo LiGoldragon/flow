@@ -214,6 +214,7 @@ impl Dispatches for RunningNexus {
                 self.launch_status(&launch_request_id)
             }
             Query::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id),
+            // Off the gate: the refresh takes it for each of its steps.
             Query::Refresh(address) => {
                 use crate::waking::RefreshesMetaflows;
                 self.refresh(&address)
@@ -1120,7 +1121,8 @@ impl ReconcilesListedFlows for RunningNexus {
 
 trait DispatchesSerially {
     /// Store transitions are read-modify-write; one dispatch runs at a time
-    /// across both sockets while frames are read concurrently.
+    /// across both sockets while frames are read concurrently. A Refresh
+    /// takes the gate for each of its own steps, as a wake does.
     fn dispatch_serially(&self, query: Query, origin: Origin) -> Response;
     fn dispatch_meta_serially(
         &self,
@@ -1131,6 +1133,9 @@ trait DispatchesSerially {
 
 impl DispatchesSerially for RunningNexus {
     fn dispatch_serially(&self, query: Query, origin: Origin) -> Response {
+        if let Query::Refresh(_) = &query {
+            return self.dispatch_from(query, origin);
+        }
         let response = {
             let _turn = self
                 .dispatch_gate

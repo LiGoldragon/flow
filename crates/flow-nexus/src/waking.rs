@@ -26,9 +26,13 @@
 //! write that records the exit, and woken with no queued request needed.
 //!
 //! A refresh ordered from outside (`Refresh.Address`,
-//! [`RefreshesMetaflows`]) takes the metaflow's hold, closes its flow's
-//! harness without a turn, records the flow Stopped and leaves the metaflow
-//! Asleep, its queue kept; the successor starts on the next waking request.
+//! [`RefreshesMetaflows`]) takes the metaflow's hold and ends its flow
+//! without a turn. A Required metaflow, or one holding work that wakes it,
+//! has its successor started and confirmed through Replace before the
+//! ending flow is reaped, and the queue is handed to it. Any other has its
+//! flow's harness closed and the flow recorded Stopped, the metaflow left
+//! Asleep with its queue kept; its successor starts on the next waking
+//! request.
 //!
 //! A metaflow is Asleep once its flow has ended: its seat slept, its pane
 //! closed by the living, its harness crashed, or the flow replaced. Work queued for an
@@ -1351,15 +1355,22 @@ impl SleepsAndWakesSeats for RunningNexus {
 }
 
 /// A refresh ordered from outside: the metaflow's current flow ends
-/// without a turn, and its successor runs on the next waking request.
+/// without a turn. A Required metaflow, or one holding a request that asks
+/// for a wake, has its successor started and confirmed in the same event,
+/// before the ending flow is reaped; any other is left Asleep, and its
+/// successor runs on the next waking request.
 pub trait RefreshesMetaflows {
-    /// Runs under the dispatch gate. Takes the metaflow's lock, the hold a
-    /// wake takes, so nothing is delivered to it and what arrives queues;
-    /// closes the flow's harness under its pane's lease, typing nothing;
-    /// records the flow Stopped, which puts the metaflow Asleep with the
-    /// flow in Past and its queue kept; releases the lock. The successor's
-    /// context is what any wake composes: the metaflow's declaration, else
-    /// the last launch's modules, remembering this flow.
+    /// Runs off the dispatch gate, taking it for each step as a wake does.
+    /// Takes the metaflow's lock, the hold a wake takes, so nothing is
+    /// delivered to it and what arrives queues. A metaflow owed its
+    /// successor has it started and confirmed through Replace, which then
+    /// reaps the ending flow; once the lock is released the queue is handed
+    /// to the successor, oldest first. Any other has its flow's harness
+    /// closed under its pane's lease, typing nothing, and its flow recorded
+    /// Stopped, which puts the metaflow Asleep with the flow in Past and its
+    /// queue kept. The successor's context is what any wake composes: the
+    /// metaflow's declaration, else the last launch's modules, remembering
+    /// the ending flow.
     fn refresh(&self, address: &Address) -> Response;
 }
 
@@ -1367,15 +1378,21 @@ impl RefreshesMetaflows for RunningNexus {
     fn refresh(&self, address: &Address) -> Response {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         use signal_flow::{RefreshRejection, Refreshed, Refusal, Unknown_Data};
+        let turn = self
+            .dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(lock) = self.waking.hold(address) else {
             return Response::RefreshRejected(RefreshRejection::Locked);
         };
         self.rest_ended_awake(address);
-        let flow_id = match self.store.metaflow(address) {
-            Ok(Some(Metaflow {
-                state: flow_ethos::State::Awake(flow_id),
-                ..
-            })) => flow_id,
+        let metaflow = match self.store.metaflow(address) {
+            Ok(Some(
+                metaflow @ Metaflow {
+                    state: flow_ethos::State::Awake(_),
+                    ..
+                },
+            )) => metaflow,
             Ok(Some(_)) => return Response::RefreshRejected(RefreshRejection::NotAwake),
             Ok(None) => {
                 return match self.store.metaflow_declaration(address) {
@@ -1387,6 +1404,9 @@ impl RefreshesMetaflows for RunningNexus {
                 };
             }
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+        };
+        let flow_ethos::State::Awake(flow_id) = metaflow.state.clone() else {
+            return Response::RefreshRejected(RefreshRejection::NotAwake);
         };
         // A flow whose launch is not yet confirmed only holds its Address:
         // the launch that holds it is a waking still running.
@@ -1417,21 +1437,62 @@ impl RefreshesMetaflows for RunningNexus {
             }
         }
         let node = self.herdr.refresh_route(node);
+        let availability = match self.store.availability(address) {
+            Ok(availability) => availability,
+            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+        };
+        let wakes = metaflow
+            .queue
+            .iter()
+            .any(|entry| entry.delivery == signal_flow::Delivery::Wake);
+        let refreshed = Response::Refreshed(Refreshed {
+            address: address.clone(),
+            flow_id: flow_id.clone(),
+        });
+        // A Required metaflow is never left without a flow, and one holding
+        // a waking request is owed the flow that takes it up: the successor
+        // is started and confirmed before the ending flow is reaped.
+        if availability == Availability::Required || wakes {
+            // Replace takes the gate for its own steps; the lock keeps any
+            // wake, drain or delivery of the metaflow out meanwhile.
+            drop(turn);
+            let replaced = self.refresh_successor_first(&flow_id, &metaflow);
+            drop(lock);
+            self.wake_deferred();
+            return match replaced {
+                AtStop::Refreshed(_) => {
+                    eprintln!(
+                        "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} runs its successor",
+                        address.aspect, address.topic, address.layer
+                    );
+                    // What queued while the lock stood is handed to the
+                    // successor, oldest first.
+                    self.wake_due(address.clone());
+                    refreshed
+                }
+                AtStop::Kept(KeptAtStop::RefreshLaunchRefused(response)) => *response,
+                AtStop::Kept(KeptAtStop::RefreshUnplaceable) => {
+                    Response::Refused(Refusal::NotConfigured)
+                }
+                _ => Response::RefreshRejected(RefreshRejection::PersistenceRefused),
+            };
+        }
         if let Err(outcome) = self.close_at_rest(&flow_id, &node) {
             return Response::RefreshRejected(match *outcome {
                 Outcome::Failed(Failed_Data::HerdrRefused) => RefreshRejection::CloseRefused,
                 _ => RefreshRejection::PersistenceRefused,
             });
         }
+        // The lock is released under the gate, so a Send admitted after it
+        // finds the metaflow Asleep and free, and its waking request wakes
+        // it.
         drop(lock);
+        drop(turn);
         eprintln!(
             "flow-nexus: flow {flow_id} refreshed; {:?} {} {:?} sleeps until a waking request",
             address.aspect, address.topic, address.layer
         );
-        Response::Refreshed(Refreshed {
-            address: address.clone(),
-            flow_id,
-        })
+        refreshed
     }
 }
 

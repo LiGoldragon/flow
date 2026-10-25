@@ -182,8 +182,13 @@ impl Dispatches for RunningNexus {
                 let response = self.start(profile, origin);
                 self.settle(&launch_request_id, response)
             }
+            // Off the gate: the replacement takes it under the metaflow's
+            // lock.
             Query::Replace(profile) => match self.admission_refusal(&profile) {
-                Ok(None) => self.replace(profile, origin),
+                Ok(None) => {
+                    use crate::waking::RefreshesMetaflows;
+                    self.replace_held(profile, origin)
+                }
                 Ok(Some(rejection)) => Response::ReplaceRejected(
                     signal_flow::ReplaceRejection::LaunchRefused(rejection),
                 ),
@@ -780,8 +785,9 @@ impl ServesConnection for Connection {
                 let response = nexus.bind_seat(address.clone(), self.process.as_ref());
                 return self.peer.write_response(&response);
             }
-            // A Launch is the Start, or the Replace of the caller's own
-            // flow, its declaration names, from the calling process.
+            // A Launch is the Start its declaration names, from the calling
+            // process, or, for a metaflow Awake as a live flow, the Replace
+            // of that flow under the metaflow's lock.
             Query::Launch(launch) => {
                 let origin = nexus.origin_of(self.peer.peer_process());
                 let declared = {
@@ -1122,7 +1128,8 @@ impl ReconcilesListedFlows for RunningNexus {
 trait DispatchesSerially {
     /// Store transitions are read-modify-write; one dispatch runs at a time
     /// across both sockets while frames are read concurrently. A Refresh
-    /// takes the gate for each of its own steps, as a wake does.
+    /// and a Replace take the gate for each of their own steps, as a wake
+    /// does.
     fn dispatch_serially(&self, query: Query, origin: Origin) -> Response;
     fn dispatch_meta_serially(
         &self,
@@ -1133,7 +1140,7 @@ trait DispatchesSerially {
 
 impl DispatchesSerially for RunningNexus {
     fn dispatch_serially(&self, query: Query, origin: Origin) -> Response {
-        if let Query::Refresh(_) = &query {
+        if let Query::Refresh(_) | Query::Replace(_) = &query {
             return self.dispatch_from(query, origin);
         }
         let response = {

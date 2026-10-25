@@ -32,8 +32,9 @@
 //! ending flow is reaped, and the queue is handed to it. Any other has its
 //! flow's harness closed and the flow recorded Stopped, the metaflow left
 //! Asleep with its queue kept; its successor starts on the next waking
-//! request. A Send that arrives while any of these holds the metaflow is
-//! queued on it.
+//! request. A Launch addressed to an Awake metaflow is such a refresh, its
+//! successor the Launch's, run under the same hold. A Send that arrives
+//! while any of these holds the metaflow is queued on it.
 //!
 //! A metaflow is Asleep once its flow has ended: its seat slept, its pane
 //! closed by the living, its harness crashed, or the flow replaced. Work queued for an
@@ -1373,6 +1374,13 @@ pub trait RefreshesMetaflows {
     /// metaflow's declaration, else the last launch's modules, remembering
     /// the ending flow.
     fn refresh(&self, address: &Address) -> Response;
+    /// A Replace, as a Launch addressed to an Awake metaflow names one: a
+    /// refresh whose successor is the profile's. Under the metaflow's lock
+    /// the successor is started and confirmed, then the flow it replaces is
+    /// reaped, given no turn; once the lock is released the queue is handed
+    /// to the successor, oldest first. A metaflow another holds is refused
+    /// Locked. Runs off the dispatch gate, taking it for the replacement.
+    fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response;
 }
 
 impl RefreshesMetaflows for RunningNexus {
@@ -1494,6 +1502,28 @@ impl RefreshesMetaflows for RunningNexus {
             address.aspect, address.topic, address.layer
         );
         refreshed
+    }
+
+    fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response {
+        use signal_flow::RefreshRejection;
+        let address = profile.address.clone();
+        let response = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(lock) = self.waking.hold(&address) else {
+                return Response::RefreshRejected(RefreshRejection::Locked);
+            };
+            let response = self.replace(profile, origin);
+            drop(lock);
+            response
+        };
+        self.wake_deferred();
+        // What queued for the metaflow is handed to the flow it is Awake as
+        // now, oldest first.
+        self.wake_due(address);
+        response
     }
 }
 

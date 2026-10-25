@@ -419,10 +419,11 @@ impl ChoosesEffort for RunningNexus {}
 const DEFAULT_HERDR_SESSION: &str = "default";
 
 pub trait LaunchesDeclared {
-    /// The Start, or the Replace of the caller's own flow, a Launch from
-    /// `caller` names; Err with the refusal when the Address is undeclared
-    /// or its model unconfigured. It only reads; the Start or Replace it
-    /// names is dispatched as any other.
+    /// The Start a Launch from `caller` names, or, when the metaflow is
+    /// Awake as a live flow, whoever the caller is, the Replace of that
+    /// flow; Err with the refusal when the Address is undeclared or its
+    /// model unconfigured. It only reads; the Start or Replace it names is
+    /// dispatched as any other.
     fn declared_launch(
         &self,
         launch: Launch_Data,
@@ -465,11 +466,9 @@ impl LaunchesDeclared for RunningNexus {
         else {
             return Err(Box::new(Response::Refused(Refusal::NotConfigured)));
         };
-        // A flow launching its own Address is replaced by the launch.
-        let predecessor = caller
-            .and_then(|process| self.sending_address(process).ok())
-            .filter(|sender| *sender == address)
-            .and_then(|_| self.live_awake_flow(&address));
+        // A Launch addressed to an Awake metaflow refreshes it: the flow it
+        // is Awake as is replaced by the launch, never typed into.
+        let predecessor = self.live_awake_flow(&address);
         let herdr_session_name = caller
             .and_then(|process| u32::try_from(process.pid).ok())
             .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))

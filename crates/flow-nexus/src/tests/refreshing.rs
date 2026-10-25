@@ -3,8 +3,8 @@
 //! one holding a waking request, has its successor started and confirmed
 //! before the ending flow is reaped; any other is left Asleep with that flow
 //! in Past and its queue kept, and its successor runs on the next waking
-//! request. While the metaflow is held, nothing reaches the ending flow and
-//! a Send queues.
+//! request. A Launch addressed to an Awake metaflow is such a refresh. While
+//! the metaflow is held, nothing reaches the ending flow and a Send queues.
 
 use super::refresh_and_compaction::{declare_seat, owe_staged_successor, staged_refresh_successor};
 use super::waking::{
@@ -603,4 +603,110 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
     fixture.nexus.wake_due(pending.address);
     assert!(fixture.typed().is_none());
     drop(held);
+}
+
+/// A Launch addressed to a metaflow Awake as a live flow, from any caller,
+/// names the Replace of that flow: no AddressAwake, and the flow it is
+/// Awake as is the predecessor.
+#[test]
+fn a_launch_to_an_awake_metaflow_names_the_replace_of_its_flow() {
+    use crate::sending::LaunchesDeclared;
+    let fixture = NexusFixture::new();
+    declare_seat(
+        &fixture,
+        Availability::OnDemand,
+        vec!["spirit-core".into(), "intent-flow".into()],
+    );
+    awake_seat(&fixture, vec![]);
+    let Ok(Query::Replace(profile)) = fixture.nexus.declared_launch(
+        signal_flow::Launch_Data {
+            address: seat_address(),
+            remembering: signal_flow::Remembering::Predecessors(1),
+            instruction_prompt: "Take up the work.".into(),
+        },
+        None,
+    ) else {
+        panic!("a Launch to an Awake metaflow is a Replace");
+    };
+    assert_eq!(profile.flow_id_option, Some(CLAUDE_SEAT.to_owned()));
+    assert_eq!(profile.address, seat_address());
+    assert_eq!(profile.instruction_prompt, "Take up the work.");
+}
+
+/// A Replace of an Awake metaflow's flow, as a Launch names it, runs under
+/// the metaflow's lock: refused Locked while another holds it; while it
+/// reaps, the metaflow is held, and a drain that asks meanwhile types
+/// nothing into the predecessor's pane; the queue is kept for the
+/// successor.
+#[test]
+fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predecessor() {
+    let (fixture, profile) = refreshable_with_successor(Availability::OnDemand, Delivery::Queue);
+
+    let held = fixture
+        .nexus
+        .waking
+        .hold(&seat_address())
+        .expect("another holds the metaflow");
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Replace(profile.clone())),
+        Response::RefreshRejected(RefreshRejection::Locked)
+    );
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
+    drop(held);
+
+    // The predecessor's close announces itself, then waits for the test.
+    let closing = fixture.directory.path().join("close-reached");
+    let release = fixture.directory.path().join("close-released");
+    let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
+    let pattern = "  *\" pane close \"*) exit 0 ;;";
+    assert!(script.contains(pattern), "{script}");
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replacen(
+        pattern,
+        &format!(
+            "  *\" pane close \"*) : > '{closing}'; while [ ! -e '{release}' ]; do sleep 0.02; done; exit 0 ;;",
+            closing = closing.display(),
+            release = release.display(),
+        ),
+        1,
+    ));
+
+    let replaced = std::thread::scope(|scope| {
+        let replacing = scope.spawn(|| fixture.nexus.dispatch(Query::Replace(profile.clone())));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !closing.exists() {
+            assert!(std::time::Instant::now() < deadline, "the reap never ran");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            fixture.nexus.waking.is_waking(&seat_address()),
+            "the replacement holds the metaflow"
+        );
+        let draining = scope.spawn(|| fixture.nexus.drain_awake(&seat_address()));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(typing_calls(&fixture), Vec::<String>::new());
+        fs::write(&release, "").expect("close released");
+        draining.join().expect("drain asked");
+        replacing.join().expect("replace answered")
+    });
+
+    assert!(
+        matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id == CLAUDE_SEAT),
+        "{replaced:?}"
+    );
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped);
+    let metaflow = stored(&fixture);
+    assert_eq!(metaflow.state, State::Awake("908786".into()));
+    assert_eq!(
+        requests(&metaflow),
+        vec![Request::Order("For the successor.".into())]
+    );
+    assert_eq!(
+        typing_calls(&fixture),
+        Vec::<String>::new(),
+        "nothing is typed into the predecessor"
+    );
+    assert!(!fixture.nexus.waking.is_waking(&seat_address()));
 }

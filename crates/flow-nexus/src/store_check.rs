@@ -10,12 +10,14 @@
 use crate::generated::startup::{ChecksStore, StoreCheck, StoreCheckRequest, StoreRefusal};
 use crate::store::{FlowStore, OpensFlowStore, StoreError};
 use std::fs;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-/// A private copy of a store, removed with its directory when dropped.
+/// A private copy of a store in a temporary directory of its own, named
+/// uniquely and readable by its owner alone, removed with the copy when it
+/// is dropped: two checks, in one process or many, never share a copy.
 struct StoreCopy {
-    directory: PathBuf,
+    _directory: tempfile::TempDir,
     path: PathBuf,
 }
 
@@ -25,22 +27,16 @@ trait CopiesStore: Sized {
 
 impl CopiesStore for StoreCopy {
     fn copied(store: &Path, attempt: u32) -> std::io::Result<Self> {
-        let directory =
-            std::env::temp_dir().join(format!("flow-store-check-{}-{attempt}", std::process::id()));
-        if directory.exists() {
-            fs::remove_dir_all(&directory)?;
-        }
-        fs::DirBuilder::new().mode(0o700).create(&directory)?;
-        let path = directory.join("flow.sema");
-        let copy = Self { directory, path };
-        fs::copy(store, &copy.path)?;
-        Ok(copy)
-    }
-}
-
-impl Drop for StoreCopy {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.directory);
+        let directory = tempfile::Builder::new()
+            .prefix(&format!("flow-store-check-{attempt}-"))
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        let path = directory.path().join("flow.sema");
+        fs::copy(store, &path)?;
+        Ok(Self {
+            _directory: directory,
+            path,
+        })
     }
 }
 

@@ -30,7 +30,7 @@
 ; a turn on a thread through the app-server socket.
 
 Library
-[ signal_flow:[ Address Delivery Message Sender SendAcceptance SendPayloadSize ]
+[ signal_flow:[ Address Delivery Message Sender SendAcceptance SendPayloadSize Topic ]
   serde_json:JsonValue.Value ]
 [ SendKind.[ Order Question Result Notice ]
   Target.Address
@@ -57,7 +57,9 @@ Library
   ; other content. UnknownRecipient: the target is no metaflow. Held:
   ; Message holds a lock on the target, about to deliver. Store: the store
   ; refused; the Nexus log names why. Oversized: the rendered native
-  ; prompt exceeds Flow's Send admission budget.
+  ; prompt exceeds Flow's Send admission budget. TopicRefused: the target's
+  ; topic is not an uncapitalized camelCase identifier; it carries the topic
+  ; as written.
   SendRefusal.[ UnknownTool
                 Malformed
                 ThreadUnowned
@@ -68,7 +70,8 @@ Library
                 Held
                 Oversized.SendPayloadSize
                 Store
-                OffRoute ]
+                OffRoute
+                TopicRefused.Topic ]
   ; Accepted is a durable logical delivery, never a claim of delivery.
   ; LegacyUnknown preserves historical calls which predate logical IDs.
   SendOutcome.[ Accepted.{ Sender Target SendAcceptance }

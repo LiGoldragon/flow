@@ -73,6 +73,7 @@ pub enum SendRefusal {
     Oversized(signal_flow::SendPayloadSize),
     Store,
     OffRoute,
+    TopicRefused(signal_flow::Topic),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

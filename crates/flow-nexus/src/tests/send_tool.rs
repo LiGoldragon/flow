@@ -824,6 +824,42 @@ fn a_malformed_call_is_refused_and_recorded() {
     );
 }
 
+/// A target whose topic is not an uncapitalized camelCase identifier is
+/// refused TopicRefused, carrying the topic as written: a capital is never
+/// lowered into the metaflow it would then name. The refusal is the call's
+/// recorded answer, and a replay is answered the same.
+#[test]
+fn a_call_to_a_topic_that_is_not_camel_case_is_refused_as_written() {
+    let fixture = NexusFixture::new();
+    fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
+    fixture.awake_target();
+    for (call_id, topic) in [("call-capital", "Gamma"), ("call-snake", "gamma_two")] {
+        let mut call = tool_call(THREAD_A, call_id, "x");
+        call.arguments = serde_json::json!({
+            "target": { "aspect": "Mind", "topic": topic, "layer": "Secondary" },
+            "delivery": "Wake",
+            "priority": "Soft",
+            "kind": "Order",
+            "body": "x"
+        })
+        .to_string();
+        let refused = SendOutcome::Refused(SendRefusal::TopicRefused(topic.into()));
+        assert_eq!(fixture.nexus.handle_send_call(call.clone()), refused);
+        assert!(fixture.target_queue().is_empty(), "nothing reaches gamma");
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .send_call(&call.tool_call_key)
+                .unwrap()
+                .unwrap()
+                .send_outcome,
+            refused
+        );
+        assert_eq!(fixture.nexus.handle_send_call(call), refused);
+    }
+}
+
 #[test]
 fn an_oversized_dynamic_send_is_typed_durable_and_not_queued() {
     let fixture = NexusFixture::new();

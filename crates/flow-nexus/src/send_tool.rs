@@ -44,6 +44,7 @@ use crate::generated::send_tool::{
     ReadsToolCall, SendArguments, SendCall, SendInvocation, SendKind, SendOutcome, SendPriority,
     SendRefusal, ToolCall, ToolCallCarrying, ToolCallKey, ToolName,
 };
+use crate::launching::NamesTopic;
 use crate::sending::{AdmitsSendPayload, MintsId};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::send_call::KeepsSendCalls;
@@ -397,17 +398,30 @@ impl HandlesSendCall for RunningNexus {
                 Ok(None) => {}
                 Err(error) => return store_refused(error),
             }
-            let Some(arguments) = call.send_arguments() else {
-                let outcome = SendOutcome::Refused(SendRefusal::Malformed);
-                return match self.store.record_send_call(SendCall {
+            // A refusal of the call's content is kept as its answer, so a
+            // replay is answered the same.
+            let refused_kept = |refusal: SendRefusal, content_sha256: String| {
+                let outcome = SendOutcome::Refused(refusal);
+                match self.store.record_send_call(SendCall {
                     tool_call_key: key.clone(),
                     content_sha256,
                     send_outcome: outcome.clone(),
                 }) {
                     Ok(()) => outcome,
                     Err(error) => store_refused(error),
-                };
+                }
             };
+            let Some(arguments) = call.send_arguments() else {
+                return refused_kept(SendRefusal::Malformed, content_sha256);
+            };
+            // The target's topic is an uncapitalized camelCase identifier,
+            // taken as written: its capitals are never lowered.
+            if !arguments.target.topic.as_str().is_camel_case_topic() {
+                return refused_kept(
+                    SendRefusal::TopicRefused(arguments.target.topic.clone()),
+                    content_sha256,
+                );
+            }
             let Some(now) = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()
@@ -418,15 +432,7 @@ impl HandlesSendCall for RunningNexus {
             let message = arguments.message();
             if let Some(signal_flow::Refusal::Oversized(size)) = message.oversized_refusal(&sender)
             {
-                let outcome = SendOutcome::Refused(SendRefusal::Oversized(size));
-                return match self.store.record_send_call(SendCall {
-                    tool_call_key: key.clone(),
-                    content_sha256,
-                    send_outcome: outcome.clone(),
-                }) {
-                    Ok(()) => outcome,
-                    Err(error) => store_refused(error),
-                };
+                return refused_kept(SendRefusal::Oversized(size), content_sha256);
             }
             let outcome = self
                 .store

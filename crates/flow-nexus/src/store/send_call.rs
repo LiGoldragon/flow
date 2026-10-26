@@ -70,8 +70,9 @@ impl MemoryDefinition for SendCall {
 }
 
 /// A call as Flow kept it while its accepted answer's delivery state was
-/// signal-flow 31's, before Withdrawn. It is read only by the v4-to-v5
-/// upgrade, which carries it unchanged.
+/// signal-flow 31's, before Withdrawn, and its refusal had no
+/// TopicRefused. It is read only by the v4-to-v5 upgrade, which carries it
+/// unchanged.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SendCallV4 {
     pub(super) tool_call_key: ToolCallKey,
@@ -83,7 +84,41 @@ pub struct SendCallV4 {
 pub(super) enum SendOutcomeV4 {
     Accepted(AcceptedV4),
     LegacyUnknown(LegacyUnknown_Data),
-    Refused(SendRefusal),
+    Refused(SendRefusalV4),
+}
+
+/// The send tool's refusal before TopicRefused.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) enum SendRefusalV4 {
+    UnknownTool,
+    Malformed,
+    ThreadUnowned,
+    FlowEnded,
+    NotAwake,
+    KeyReused,
+    UnknownRecipient(Target),
+    Held,
+    Oversized(SendPayloadSize),
+    Store,
+    OffRoute,
+}
+
+impl From<SendRefusalV4> for SendRefusal {
+    fn from(refusal: SendRefusalV4) -> Self {
+        match refusal {
+            SendRefusalV4::UnknownTool => Self::UnknownTool,
+            SendRefusalV4::Malformed => Self::Malformed,
+            SendRefusalV4::ThreadUnowned => Self::ThreadUnowned,
+            SendRefusalV4::FlowEnded => Self::FlowEnded,
+            SendRefusalV4::NotAwake => Self::NotAwake,
+            SendRefusalV4::KeyReused => Self::KeyReused,
+            SendRefusalV4::UnknownRecipient(target) => Self::UnknownRecipient(target),
+            SendRefusalV4::Held => Self::Held,
+            SendRefusalV4::Oversized(size) => Self::Oversized(size),
+            SendRefusalV4::Store => Self::Store,
+            SendRefusalV4::OffRoute => Self::OffRoute,
+        }
+    }
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -123,7 +158,7 @@ impl UpgradeFrom<SendCallV4> for SendCall {
                     send_acceptance: accepted.send_acceptance.into(),
                 }),
                 SendOutcomeV4::LegacyUnknown(unknown) => SendOutcome::LegacyUnknown(unknown),
-                SendOutcomeV4::Refused(refusal) => SendOutcome::Refused(refusal),
+                SendOutcomeV4::Refused(refusal) => SendOutcome::Refused(refusal.into()),
             },
         })
     }

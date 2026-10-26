@@ -8031,6 +8031,7 @@ mod tests {
     /// successors, deliveries and send calls as they were kept.
     #[test]
     fn a_store_before_continuity_and_withdrawal_upgrades_and_reopens() {
+        use super::MemoryDefinition;
         use super::events::{EventV3, FlowEventsV3};
         use super::logical_delivery::{CurrentLogicalDeliveryV1, LogicalDeliveryEventV1};
         use super::metaflow_declaration::{
@@ -8038,11 +8039,12 @@ mod tests {
             StoredMetaMetaflowConfigurationV3,
         };
         use super::send_call::{AcceptedV4, SendCallV4, SendOutcomeV4};
-        use super::send_v31::{DeliverySnapshotV31, DeliveryStateV31, RefusalV31, SendAcceptanceV31};
+        use super::send_v31::{
+            DeliverySnapshotV31, DeliveryStateV31, RefusalV31, SendAcceptanceV31,
+        };
         use super::successor::{
             OwesSuccessors, SuccessionCause, SuccessionCauseV1, SuccessorIntent, SuccessorIntentV1,
         };
-        use super::MemoryDefinition;
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         let fixture = StoreFixture::new();
         fixture.configured();
@@ -8894,14 +8896,14 @@ mod tests {
     }
 
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
-    use super::{FlowRecordV5, LaunchedRecordV2, OriginClueBeforeOrigin, ReplacedRecordV2};
-    use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
-    use super::{LaunchOutcomeV4, ReplaceRejectionV18, StartRejectionV18, StoredLaunchOutcomeV4};
-    use super::{LaunchOutcomeV5, ReplaceRejectionV22, StartRejectionV22, StoredLaunchOutcomeV5};
     use super::{
         ContextRefusalV30, LaunchOutcomeV6, ReplaceRejectionV30, StartRejectionV30,
         StoredLaunchOutcomeV6,
     };
+    use super::{FlowRecordV5, LaunchedRecordV2, OriginClueBeforeOrigin, ReplacedRecordV2};
+    use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
+    use super::{LaunchOutcomeV4, ReplaceRejectionV18, StartRejectionV18, StoredLaunchOutcomeV4};
+    use super::{LaunchOutcomeV5, ReplaceRejectionV22, StartRejectionV22, StoredLaunchOutcomeV5};
     use super::{LaunchedRecord, ReplacedRecord};
     use super::{LaysOutDefaults, SeedsConfiguration};
     use crate::store::RegistersBindings;
@@ -11829,9 +11831,7 @@ mod tests {
                 StoredLaunchOutcomeV5 {
                     launch_request_id: "v5-context".into(),
                     launch_outcome: LaunchOutcomeV5::StartRejected(
-                        StartRejectionV22::ContextRefused(
-                            ContextRefusalV30::ModuleMissing,
-                        ),
+                        StartRejectionV22::ContextRefused(ContextRefusalV30::ModuleMissing),
                     ),
                 },
                 StoredLaunchOutcomeV5 {
@@ -11912,9 +11912,9 @@ mod tests {
             },
             StoredLaunchOutcomeV6 {
                 launch_request_id: "v6-reap".into(),
-                launch_outcome: LaunchOutcomeV6::ReplaceRejected(
-                    ReplaceRejectionV30::ReapRefused(StopRejection::CloseRefused),
-                ),
+                launch_outcome: LaunchOutcomeV6::ReplaceRejected(ReplaceRejectionV30::ReapRefused(
+                    StopRejection::CloseRefused,
+                )),
             },
         ];
         {

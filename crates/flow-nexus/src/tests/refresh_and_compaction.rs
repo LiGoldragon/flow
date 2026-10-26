@@ -18,7 +18,7 @@ use crate::store::{ManagesMetaflowState, ReadsFlowRows, SeedsRole};
 use crate::waking::{AtStop, SleepsAndWakesSeats};
 use flow_ethos::State;
 use meta_signal_flow::{
-    Continuity, ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold,
+    ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold, Continuity,
 };
 use signal_flow::{
     Address, Aspect, Caller, Delivery, FlowLifecycle, Layer, Message, Metaflow, PowerLevel,

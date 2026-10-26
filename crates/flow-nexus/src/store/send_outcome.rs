@@ -1,8 +1,8 @@
 //! Durable, countable answers to ordinary Send queries.
 
+use super::send_v31::{RefusalV31, SendAcceptanceV31, SendFailureV31};
 use super::*;
 use meta_signal_flow::{OrdinarySendOutcome, SendOutcomeRecord};
-use super::send_v31::{RefusalV31, SendAcceptanceV31, SendFailureV31};
 use signal_flow::{Address, Process, Response};
 
 pub(super) const COUNTER_FAMILY: &str = "flow-nexus-send-outcome-counter";
@@ -226,19 +226,18 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
             counter: engine.register_table(descriptors.counter)?,
             // A v2 family upgrades from v2; one refused at admission is a
             // v1 family, which upgrades from v1.
-            outcomes: match engine
-                .upgrade_table::<StoredSendOutcomeV2, StoredSendOutcome>(
-                    descriptors.outcomes.clone(),
-                ) {
+            outcomes: match engine.upgrade_table::<StoredSendOutcomeV2, StoredSendOutcome>(
+                descriptors.outcomes.clone(),
+            ) {
                 UpgradeOutcome::Upgraded(receipt) => receipt.table(),
                 UpgradeOutcome::AlreadyCurrent(table) => table,
                 UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
                 UpgradeOutcome::Failed(failure)
                     if failure.phase() == sema_engine::StoragePhase::Admission =>
                 {
-                    match engine
-                        .upgrade_table::<StoredSendOutcomeV1, StoredSendOutcome>(descriptors.outcomes)
-                    {
+                    match engine.upgrade_table::<StoredSendOutcomeV1, StoredSendOutcome>(
+                        descriptors.outcomes,
+                    ) {
                         UpgradeOutcome::Upgraded(receipt) => receipt.table(),
                         UpgradeOutcome::AlreadyCurrent(table) => table,
                         UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
@@ -445,12 +444,13 @@ mod tests {
                     OrdinarySendOutcomeV2::Accepted(SendAcceptanceV31 {
                         logical_delivery_id: "logical-1".into(),
                         delivery_cursor: 1,
-                        delivery_state: DeliveryStateV31::Failed(RefusalV31::Direct(
-                            "gone".into(),
-                        )),
+                        delivery_state: DeliveryStateV31::Failed(RefusalV31::Direct("gone".into())),
                     }),
                 ),
-                previous("refused", OrdinarySendOutcomeV2::Refused(RefusalV31::OffRoute)),
+                previous(
+                    "refused",
+                    OrdinarySendOutcomeV2::Refused(RefusalV31::OffRoute),
+                ),
                 previous(
                     "failed",
                     OrdinarySendOutcomeV2::Failed(SendFailureV31 {

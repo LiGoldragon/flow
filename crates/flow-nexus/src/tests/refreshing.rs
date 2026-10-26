@@ -26,7 +26,7 @@ use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRo
 use crate::waking::{HoldsWakingMetaflows, SleepsAndWakesSeats};
 use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::State;
-use meta_signal_flow::{Continuity, ConfigurationChange, ConfigureMetaflow};
+use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
 use signal_flow::{
     Address, Delivery, FlowLifecycle, HerdrRouteSelection, Layer, Message, Metaflow, Origin, Query,
     Recipient, RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response,

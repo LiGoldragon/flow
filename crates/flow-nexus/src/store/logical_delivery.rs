@@ -2,13 +2,13 @@
 //! hand-over attempts. The event table is append-only; the current table is
 //! a materialized view used for sender-filtered reconnect snapshots.
 
+use super::send_v31::DeliverySnapshotV31;
 use super::*;
 use crate::generated::send_tool::{
     Accepted_Data, SendCall, SendOutcome as ToolSendOutcome, SendRefusal as ToolSendRefusal,
     Target, ToolCallKey,
 };
 use flow_ethos::{Delivery, Message, QueueEntry};
-use super::send_v31::DeliverySnapshotV31;
 use sema_engine::AtomicCommit;
 use signal_flow::{
     Address, DeliverySnapshot, DeliveryState, Lock, LogicalDeliveryId, NativeReceipt, Refusal,
@@ -267,10 +267,9 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
     ) -> Result<LogicalDeliveryTables, StoreError> {
         Ok(LogicalDeliveryTables {
             counter: engine.register_table(descriptors.counter)?,
-            current: match engine
-                .upgrade_table::<CurrentLogicalDeliveryV1, CurrentLogicalDelivery>(
-                    descriptors.current,
-                ) {
+            current: match engine.upgrade_table::<CurrentLogicalDeliveryV1, CurrentLogicalDelivery>(
+                descriptors.current,
+            ) {
                 UpgradeOutcome::Upgraded(receipt) => receipt.table(),
                 UpgradeOutcome::AlreadyCurrent(table) => table,
                 UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},

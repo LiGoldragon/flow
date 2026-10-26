@@ -9,7 +9,7 @@
 //! its purpose and records opens with none.
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
-use meta_signal_flow::{Continuity, ConfigureMetaflow};
+use meta_signal_flow::{ConfigureMetaflow, Continuity};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Decision, Engine, EngineRecord, FamilyName, MemoryDefinition, MemoryUpgrades, MemoryVersion,

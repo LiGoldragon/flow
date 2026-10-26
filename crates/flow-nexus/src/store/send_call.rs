@@ -13,12 +13,12 @@
 //! as it was: no metaflow is ended any more, and no current refusal says
 //! what it said.
 
+use super::send_v31::SendAcceptanceV31;
 use super::{
     FlowStore, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, StoreError,
     metaflow::{SleepsMetaflows, TakesLaunchAddress},
     opened_thread::RecordsOpenedThreads,
 };
-use super::send_v31::SendAcceptanceV31;
 use crate::generated::send_tool::{
     Accepted_Data, LegacyUnknown_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,
 };

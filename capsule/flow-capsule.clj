@@ -548,6 +548,10 @@
           (println (str "curriculum context " name " | " url " main " head " | " rewritten
                         " files with dependencies rewritten to type:subject, served at " served)))))
     (reset! curriculum-environment env)
+    ;; The Nexus serves only in a runtime directory that exists, as its unit's
+    ;; RuntimeDirectory=curriculum (mode 0700) makes it; it opens none itself.
+    (fs/create-dirs (fs/parent curriculum-socket))
+    (fs/set-posix-file-permissions (fs/parent curriculum-socket) "rwx------")
     (reset! curriculum (p/process [(str curriculum-package "/bin/curriculum-nexus")]
                                   {:env env :dir @source-root :out :append :out-file (fs/file log)
                                    :err :append :err-file (fs/file log) :in ""}))

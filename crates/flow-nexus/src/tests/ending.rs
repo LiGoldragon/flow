@@ -4,6 +4,7 @@
 //! gone is nothing to close, and a pane now running another session is
 //! never closed.
 
+use super::refreshing::close_answers;
 use super::waking::{CLAUDE_SEAT, CLAUDE_SESSION, address, claude_agent, claude_seat};
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
@@ -200,4 +201,36 @@ fn a_start_after_no_clear_of_its_own_session_rebinds_nothing() {
     );
     assert_eq!(session(&fixture), CLAUDE_SESSION);
     assert!(lifecycle(&fixture).is_live());
+}
+
+/// A Retire whose pane close Herdr refuses answers CloseRefused and records
+/// nothing: the flow stays live, its metaflow Awake as it.
+#[test]
+fn a_retire_whose_close_herdr_refuses_answers_close_refused_and_records_nothing() {
+    let fixture = NexusFixture::new();
+    awake_seat(&fixture);
+    let live = lifecycle(&fixture);
+    close_answers(&fixture, "exit 1");
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into())),
+        meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::CloseRefused)
+    );
+    assert_eq!(lifecycle(&fixture), live);
+    assert_eq!(state(&fixture), State::Awake(CLAUDE_SEAT.into()));
+}
+
+/// An exit is recorded though Herdr refuses to close the pane: the exit
+/// takes no lease and is not held back, the refused close is logged.
+#[test]
+fn an_exit_whose_close_herdr_refuses_is_recorded_all_the_same() {
+    let fixture = NexusFixture::new();
+    awake_seat(&fixture);
+    close_answers(&fixture, "exit 1");
+
+    report(&fixture, Event::Ended(Some(CLAUDE_SESSION.into())));
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Exited);
+    assert_eq!(state(&fixture), State::Asleep);
 }

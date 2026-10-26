@@ -382,10 +382,10 @@ impl Dispatches for RunningNexus {
             // history, and takes the flow out of receiving: it is not a
             // delete. No pane outlives its flow: a pane still there, its
             // harness running the flow's own session or none, is closed in
-            // the same event, under its lease. Retirement comes from
-            // authority, so a close Herdr refuses does not hold it back.
-            // Privileged, because it changes what Flow holds of a flow
-            // without that flow acting.
+            // the same event, under its lease. A close Herdr refuses
+            // answers CloseRefused and records nothing: the flow is not
+            // retired while its pane stays. Privileged, because it changes
+            // what Flow holds of a flow without that flow acting.
             meta_signal_flow::Query::Retire(flow_id) => {
                 let node = match self.store.flow_node(&flow_id) {
                     Ok(Some(node)) => node,
@@ -416,7 +416,9 @@ impl Dispatches for RunningNexus {
                         self.perform(Operation::Close(node.clone()))
                     };
                     if closed != Outcome::Closed {
-                        eprintln!("flow-nexus: flow {flow_id} retired; its pane was not closed");
+                        return meta_signal_flow::Response::RetireRejected(
+                            meta_signal_flow::RetireRejection::CloseRefused,
+                        );
                     }
                 }
                 if self.perform(Operation::Record(Record_Data::Retired(flow_id.clone())))
@@ -3728,7 +3730,10 @@ mod tests {
     #[test]
     fn retire_keeps_the_row_and_takes_the_flow_out_of_receiving() {
         let fixture = NexusFixture::new();
-        fixture.set_agents(vec![fixture.current_agent()]);
+        fixture.accept_pane_operations(
+            vec![fixture.current_agent()],
+            PromptFixture::Prompted("w1:p3"),
+        );
         let node = fixture.node();
         fixture.register_with(FlowLifecycle::Active);
 
@@ -3762,7 +3767,8 @@ mod tests {
             )
         );
 
-        // Its pane is still live in Herdr, and it stays Retired anyway:
+        // Its pane is closed, and though Herdr still shows it live, it
+        // stays Retired:
         // retirement is a decision about the flow, not a reading of Herdr,
         // and List does not talk it back into being live.
         assert_eq!(fixture.only_lifecycle(), FlowLifecycle::Retired);

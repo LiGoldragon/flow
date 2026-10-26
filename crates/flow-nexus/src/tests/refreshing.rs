@@ -399,7 +399,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
 
 /// The fixture Herdr's answer to `pane close` becomes `answer`, a shell
 /// fragment run in its place.
-fn close_answers(fixture: &NexusFixture, answer: &str) {
+pub(super) fn close_answers(fixture: &NexusFixture, answer: &str) {
     let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
     let pattern = "  \"pane close\"|\"pane send-keys\"|\"agent wait\")";
     assert!(script.contains(pattern), "{script}");

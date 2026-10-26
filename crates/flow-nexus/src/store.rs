@@ -4041,6 +4041,22 @@ pub trait RecordsFlowLifecycle {
     fn record_exited(&self, flow_id: &str) -> Result<bool, StoreError>;
 }
 
+/// A flow whose harness goes on in a new native session: Claude's /clear
+/// ends one session and starts the next in the same harness. The FlowId
+/// stays.
+pub trait RebindsNativeSession {
+    /// The live flow `flow_id`, bound to the session `previous`, is bound
+    /// to `session` now: its row and its owner proof name the new session,
+    /// in one write. False, and nothing written, when the flow is not live
+    /// or is not bound to `previous`.
+    fn rebind_native_session(
+        &self,
+        flow_id: &str,
+        previous: &str,
+        session: &str,
+    ) -> Result<bool, StoreError>;
+}
+
 trait ReadsFlowStore {
     fn state(&self) -> Result<FlowStoreState, StoreError>;
     fn flow(&self, flow_id: &str) -> Result<Option<FlowRecord>, StoreError>;
@@ -6464,6 +6480,32 @@ impl RecordsFlowLifecycle for FlowStore {
     }
 }
 
+impl RebindsNativeSession for FlowStore {
+    fn rebind_native_session(
+        &self,
+        flow_id: &str,
+        previous: &str,
+        session: &str,
+    ) -> Result<bool, StoreError> {
+        let Some(mut flow) = self.flow(flow_id)? else {
+            return Ok(false);
+        };
+        if !flow.lifecycle.is_live() || flow.thread_id.as_deref() != Some(previous) {
+            return Ok(false);
+        }
+        flow.thread_id = Some(session.to_owned());
+        let mut commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
+        if let Some(mut owner_proof) = self.native_owner_proof_record(flow_id)?
+            && owner_proof.proof.native_session_id == previous
+        {
+            owner_proof.proof.native_session_id = session.to_owned();
+            commit = commit.mutate(self.native_owner_proofs, owner_proof);
+        }
+        self.engine.commit_atomic(commit)?;
+        Ok(true)
+    }
+}
+
 impl WritesFlowStore for FlowStore {
     fn mutate_launch_attempt(&self, stored: StoredLaunchAttempt) -> Result<(), StoreError> {
         self.engine.mutate_keyed(KeyedMutation::new(
@@ -8225,7 +8267,7 @@ mod tests {
                     .unwrap()
                     .unwrap(),
                 vec![
-                    signal_flow::Event::Started,
+                    signal_flow::Event::Started(None),
                     signal_flow::Event::ToolUsed("Bash".into())
                 ]
             );
@@ -11369,7 +11411,7 @@ mod tests {
         assert_eq!(
             store.events("a1a1a1").unwrap(),
             Some(vec![
-                Event::Started,
+                Event::Started(None),
                 Event::ToolUsed("Bash".into()),
                 Event::Stopped(NativeStop {
                     native_session_id_option: None,
@@ -12809,7 +12851,7 @@ mod tests {
             assert_eq!(
                 store.events("a1a1a1").expect("events read"),
                 Some(vec![
-                    Event::Started,
+                    Event::Started(None),
                     Event::ToolUsed("Bash".into()),
                     Event::Stopped(NativeStop {
                         native_session_id_option: None,

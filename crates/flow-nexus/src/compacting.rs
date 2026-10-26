@@ -281,6 +281,9 @@ pub trait WatchesCompactions {
     /// Reads the Claude flow's transcript past the last reading for
     /// compactions its harness made on its own, and raises each.
     fn watch_claude_compactions(&self, flow_id: &str);
+    /// The flow's harness goes on in a new session: its transcript is the
+    /// new session's, read from its start.
+    fn session_rebound(&self, flow_id: &str);
     /// A Codex thread's app-server reported a context signal.
     fn codex_context_signal(&self, thread: &str, signal: CodexContextSignal);
     /// A Compact was typed into the flow: its next Codex compaction is the
@@ -327,6 +330,14 @@ impl WatchesCompactions for RunningNexus {
         for compaction in raised {
             self.raise_compaction(&node, &compaction.uuid, compaction.pre_tokens);
         }
+    }
+
+    fn session_rebound(&self, flow_id: &str) {
+        self.compactions
+            .read_to
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(flow_id);
     }
 
     fn codex_context_signal(&self, thread: &str, signal: CodexContextSignal) {

@@ -10,6 +10,11 @@
 //! digest is exactly the request a hand-over typed is that request's
 //! receipt, and settles it (`after_report`). An event naming another session
 //! is kept and acts on nothing.
+//!
+//! A Claude session /clear ends is a session change, not an exit: its
+//! `Cleared` is kept and records nothing else, the flow stays live and its
+//! pane open. The `Started` that follows it names the harness's new
+//! session, and the flow is rebound to that session; its FlowId stays.
 
 use crate::RunningNexus;
 use crate::claude::ReadsClaudeTurns;
@@ -18,11 +23,11 @@ use crate::generated::operation::{
 };
 use crate::performing::Performs;
 use crate::store::AnnouncesLaunchChanges;
-use crate::store::ReadsFlowRows;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::logical_delivery::{CorePresentationRoute, RecordsLogicalDeliveries};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{AccountsQueueDelivery, ShowsQueueDelivery};
+use crate::store::{ReadsFlowRows, RebindsNativeSession};
 use crate::waking::{
     CorrelatesNativeEvents, ReadsClaudeDelivery, ReconcilesQueueDelivery, SleepsAndWakesSeats,
 };
@@ -80,6 +85,9 @@ impl RecordsReports for RunningNexus {
     }
 
     fn after_report(&self, flow_id: &FlowId, event: &Event) {
+        if let Event::Started(Some(session)) = event {
+            self.follow_cleared_session(flow_id, session);
+        }
         // Every report of a Claude flow has its transcript read for a
         // compaction its harness made on its own; SessionStart follows one
         // at once.
@@ -182,7 +190,9 @@ impl RecordsReports for RunningNexus {
                     self.settle_submitted_prompt(flow_id, prompt);
                 }
             }
-            Event::Started | Event::ToolUsed(_) => {}
+            // A cleared session is not an exit: the harness goes on in the
+            // session the next Started names.
+            Event::Started(_) | Event::ToolUsed(_) | Event::Cleared(_) => {}
         }
     }
 
@@ -259,5 +269,56 @@ impl RecordsReports for RunningNexus {
             address,
             queue_delivery_vector,
         })
+    }
+}
+
+/// A Claude flow whose harness goes on in a new session after /clear.
+trait FollowsClearedSession {
+    /// A `Started` naming `session` that follows the flow's own `Cleared`
+    /// rebinds the live Claude flow to `session`: the last start or end
+    /// reported before it is the clear of the session the flow is bound
+    /// to. Any other start rebinds nothing.
+    fn follow_cleared_session(&self, flow_id: &FlowId, session: &str);
+}
+
+impl FollowsClearedSession for RunningNexus {
+    fn follow_cleared_session(&self, flow_id: &FlowId, session: &str) {
+        let Ok(Some(node)) = self.store.flow_node(flow_id) else {
+            return;
+        };
+        if node.harness_kind != signal_flow::HarnessKind::Claude
+            || node.session_id.is_empty()
+            || node.session_id == session
+        {
+            return;
+        }
+        let Ok(Some(events)) = self.store.events(flow_id) else {
+            return;
+        };
+        let cleared_own = events
+            .iter()
+            .rev()
+            .skip(1)
+            .find_map(|earlier| match earlier {
+                Event::Cleared(cleared) => {
+                    Some(cleared.as_deref() == Some(node.session_id.as_str()))
+                }
+                Event::Started(_) | Event::Ended(_) => Some(false),
+                Event::ToolUsed(_) | Event::Stopped(_) | Event::PromptSubmitted(_) => None,
+            })
+            .unwrap_or(false);
+        if !cleared_own {
+            return;
+        }
+        match self
+            .store
+            .rebind_native_session(flow_id, &node.session_id, session)
+        {
+            Ok(true) => crate::compacting::WatchesCompactions::session_rebound(self, flow_id),
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "flow-nexus: flow {flow_id} was not rebound to its new session {session}: {error:?}"
+            ),
+        }
     }
 }

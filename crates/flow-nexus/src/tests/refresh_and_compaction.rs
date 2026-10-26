@@ -506,7 +506,7 @@ fn a_compaction_during_continuous_work_is_recorded_once_without_an_order() {
     append_boundary(&fixture, "asked", "manual", &now_transcript_time());
     append_boundary(&fixture, "continuous", "auto", &now_transcript_time());
 
-    let started = signal_flow::Event::Started;
+    let started = signal_flow::Event::Started(None);
     fixture
         .nexus
         .after_report(&CLAUDE_SEAT.to_owned(), &started);
@@ -536,7 +536,7 @@ fn a_compaction_with_no_investigation_seat_is_recorded_not_investigated() {
     append_boundary(&fixture, "continuous", "auto", &now_transcript_time());
     fixture
         .nexus
-        .after_report(&CLAUDE_SEAT.to_owned(), &signal_flow::Event::Started);
+        .after_report(&CLAUDE_SEAT.to_owned(), &signal_flow::Event::Started(None));
     let compactions = fixture.nexus.store.compactions_of(CLAUDE_SEAT).unwrap();
     assert_eq!(compactions.len(), 1);
     assert_eq!(compactions[0].investigation, Investigation::NotConfigured);

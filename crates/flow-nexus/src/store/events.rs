@@ -52,8 +52,9 @@ impl MemoryDefinition for FlowEvents {
     }
 }
 
-/// One flow's events as Flow kept them before a session's end was an
-/// event, signal-flow 31's. It is read only by the v3-to-v4 upgrade.
+/// One flow's events as Flow kept them before a session's end, a cleared
+/// session and the session a start names were events, signal-flow 31's. It
+/// is read only by the v3-to-v4 upgrade.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FlowEventsV3 {
     pub flow_id: String,
@@ -76,7 +77,9 @@ impl MemoryDefinition for FlowEventsV3 {
     }
 }
 
-/// A harness event as signal-flow 31.0.0 archived it, before `Ended`.
+/// A harness event as signal-flow 31.0.0 archived it, before `Ended` and
+/// `Cleared`, its `Started` naming no session. A start it kept is upgraded
+/// to `Started.None`.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub enum EventV3 {
     Started,
@@ -88,7 +91,7 @@ pub enum EventV3 {
 impl From<EventV3> for Event {
     fn from(event: EventV3) -> Self {
         match event {
-            EventV3::Started => Event::Started,
+            EventV3::Started => Event::Started(None),
             EventV3::ToolUsed(tool) => Event::ToolUsed(tool),
             EventV3::Stopped(stop) => Event::Stopped(stop),
             EventV3::PromptSubmitted(prompt) => Event::PromptSubmitted(prompt),
@@ -177,7 +180,7 @@ pub struct NativeStopV2 {
 impl From<EventV2> for Event {
     fn from(event: EventV2) -> Self {
         match event {
-            EventV2::Started => Event::Started,
+            EventV2::Started => Event::Started(None),
             EventV2::ToolUsed(tool) => Event::ToolUsed(tool),
             EventV2::PromptSubmitted(prompt) => Event::PromptSubmitted(prompt),
             EventV2::Stopped(stop) => Event::Stopped(NativeStop {
@@ -202,7 +205,7 @@ impl UpgradeFrom<FlowEventsV2> for FlowEvents {
 impl From<EventBeforeIdentity> for Event {
     fn from(event: EventBeforeIdentity) -> Self {
         match event {
-            EventBeforeIdentity::Started => Event::Started,
+            EventBeforeIdentity::Started => Event::Started(None),
             EventBeforeIdentity::ToolUsed(tool) => Event::ToolUsed(tool),
             EventBeforeIdentity::Stopped => Event::Stopped(NativeStop {
                 native_session_id_option: None,
@@ -467,6 +470,18 @@ mod tests {
         })
     }
 
+    /// A start naming its session, a tool use, a turn end, a cleared
+    /// session and the start of the session after it.
+    fn events() -> Vec<Event> {
+        vec![
+            Event::Started(Some("c0ffee00-0000-4000-8000-000000000001".into())),
+            Event::ToolUsed("Bash".into()),
+            stop(),
+            Event::Cleared(Some("c0ffee00-0000-4000-8000-000000000001".into())),
+            Event::Started(Some("c0ffee00-0000-4000-8000-000000000002".into())),
+        ]
+    }
+
     #[test]
     fn v2_event_upgrade_preserves_order_and_every_event_with_empty_new_stop_field() {
         let old_stop = NativeStopV2 {
@@ -494,7 +509,7 @@ mod tests {
         assert_eq!(
             upgraded.event_vector,
             vec![
-                Event::Started,
+                Event::Started(None),
                 Event::ToolUsed("Bash".into()),
                 Event::PromptSubmitted(prompt),
                 Event::Stopped(signal_flow::NativeStop {
@@ -519,22 +534,19 @@ mod tests {
                 crate::store::FlowRegistration::Registered(_)
             ));
             assert_eq!(store.events("5a4d0b").unwrap(), Some(vec![]));
-            for event in [Event::Started, Event::ToolUsed("Bash".into()), stop()] {
+            for event in events() {
                 assert_eq!(
                     store.record_event("5a4d0b", event).unwrap(),
                     EventRecording::Recorded
                 );
             }
             assert_eq!(
-                store.record_event("0a0a0a", Event::Started).unwrap(),
+                store.record_event("0a0a0a", Event::Started(None)).unwrap(),
                 EventRecording::UnknownFlow
             );
         }
         let store = FlowStore::open(&path).unwrap();
-        assert_eq!(
-            store.events("5a4d0b").unwrap(),
-            Some(vec![Event::Started, Event::ToolUsed("Bash".into()), stop()])
-        );
+        assert_eq!(store.events("5a4d0b").unwrap(), Some(events()));
         assert_eq!(store.events("0a0a0a").unwrap(), None);
     }
 
@@ -552,7 +564,7 @@ mod tests {
             store.release_reserved_flow("0b0b0b").unwrap();
             assert_eq!(store.events("0b0b0b").unwrap(), None);
             assert_eq!(
-                store.record_event("0b0b0b", Event::Started).unwrap(),
+                store.record_event("0b0b0b", Event::Started(None)).unwrap(),
                 EventRecording::UnknownFlow
             );
             store.release_reserved_flow("0b0b0b").unwrap();
@@ -560,11 +572,14 @@ mod tests {
                 store.register_flow(node()).unwrap(),
                 crate::store::FlowRegistration::Registered(_)
             ));
-            store.record_event("5a4d0b", Event::Started).unwrap();
+            store.record_event("5a4d0b", Event::Started(None)).unwrap();
             store.release_reserved_flow("5a4d0b").unwrap();
         }
         let store = FlowStore::open(&path).unwrap();
         assert_eq!(store.events("0b0b0b").unwrap(), None);
-        assert_eq!(store.events("5a4d0b").unwrap(), Some(vec![Event::Started]));
+        assert_eq!(
+            store.events("5a4d0b").unwrap(),
+            Some(vec![Event::Started(None)])
+        );
     }
 }

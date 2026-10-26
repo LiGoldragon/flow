@@ -861,7 +861,9 @@ impl CorrelatesNativeEvents for RunningNexus {
                 Event::PromptSubmitted(prompt) => {
                     self.correlated_prompt(flow_id, prompt).then_some(false)
                 }
-                Event::Started | Event::ToolUsed(_) | Event::Ended(_) => None,
+                Event::Started(_) | Event::ToolUsed(_) | Event::Ended(_) | Event::Cleared(_) => {
+                    None
+                }
             })
             .unwrap_or(false)
     }

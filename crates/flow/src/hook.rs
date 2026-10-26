@@ -4,11 +4,15 @@
 //! event into one `Report.{ FlowId Event }` datom and hands it to the `flow`
 //! CLI beside it, which is the only thing here that speaks Signal.
 //!
-//!   SessionStart     -> Report.{ «FLOW_ID» Started }
+//!   SessionStart     -> Report.{ «FLOW_ID» Started.Some.«session_id» }
 //!   PostToolUse      -> Report.{ «FLOW_ID» ToolUsed.«tool_name» }
 //!   UserPromptSubmit -> Report.{ «FLOW_ID» PromptSubmitted.{ Some.«session_id» Some.«prompt_id» SHA256 } }
 //!   Stop             -> Report.{ «FLOW_ID» Stopped.{ Some.«session_id» Some.«transcript_path» Some.«last_assistant_message» } }
 //!   SessionEnd       -> Report.{ «FLOW_ID» Ended.Some.«session_id» }
+//!   SessionEnd clear -> Report.{ «FLOW_ID» Cleared.Some.«session_id» }
+//!
+//! A SessionEnd whose reason is `clear` is a session change, not an exit:
+//! the harness goes on in the session the SessionStart after it names.
 //!
 //! A Stop and a submitted prompt carry the native identity Claude Code gave
 //! the hook, so the Nexus acts on them only when they are the flow's own
@@ -116,7 +120,7 @@ impl ChoosesHookCall for HarnessHook {
             return HookCall::Nothing("no FLOW_ID in the harness environment");
         };
         let event = match self.event_name().as_str() {
-            "SessionStart" => "Started".to_owned(),
+            "SessionStart" => format!("Started.{}", self.optional("session_id")),
             "PostToolUse" => match self
                 .input
                 .get("tool_name")
@@ -135,6 +139,14 @@ impl ChoosesHookCall for HarnessHook {
                     ),
                     None => return HookCall::Nothing("UserPromptSubmit without a prompt"),
                 }
+            }
+            // A session /clear ended: the harness goes on in a new
+            // session, so the flow has not exited.
+            "SessionEnd"
+                if self.input.get("reason").and_then(serde_json::Value::as_str)
+                    == Some("clear") =>
+            {
+                format!("Cleared.{}", self.optional("session_id"))
             }
             // The session ends: the flow has exited, whether or not
             // anything looks at its pane.
@@ -208,7 +220,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Started }".into())
+            HookCall::Report("Report.{ «5a4d0b» Started.Some.«s» }".into())
         );
         assert_eq!(
             hook(
@@ -255,6 +267,40 @@ mod tests {
             )
             .call(),
             HookCall::Report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
+        );
+        assert_eq!(
+            hook(
+                serde_json::json!({"hook_event_name": "SessionEnd", "session_id": "s",
+                    "reason": "logout"}),
+                Some("5a4d0b")
+            )
+            .call(),
+            HookCall::Report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
+        );
+    }
+
+    /// A session /clear ends is a session change: its SessionEnd reports
+    /// Cleared, never Ended, and the SessionStart after it names the new
+    /// session.
+    #[test]
+    fn a_cleared_session_reports_cleared_and_its_successor_session_started() {
+        assert_eq!(
+            hook(
+                serde_json::json!({"hook_event_name": "SessionEnd", "session_id": "s1",
+                    "reason": "clear"}),
+                Some("5a4d0b")
+            )
+            .call(),
+            HookCall::Report("Report.{ «5a4d0b» Cleared.Some.«s1» }".into())
+        );
+        assert_eq!(
+            hook(
+                serde_json::json!({"hook_event_name": "SessionStart", "session_id": "s2",
+                    "source": "clear"}),
+                Some("5a4d0b")
+            )
+            .call(),
+            HookCall::Report("Report.{ «5a4d0b» Started.Some.«s2» }".into())
         );
     }
 
@@ -352,6 +398,21 @@ mod tests {
                     prompt_sha256:
                         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
                 }),
+            })
+        );
+        assert_eq!(
+            read(serde_json::json!({"hook_event_name": "SessionEnd",
+                "session_id": "s1", "reason": "clear"})),
+            signal_flow::Query::Report(signal_flow::Report_Data {
+                flow_id: "5a4d0b".into(),
+                event: signal_flow::Event::Cleared(Some("s1".into())),
+            })
+        );
+        assert_eq!(
+            read(serde_json::json!({"hook_event_name": "SessionStart", "session_id": "s2"})),
+            signal_flow::Query::Report(signal_flow::Report_Data {
+                flow_id: "5a4d0b".into(),
+                event: signal_flow::Event::Started(Some("s2".into())),
             })
         );
     }

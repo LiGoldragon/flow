@@ -3689,7 +3689,7 @@ mod tests {
         };
 
         assert_eq!(
-            report("0a0a0a", Event::Started),
+            report("0a0a0a", Event::Started(None)),
             Response::Refused(signal_flow::Refusal::Unknown(
                 signal_flow::Unknown_Data::FlowId("0a0a0a".into())
             ))
@@ -3703,7 +3703,7 @@ mod tests {
             ),
             "the refused flow was not adopted"
         );
-        assert_eq!(report("908786", Event::Started), Response::Reported);
+        assert_eq!(report("908786", Event::Started(None)), Response::Reported);
         assert_eq!(
             report("908786", Event::ToolUsed("Bash".into())),
             Response::Reported
@@ -3720,7 +3720,7 @@ mod tests {
                 .dispatch_meta(meta_signal_flow::Query::ReadEvents("908786".into())),
             meta_signal_flow::Response::EventsRead(meta_signal_flow::EventsRead_Data {
                 flow_id: "908786".into(),
-                event_vector: vec![Event::Started, Event::ToolUsed("Bash".into()), stop],
+                event_vector: vec![Event::Started(None), Event::ToolUsed("Bash".into()), stop],
             })
         );
     }

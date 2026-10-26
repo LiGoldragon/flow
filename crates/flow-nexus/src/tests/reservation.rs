@@ -110,7 +110,7 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
         MetaResponse::ReadEventsRejected(meta_signal_flow::ReadEventsRejected_Data::UnknownFlow)
     );
     assert_eq!(
-        fixture.report(&flow_id, Event::Started),
+        fixture.report(&flow_id, Event::Started(None)),
         Response::Refused(signal_flow::Refusal::Unknown(
             signal_flow::Unknown_Data::FlowId(flow_id.clone())
         ))

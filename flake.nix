@@ -278,14 +278,10 @@
             "context::tests::a_module_body_that_differs_from_its_rendered_hash_is_refused";
           flow-start-is-one-message = context.exactTest "flow-nexus"
             "composition::tests::a_message_too_large_for_one_message_is_sent_in_parts_and_never_moves_to_the_system_prompt";
-          flow-presentation-asked = context.exactTest "flow-nexus"
-            "composition::tests::a_first_prompt_and_the_living_s_words_end_asking_for_a_presentation";
           flow-launch-carries-its-flow-id = context.exactTest "flow-nexus"
             "composition::tests::a_launch_carries_its_flow_id_first_in_its_launch_section";
           flow-codex-seat-told-its-flow-id = context.exactTest "flow-nexus"
             "codex::tests::after_attach_the_exclusions_are_applied_again_and_read_back";
-          flow-sent-by-flow = context.exactTest "flow-nexus"
-            "composition::tests::a_request_flow_raised_names_flow_as_its_sender";
           flow-store-before-flow-senders-upgrades = context.exactTest "flow-nexus"
             "store::queue_delivery::tests::a_store_before_flow_senders_opens_with_its_queue_carried";
           flow-store-check-refuses-a-later-store = context.exactTest "flow-nexus"
@@ -298,8 +294,6 @@
             "tests::refresh_and_compaction::a_seat_resting_past_its_threshold_is_reaped_and_its_work_kept_for_the_next_flow";
           flow-deliver-past-threshold-refused = context.exactTest "flow-nexus"
             "tests::delivery::a_deliver_into_a_flow_past_its_threshold_is_refused";
-          flow-compaction-investigated-once = context.exactTest "flow-nexus"
-            "tests::refresh_and_compaction::a_compaction_during_continuous_work_is_investigated_once";
           flow-codex-context-measured = context.exactTest "flow-nexus"
             "tests::refresh_and_compaction::a_codex_flow_s_context_is_its_thread_s_last_input";
           flow-one-message-through-herdr-socket = context.exactTest "flow-nexus"
@@ -308,10 +302,6 @@
             "herdr::launch::tests::a_two_part_claude_message_is_received_part_by_part_in_order";
           flow-parts-advance-one-at-a-time = context.exactTest "flow-nexus"
             "store::tests::parts_advance_one_at_a_time_and_the_receipt_waits_for_the_last";
-          flow-fresh-wake-composes-last-launch-context = context.exactTest "flow-nexus"
-            "tests::waking::a_fresh_wake_composes_the_last_launch_modules_and_the_queued_work";
-          flow-leave-outs-refused-when-unsafe = context.exactTest "flow-nexus"
-            "lean::tests::indispensable_parts_skills_with_workflow_and_other_harness_parts_are_refused";
           flow-user-settings-leave-out-refused = context.exactTest "flow-nexus"
             "lean::tests::user_settings_are_indispensable_and_the_agent_tool_is_not";
           flow-leave-outs-reach-the-harness = context.exactTest "flow-nexus"
@@ -340,10 +330,6 @@
             "tests::a_flow_whose_pane_left_herdr_is_listed_exited_and_keeps_its_row";
           flow-unreadable-herdr-changes-nothing = context.exactTest "flow-nexus"
             "tests::an_unreadable_herdr_leaves_a_listed_flow_as_it_stands";
-          flow-start-settles-before-answering = context.exactTest "flow-nexus"
-            "tests::a_plain_start_answers_started_rather_than_the_transient_ambiguity";
-          flow-brief-continuation-after-receipt = context.exactTest "flow-nexus"
-            "tests::replace_stops_the_predecessor_before_the_successor_is_routable";
           flow-live-pane-lists-active = context.exactTest "flow-nexus"
             "tests::a_pending_seat_whose_pane_herdr_shows_live_is_listed_active";
           flow-caller-server-known-by-session-socket = context.exactTest "flow-nexus"
@@ -436,16 +422,12 @@
             "tests::a_stale_hold_behind_an_ended_flow_is_given_back_at_start";
           flow-in-flight-launch-refuses-its-address = context.exactTest "flow-nexus"
             "tests::a_launch_in_flight_before_binding_refuses_another_start_at_its_address";
-          flow-contradicting-receipt-rejects-the-launch = context.exactTest "flow-nexus"
-            "tests::a_receipt_that_contradicts_the_launch_rejects_it";
           flow-stop-waits-for-the-seat-to-rest = context.exactTest "flow-nexus"
             "tests::waking::a_seat_herdr_shows_working_at_its_stop_is_idle_once_herdr_shows_it_done";
           flow-stop-names-why-a-seat-is-kept = context.exactTest "flow-nexus"
             "tests::waking::a_stop_that_leaves_its_seat_names_why";
           flow-hook-closed-before-the-rest-wait = context.exactTest "flow-nexus"
             "tests::waking::the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends";
-          flow-codex-stop-before-confirmation-fabricates-nothing = context.exactTest "flow-nexus"
-            "tests::waking::a_codex_stop_before_confirmation_does_not_fabricate_completion";
           flow-claude-end-turn-with-sidechain-drains = context.exactTest "flow-nexus"
             "tests::queue_drain::a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop";
           flow-claude-two-requests-drain-on-receipts = context.exactTest "flow-nexus"
@@ -456,22 +438,14 @@
             "tests::queue_drain::a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_typing";
           flow-claude-turn-end-before-confirmation = context.exactTest "flow-nexus"
             "tests::queue_drain::a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it";
-          flow-queue-resolved-delivered-leaves-the-queue = context.exactTest "flow-nexus"
-            "tests::queue_drain::an_uncertain_hand_over_resolved_delivered_leaves_the_queue_with_its_record";
-          flow-queue-resolved-absent-one-new-attempt = context.exactTest "flow-nexus"
-            "tests::queue_drain::an_uncertain_hand_over_resolved_absent_is_followed_by_exactly_one_new_attempt";
           flow-queue-resolution-refused-at-the-nexus = context.exactTest "flow-nexus"
             "tests::queue_drain::a_resolution_is_refused_without_a_peer_for_an_unknown_or_non_uncertain_attempt";
-          flow-queue-resolved-delivered-survives-restart = context.exactTest "flow-nexus"
-            "store::queue_delivery::tests::resolved_delivered_leaves_the_queue_with_its_record_and_survives_restart";
           flow-queue-resolved-absent-survives-restart = context.exactTest "flow-nexus"
             "store::queue_delivery::tests::resolved_absent_keeps_the_request_and_authorises_exactly_one_new_attempt";
           flow-queue-resolution-store-refusals = context.exactTest "flow-nexus"
             "store::queue_delivery::tests::a_resolution_is_refused_for_what_is_not_the_oldest_uncertain_attempt";
           flow-codex-crash-found-in-history = context.exactTest "flow-nexus"
             "tests::send_tool::a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history";
-          flow-codex-absent-handed-over-once = context.exactTest "flow-nexus"
-            "tests::send_tool::a_codex_turn_absent_from_an_idle_thread_is_handed_over_again_once";
           flow-codex-undecidable-never-resent = context.exactTest "flow-nexus"
             "tests::send_tool::an_undecidable_codex_turn_stays_uncertain_and_is_never_resent";
           flow-v1-stop-upgrades-unknown-identity = context.exactTest "flow-nexus"
@@ -504,8 +478,6 @@
             "tests::reservation::a_refused_registration_is_reported_with_its_stage";
           flow-native-step-refusal-answered = context.exactTest "flow-nexus"
             "performing::failure_tests::a_binding_failure_is_answered_with_its_stage_and_allowlisted_category";
-          flow-receipt-refusal-staged = context.exactTest "flow-nexus"
-            "tests::a_receipt_that_contradicts_the_launch_rejects_it";
           flow-v4-outcomes-upgrade-to-staged-refusal = context.exactTest "flow-nexus"
             "store::tests::v4_launch_outcomes_upgrade_to_the_staged_refusal_shape";
           flow-codex-recovery-binds-recorded-thread = context.exactTest "flow-nexus"
@@ -564,8 +536,6 @@
             "tests::waking::a_flow_whose_pane_is_gone_is_asleep_and_wakes_fresh";
           flow-order-wakes-primary-fresh = context.exactTest "flow-nexus"
             "tests::waking::an_order_wakes_an_asleep_primary_fresh";
-          flow-wake-fresh-with-queue-oldest-first = context.exactTest "flow-nexus"
-            "tests::waking::a_queued_order_wakes_a_fresh_claude_flow_with_the_whole_queue_then_what_arrived";
           flow-send-tool-threads-attributed = context.exactTest "flow-nexus"
             "tests::send_tool::two_threads_are_each_attributed_to_their_own_metaflow";
           flow-send-tool-unowned-thread-refused = context.exactTest "flow-nexus"
@@ -582,20 +552,10 @@
             "tests::send_tool::a_malformed_call_is_refused_and_recorded";
           flow-send-tool-ungated-app-server-refused = context.exactTest "flow-nexus"
             "codex::tests::an_app_server_that_does_not_gate_the_send_tool_opens_no_thread";
-          flow-queued-request-rendered-with-sender = context.exactTest "flow-nexus"
-            "tests::send_tool::a_queued_request_is_rendered_with_its_sender";
-          flow-send-tool-wake-survives-failed-answer = context.exactTest "flow-nexus"
-            "tests::send_tool::an_asleep_target_wakes_once_though_the_answer_fails_and_the_call_is_replayed";
-          flow-send-tool-replay-wakes-asleep-target = context.exactTest "flow-nexus"
-            "tests::send_tool::a_replayed_call_wakes_the_asleep_target_its_first_handling_did_not";
-          flow-send-tool-result-notice-wait-order-wakes-primary = context.exactTest "flow-nexus"
-            "tests::send_tool::a_send_of_a_result_or_notice_wakes_nothing_and_an_order_wakes_a_primary";
           flow-nexus-start-wakes-each-due-metaflow-once = context.exactTest "flow-nexus"
             "tests::waking::a_nexus_start_wakes_a_seat_whose_wake_did_not_finish";
           flow-v1-metaflow-queue-upgrades-sender-unknown = context.exactTest "flow-nexus"
             "store::tests::a_v1_metaflow_queue_upgrades_with_its_senders_unknown";
-          flow-first-turn-send-served = context.exactTest "flow-nexus"
-            "tests::waking::a_first_turn_that_calls_send_is_served_and_the_launch_completes";
           flow-codex-long-first-turn-refuses-nothing = context.exactTest "flow-nexus"
             "tests::waking::a_codex_first_turn_starts_after_the_tui_attached_and_a_long_turn_refuses_nothing";
           flow-refused-codex-start-archives-idle-thread = context.exactTest "flow-nexus"

@@ -1,4 +1,4 @@
-# Flow next (unreleased, branch flow-0.40)
+# Flow 0.40.0 (unreleased, branch flow-0.40)
 
 Pins signal-flow 32.0.0 and meta-signal-flow 40.0.0 (both on their
 `flow-0.40` branches) and the Curriculum schema of Curriculum 4493d1e. Every

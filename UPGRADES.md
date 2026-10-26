@@ -1,6 +1,6 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
-Pins signal-flow 32.0.0 (a3e738) and meta-signal-flow 40.0.0 (34b164), both
+Pins signal-flow 32.0.0 (e5e9d5) and meta-signal-flow 40.0.0 (f0f214), both
 on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`
 branch, whose schema it carries. Every ordinary and meta peer repins, and
 Curriculum serves that schema.
@@ -55,8 +55,8 @@ Curriculum serves that schema.
   an older start reads `Started.None`), successor intents v1 to v2
   (`Ordered`, `Replace`), logical deliveries' current and event rows v1 to
   v2, send outcomes v2 to v3 and send calls v4 to v5
-  (`DeliveryState.Withdrawn`, `Refusal.TopicRefused`, the send tool's
-  `TopicRefused`).
+  (`DeliveryState.Withdrawn`, `RetryCause.WakeRefused`,
+  `Refusal.TopicRefused`, the send tool's `TopicRefused`).
 - `Configure.Nexus` names the Curriculum socket in `CurriculumNexusPath`,
   after `MessageNexusBinary`; the Nexus composes every launch's context
   through that socket, read when it opens, and no longer derives it from
@@ -65,7 +65,7 @@ Curriculum serves that schema.
   `$XDG_RUNTIME_DIR/curriculum/curriculum.sock` of the process that opens
   the store, the socket Curriculum serves by default.
 - `StartRejected.CompositionRefused` carries its reason
-  (`CompositionRefusal`, signal-flow a3e738): a profile field that is not
+  (`CompositionRefusal`): a profile field that is not
   well formed names itself (`InvalidRemembering` for a `Custom.[]`), a
   model no harness launches exactly is `InexactModel`, a wake whose seat
   has no configured model `Unconfigured`, an unreadable presentation prompt
@@ -93,9 +93,17 @@ Curriculum serves that schema.
   (`Refused.TopicRefused.«topic»`); a topic's capitals are never lowered. A
   new Primary needs its Secondary Awake (`NoSecondary`).
 - A simplified Claude flow always starts with an explicit empty tool set.
-- Curriculum is asked for the remembered flows' raw records; it must answer
-  a flow that logged none with nothing, not `record missing`, or every wake
-  and successor of such a flow is refused `ContextRefused.RecordMissing`.
+- Curriculum is asked for the remembered flows' raw records; a remembered
+  flow that logged none contributes nothing and refuses nothing, and a
+  module's dependencies read as `type:subject` or `type-subject`, one ID.
+  Deploy the Curriculum Flow pins with it.
+- A wake whose start is refused leaves the queue as it was and marks each
+  waiting request's delivery `Retryable.WakeRefused.<StartRejection>`, e.g.
+  `Retryable.WakeRefused.ContextRefused.RecordMissing`, which the sender's
+  `ObserveSends` shows; the next waking request retries the start.
+- `Retire` of the flow a Maintained metaflow is Awake as answers
+  `RetireRejected.Maintained` and changes nothing. Change that metaflow's
+  declaration to `OnDemand` (`Configure.Metaflows`) before retiring it.
 
 # Flow 0.39.1 (unreleased)
 

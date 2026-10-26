@@ -102,7 +102,9 @@ privileged `Retire`. A pane going away never retires a flow: an exit retains
 the record, and retirement comes from authority, never from an observation.
 None of the three is a deletion — each keeps the row, its origin and its
 history — and `Deliver`, `ResolveRecipient`, `Stop` and `Replace` treat all three
-as gone. `Retire` refuses `AlreadyGone` for a flow that has already ended.
+as gone. `Retire` refuses `AlreadyGone` for a flow that has already ended,
+and `Maintained`, changing nothing, for the flow a Maintained metaflow is
+Awake as; that metaflow's declaration is changed to `OnDemand` first.
 
 `Start` carries a typed `LaunchProfile` alone. A profile names the module
 identities of its system prompt and of its first USER message, the launched
@@ -124,7 +126,10 @@ Asleep and a queued request wakes a fresh flow for it, and a launch refused,
 or a flow that ends, before confirmation gives the metaflow back as it found
 it; a Start whose Address a live seat holds, or another unsettled launch
 names, answers `StartRejected.AddressAwake`. A metaflow is Awake or Asleep:
-a topic never dies. A Primary starts after its Secondary: a
+a topic never dies. A wake whose start is refused leaves its queue as it
+was, each waiting request's delivery `Retryable.WakeRefused` with the
+refusal, so its sender's `ObserveSends` shows why; the next waking request
+tries the start again. A Primary starts after its Secondary: a
 Start of a Primary whose Secondary metaflow (the same aspect and topic) is
 not recorded, Awake or Asleep, answers `StartRejected.NoSecondary` before
 anything is written. Profile producers should use the

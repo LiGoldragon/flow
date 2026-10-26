@@ -173,6 +173,57 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
     assert_eq!(attempt.launch_profile.address.topic, "primaryCommitting");
 }
 
+/// A Send whose recipient Address has a topic that is not camelCase is
+/// refused TopicRefused, carrying the topic as written, before anything is
+/// queued; an abrupt one fails with that refusal.
+#[test]
+fn a_send_to_a_bad_topic_is_topic_refused() {
+    use crate::sending::SendsRequests;
+    use crate::store::metaflow::SleepsMetaflows;
+    use signal_flow::{Address, Delivery, Message, Recipient, Refusal, Request, SendRequest};
+    let fixture = NexusFixture::new();
+    for topic in ["PrimaryCommitting", "primary-committing", "", "9lives"] {
+        let recipient = Address {
+            aspect: Aspect::Mind,
+            topic: topic.into(),
+            layer: Layer::Secondary,
+        };
+        let sent = fixture.nexus.send_request(
+            SendRequest {
+                recipient: Recipient::Address(recipient.clone()),
+                delivery: Delivery::Queue,
+                message: Message::Soft(Request::Order("Never queued.".into())),
+            },
+            None,
+        );
+        assert_eq!(
+            sent.response,
+            Response::Refused(Refusal::TopicRefused(topic.into())),
+            "{topic:?}"
+        );
+        assert!(sent.pending.is_none());
+        assert_eq!(fixture.nexus.store.metaflow(&recipient).unwrap(), None);
+        let abrupt = fixture.nexus.send_request(
+            SendRequest {
+                recipient: Recipient::Address(recipient),
+                delivery: Delivery::Wake,
+                message: Message::HardAbrupt(Request::Order("Never typed.".into())),
+            },
+            None,
+        );
+        assert_eq!(
+            abrupt.response,
+            Response::Failed(signal_flow::SendFailure {
+                logical_delivery_id_option: None,
+                send_failure_reason: signal_flow::SendFailureReason::Refused(
+                    Refusal::TopicRefused(topic.into())
+                ),
+            }),
+            "{topic:?}"
+        );
+    }
+}
+
 /// A Launch naming a topic that is not camelCase is refused TopicRefused,
 /// as Start and Configure refuse it.
 #[test]

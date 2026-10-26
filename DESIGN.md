@@ -478,7 +478,9 @@ Primary is refused `NoSecondary` only when that Secondary has no
 declaration, or its start was refused. A Primary that replaces a flow, a successor a Maintained
 metaflow is owed, a wake Flow starts itself, and a request already
 attempted continue a metaflow already admitted. Configure refuses an
-Address with such a topic `ConfigureRejected.TopicRefused`. A simplified
+Address with such a topic `ConfigureRejected.TopicRefused`, and a Send
+whose recipient Address names one is refused `Refused.TopicRefused`
+before anything is queued. A simplified
 flow starts with an explicit empty tool set whatever tool set it names. A metaflow is never ended:
 it is Awake or Asleep. No environment variable is laid over the stored values;
 `Configure` is their only way in. The adapter is outside the Signal wire boundary: the

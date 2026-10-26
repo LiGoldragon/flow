@@ -224,6 +224,14 @@ impl SendsRequests for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // The recipient's topic is input, checked before anything else:
+            // an uncapitalized camelCase identifier, kept as written.
+            if let Recipient::Address(address) = &send.recipient {
+                use crate::launching::NamesTopic;
+                if !address.topic.as_str().is_camel_case_topic() {
+                    return Response::Refused(Refusal::TopicRefused(address.topic.clone())).into();
+                }
+            }
             let Some(peer) = peer else {
                 return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }))
                     .into();

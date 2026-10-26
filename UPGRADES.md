@@ -27,8 +27,9 @@ schema.
 - A new Primary whose declared Secondary is not Awake has that Secondary
   started first.
 - A caller's Start, Replace or Launch with a topic that is not camelCase is
-  refused `TopicRefused`, as is a Configure naming one; a new Primary needs
-  its Secondary Awake (`NoSecondary`).
+  refused `TopicRefused`, as is a Configure naming one and a Send to one
+  (`Refused.TopicRefused`); a new Primary needs its Secondary Awake
+  (`NoSecondary`).
 - A simplified Claude flow always starts with an explicit empty tool set.
 - Curriculum is asked for the remembered flows' raw records; it must answer
   a flow that logged none with nothing, not `record missing`, or every wake

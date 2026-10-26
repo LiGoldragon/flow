@@ -1,22 +1,30 @@
 ;; flow-capsule: the real-world test of a Flow package in a capsule of its own.
 ;;
-;; Usage: flow-capsule <flow-package> <source-root> [--keep-going] [--log <path>]
+;; Usage: flow-capsule <flow-package> [--keep-going] [--log <path>]
 ;;
 ;; The capsule owns: the runtime directory $XDG_RUNTIME_DIR/flow-testing/,
 ;; which is XDG_RUNTIME_DIR for every process it runs and holds the Flow and
 ;; Curriculum sockets; the state directory ~/.local/state/flow-testing/,
 ;; which holds the Flow store and the Curriculum's context checkouts; the
-;; Herdr session flow-testing; its own Curriculum Nexus, built from the
-;; Curriculum revision Flow pins; and the seats it starts. Every process it
-;; runs gets a clean environment, so no inherited Herdr, Flow or Claude
-;; identity leaks in.
+;; source root $TMPDIR/flow-testing/source; the Herdr session flow-testing; its own Curriculum
+;; Nexus, built from the Curriculum revision Flow pins; the seats it starts
+;; and the Claude transcripts and session environments they leave. Every
+;; process it runs gets a clean environment, so no inherited Herdr, Flow or
+;; Claude identity leaks in.
 ;;
-;; The Curriculum is configured as the running one is: its context
+;; The source root is an empty directory of the capsule's: Flow's
+;; Configure.Nexus names it, its seats run in it, and its flows directory
+;; holds their flow-id claims. That flows directory is also the Curriculum's
+;; records root (Curriculum reads <root>/<flow>/vision and
+;; <root>/<flow>/notion), so it reads no flow but the capsule's. It lies
+;; in the temporary directory because Claude blocks a seat's startup on a
+;; trust question in a working directory not inside one it trusts, and the
+;; temporary directory is one the user's Claude trusts.
+;;
+;; The Curriculum is configured as the running one is otherwise: its context
 ;; repositories are the origins the user's curriculum-nexus.service names,
 ;; read from its unit environment (read only), each cloned fresh at main
-;; into the capsule; its records root is the source root's flows directory,
-;; which holds one directory per flow (Curriculum reads <root>/<flow>/vision
-;; and <root>/<flow>/notion).
+;; into the capsule.
 (ns flow-capsule
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
@@ -36,6 +44,16 @@
 (def herdr-session-dir (str home "/.config/herdr/sessions/" session))
 (def curriculum-socket (str capsule-runtime "/curriculum/curriculum.sock"))
 (def curriculum-contexts (str state-root "/curriculum-context"))
+(def source-parent (str (fs/path (System/getProperty "java.io.tmpdir") "flow-testing")))
+(def source-root (str source-parent "/source"))
+(def capsule-flows (str source-root "/flows"))
+;; Flow's default source root's flows directory, where the running Flow keeps
+;; its flows: the verdict checks that none of the capsule's flows is there.
+(def default-flows (str home "/primary/flows"))
+(def claude-root (str home "/.claude"))
+;; Claude names a project's transcript directory by its working directory,
+;; every character but a letter or digit written as a dash.
+(def capsule-transcripts (str claude-root "/projects/" (str/replace source-root #"[^A-Za-z0-9]" "-")))
 (def curriculum-unit "curriculum-nexus.service")
 (def libexec (str (fs/parent (fs/canonicalize (System/getProperty "babashka.file")))))
 (def curriculum-package (str (fs/canonicalize (fs/file libexec "curriculum"))))
@@ -124,7 +142,6 @@
 ;; ---------------------------------------------------------------- processes
 
 (def package (atom nil))
-(def source-root (atom nil))
 (def driver-pane (atom nil))
 
 (defn clean-env
@@ -458,26 +475,69 @@
 ;; ---------------------------------------------------------------- capsule life
 
 (def nexus (atom nil))
+(def natives-seen (atom #{}))
 (def herdr-server (atom nil))
-(def markers-before (atom #{}))
 
-(defn flow-markers []
-  (set (map str (fs/glob (str @source-root "/flows") ".*.flow-id" {:hidden true}))))
+(defn capsule-natives
+  "The native sessions of the capsule's seats: each transcript in the capsule
+  project's directory, and each session a reply named."
+  []
+  (into (set (map #(str (fs/strip-ext (fs/file-name %)))
+                  (when (fs/exists? capsule-transcripts) (fs/glob capsule-transcripts "*.jsonl"))))
+        (mapcat #(re-seq #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" (str (:reply %))) @results)))
+
+(defn traces
+  "Every path that carries one of the capsule's flows: an entry of the default
+  flows directory named by a capsule flow, the capsule's flows directory, and
+  each Claude entry, two levels under ~/.claude, named by a capsule session."
+  [natives]
+  (let [flows @seen-flows]
+    (vec (concat
+          (for [entry (when (fs/exists? default-flows) (fs/list-dir default-flows))
+                :let [n (str (fs/file-name entry))]
+                :when (some #(str/includes? n %) flows)]
+            (str entry))
+          (when (fs/exists? capsule-flows) [capsule-flows])
+          (when (fs/exists? capsule-transcripts) [capsule-transcripts])
+          (for [entry (concat (fs/list-dir claude-root)
+                              (mapcat #(when (fs/directory? %) (fs/list-dir %)) (fs/list-dir claude-root)))
+                :let [n (str (fs/file-name entry))]
+                :when (some #(str/includes? n %) natives)]
+            (str entry))))))
+
+(defn history-lines
+  "The lines of Claude's shared prompt history that name a capsule session;
+  the file is shared with every running Claude session and is not written."
+  [natives]
+  (let [file (str claude-root "/history.jsonl")]
+    (if (and (seq natives) (fs/exists? file))
+      (count (filter (fn [line] (some #(str/includes? line %) natives)) (str/split-lines (slurp file))))
+      0)))
+
+(defn project-entry?
+  "Whether Claude's shared configuration holds an entry for the capsule's
+  source root; the file is shared with every running Claude and is not written."
+  []
+  (let [file (str home "/.claude.json")]
+    (boolean (and (fs/exists? file)
+                  (contains? (get (try (json/parse-string (slurp file)) (catch Exception _ {})) "projects" {})
+                             source-root)))))
 
 (defn refuse [why] (binding [*out* *err*] (println "flow-capsule:" why)) (System/exit 2))
 
 (defn start-capsule! [log]
   (when (fs/exists? herdr-session-dir) (refuse (str "Herdr session " session " already exists; nothing started")))
   (when (fs/exists? capsule-runtime) (refuse (str capsule-runtime " already exists; nothing started")))
+  (when (fs/exists? source-parent) (refuse (str source-parent " already exists; nothing started")))
   (fs/delete-tree state-root)
   (fs/create-dirs state-root)
   (fs/create-dirs capsule-runtime)
-  (reset! markers-before (flow-markers))
+  (fs/create-dirs capsule-flows)
   (reset! herdr-server (p/process ["herdr" "--session" session "server"]
                                   {:env (clean-env) :out :discard :err :discard :in ""}))
   (when-not (watch 15 #(get-in (herdr-json "workspace" "list") [:result :workspaces]))
     (throw (ex-info "Herdr session did not answer" {})))
-  (let [created (herdr-json "workspace" "create" "--cwd" @source-root "--label" "capsule-driver" "--no-focus")]
+  (let [created (herdr-json "workspace" "create" "--cwd" source-root "--label" "capsule-driver" "--no-focus")]
     (reset! driver-pane (get-in created [:result :root_pane :pane_id]))))
 
 ;; ---------------------------------------------------------------- curriculum
@@ -507,7 +567,7 @@
         no-refresh (str (fs/which "true"))
         env (into (clean-env {"CURRICULUM_CONTEXT_LAYOUT" layout
                               "CURRICULUM_CONTEXT_REFRESH_PROGRAM" no-refresh
-                              "CURRICULUM_RECORDS_DIR" (str @source-root "/flows")})
+                              "CURRICULUM_RECORDS_DIR" capsule-flows})
                   (for [[dir-key _ name] context-roots] [dir-key (str curriculum-contexts "/" name)]))]
     (fs/create-dirs curriculum-contexts)
     (doseq [[_ url-key name] context-roots]
@@ -527,7 +587,7 @@
     (fs/create-dirs (fs/parent curriculum-socket))
     (fs/set-posix-file-permissions (fs/parent curriculum-socket) "rwx------")
     (reset! curriculum (p/process [(str curriculum-package "/bin/curriculum-nexus")]
-                                  {:env env :dir @source-root :out :append :out-file (fs/file log)
+                                  {:env env :dir source-root :out :append :out-file (fs/file log)
                                    :err :append :err-file (fs/file log) :in ""}))
     (when-not (watch 30 #(or (fs/exists? curriculum-socket) (not (p/alive? @curriculum))))
       (throw (ex-info "the Curriculum Nexus opened no socket" {})))
@@ -535,7 +595,7 @@
       (throw (ex-info "the Curriculum Nexus exited" {:log (str/trim (slurp log))})))
     (let [probe (reply-text (run {:env env} (str curriculum-package "/bin/curriculum") "ResolveSkills.[ spirit:core intent:models ]"))]
       (println (str "curriculum | " curriculum-package " | layout " layout ", refresh " no-refresh
-                    ", records " @source-root "/flows | socket " curriculum-socket " | ResolveSkills -> " probe)))))
+                    ", records " capsule-flows " | socket " curriculum-socket " | ResolveSkills -> " probe)))))
 
 (defn start-text []
   (str "{ «" ordinary-socket "» «" meta-socket "» «" store-path "» None }"))
@@ -576,7 +636,7 @@
   (let [file (fs/file libexec "configure.datom")]
     (doseq [line (str/split-lines (slurp file))
             :when (and (not (str/blank? line)) (not (str/starts-with? line ";")))]
-      (let [datom (-> line (str/replace "@SOURCE_ROOT@" @source-root) (str/replace "@CAPSULE_RUNTIME@" capsule-runtime)
+      (let [datom (-> line (str/replace "@SOURCE_ROOT@" source-root) (str/replace "@CAPSULE_RUNTIME@" capsule-runtime)
                       (str/replace "@CURRICULUM_SOCKET@" curriculum-socket))
             [reply exit] (configure-one! datom log)
             family (second (re-find #"^Configure\.([A-Za-z]+)" datom))
@@ -638,36 +698,41 @@
       (when (= ::running (deref h 10000 ::running)) (p/destroy-tree h))
       (swap! steps conj (str "Herdr session " session " stopped")))
     (run {} "herdr" "session" "delete" session)
-    (let [new-markers (remove @markers-before (flow-markers))
-          ours (filter (fn [m] (some #(str/includes? m (str "." % ".flow-id")) @seen-flows)) new-markers)]
-      (doseq [m ours] (fs/delete m))
-      (swap! steps conj (str "flow-id claims removed " (count ours) " of " (count new-markers) " new")))
+    (let [natives (reset! natives-seen (capsule-natives))
+          found (traces natives)]
+      (doseq [t found] (fs/delete-tree t))
+      (swap! steps conj (str "capsule traces removed " (count found) " for " (count @seen-flows) " flows and "
+                             (count natives) " Claude sessions")))
     (fs/delete-tree state-root)
+    (fs/delete-tree source-parent)
     (fs/delete-tree capsule-runtime)
     (doseq [s @steps] (println (str "  " s)))
     (let [sessions (:out (run {} "herdr" "session" "list"))
           remaining {:herdr-session (str/includes? sessions session)
                      :processes (vec (or (watch 20 #(let [left (capsule-processes)] (when (empty? left) []))) (capsule-processes)))
                      :store (fs/exists? state-root)
+                     :source-root (fs/exists? source-parent)
                      :sockets (fs/exists? capsule-runtime)
                      :curriculum-process (boolean (some-> @curriculum p/alive?))
                      :curriculum-store (fs/exists? curriculum-contexts)
                      :curriculum-socket (fs/exists? curriculum-socket)
-                     :claims (vec (filter (fn [m] (some #(str/includes? m (str "." % ".flow-id")) @seen-flows)) (flow-markers)))}
+                     :traces (traces @natives-seen)
+                     :history-lines (history-lines @natives-seen)
+                     :claude-project-entry (project-entry?)}
           clean (and (not (:herdr-session remaining)) (empty? (:processes remaining)) (not (:store remaining))
-                     (not (:sockets remaining)) (empty? (:claims remaining))
+                     (not (:sockets remaining)) (not (:source-root remaining)) (empty? (:traces remaining))
                      (not (:curriculum-process remaining)) (not (:curriculum-store remaining))
                      (not (:curriculum-socket remaining)))]
       (print-line {:name "13 teardown" :reply (pr-str remaining) :pass clean
                    :ms (- (System/currentTimeMillis) started)
-                   :watched "Herdr session list; /proc cmdline and environ, waiting up to 20 s for capsule processes to end; store, sockets, flow-id claims; the Curriculum Nexus process, its context checkouts and socket"})
+                   :watched (str "Herdr session list; /proc cmdline and environ, waiting up to 20 s for capsule processes to end; store, source root, sockets; the Curriculum Nexus process, its context checkouts and socket; traces of the capsule's flows in " default-flows " and " claude-root "; history.jsonl lines naming a capsule session and ~/.claude.json's entry for the source root are reported and left")})
       clean)))
 
 (defn -main [& args]
-  (let [[pkg root & options] args]
-    (when-not (and pkg root) (refuse "usage: flow-capsule <flow-package> <source-root> [--keep-going] [--log <path>]"))
+  (let [[pkg & options] args]
+    (when-not (and pkg (not (str/starts-with? pkg "--")))
+      (refuse "usage: flow-capsule <flow-package> [--keep-going] [--log <path>]"))
     (reset! package (str (fs/canonicalize pkg)))
-    (reset! source-root (str (fs/canonicalize root)))
     (reset! keep-going (boolean (some #{"--keep-going"} options)))
     (let [log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (System/currentTimeMillis)

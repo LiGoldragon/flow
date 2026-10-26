@@ -1,6 +1,6 @@
 ; The capsule's configuration, one Configure datom per line, applied in order
 ; over the capsule's meta socket. @SOURCE_ROOT@ and @CAPSULE_RUNTIME@ are
-; filled by flow-capsule from its arguments and the runtime directory;
+; filled by flow-capsule with its own source root and runtime directory;
 ; @CURRICULUM_SOCKET@ is the socket of the capsule's own Curriculum Nexus.
 ; Codex endpoints name sockets no app-server serves and no models, so no
 ; Codex seat can start; Message names no running executable.

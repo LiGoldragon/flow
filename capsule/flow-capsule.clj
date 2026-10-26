@@ -17,12 +17,6 @@
 ;; into the capsule; its records root is the source root's flows directory,
 ;; which holds one directory per flow (Curriculum reads <root>/<flow>/vision
 ;; and <root>/<flow>/notion).
-;;
-;; The Curriculum Flow pins (4493d1e) admits a module's dependencies only as
-;; type:subject identities, and every context origin still names them
-;; type-subject. The capsule rewrites those header lines in its own clones,
-;; and commits the rewrite there, so the pinned Curriculum admits them; it
-;; prints how many files it rewrote. Nothing else in a clone changes.
 (ns flow-capsule
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
@@ -493,39 +487,6 @@
     (when-not (zero? exit) (throw (ex-info "the running Curriculum's unit environment is unreadable" {:err err})))
     (into {} (keep #(let [[k v] (str/split % #"=" 2)] (when v [k v])) (str/split (str/trim out) #"\s+")))))
 
-(def module-types #{"vision" "intent" "spirit" "knowledge" "inquiry" "compensation" "role" "raw"})
-
-(defn colon-identity
-  "A type-subject identity as type:subject; any other word as it was."
-  [word]
-  (let [[kind subject] (str/split word #"-" 2)]
-    (if (and subject (module-types kind)) (str kind ":" subject) word)))
-
-(defn colon-dependencies!
-  "Rewrites every module's dependencies header line in one clone to
-  type:subject identities, commits it in the clone, and answers how many
-  files changed."
-  [clone]
-  (let [changed (atom 0)]
-    (doseq [file (fs/glob clone "**.md")
-            :when (not (str/includes? (str file) "/.git/"))]
-      (let [text (slurp (str file))
-            rewritten (str/replace text #"(?m)^dependencies: \[([^\]\n]*)\]"
-                                   (fn [[_ inner]]
-                                     (str "dependencies: ["
-                                          (str/join ", " (map colon-identity (remove str/blank? (str/split inner #"[,\s]+"))))
-                                          "]")))]
-        (when (not= text rewritten)
-          (spit (str file) rewritten)
-          (swap! changed inc))))
-    (when (pos? @changed)
-      (let [git-env (clean-env {"GIT_CONFIG_GLOBAL" "/dev/null" "GIT_CONFIG_NOSYSTEM" "1"})
-            {:keys [exit err]} (run {:env git-env} "git" "-C" clone "-c" "user.name=flow-capsule"
-                                    "-c" "user.email=flow-capsule@localhost" "commit" "--quiet" "--all"
-                                    "-m" "flow-capsule: dependencies as type:subject")]
-        (when-not (zero? exit) (throw (ex-info (str "committing the rewrite in " clone " failed") {:err err})))))
-    @changed))
-
 (defn start-curriculum! [log]
   (let [stable (stable-curriculum-environment)
         layout (get stable "CURRICULUM_CONTEXT_LAYOUT")
@@ -545,10 +506,7 @@
                                     url (str curriculum-contexts "/" name))
             head (str/trim (:out (run {} "git" "-C" (str curriculum-contexts "/" name) "rev-parse" "HEAD")))]
         (when-not (zero? exit) (throw (ex-info (str "cloning " url " failed") {:err err})))
-        (let [rewritten (colon-dependencies! (str curriculum-contexts "/" name))
-              served (str/trim (:out (run {} "git" "-C" (str curriculum-contexts "/" name) "rev-parse" "HEAD")))]
-          (println (str "curriculum context " name " | " url " main " head " | " rewritten
-                        " files with dependencies rewritten to type:subject, served at " served)))))
+        (println (str "curriculum context " name " | " url " main " head))))
     (reset! curriculum-environment env)
     ;; The Nexus serves only in a runtime directory that exists, as its unit's
     ;; RuntimeDirectory=curriculum (mode 0700) makes it; it opens none itself.

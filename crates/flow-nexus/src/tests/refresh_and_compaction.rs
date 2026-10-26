@@ -320,7 +320,7 @@ fn an_idle_on_demand_seat_is_refreshed_only_past_its_threshold() {
 /// pane closed, and the owed successor is given in the write that confirms
 /// it.
 #[test]
-fn a_required_seat_refreshed_with_nothing_queued_starts_its_successor_first() {
+fn a_maintained_seat_refreshed_with_nothing_queued_starts_its_successor_first() {
     let fixture = NexusFixture::new();
     claude_seat(&fixture, 200_000);
     append_main_rows(&fixture, &[end_turn("last-turn")]);

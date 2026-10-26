@@ -1471,10 +1471,17 @@ impl RefreshesMetaflows for RunningNexus {
             return Response::RefreshRejected(RefreshRejection::NotAwake);
         };
         // A flow whose launch is not yet confirmed only holds its Address:
-        // the launch that holds it is a waking still running.
+        // the launch that holds it is the owed successor's, still pending
+        // or ambiguous, or a waking still running.
         match self.store.address_hold(&flow_id) {
             Ok(None) => {}
-            Ok(Some(_)) => return Response::RefreshRejected(RefreshRejection::Locked),
+            Ok(Some(_)) => {
+                return Response::RefreshRejected(match self.store.successor_intent(address) {
+                    Ok(Some(_)) => RefreshRejection::SuccessorUnconfirmed,
+                    Ok(None) => RefreshRejection::Locked,
+                    Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+                });
+            }
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
         }
         let node = match self.store.flow_node(&flow_id) {
@@ -1534,7 +1541,8 @@ impl RefreshesMetaflows for RunningNexus {
                     refreshed
                 }
                 // A refused successor answers the Replace's own rejection;
-                // one whose launch is not yet confirmed holds the metaflow.
+                // one whose launch is still pending or ambiguous when the
+                // confirmation wait ends is unconfirmed, and stays owed.
                 AtStop::Kept(KeptAtStop::RefreshLaunchRefused(response)) => {
                     Response::RefreshRejected(match *response {
                         Response::ReplaceRejected(rejection) => {
@@ -1544,7 +1552,7 @@ impl RefreshesMetaflows for RunningNexus {
                             signal_flow::ReplaceRejection::LaunchRefused(rejection),
                         ),
                         Response::LaunchPending(_) | Response::StartAmbiguous(_) => {
-                            RefreshRejection::Locked
+                            RefreshRejection::SuccessorUnconfirmed
                         }
                         _ => RefreshRejection::PersistenceRefused,
                     })

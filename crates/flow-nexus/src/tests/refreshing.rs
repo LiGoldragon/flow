@@ -478,11 +478,23 @@ fn refreshable_with_successor(
     continuity: Continuity,
     delivery: Delivery,
 ) -> (NexusFixture, signal_flow::LaunchProfile) {
+    refreshable_with_staged_successor(continuity, delivery, true)
+}
+
+/// As [`refreshable_with_successor`], the successor's receipt written only
+/// when `confirmed`: without it the successor's launch stays ambiguous.
+fn refreshable_with_staged_successor(
+    continuity: Continuity,
+    delivery: Delivery,
+    confirmed: bool,
+) -> (NexusFixture, signal_flow::LaunchProfile) {
     let fixture = NexusFixture::new();
     claude_seat(&fixture, 40_000);
     let mut successor = staged_refresh_successor(&fixture);
     successor.stage_to_ambiguity(&fixture.nexus);
-    successor.write_receipt();
+    if confirmed {
+        successor.write_receipt();
+    }
     declare_seat(
         &fixture,
         continuity,
@@ -555,6 +567,38 @@ fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
         );
         assert!(!fixture.nexus.waking.is_waking(&seat_address()));
     }
+}
+
+/// A refresh whose owed successor's launch is still ambiguous when the
+/// confirmation wait ends answers SuccessorUnconfirmed, never Locked: the
+/// ending flow stays Awake, live and unreaped, the successor stays owed,
+/// and the lock is released.
+#[test]
+fn a_refresh_whose_successor_stays_unconfirmed_answers_successor_unconfirmed() {
+    let (fixture, _) =
+        refreshable_with_staged_successor(Continuity::Maintained, Delivery::Queue, false);
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Refresh(seat_address())),
+        Response::RefreshRejected(RefreshRejection::SuccessorUnconfirmed)
+    );
+    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
+    assert!(
+        !fs::read_to_string(fixture.directory.path().join("herdr-calls.log"))
+            .unwrap_or_default()
+            .contains("pane close w1:p3"),
+        "the ending flow's pane stays open"
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .successor_intent(&seat_address())
+            .unwrap()
+            .is_some(),
+        "the successor stays owed"
+    );
+    assert!(!fixture.nexus.waking.is_waking(&seat_address()));
 }
 
 /// A HardAbrupt Send that asks for a wake, arriving while a refresh, a

@@ -3327,9 +3327,9 @@ fn a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
 }
 
 /// A layer Model declared as a Claude alias is not an exact native model: a
-/// fresh wake from it is refused before any pane is opened, so no native
-/// session receives the queued work, and the work stays queued with the
-/// metaflow Asleep. Declared as the full name, the same wake starts and
+/// fresh wake from it is refused `InexactModel` before any pane is opened,
+/// so no native session receives the queued work, and the work stays queued
+/// with the metaflow Asleep. Declared as the full name, the same wake starts and
 /// takes the work.
 #[test]
 fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
@@ -3348,7 +3348,11 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
 
     assert_eq!(
         fixture.nexus.perform(Operation::Wake(at.clone())),
-        Outcome::Failed(crate::generated::operation::Failed_Data::Unstarted)
+        Outcome::Failed(
+            crate::generated::operation::Failed_Data::CompositionRefused(
+                signal_flow::CompositionRefusal::InexactModel
+            )
+        )
     );
     let asleep = stored(&fixture, Layer::Secondary);
     assert_eq!(asleep.state, State::Asleep);
@@ -3367,6 +3371,109 @@ fn a_fresh_wake_from_a_claude_alias_opens_nothing_and_keeps_its_work() {
     let woken = stored(&fixture, Layer::Secondary);
     assert_eq!(woken.state, State::Awake(flow_id));
     assert_eq!(woken.queue.len(), 1);
+}
+
+/// A wake whose start is refused keeps every request queued, never lost,
+/// and marks each one's delivery `Retryable.WakeRefused` with the refusal,
+/// which the sender's observation shows; the next wake retries the start and
+/// the woken flow takes the same queue.
+#[test]
+fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
+    let mut fixture = NexusFixture::new();
+    ended_claude(&fixture);
+    fixture.claims_flow_ids();
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        State::Asleep,
+        vec!["abc123"],
+        vec![],
+    ));
+    configure_secondary_model(&fixture, "haiku");
+    let at = address(Layer::Secondary);
+    let sender = Address {
+        aspect: Aspect::Psyche,
+        topic: "core".into(),
+        layer: Layer::Secondary,
+    };
+    let accepted: Vec<_> = ["A", "B"]
+        .into_iter()
+        .map(|body| {
+            match fixture
+                .nexus
+                .store
+                .accept_logical_delivery(
+                    &at,
+                    SentBy::Sender(sender.clone()),
+                    Delivery::Queue,
+                    Message::Soft(Request::Order(body.into())),
+                    None,
+                )
+                .unwrap()
+            {
+                signal_flow::Response::SendAccepted(accepted) => accepted.logical_delivery_id,
+                other => panic!("the send is accepted: {other:?}"),
+            }
+        })
+        .collect();
+    let world = fixture.fresh_world("unused");
+
+    assert_eq!(
+        fixture.nexus.perform(Operation::Wake(at.clone())),
+        Outcome::Failed(
+            crate::generated::operation::Failed_Data::CompositionRefused(
+                signal_flow::CompositionRefusal::InexactModel
+            )
+        )
+    );
+    let asleep = stored(&fixture, Layer::Secondary);
+    assert_eq!(asleep.state, State::Asleep);
+    assert_eq!(
+        asleep
+            .queue
+            .iter()
+            .map(|entry| entry.logical_delivery_id.clone())
+            .collect::<Vec<_>>(),
+        accepted,
+        "every request stays queued, in order"
+    );
+    let refused = signal_flow::DeliveryState::Retryable(signal_flow::RetryCause::WakeRefused(
+        signal_flow::StartRejection::CompositionRefused(
+            signal_flow::CompositionRefusal::InexactModel,
+        ),
+    ));
+    let observed = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(&sender, None)
+        .unwrap();
+    assert_eq!(
+        observed
+            .delivery_snapshot_vector
+            .iter()
+            .map(|snapshot| (
+                snapshot.logical_delivery_id.clone(),
+                snapshot.delivery_state.clone()
+            ))
+            .collect::<Vec<_>>(),
+        accepted
+            .iter()
+            .map(|id| (id.clone(), refused.clone()))
+            .collect::<Vec<_>>(),
+        "the sender sees why each request waits"
+    );
+    let calls = fs::read_to_string(world.state.join("calls")).unwrap_or_default();
+    assert!(!calls.contains("--session-id"), "{calls}");
+
+    configure_secondary_model(&fixture, "claude-fixture");
+    let Outcome::Woken(flow_id) = fixture.nexus.perform(Operation::Wake(at.clone())) else {
+        panic!(
+            "the retried wake starts; Herdr calls: {}",
+            fs::read_to_string(world.state.join("calls")).unwrap_or_default()
+        );
+    };
+    let woken = stored(&fixture, Layer::Secondary);
+    assert_eq!(woken.state, State::Awake(flow_id));
+    assert_eq!(woken.queue.len(), 2, "the woken flow takes the same queue");
 }
 
 /// A fresh wake takes the model configured for its seat's layer and

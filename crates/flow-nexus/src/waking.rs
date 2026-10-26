@@ -433,6 +433,9 @@ pub enum WakeRefusal {
     Unplaceable,
     /// A fresh launch did not start.
     FreshNotStarted(Failed_Data),
+    /// The fresh launch was refused for this reason. The queue is kept,
+    /// each request waiting in it marked `Retryable.WakeRefused` with it.
+    StartRejected(signal_flow::StartRejection),
     /// The started flow was not recorded Awake.
     AwakeNotRecorded,
 }
@@ -451,6 +454,25 @@ impl AnswersWakeRefusal for WakeRefusal {
             Self::NothingQueued => Failed_Data::NothingQueued,
             Self::SessionLive => Failed_Data::ConflictingBinding,
             Self::FreshNotStarted(failure) => failure.clone(),
+            Self::StartRejected(rejection) => match rejection {
+                signal_flow::StartRejection::CompositionRefused(refusal) => {
+                    Failed_Data::CompositionRefused(refusal.clone())
+                }
+                signal_flow::StartRejection::ContextRefused(refusal) => {
+                    Failed_Data::ContextRefused(refusal.clone())
+                }
+                signal_flow::StartRejection::LeaveOutRefused(refusal) => {
+                    Failed_Data::LeaveOutRefused(refusal.clone())
+                }
+                signal_flow::StartRejection::HarnessSpawnRefused(refusal) => {
+                    Failed_Data::SpawnRefused(refusal.clone())
+                }
+                signal_flow::StartRejection::NativeLaunchRefused(refusal) => {
+                    Failed_Data::LaunchRefused(refusal.clone())
+                }
+                signal_flow::StartRejection::AddressAwake => Failed_Data::AddressAwake,
+                _ => Failed_Data::Unstarted,
+            },
             Self::HerdrUnreadable | Self::Unplaceable => Failed_Data::HerdrRefused,
         }
     }
@@ -610,15 +632,23 @@ impl StartsSecondaryFirst for RunningNexus {
     }
 }
 
+/// Why a flow the Nexus starts itself did not start: its start was refused
+/// for a reason, or it failed before or after the start was asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FreshRefusal {
+    Rejected(signal_flow::StartRejection),
+    Failed(Failed_Data),
+}
+
 /// A flow the Nexus starts itself, as a wake starts one: no calling flow is
 /// its origin. The start runs under the dispatch gate, which is released
 /// while the launch settles.
 pub(crate) trait StartsUnbound {
-    fn start_unbound(&self, profile: LaunchProfile) -> Result<FlowId, Failed_Data>;
+    fn start_unbound(&self, profile: LaunchProfile) -> Result<FlowId, FreshRefusal>;
 }
 
 impl StartsUnbound for RunningNexus {
-    fn start_unbound(&self, profile: LaunchProfile) -> Result<FlowId, Failed_Data> {
+    fn start_unbound(&self, profile: LaunchProfile) -> Result<FlowId, FreshRefusal> {
         let launch_request_id = profile.launch_request_id.clone();
         let response = {
             let _turn = self
@@ -639,7 +669,8 @@ impl StartsUnbound for RunningNexus {
         // Nexus's own promoter, which needs the gate to do it.
         match response {
             Response::Started(launched) => Ok(launched.flow_id),
-            _ => Err(Failed_Data::Unstarted),
+            Response::StartRejected(rejection) => Err(FreshRefusal::Rejected(rejection)),
+            _ => Err(FreshRefusal::Failed(Failed_Data::Unstarted)),
         }
     }
 }
@@ -653,7 +684,7 @@ trait WakesInParts {
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
-    ) -> Result<FlowId, Failed_Data>;
+    ) -> Result<FlowId, FreshRefusal>;
     /// Types text into a live flow's pane under its lease, as Flow's own
     /// write: no Priority head, since it is not a Message. A refusal is
     /// logged by its reason.
@@ -2011,9 +2042,35 @@ impl WakesInParts for RunningNexus {
         let WakePlan::Fresh(fresh) = plan else {
             return Err(WakeRefusal::Unplaceable);
         };
-        let flow_id = self
-            .start_fresh(&metaflow, fresh, "")
-            .map_err(WakeRefusal::FreshNotStarted)?;
+        let flow_id = match self.start_fresh(&metaflow, fresh, "") {
+            Ok(flow_id) => flow_id,
+            Err(FreshRefusal::Failed(failure)) => {
+                return Err(WakeRefusal::FreshNotStarted(failure));
+            }
+            Err(FreshRefusal::Rejected(rejection)) => {
+                // Nothing was taken: every request stays queued, and its
+                // sender sees why it waits. The next waking request retries.
+                use crate::store::logical_delivery::RecordsLogicalDeliveries;
+                let _turn = self
+                    .dispatch_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let queue = match self.store.metaflow(address) {
+                    Ok(Some(current)) => current.queue,
+                    _ => metaflow.queue.clone(),
+                };
+                if let Err(error) = self.store.mark_queue_retryable(
+                    &queue,
+                    signal_flow::RetryCause::WakeRefused(rejection.clone()),
+                ) {
+                    eprintln!(
+                        "flow-nexus: the queue of {:?} {} {:?} is not marked WakeRefused: {error}",
+                        address.aspect, address.topic, address.layer
+                    );
+                }
+                return Err(WakeRefusal::StartRejected(rejection));
+            }
+        };
         let _turn = self
             .dispatch_gate
             .lock()
@@ -2041,17 +2098,19 @@ impl WakesInParts for RunningNexus {
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
-    ) -> Result<FlowId, Failed_Data> {
+    ) -> Result<FlowId, FreshRefusal> {
         let address = &metaflow.address;
         // The seat's model is the one configured for its layer and aspect.
         let model = match self.store.configured_model(address) {
             Ok(Some(model)) => model,
             Ok(None) => {
-                return Err(Failed_Data::CompositionRefused(
-                    signal_flow::CompositionRefusal::Unconfigured,
+                return Err(FreshRefusal::Rejected(
+                    signal_flow::StartRejection::CompositionRefused(
+                        signal_flow::CompositionRefusal::Unconfigured,
+                    ),
                 ));
             }
-            Err(_) => return Err(Failed_Data::StoreRefused),
+            Err(_) => return Err(FreshRefusal::Failed(Failed_Data::StoreRefused)),
         };
         let launch_request_id = format!(
             "wake-{}-{}",

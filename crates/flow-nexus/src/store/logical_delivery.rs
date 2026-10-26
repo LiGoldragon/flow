@@ -340,6 +340,14 @@ pub(crate) trait RecordsLogicalDeliveries {
         &self,
         id: &LogicalDeliveryId,
     ) -> Result<Option<DeliverySnapshot>, StoreError>;
+    /// Marks each request of `queue` that waits, Queued or Retryable,
+    /// `Retryable(cause)`, so its sender sees why it waits; the queue itself
+    /// is untouched. Answers how many changed.
+    fn mark_queue_retryable(
+        &self,
+        queue: &[QueueEntry],
+        cause: signal_flow::RetryCause,
+    ) -> Result<usize, StoreError>;
     fn read_logical_delivery_snapshots(
         &self,
         sender: &Address,
@@ -868,6 +876,33 @@ impl RecordsLogicalDeliveries for FlowStore {
         state: DeliveryState,
     ) -> Result<DeliverySnapshot, StoreError> {
         self.commit_logical_transition(id, state, self.engine.begin_atomic_commit())
+    }
+    fn mark_queue_retryable(
+        &self,
+        queue: &[QueueEntry],
+        cause: signal_flow::RetryCause,
+    ) -> Result<usize, StoreError> {
+        let mut changed = 0;
+        for entry in queue {
+            let Some(snapshot) = self.logical_delivery_snapshot(&entry.logical_delivery_id)? else {
+                continue;
+            };
+            let retryable = DeliveryState::Retryable(cause.clone());
+            if snapshot.delivery_state != retryable
+                && matches!(
+                    snapshot.delivery_state,
+                    DeliveryState::Queued | DeliveryState::Retryable(_)
+                )
+            {
+                self.commit_logical_transition(
+                    &entry.logical_delivery_id,
+                    retryable,
+                    self.engine.begin_atomic_commit(),
+                )?;
+                changed += 1;
+            }
+        }
+        Ok(changed)
     }
     fn commit_logical_transition(
         &self,

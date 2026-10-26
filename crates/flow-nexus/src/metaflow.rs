@@ -1,7 +1,6 @@
 //! The ordinary Message bridge uses the accepted socket's kernel identity.
 use crate::caller::{BindsCallerPane, CallerProcess, LocatesCallerPane, NamesRootThread};
 use crate::sending::{CompletesDirectSends, IdentifiesSender};
-use crate::store::logical_delivery::CorePresentationRoute;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
@@ -163,12 +162,6 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     let sender = request.lock.sender.clone();
                     let recipient = request.lock.address.clone();
                     self.rest_ended_awake(&request.lock.address);
-                    if !recipient.accepts_primary_request(
-                        &signal_flow::SentBy::Sender(sender.clone()),
-                        &request.message,
-                    ) {
-                        return Response::Refused(Refusal::OffRoute).into();
-                    }
                     let abrupt = !matches!(&request.message, signal_flow::Message::Soft(_));
                     if abrupt && request.delivery == signal_flow::Delivery::Queue {
                         return Response::Failed(signal_flow::SendFailure {

@@ -39,7 +39,7 @@ fn seat_address() -> Address {
 
 /// The Claude seat runs `CLAUDE_MODEL`, whose refresh threshold is
 /// `refresh` tokens.
-fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
+pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
     fixture.nexus.store.seed_role(Caller {
         flow_id: CLAUDE_SEAT.into(),
         aspect: Aspect::Mind,

@@ -652,6 +652,148 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
     drop(held);
 }
 
+/// A HardAbrupt or MiddleAbrupt Send that asks for a wake, to a seat whose
+/// queue is not empty, whose delivery is outstanding, or which is past its
+/// context threshold, is queued and answered accepted: a Send is never
+/// refused for the seat's state.
+#[test]
+fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
+    use crate::store::context::JudgesThreshold as _;
+    use crate::store::context::RecordsContextSize as _;
+    use crate::store::queue_delivery::{
+        AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
+    };
+    use signal_flow::{DeliveryState, HarnessKind};
+    #[derive(Clone, Copy, Debug)]
+    enum Busy {
+        QueueNotEmpty,
+        DeliveryOutstanding,
+        PastThreshold,
+    }
+    for busy in [
+        Busy::QueueNotEmpty,
+        Busy::DeliveryOutstanding,
+        Busy::PastThreshold,
+    ] {
+        for abrupt in [
+            Message::HardAbrupt as fn(Request) -> Message,
+            Message::MiddleAbrupt,
+        ] {
+            let fixture = NexusFixture::new();
+            bind_existing_caller(&fixture, "a001", "pane-1");
+            fixture.accept_pane_operations(
+                vec![
+                    codex_agent_in("pane-1", "terminal-pane-1"),
+                    claude_agent(&fixture),
+                ],
+                PromptFixture::Prompted("w1:p3"),
+            );
+            awake_seat(
+                &fixture,
+                match busy {
+                    Busy::PastThreshold => vec![],
+                    _ => vec![Request::Order("Already waiting.".into())],
+                },
+            );
+            declare(&fixture, seat_address());
+            match busy {
+                Busy::QueueNotEmpty => {}
+                Busy::DeliveryOutstanding => {
+                    let PrepareQueueDelivery::Prepared(_) = fixture
+                        .nexus
+                        .store
+                        .prepare_oldest_delivery(
+                            &seat_address(),
+                            CLAUDE_SEAT,
+                            "c1a0de00-0000-4000-8000-000000000001",
+                            HarnessKind::Claude,
+                            NativeHistoryAnchor::CodexTurns(None),
+                        )
+                        .expect("prepared")
+                    else {
+                        panic!("the oldest request is prepared")
+                    };
+                    assert!(
+                        fixture
+                            .nexus
+                            .store
+                            .outstanding_delivery(&seat_address())
+                            .unwrap()
+                            .is_some()
+                    );
+                }
+                Busy::PastThreshold => {
+                    super::refresh_and_compaction::seat_refreshing_at(&fixture, 200_000);
+                    fixture
+                        .nexus
+                        .store
+                        .record_context_size(CLAUDE_SEAT, 200_000)
+                        .unwrap();
+                    assert!(fixture.nexus.store.past_threshold(CLAUDE_SEAT).unwrap());
+                }
+            }
+            let queued_before = stored(&fixture).queue.len();
+            let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
+            let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
+            let sent = fixture.nexus.send_request(
+                SendRequest {
+                    recipient: Recipient::Address(seat_address()),
+                    delivery: Delivery::Wake,
+                    message: abrupt(Request::Order("Arrived while busy.".into())),
+                },
+                Some(&peer),
+            );
+            let Response::SendAccepted(acceptance) = &sent.response else {
+                panic!("{busy:?}: {:?}", sent.response)
+            };
+            assert_eq!(acceptance.delivery_state, DeliveryState::Queued, "{busy:?}");
+            assert_eq!(stored(&fixture).queue.len(), queued_before + 1, "{busy:?}");
+        }
+    }
+}
+
+/// A Send between Primaries and from a Secondary to its Primary is queued
+/// like any other: no route refuses it.
+#[test]
+fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
+    use crate::store::logical_delivery::RecordsLogicalDeliveries as _;
+    let fixture = NexusFixture::new();
+    let primary = |topic: &str| Address {
+        aspect: signal_flow::Aspect::Mind,
+        topic: topic.into(),
+        layer: Layer::Primary,
+    };
+    let target = primary("flow");
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: target.clone(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    for sender in [primary("other"), seat_address()] {
+        for request in [
+            Request::Order("An order.".into()),
+            Request::Result("A result.".into()),
+        ] {
+            let response = fixture
+                .nexus
+                .store
+                .accept_logical_delivery(
+                    &target,
+                    SentBy::Sender(sender.clone()),
+                    Delivery::Queue,
+                    Message::Soft(request),
+                    None,
+                )
+                .expect("accepted");
+            assert!(
+                matches!(response, Response::SendAccepted(_)),
+                "{sender:?}: {response:?}"
+            );
+        }
+    }
+}
+
 /// A Launch addressed to a metaflow Awake as a live flow, from any caller,
 /// names the Replace of that flow: no AddressAwake, and the flow it is
 /// Awake as is the predecessor.

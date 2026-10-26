@@ -149,9 +149,7 @@ pub struct StartupReading {
 pub struct LeanStart {
     pub harness_kind: signal_flow::HarnessKind,
     pub leave_outs: signal_flow::LeaveOuts,
-    pub flow_kind: signal_flow::FlowKind,
     pub tool_set: signal_flow::ToolSet,
-    pub artifact_tools_allowed: signal_flow::ArtifactToolsAllowed,
 }
 #[rustfmt::skip]
 pub trait Textual {

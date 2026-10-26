@@ -5,6 +5,23 @@ on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`
 branch, whose schema it carries. Every ordinary and meta peer repins, and
 Curriculum serves that schema.
 
+- A Send is never refused for the seat's state or its route. A Wake Send to
+  a seat with a queue, an outstanding delivery, a hold or a passed context
+  threshold is queued and answers `SendAccepted.{ ... Queued }`; the route
+  rule and `OffRoute` are gone, from the ordinary refusals and the Codex
+  send tool's. Pins signal-flow 33.0.0 (ddf27d) and meta-signal-flow
+  c58cef. The logical-delivery, send-outcome and send-call tables upgrade
+  one version, with frozen signal-flow 32 shapes: a stored `OffRoute` reads
+  as `Direct.«off route»` (the send tool's, as `Malformed`) and a stored
+  `RecipientBusy` as `NotSent.«recipient busy { <address> }»`.
+- Flow passes no tool restriction of its own: a seat declared `Regular
+  Default` launches with no `--tools` and no `--disallowedTools` flag; a
+  declared tool set is passed exactly as declared, a Simplified flow's
+  included; Artifact tools are no longer disallowed and
+  `CLAUDE_CODE_ARTIFACT` is no longer set. A Simplified flow is no longer
+  refused for a tool set other than `Explicit.[]` and no longer gets
+  `--strict-mcp-config` or `ENABLE_CLAUDEAI_MCP_SERVERS=false` of its own:
+  both come only from configured leave-outs.
 - `Restart.FlowId` is gone: `Refresh.{ Psyche core Primary }` ends the flow
   the metaflow is Awake as, without a turn, under the metaflow's lock; a
   Send arriving under the lock queues. It answers `Refreshed.{ Address

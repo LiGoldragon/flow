@@ -138,19 +138,21 @@ The old `flow start ...`, `flow restart ...`, and `flow resolve ...` argument
 forms are rejected.
 
 A metaflow declaration sets `FlowKind` (`Regular` or `Simplified`) and
-`ToolSet` (`Default` or `Explicit.[ ... ]`). A simplified flow requires an
-explicit empty tool set and its own system modules. Claude receives that
-empty set as `--tools ""`; its first queued request is submitted after
-the idle native seat is bound, without a synthetic startup turn. The Stop
+`ToolSet` (`Default` or `Explicit.[ ... ]`). A simplified flow carries its
+own system modules. Claude receives a declared tool set exactly as declared
+(the empty set as `--tools ""`) and the default as no tool flag at all,
+whatever the flow's kind. A simplified flow's first queued request is
+submitted after the idle native seat is bound, without a synthetic startup
+turn. The Stop
 hook's `last_assistant_message` becomes a `Result` to the sender of the
 consumed request. The response binding follows that request's native
 receipt, rather than whichever sender wrote most recently.
 
-Artifact, ArtifactComments and ArtifactData are disabled on Claude flows
-except the exact `Psyche book Tertiary` address.
+Flow passes no tool restriction of its own: every tool list is
+configuration, and a seat declared `Regular Default` launches with every
+tool and subagent.
 
-`Psyche core Primary` accepts requests only from `Psyche core Secondary`.
-For its simplified presentation, the witnessed final source is queued
+For the `Psyche core Primary` simplified presentation, the witnessed final source is queued
 unchanged as one Order to `Psyche book Tertiary`; Secondary receives only a
 notification. Completion and both queues commit atomically, so replayed
 Stop hooks create no second publication path.

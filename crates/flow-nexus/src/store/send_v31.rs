@@ -5,6 +5,7 @@
 //! families kept these shapes under their previous labels; each is read
 //! only by its family's upgrade, which carries every value unchanged.
 
+use super::send_v32::{UpgradesOffRoute, UpgradesRecipientBusy};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use signal_flow::{
     DeliverySnapshot, DeliveryState, NativeReceipt, Refusal, RetryCause, SendAcceptance,
@@ -93,7 +94,7 @@ impl From<RefusalV31> for Refusal {
             RefusalV31::Unidentified(process) => Self::Unidentified(process),
             RefusalV31::Store(reason) => Self::Store(reason),
             RefusalV31::NotSendServer(process) => Self::NotSendServer(process),
-            RefusalV31::OffRoute => Self::OffRoute,
+            RefusalV31::OffRoute => Self::from_off_route(),
             RefusalV31::Oversized(size) => Self::Oversized(size),
             RefusalV31::Direct(reason) => Self::Direct(reason),
         }
@@ -145,7 +146,7 @@ impl From<SendFailureV31> for SendFailure {
                 }
                 SendFailureReasonV31::QueueNotPermitted => SendFailureReason::QueueNotPermitted,
                 SendFailureReasonV31::RecipientBusy(address) => {
-                    SendFailureReason::RecipientBusy(address)
+                    SendFailureReason::from_recipient_busy(&address)
                 }
                 SendFailureReasonV31::Refused(refusal) => {
                     SendFailureReason::Refused(refusal.into())

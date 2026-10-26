@@ -25,7 +25,7 @@ use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::metaflow::IdentifiesPeerProcess;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
-use crate::store::logical_delivery::{CorePresentationRoute, RecordsLogicalDeliveries};
+use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{PreparesDeclaredMetaflow, SleepsMetaflows, TakesLaunchAddress};
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::queue_delivery::AccountsQueueDelivery;
@@ -262,12 +262,6 @@ impl SendsRequests for RunningNexus {
                     None => return Response::Refused(Refusal::NoneAbove).into(),
                 },
             };
-            if !recipient.accepts_primary_request(
-                &signal_flow::SentBy::Sender(sender.clone()),
-                &send.message,
-            ) {
-                return Response::Refused(Refusal::OffRoute).into();
-            }
             if abrupt && delivery == Delivery::Queue {
                 return Response::Failed(signal_flow::SendFailure {
                     logical_delivery_id_option: None,
@@ -862,7 +856,7 @@ impl CompletesDirectSends for RunningNexus {
         }
         match self.store.metaflow(address) {
             Ok(Some(metaflow)) if metaflow.queue.is_empty() => {}
-            Ok(_) => return Err(failed(SendFailureReason::RecipientBusy(address.clone()))),
+            Ok(_) => return Ok(None),
             Err(error) => {
                 return Err(failed(SendFailureReason::Refused(Refusal::Store(
                     error.to_string(),
@@ -875,7 +869,7 @@ impl CompletesDirectSends for RunningNexus {
                     || !matches!(self.store.past_threshold(flow_id), Ok(false))
             })
         {
-            return Err(failed(SendFailureReason::RecipientBusy(address.clone())));
+            return Ok(None);
         }
         Ok(Some(lease))
     }

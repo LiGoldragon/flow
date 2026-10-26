@@ -6,8 +6,8 @@
 //! (the lean-start catalogue of 2026-10-16): a tool left out is named in
 //! `--disallowedTools`, a block or feature is turned off by its flag,
 //! environment variable or setting. A leave-out the flow cannot go without
-//! (ToolSearch, Bash, and the user settings, which carry Herdr's SessionStart
-//! hook that Flow's binding relies on), a skill leave-out with Workflow kept,
+//! (the user settings, which carry Herdr's SessionStart hook that Flow's
+//! binding relies on), a skill leave-out with Workflow kept,
 //! and a leave-out of the other harness are refused before anything
 //! launches.
 
@@ -98,39 +98,16 @@ impl RendersLeanStart for LeanStart {
             };
             arguments.extend(switches.iter().map(|switch| (*switch).to_owned()));
         }
-        if self.harness_kind == HarnessKind::Claude
-            && self.flow_kind == signal_flow::FlowKind::Simplified
-            && !arguments
-                .iter()
-                .any(|argument| argument == "--strict-mcp-config")
-        {
-            arguments.push("--strict-mcp-config".into());
-        }
         let tools = self.disallowed_tools();
         if !tools.is_empty() {
             arguments.push("--disallowedTools".into());
             arguments.push(tools.join(","));
         }
-        // A simplified flow is made for judgment alone and has no regular
-        // tool: whatever tool set it names, it starts with an explicit
-        // empty one. Any other flow names its tools only when it declares
-        // them.
-        let tools = match (&self.flow_kind, &self.tool_set) {
-            (signal_flow::FlowKind::Simplified, _) => Some(Vec::new()),
-            (_, ToolSet::Explicit(tools)) => Some(
-                tools
-                    .iter()
-                    .filter(|tool| {
-                        self.artifact_tools_allowed
-                            || !matches!(
-                                tool.as_str(),
-                                "Artifact" | "ArtifactComments" | "ArtifactData"
-                            )
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            ),
-            (_, ToolSet::Default) => None,
+        // The tool set is configuration: a declared list is passed exactly
+        // as declared, and the default passes none.
+        let tools = match &self.tool_set {
+            ToolSet::Explicit(tools) => Some(tools.clone()),
+            ToolSet::Default => None,
         };
         if self.harness_kind == HarnessKind::Claude
             && let Some(tools) = tools
@@ -143,19 +120,6 @@ impl RendersLeanStart for LeanStart {
 
     fn environment(&self) -> Vec<String> {
         let mut environment = Vec::new();
-        if self.harness_kind == HarnessKind::Claude {
-            environment.push(format!(
-                "CLAUDE_CODE_ARTIFACT={}",
-                if self.artifact_tools_allowed {
-                    "1"
-                } else {
-                    "0"
-                }
-            ));
-            if self.flow_kind == signal_flow::FlowKind::Simplified {
-                environment.push("ENABLE_CLAUDEAI_MCP_SERVERS=false".into());
-            }
-        }
         for leave_out in &self.leave_outs {
             let variable = match leave_out {
                 LeaveOut::ClaudeAiConnectors => "ENABLE_CLAUDEAI_MCP_SERVERS=false",
@@ -197,13 +161,6 @@ impl RendersLeanStart for LeanStart {
                 }
             }
         }
-        if self.harness_kind == HarnessKind::Claude && !self.artifact_tools_allowed {
-            for tool in ["Artifact", "ArtifactComments", "ArtifactData"] {
-                if !tools.iter().any(|known| known == tool) {
-                    tools.push(tool.to_owned());
-                }
-            }
-        }
         tools
     }
 
@@ -225,9 +182,7 @@ mod tests {
         LeanStart {
             harness_kind,
             leave_outs: leave_outs.to_vec(),
-            flow_kind: signal_flow::FlowKind::Regular,
             tool_set: ToolSet::Default,
-            artifact_tools_allowed: false,
         }
     }
 
@@ -236,9 +191,7 @@ mod tests {
         let launch = LeanStart {
             harness_kind: HarnessKind::Claude,
             leave_outs: Vec::new(),
-            flow_kind: signal_flow::FlowKind::Simplified,
             tool_set: ToolSet::Explicit(Vec::new()),
-            artifact_tools_allowed: false,
         };
         assert!(launch.refusal().is_none());
         assert!(
@@ -248,68 +201,56 @@ mod tests {
                 .any(|args| args == ["--tools", ""])
         );
         assert!(
-            launch
+            !launch
                 .environment()
-                .contains(&"CLAUDE_CODE_ARTIFACT=0".into())
+                .iter()
+                .any(|variable| variable.starts_with("CLAUDE_CODE_ARTIFACT"))
         );
     }
 
-    /// A simplified flow has no regular tool: it starts with an explicit
-    /// empty tool set whatever tool set its declaration names, while a
-    /// regular flow with the default set names none.
+    /// The tool set is configuration: a declared list is passed exactly as
+    /// declared, and the default passes no tool flag at all; Flow adds
+    /// nothing to either.
     #[test]
-    fn a_simplified_flow_passes_an_explicit_empty_tool_set_whatever_it_names() {
-        for tool_set in [
-            ToolSet::Default,
-            ToolSet::Explicit(Vec::new()),
-            ToolSet::Explicit(vec!["Bash".into(), "Read".into()]),
+    fn a_declared_tool_set_is_passed_exactly_and_the_default_passes_none() {
+        for (tool_set, expected) in [
+            (ToolSet::Explicit(Vec::new()), Some("")),
+            (
+                ToolSet::Explicit(vec!["Bash".into(), "Read".into()]),
+                Some("Bash,Read"),
+            ),
+            (
+                ToolSet::Explicit(vec!["Artifact".into(), "Read".into()]),
+                Some("Artifact,Read"),
+            ),
+            (ToolSet::Default, None),
         ] {
             let launch = LeanStart {
                 harness_kind: HarnessKind::Claude,
                 leave_outs: Vec::new(),
-                flow_kind: signal_flow::FlowKind::Simplified,
                 tool_set: tool_set.clone(),
-                artifact_tools_allowed: false,
             };
             let arguments = launch.arguments();
             let named = arguments
                 .windows(2)
                 .filter(|pair| pair[0] == "--tools")
-                .map(|pair| pair[1].clone())
+                .map(|pair| pair[1].as_str())
                 .collect::<Vec<_>>();
-            assert_eq!(named, [String::new()], "{tool_set:?}: {arguments:?}");
-            assert!(arguments.contains(&"--strict-mcp-config".to_owned()));
+            assert_eq!(
+                named,
+                expected.into_iter().collect::<Vec<_>>(),
+                "{tool_set:?}: {arguments:?}"
+            );
+            assert!(
+                !arguments.contains(&"--disallowedTools".to_owned()),
+                "{arguments:?}"
+            );
+            assert!(
+                !arguments.contains(&"--strict-mcp-config".to_owned()),
+                "{arguments:?}"
+            );
+            assert!(launch.environment().is_empty(), "{tool_set:?}");
         }
-        let regular = LeanStart {
-            harness_kind: HarnessKind::Claude,
-            leave_outs: Vec::new(),
-            flow_kind: signal_flow::FlowKind::Regular,
-            tool_set: ToolSet::Default,
-            artifact_tools_allowed: false,
-        };
-        assert!(!regular.arguments().contains(&"--tools".to_owned()));
-    }
-
-    #[test]
-    fn book_tertiary_artifact_exception_keeps_artifacts() {
-        let launch = LeanStart {
-            harness_kind: HarnessKind::Claude,
-            leave_outs: Vec::new(),
-            flow_kind: signal_flow::FlowKind::Regular,
-            tool_set: ToolSet::Default,
-            artifact_tools_allowed: true,
-        };
-        assert!(!launch.disallowed_tools().iter().any(|tool| {
-            matches!(
-                tool.as_str(),
-                "Artifact" | "ArtifactComments" | "ArtifactData"
-            )
-        }));
-        assert!(
-            launch
-                .environment()
-                .contains(&"CLAUDE_CODE_ARTIFACT=1".into())
-        );
     }
 
     /// Leaving out the user settings drops Herdr's SessionStart hook, on
@@ -384,11 +325,6 @@ mod tests {
                 LeaveOut::AttributionReminder,
             ],
         );
-        assert!(
-            start
-                .environment()
-                .contains(&"CLAUDE_CODE_ARTIFACT=0".into())
-        );
         assert_eq!(start.refusal(), None);
         let arguments = start.arguments();
         assert!(arguments.contains(&"--disable-slash-commands".to_owned()));
@@ -402,7 +338,6 @@ mod tests {
         assert_eq!(
             start.environment(),
             [
-                "CLAUDE_CODE_ARTIFACT=0",
                 "CLAUDE_CODE_DISABLE_WORKFLOWS=1",
                 "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1",
                 "ENABLE_CLAUDEAI_MCP_SERVERS=false",
@@ -412,11 +347,10 @@ mod tests {
         assert!(start.attribution_off() && start.skill_listing_off());
         assert_eq!(
             lean(HarnessKind::Claude, &[]).arguments(),
-            [
-                "--disallowedTools",
-                "Artifact,ArtifactComments,ArtifactData"
-            ]
+            Vec::<String>::new(),
+            "a seat configured Regular Default passes no tool flag"
         );
+        assert!(lean(HarnessKind::Claude, &[]).environment().is_empty());
     }
 
     #[test]

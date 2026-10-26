@@ -70,7 +70,6 @@ Library
                 Held
                 Oversized.SendPayloadSize
                 Store
-                OffRoute
                 TopicRefused.Topic ]
   ; Accepted is a durable logical delivery, never a claim of delivery.
   ; LegacyUnknown preserves historical calls which predate logical IDs.

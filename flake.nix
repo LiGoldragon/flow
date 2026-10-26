@@ -518,8 +518,8 @@
             "tests::secondary::a_topic_that_is_not_camel_case_is_refused_at_start_and_configure";
           flow-primary-needs-awake-secondary = context.exactTest "flow-nexus"
             "tests::secondary::a_primary_start_is_refused_until_its_secondary_is_awake";
-          flow-simplified-empty-tools = context.exactTest "flow-nexus"
-            "lean::tests::a_simplified_flow_passes_an_explicit_empty_tool_set_whatever_it_names";
+          flow-declared-tool-set-passed-exactly = context.exactTest "flow-nexus"
+            "lean::tests::a_declared_tool_set_is_passed_exactly_and_the_default_passes_none";
           flow-remembered-records-composed = context.exactTest "flow-nexus"
             "composition::tests::remembered_flows_raw_records_follow_the_user_modules_in_the_first_message";
           flow-secondary-starts-first = context.exactTest "flow-nexus"

@@ -14,7 +14,7 @@
 //! The production composer is the Curriculum Nexus, asked over the socket
 //! the Nexus's configuration names (`CurriculumNexusPath`),
 //! with `ComposeStartup` from its schema, copied byte for byte into
-//! `ethos/curriculum.ethos` from Curriculum 4493d1ec (schema SHA-256
+//! `ethos/curriculum.ethos` from Curriculum 91acf293 (schema SHA-256
 //! 26011a94…48e28), whose selection names the flows a launch remembers
 //! and whose composition carries their raw records. Its answer names no
 //! metaflow, so the metaflow check is Flow's own: the request carries the

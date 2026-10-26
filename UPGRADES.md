@@ -1,8 +1,9 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
 Pins signal-flow 32.0.0 (a3e738) and meta-signal-flow 40.0.0 (34b164), both
-on their `flow-0.40` branches, and the Curriculum schema of Curriculum 4493d1e. Every
-ordinary and meta peer repins, and Curriculum serves that schema.
+on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`
+branch, whose schema it carries. Every ordinary and meta peer repins, and
+Curriculum serves that schema.
 
 - `Restart.FlowId` is gone: `Refresh.{ Psyche core Primary }` ends the flow
   the metaflow is Awake as, without a turn, under the metaflow's lock; a

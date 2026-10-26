@@ -9,7 +9,7 @@
     # The Curriculum whose schema Flow pins (crates/flow-nexus/ethos/
     # curriculum.ethos): the capsule runs its own Curriculum Nexus from it.
     curriculum = {
-      url = "github:LiGoldragon/Curriculum/4493d1ec8737daf770824b4ec1e72ad6004ced8f";
+      url = "github:LiGoldragon/Curriculum/91acf293a0d0cce1793b458d5377fe78f841e0c1";
       flake = false;
     };
   };

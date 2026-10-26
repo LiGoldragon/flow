@@ -104,6 +104,7 @@ pub trait LaysOutDefaults {
     const NEXT_CODEX_HOME: &str = ".codex-next";
     const NEXT_CODEX_MODELS: [&str; 3] = ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"];
     const CODEX_CONTROL_SOCKET: &str = "app-server-control/app-server-control.sock";
+    const CURRICULUM_SOCKET: &str = "curriculum/curriculum.sock";
 
     fn home(&self) -> &Path;
     fn runtime_directory(&self) -> &Path;
@@ -130,6 +131,11 @@ pub trait LaysOutDefaults {
 
     fn source_root(&self) -> PathBuf {
         self.home().join(Self::SOURCE_ROOT)
+    }
+
+    /// The socket Curriculum serves under the runtime directory.
+    fn curriculum_socket_path(&self) -> PathBuf {
+        self.runtime_directory().join(Self::CURRICULUM_SOCKET)
     }
 
     fn stable_codex(&self) -> DefaultCodexEndpoint {
@@ -194,6 +200,10 @@ mod tests {
         assert_eq!(
             defaults.store_path(),
             Path::new("/home/someone/.local/state/flow/flow.sema")
+        );
+        assert_eq!(
+            defaults.curriculum_socket_path(),
+            Path::new("/run/user/4242/curriculum/curriculum.sock")
         );
         assert_eq!(
             defaults.stable_codex().socket,

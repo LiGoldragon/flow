@@ -119,6 +119,7 @@ fn configuration(_start: &Start, home: &Path) -> meta_signal_flow::ConfigureNexu
         meta_aspects: vec![flow_ethos::Aspect::Psyche, flow_ethos::Aspect::Mind],
         message_nexus_path: "/run/message.sock".into(),
         message_nexus_binary: "/opt/message-nexus".into(),
+        curriculum_nexus_path: "/fixture/curriculum.sock".into(),
         lease: 60,
     }
 }

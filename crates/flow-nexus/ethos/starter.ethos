@@ -98,8 +98,7 @@ Library
   CallerProcessing.[ caller_process.[ Option<CallerProcess> ] ]
   ; The starter's capabilities.
   ComposesFlowContext.[ compose_flow_context.{ [ ContextRequesting ] [ Result<StartupComposition ContextRefusal> ] } ]
-  OpensCurriculumComposer.[ at:{ [ Textual ] [ Self ] }
-                            from_environment:[ Self ] ]
+  OpensCurriculumComposer.[ at:{ [ Textual ] [ Self ] } ]
   SelectsStartup.[ startup_selection.[ StartupSelection ] ]
   ExchangesCurriculumFrames.[ exchange.{ [ CurriculumQuerying ] [ Result<CurriculumOutcome String> ] } ]
   VerifiesContext.[ verified:{ [ ContextRequesting StartupComposing ] [ Result<Self ContextRefusal> ] } ]

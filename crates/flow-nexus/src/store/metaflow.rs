@@ -726,6 +726,7 @@ mod tests {
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: binary,
+                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 30,
                 }))
                 .expect("Nexus configuration");

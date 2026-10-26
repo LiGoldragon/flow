@@ -239,9 +239,6 @@ pub trait OpensCurriculumComposer {
     fn at<N: Textual>(input: N) -> Self
     where
         Self: Sized;
-    fn from_environment() -> Self
-    where
-        Self: Sized;
 }
 #[rustfmt::skip]
 pub trait SelectsStartup {

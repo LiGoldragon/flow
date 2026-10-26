@@ -573,6 +573,7 @@ mod tests {
             meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
             message_nexus_path: message_socket.into(),
             message_nexus_binary: binary.into(),
+            curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease: 60,
         })
     }

@@ -617,9 +617,10 @@ impl OpensRunningNexus for RunningNexus {
                 .with_source_root(&source_root)
                 .with_codex_endpoints(codex_endpoints)
                 .with_ordinary_socket(&ordinary_socket),
-            // A launch's context is composed by the Curriculum Nexus.
+            // A launch's context is composed by the Curriculum Nexus at the
+            // socket the configuration names, read as the Nexus opens.
             composer: LaunchComposer::with_context(context::ContextComposer::Curriculum(
-                CurriculumComposer::from_environment(),
+                CurriculumComposer::at(&snapshot.nexus.curriculum_nexus_path),
             )),
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),

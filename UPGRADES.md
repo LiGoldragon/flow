@@ -56,6 +56,13 @@ ordinary and meta peer repins, and Curriculum serves that schema.
   v2, send outcomes v2 to v3 and send calls v4 to v5
   (`DeliveryState.Withdrawn`, `Refusal.TopicRefused`, the send tool's
   `TopicRefused`).
+- `Configure.Nexus` names the Curriculum socket in `CurriculumNexusPath`,
+  after `MessageNexusBinary`; the Nexus composes every launch's context
+  through that socket, read when it opens, and no longer derives it from
+  its environment. The stored Nexus family upgrades v1 to v2: an archived
+  declaration keeps every value and names
+  `$XDG_RUNTIME_DIR/curriculum/curriculum.sock` of the process that opens
+  the store, the socket Curriculum serves by default.
 - Locks held by a sender whose flow ends are retracted with the end.
 - No pane outlives its flow: `Retire` and a recorded exit close the flow's
   pane where it is still there, as `Stop`, a refresh and a replacement's

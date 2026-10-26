@@ -32,6 +32,11 @@ fn a_launch_receives_the_socket_from_each_typed_start() {
                 .join("message-nexus")
                 .to_string_lossy()
                 .into_owned(),
+            curriculum_nexus_path: directory
+                .path()
+                .join("run/curriculum/curriculum.sock")
+                .to_string_lossy()
+                .into_owned(),
             lease: 60,
         }))
         .expect("whole typed Nexus configuration commits");
@@ -55,6 +60,15 @@ fn a_launch_receives_the_socket_from_each_typed_start() {
     assert_eq!(
         nexus.herdr.ordinary_socket,
         directory.path().join("run/flow-next/flow.sock")
+    );
+    // The context composer asks the Curriculum socket the configuration names.
+    let composer = format!("{:?}", nexus.composer);
+    assert!(
+        composer.contains(&format!(
+            "socket: {:?}",
+            directory.path().join("run/curriculum/curriculum.sock")
+        )),
+        "{composer}"
     );
     drop(nexus);
 

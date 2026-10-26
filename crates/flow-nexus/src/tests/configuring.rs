@@ -138,6 +138,7 @@ impl ConfiguredStore {
                 .expect("test executable")
                 .to_string_lossy()
                 .into_owned(),
+            curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease,
         }
     }

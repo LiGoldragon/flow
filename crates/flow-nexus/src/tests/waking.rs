@@ -1734,6 +1734,7 @@ pub(super) fn message_peer(fixture: &NexusFixture) -> (super::MarkedProcess, sig
                 meta_aspects: settings.meta_aspects,
                 message_nexus_path: settings.message_nexus_path,
                 message_nexus_binary: message_executable,
+                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 30,
             },
         ))
@@ -3051,6 +3052,7 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
                 meta_aspects: settings.meta_aspects,
                 message_nexus_path: settings.message_nexus_path,
                 message_nexus_binary: "/fixture/message-nexus".into(),
+                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 30,
             },
         ))
@@ -3514,6 +3516,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
+                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 30,
                 },
             ))
@@ -4425,6 +4428,7 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
                 meta_aspects: settings.meta_aspects,
                 message_nexus_path: settings.message_nexus_path,
                 message_nexus_binary: "/fixture/bin/message-nexus".into(),
+                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 30,
             },
         ))

@@ -11,7 +11,8 @@
 //! of its modules, each module's slice matching its rendered SHA-256. No
 //! path, file or inline context text is accepted anywhere on this route.
 //!
-//! The production composer is the Curriculum Nexus, asked over its socket
+//! The production composer is the Curriculum Nexus, asked over the socket
+//! the Nexus's configuration names (`CurriculumNexusPath`),
 //! with `ComposeStartup` from its schema, copied byte for byte into
 //! `ethos/curriculum.ethos` from Curriculum 4493d1ec (schema SHA-256
 //! 26011a94…48e28), whose selection names the flows a launch remembers
@@ -52,22 +53,12 @@ const ANSWER_FRAME_LIMIT: usize = 64 * 1024 * 1024;
 /// The opening line of a rendered context text.
 pub const CONTEXT_OPENING: &str = "These are your skills, given here; do not reload them.";
 
-/// A Curriculum composer at the socket a text names; from the environment,
-/// at `$XDG_RUNTIME_DIR/curriculum/curriculum.sock`, as Curriculum serves it.
+/// A Curriculum composer at the socket a text names: the Nexus's
+/// configured `CurriculumNexusPath`.
 impl OpensCurriculumComposer for CurriculumComposer {
     fn at<N: Textual>(input: N) -> Self {
         Self {
             socket: PathBuf::from(input.text()),
-        }
-    }
-
-    fn from_environment() -> Self {
-        Self {
-            socket: std::env::var_os("XDG_RUNTIME_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/run"))
-                .join("curriculum")
-                .join("curriculum.sock"),
         }
     }
 }

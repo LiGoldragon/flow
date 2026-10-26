@@ -213,6 +213,7 @@ mod tests {
             meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
             message_nexus_path: "/run/message.sock".into(),
             message_nexus_binary: "/opt/message-nexus".into(),
+            curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease: 60,
         };
         let query = Query::Configure(ConfigurationChange::Nexus(nexus.clone()));
@@ -398,6 +399,7 @@ mod tests {
                 meta_aspects: vec![Aspect::Psyche],
                 message_nexus_path: "/run/message.sock".into(),
                 message_nexus_binary: "/opt/message-nexus".into(),
+                curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 60,
             },
             models: vec![],

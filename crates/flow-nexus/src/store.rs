@@ -15,6 +15,7 @@ pub(crate) mod launch_cleanup;
 pub(crate) mod logical_delivery;
 pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
+pub(crate) mod nexus_configuration;
 pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
 pub(crate) mod repair;
@@ -34,6 +35,9 @@ use logical_delivery::{
 };
 use metaflow::{TakesLaunchAddress, WritesTakenAddress};
 use metaflow_declaration::UpgradesMetaflowDeclarations;
+use nexus_configuration::{
+    DescribesNexusConfigurationTable, StoredMetaNexusConfiguration, UpgradesNexusConfiguration,
+};
 use queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
 use queue_delivery::{DeclaresQueueDeliveryTables, QueueDeliveryTables};
 use send_outcome::{DeclaresSendOutcomeTables, SendOutcomeTables};
@@ -927,17 +931,6 @@ pub(crate) struct StoredMetaflowLock {
 impl EngineRecord for StoredMetaflowLock {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(FlowStore::address_record_key(&self.lock.address))
-    }
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct StoredMetaNexusConfiguration {
-    nexus: ConfigureNexus,
-}
-
-impl EngineRecord for StoredMetaNexusConfiguration {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new("nexus")
     }
 }
 
@@ -3027,6 +3020,8 @@ pub enum StoreError {
     LogicalDeliveryUpgrade(String),
     #[error("the model family could not be upgraded: {0}")]
     ModelUpgrade(String),
+    #[error("the Nexus configuration family could not be upgraded: {0}")]
+    NexusUpgrade(String),
     #[error("flow events upgrade failed: {0}")]
     EventUpgrade(String),
     #[error("successor intent family upgrade failed: {0}")]
@@ -3534,11 +3529,8 @@ trait RegistersMetaConfigurationTables: Sized {
 impl RegistersMetaConfigurationTables for MetaConfigurationTables {
     fn register(engine: &mut Engine) -> Result<Self, StoreError> {
         Ok(Self {
-            nexus: engine.register_table(TableDescriptor::new(
-                META_NEXUS_CONFIGURATION_TABLE_NAME,
-                FamilyName::new("flow-nexus-meta-nexus-configuration"),
-                SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
-            ))?,
+            nexus: engine
+                .upgraded_nexus_configuration(StoredMetaNexusConfiguration::descriptor())?,
             models: engine.upgraded_models(StoredMetaModelConfiguration::descriptor())?,
             thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
             leave_outs: engine
@@ -3666,11 +3658,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             FamilyName::new("flow-nexus-delivery-configuration"),
             SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
         );
-        let meta_nexus_descriptor = TableDescriptor::new(
-            META_NEXUS_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-meta-nexus-configuration"),
-            SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
-        );
+        let meta_nexus_descriptor = StoredMetaNexusConfiguration::descriptor();
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
@@ -3702,7 +3690,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
-            nexus: engine.register_table(meta_nexus_descriptor)?,
+            nexus: engine.upgraded_nexus_configuration(meta_nexus_descriptor)?,
             models: engine.upgraded_models(meta_models_descriptor)?,
             thresholds: engine.register_table(meta_thresholds_descriptor)?,
             leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
@@ -4210,11 +4198,7 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-delivery-configuration"),
             SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
         );
-        let meta_nexus_descriptor = TableDescriptor::<StoredMetaNexusConfiguration>::new(
-            META_NEXUS_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-meta-nexus-configuration"),
-            SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
-        );
+        let meta_nexus_descriptor = StoredMetaNexusConfiguration::descriptor();
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
@@ -7163,10 +7147,12 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-delivery-configuration",
                 "flow-nexus-delivery-configuration-v1",
             ),
-            "flow_nexus_meta_nexus_configuration" => (
-                "flow-nexus-meta-nexus-configuration",
-                "flow-nexus-meta-nexus-configuration-v1",
-            ),
+            "flow_nexus_meta_nexus_configuration" => {
+                return Some((
+                    nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
+                    StoredMetaNexusConfiguration::schema_hash(),
+                ));
+            }
             "flow_nexus_meta_model_configuration" => {
                 return Some((
                     "flow-nexus-meta-model-configuration",
@@ -7340,6 +7326,10 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_meta_model_configuration" => &[(
                 "flow-nexus-meta-model-configuration",
                 StoredMetaModelConfigurationV1::schema_hash(),
+            )],
+            "flow_nexus_meta_nexus_configuration" => &[(
+                nexus_configuration::META_NEXUS_CONFIGURATION_FAMILY,
+                <nexus_configuration::StoredMetaNexusConfigurationV1 as MemoryDefinition>::schema_hash(),
             )],
             "flow_nexus_logical_delivery_current" => &[(
                 "flow-nexus-logical-delivery-current",
@@ -9044,6 +9034,7 @@ mod tests {
                         meta_aspects: settings.meta_aspects,
                         message_nexus_path: settings.message_nexus_path,
                         message_nexus_binary: "/fixture/message-nexus".into(),
+                        curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                         lease: 60,
                     },
                 ))
@@ -9943,6 +9934,7 @@ mod tests {
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
+                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
                 },
             ))
@@ -10005,6 +9997,7 @@ mod tests {
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
+                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
                 },
             ))
@@ -10077,6 +10070,7 @@ mod tests {
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
+                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
                 },
             ))
@@ -10175,6 +10169,7 @@ mod tests {
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
+                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
                 },
             ))
@@ -12387,6 +12382,97 @@ mod tests {
         }
     }
 
+    /// A Nexus declared before it named the Curriculum socket opens naming
+    /// the socket Curriculum serves under the opening process's runtime
+    /// directory, every other value as it was; the Nexus then opens on it.
+    #[test]
+    fn a_v1_nexus_declaration_opens_naming_the_default_curriculum_socket() {
+        use super::nexus_configuration::{ConfigureNexusV1, StoredMetaNexusConfigurationV1};
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let database = redb::Database::open(fixture.path()).expect("store opens directly");
+        let write = database.begin_write().expect("catalog transaction starts");
+        {
+            let mut catalog = write
+                .open_table(super::SEMA_CATALOG_TABLE)
+                .expect("catalog opens");
+            catalog
+                .remove("flow_nexus_meta_nexus_configuration")
+                .expect("nexus family removes");
+        }
+        let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+            "flow_nexus_meta_nexus_configuration",
+        ));
+        write.commit().expect("catalog commits");
+        drop(database);
+        {
+            let mut engine = Engine::open(EngineOpen::new(
+                fixture.path(),
+                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+            ))
+            .expect("store opens");
+            let table = engine
+                .register_table(TableDescriptor::new(
+                    super::META_NEXUS_CONFIGURATION_TABLE_NAME,
+                    FamilyName::new("flow-nexus-meta-nexus-configuration"),
+                    SchemaHash::for_label("flow-nexus-meta-nexus-configuration-v1"),
+                ))
+                .expect("v1 nexus family registers");
+            let endpoint = |name: &str| meta_signal_flow::CodexEndpoint {
+                client_path: format!("/fixture/{name}-client"),
+                home: format!("/fixture/{name}"),
+                control_socket_path: format!("/fixture/{name}.sock"),
+                model_name_vector: vec![format!("gpt-{name}")],
+            };
+            engine
+                .assert(Assertion::new(
+                    table,
+                    StoredMetaNexusConfigurationV1 {
+                        nexus: ConfigureNexusV1 {
+                            source_root: "/fixture/source".into(),
+                            stable_codex: endpoint("stable"),
+                            next_codex: endpoint("next"),
+                            harness_profiles: vec![],
+                            meta_aspects: vec![Aspect::Psyche],
+                            message_nexus_path: "/fixture/message.sock".into(),
+                            message_nexus_binary: "/fixture/message-nexus".into(),
+                            lease: 45,
+                        },
+                    },
+                ))
+                .expect("v1 nexus row persists");
+        }
+        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
+        let nexus = configuration
+            .configuration_snapshot()
+            .expect("snapshot reads")
+            .expect("store configured")
+            .nexus;
+        drop(configuration);
+        assert_eq!(nexus.source_root, "/fixture/source");
+        assert_eq!(nexus.message_nexus_path, "/fixture/message.sock");
+        assert_eq!(nexus.message_nexus_binary, "/fixture/message-nexus");
+        assert_eq!(nexus.lease, 45);
+        assert_eq!(nexus.next_codex.model_name_vector, ["gpt-next"]);
+        assert!(
+            nexus
+                .curriculum_nexus_path
+                .ends_with("/curriculum/curriculum.sock"),
+            "{}",
+            nexus.curriculum_nexus_path
+        );
+        let store = fixture.configured_store();
+        assert_eq!(
+            store
+                .configuration_snapshot()
+                .expect("snapshot reads")
+                .expect("store configured")
+                .nexus,
+            nexus
+        );
+    }
+
     /// The configuration-only open, which the deployment runs before the
     /// Nexus, carries a v1 model family the same way.
     #[test]
@@ -12408,6 +12494,7 @@ mod tests {
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
+                    curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
                 },
             ))

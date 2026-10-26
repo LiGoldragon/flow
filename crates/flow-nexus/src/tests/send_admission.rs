@@ -70,7 +70,7 @@ fn direct_send_to_sleeping_or_unknown_recipient_fails_without_queueing() {
     fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
     let target = Address {
         aspect: Aspect::Mind,
-        topic: "direct-target".into(),
+        topic: "directTarget".into(),
         layer: Layer::Secondary,
     };
     fixture.nexus.store.seed_metaflow(Metaflow {

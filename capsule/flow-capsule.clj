@@ -276,6 +276,13 @@
     (try (note-flows!) (catch Exception _ nil))
     (:pass outcome)))
 
+(defn on-demand-secondary
+  "The capsule's Configure.Metaflows with the Secondary declared OnDemand."
+  []
+  (let [line (first (filter #(str/starts-with? % "Configure.Metaflows.")
+                            (str/split-lines (slurp (fs/file libexec "configure.datom")))))]
+    (str/replace-first line "Simplified Explicit.[] Maintained" "Simplified Explicit.[] OnDemand")))
+
 (defn launch [addr] (flow (str "Launch.{ " addr " Predecessors.0 «" brief "» }")))
 
 (defn awake-flow [addr] (let [m (current addr)] (when (= :awake (:state m)) (:flow m))))
@@ -429,16 +436,23 @@
          :pass (boolean (and (str/includes? reply "TopicRefused") (= before (pane-ids))))
          :watched "no pane opened"}))]
 
-   ["12 Retire"
+   ["12 Retire: refused while Maintained; retired once declared OnDemand"
     (fn []
       (let [flow-id (str (awake-flow secondary))
             pane (sender-pane)
+            refused (flow-meta (str "Retire." flow-id))
+            kept (and (contains? (pane-ids) pane) (= (str (awake-flow secondary)) flow-id))
+            declared (flow-meta (on-demand-secondary))
             reply (flow-meta (str "Retire." flow-id))
             gone (watch 10 #(not (contains? (pane-ids) pane)))
             m (watch 20 #(let [m (current secondary)] (when (not= (str (:flow m)) flow-id) m)))]
-        {:reply reply
-         :pass (boolean (and (str/starts-with? reply "FlowRetired.") gone))
-         :watched (str "pane " pane (if gone " closed" " still open") "; Secondary afterwards "
+        {:reply (str "Retire while Maintained: " refused " / Configure.Metaflows (Secondary OnDemand): "
+                     declared " / Retire: " reply)
+         :pass (boolean (and (= refused "RetireRejected.Maintained") kept
+                             (str/starts-with? declared "Configured.")
+                             (str/starts-with? reply "FlowRetired.") gone))
+         :watched (str "after the refused Retire, pane " pane (if kept " open and Secondary Awake as " " changed; Secondary ")
+                       flow-id "; after the second, pane " (if gone "closed" "still open") "; Secondary afterwards "
                        (if m (str (name (:state m)) " " (:flow m)) "unchanged after 20 s"))}))]])
 
 ;; ---------------------------------------------------------------- capsule life

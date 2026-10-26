@@ -1,10 +1,24 @@
-# Flow next (unreleased, branch 0595fb-reimplementation)
+# Flow next (unreleased, branch flow-0.40)
 
 Pins signal-flow 32.0.0 and meta-signal-flow 40.0.0 (both on their
-`0595fb-reimplementation` branches) and the Curriculum schema of Curriculum
-4493d1e. Every ordinary and meta peer repins, and Curriculum serves that
-schema.
+`flow-0.40` branches) and the Curriculum schema of Curriculum 4493d1e. Every
+ordinary and meta peer repins, and Curriculum serves that schema.
 
+- `Restart.FlowId` is gone: `Refresh.{ Psyche core Primary }` ends the flow
+  the metaflow is Awake as, without a turn, under the metaflow's lock; a
+  Send arriving under the lock queues. It answers `Refreshed.{ Address
+  FlowId }`, naming the flow that ended, or `RefreshRejected.[ NotAwake
+  Locked CloseRefused PersistenceRefused HerdrUnavailable
+  SuccessorRefused.ReplaceRejection Undeclared SuccessorUnconfirmed ]`. A
+  Maintained metaflow, or one whose queue holds a waking request, has its
+  successor started and confirmed before the ending flow is reaped, and the
+  queue goes to it; any other is left Asleep. A Launch addressed to a
+  metaflow Awake as a live flow is such a Refresh, its successor the
+  Launch's, and answers `Replaced`.
+- A Replace whose metaflow a refresh or a waking holds is refused
+  `ReplaceRejected.Locked`. A refresh's or a replace's successor is owed in
+  the store until it is confirmed, and a Nexus that starts with one owed
+  starts it.
 - A launch profile names its `Remembering` (`Predecessors.<depth>` or
   `Custom.[ FlowId … ]`) in place of its remembered-flow list; `Launch` is
   `Launch.{ Address Remembering InstructionPrompt }`. Stored launch
@@ -21,26 +35,46 @@ schema.
   pane closed and sleeps; a Maintained one keeps its pane and is always
   followed by a successor when refreshed or ended by an exit. The store
   gains `flow_nexus_successor_intents`.
+- The meta socket answers `Inspect.Address` with the metaflow whole
+  (`Inspected`: its state, Past and queue, the row of its current flow and
+  the process bound to its Address, its sender locks, every outstanding
+  attempt); `Rebind.{ Address Pane.HerdrPaneId }` records the pane its
+  current flow lives in and `Rebind.{ Address Flow.FlowId }` makes that
+  flow current, answered `Rebound.Address` or `RebindRejected.[
+  UnknownAddress PaneAbsent FlowUnknown NotAwake HerdrUnavailable
+  FlowTaken.Address ]`; `Withdraw.{ Address LogicalDeliveryId }` takes one
+  request out of the queue, answered `Withdrawn.LogicalDeliveryId` or
+  `WithdrawRejected.[ UnknownAddress NotQueued ]`, and its sender sees it
+  end `DeliveryState.Withdrawn`. None touches a harness.
 - Every stored family whose record shape changed opens under a new label,
   each older row carried into the current shape: launch outcomes v6 to v7
   (signal-flow 30 rejections; a `ContextRefusal` archived before
   `RecordMissing` keeps its meaning, in every older outcome too), flow
-  events v3 to v4 (`Ended`), successor intents v1 to v2 (`Ordered`,
-  `Replace`), logical deliveries' current and event rows v1 to v2, send
-  outcomes v2 to v3 and send calls v4 to v5 (`DeliveryState.Withdrawn`,
-  `Refusal.TopicRefused`).
+  events v3 to v4 (`Ended`, `Cleared`, and `Started` naming its session;
+  an older start reads `Started.None`), successor intents v1 to v2
+  (`Ordered`, `Replace`), logical deliveries' current and event rows v1 to
+  v2, send outcomes v2 to v3 and send calls v4 to v5
+  (`DeliveryState.Withdrawn`, `Refusal.TopicRefused`, the send tool's
+  `TopicRefused`).
 - Locks held by a sender whose flow ends are retracted with the end.
 - No pane outlives its flow: `Retire` and a recorded exit close the flow's
   pane where it is still there, as `Stop`, a refresh and a replacement's
-  reap do; `Stop` also closes a pane that shows no agent.
-- `flow-hook` reports Claude's SessionEnd as `Ended.Option<NativeSessionId>`;
-  a flow whose own session ended is recorded Exited.
+  reap do; `Stop` also closes a pane that shows no agent. A Retire whose
+  close Herdr refuses answers `RetireRejected.CloseRefused` and records
+  nothing; an exit is recorded all the same.
+- `flow-hook` reports Claude's SessionStart as
+  `Started.Option<NativeSessionId>` and SessionEnd as
+  `Ended.Option<NativeSessionId>`; a flow whose own session ended is
+  recorded Exited. A SessionEnd with reason `clear` reports `Cleared`: the
+  flow has not exited and its pane stays, and the Started after it rebinds
+  the flow, its FlowId kept, to the new session.
 - A new Primary whose declared Secondary is not Awake has that Secondary
   started first.
 - A caller's Start, Replace or Launch with a topic that is not camelCase is
-  refused `TopicRefused`, as is a Configure naming one and a Send to one
-  (`Refused.TopicRefused`); a new Primary needs its Secondary Awake
-  (`NoSecondary`).
+  refused `TopicRefused`, as is a Configure naming one, a Send to one
+  (`Refused.TopicRefused`) and a Codex send tool call to one
+  (`Refused.TopicRefused.«topic»`); a topic's capitals are never lowered. A
+  new Primary needs its Secondary Awake (`NoSecondary`).
 - A simplified Claude flow always starts with an explicit empty tool set.
 - Curriculum is asked for the remembered flows' raw records; it must answer
   a flow that logged none with nothing, not `record missing`, or every wake

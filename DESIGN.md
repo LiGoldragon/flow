@@ -24,11 +24,20 @@ are not yet.
 
 Every harness event reaches Flow through the harness's hooks calling the Flow
 CLI. `flow-hook`, which Flow writes into each Claude flow's launch settings on
-SessionStart, PostToolUse and Stop, sends `Report.{ FlowId Event }` with the
-`FLOW_ID` from its environment; the Nexus performs it as `Record.Harness`,
-appending the event to that flow's events in its Memory, and answers
-`Reported`, or `Refused.UnknownFlow` for a flow it does not hold, which it
-never adopts. The owner reads a flow's events with meta `ReadEvents`.
+SessionStart, PostToolUse, UserPromptSubmit, Stop and SessionEnd, sends
+`Report.{ FlowId Event }` with the `FLOW_ID` from its environment; the Nexus
+performs it as `Record.Harness`, appending the event to that flow's events in
+its Memory, and answers `Reported`, or `Refused.UnknownFlow` for a flow it
+does not hold, which it never adopts. The owner reads a flow's events with
+meta `ReadEvents`.
+
+A Claude session /clear ends is a session change, not an exit. Its
+SessionEnd, reason `clear`, reports `Cleared.Some.«session»`: Flow records
+no exit and closes no pane. SessionStart reports `Started.Some.«session»`,
+naming the session; the one that follows the flow's own `Cleared` rebinds
+the flow to that new session, in its row and its owner proof, and its
+FlowId stays. A SessionEnd with any other reason reports `Ended` and is the
+flow's exit.
 
 A Claude flow's FlowId exists before its harness. Reserve chooses the Claude
 session id from the launch request id (UUIDv5-shaped, so one request names
@@ -286,8 +295,9 @@ flow's own session, or no agent at all. A pane already gone is nothing to
 close, and a pane now running another session is never closed. `Stop`,
 `Retire` and a refresh close under the pane's lease; an exit is recorded
 where a write may already hold the lease, and closes without it. A close
-Herdr refuses holds back a `Stop` or a refresh (`CloseRefused`), never a
-`Retire` or an exit, which are recorded all the same.
+Herdr refuses holds back a `Stop`, a refresh or a `Retire` (`CloseRefused`),
+which records nothing, never an exit, which is recorded all the same and
+the refused close logged.
 
 Every Codex thread Flow opens declares one dynamic tool, `send`, whose
 arguments are a target Address, a kind (`Order`, `Question`, `Result`,
@@ -488,9 +498,10 @@ Primary is refused `NoSecondary` only when that Secondary has no
 declaration, or its start was refused. A Primary that replaces a flow, a successor a Maintained
 metaflow is owed, a wake Flow starts itself, and a request already
 attempted continue a metaflow already admitted. Configure refuses an
-Address with such a topic `ConfigureRejected.TopicRefused`, and a Send
+Address with such a topic `ConfigureRejected.TopicRefused`, a Send
 whose recipient Address names one is refused `Refused.TopicRefused`
-before anything is queued. A simplified
+before anything is queued, and a Codex send tool call whose target names
+one is refused `Refused.TopicRefused.«topic»`, its recorded answer. A simplified
 flow starts with an explicit empty tool set whatever tool set it names. A metaflow is never ended:
 it is Awake or Asleep. No environment variable is laid over the stored values;
 `Configure` is their only way in. The adapter is outside the Signal wire boundary: the

@@ -26,7 +26,8 @@ pub(crate) trait RepairsMetaflows {
     fn rebind_route(&self, flow_id: &str, route: HerdrRoute) -> Result<(), StoreError>;
     /// The metaflow at `address` is Awake as `flow_id` now; the flow it was
     /// Awake as joins Past. A flow another metaflow is Awake as is refused
-    /// as a broken invariant: no flow is two metaflows' current flow.
+    /// FlowTaken, naming that metaflow: no flow is two metaflows' current
+    /// flow.
     fn rebind_current_flow(
         &self,
         address: &Address,
@@ -119,8 +120,8 @@ impl RepairsMetaflows for FlowStore {
         if current == flow_id {
             return Ok(Ok(()));
         }
-        if self.metaflow_awake_as(flow_id)?.is_some() {
-            return Err(StoreError::StateInvariant);
+        if let Some(other) = self.metaflow_awake_as(flow_id)? {
+            return Ok(Err(RebindRejected_Data::FlowTaken(other.address)));
         }
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(Err(RebindRejected_Data::UnknownAddress));

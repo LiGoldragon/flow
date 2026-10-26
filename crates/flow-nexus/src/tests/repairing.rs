@@ -8,6 +8,7 @@
 use super::refresh_and_compaction::{SUCCESSOR_REQUEST, staged_refresh_successor};
 use super::waking::{CLAUDE_SEAT, address, claude_agent, claude_seat};
 use super::{ControlsHerdrSnapshot, NexusFixture};
+use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{MutatesMetaflows, SeedsMetaflow, SleepsMetaflows};
 use crate::store::queue_delivery::{
@@ -231,9 +232,10 @@ fn inspect_answers_the_metaflow_whole() {
 /// Rebind.Pane records the pane the metaflow's flow lives in now, with the
 /// terminal and agent Herdr shows there, so the flow is reached and
 /// identified in that pane and no longer in the old one. A pane Herdr does
-/// not show with the flow's harness is refused PaneAbsent; an Asleep
-/// metaflow, NotAwake; an Address Flow holds no metaflow for,
-/// UnknownAddress. Nothing is closed or typed.
+/// not show with the flow's harness is refused PaneAbsent; a Herdr whose
+/// session cannot be read, HerdrUnavailable; an Asleep metaflow, NotAwake;
+/// an Address Flow holds no metaflow for, UnknownAddress. Nothing is closed
+/// or typed.
 #[test]
 fn rebind_pane_moves_the_current_flow_to_its_new_pane() {
     let fixture = NexusFixture::new();
@@ -285,6 +287,21 @@ fn rebind_pane_moves_the_current_flow_to_its_new_pane() {
         rebind(Rebinding::Pane("w1:p9".into()), elsewhere()),
         MetaResponse::RebindRejected(RebindRejected_Data::UnknownAddress)
     );
+    // Herdr lists its sessions, but the snapshot of the flow's own fails.
+    let script = fs::read_to_string(&fixture.snapshot_program).expect("fixture Herdr");
+    assert!(script.contains("|| exit 64"), "{script}");
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&script.replacen(
+        "|| exit 64",
+        "&& { echo 'herdr: server unreachable' >&2; exit 1; }",
+        1,
+    ));
+    assert_eq!(
+        rebind(Rebinding::Pane("w1:p9".into()), seat_address()),
+        MetaResponse::RebindRejected(RebindRejected_Data::HerdrUnavailable)
+    );
     let mut asleep = stored(&fixture);
     asleep.state = State::Asleep;
     fixture.nexus.store.seed_metaflow(asleep);
@@ -298,7 +315,8 @@ fn rebind_pane_moves_the_current_flow_to_its_new_pane() {
 
 /// Rebind.Flow makes another flow the metaflow's current flow and moves the
 /// one it was Awake as to Past, keeping its queue, with no harness action.
-/// A flow Flow holds no row for is refused FlowUnknown; an Asleep
+/// A flow Flow holds no row for is refused FlowUnknown; a flow another
+/// metaflow is Awake as, FlowTaken naming that metaflow; an Asleep
 /// metaflow, NotAwake.
 #[test]
 fn rebind_flow_makes_another_flow_current() {
@@ -321,6 +339,25 @@ fn rebind_flow_makes_another_flow_current() {
         MetaResponse::RebindRejected(RebindRejected_Data::FlowUnknown)
     );
     assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+
+    // The other flow is another metaflow's current flow: it is not taken.
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: elsewhere(),
+        state: State::Awake("908786".into()),
+        past: vec![],
+        queue: vec![],
+    });
+    assert_eq!(
+        rebind("908786"),
+        MetaResponse::RebindRejected(RebindRejected_Data::FlowTaken(elsewhere()))
+    );
+    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: elsewhere(),
+        state: State::Asleep,
+        past: vec!["908786".into()],
+        queue: vec![],
+    });
 
     assert_eq!(rebind("908786"), MetaResponse::Rebound(seat_address()));
     let metaflow = stored(&fixture);

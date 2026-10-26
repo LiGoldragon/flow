@@ -428,16 +428,27 @@ pub trait ReadsHerdrPanes {
     /// Flow recorded for the flow, Herdr recognizing a Codex agent in it,
     /// runs the flow's opened thread unless it reports another session.
     fn holds_native_session(&self, herdr_session_name: &str, node: &FlowNode) -> Option<bool>;
-    /// The route of the agent of `harness_kind` that this Herdr session
-    /// shows in pane `herdr_pane_id`, its terminal and agent name as Herdr
-    /// reports them; None when the session shows no such agent there, or
-    /// cannot be read.
+    /// What this Herdr session shows in pane `herdr_pane_id` of an agent
+    /// of `harness_kind`: its route, its terminal and agent name as Herdr
+    /// reports them; that it shows no such agent there; or that it could
+    /// not be read.
     fn pane_route(
         &self,
         herdr_session_name: &str,
         herdr_pane_id: &str,
         harness_kind: &HarnessKind,
-    ) -> Option<HerdrRoute>;
+    ) -> PaneRoute;
+}
+
+/// What a Herdr session shows in one pane of an agent of one harness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneRoute {
+    /// The agent is there, at this route.
+    Shown(HerdrRoute),
+    /// A readable snapshot shows no agent of the harness in the pane.
+    NotShown,
+    /// The session's snapshot could not be read.
+    Unreadable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -668,22 +679,34 @@ impl ReadsHerdrPanes for HerdrCli {
         herdr_session_name: &str,
         herdr_pane_id: &str,
         harness_kind: &HarnessKind,
-    ) -> Option<HerdrRoute> {
+    ) -> PaneRoute {
         let expected_harness = match harness_kind {
             HarnessKind::Codex => "codex",
             HarnessKind::Claude => "claude",
         };
-        let snapshot = self.session_snapshot(herdr_session_name)?;
-        let agent = snapshot
+        let Some(snapshot) = self.session_snapshot(herdr_session_name) else {
+            return PaneRoute::Unreadable;
+        };
+        let Some(agents) = snapshot
             .pointer("/result/snapshot/agents")
-            .and_then(serde_json::Value::as_array)?
-            .iter()
-            .find(|agent| {
-                agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(herdr_pane_id)
-                    && agent.get("agent").and_then(serde_json::Value::as_str)
-                        == Some(expected_harness)
-            })?;
-        Some(HerdrRoute {
+            .and_then(serde_json::Value::as_array)
+        else {
+            return PaneRoute::Unreadable;
+        };
+        let Some(agent) = agents.iter().find(|agent| {
+            agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(herdr_pane_id)
+                && agent.get("agent").and_then(serde_json::Value::as_str) == Some(expected_harness)
+        }) else {
+            return PaneRoute::NotShown;
+        };
+        let Some(herdr_terminal_id) = agent
+            .get("terminal_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|terminal| !terminal.is_empty())
+        else {
+            return PaneRoute::NotShown;
+        };
+        PaneRoute::Shown(HerdrRoute {
             herdr_session_name: herdr_session_name.to_owned(),
             herdr_agent_name: agent
                 .get("name")
@@ -691,11 +714,7 @@ impl ReadsHerdrPanes for HerdrCli {
                 .unwrap_or_default()
                 .to_owned(),
             herdr_pane_id: herdr_pane_id.to_owned(),
-            herdr_terminal_id: agent
-                .get("terminal_id")
-                .and_then(serde_json::Value::as_str)
-                .filter(|terminal| !terminal.is_empty())?
-                .to_owned(),
+            herdr_terminal_id: herdr_terminal_id.to_owned(),
         })
     }
 

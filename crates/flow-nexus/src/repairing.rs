@@ -5,7 +5,7 @@
 //! attempt that holds it back.
 
 use crate::RunningNexus;
-use crate::herdr::ReadsHerdrPanes;
+use crate::herdr::{PaneRoute, ReadsHerdrPanes};
 use crate::store::ReadsFlowRows;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
@@ -64,12 +64,18 @@ impl RepairsFromMeta for RunningNexus {
                 let HerdrRouteSelection::Available(recorded) = &node.herdr_route_selection else {
                     return Response::RebindRejected(RebindRejected_Data::PaneAbsent);
                 };
-                let Some(route) = self.herdr.pane_route(
+                let route = match self.herdr.pane_route(
                     &recorded.herdr_session_name,
                     &herdr_pane_id,
                     &node.harness_kind,
-                ) else {
-                    return Response::RebindRejected(RebindRejected_Data::PaneAbsent);
+                ) {
+                    PaneRoute::Shown(route) => route,
+                    PaneRoute::NotShown => {
+                        return Response::RebindRejected(RebindRejected_Data::PaneAbsent);
+                    }
+                    PaneRoute::Unreadable => {
+                        return Response::RebindRejected(RebindRejected_Data::HerdrUnavailable);
+                    }
                 };
                 self.store.rebind_route(&flow_id, route).map(Ok)
             }

@@ -225,7 +225,9 @@ impl Performs for RunningNexus {
                     "flow-nexus: launch {} not composed: model {} is not an exact native model",
                     profile.launch_request_id, profile.model_name
                 );
-                Outcome::Failed(Failed_Data::CompositionRefused)
+                Outcome::Failed(Failed_Data::CompositionRefused(
+                    signal_flow::CompositionRefusal::InexactModel,
+                ))
             }
             Operation::Compose(profile) => {
                 // A Start naming no leave-outs takes its metaflow's default
@@ -263,9 +265,15 @@ impl Performs for RunningNexus {
                         eprintln!("flow-nexus: launch {request} context refused: {refusal:?}");
                         Outcome::Failed(Failed_Data::ContextRefused(refusal))
                     }
-                    Err(error) => {
+                    Err(CompositionError::InvalidProfileField(refusal)) => {
+                        eprintln!("flow-nexus: launch {request} not composed: {refusal:?}");
+                        Outcome::Failed(Failed_Data::CompositionRefused(refusal))
+                    }
+                    Err(error @ CompositionError::PresentationPromptUnavailable(_)) => {
                         eprintln!("flow-nexus: launch {request} not composed: {error}");
-                        Outcome::Failed(Failed_Data::CompositionRefused)
+                        Outcome::Failed(Failed_Data::CompositionRefused(
+                            signal_flow::CompositionRefusal::PresentationUnavailable,
+                        ))
                     }
                 }
             }

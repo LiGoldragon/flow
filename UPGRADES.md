@@ -1,7 +1,7 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
-Pins signal-flow 32.0.0 and meta-signal-flow 40.0.0 (both on their
-`flow-0.40` branches) and the Curriculum schema of Curriculum 4493d1e. Every
+Pins signal-flow 32.0.0 (a3e738) and meta-signal-flow 40.0.0 (34b164), both
+on their `flow-0.40` branches, and the Curriculum schema of Curriculum 4493d1e. Every
 ordinary and meta peer repins, and Curriculum serves that schema.
 
 - `Restart.FlowId` is gone: `Refresh.{ Psyche core Primary }` ends the flow
@@ -63,6 +63,15 @@ ordinary and meta peer repins, and Curriculum serves that schema.
   declaration keeps every value and names
   `$XDG_RUNTIME_DIR/curriculum/curriculum.sock` of the process that opens
   the store, the socket Curriculum serves by default.
+- `StartRejected.CompositionRefused` carries its reason
+  (`CompositionRefusal`, signal-flow a3e738): a profile field that is not
+  well formed names itself (`InvalidRemembering` for a `Custom.[]`), a
+  model no harness launches exactly is `InexactModel`, a wake whose seat
+  has no configured model `Unconfigured`, an unreadable presentation prompt
+  `PresentationUnavailable`. A store-refused read of the flows a launch
+  remembers answers `LaunchPersistenceRefused`. Launch outcomes upgrade v7
+  to v8; a composition refusal archived without its reason reads
+  `Unrecorded`, in every older outcome too.
 - Locks held by a sender whose flow ends are retracted with the end.
 - No pane outlives its flow: `Retire` and a recorded exit close the flow's
   pane where it is still there, as `Stop`, a refresh and a replacement's

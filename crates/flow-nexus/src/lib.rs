@@ -4470,7 +4470,9 @@ mod tests {
             .store
             .record_launch_outcome(
                 "outcome-without-attempt",
-                LaunchOutcome::StartRejected(StartRejection::CompositionRefused),
+                LaunchOutcome::StartRejected(StartRejection::CompositionRefused(
+                    signal_flow::CompositionRefusal::InvalidRemembering,
+                )),
             )
             .unwrap();
         assert_eq!(

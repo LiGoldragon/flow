@@ -3410,7 +3410,11 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
 
     assert_eq!(
         fixture.nexus.perform(Operation::Wake(at.clone())),
-        Outcome::Failed(crate::generated::operation::Failed_Data::CompositionRefused)
+        Outcome::Failed(
+            crate::generated::operation::Failed_Data::CompositionRefused(
+                signal_flow::CompositionRefusal::Unconfigured
+            )
+        )
     );
     let asleep = stored(&fixture, Layer::Secondary);
     assert_eq!(asleep.state, State::Asleep);

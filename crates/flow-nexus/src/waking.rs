@@ -2046,7 +2046,11 @@ impl WakesInParts for RunningNexus {
         // The seat's model is the one configured for its layer and aspect.
         let model = match self.store.configured_model(address) {
             Ok(Some(model)) => model,
-            Ok(None) => return Err(Failed_Data::CompositionRefused),
+            Ok(None) => {
+                return Err(Failed_Data::CompositionRefused(
+                    signal_flow::CompositionRefusal::Unconfigured,
+                ));
+            }
             Err(_) => return Err(Failed_Data::StoreRefused),
         };
         let launch_request_id = format!(

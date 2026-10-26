@@ -26,16 +26,16 @@ use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
-    Address, Aspect, ComposedLaunch, ContextRefusal, FirstPromptPayload, HarnessKind,
-    LaunchProfile, Layer, LeaveOut, LeaveOutRefusal, PromptPart, QueueEntry, SystemPrompt,
-    TargetReceiptRequest,
+    Address, Aspect, ComposedLaunch, CompositionRefusal, ContextRefusal, FirstPromptPayload,
+    HarnessKind, LaunchProfile, Layer, LeaveOut, LeaveOutRefusal, PromptPart, QueueEntry,
+    SystemPrompt, TargetReceiptRequest,
 };
 use std::collections::HashSet;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CompositionError {
-    #[error("launch profile field is invalid: {0}")]
-    InvalidProfileField(&'static str),
+    #[error("launch profile field is invalid: {0:?}")]
+    InvalidProfileField(CompositionRefusal),
     #[error("the launch's context was refused: {0:?}")]
     Context(ContextRefusal),
     #[error("the launch's leave-outs were refused: {0:?}")]
@@ -315,13 +315,19 @@ impl ValidatesLaunchProfile for LaunchProfile {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
             })
         {
-            return Err(CompositionError::InvalidProfileField("launch_request_id"));
+            return Err(CompositionError::InvalidProfileField(
+                CompositionRefusal::InvalidLaunchRequestId,
+            ));
         }
         if profile.model_name.is_empty() || profile.model_name.contains(['\r', '\n']) {
-            return Err(CompositionError::InvalidProfileField("model_name"));
+            return Err(CompositionError::InvalidProfileField(
+                CompositionRefusal::InvalidModelName,
+            ));
         }
         if profile.effort.is_empty() || profile.effort.contains(['\r', '\n']) {
-            return Err(CompositionError::InvalidProfileField("effort"));
+            return Err(CompositionError::InvalidProfileField(
+                CompositionRefusal::InvalidEffort,
+            ));
         }
         if profile.flow_kind == signal_flow::FlowKind::Simplified
             && !matches!(
@@ -329,12 +335,16 @@ impl ValidatesLaunchProfile for LaunchProfile {
                 signal_flow::ToolSet::Explicit(tools) if tools.is_empty()
             )
         {
-            return Err(CompositionError::InvalidProfileField("simplified_tool_set"));
+            return Err(CompositionError::InvalidProfileField(
+                CompositionRefusal::InvalidToolSet,
+            ));
         }
         if profile.herdr_session_name.is_empty()
             || profile.herdr_session_name.contains(['\r', '\n'])
         {
-            return Err(CompositionError::InvalidProfileField("herdr_session_name"));
+            return Err(CompositionError::InvalidProfileField(
+                CompositionRefusal::InvalidHerdrSessionName,
+            ));
         }
         let identities_valid = |identities: &[String]| {
             let mut seen = HashSet::new();
@@ -356,7 +366,9 @@ impl ValidatesLaunchProfile for LaunchProfile {
             })
         };
         if profile.system_modules.is_empty() || !identities_valid(&profile.system_modules) {
-            return Err(CompositionError::InvalidProfileField("system_modules"));
+            return Err(CompositionError::InvalidProfileField(
+                CompositionRefusal::InvalidSystemModules,
+            ));
         }
         if !identities_valid(&profile.user_modules)
             || profile
@@ -364,7 +376,9 @@ impl ValidatesLaunchProfile for LaunchProfile {
                 .iter()
                 .any(|identity| profile.system_modules.contains(identity))
         {
-            return Err(CompositionError::InvalidProfileField("user_modules"));
+            return Err(CompositionError::InvalidProfileField(
+                CompositionRefusal::InvalidUserModules,
+            ));
         }
         let remembering_valid = match &profile.remembering {
             signal_flow::Remembering::Predecessors(depth) => *depth >= 0,
@@ -373,7 +387,9 @@ impl ValidatesLaunchProfile for LaunchProfile {
             }
         };
         if !remembering_valid {
-            return Err(CompositionError::InvalidProfileField("remembering"));
+            return Err(CompositionError::InvalidProfileField(
+                CompositionRefusal::InvalidRemembering,
+            ));
         }
         Ok(())
     }
@@ -719,7 +735,8 @@ pub(crate) mod tests {
     };
     use crate::context::FixtureComposer;
     use signal_flow::{
-        Address, Aspect, ContextRefusal, HarnessKind, LaunchProfile, Layer, LeaveOut, Remembering,
+        Address, Aspect, CompositionRefusal, ContextRefusal, HarnessKind, LaunchProfile, Layer,
+        LeaveOut, Remembering,
     };
 
     /// A launch profile and a composer holding its modules, for tests.
@@ -1436,16 +1453,28 @@ pub(crate) mod tests {
     fn a_profile_naming_no_valid_identities_is_refused_before_composition() {
         let composer = fixture_composer();
         type ProfileChange = fn(&mut LaunchProfile);
-        let cases: [(&str, ProfileChange); 4] = [
-            ("system_modules", |profile| profile.system_modules.clear()),
-            ("system_modules", |profile| {
+        let cases: [(CompositionRefusal, ProfileChange); 7] = [
+            (CompositionRefusal::InvalidSystemModules, |profile| {
+                profile.system_modules.clear()
+            }),
+            (CompositionRefusal::InvalidSystemModules, |profile| {
                 profile.system_modules.push("/abs/path.md".into())
             }),
-            ("user_modules", |profile| {
+            (CompositionRefusal::InvalidUserModules, |profile| {
                 profile.user_modules.push("knowledge-flow".into())
             }),
-            ("user_modules", |profile| {
+            (CompositionRefusal::InvalidUserModules, |profile| {
                 profile.user_modules.push("spirit-core".into())
+            }),
+            // A Remembering of no flows names the field it refuses.
+            (CompositionRefusal::InvalidRemembering, |profile| {
+                profile.remembering = Remembering::Custom(vec![])
+            }),
+            (CompositionRefusal::InvalidRemembering, |profile| {
+                profile.remembering = Remembering::Custom(vec![String::new()])
+            }),
+            (CompositionRefusal::InvalidRemembering, |profile| {
+                profile.remembering = Remembering::Predecessors(-1)
             }),
         ];
         for (field, change) in cases {

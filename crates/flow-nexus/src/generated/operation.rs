@@ -127,7 +127,7 @@ pub struct Reserved_Data {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Failed_Data {
-    CompositionRefused,
+    CompositionRefused(signal_flow::CompositionRefusal),
     StoreRefused,
     ConflictingBinding,
     Unstarted,

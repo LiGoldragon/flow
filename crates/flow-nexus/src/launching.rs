@@ -84,7 +84,12 @@ impl InterpretsLaunchObservations for RunningNexus {
             Outcome::Failed(Failed_Data::LeaveOutRefused(refusal)) => {
                 Response::StartRejected(StartRejection::LeaveOutRefused(refusal))
             }
-            _ => Response::StartRejected(StartRejection::CompositionRefused),
+            Outcome::Failed(Failed_Data::CompositionRefused(refusal)) => {
+                Response::StartRejected(StartRejection::CompositionRefused(refusal))
+            }
+            // Compose answers no other outcome but a store that refused the
+            // read of the flows the launch remembers.
+            _ => Response::StartRejected(StartRejection::LaunchPersistenceRefused),
         }
     }
 }

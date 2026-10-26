@@ -511,7 +511,11 @@ fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
         profile.model_name = inexact.into();
         assert_eq!(
             nexus.perform(Operation::Compose(profile.clone())),
-            Outcome::Failed(crate::generated::operation::Failed_Data::CompositionRefused),
+            Outcome::Failed(
+                crate::generated::operation::Failed_Data::CompositionRefused(
+                    signal_flow::CompositionRefusal::InexactModel
+                )
+            ),
             "{inexact}"
         );
     }

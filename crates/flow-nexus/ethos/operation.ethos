@@ -64,7 +64,7 @@
 ; (memory.ethos), named through the Nexus crate.
 
 Operation
-[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ]
+[ signal_flow:[ FlowId LaunchRequestId FlowNode Caller LaunchProfile ComposedLaunch Origin LaunchAttemptReservation HerdrPaneBinding NativeLaunchIntent NativeLaunchBinding RegistrationAcknowledgement PromptDeliveryIntent PromptDeliveryResult Launched Event Address Request QueueEntry LogicalDeliveryId ContextRefusal CompositionRefusal LeaveOutRefusal NativeSessionId HarnessSpawnRefusal NativeLaunchRefusal ]
   flow_nexus:[ LaunchOutcome Replacement ] ]
 [ Compose.LaunchProfile
   Reserve.{ ComposedLaunch Origin }
@@ -111,7 +111,7 @@ Operation
   Drained.Vector<QueueEntry>
   AwaitingReceipt.LogicalDeliveryId
   WaitingForTurn.LogicalDeliveryId
-  Failed.[ CompositionRefused
+  Failed.[ CompositionRefused.CompositionRefusal
            StoreRefused
            ConflictingBinding
            Unstarted

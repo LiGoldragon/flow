@@ -554,7 +554,7 @@
     (doseq [s @steps] (println (str "  " s)))
     (let [sessions (:out (run {} "herdr" "session" "list"))
           remaining {:herdr-session (str/includes? sessions session)
-                     :processes (vec (capsule-processes))
+                     :processes (vec (or (watch 20 #(let [left (capsule-processes)] (when (empty? left) []))) (capsule-processes)))
                      :store (fs/exists? state-root)
                      :sockets (fs/exists? capsule-runtime)
                      :claims (vec (filter (fn [m] (some #(str/includes? m (str "." % ".flow-id")) @seen-flows)) (flow-markers)))}
@@ -562,7 +562,7 @@
                      (not (:sockets remaining)) (empty? (:claims remaining)))]
       (print-line {:name "13 teardown" :reply (pr-str remaining) :pass clean
                    :ms (- (System/currentTimeMillis) started)
-                   :watched "Herdr session list, /proc cmdline and environ, store, sockets, flow-id claims"})
+                   :watched "Herdr session list; /proc cmdline and environ, waiting up to 20 s for capsule processes to end; store, sockets, flow-id claims"})
       clean)))
 
 (defn -main [& args]

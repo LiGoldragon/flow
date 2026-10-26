@@ -14,7 +14,9 @@
 ;; The Curriculum is configured as the running one is: its context
 ;; repositories are the origins the user's curriculum-nexus.service names,
 ;; read from its unit environment (read only), each cloned fresh at main
-;; into the capsule; its records root is the source root.
+;; into the capsule; its records root is the source root's flows directory,
+;; which holds one directory per flow (Curriculum reads <root>/<flow>/vision
+;; and <root>/<flow>/notion).
 ;;
 ;; The Curriculum Flow pins (4493d1e) admits a module's dependencies only as
 ;; type:subject identities, and every context origin still names them
@@ -530,7 +532,7 @@
         no-refresh (str (fs/which "true"))
         env (into (clean-env {"CURRICULUM_CONTEXT_LAYOUT" layout
                               "CURRICULUM_CONTEXT_REFRESH_PROGRAM" no-refresh
-                              "CURRICULUM_RECORDS_DIR" @source-root})
+                              "CURRICULUM_RECORDS_DIR" (str @source-root "/flows")})
                   (for [[dir-key _ name] context-roots] [dir-key (str curriculum-contexts "/" name)]))]
     (fs/create-dirs curriculum-contexts)
     (doseq [[_ url-key name] context-roots]
@@ -561,7 +563,7 @@
       (throw (ex-info "the Curriculum Nexus exited" {:log (str/trim (slurp log))})))
     (let [probe (reply-text (run {:env env} (str curriculum-package "/bin/curriculum") "ResolveSkills.[ spirit:core intent:models ]"))]
       (println (str "curriculum | " curriculum-package " | layout " layout ", refresh " no-refresh
-                    ", records " @source-root " | socket " curriculum-socket " | ResolveSkills -> " probe)))))
+                    ", records " @source-root "/flows | socket " curriculum-socket " | ResolveSkills -> " probe)))))
 
 (defn start-text []
   (str "{ «" ordinary-socket "» «" meta-socket "» «" store-path "» None }"))

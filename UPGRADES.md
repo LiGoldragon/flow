@@ -22,6 +22,9 @@ schema.
   followed by a successor when refreshed or ended by an exit. The store
   gains `flow_nexus_successor_intents`.
 - Locks held by a sender whose flow ends are retracted with the end.
+- No pane outlives its flow: `Retire` and a recorded exit close the flow's
+  pane where it is still there, as `Stop`, a refresh and a replacement's
+  reap do; `Stop` also closes a pane that shows no agent.
 - `flow-hook` reports Claude's SessionEnd as `Ended.Option<NativeSessionId>`;
   a flow whose own session ended is recorded Exited.
 - A new Primary whose declared Secondary is not Awake has that Secondary

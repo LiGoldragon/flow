@@ -256,7 +256,10 @@ impl Dispatches for RunningNexus {
                 let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
                     return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
                 };
-                if self.herdr.pane_presence(&node) != herdr::PanePresence::Present {
+                if !matches!(
+                    self.herdr.pane_presence(&node),
+                    herdr::PanePresence::Present | herdr::PanePresence::Bare
+                ) {
                     return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
                 }
                 // No write is left half-typed into a pane as it closes.
@@ -376,8 +379,11 @@ impl Dispatches for RunningNexus {
                     meta_signal_flow::ResetRejection::AdapterUnavailable,
                 )),
             // A seat Flow lost. Retire keeps the row, its origin and its
-            // history, and takes the flow out of receiving: it is not Stop,
-            // which closes a pane Flow still holds, and it is not a delete.
+            // history, and takes the flow out of receiving: it is not a
+            // delete. No pane outlives its flow: a pane still there, its
+            // harness running the flow's own session or none, is closed in
+            // the same event, under its lease. Retirement comes from
+            // authority, so a close Herdr refuses does not hold it back.
             // Privileged, because it changes what Flow holds of a flow
             // without that flow acting.
             meta_signal_flow::Query::Retire(flow_id) => {
@@ -398,6 +404,20 @@ impl Dispatches for RunningNexus {
                     return meta_signal_flow::Response::RetireRejected(
                         meta_signal_flow::RetireRejection::AlreadyGone,
                     );
+                }
+                if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection
+                    && matches!(
+                        self.herdr.pane_presence(&node),
+                        herdr::PanePresence::Present | herdr::PanePresence::Bare
+                    )
+                {
+                    let closed = {
+                        let _lease = self.pane_leases.hold(route);
+                        self.perform(Operation::Close(node.clone()))
+                    };
+                    if closed != Outcome::Closed {
+                        eprintln!("flow-nexus: flow {flow_id} retired; its pane was not closed");
+                    }
                 }
                 if self.perform(Operation::Record(Record_Data::Retired(flow_id.clone())))
                     != Outcome::Recorded
@@ -1288,6 +1308,7 @@ mod tests {
     use crate::herdr::ReadsHerdrPanes;
     mod configuring;
     mod delivery;
+    mod ending;
     mod launching_nexus;
     mod model;
     mod queue_drain;

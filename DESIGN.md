@@ -279,6 +279,16 @@ produces it: a pane going away never retires a flow, because an exit retains
 the flow's record and retirement is a decision, not an inference. None of the
 three deletes anything.
 
+No pane outlives its flow. In the event that ends a flow — `Stop`, `Retire`,
+a refresh, a sleep, a replacement's reap, an exit — Flow closes the flow's
+harness and its Herdr pane where they are still there: a pane showing the
+flow's own session, or no agent at all. A pane already gone is nothing to
+close, and a pane now running another session is never closed. `Stop`,
+`Retire` and a refresh close under the pane's lease; an exit is recorded
+where a write may already hold the lease, and closes without it. A close
+Herdr refuses holds back a `Stop` or a refresh (`CloseRefused`), never a
+`Retire` or an exit, which are recorded all the same.
+
 Every Codex thread Flow opens declares one dynamic tool, `send`, whose
 arguments are a target Address, a kind (`Order`, `Question`, `Result`,
 `Notice`) and a body. The living's words are not among the kinds: Flow admits

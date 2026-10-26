@@ -15,13 +15,13 @@ use crate::generated::operation::{
     Record_Data_Settled_Data, Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::generated::starter::DerivesHarness;
-use crate::herdr::OperatesHerdrPane;
+use crate::herdr::{OperatesHerdrPane, ReadsHerdrPanes};
 use crate::herdr::launch::{
     CreatesHerdrLaunchPane, NativeTargetRefusal, ObservesNativeLaunchBinding, SpawnFailure,
     StartsNativeHerdrHarness, SubmitsStartupPart, TitleRefusal, TitlesNativeFlow,
 };
 use crate::send_tool::ServesLaunchCalls;
-use crate::store::ManagesMetaflowState;
+use crate::store::{ManagesMetaflowState, ReadsFlowRows};
 use crate::store::{
     ConfirmsStartedFlow, FlowRegistration, RecordsFlowLifecycle, RecordsLaunchOutcome,
     RecordsNativeLaunchBinding, RecordsNativeLaunchIntent, RecordsPromptDeliveryIntent,
@@ -586,7 +586,27 @@ impl PerformsInParts for RunningNexus {
             Record_Data::Active(flow_id) => self.store.record_active(&flow_id).recorded(),
             Record_Data::Stopped(flow_id) => self.store.record_stopped(&flow_id).recorded(),
             Record_Data::Retired(flow_id) => self.store.record_retired(&flow_id).recorded(),
-            Record_Data::Exited(flow_id) => self.store.record_exited(&flow_id).recorded(),
+            // No pane outlives its flow: a flow that exited with its pane
+            // still there, its harness gone or its own session ended, has
+            // that pane closed in the event that records the exit. A pane
+            // now running another session is never closed. The close takes
+            // no pane lease: an exit is recorded where a write may already
+            // hold it, and nothing more is typed into an exited flow.
+            Record_Data::Exited(flow_id) => {
+                let node = self.store.flow_node(&flow_id).ok().flatten();
+                let recorded = self.store.record_exited(&flow_id).recorded();
+                if recorded == Outcome::Recorded
+                    && let Some(node) = node
+                    && matches!(
+                        self.herdr.pane_presence(&node),
+                        crate::herdr::PanePresence::Present | crate::herdr::PanePresence::Bare
+                    )
+                    && !self.herdr.close(&node)
+                {
+                    eprintln!("flow-nexus: flow {flow_id} exited; its pane was not closed");
+                }
+                recorded
+            }
             Record_Data::Replacing(replacement) => {
                 self.store.record_replacement(replacement).recorded()
             }

@@ -1,0 +1,10 @@
+; The capsule's configuration, one Configure datom per line, applied in order
+; over the capsule's meta socket. @SOURCE_ROOT@ and @CAPSULE_RUNTIME@ are
+; filled by flow-capsule from its arguments and the runtime directory.
+; Codex endpoints name sockets no app-server serves and no models, so no
+; Codex seat can start; Message names no running executable.
+Configure.Nexus.{ @SOURCE_ROOT@ { @CAPSULE_RUNTIME@/no-codex-client @CAPSULE_RUNTIME@/codex-stable @CAPSULE_RUNTIME@/codex-stable.sock [] } { @CAPSULE_RUNTIME@/no-codex-client @CAPSULE_RUNTIME@/codex-next @CAPSULE_RUNTIME@/codex-next.sock [] } [ { Claude [ / «!» # ] [ esc esc ] [ enter ] } { Codex [ / «!» ] [ esc ] [] } ] [ Psyche ] @CAPSULE_RUNTIME@/message.sock @CAPSULE_RUNTIME@/no-message-nexus 60 }
+Configure.Models.[ { Primary Psyche claude-haiku-5-5 } { Secondary Psyche claude-haiku-5-5 } { Tertiary Psyche claude-haiku-5-5 } { Quaternary Psyche claude-haiku-5-5 } ]
+Configure.Thresholds.[ { claude-haiku-5-5 200000 } ]
+Configure.LeaveOuts.[ { { Psyche test Secondary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } { { Psyche test Tertiary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } { { Psyche test Quaternary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } ]
+Configure.Metaflows.[ { { Psyche test Secondary } [ spirit-core intent-models ] [] Simplified Explicit.[] Maintained «» [] } { { Psyche test Tertiary } [ spirit-core intent-models ] [] Regular Default OnDemand «» [] } { { Psyche test Quaternary } [ spirit-core intent-models ] [] Simplified Explicit.[] OnDemand «» [] } ]

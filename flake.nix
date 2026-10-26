@@ -162,8 +162,28 @@
               '';
             }
           );
+          # The capsule test: a Babashka script and the Configure datoms it
+          # applies, kept side by side. It builds nothing; it is given the
+          # flow package to run.
+          flow-capsule = context.pkgs.runCommand "flow-capsule" { } ''
+            mkdir -p "$out/libexec/flow-capsule" "$out/bin"
+            {
+              echo "#!${context.pkgs.babashka}/bin/bb"
+              cat ${./capsule/flow-capsule.clj}
+            } > "$out/libexec/flow-capsule/flow-capsule"
+            chmod +x "$out/libexec/flow-capsule/flow-capsule"
+            cp ${./capsule/configure.datom} "$out/libexec/flow-capsule/configure.datom"
+            ln -s "$out/libexec/flow-capsule/flow-capsule" "$out/bin/flow-capsule"
+          '';
         }
       );
+
+      apps = forSystems (system: {
+        flow-capsule = {
+          type = "app";
+          program = "${self.packages.${system}.flow-capsule}/bin/flow-capsule";
+        };
+      });
 
       checks = forSystems (
         system:

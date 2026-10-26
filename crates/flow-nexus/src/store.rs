@@ -17,6 +17,7 @@ pub(crate) mod metaflow;
 pub(crate) mod metaflow_declaration;
 pub(crate) mod opened_thread;
 pub(crate) mod queue_delivery;
+pub(crate) mod repair;
 pub(crate) mod send_call;
 pub(crate) mod send_outcome;
 pub(crate) mod send_server;

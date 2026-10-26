@@ -428,6 +428,16 @@ pub trait ReadsHerdrPanes {
     /// Flow recorded for the flow, Herdr recognizing a Codex agent in it,
     /// runs the flow's opened thread unless it reports another session.
     fn holds_native_session(&self, herdr_session_name: &str, node: &FlowNode) -> Option<bool>;
+    /// The route of the agent of `harness_kind` that this Herdr session
+    /// shows in pane `herdr_pane_id`, its terminal and agent name as Herdr
+    /// reports them; None when the session shows no such agent there, or
+    /// cannot be read.
+    fn pane_route(
+        &self,
+        herdr_session_name: &str,
+        herdr_pane_id: &str,
+        harness_kind: &HarnessKind,
+    ) -> Option<HerdrRoute>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,6 +661,42 @@ impl ReadsHerdrPanes for HerdrCli {
                 }
             }
         }))
+    }
+
+    fn pane_route(
+        &self,
+        herdr_session_name: &str,
+        herdr_pane_id: &str,
+        harness_kind: &HarnessKind,
+    ) -> Option<HerdrRoute> {
+        let expected_harness = match harness_kind {
+            HarnessKind::Codex => "codex",
+            HarnessKind::Claude => "claude",
+        };
+        let snapshot = self.session_snapshot(herdr_session_name)?;
+        let agent = snapshot
+            .pointer("/result/snapshot/agents")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .find(|agent| {
+                agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(herdr_pane_id)
+                    && agent.get("agent").and_then(serde_json::Value::as_str)
+                        == Some(expected_harness)
+            })?;
+        Some(HerdrRoute {
+            herdr_session_name: herdr_session_name.to_owned(),
+            herdr_agent_name: agent
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            herdr_pane_id: herdr_pane_id.to_owned(),
+            herdr_terminal_id: agent
+                .get("terminal_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|terminal| !terminal.is_empty())?
+                .to_owned(),
+        })
     }
 
     fn session_snapshot(&self, herdr_session_name: &str) -> Option<serde_json::Value> {

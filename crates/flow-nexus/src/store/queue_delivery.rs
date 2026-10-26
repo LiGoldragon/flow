@@ -13,8 +13,9 @@ use super::logical_delivery::RecordsLogicalDeliveries;
 use super::*;
 use flow_ethos::Request;
 use meta_signal_flow::{
-    AbsenceProof, Legacy_Data, QueueEvidence, QueueResolutionOutcome, QueueResolutionRecord,
-    ResolveQueueDeliveryRejected_Data, Undecided,
+    AbsenceProof, Legacy_Data, QueueDelivery, QueueDeliveryStanding, QueueEvidence,
+    QueueResolutionOutcome, QueueResolutionRecord, ResolveQueueDeliveryRejected_Data, Undecided,
+    WithdrawRejected_Data,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::AtomicCommit;
@@ -300,6 +301,34 @@ pub enum QueueDeliveryPhase {
     /// The owner resolved an Uncertain attempt: who, why and when are
     /// recorded with the outcome.
     Resolved(QueueResolutionRecord),
+}
+
+/// An attempt as the meta socket shows it: its standing, with the flow and
+/// native session it was handed to and the request it carries.
+pub trait ShowsQueueDelivery {
+    /// None for a Settled attempt, which is not listed.
+    fn queue_delivery(self) -> Option<QueueDelivery>;
+}
+
+impl ShowsQueueDelivery for QueueDeliveryAttempt {
+    fn queue_delivery(self) -> Option<QueueDelivery> {
+        let queue_delivery_standing = match self.phase {
+            QueueDeliveryPhase::Prepared => QueueDeliveryStanding::Prepared,
+            QueueDeliveryPhase::Uncertain(undecided) => QueueDeliveryStanding::Uncertain(undecided),
+            QueueDeliveryPhase::ReceiptRecorded(_) => QueueDeliveryStanding::ReceiptRecorded,
+            QueueDeliveryPhase::Absent(absence) => QueueDeliveryStanding::Absent(absence.proof),
+            QueueDeliveryPhase::Resolved(record) => QueueDeliveryStanding::Resolved(record),
+            QueueDeliveryPhase::Settled(_) => return None,
+        };
+        Some(QueueDelivery {
+            queue_attempt_id: self.attempt_id,
+            flow_id: self.flow_id,
+            native_session_id: self.thread_id,
+            harness_kind: self.harness_kind,
+            queue_evidence: self.queue_evidence,
+            queue_delivery_standing,
+        })
+    }
 }
 
 pub trait EndsQueueDeliveryPhase {
@@ -689,6 +718,18 @@ pub trait AccountsQueueDelivery {
         &self,
         attempt_id: &str,
     ) -> Result<Option<QueueDeliveryAttempt>, StoreError>;
+
+    /// The owner withdraws the request `id` from the queue of the metaflow
+    /// at `address`, and closes the attempt that holds it back, as its
+    /// hand-over stands: one whose receipt is recorded settles as delivered;
+    /// one that may have reached the seat stays Uncertain, parked so it is
+    /// never handed over again; a request that never reached the seat ends
+    /// Withdrawn.
+    fn withdraw_queued(
+        &self,
+        address: &Address,
+        id: &str,
+    ) -> Result<Result<(), WithdrawRejected_Data>, StoreError>;
 }
 
 trait ReadsQueueDelivery {
@@ -1426,6 +1467,73 @@ impl AccountsQueueDelivery for FlowStore {
             }
         }
         Ok(outstanding)
+    }
+
+    fn withdraw_queued(
+        &self,
+        address: &Address,
+        id: &str,
+    ) -> Result<Result<(), WithdrawRejected_Data>, StoreError> {
+        let Some(mut stored) = self.stored_metaflow(address)? else {
+            return Ok(Err(WithdrawRejected_Data::UnknownAddress));
+        };
+        let Some(index) = stored
+            .metaflow
+            .queue
+            .iter()
+            .position(|entry| entry.logical_delivery_id == id)
+        else {
+            return Ok(Err(WithdrawRejected_Data::NotQueued));
+        };
+        if let Some(attempt) = self.outstanding_for(address)?
+            && matches!(&attempt.queue_evidence,
+                QueueEvidence::Logical(entry) if entry.logical_delivery_id == id)
+        {
+            let closed = match attempt.phase {
+                QueueDeliveryPhase::ReceiptRecorded(_) => {
+                    self.settle_recorded_delivery(&attempt.attempt_id)?
+                }
+                // A prepared hand-over is potentially native input: it is
+                // never taken for absent.
+                _ => {
+                    self.mark_delivery_uncertain(&attempt.attempt_id)?
+                        && self.park_uncertain_delivery(&attempt.attempt_id)?
+                }
+            };
+            return if closed {
+                Ok(Ok(()))
+            } else {
+                Err(StoreError::StateInvariant)
+            };
+        }
+        // The request never reached the seat: no attempt holds it, or its
+        // last attempt was proved or resolved absent.
+        let entry = stored.metaflow.queue.remove(index);
+        let evidence = QueueEvidence::Logical(entry);
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.queue_delivery.requests,
+            RecordKey::new(id.to_owned()),
+        ))?;
+        let commit = self
+            .engine
+            .begin_atomic_commit()
+            .mutate(self.metaflows, stored);
+        let commit = match rows.records() {
+            [] => commit,
+            [request] if request.address == *address && request.queue_evidence == evidence => {
+                let mut parked = request.clone();
+                parked.state = RequestState::Parked;
+                commit.mutate(self.queue_delivery.requests, parked)
+            }
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let logical_id = id.to_owned();
+        if self.logical_delivery_snapshot(&logical_id)?.is_some() {
+            self.commit_logical_transition(&logical_id, DeliveryState::Withdrawn, commit)?;
+        } else {
+            self.engine.commit_atomic(commit)?;
+        }
+        Ok(Ok(()))
     }
 
     fn queue_delivery_attempt(

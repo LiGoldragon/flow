@@ -36,6 +36,7 @@ pub mod delivery;
 pub mod lean;
 mod metaflow;
 pub mod recovery;
+pub mod repairing;
 use metaflow::DispatchesMetaflowPeer;
 #[cfg(test)]
 mod fixture_executable;
@@ -513,6 +514,18 @@ impl Dispatches for RunningNexus {
                     meta_signal_flow::MetaRefusal::PeerUnknown,
                 ),
             },
+            meta_signal_flow::Query::Inspect(address) => {
+                use crate::repairing::RepairsFromMeta;
+                self.inspect(address)
+            }
+            meta_signal_flow::Query::Rebind(rebind) => {
+                use crate::repairing::RepairsFromMeta;
+                self.rebind(rebind)
+            }
+            meta_signal_flow::Query::Withdraw(withdraw) => {
+                use crate::repairing::RepairsFromMeta;
+                self.withdraw(withdraw)
+            }
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
                 if !self.herdr.validate_registration(&flow_node) {
                     return meta_signal_flow::Response::FlowRegistrationRejected(
@@ -1159,6 +1172,10 @@ impl DispatchesSerially for RunningNexus {
         query: meta_signal_flow::Query,
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Response {
+        let withdrawing = match &query {
+            meta_signal_flow::Query::Withdraw(withdraw) => Some(withdraw.address.clone()),
+            _ => None,
+        };
         let response = {
             let _turn = self
                 .dispatch_gate
@@ -1167,10 +1184,17 @@ impl DispatchesSerially for RunningNexus {
             self.dispatch_meta_from(query, resolver)
         };
         // A resolution that committed leaves the oldest request queued (Absent)
-        // or the next one oldest (Delivered): a seat already resting gets no
-        // turn end, so it is handed that request now, the gate given back.
-        if let meta_signal_flow::Response::QueueDeliveryResolved(resolved) = &response {
-            self.drain_awake(&resolved.address);
+        // or the next one oldest (Delivered), and a withdrawal may leave
+        // another oldest: a seat already resting gets no turn end, so it is
+        // handed that request now, the gate given back.
+        match (&response, withdrawing) {
+            (meta_signal_flow::Response::QueueDeliveryResolved(resolved), _) => {
+                self.drain_awake(&resolved.address);
+            }
+            (meta_signal_flow::Response::Withdrawn(_), Some(address)) => {
+                self.drain_awake(&address);
+            }
+            _ => {}
         }
         response
     }
@@ -1269,6 +1293,7 @@ mod tests {
     mod queue_drain;
     mod refresh_and_compaction;
     mod refreshing;
+    mod repairing;
     mod reservation;
     mod seat_binding;
     mod secondary;

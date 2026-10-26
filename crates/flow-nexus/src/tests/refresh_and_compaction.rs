@@ -99,7 +99,7 @@ fn closed(fixture: &NexusFixture) -> bool {
 
 /// The launch request a refresh's successor is staged under; the intent the
 /// tests owe names it, so the refresh resumes the staged launch.
-const SUCCESSOR_REQUEST: &str = "refresh-c1a0de";
+pub(super) const SUCCESSOR_REQUEST: &str = "refresh-c1a0de";
 
 /// Declares the seat's metaflow, continuing as `availability`, and the model
 /// its layer and aspect run.

@@ -22,15 +22,14 @@ use crate::store::ReadsFlowRows;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::logical_delivery::{CorePresentationRoute, RecordsLogicalDeliveries};
 use crate::store::metaflow::SleepsMetaflows;
-use crate::store::queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
+use crate::store::queue_delivery::{AccountsQueueDelivery, ShowsQueueDelivery};
 use crate::waking::{
     CorrelatesNativeEvents, ReadsClaudeDelivery, ReconcilesQueueDelivery, SleepsAndWakesSeats,
 };
 use meta_signal_flow::{
-    EventsRead_Data, QueueDeliveriesRead_Data, QueueDelivery, QueueDeliveryResolution,
-    QueueDeliveryResolved_Data, QueueDeliveryStanding, QueueResolutionRecord,
-    ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data, ResolveQueueDeliveryRejected_Data,
-    ResolverIdentity,
+    EventsRead_Data, QueueDeliveriesRead_Data, QueueDeliveryResolution, QueueDeliveryResolved_Data,
+    QueueResolutionRecord, ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data,
+    ResolveQueueDeliveryRejected_Data, ResolverIdentity,
 };
 use signal_flow::{Address, Event, FlowId, Report_Data, Response};
 
@@ -254,30 +253,7 @@ impl RecordsReports for RunningNexus {
         };
         let queue_delivery_vector = attempts
             .into_iter()
-            .filter_map(|attempt| {
-                let queue_delivery_standing = match attempt.phase {
-                    QueueDeliveryPhase::Prepared => QueueDeliveryStanding::Prepared,
-                    QueueDeliveryPhase::Uncertain(undecided) => {
-                        QueueDeliveryStanding::Uncertain(undecided)
-                    }
-                    QueueDeliveryPhase::ReceiptRecorded(_) => {
-                        QueueDeliveryStanding::ReceiptRecorded
-                    }
-                    QueueDeliveryPhase::Absent(absence) => {
-                        QueueDeliveryStanding::Absent(absence.proof)
-                    }
-                    QueueDeliveryPhase::Resolved(record) => QueueDeliveryStanding::Resolved(record),
-                    QueueDeliveryPhase::Settled(_) => return None,
-                };
-                Some(QueueDelivery {
-                    queue_attempt_id: attempt.attempt_id,
-                    flow_id: attempt.flow_id,
-                    native_session_id: attempt.thread_id,
-                    harness_kind: attempt.harness_kind,
-                    queue_evidence: attempt.queue_evidence,
-                    queue_delivery_standing,
-                })
-            })
+            .filter_map(ShowsQueueDelivery::queue_delivery)
             .collect();
         meta_signal_flow::Response::QueueDeliveriesRead(QueueDeliveriesRead_Data {
             address,

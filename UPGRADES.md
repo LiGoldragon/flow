@@ -283,7 +283,7 @@ at the first open, and drops `flow_nexus_meta_threshold_configuration`.
 - **A presentation is asked for.** Every first prompt, and queued work that
   carries the living's words (`Psyche`, `Psyches`), ends with: "End this
   turn with a presentation: a response that could fit into a book, taking
-  its form from your context modules and this prompt."
+  its form from your belief modules and this prompt."
 - **A compaction during continuous work is investigated.** A Claude
   `compact_boundary` with trigger `auto`, or a Codex `contextCompaction` no
   Compact asked for, is recorded once (`flow_nexus_compactions`), logged at

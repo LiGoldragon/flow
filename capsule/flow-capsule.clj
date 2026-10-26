@@ -2,10 +2,19 @@
 ;;
 ;; Usage: flow-capsule <flow-package> <source-root> [--keep-going] [--log <path>]
 ;;
-;; The capsule owns: the sockets under $XDG_RUNTIME_DIR/flow-testing/, the
-;; store ~/.local/state/flow-testing/flow.sema, the Herdr session
-;; flow-testing, and the seats it starts. Every process it runs gets a clean
-;; environment, so no inherited Herdr, Flow or Claude identity leaks in.
+;; The capsule owns: the runtime directory $XDG_RUNTIME_DIR/flow-testing/,
+;; which is XDG_RUNTIME_DIR for every process it runs and holds the Flow and
+;; Curriculum sockets; the state directory ~/.local/state/flow-testing/,
+;; which holds the Flow store and the Curriculum's context checkouts; the
+;; Herdr session flow-testing; its own Curriculum Nexus, built from the
+;; Curriculum revision Flow pins; and the seats it starts. Every process it
+;; runs gets a clean environment, so no inherited Herdr, Flow or Claude
+;; identity leaks in.
+;;
+;; The Curriculum is configured as the running one is: its context
+;; repositories are the origins the user's curriculum-nexus.service names,
+;; read from its unit environment (read only), each cloned fresh at main
+;; into the capsule; its records root is the source root.
 (ns flow-capsule
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
@@ -23,6 +32,11 @@
 (def state-root (str home "/.local/state/flow-testing"))
 (def store-path (str state-root "/flow.sema"))
 (def herdr-session-dir (str home "/.config/herdr/sessions/" session))
+(def curriculum-socket (str capsule-runtime "/curriculum/curriculum.sock"))
+(def curriculum-contexts (str state-root "/curriculum-context"))
+(def curriculum-unit "curriculum-nexus.service")
+(def libexec (str (fs/parent (fs/canonicalize (System/getProperty "babashka.file")))))
+(def curriculum-package (str (fs/canonicalize (fs/file libexec "curriculum"))))
 
 (def brief "Answer with one word and stop.")
 (def quaternary "{ Psyche test Quaternary }")
@@ -120,7 +134,7 @@
            "LOGNAME" (or (System/getenv "LOGNAME") (System/getenv "USER") "")
            "SHELL" (or (System/getenv "SHELL") "/bin/sh")
            "PATH" (str @package "/bin:" (System/getenv "PATH"))
-           "XDG_RUNTIME_DIR" runtime-root
+           "XDG_RUNTIME_DIR" capsule-runtime
            "LANG" (or (System/getenv "LANG") "C.UTF-8")
            "TERM" "xterm-256color"}
           extra)))
@@ -450,6 +464,55 @@
   (let [created (herdr-json "workspace" "create" "--cwd" @source-root "--label" "capsule-driver" "--no-focus")]
     (reset! driver-pane (get-in created [:result :root_pane :pane_id]))))
 
+;; ---------------------------------------------------------------- curriculum
+
+(def curriculum (atom nil))
+(def curriculum-environment (atom nil))
+
+(def context-roots
+  "Each context repository as Curriculum's environment names its directory
+  and origin."
+  [["CURRICULUM_PSYCHES_REPOSITORY_DIR" "CURRICULUM_PSYCHES_REPOSITORY_URL" "psyche-context"]
+   ["CURRICULUM_MIND_CONTEXT_DIR" "CURRICULUM_MIND_CONTEXT_URL" "mind-context"]
+   ["CURRICULUM_FIELD_CONTEXT_DIR" "CURRICULUM_FIELD_CONTEXT_URL" "field-context"]])
+
+(defn stable-curriculum-environment
+  "The running Curriculum's configuration: its unit's environment, read
+  through systemd and never written."
+  []
+  (let [{:keys [exit out err]} (run {:env (merge (clean-env) {"XDG_RUNTIME_DIR" runtime-root})}
+                                    "systemctl" "--user" "show" curriculum-unit "-p" "Environment" "--value")]
+    (when-not (zero? exit) (throw (ex-info "the running Curriculum's unit environment is unreadable" {:err err})))
+    (into {} (keep #(let [[k v] (str/split % #"=" 2)] (when v [k v])) (str/split (str/trim out) #"\s+")))))
+
+(defn start-curriculum! [log]
+  (let [stable (stable-curriculum-environment)
+        layout (get stable "CURRICULUM_CONTEXT_LAYOUT")
+        no-refresh (str (fs/which "true"))
+        env (into (clean-env {"CURRICULUM_CONTEXT_LAYOUT" layout
+                              "CURRICULUM_CONTEXT_REFRESH_PROGRAM" no-refresh
+                              "CURRICULUM_RECORDS_DIR" @source-root})
+                  (for [[dir-key _ name] context-roots] [dir-key (str curriculum-contexts "/" name)]))]
+    (fs/create-dirs curriculum-contexts)
+    (doseq [[_ url-key name] context-roots]
+      (let [url (get stable url-key)
+            {:keys [exit err]} (run {} "git" "clone" "--quiet" "--depth" "1" "--single-branch" "--branch" "main"
+                                    url (str curriculum-contexts "/" name))
+            head (str/trim (:out (run {} "git" "-C" (str curriculum-contexts "/" name) "rev-parse" "HEAD")))]
+        (when-not (zero? exit) (throw (ex-info (str "cloning " url " failed") {:err err})))
+        (println (str "curriculum context " name " | " url " main " head))))
+    (reset! curriculum-environment env)
+    (reset! curriculum (p/process [(str curriculum-package "/bin/curriculum-nexus")]
+                                  {:env env :dir @source-root :out :append :out-file (fs/file log)
+                                   :err :append :err-file (fs/file log) :in ""}))
+    (when-not (watch 30 #(or (fs/exists? curriculum-socket) (not (p/alive? @curriculum))))
+      (throw (ex-info "the Curriculum Nexus opened no socket" {})))
+    (when-not (p/alive? @curriculum)
+      (throw (ex-info "the Curriculum Nexus exited" {:log (str/trim (slurp log))})))
+    (let [probe (reply-text (run {:env env} (str curriculum-package "/bin/curriculum") "ResolveSkills.[ spirit:core intent:models ]"))]
+      (println (str "curriculum | " curriculum-package " | layout " layout ", refresh " no-refresh
+                    ", records " @source-root " | socket " curriculum-socket " | ResolveSkills -> " probe)))))
+
 (defn start-text []
   (str "{ «" ordinary-socket "» «" meta-socket "» «" store-path "» None }"))
 
@@ -486,10 +549,11 @@
       [reply exit])))
 
 (defn configure! [log]
-  (let [file (fs/file (fs/parent (fs/canonicalize (System/getProperty "babashka.file"))) "configure.datom")]
+  (let [file (fs/file libexec "configure.datom")]
     (doseq [line (str/split-lines (slurp file))
             :when (and (not (str/blank? line)) (not (str/starts-with? line ";")))]
-      (let [datom (-> line (str/replace "@SOURCE_ROOT@" @source-root) (str/replace "@CAPSULE_RUNTIME@" capsule-runtime))
+      (let [datom (-> line (str/replace "@SOURCE_ROOT@" @source-root) (str/replace "@CAPSULE_RUNTIME@" capsule-runtime)
+                      (str/replace "@CURRICULUM_SOCKET@" curriculum-socket))
             [reply exit] (configure-one! datom log)
             family (second (re-find #"^Configure\.([A-Za-z]+)" datom))
             ok (str/starts-with? reply "Configured.")]
@@ -516,6 +580,8 @@
           :let [cmd (try (str/replace (slurp (str dir "/cmdline")) "\u0000" " ") (catch Exception _ ""))
                 env (try (slurp (str dir "/environ")) (catch Exception _ ""))]
           :when (or (str/includes? cmd capsule-runtime) (str/includes? cmd store-path)
+                    (str/includes? cmd curriculum-package)
+                    (str/includes? env (str "XDG_RUNTIME_DIR=" capsule-runtime "\u0000"))
                     (str/includes? cmd (str "--session " session))
                     (str/includes? env (str "FLOW_SOCKET=" ordinary-socket))
                     (str/includes? env (str "HERDR_SESSION=" session)))]
@@ -540,6 +606,9 @@
     (when-let [n @nexus]
       (p/destroy n)
       (swap! steps conj (str "Nexus stopped, exit " (:exit (deref n 20000 {:exit "still running"})))))
+    (when-let [c @curriculum]
+      (p/destroy c)
+      (swap! steps conj (str "Curriculum Nexus stopped, exit " (:exit (deref c 20000 {:exit "still running"})))))
     (when-let [h @herdr-server]
       (herdr "server" "stop")
       (when (= ::running (deref h 10000 ::running)) (p/destroy-tree h))
@@ -557,12 +626,17 @@
                      :processes (vec (or (watch 20 #(let [left (capsule-processes)] (when (empty? left) []))) (capsule-processes)))
                      :store (fs/exists? state-root)
                      :sockets (fs/exists? capsule-runtime)
+                     :curriculum-process (boolean (some-> @curriculum p/alive?))
+                     :curriculum-store (fs/exists? curriculum-contexts)
+                     :curriculum-socket (fs/exists? curriculum-socket)
                      :claims (vec (filter (fn [m] (some #(str/includes? m (str "." % ".flow-id")) @seen-flows)) (flow-markers)))}
           clean (and (not (:herdr-session remaining)) (empty? (:processes remaining)) (not (:store remaining))
-                     (not (:sockets remaining)) (empty? (:claims remaining)))]
+                     (not (:sockets remaining)) (empty? (:claims remaining))
+                     (not (:curriculum-process remaining)) (not (:curriculum-store remaining))
+                     (not (:curriculum-socket remaining)))]
       (print-line {:name "13 teardown" :reply (pr-str remaining) :pass clean
                    :ms (- (System/currentTimeMillis) started)
-                   :watched "Herdr session list; /proc cmdline and environ, waiting up to 20 s for capsule processes to end; store, sockets, flow-id claims"})
+                   :watched "Herdr session list; /proc cmdline and environ, waiting up to 20 s for capsule processes to end; store, sockets, flow-id claims; the Curriculum Nexus process, its context checkouts and socket"})
       clean)))
 
 (defn -main [& args]
@@ -574,9 +648,11 @@
     (let [log (or (second (drop-while #(not= % "--log") options)) (str state-root "/nexus.log"))
           wall (System/currentTimeMillis)
           passed (atom true)]
-      (println (str "flow-capsule " @package " | " (str/trim (:out (run {} (str @package "/bin/flow-nexus") "--version")))))
+      (println (str "flow-capsule " @package " | " (str/trim (:out (run {} (str @package "/bin/flow-nexus") "--version")))
+                    " | curriculum " curriculum-package))
       (try
         (start-capsule! log)
+        (start-curriculum! log)
         (configure! log)
         (start-nexus! log)
         (println (str "configuration | " (flow-meta "Configuration")))

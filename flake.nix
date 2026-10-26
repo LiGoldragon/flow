@@ -6,6 +6,12 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     crane.url = "github:ipetkov/crane";
+    # The Curriculum whose schema Flow pins (crates/flow-nexus/ethos/
+    # curriculum.ethos): the capsule runs its own Curriculum Nexus from it.
+    curriculum = {
+      url = "github:LiGoldragon/Curriculum/4493d1ec8737daf770824b4ec1e72ad6004ced8f";
+      flake = false;
+    };
   };
 
   outputs =
@@ -14,6 +20,7 @@
       nixpkgs,
       fenix,
       crane,
+      curriculum,
     }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
@@ -162,11 +169,22 @@
               '';
             }
           );
+          # The Curriculum Nexus and CLI of the Curriculum revision Flow
+          # pins, as the capsule runs them.
+          curriculum = context.craneLib.buildPackage {
+            pname = "curriculum";
+            version = "0.1.0";
+            src = curriculum;
+            strictDeps = true;
+            cargoExtraArgs = "--locked --features datom --bins";
+            doCheck = false;
+          };
           # The capsule test: a Babashka script and the Configure datoms it
-          # applies, kept side by side. It builds nothing; it is given the
-          # flow package to run.
+          # applies, kept side by side, with the Curriculum it runs. It is
+          # given the flow package to run.
           flow-capsule = context.pkgs.runCommand "flow-capsule" { } ''
             mkdir -p "$out/libexec/flow-capsule" "$out/bin"
+            ln -s ${self.packages.${system}.curriculum} "$out/libexec/flow-capsule/curriculum"
             {
               echo "#!${context.pkgs.babashka}/bin/bb"
               cat ${./capsule/flow-capsule.clj}

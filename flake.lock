@@ -15,6 +15,23 @@
         "type": "github"
       }
     },
+    "curriculum": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792793221,
+        "narHash": "sha256-66bhenOr+Fa3Xx5ypUGzdAAjEWHqc+ptXxTQlVNweJ0=",
+        "owner": "LiGoldragon",
+        "repo": "Curriculum",
+        "rev": "4493d1ec8737daf770824b4ec1e72ad6004ced8f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LiGoldragon",
+        "repo": "Curriculum",
+        "rev": "4493d1ec8737daf770824b4ec1e72ad6004ced8f",
+        "type": "github"
+      }
+    },
     "fenix": {
       "inputs": {
         "nixpkgs": [
@@ -55,6 +72,7 @@
     "root": {
       "inputs": {
         "crane": "crane",
+        "curriculum": "curriculum",
         "fenix": "fenix",
         "nixpkgs": "nixpkgs"
       }

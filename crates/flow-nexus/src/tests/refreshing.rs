@@ -6,7 +6,9 @@
 //! request. A Launch addressed to an Awake metaflow is such a refresh. While
 //! the metaflow is held, nothing reaches the ending flow and a Send queues.
 
-use super::refresh_and_compaction::{declare_seat, owe_staged_successor, staged_refresh_successor};
+use super::refresh_and_compaction::{
+    SUCCESSOR_REQUEST, declare_seat, owe_staged_successor, staged_refresh_successor,
+};
 use super::waking::{
     CLAUDE_SEAT, ReadsFreshWorld, WakesFreshClaude, address, claude_agent, claude_seat,
     launched_claude_ended_by,
@@ -17,8 +19,9 @@ use super::{
 };
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::sending::SendsRequests;
+use crate::store::context::JudgesThreshold;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
-use crate::store::successor::OwesSuccessors;
+use crate::store::successor::{OwesSuccessors, SuccessionCause, SuccessorIntent};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRows};
 use crate::waking::{HoldsWakingMetaflows, SleepsAndWakesSeats};
 use crate::{Dispatches, DispatchesSerially};
@@ -773,4 +776,89 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
         "a refused successor is not owed"
     );
     assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+}
+
+/// A Launch-ordered Replace owes its successor until it is confirmed: the
+/// intent is recorded before the launch and given with the confirmation.
+#[test]
+fn a_launch_ordered_replace_owes_its_successor_until_it_is_confirmed() {
+    let (fixture, profile) = refreshable_with_successor(Availability::OnDemand, Delivery::Queue);
+    fixture
+        .nexus
+        .store
+        .forget_successor(&seat_address())
+        .unwrap();
+    let replaced = fixture.nexus.dispatch(Query::Replace(profile));
+    assert!(
+        matches!(&replaced, Response::Replaced(replaced) if replaced.flow_id == CLAUDE_SEAT),
+        "{replaced:?}"
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .successor_intent(&seat_address())
+            .unwrap(),
+        None,
+        "the successor owed is given"
+    );
+}
+
+/// A successor an earlier Nexus owed after a Refresh ordered from outside,
+/// or after a Replace, and did not see confirmed is started when the Nexus
+/// starts, though the predecessor is nowhere near a refresh threshold: it
+/// is confirmed before the predecessor is reaped, the metaflow is Awake as
+/// it, and nothing is typed into the predecessor.
+#[test]
+fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
+    for cause in [SuccessionCause::Ordered, SuccessionCause::Replace] {
+        let (fixture, _) = refreshable_with_successor(Availability::Required, Delivery::Queue);
+        fixture
+            .nexus
+            .store
+            .owe_successor(SuccessorIntent {
+                address: seat_address(),
+                predecessor: CLAUDE_SEAT.into(),
+                cause: cause.clone(),
+                launch_request_id: SUCCESSOR_REQUEST.into(),
+            })
+            .expect("successor owed");
+        assert!(
+            !fixture.nexus.store.past_threshold(CLAUDE_SEAT).unwrap(),
+            "the predecessor is not past any threshold"
+        );
+
+        fixture.nexus.recover_wakes();
+
+        let metaflow = stored(&fixture);
+        assert_eq!(
+            metaflow.state,
+            State::Awake("908786".into()),
+            "the successor is Awake: {cause:?}"
+        );
+        assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()], "{cause:?}");
+        assert_eq!(lifecycle(&fixture), FlowLifecycle::Stopped, "{cause:?}");
+        assert!(
+            fs::read_to_string(fixture.directory.path().join("herdr-calls.log"))
+                .unwrap_or_default()
+                .contains("pane close w1:p3"),
+            "the predecessor's pane is closed: {cause:?}"
+        );
+        assert!(
+            typing_calls(&fixture)
+                .iter()
+                .all(|call| !call.contains("w1:p3")),
+            "nothing is typed into the predecessor: {cause:?}"
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .successor_intent(&seat_address())
+                .unwrap(),
+            None,
+            "the successor owed is given: {cause:?}"
+        );
+        assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+    }
 }

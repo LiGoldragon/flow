@@ -2,10 +2,12 @@
 //! always has a flow: when its flow is refreshed, or ends without Flow or
 //! an owner ending it (its pane gone), Flow records that the metaflow is
 //! owed a successor, in the write that ends the flow or before a refresh
-//! starts the successor, and starts it with no queued request needed. The
-//! intent goes in the write in which a flow takes the metaflow's Address,
-//! so a Nexus that dies between the two finds the intent at its next start
-//! and starts the successor then.
+//! starts the successor, and starts it with no queued request needed. A
+//! Refresh ordered from outside and a Replace owe theirs the same way,
+//! before the successor starts. The intent goes in the write in which a
+//! flow takes the metaflow's Address, which is the successor's
+//! confirmation, so a Nexus that dies between the two finds the intent at
+//! its next start and starts the successor then.
 //!
 //! The rows live in their own table, so a store written before successors
 //! were owed opens with the table added and holding none.
@@ -31,6 +33,11 @@ pub enum SuccessionCause {
     Refresh,
     /// Its flow ended without Flow or an owner ending it: its pane gone.
     Exit,
+    /// A Refresh ordered from outside ends its flow, whatever its context.
+    Ordered,
+    /// A Replace, as a Launch addressed to an Awake metaflow names one, ends
+    /// its flow; the successor is the Replace's own launch.
+    Replace,
 }
 
 /// A successor owed to the metaflow at `address`, after `predecessor`. A

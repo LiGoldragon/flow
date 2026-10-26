@@ -677,8 +677,30 @@ trait WakesInParts {
     /// Replaces a resting seat owed a successor. The caller has released
     /// the dispatch gate and holds the metaflow's waking lease, so no wake
     /// or drain runs meanwhile: the successor is started and confirmed
-    /// through Replace before the predecessor is stopped and closed.
-    fn refresh_successor_first(&self, flow_id: &str, metaflow: &Metaflow) -> AtStop;
+    /// through Replace before the predecessor is stopped and closed. The
+    /// successor is owed for `cause` until it is confirmed.
+    fn refresh_successor_first(
+        &self,
+        flow_id: &str,
+        metaflow: &Metaflow,
+        cause: SuccessionCause,
+    ) -> AtStop;
+    /// Starts a successor an earlier Nexus owed after a Refresh ordered from
+    /// outside or a Replace and did not see confirmed, its predecessor still
+    /// the flow the metaflow is Awake as: under the metaflow's lock, whatever
+    /// the predecessor's context, the Refresh's successor is started as the
+    /// refresh started it and the Replace's resumes its own launch. A launch
+    /// already refused is not resumed; a new one is started in its place. A
+    /// Replace whose launch was never recorded had started nothing, and is
+    /// forgotten.
+    fn take_up_owed(&self, intent: SuccessorIntent) -> AtStop;
+    /// Settles the successor owed at `address` by its Replace's answer: a
+    /// launch that has not settled, or a reap refused once the successor
+    /// was confirmed, stays owed under the same request; any other answer
+    /// forgets it, so the next refresh owes a new launch.
+    fn settle_owed(&self, address: &Address, response: &Response);
+    /// Whether the launch request has settled refused.
+    fn launch_refused(&self, launch_request_id: &str) -> bool;
 }
 
 pub(crate) trait ReadsClaudeDelivery {
@@ -1299,25 +1321,39 @@ impl SleepsAndWakesSeats for RunningNexus {
 
     fn recover_wakes(&self) {
         self.recover_deliveries();
-        // A refresh's successor an earlier Nexus owed and did not see
-        // confirmed is taken up again: its predecessor, still Awake and
-        // resting, is refreshed under the same launch request. An intent a
-        // flow already took the Address for is forgotten. An Asleep
-        // metaflow owed one is due a wake, below.
-        let refreshes = {
+        // A successor an earlier Nexus owed and did not see confirmed is
+        // taken up again while its predecessor is still the flow the
+        // metaflow is Awake as. A threshold refresh's predecessor is
+        // refreshed at its rest, under the same launch request. A Refresh
+        // ordered from outside, or a Replace, has its successor started
+        // whatever the predecessor's context. An intent another flow took
+        // the Address for is forgotten, unless that flow's own launch is
+        // still unconfirmed. An Asleep metaflow owed one is due a wake,
+        // below.
+        let (refreshes, owed) = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut refreshes = Vec::new();
+            let mut owed = Vec::new();
             for intent in self.store.successor_intents().unwrap_or_default() {
                 match self.store.metaflow(&intent.address) {
                     Ok(Some(metaflow)) => match metaflow.state {
                         flow_ethos::State::Awake(current) if current == intent.predecessor => {
-                            refreshes.push(current);
+                            match intent.cause {
+                                SuccessionCause::Refresh | SuccessionCause::Exit => {
+                                    refreshes.push(current);
+                                }
+                                SuccessionCause::Ordered | SuccessionCause::Replace => {
+                                    owed.push(intent);
+                                }
+                            }
                         }
-                        flow_ethos::State::Awake(_) => {
-                            let _ = self.store.forget_successor(&intent.address);
+                        flow_ethos::State::Awake(current) => {
+                            if !matches!(self.store.address_hold(&current), Ok(Some(_))) {
+                                let _ = self.store.forget_successor(&intent.address);
+                            }
                         }
                         flow_ethos::State::Asleep => {}
                     },
@@ -1327,10 +1363,27 @@ impl SleepsAndWakesSeats for RunningNexus {
                     Err(_) => {}
                 }
             }
-            refreshes
+            (refreshes, owed)
         };
         for flow_id in refreshes {
             self.settle_stopped(&flow_id);
+        }
+        for intent in owed {
+            let predecessor = intent.predecessor.clone();
+            match self.take_up_owed(intent) {
+                AtStop::Refreshed(address) => {
+                    eprintln!(
+                        "flow-nexus: flow {predecessor} replaced by the successor it was owed"
+                    );
+                    // What queued meanwhile is handed to the successor.
+                    self.wake_due(address);
+                }
+                kept => {
+                    eprintln!(
+                        "flow-nexus: successor owed after {predecessor} not started: {kept:?}"
+                    );
+                }
+            }
         }
         let due = {
             let _turn = self
@@ -1465,7 +1518,8 @@ impl RefreshesMetaflows for RunningNexus {
             // Replace takes the gate for its own steps; the lock keeps any
             // wake, drain or delivery of the metaflow out meanwhile.
             drop(turn);
-            let replaced = self.refresh_successor_first(&flow_id, &metaflow);
+            let replaced =
+                self.refresh_successor_first(&flow_id, &metaflow, SuccessionCause::Ordered);
             drop(lock);
             self.wake_deferred();
             return match replaced {
@@ -1520,7 +1574,7 @@ impl RefreshesMetaflows for RunningNexus {
     }
 
     fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response {
-        use signal_flow::ReplaceRejection;
+        use signal_flow::{ReplaceRejection, StartRejection};
         let address = profile.address.clone();
         let response = {
             let _turn = self
@@ -1530,7 +1584,25 @@ impl RefreshesMetaflows for RunningNexus {
             let Some(lock) = self.waking.hold(&address) else {
                 return Response::ReplaceRejected(ReplaceRejection::Locked);
             };
+            // The successor is owed until it is confirmed, so a Nexus that
+            // stops before then starts it at its next start.
+            if let Some(predecessor) = profile.flow_id_option.clone()
+                && self
+                    .store
+                    .owe_successor(SuccessorIntent {
+                        address: address.clone(),
+                        predecessor,
+                        cause: SuccessionCause::Replace,
+                        launch_request_id: profile.launch_request_id.clone(),
+                    })
+                    .is_err()
+            {
+                return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::LaunchPersistenceRefused,
+                ));
+            }
             let response = self.replace(profile, origin);
+            self.settle_owed(&address, &response);
             drop(lock);
             response
         };
@@ -2097,7 +2169,12 @@ impl WakesInParts for RunningNexus {
         Ok(())
     }
 
-    fn refresh_successor_first(&self, flow_id: &str, metaflow: &Metaflow) -> AtStop {
+    fn refresh_successor_first(
+        &self,
+        flow_id: &str,
+        metaflow: &Metaflow,
+        cause: SuccessionCause,
+    ) -> AtStop {
         let address = metaflow.address.clone();
         // The successor's context is the metaflow's declaration, else what
         // the predecessor's own launch named.
@@ -2112,20 +2189,37 @@ impl WakesInParts for RunningNexus {
             Ok(None) | Err(_) => return AtStop::Kept(KeptAtStop::RefreshUnplaceable),
         };
         // The intent names the replacement's launch request, so a Nexus
-        // that takes it up again resumes that launch.
+        // that takes it up again resumes that launch; a launch already
+        // refused is not resumed, and a new one is owed in its place.
         let launch_request_id = match self.store.successor_intent(&address) {
             Ok(Some(intent))
                 if intent.predecessor == flow_id
-                    && intent.cause == SuccessionCause::Refresh
-                    && !intent.launch_request_id.is_empty() =>
+                    && matches!(
+                        intent.cause,
+                        SuccessionCause::Refresh | SuccessionCause::Ordered
+                    )
+                    && !intent.launch_request_id.is_empty()
+                    && !self.launch_refused(&intent.launch_request_id) =>
             {
+                // The successor is owed now for this refresh's cause.
+                if intent.cause != cause
+                    && self
+                        .store
+                        .owe_successor(SuccessorIntent {
+                            cause,
+                            ..intent.clone()
+                        })
+                        .is_err()
+                {
+                    return AtStop::Kept(KeptAtStop::StoreUnreadable);
+                }
                 intent.launch_request_id
             }
             Ok(_) => {
                 let intent = SuccessorIntent {
                     address: address.clone(),
                     predecessor: flow_id.to_owned(),
-                    cause: SuccessionCause::Refresh,
+                    cause,
                     launch_request_id: crate::sending::MintsId::minted_id("refresh"),
                 };
                 if self.store.owe_successor(intent.clone()).is_err() {
@@ -2157,21 +2251,94 @@ impl WakesInParts for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.replace(profile, Origin::Unbound)
         };
+        self.settle_owed(&address, &response);
         match response {
             Response::Replaced(_) => AtStop::Refreshed(address),
-            // A launch that has not settled stays owed under the same
-            // request; a refused one is forgotten, so the next rest owes a
-            // new launch.
+            response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
+        }
+    }
+
+    fn settle_owed(&self, address: &Address, response: &Response) {
+        match response {
             Response::LaunchPending(_)
             | Response::StartAmbiguous(_)
-            | Response::ReplaceRejected(signal_flow::ReplaceRejection::ReapRefused(_)) => {
-                AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response)))
-            }
-            response => {
-                let _ = self.store.forget_successor(&address);
-                AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response)))
+            | Response::ReplaceRejected(signal_flow::ReplaceRejection::ReapRefused(_)) => {}
+            _ => {
+                let _ = self.store.forget_successor(address);
             }
         }
+    }
+
+    fn launch_refused(&self, launch_request_id: &str) -> bool {
+        use crate::store::{LaunchOutcome, RecordsLaunchOutcome};
+        matches!(
+            self.store.launch_outcome(launch_request_id),
+            Ok(Some(
+                LaunchOutcome::StartRejected(_) | LaunchOutcome::ReplaceRejected(_)
+            ))
+        )
+    }
+
+    fn take_up_owed(&self, intent: SuccessorIntent) -> AtStop {
+        let address = intent.address.clone();
+        let Some(lock) = self.waking.hold(&address) else {
+            return AtStop::Kept(KeptAtStop::Waking);
+        };
+        // The owed flow is still current: the intent was read under the
+        // gate, and the lock keeps every wake and refresh out since.
+        let metaflow = match self.store.metaflow(&address) {
+            Ok(Some(metaflow))
+                if metaflow.state == flow_ethos::State::Awake(intent.predecessor.clone()) =>
+            {
+                metaflow
+            }
+            Ok(_) => return AtStop::Kept(KeptAtStop::NotAwake),
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
+        let taken = match intent.cause {
+            SuccessionCause::Replace => {
+                let attempt = match self.store.launch_attempt(&intent.launch_request_id) {
+                    Ok(Some(attempt)) => attempt,
+                    // A Replace whose launch was never recorded started
+                    // nothing: its predecessor was never touched.
+                    Ok(None) => {
+                        let _ = self.store.forget_successor(&address);
+                        return AtStop::Kept(KeptAtStop::Unconfirmed);
+                    }
+                    Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+                };
+                let mut profile = attempt.launch_profile;
+                if self.launch_refused(&intent.launch_request_id) {
+                    profile.launch_request_id = crate::sending::MintsId::minted_id("replace");
+                    if self
+                        .store
+                        .owe_successor(SuccessorIntent {
+                            launch_request_id: profile.launch_request_id.clone(),
+                            ..intent
+                        })
+                        .is_err()
+                    {
+                        return AtStop::Kept(KeptAtStop::StoreUnreadable);
+                    }
+                }
+                let response = {
+                    let _turn = self
+                        .dispatch_gate
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    self.replace(profile, attempt.origin)
+                };
+                self.settle_owed(&address, &response);
+                match response {
+                    Response::Replaced(_) => AtStop::Refreshed(address),
+                    response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
+                }
+            }
+            cause => self.refresh_successor_first(&intent.predecessor, &metaflow, cause),
+        };
+        drop(lock);
+        self.wake_deferred();
+        taken
     }
 
     fn settle_rested(&self, flow_id: &str) -> AtStop {
@@ -2281,7 +2448,8 @@ impl WakesInParts for RunningNexus {
                 // Replace takes the gate for its own steps; the waking lease
                 // keeps any wake or drain of the metaflow out meanwhile.
                 drop(turn);
-                let refreshed = self.refresh_successor_first(flow_id, &metaflow);
+                let refreshed =
+                    self.refresh_successor_first(flow_id, &metaflow, SuccessionCause::Refresh);
                 drop(refreshing);
                 self.wake_deferred();
                 return refreshed;

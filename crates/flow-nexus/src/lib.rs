@@ -384,8 +384,11 @@ impl Dispatches for RunningNexus {
             // harness running the flow's own session or none, is closed in
             // the same event, under its lease. A close Herdr refuses
             // answers CloseRefused and records nothing: the flow is not
-            // retired while its pane stays. Privileged, because it changes
-            // what Flow holds of a flow without that flow acting.
+            // retired while its pane stays. The flow a Maintained metaflow
+            // is Awake as is not retired: Retire answers Maintained and
+            // changes nothing, and the declaration's continuity is changed
+            // first. Privileged, because it changes what Flow holds of a
+            // flow without that flow acting.
             meta_signal_flow::Query::Retire(flow_id) => {
                 let node = match self.store.flow_node(&flow_id) {
                     Ok(Some(node)) => node,
@@ -404,6 +407,28 @@ impl Dispatches for RunningNexus {
                     return meta_signal_flow::Response::RetireRejected(
                         meta_signal_flow::RetireRejection::AlreadyGone,
                     );
+                }
+                {
+                    use crate::store::metaflow::SleepsMetaflows;
+                    use crate::store::successor::ReadsContinuity;
+                    let maintained = self.store.metaflow_awake_as(&flow_id).and_then(|awake| {
+                        awake
+                            .map(|metaflow| self.store.continuity(&metaflow.address))
+                            .transpose()
+                    });
+                    match maintained {
+                        Ok(Some(meta_signal_flow::Continuity::Maintained)) => {
+                            return meta_signal_flow::Response::RetireRejected(
+                                meta_signal_flow::RetireRejection::Maintained,
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(_) => {
+                            return meta_signal_flow::Response::RetireRejected(
+                                meta_signal_flow::RetireRejection::StoreRefused,
+                            );
+                        }
+                    }
                 }
                 if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection
                     && matches!(

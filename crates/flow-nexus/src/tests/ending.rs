@@ -101,6 +101,58 @@ fn after_retire_the_flow_s_pane_is_closed() {
     assert!(fixture.typed().is_none(), "nothing is typed");
 }
 
+/// Declares the Secondary address the seat is Awake at with `continuity`.
+fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Continuity) {
+    use crate::store::ManagesMetaflowState;
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            meta_signal_flow::ConfigureMetaflow {
+                address: address(Layer::Secondary),
+                system_modules: vec!["spirit:core".into(), "intent:flow".into()],
+                user_modules: vec![],
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                continuity,
+                purpose: String::new(),
+                records: vec![],
+            },
+        ]))
+        .expect("metaflow declared");
+}
+
+/// The flow a Maintained metaflow is Awake as is not retired: Retire
+/// answers Maintained and changes nothing, its pane open and the metaflow
+/// Awake as it. Once its declaration is OnDemand, the same Retire retires it.
+#[test]
+fn retire_of_a_maintained_metaflow_s_flow_is_refused_and_changes_nothing() {
+    let fixture = NexusFixture::new();
+    awake_seat(&fixture);
+    declare_secondary(&fixture, meta_signal_flow::Continuity::Maintained);
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into())),
+        meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::Maintained)
+    );
+    assert!(lifecycle(&fixture).is_live(), "the flow stays live");
+    assert_eq!(state(&fixture), State::Awake(CLAUDE_SEAT.into()));
+    assert!(!closed(&fixture), "its pane is not closed");
+    assert!(fixture.typed().is_none(), "nothing is typed");
+
+    declare_secondary(&fixture, meta_signal_flow::Continuity::OnDemand);
+    let meta_signal_flow::Response::FlowRetired(retired) = fixture
+        .nexus
+        .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into()))
+    else {
+        panic!("an OnDemand metaflow's flow is retired")
+    };
+    assert_eq!(retired.flow_lifecycle, FlowLifecycle::Retired);
+    assert!(closed(&fixture), "the retired flow's pane is closed");
+}
+
 /// A flow whose own session end its hook reports is recorded Exited, and
 /// its pane, still there, is closed in the same event.
 #[test]

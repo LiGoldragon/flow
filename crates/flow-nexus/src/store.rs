@@ -2301,6 +2301,32 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(7)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v7")
+    }
+}
+
+/// An outcome as Flow 0.35.22 to 0.39 archived it, its rejections
+/// signal-flow 30's: before a Start could be refused for its topic or a
+/// missing record, and a Replace for a held metaflow. This shape is read by
+/// the v6-to-v7 family upgrade, and every older shape is carried through it.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcomeV6 {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcomeV6,
+}
+
+impl EngineRecord for StoredLaunchOutcomeV6 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchOutcomeV6 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(6)
     }
 
@@ -2309,9 +2335,132 @@ impl MemoryDefinition for StoredLaunchOutcome {
     }
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LaunchOutcomeV6 {
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
+    StartRejected(StartRejectionV30),
+    ReplaceRejected(ReplaceRejectionV30),
+}
+
+/// A context refusal as signal-flow 30.0.0 and every earlier one archived
+/// it, before RecordMissing was placed after ModuleMissing: SystemTooLarge
+/// and ModuleTooLarge archived one place earlier.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ContextRefusalV30 {
+    ComposerUnavailable,
+    ComposerRejected,
+    MetaflowMismatch,
+    PayloadMismatch,
+    ModuleMissing,
+    SystemTooLarge,
+    ModuleTooLarge,
+}
+
+/// A start rejection as signal-flow 30.0.0 archived it, before
+/// TopicRefused, its context refusal before RecordMissing.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum StartRejectionV30 {
+    CompositionRefused,
+    LaunchRequestConflict,
+    LaunchPersistenceRefused,
+    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
+    BindingRefused(signal_flow::BindingRefusal),
+    RegistrationRefused(signal_flow::RegistrationRefusal),
+    IntentPersistenceRefused,
+    OriginUnavailable,
+    AddressAwake,
+    ContextRefused(ContextRefusalV30),
+    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
+    ModelRefused(signal_flow::ModelRefusal),
+    NoSecondary,
+    Undeclared,
+}
+
+/// A replace rejection as signal-flow 30.0.0 archived it, before Locked.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ReplaceRejectionV30 {
+    PredecessorAbsent,
+    UnknownPredecessor,
+    PredecessorStopped,
+    LaunchRefused(StartRejectionV30),
+    ReapRefused(signal_flow::StopRejection),
+}
+
+impl From<ContextRefusalV30> for signal_flow::ContextRefusal {
+    fn from(refusal: ContextRefusalV30) -> Self {
+        match refusal {
+            ContextRefusalV30::ComposerUnavailable => Self::ComposerUnavailable,
+            ContextRefusalV30::ComposerRejected => Self::ComposerRejected,
+            ContextRefusalV30::MetaflowMismatch => Self::MetaflowMismatch,
+            ContextRefusalV30::PayloadMismatch => Self::PayloadMismatch,
+            ContextRefusalV30::ModuleMissing => Self::ModuleMissing,
+            ContextRefusalV30::SystemTooLarge => Self::SystemTooLarge,
+            ContextRefusalV30::ModuleTooLarge => Self::ModuleTooLarge,
+        }
+    }
+}
+
+impl From<StartRejectionV30> for StartRejection {
+    fn from(rejection: StartRejectionV30) -> Self {
+        match rejection {
+            StartRejectionV30::CompositionRefused => Self::CompositionRefused,
+            StartRejectionV30::LaunchRequestConflict => Self::LaunchRequestConflict,
+            StartRejectionV30::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
+            StartRejectionV30::NativeLaunchRefused(refusal) => Self::NativeLaunchRefused(refusal),
+            StartRejectionV30::BindingRefused(refusal) => Self::BindingRefused(refusal),
+            StartRejectionV30::RegistrationRefused(refusal) => Self::RegistrationRefused(refusal),
+            StartRejectionV30::IntentPersistenceRefused => Self::IntentPersistenceRefused,
+            StartRejectionV30::OriginUnavailable => Self::OriginUnavailable,
+            StartRejectionV30::AddressAwake => Self::AddressAwake,
+            StartRejectionV30::ContextRefused(refusal) => Self::ContextRefused(refusal.into()),
+            StartRejectionV30::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+            StartRejectionV30::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
+            StartRejectionV30::ModelRefused(refusal) => Self::ModelRefused(refusal),
+            StartRejectionV30::NoSecondary => Self::NoSecondary,
+            StartRejectionV30::Undeclared => Self::Undeclared,
+        }
+    }
+}
+
+impl From<ReplaceRejectionV30> for ReplaceRejection {
+    fn from(rejection: ReplaceRejectionV30) -> Self {
+        match rejection {
+            ReplaceRejectionV30::PredecessorAbsent => Self::PredecessorAbsent,
+            ReplaceRejectionV30::UnknownPredecessor => Self::UnknownPredecessor,
+            ReplaceRejectionV30::PredecessorStopped => Self::PredecessorStopped,
+            ReplaceRejectionV30::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
+            ReplaceRejectionV30::ReapRefused(rejection) => Self::ReapRefused(rejection),
+        }
+    }
+}
+
+impl From<LaunchOutcomeV6> for LaunchOutcome {
+    fn from(outcome: LaunchOutcomeV6) -> Self {
+        match outcome {
+            LaunchOutcomeV6::Started(launched) => Self::Started(launched),
+            LaunchOutcomeV6::Replaced(replaced) => Self::Replaced(replaced),
+            LaunchOutcomeV6::StartRejected(rejection) => Self::StartRejected(rejection.into()),
+            LaunchOutcomeV6::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
+        }
+    }
+}
+
+impl UpgradeFrom<StoredLaunchOutcomeV6> for StoredLaunchOutcome {
+    type Refusal = EndedAddressOutcome;
+
+    fn upgrade_from(previous: StoredLaunchOutcomeV6) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            launch_request_id: previous.launch_request_id,
+            launch_outcome: previous.launch_outcome.into(),
+        })
+    }
+}
+
 /// An outcome as Flow 0.35.6 to 0.35.21 archived it, its rejections
 /// signal-flow 22's, when a Start could be refused for an ended Address.
-/// This shape is read by the v5-to-v6 family upgrade, and every older
+/// This shape is read by the v5-to-v7 family upgrade, and every older
 /// shape is carried through it.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 struct StoredLaunchOutcomeV5 {
@@ -2357,7 +2506,7 @@ enum StartRejectionV22 {
     OriginUnavailable,
     AddressAwake,
     AddressEnded,
-    ContextRefused(signal_flow::ContextRefusal),
+    ContextRefused(ContextRefusalV30),
     LeaveOutRefused(signal_flow::LeaveOutRefusal),
     HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
     ModelRefused(signal_flow::ModelRefusal),
@@ -2380,7 +2529,7 @@ enum ReplaceRejectionV22 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EndedAddressOutcome;
 
-impl TryFrom<StartRejectionV22> for StartRejection {
+impl TryFrom<StartRejectionV22> for StartRejectionV30 {
     type Error = EndedAddressOutcome;
 
     fn try_from(rejection: StartRejectionV22) -> Result<Self, Self::Error> {
@@ -2403,7 +2552,7 @@ impl TryFrom<StartRejectionV22> for StartRejection {
     }
 }
 
-impl TryFrom<ReplaceRejectionV22> for ReplaceRejection {
+impl TryFrom<ReplaceRejectionV22> for ReplaceRejectionV30 {
     type Error = EndedAddressOutcome;
 
     fn try_from(rejection: ReplaceRejectionV22) -> Result<Self, Self::Error> {
@@ -2419,7 +2568,7 @@ impl TryFrom<ReplaceRejectionV22> for ReplaceRejection {
     }
 }
 
-impl TryFrom<LaunchOutcomeV5> for LaunchOutcome {
+impl TryFrom<LaunchOutcomeV5> for LaunchOutcomeV6 {
     type Error = EndedAddressOutcome;
 
     fn try_from(outcome: LaunchOutcomeV5) -> Result<Self, Self::Error> {
@@ -2434,16 +2583,17 @@ impl TryFrom<LaunchOutcomeV5> for LaunchOutcome {
     }
 }
 
-/// Every older outcome is carried as a v5 one, then into the current shape.
+/// Every older outcome is carried as a v5 one, then as a v6 one, then into
+/// the current shape.
 trait UpgradesThroughV5: Into<LaunchOutcomeV5> {
     fn stored(
         launch_request_id: String,
         outcome: Self,
     ) -> Decision<StoredLaunchOutcome, EndedAddressOutcome> {
-        match LaunchOutcome::try_from(outcome.into()) {
+        match LaunchOutcomeV6::try_from(outcome.into()) {
             Ok(launch_outcome) => Decision::Ready(StoredLaunchOutcome {
                 launch_request_id,
-                launch_outcome,
+                launch_outcome: launch_outcome.into(),
             }),
             Err(refusal) => Decision::Refused(refusal),
         }
@@ -2510,7 +2660,7 @@ enum StartRejectionV18 {
     OriginUnavailable,
     AddressAwake,
     AddressEnded,
-    ContextRefused(signal_flow::ContextRefusal),
+    ContextRefused(ContextRefusalV30),
     LeaveOutRefused(signal_flow::LeaveOutRefusal),
     HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
 }
@@ -2631,7 +2781,7 @@ enum StartRejectionV17 {
     OriginUnavailable,
     AddressAwake,
     AddressEnded,
-    ContextRefused(signal_flow::ContextRefusal),
+    ContextRefused(ContextRefusalV30),
     LeaveOutRefused(signal_flow::LeaveOutRefusal),
 }
 
@@ -3225,8 +3375,9 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredLaunchOutcome>,
     ) -> Result<TableReference<StoredLaunchOutcome>, StoreError> {
-        // A 0.35.6 to 0.35.21 store holds v5 rows, a 0.35.3 to 0.35.5 store
-        // v4 rows, a 0.35.2 store v3 rows and a 0.34 store v2 rows; the
+        // A 0.35.22 to 0.39 store holds v6 rows, a 0.35.6 to 0.35.21 store v5
+        // rows, a 0.35.3 to 0.35.5 store v4 rows, a 0.35.2 store v3 rows and
+        // a 0.34 store v2 rows; the
         // newest edge is tried first, and a store it does not admit is tried
         // on the next. An admission refusal writes nothing. An outcome that
         // refused a Start for an ended Address refuses the upgrade.
@@ -3239,10 +3390,18 @@ impl UpgradesFlowFamilies for Engine {
         let admission = |failure: &sema_engine::StorageFailure| {
             failure.phase() == sema_engine::StoragePhase::Admission
         };
+        let from_v5 = descriptor.clone();
         let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
-        match self.upgrade_table::<StoredLaunchOutcomeV5, StoredLaunchOutcome>(descriptor) {
+        match self.upgrade_table::<StoredLaunchOutcomeV6, StoredLaunchOutcome>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
+            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
+            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
+        }
+        match self.upgrade_table::<StoredLaunchOutcomeV5, StoredLaunchOutcome>(from_v5) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
@@ -3985,7 +4144,8 @@ impl OpensFlowStore for FlowStore {
         .with_predecessor::<StoredLaunchOutcomeV2>()
         .with_predecessor::<StoredLaunchOutcomeV3>()
         .with_predecessor::<StoredLaunchOutcomeV4>()
-        .with_predecessor::<StoredLaunchOutcomeV5>();
+        .with_predecessor::<StoredLaunchOutcomeV5>()
+        .with_predecessor::<StoredLaunchOutcomeV6>();
         let replacements_descriptor = TableDescriptor::<Replacement>::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -4241,7 +4401,8 @@ impl OpensFlowStore for FlowStore {
             .with_predecessor::<StoredLaunchOutcomeV2>()
             .with_predecessor::<StoredLaunchOutcomeV3>()
             .with_predecessor::<StoredLaunchOutcomeV4>()
-            .with_predecessor::<StoredLaunchOutcomeV5>(),
+            .with_predecessor::<StoredLaunchOutcomeV5>()
+            .with_predecessor::<StoredLaunchOutcomeV6>(),
         )?;
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
@@ -7072,6 +7233,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-launch-outcome",
                     StoredLaunchOutcomeV5::schema_hash(),
                 ),
+                (
+                    "flow-nexus-launch-outcome",
+                    StoredLaunchOutcomeV6::schema_hash(),
+                ),
             ],
             "flow_nexus_launch_attempts" => &[
                 (
@@ -8415,6 +8580,10 @@ mod tests {
     use super::{LaunchOutcomeV3, ReplaceRejectionV17, StartRejectionV17, StoredLaunchOutcomeV3};
     use super::{LaunchOutcomeV4, ReplaceRejectionV18, StartRejectionV18, StoredLaunchOutcomeV4};
     use super::{LaunchOutcomeV5, ReplaceRejectionV22, StartRejectionV22, StoredLaunchOutcomeV5};
+    use super::{
+        ContextRefusalV30, LaunchOutcomeV6, ReplaceRejectionV30, StartRejectionV30,
+        StoredLaunchOutcomeV6,
+    };
     use super::{LaunchedRecord, ReplacedRecord};
     use super::{LaysOutDefaults, SeedsConfiguration};
     use crate::store::RegistersBindings;
@@ -11343,7 +11512,7 @@ mod tests {
                     launch_request_id: "v5-context".into(),
                     launch_outcome: LaunchOutcomeV5::StartRejected(
                         StartRejectionV22::ContextRefused(
-                            signal_flow::ContextRefusal::ModuleMissing,
+                            ContextRefusalV30::ModuleMissing,
                         ),
                     ),
                 },
@@ -11385,6 +11554,101 @@ mod tests {
                     .expect("upgraded outcome reads"),
                 Some(outcome),
                 "the v5 outcome for {request} survives the family upgrade"
+            );
+        }
+    }
+
+    /// A 0.35.22 to 0.39 store's outcomes, each rejection in signal-flow
+    /// 30's shape, open as the current outcomes: a context refusal archived
+    /// before RecordMissing keeps its meaning though its discriminant moves.
+    #[test]
+    fn v6_launch_outcomes_upgrade_to_the_topic_and_record_shape() {
+        let fixture = StoreFixture::new();
+        let started = LaunchedRecord {
+            flow_id: "started-flow".into(),
+            session_id: "started-session".into(),
+            origin: Origin::Unbound,
+        };
+        let rows = vec![
+            StoredLaunchOutcomeV6 {
+                launch_request_id: "v6-started".into(),
+                launch_outcome: LaunchOutcomeV6::Started(started.clone()),
+            },
+            StoredLaunchOutcomeV6 {
+                launch_request_id: "v6-system".into(),
+                launch_outcome: LaunchOutcomeV6::StartRejected(StartRejectionV30::ContextRefused(
+                    ContextRefusalV30::SystemTooLarge,
+                )),
+            },
+            StoredLaunchOutcomeV6 {
+                launch_request_id: "v6-module".into(),
+                launch_outcome: LaunchOutcomeV6::StartRejected(StartRejectionV30::ContextRefused(
+                    ContextRefusalV30::ModuleTooLarge,
+                )),
+            },
+            StoredLaunchOutcomeV6 {
+                launch_request_id: "v6-undeclared".into(),
+                launch_outcome: LaunchOutcomeV6::ReplaceRejected(
+                    ReplaceRejectionV30::LaunchRefused(StartRejectionV30::Undeclared),
+                ),
+            },
+            StoredLaunchOutcomeV6 {
+                launch_request_id: "v6-reap".into(),
+                launch_outcome: LaunchOutcomeV6::ReplaceRejected(
+                    ReplaceRejectionV30::ReapRefused(StopRejection::CloseRefused),
+                ),
+            },
+        ];
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("outcome store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_launch_outcomes"),
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    SchemaHash::for_label("flow-nexus-launch-outcome-v6"),
+                ))
+                .expect("v6 outcome family registers");
+            for row in rows {
+                engine
+                    .assert(Assertion::new(outcomes, row))
+                    .expect("v6 outcome persists");
+            }
+        }
+        let store = fixture.store();
+        for (request, outcome) in [
+            ("v6-started", LaunchOutcome::Started(started)),
+            (
+                "v6-system",
+                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
+                    signal_flow::ContextRefusal::SystemTooLarge,
+                )),
+            ),
+            (
+                "v6-module",
+                LaunchOutcome::StartRejected(StartRejection::ContextRefused(
+                    signal_flow::ContextRefusal::ModuleTooLarge,
+                )),
+            ),
+            (
+                "v6-undeclared",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::Undeclared,
+                )),
+            ),
+            (
+                "v6-reap",
+                LaunchOutcome::ReplaceRejected(ReplaceRejection::ReapRefused(
+                    StopRejection::CloseRefused,
+                )),
+            ),
+        ] {
+            assert_eq!(
+                store
+                    .launch_outcome(request)
+                    .expect("upgraded outcome reads"),
+                Some(outcome),
+                "the v6 outcome for {request} survives the family upgrade"
             );
         }
     }
@@ -11447,7 +11711,7 @@ mod tests {
                 launch_request_id: "v3-replace".into(),
                 launch_outcome: LaunchOutcomeV3::ReplaceRejected(
                     ReplaceRejectionV17::LaunchRefused(StartRejectionV17::ContextRefused(
-                        signal_flow::ContextRefusal::SystemTooLarge,
+                        ContextRefusalV30::SystemTooLarge,
                     )),
                 ),
             },

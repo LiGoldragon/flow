@@ -496,7 +496,11 @@
     (fs/create-dirs curriculum-contexts)
     (doseq [[_ url-key name] context-roots]
       (let [url (get stable url-key)
-            {:keys [exit err]} (run {} "git" "clone" "--quiet" "--depth" "1" "--single-branch" "--branch" "main"
+            ;; The origin as named, anonymously: no user Git configuration
+            ;; rewrites it to another transport or asks for credentials.
+            {:keys [exit err]} (run {:env (clean-env {"GIT_CONFIG_GLOBAL" "/dev/null" "GIT_CONFIG_NOSYSTEM" "1"
+                                                      "GIT_TERMINAL_PROMPT" "0"})}
+                                    "git" "clone" "--quiet" "--depth" "1" "--single-branch" "--branch" "main"
                                     url (str curriculum-contexts "/" name))
             head (str/trim (:out (run {} "git" "-C" (str curriculum-contexts "/" name) "rev-parse" "HEAD")))]
         (when-not (zero? exit) (throw (ex-info (str "cloning " url " failed") {:err err})))

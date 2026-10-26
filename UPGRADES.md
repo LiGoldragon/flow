@@ -9,14 +9,18 @@ schema.
   `Custom.[ FlowId … ]`) in place of its remembered-flow list; `Launch` is
   `Launch.{ Address Remembering InstructionPrompt }`. Stored launch
   attempts upgrade v3 to v4; an archived list becomes `Custom` of its flows.
-- A metaflow declaration appends `Availability.[ Required OnDemand ]`,
-  `Purpose` and `Records`. Stored declarations upgrade v2 to v3: { Psyche
-  core Primary } opens Required, every other OnDemand, with no purpose
-  and no records. Initializers supply the new positions.
-- An OnDemand seat whose turn ends with nothing queued closes its harness
-  and sleeps; a Required one keeps its pane and is always followed by a
-  successor when refreshed or ended by an exit. The store gains
-  `flow_nexus_successor_intents`.
+- A metaflow declaration appends `Continuity.[ OnDemand Maintained ]`,
+  `Purpose` and `Records`. Stored declarations upgrade v1, v2 and v3 to
+  v4: { Psyche core Primary }, { Psyche core Secondary }, { Psyche core
+  Tertiary }, { Psyche core Quaternary }, { Mind core Primary }, { Mind
+  core Secondary }, { Mind core Tertiary }, { Field core Primary }, { Field
+  core Secondary } and { Field core Tertiary } open Maintained, every other
+  Address OnDemand, whatever a v3 row named; v1 and v2 rows open with no
+  purpose and no records. Initializers supply the new positions.
+- An OnDemand seat whose turn ends with nothing queued has its harness and
+  pane closed and sleeps; a Maintained one keeps its pane and is always
+  followed by a successor when refreshed or ended by an exit. The store
+  gains `flow_nexus_successor_intents`.
 - Locks held by a sender whose flow ends are retracted with the end.
 - `flow-hook` reports Claude's SessionEnd as `Ended.Option<NativeSessionId>`;
   a flow whose own session ended is recorded Exited.

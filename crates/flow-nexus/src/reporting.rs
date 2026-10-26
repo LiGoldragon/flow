@@ -86,7 +86,7 @@ impl RecordsReports for RunningNexus {
         crate::compacting::WatchesCompactions::watch_claude_compactions(self, flow_id);
         match event {
             // The flow's own Claude session ended: it has exited, its locks
-            // go with it, and a Required metaflow is owed its successor.
+            // go with it, and a Maintained metaflow is owed its successor.
             // Observe's Gone remains the fallback for an exit no hook
             // reports.
             Event::Ended(session) => {

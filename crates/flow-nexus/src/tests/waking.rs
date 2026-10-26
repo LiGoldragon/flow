@@ -100,7 +100,7 @@ impl Unsent for Vec<Request> {
     }
 }
 
-/// Declares the metaflow at `address` Required: it always has a flow, and
+/// Declares the metaflow at `address` Maintained: it always has a flow, and
 /// an idle seat keeps its harness.
 pub(super) fn require(fixture: &NexusFixture, address: Address) {
     fixture
@@ -113,12 +113,12 @@ pub(super) fn require(fixture: &NexusFixture, address: Address) {
                 user_modules: vec!["operation-main-flow".into()],
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
-                availability: meta_signal_flow::Availability::Required,
+                continuity: meta_signal_flow::Continuity::Maintained,
                 purpose: String::new(),
                 records: vec![],
             },
         ]))
-        .expect("metaflow declared Required");
+        .expect("metaflow declared Maintained");
 }
 
 pub(super) fn stored(fixture: &NexusFixture, layer: Layer) -> Metaflow {
@@ -221,7 +221,7 @@ pub(super) fn claude_stop(fixture: &NexusFixture) -> signal_flow::Event {
     })
 }
 
-/// An idle Required Claude flow of any layer keeps its pane and stays
+/// An idle Maintained Claude flow of any layer keeps its pane and stays
 /// Awake: its Stop writes its context size and, with nothing queued, leaves
 /// the seat as it is.
 #[test]
@@ -266,7 +266,7 @@ fn an_idle_required_claude_flow_keeps_its_pane_and_stays_awake() {
     }
 }
 
-/// An idle Required Codex flow keeps its pane and stays Awake: its thread
+/// An idle Maintained Codex flow keeps its pane and stays Awake: its thread
 /// coming to rest with nothing queued settles nothing, and a turn end read
 /// then leaves the seat as it is.
 #[test]
@@ -4530,7 +4530,7 @@ fn a_sender_observe_reports_gone_is_exited_and_its_lock_released() {
     );
 }
 
-/// A Required metaflow whose flow exits with its pane gone is owed a
+/// A Maintained metaflow whose flow exits with its pane gone is owed a
 /// successor in the write that records the exit, and is due a wake with
 /// nothing queued; an OnDemand one is owed none and is not due.
 #[test]
@@ -4577,7 +4577,7 @@ fn a_required_metaflow_ended_by_an_exit_is_owed_a_successor() {
     }
 }
 
-/// A Stop the owner asks for is not an unexpected exit: a Required
+/// A Stop the owner asks for is not an unexpected exit: a Maintained
 /// metaflow so stopped is owed no successor.
 #[test]
 fn a_required_metaflow_stopped_deliberately_is_owed_no_successor() {
@@ -4728,7 +4728,7 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
                 user_modules: vec!["operation-main-flow".into()],
                 flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
-                availability: meta_signal_flow::Availability::OnDemand,
+                continuity: meta_signal_flow::Continuity::OnDemand,
                 purpose: String::new(),
                 records: vec![],
             },
@@ -4763,7 +4763,7 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
 
 /// A Claude flow's own SessionEnd, reported by its hook, is its exit as an
 /// event: it is recorded Exited without anything looking at its pane, and
-/// a Required metaflow is owed its successor. A session end naming another
+/// a Maintained metaflow is owed its successor. A session end naming another
 /// session changes nothing.
 #[test]
 fn a_reported_session_end_exits_the_flow_and_owes_a_required_successor() {
@@ -4882,7 +4882,7 @@ fn recover_wakes_takes_up_an_owed_successor() {
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
 }
 
-/// A Required metaflow whose flow's own session end is reported gets its
+/// A Maintained metaflow whose flow's own session end is reported gets its
 /// successor started, not only owed.
 #[test]
 fn reported_session_end_starts_a_required_successor() {

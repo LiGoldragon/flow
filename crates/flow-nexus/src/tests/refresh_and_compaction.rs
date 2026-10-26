@@ -18,7 +18,7 @@ use crate::store::{ManagesMetaflowState, ReadsFlowRows, SeedsRole};
 use crate::waking::{AtStop, SleepsAndWakesSeats};
 use flow_ethos::State;
 use meta_signal_flow::{
-    Availability, ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold,
+    Continuity, ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold,
 };
 use signal_flow::{
     Address, Aspect, Caller, Delivery, FlowLifecycle, Layer, Message, Metaflow, PowerLevel,
@@ -101,11 +101,11 @@ fn closed(fixture: &NexusFixture) -> bool {
 /// tests owe names it, so the refresh resumes the staged launch.
 pub(super) const SUCCESSOR_REQUEST: &str = "refresh-c1a0de";
 
-/// Declares the seat's metaflow, continuing as `availability`, and the model
+/// Declares the seat's metaflow, continuing as `continuity`, and the model
 /// its layer and aspect run.
 pub(super) fn declare_seat(
     fixture: &NexusFixture,
-    availability: Availability,
+    continuity: Continuity,
     system_modules: Vec<String>,
 ) {
     fixture
@@ -117,7 +117,7 @@ pub(super) fn declare_seat(
             user_modules: vec!["operation-main-flow".into()],
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
-            availability,
+            continuity,
             purpose: String::new(),
             records: vec![],
         }]))
@@ -314,7 +314,7 @@ fn an_idle_on_demand_seat_is_refreshed_only_past_its_threshold() {
     }
 }
 
-/// A Required metaflow is never left without a flow: its seat resting
+/// A Maintained metaflow is never left without a flow: its seat resting
 /// past its threshold with nothing queued has its successor started and
 /// confirmed first; only then is the predecessor recorded Stopped and its
 /// pane closed, and the owed successor is given in the write that confirms
@@ -331,7 +331,7 @@ fn a_required_seat_refreshed_with_nothing_queued_starts_its_successor_first() {
     successor.write_receipt();
     declare_seat(
         &fixture,
-        Availability::Required,
+        Continuity::Maintained,
         vec!["spirit-core".into(), "intent-flow".into()],
     );
     seat_metaflow(&fixture, vec![]);
@@ -372,7 +372,7 @@ fn an_on_demand_seat_refreshed_with_a_waking_request_starts_its_successor_first(
     successor.write_receipt();
     declare_seat(
         &fixture,
-        Availability::OnDemand,
+        Continuity::OnDemand,
         vec!["spirit-core".into(), "intent-flow".into()],
     );
     let mut waking = seat_metaflow_with(vec![Request::Order("For the successor.".into())]);
@@ -413,7 +413,7 @@ fn a_refused_successor_launch_keeps_the_predecessor() {
     // the successor launch is refused before any native seat starts.
     declare_seat(
         &fixture,
-        Availability::Required,
+        Continuity::Maintained,
         vec!["missing-module".into()],
     );
 
@@ -596,7 +596,7 @@ fn unconfirmed_successor_keeps_predecessor_unreaped() {
     // No write_receipt: the successor's first turn is never authenticated.
     declare_seat(
         &fixture,
-        Availability::Required,
+        Continuity::Maintained,
         vec!["spirit-core".into(), "intent-flow".into()],
     );
     seat_metaflow(&fixture, vec![]);

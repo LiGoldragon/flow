@@ -3,26 +3,27 @@
 //! Launch of that Address composes into the system prompt and into the first
 //! user message. A store written before metaflows were declared opens with
 //! the table added and holds none. A declaration archived before it named
-//! its availability, purpose and records opens Required when it declares
-//! { Psyche core Primary } and OnDemand otherwise, with no purpose and no
-//! records.
+//! its continuity opens Maintained when it declares one of the core
+//! Addresses Flow keeps running ([`DefaultsContinuity`]) and OnDemand
+//! otherwise, whatever an earlier shape said; one archived before it named
+//! its purpose and records opens with none.
 
 use super::{FlowStore, ReadsFlowMemory, StoreError};
-use meta_signal_flow::{Availability, ConfigureMetaflow};
+use meta_signal_flow::{Continuity, ConfigureMetaflow};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
     Decision, Engine, EngineRecord, FamilyName, MemoryDefinition, MemoryUpgrades, MemoryVersion,
     QueryPlan, RecordKey, SchemaHash, TableDescriptor, TableName, TableReference, UpgradeFrom,
     UpgradeOutcome,
 };
-use signal_flow::Address;
+use signal_flow::{Address, Aspect, Layer};
 
 pub(super) const META_METAFLOW_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_metaflow_configuration");
 pub(super) const META_METAFLOW_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-metaflow-configuration";
 pub(super) const META_METAFLOW_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-metaflow-configuration-v3";
+    "flow-nexus-meta-metaflow-configuration-v4";
 
 /// One declared metaflow, keyed by its Address.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -38,7 +39,7 @@ impl EngineRecord for StoredMetaMetaflowConfiguration {
 
 impl MemoryDefinition for StoredMetaMetaflowConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
 
     fn schema_hash() -> SchemaHash {
@@ -46,26 +47,102 @@ impl MemoryDefinition for StoredMetaMetaflowConfiguration {
     }
 }
 
-/// How a declaration archived before Availability continues: the Address the
-/// living is never left without is Required, every other OnDemand.
-pub(crate) trait DefaultsAvailability {
-    fn default_availability(&self) -> Availability;
+/// How a declaration archived before Continuity continues: Maintained at
+/// exactly these Addresses, the core Primary, Secondary and Tertiary of
+/// each aspect and the Psyche core Quaternary, and OnDemand at every other.
+/// A metaflow is Maintained by its exact Address, never by its layer.
+pub(crate) trait DefaultsContinuity {
+    fn default_continuity(&self) -> Continuity;
 }
 
-impl DefaultsAvailability for Address {
-    fn default_availability(&self) -> Availability {
-        let required = self.aspect == signal_flow::Aspect::Psyche
-            && self.topic == "core"
-            && self.layer == signal_flow::Layer::Primary;
-        if required {
-            Availability::Required
+impl DefaultsContinuity for Address {
+    fn default_continuity(&self) -> Continuity {
+        let maintained = self.topic == "core"
+            && matches!(
+                (&self.aspect, &self.layer),
+                (Aspect::Psyche, Layer::Primary)
+                    | (Aspect::Psyche, Layer::Secondary)
+                    | (Aspect::Psyche, Layer::Tertiary)
+                    | (Aspect::Psyche, Layer::Quaternary)
+                    | (Aspect::Mind, Layer::Primary)
+                    | (Aspect::Mind, Layer::Secondary)
+                    | (Aspect::Mind, Layer::Tertiary)
+                    | (Aspect::Field, Layer::Primary)
+                    | (Aspect::Field, Layer::Secondary)
+                    | (Aspect::Field, Layer::Tertiary)
+            );
+        if maintained {
+            Continuity::Maintained
         } else {
-            Availability::OnDemand
+            Continuity::OnDemand
         }
     }
 }
 
-/// The archived declaration before availability, purpose and records.
+/// How the archived declaration before Continuity named how its metaflow
+/// went on. It is read only by the v3-to-v4 upgrade, which does not carry
+/// it: every row takes its Address's continuity.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) enum AvailabilityV3 {
+    Required,
+    OnDemand,
+}
+
+/// The archived declaration before Continuity.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConfigureMetaflowV3 {
+    pub(super) address: Address,
+    pub(super) system_modules: Vec<String>,
+    pub(super) user_modules: Vec<String>,
+    pub(super) flow_kind: signal_flow::FlowKind,
+    pub(super) tool_set: signal_flow::ToolSet,
+    pub(super) availability: AvailabilityV3,
+    pub(super) purpose: String,
+    pub(super) records: Vec<String>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct StoredMetaMetaflowConfigurationV3 {
+    pub(super) metaflow: ConfigureMetaflowV3,
+}
+
+impl EngineRecord for StoredMetaMetaflowConfigurationV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaMetaflowConfigurationV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v3")
+    }
+}
+
+impl UpgradeFrom<StoredMetaMetaflowConfigurationV3> for StoredMetaMetaflowConfiguration {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredMetaMetaflowConfigurationV3) -> Decision<Self, Self::Refusal> {
+        let previous = previous.metaflow;
+        Decision::Ready(Self {
+            metaflow: ConfigureMetaflow {
+                continuity: previous.address.default_continuity(),
+                address: previous.address,
+                system_modules: previous.system_modules,
+                user_modules: previous.user_modules,
+                flow_kind: previous.flow_kind,
+                tool_set: previous.tool_set,
+                purpose: previous.purpose,
+                records: previous.records,
+            },
+        })
+    }
+}
+
+/// The archived declaration before continuity, purpose and records.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConfigureMetaflowV2 {
     pub(super) address: Address,
@@ -103,7 +180,7 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV2> for StoredMetaMetaflowConfig
         let previous = previous.metaflow;
         Decision::Ready(Self {
             metaflow: ConfigureMetaflow {
-                availability: previous.address.default_availability(),
+                continuity: previous.address.default_continuity(),
                 address: previous.address,
                 system_modules: previous.system_modules,
                 user_modules: previous.user_modules,
@@ -152,7 +229,7 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV1> for StoredMetaMetaflowConfig
         let previous = previous.metaflow;
         Decision::Ready(Self {
             metaflow: ConfigureMetaflow {
-                availability: previous.address.default_availability(),
+                continuity: previous.address.default_continuity(),
                 address: previous.address,
                 system_modules: previous.system_modules,
                 user_modules: previous.user_modules,
@@ -178,6 +255,7 @@ impl DescribesMetaflowDeclarationTable for StoredMetaMetaflowConfiguration {
         )
         .with_predecessor::<StoredMetaMetaflowConfigurationV1>()
         .with_predecessor::<StoredMetaMetaflowConfigurationV2>()
+        .with_predecessor::<StoredMetaMetaflowConfigurationV3>()
     }
 }
 
@@ -193,12 +271,28 @@ impl UpgradesMetaflowDeclarations for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredMetaMetaflowConfiguration>,
     ) -> Result<TableReference<StoredMetaMetaflowConfiguration>, StoreError> {
-        // A v2 family upgrades from v2; a v2 upgrade refused at admission
-        // names a v1 family, which upgrades from v1.
+        // A v3 family upgrades from v3; a v3 upgrade refused at admission
+        // names an older family: a v2 one upgrades from v2, and a v2
+        // upgrade refused at admission names a v1 family, which upgrades
+        // from v1.
+        let from_v2 = descriptor.clone();
         let from_v1 = descriptor.clone();
         match self
-            .upgrade_table::<StoredMetaMetaflowConfigurationV2, StoredMetaMetaflowConfiguration>(
+            .upgrade_table::<StoredMetaMetaflowConfigurationV3, StoredMetaMetaflowConfiguration>(
                 descriptor,
+            ) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+            }
+        }
+        match self
+            .upgrade_table::<StoredMetaMetaflowConfigurationV2, StoredMetaMetaflowConfiguration>(
+                from_v2,
             ) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
@@ -256,12 +350,47 @@ impl ReadsMetaflowDeclarations for FlowStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigureMetaflowV1, ConfigureMetaflowV2, StoredMetaMetaflowConfiguration,
-        StoredMetaMetaflowConfigurationV1, StoredMetaMetaflowConfigurationV2,
+        AvailabilityV3, ConfigureMetaflowV1, ConfigureMetaflowV2, ConfigureMetaflowV3,
+        StoredMetaMetaflowConfiguration, StoredMetaMetaflowConfigurationV1,
+        StoredMetaMetaflowConfigurationV2, StoredMetaMetaflowConfigurationV3,
     };
-    use meta_signal_flow::Availability;
+    use meta_signal_flow::Continuity;
     use sema_engine::{Decision, UpgradeFrom};
     use signal_flow::{Address, Aspect, FlowKind, Layer, ToolSet};
+
+    fn at(aspect: Aspect, topic: &str, layer: Layer) -> Address {
+        Address {
+            aspect,
+            topic: topic.into(),
+            layer,
+        }
+    }
+
+    /// The Addresses a declaration archived before Continuity opens
+    /// Maintained at, and some it opens OnDemand at: the same layers under
+    /// another topic or aspect, so Maintained is never read off a layer.
+    fn expected_continuities() -> Vec<(Address, Continuity)> {
+        use Aspect::{Field, Mind, Psyche};
+        use Continuity::{Maintained, OnDemand};
+        use Layer::{Primary, Quaternary, Secondary, Tertiary};
+        vec![
+            (at(Psyche, "core", Primary), Maintained),
+            (at(Psyche, "core", Secondary), Maintained),
+            (at(Psyche, "core", Tertiary), Maintained),
+            (at(Psyche, "core", Quaternary), Maintained),
+            (at(Mind, "core", Primary), Maintained),
+            (at(Mind, "core", Secondary), Maintained),
+            (at(Mind, "core", Tertiary), Maintained),
+            (at(Field, "core", Primary), Maintained),
+            (at(Field, "core", Secondary), Maintained),
+            (at(Field, "core", Tertiary), Maintained),
+            (at(Mind, "core", Quaternary), OnDemand),
+            (at(Field, "core", Quaternary), OnDemand),
+            (at(Psyche, "flow", Primary), OnDemand),
+            (at(Mind, "flow", Secondary), OnDemand),
+            (at(Field, "coreWork", Primary), OnDemand),
+        ]
+    }
 
     #[test]
     fn v1_declaration_upgrade_preserves_context_and_defaults_regular_tools() {
@@ -281,24 +410,18 @@ mod tests {
         assert_eq!(upgraded.metaflow.user_modules, ["vision-book"]);
         assert_eq!(upgraded.metaflow.flow_kind, FlowKind::Regular);
         assert_eq!(upgraded.metaflow.tool_set, ToolSet::Default);
-        assert_eq!(upgraded.metaflow.availability, Availability::OnDemand);
+        assert_eq!(upgraded.metaflow.continuity, Continuity::OnDemand);
     }
 
-    /// A declaration archived before availability opens Required for
-    /// { Psyche core Primary } and OnDemand for every other Address.
+    /// A declaration archived before continuity, purpose and records opens
+    /// Maintained at exactly the core Addresses Flow keeps running, and
+    /// OnDemand at every other.
     #[test]
-    fn v2_declaration_upgrade_requires_only_the_psyche_core_primary() {
-        for (layer, availability) in [
-            (Layer::Primary, Availability::Required),
-            (Layer::Secondary, Availability::OnDemand),
-        ] {
+    fn v2_declaration_upgrade_maintains_exactly_the_core_addresses() {
+        for (address, continuity) in expected_continuities() {
             let previous = StoredMetaMetaflowConfigurationV2 {
                 metaflow: ConfigureMetaflowV2 {
-                    address: Address {
-                        aspect: Aspect::Psyche,
-                        topic: "core".into(),
-                        layer,
-                    },
+                    address: address.clone(),
                     system_modules: vec!["spirit:core".into()],
                     user_modules: vec![],
                     flow_kind: FlowKind::Simplified,
@@ -306,10 +429,39 @@ mod tests {
                 },
             };
             let Decision::Ready(upgraded) = StoredMetaMetaflowConfiguration::upgrade_from(previous);
-            assert_eq!(upgraded.metaflow.availability, availability);
+            assert_eq!(upgraded.metaflow.continuity, continuity, "{address:?}");
             assert_eq!(upgraded.metaflow.flow_kind, FlowKind::Simplified);
             assert!(upgraded.metaflow.purpose.is_empty());
             assert!(upgraded.metaflow.records.is_empty());
+        }
+    }
+
+    /// A declaration archived with Availability opens with its Address's
+    /// continuity, whatever it named, and keeps its purpose and records.
+    #[test]
+    fn v3_declaration_upgrade_maintains_exactly_the_core_addresses() {
+        for (address, continuity) in expected_continuities() {
+            for availability in [AvailabilityV3::Required, AvailabilityV3::OnDemand] {
+                let previous = StoredMetaMetaflowConfigurationV3 {
+                    metaflow: ConfigureMetaflowV3 {
+                        address: address.clone(),
+                        system_modules: vec!["spirit:core".into()],
+                        user_modules: vec!["vision:flow".into()],
+                        flow_kind: FlowKind::Regular,
+                        tool_set: ToolSet::Default,
+                        availability,
+                        purpose: "Keeps Flow running.".into(),
+                        records: vec!["flows/a68420/vision/flow.md".into()],
+                    },
+                };
+                let Decision::Ready(upgraded) =
+                    StoredMetaMetaflowConfiguration::upgrade_from(previous);
+                assert_eq!(upgraded.metaflow.continuity, continuity, "{address:?}");
+                assert_eq!(upgraded.metaflow.address, address);
+                assert_eq!(upgraded.metaflow.user_modules, ["vision:flow"]);
+                assert_eq!(upgraded.metaflow.purpose, "Keeps Flow running.");
+                assert_eq!(upgraded.metaflow.records, ["flows/a68420/vision/flow.md"]);
+            }
         }
     }
 }

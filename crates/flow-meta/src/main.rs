@@ -384,7 +384,7 @@ mod tests {
                     1 => ToolSet::Explicit(vec![]),
                     _ => ToolSet::Explicit(vec!["Bash".into(), "ToolSearch".into()]),
                 },
-                availability: meta_signal_flow::Availability::OnDemand,
+                continuity: meta_signal_flow::Continuity::OnDemand,
                 purpose: format!("Prints page {index}."),
                 records: vec![],
             })

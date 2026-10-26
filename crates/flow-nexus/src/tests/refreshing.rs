@@ -1,5 +1,5 @@
 //! A refresh ordered from outside: `Refresh.Address` ends the flow the
-//! metaflow is Awake as without giving it a turn. A Required metaflow, or
+//! metaflow is Awake as without giving it a turn. A Maintained metaflow, or
 //! one holding a waking request, has its successor started and confirmed
 //! before the ending flow is reaped; any other is left Asleep with that flow
 //! in Past and its queue kept, and its successor runs on the next waking
@@ -26,7 +26,7 @@ use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, ReadsFlowRo
 use crate::waking::{HoldsWakingMetaflows, SleepsAndWakesSeats};
 use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::State;
-use meta_signal_flow::{Availability, ConfigurationChange, ConfigureMetaflow};
+use meta_signal_flow::{Continuity, ConfigurationChange, ConfigureMetaflow};
 use signal_flow::{
     Address, Delivery, FlowLifecycle, HerdrRouteSelection, Layer, Message, Metaflow, Origin, Query,
     Recipient, RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response,
@@ -51,7 +51,7 @@ fn declare(fixture: &NexusFixture, at: Address) {
             user_modules: vec!["operation-main-flow".into()],
             flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
-            availability: Availability::OnDemand,
+            continuity: Continuity::OnDemand,
             purpose: String::new(),
             records: vec![],
         }]))
@@ -471,11 +471,11 @@ fn typing_calls(fixture: &NexusFixture) -> Vec<String> {
 }
 
 /// The Claude seat Awake at the Secondary address, its metaflow declared
-/// as `availability`, holding one Order queued with `delivery`, and its
+/// as `continuity`, holding one Order queued with `delivery`, and its
 /// successor staged so a Replace of `LaunchProfile` resumes it and finds it
 /// confirmed.
 fn refreshable_with_successor(
-    availability: Availability,
+    continuity: Continuity,
     delivery: Delivery,
 ) -> (NexusFixture, signal_flow::LaunchProfile) {
     let fixture = NexusFixture::new();
@@ -485,7 +485,7 @@ fn refreshable_with_successor(
     successor.write_receipt();
     declare_seat(
         &fixture,
-        availability,
+        continuity,
         vec!["spirit-core".into(), "intent-flow".into()],
     );
     fixture.nexus.store.seed_metaflow(Metaflow {
@@ -504,31 +504,31 @@ fn refreshable_with_successor(
     (fixture, successor.request())
 }
 
-/// A refresh of a Required metaflow, or of one whose queue holds a request
+/// A refresh of a Maintained metaflow, or of one whose queue holds a request
 /// that asks for a wake, starts the successor in the same event: it is
 /// started and its receipt confirmed before the ending flow is reaped, the
 /// metaflow is Awake as it, the queue is kept for it, and the answer still
 /// names the flow that ended. Nothing is typed into the ending flow.
 #[test]
 fn a_refresh_owed_a_successor_starts_it_before_the_ending_flow_is_reaped() {
-    for (availability, delivery) in [
-        (Availability::Required, Delivery::Queue),
-        (Availability::OnDemand, Delivery::Wake),
+    for (continuity, delivery) in [
+        (Continuity::Maintained, Delivery::Queue),
+        (Continuity::OnDemand, Delivery::Wake),
     ] {
-        let (fixture, _) = refreshable_with_successor(availability.clone(), delivery.clone());
+        let (fixture, _) = refreshable_with_successor(continuity.clone(), delivery.clone());
         assert_eq!(
             fixture.nexus.dispatch(Query::Refresh(seat_address())),
             Response::Refreshed(Refreshed {
                 address: seat_address(),
                 flow_id: CLAUDE_SEAT.into(),
             }),
-            "{availability:?} {delivery:?}"
+            "{continuity:?} {delivery:?}"
         );
         let metaflow = stored(&fixture);
         assert_eq!(
             metaflow.state,
             State::Awake("908786".into()),
-            "the successor is Awake: {availability:?} {delivery:?}"
+            "the successor is Awake: {continuity:?} {delivery:?}"
         );
         assert_eq!(metaflow.past, vec![CLAUDE_SEAT.to_owned()]);
         assert_eq!(
@@ -617,7 +617,7 @@ fn a_launch_to_an_awake_metaflow_names_the_replace_of_its_flow() {
     let fixture = NexusFixture::new();
     declare_seat(
         &fixture,
-        Availability::OnDemand,
+        Continuity::OnDemand,
         vec!["spirit-core".into(), "intent-flow".into()],
     );
     awake_seat(&fixture, vec![]);
@@ -643,7 +643,7 @@ fn a_launch_to_an_awake_metaflow_names_the_replace_of_its_flow() {
 /// successor.
 #[test]
 fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predecessor() {
-    let (fixture, profile) = refreshable_with_successor(Availability::OnDemand, Delivery::Queue);
+    let (fixture, profile) = refreshable_with_successor(Continuity::OnDemand, Delivery::Queue);
 
     let held = fixture
         .nexus
@@ -746,11 +746,11 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
     assert!(!closed(&fixture));
     assert!(!fixture.nexus.waking.is_waking(&seat_address()));
 
-    // Required, its declared module absent from the verified context: the
+    // Maintained, its declared module absent from the verified context: the
     // successor's launch is refused before any native seat starts.
     declare_seat(
         &fixture,
-        Availability::Required,
+        Continuity::Maintained,
         vec!["missing-module".into()],
     );
     let refused = fixture.nexus.dispatch(Query::Refresh(seat_address()));
@@ -782,7 +782,7 @@ fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
 /// intent is recorded before the launch and given with the confirmation.
 #[test]
 fn a_launch_ordered_replace_owes_its_successor_until_it_is_confirmed() {
-    let (fixture, profile) = refreshable_with_successor(Availability::OnDemand, Delivery::Queue);
+    let (fixture, profile) = refreshable_with_successor(Continuity::OnDemand, Delivery::Queue);
     fixture
         .nexus
         .store
@@ -812,7 +812,7 @@ fn a_launch_ordered_replace_owes_its_successor_until_it_is_confirmed() {
 #[test]
 fn a_nexus_start_starts_a_successor_owed_after_a_refresh_or_a_replace() {
     for cause in [SuccessionCause::Ordered, SuccessionCause::Replace] {
-        let (fixture, _) = refreshable_with_successor(Availability::Required, Delivery::Queue);
+        let (fixture, _) = refreshable_with_successor(Continuity::Maintained, Delivery::Queue);
         fixture
             .nexus
             .store

@@ -6248,7 +6248,7 @@ impl RecordsFlowLifecycle for FlowStore {
             return Ok(false);
         }
         flow.lifecycle = FlowLifecycle::Exited;
-        // A Required metaflow whose flow went without Flow or an owner
+        // A Maintained metaflow whose flow went without Flow or an owner
         // ending it is owed a successor, in the same write.
         let owed = match self.address_hold(flow_id)? {
             Some(_) => None,
@@ -6259,8 +6259,8 @@ impl RecordsFlowLifecycle for FlowStore {
         let commit = self.engine.begin_atomic_commit().mutate(self.flows, flow);
         let commit = match owed {
             Some(metaflow)
-                if successor::ReadsAvailability::availability(self, &metaflow.address)?
-                    == meta_signal_flow::Availability::Required =>
+                if successor::ReadsContinuity::continuity(self, &metaflow.address)?
+                    == meta_signal_flow::Continuity::Maintained =>
             {
                 successor::OwesSuccessors::owing_successor(
                     self,
@@ -7083,10 +7083,20 @@ pub(crate) trait ReadsFlowMemory {
                     StoredLaunchAttemptV2::schema_hash(),
                 ),
             ],
-            "flow_nexus_meta_metaflow_configuration" => &[(
-                metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
-                SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v1"),
-            )],
+            "flow_nexus_meta_metaflow_configuration" => &[
+                (
+                    metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
+                    SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v1"),
+                ),
+                (
+                    metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
+                    SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v2"),
+                ),
+                (
+                    metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
+                    SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v3"),
+                ),
+            ],
             "flow_nexus_metaflows" => &[
                 ("flow-nexus-metaflow", StoredMetaflowV1::schema_hash()),
                 ("flow-nexus-metaflow", StoredMetaflowV2::schema_hash()),

@@ -323,7 +323,7 @@ impl SleepsMetaflows for FlowStore {
             return Ok(false);
         };
         use super::successor::OwesSuccessors;
-        // A woken flow is the successor a Required metaflow was owed.
+        // A woken flow is the successor a Maintained metaflow was owed.
         let commit = self.successor_given(
             address,
             taken.written(self, self.engine.begin_atomic_commit()),

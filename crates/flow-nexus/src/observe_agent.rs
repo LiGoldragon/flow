@@ -9,7 +9,7 @@
 //! A pane Herdr shows gone, or announces closed, is a witness of the flow's
 //! fate: a live flow whose pane is gone is recorded Exited, which puts its
 //! metaflow Asleep and retracts every lock it holds as a sender, and a
-//! Required metaflow so ended is woken into its successor.
+//! Maintained metaflow so ended is woken into its successor.
 
 use crate::herdr::HerdrCli;
 use crate::herdr::pane::ReadsAgentStatus;

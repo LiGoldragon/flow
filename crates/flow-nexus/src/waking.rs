@@ -1,7 +1,7 @@
 //! Wake and drain: a metaflow's seat stays in its pane while it runs, and a
 //! seat whose pane is gone wakes fresh.
 //!
-//! A metaflow continues as its declaration's `Availability` names. When its
+//! A metaflow continues as its declaration's `Continuity` names. When its
 //! flow's turn ends, Flow reads whether its seat rests. A Claude seat
 //! reports `Stopped` naming its own native session and transcript; one
 //! whose transcript records its main turn's `end_turn` is ready for work
@@ -12,22 +12,22 @@
 //! request is handed over (`Operation::Drain`). With nothing queued, an
 //! OnDemand seat sleeps: its harness is closed under the pane's lease and
 //! its flow recorded Stopped, its metaflow Asleep, keeping its Address and
-//! the flow's transcript; a Required seat stays Awake in its pane. Work
+//! the flow's transcript; a Maintained seat stays Awake in its pane. Work
 //! queued later for an Awake seat known resting, by the same evidence, is
 //! handed over at once.
 //!
 //! A seat past its model's refresh threshold is replaced at its rest. A
-//! Required metaflow, or one holding work that wakes it, is owed its
+//! Maintained metaflow, or one holding work that wakes it, is owed its
 //! successor: the intent is recorded, the successor is started and
 //! confirmed through Replace, and only then is the predecessor recorded
 //! Stopped and its pane closed, in the replacement's reaping. Any other is
-//! closed and put Asleep, its queue kept for the next flow. A Required
+//! closed and put Asleep, its queue kept for the next flow. A Maintained
 //! metaflow whose flow ends with its pane gone is owed a successor in the
 //! write that records the exit, and woken with no queued request needed.
 //!
 //! A refresh ordered from outside (`Refresh.Address`,
 //! [`RefreshesMetaflows`]) takes the metaflow's hold and ends its flow
-//! without a turn. A Required metaflow, or one holding work that wakes it,
+//! without a turn. A Maintained metaflow, or one holding work that wakes it,
 //! has its successor started and confirmed through Replace before the
 //! ending flow is reaped, and the queue is handed to it. Any other has its
 //! flow's harness closed and the flow recorded Stopped, the metaflow left
@@ -101,14 +101,14 @@ use crate::store::queue_delivery::{
     NativeTranscriptCursor, PrepareQueueDelivery, QueueDeliveryAttempt, QueueDeliveryPhase,
 };
 use crate::store::successor::{
-    OwesSuccessors, ReadsAvailability, SuccessionCause, SuccessorIntent,
+    OwesSuccessors, ReadsContinuity, SuccessionCause, SuccessorIntent,
 };
 use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
 use flow_native::DigestsPrompt;
-use meta_signal_flow::{AbsenceProof, Availability, Undecided};
+use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
     Layer, Metaflow, NativePrompt, NativeStop, Origin, PowerLevel, QueueEntry, Response,
@@ -345,7 +345,7 @@ pub use crate::generated::starter::FreshContext;
 /// What a flow's Stop did to its seat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtStop {
-    /// A Required seat rested with nothing queued: it stays Awake in its
+    /// A Maintained seat rested with nothing queued: it stays Awake in its
     /// pane.
     Idle,
     /// An OnDemand seat rested with nothing queued: its harness was closed
@@ -355,7 +355,7 @@ pub enum AtStop {
     /// The seat rested with work queued: the oldest request was typed in.
     Drained(QueueEntry),
     /// The seat was due a refresh and rested, its last measured context past
-    /// its model's refresh threshold. A Required metaflow, or one holding
+    /// its model's refresh threshold. A Maintained metaflow, or one holding
     /// work that wakes it, had its successor started and confirmed first,
     /// then the predecessor recorded Stopped and its pane closed in the
     /// replacement's reaping. Any other had its pane closed and was recorded
@@ -510,7 +510,7 @@ pub trait PerformsWakeAndDrain {
 
 /// Short term, the Secondary starts first: a caller's new Primary whose
 /// Secondary of the same aspect and topic is not Awake has that Secondary
-/// started by Flow itself, OnDemand or Required, from its declaration, and
+/// started by Flow itself, OnDemand or Maintained, from its declaration, and
 /// the Primary's launch goes on once the Secondary is confirmed. A Secondary
 /// with no declaration is not started, and the Primary is then refused
 /// NoSecondary by its admission.
@@ -1410,7 +1410,7 @@ impl SleepsAndWakesSeats for RunningNexus {
 }
 
 /// A refresh ordered from outside: the metaflow's current flow ends
-/// without a turn. A Required metaflow, or one holding a request that asks
+/// without a turn. A Maintained metaflow, or one holding a request that asks
 /// for a wake, has its successor started and confirmed in the same event,
 /// before the ending flow is reaped; any other is left Asleep, and its
 /// successor runs on the next waking request.
@@ -1499,8 +1499,8 @@ impl RefreshesMetaflows for RunningNexus {
             }
         }
         let node = self.herdr.refresh_route(node);
-        let availability = match self.store.availability(address) {
-            Ok(availability) => availability,
+        let continuity = match self.store.continuity(address) {
+            Ok(continuity) => continuity,
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
         };
         let wakes = metaflow
@@ -1511,10 +1511,10 @@ impl RefreshesMetaflows for RunningNexus {
             address: address.clone(),
             flow_id: flow_id.clone(),
         });
-        // A Required metaflow is never left without a flow, and one holding
+        // A Maintained metaflow is never left without a flow, and one holding
         // a waking request is owed the flow that takes it up: the successor
         // is started and confirmed before the ending flow is reaped.
-        if availability == Availability::Required || wakes {
+        if continuity == Continuity::Maintained || wakes {
             // Replace takes the gate for its own steps; the lock keeps any
             // wake, drain or delivery of the metaflow out meanwhile.
             drop(turn);
@@ -2389,8 +2389,8 @@ impl WakesInParts for RunningNexus {
         // A seat past its model's refresh threshold is ended at its rest
         // rather than handed work; it is told nothing and writes no handover.
         let refresh_due = matches!(self.store.past_threshold(flow_id), Ok(true));
-        let availability = match self.store.availability(&address) {
-            Ok(availability) => availability,
+        let continuity = match self.store.continuity(&address) {
+            Ok(continuity) => continuity,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
         // Whether the harness may be closed now: a Claude seat only once
@@ -2439,9 +2439,9 @@ impl WakesInParts for RunningNexus {
                 .queue
                 .iter()
                 .any(|entry| entry.delivery == signal_flow::Delivery::Wake);
-            // A Required metaflow, or one holding work that wakes it, is
+            // A Maintained metaflow, or one holding work that wakes it, is
             // owed its successor, started before the predecessor rests.
-            if availability == Availability::Required || wakes {
+            if continuity == Continuity::Maintained || wakes {
                 let Some(refreshing) = self.waking.hold(&address) else {
                     return AtStop::Kept(KeptAtStop::Waking);
                 };
@@ -2474,13 +2474,13 @@ impl WakesInParts for RunningNexus {
             };
         }
         // With nothing queued, how the metaflow continues decides: a
-        // Required seat stays Awake in its pane; an OnDemand seat closes
+        // Maintained seat stays Awake in its pane; an OnDemand seat closes
         // its harness, its Address and transcript kept, once it can be
         // closed without ending work its harness still runs.
-        match availability {
-            Availability::Required => AtStop::Idle,
-            Availability::OnDemand if !closable => AtStop::Idle,
-            Availability::OnDemand => match self.close_at_rest(flow_id, &node) {
+        match continuity {
+            Continuity::Maintained => AtStop::Idle,
+            Continuity::OnDemand if !closable => AtStop::Idle,
+            Continuity::OnDemand => match self.close_at_rest(flow_id, &node) {
                 Ok(()) => AtStop::Slept(address),
                 Err(outcome) => AtStop::Kept(KeptAtStop::SleepRefused(outcome)),
             },

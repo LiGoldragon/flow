@@ -26,8 +26,8 @@ use flow_ethos::State;
 use meta_signal_flow::{Availability, ConfigurationChange, ConfigureMetaflow};
 use signal_flow::{
     Address, Delivery, FlowLifecycle, HerdrRouteSelection, Layer, Message, Metaflow, Origin, Query,
-    Recipient, RefreshRejection, Refreshed, Refusal, Request, Response, SendRequest, SentBy,
-    Unknown_Data,
+    Recipient, RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response,
+    SendRequest, SentBy, Unknown_Data,
 };
 use std::fs;
 use std::time::Duration;
@@ -649,7 +649,7 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
         .expect("another holds the metaflow");
     assert_eq!(
         fixture.nexus.dispatch(Query::Replace(profile.clone())),
-        Response::RefreshRejected(RefreshRejection::Locked)
+        Response::ReplaceRejected(ReplaceRejection::Locked)
     );
     assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
     drop(held);
@@ -707,6 +707,70 @@ fn a_launch_ordered_replace_holds_the_metaflow_and_types_nothing_into_its_predec
         typing_calls(&fixture),
         Vec::<String>::new(),
         "nothing is typed into the predecessor"
+    );
+    assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+}
+
+/// A refresh owed a successor that cannot start answers Refresh's own
+/// rejection, never the replacement's answer: Undeclared when no model is
+/// configured for the successor, SuccessorRefused with the Replace's
+/// rejection when its launch is refused. Either leaves the flow Awake and
+/// live, owes nothing, and releases the lock.
+#[test]
+fn a_successor_that_cannot_start_answers_refresh_s_own_rejection() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    awake_seat(&fixture, vec![]);
+    let mut waking = stored(&fixture);
+    waking.queue = vec![signal_flow::QueueEntry {
+        logical_delivery_id: "refreshing-wake-0".into(),
+        sent_by: SentBy::Unknown,
+        delivery: Delivery::Wake,
+        message: Message::Soft(Request::Order("Wake the successor.".into())),
+    }];
+    fixture.nexus.store.seed_metaflow(waking);
+    // Declared, with no model configured for its layer and aspect.
+    declare(&fixture, seat_address());
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Refresh(seat_address())),
+        Response::RefreshRejected(RefreshRejection::Undeclared)
+    );
+    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
+    assert!(!closed(&fixture));
+    assert!(!fixture.nexus.waking.is_waking(&seat_address()));
+
+    // Required, its declared module absent from the verified context: the
+    // successor's launch is refused before any native seat starts.
+    declare_seat(
+        &fixture,
+        Availability::Required,
+        vec!["missing-module".into()],
+    );
+    let refused = fixture.nexus.dispatch(Query::Refresh(seat_address()));
+    assert!(
+        matches!(
+            &refused,
+            Response::RefreshRejected(RefreshRejection::SuccessorRefused(
+                ReplaceRejection::LaunchRefused(_)
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
+    assert_eq!(lifecycle(&fixture), FlowLifecycle::Active);
+    assert!(!closed(&fixture));
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .successor_intent(&seat_address())
+            .unwrap(),
+        None,
+        "a refused successor is not owed"
     );
     assert!(!fixture.nexus.waking.is_waking(&seat_address()));
 }

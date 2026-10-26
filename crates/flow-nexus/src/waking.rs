@@ -1479,9 +1479,24 @@ impl RefreshesMetaflows for RunningNexus {
                     self.wake_due(address.clone());
                     refreshed
                 }
-                AtStop::Kept(KeptAtStop::RefreshLaunchRefused(response)) => *response,
+                // A refused successor answers the Replace's own rejection;
+                // one whose launch is not yet confirmed holds the metaflow.
+                AtStop::Kept(KeptAtStop::RefreshLaunchRefused(response)) => {
+                    Response::RefreshRejected(match *response {
+                        Response::ReplaceRejected(rejection) => {
+                            RefreshRejection::SuccessorRefused(rejection)
+                        }
+                        Response::StartRejected(rejection) => RefreshRejection::SuccessorRefused(
+                            signal_flow::ReplaceRejection::LaunchRefused(rejection),
+                        ),
+                        Response::LaunchPending(_) | Response::StartAmbiguous(_) => {
+                            RefreshRejection::Locked
+                        }
+                        _ => RefreshRejection::PersistenceRefused,
+                    })
+                }
                 AtStop::Kept(KeptAtStop::RefreshUnplaceable) => {
-                    Response::Refused(Refusal::NotConfigured)
+                    Response::RefreshRejected(RefreshRejection::Undeclared)
                 }
                 _ => Response::RefreshRejected(RefreshRejection::PersistenceRefused),
             };
@@ -1505,7 +1520,7 @@ impl RefreshesMetaflows for RunningNexus {
     }
 
     fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response {
-        use signal_flow::RefreshRejection;
+        use signal_flow::ReplaceRejection;
         let address = profile.address.clone();
         let response = {
             let _turn = self
@@ -1513,7 +1528,7 @@ impl RefreshesMetaflows for RunningNexus {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let Some(lock) = self.waking.hold(&address) else {
-                return Response::RefreshRejected(RefreshRejection::Locked);
+                return Response::ReplaceRejected(ReplaceRejection::Locked);
             };
             let response = self.replace(profile, origin);
             drop(lock);

@@ -27,7 +27,7 @@ use std::sync::Mutex;
 
 pub(super) const FLOW_EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_flow_events");
 pub(super) const FLOW_EVENT_FAMILY: &str = "flow-nexus-flow-events";
-pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v3";
+pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v4";
 
 /// One flow's harness events, oldest first.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -44,11 +44,66 @@ impl EngineRecord for FlowEvents {
 
 impl MemoryDefinition for FlowEvents {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(FLOW_EVENT_SCHEMA)
+    }
+}
+
+/// One flow's events as Flow kept them before a session's end was an
+/// event, signal-flow 31's. It is read only by the v3-to-v4 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FlowEventsV3 {
+    pub flow_id: String,
+    pub event_vector: Vec<EventV3>,
+}
+
+impl EngineRecord for FlowEventsV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+
+impl MemoryDefinition for FlowEventsV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-flow-events-v3")
+    }
+}
+
+/// A harness event as signal-flow 31.0.0 archived it, before `Ended`.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub enum EventV3 {
+    Started,
+    ToolUsed(String),
+    Stopped(NativeStop),
+    PromptSubmitted(signal_flow::NativePrompt),
+}
+
+impl From<EventV3> for Event {
+    fn from(event: EventV3) -> Self {
+        match event {
+            EventV3::Started => Event::Started,
+            EventV3::ToolUsed(tool) => Event::ToolUsed(tool),
+            EventV3::Stopped(stop) => Event::Stopped(stop),
+            EventV3::PromptSubmitted(prompt) => Event::PromptSubmitted(prompt),
+        }
+    }
+}
+
+impl UpgradeFrom<FlowEventsV3> for FlowEvents {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: FlowEventsV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            flow_id: previous.flow_id,
+            event_vector: previous.event_vector.into_iter().map(Event::from).collect(),
+        })
     }
 }
 
@@ -182,6 +237,7 @@ impl DescribesEventTable for FlowEvents {
         )
         .with_predecessor::<FlowEventsV1>()
         .with_predecessor::<FlowEventsV2>()
+        .with_predecessor::<FlowEventsV3>()
     }
 }
 
@@ -200,8 +256,31 @@ pub trait RegistersEventTables: Sized {
 impl RegistersEventTables for EventTables {
     fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError> {
         let descriptor = <FlowEvents as DescribesEventTable>::descriptor();
+        let from_v2 = descriptor.clone();
         let from_v1 = descriptor.clone();
-        let events = match engine.upgrade_table::<FlowEventsV2, FlowEvents>(descriptor) {
+        // A v3 family upgrades from v3; one refused at admission names an
+        // older family, tried next.
+        match engine.upgrade_table::<FlowEventsV3, FlowEvents>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => {
+                return Ok(Self {
+                    events: receipt.table(),
+                    append_gate: Mutex::new(()),
+                });
+            }
+            UpgradeOutcome::AlreadyCurrent(events) => {
+                return Ok(Self {
+                    events,
+                    append_gate: Mutex::new(()),
+                });
+            }
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::EventUpgrade(format!("{failure:?}")));
+            }
+        }
+        let events = match engine.upgrade_table::<FlowEventsV2, FlowEvents>(from_v2) {
             UpgradeOutcome::Upgraded(receipt) => receipt.table(),
             UpgradeOutcome::AlreadyCurrent(table) => table,
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},

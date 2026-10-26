@@ -21,6 +21,14 @@ schema.
   pane closed and sleeps; a Maintained one keeps its pane and is always
   followed by a successor when refreshed or ended by an exit. The store
   gains `flow_nexus_successor_intents`.
+- Every stored family whose record shape changed opens under a new label,
+  each older row carried into the current shape: launch outcomes v6 to v7
+  (signal-flow 30 rejections; a `ContextRefusal` archived before
+  `RecordMissing` keeps its meaning, in every older outcome too), flow
+  events v3 to v4 (`Ended`), successor intents v1 to v2 (`Ordered`,
+  `Replace`), logical deliveries' current and event rows v1 to v2, send
+  outcomes v2 to v3 and send calls v4 to v5 (`DeliveryState.Withdrawn`,
+  `Refusal.TopicRefused`).
 - Locks held by a sender whose flow ends are retracted with the end.
 - No pane outlives its flow: `Retire` and a recorded exit close the flow's
   pane where it is still there, as `Stop`, a refresh and a replacement's

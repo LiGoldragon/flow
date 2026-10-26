@@ -18,8 +18,9 @@ use super::{
     metaflow::{SleepsMetaflows, TakesLaunchAddress},
     opened_thread::RecordsOpenedThreads,
 };
+use super::send_v31::SendAcceptanceV31;
 use crate::generated::send_tool::{
-    LegacyUnknown_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,
+    Accepted_Data, LegacyUnknown_Data, SendCall, SendOutcome, SendRefusal, Target, ToolCallKey,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -30,7 +31,7 @@ use signal_flow::{Address, HarnessKind, SendPayloadSize};
 
 pub(super) const SEND_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_send_calls");
 pub(super) const SEND_CALL_FAMILY: &str = "flow-nexus-send-call";
-pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v4";
+pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v5";
 
 /// The record key of a call: each part prefixed by its length, so no two
 /// keys of different parts read alike.
@@ -60,11 +61,71 @@ impl EngineRecord for SendCall {
 
 impl MemoryDefinition for SendCall {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
+        MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(SEND_CALL_SCHEMA)
+    }
+}
+
+/// A call as Flow kept it while its accepted answer's delivery state was
+/// signal-flow 31's, before Withdrawn. It is read only by the v4-to-v5
+/// upgrade, which carries it unchanged.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SendCallV4 {
+    pub(super) tool_call_key: ToolCallKey,
+    pub(super) content_sha256: String,
+    pub(super) send_outcome: SendOutcomeV4,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) enum SendOutcomeV4 {
+    Accepted(AcceptedV4),
+    LegacyUnknown(LegacyUnknown_Data),
+    Refused(SendRefusal),
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct AcceptedV4 {
+    pub(super) sender: signal_flow::Sender,
+    pub(super) target: Target,
+    pub(super) send_acceptance: SendAcceptanceV31,
+}
+
+impl EngineRecord for SendCallV4 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.tool_call_key.record_key_text())
+    }
+}
+
+impl MemoryDefinition for SendCallV4 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-call-v4")
+    }
+}
+
+impl UpgradeFrom<SendCallV4> for SendCall {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: SendCallV4) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            tool_call_key: previous.tool_call_key,
+            content_sha256: previous.content_sha256,
+            send_outcome: match previous.send_outcome {
+                SendOutcomeV4::Accepted(accepted) => SendOutcome::Accepted(Accepted_Data {
+                    sender: accepted.sender,
+                    target: accepted.target,
+                    send_acceptance: accepted.send_acceptance.into(),
+                }),
+                SendOutcomeV4::LegacyUnknown(unknown) => SendOutcome::LegacyUnknown(unknown),
+                SendOutcomeV4::Refused(refusal) => SendOutcome::Refused(refusal),
+            },
+        })
     }
 }
 
@@ -316,6 +377,7 @@ impl DescribesSendCallTable for SendCall {
         .with_predecessor::<SendCallV3>()
         .with_predecessor::<SendCallV1>()
         .with_predecessor::<SendCallV2>()
+        .with_predecessor::<SendCallV4>()
     }
 }
 

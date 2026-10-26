@@ -8,6 +8,7 @@ use crate::generated::send_tool::{
     Target, ToolCallKey,
 };
 use flow_ethos::{Delivery, Message, QueueEntry};
+use super::send_v31::DeliverySnapshotV31;
 use sema_engine::AtomicCommit;
 use signal_flow::{
     Address, DeliverySnapshot, DeliveryState, Lock, LogicalDeliveryId, NativeReceipt, Refusal,
@@ -18,6 +19,8 @@ const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
 const CURRENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_current");
 const EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_events");
+pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v2";
+pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v2";
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
 
@@ -105,10 +108,38 @@ impl EngineRecord for CurrentLogicalDelivery {
 }
 impl MemoryDefinition for CurrentLogicalDelivery {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(CURRENT_SCHEMA)
+    }
+}
+
+/// A delivery's current snapshot as signal-flow 31 archived it, read only
+/// by the v1-to-v2 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CurrentLogicalDeliveryV1 {
+    pub snapshot: DeliverySnapshotV31,
+}
+impl EngineRecord for CurrentLogicalDeliveryV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.snapshot.logical_delivery_id.clone())
+    }
+}
+impl MemoryDefinition for CurrentLogicalDeliveryV1 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(1)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-logical-delivery-current-v1")
+    }
+}
+impl UpgradeFrom<CurrentLogicalDeliveryV1> for CurrentLogicalDelivery {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: CurrentLogicalDeliveryV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            snapshot: previous.snapshot.into(),
+        })
     }
 }
 
@@ -123,10 +154,38 @@ impl EngineRecord for LogicalDeliveryEvent {
 }
 impl MemoryDefinition for LogicalDeliveryEvent {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(EVENT_SCHEMA)
+    }
+}
+
+/// A delivery's lifecycle event as signal-flow 31 archived it, read only by
+/// the v1-to-v2 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogicalDeliveryEventV1 {
+    pub snapshot: DeliverySnapshotV31,
+}
+impl EngineRecord for LogicalDeliveryEventV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor))
+    }
+}
+impl MemoryDefinition for LogicalDeliveryEventV1 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(1)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-logical-delivery-event-v1")
+    }
+}
+impl UpgradeFrom<LogicalDeliveryEventV1> for LogicalDeliveryEvent {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: LogicalDeliveryEventV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            snapshot: previous.snapshot.into(),
+        })
     }
 }
 
@@ -187,12 +246,14 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 CURRENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-current"),
                 CurrentLogicalDelivery::schema_hash(),
-            ),
+            )
+            .with_predecessor::<CurrentLogicalDeliveryV1>(),
             events: TableDescriptor::new(
                 EVENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-event"),
                 LogicalDeliveryEvent::schema_hash(),
-            ),
+            )
+            .with_predecessor::<LogicalDeliveryEventV1>(),
             simplified_replies: TableDescriptor::new(
                 SIMPLIFIED_REPLY_TABLE_NAME,
                 FamilyName::new("flow-nexus-simplified-reply-binding"),
@@ -206,8 +267,31 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
     ) -> Result<LogicalDeliveryTables, StoreError> {
         Ok(LogicalDeliveryTables {
             counter: engine.register_table(descriptors.counter)?,
-            current: engine.register_table(descriptors.current)?,
-            events: engine.register_table(descriptors.events)?,
+            current: match engine
+                .upgrade_table::<CurrentLogicalDeliveryV1, CurrentLogicalDelivery>(
+                    descriptors.current,
+                ) {
+                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                UpgradeOutcome::AlreadyCurrent(table) => table,
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::LogicalDeliveryUpgrade(format!(
+                        "current deliveries: {failure:?}"
+                    )));
+                }
+            },
+            events: match engine
+                .upgrade_table::<LogicalDeliveryEventV1, LogicalDeliveryEvent>(descriptors.events)
+            {
+                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                UpgradeOutcome::AlreadyCurrent(table) => table,
+                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::LogicalDeliveryUpgrade(format!(
+                        "delivery events: {failure:?}"
+                    )));
+                }
+            },
             simplified_replies: engine.register_table(descriptors.simplified_replies)?,
             write_gate: Mutex::new(()),
         })

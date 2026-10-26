@@ -21,6 +21,7 @@ pub(crate) mod repair;
 pub(crate) mod send_call;
 pub(crate) mod send_outcome;
 pub(crate) mod send_server;
+pub(crate) mod send_v31;
 pub(crate) mod sent;
 mod staged_upgrade;
 pub(crate) mod successor;
@@ -3028,6 +3029,8 @@ pub enum StoreError {
     ModelUpgrade(String),
     #[error("flow events upgrade failed: {0}")]
     EventUpgrade(String),
+    #[error("successor intent family upgrade failed: {0}")]
+    SuccessorUpgrade(String),
     #[error("retired tables could not be dropped: {0}")]
     RetiredTableDrop(String),
     #[error("flow nexus state record is absent or duplicated")]
@@ -3316,6 +3319,20 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<crate::generated::send_tool::SendCall>,
     ) -> Result<TableReference<crate::generated::send_tool::SendCall>, StoreError> {
+        // A v4 family upgrades from v4; one refused at admission names an
+        // older family, tried next.
+        match self.upgrade_table::<send_call::SendCallV4, crate::generated::send_tool::SendCall>(
+            descriptor.clone(),
+        ) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::SendCallUpgrade(format!("{failure:?}")));
+            }
+        }
         match self.upgrade_table::<send_call::SendCallV3, crate::generated::send_tool::SendCall>(
             descriptor.clone(),
         ) {
@@ -4276,7 +4293,10 @@ impl OpensFlowStore for FlowStore {
         let send_calls = engine.upgraded_send_calls(send_calls_descriptor)?;
         let launch_cleanups = engine.register_table(launch_cleanups_descriptor)?;
         let compactions = engine.register_table(compactions_descriptor)?;
-        let successor_intents = engine.register_table(successor_intents_descriptor)?;
+        let successor_intents = successor::UpgradesSuccessorIntents::upgraded_successor_intents(
+            &mut engine,
+            successor_intents_descriptor,
+        )?;
         let queue_delivery =
             QueueDeliveryTables::register(&mut engine, queue_delivery_descriptors)?;
         let send_outcomes = SendOutcomeTables::register(&mut engine, send_outcome_descriptors)?;
@@ -4453,7 +4473,8 @@ impl OpensFlowStore for FlowStore {
         let compactions = engine.register_table(
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor(),
         )?;
-        let successor_intents = engine.register_table(
+        let successor_intents = successor::UpgradesSuccessorIntents::upgraded_successor_intents(
+            &mut engine,
             <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor(),
         )?;
         let queue_delivery =
@@ -7130,11 +7151,11 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_logical_delivery_current" => (
                 "flow-nexus-logical-delivery-current",
-                "flow-nexus-logical-delivery-current-v1",
+                logical_delivery::CURRENT_SCHEMA,
             ),
             "flow_nexus_logical_delivery_events" => (
                 "flow-nexus-logical-delivery-event",
-                "flow-nexus-logical-delivery-event-v1",
+                logical_delivery::EVENT_SCHEMA,
             ),
             "flow_nexus_simplified_reply_bindings" => (
                 "flow-nexus-simplified-reply-binding",
@@ -7211,10 +7232,16 @@ pub(crate) trait ReadsFlowMemory {
                 && identity.schema_hash() == schema_hash
         };
         let predecessors: &[(&str, SchemaHash)] = match table_key {
-            "flow_nexus_send_outcomes" => &[(
-                send_outcome::OUTCOME_FAMILY,
-                send_outcome::StoredSendOutcomeV1::schema_hash(),
-            )],
+            "flow_nexus_send_outcomes" => &[
+                (
+                    send_outcome::OUTCOME_FAMILY,
+                    send_outcome::StoredSendOutcomeV1::schema_hash(),
+                ),
+                (
+                    send_outcome::OUTCOME_FAMILY,
+                    send_outcome::StoredSendOutcomeV2::schema_hash(),
+                ),
+            ],
             "flow_nexus_flows" => &[("flow-nexus-flow", FlowRecordV5::schema_hash())],
             "flow_nexus_launch_outcomes" => &[
                 (
@@ -7272,6 +7299,18 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-meta-model-configuration",
                 StoredMetaModelConfigurationV1::schema_hash(),
             )],
+            "flow_nexus_logical_delivery_current" => &[(
+                "flow-nexus-logical-delivery-current",
+                <logical_delivery::CurrentLogicalDeliveryV1 as MemoryDefinition>::schema_hash(),
+            )],
+            "flow_nexus_logical_delivery_events" => &[(
+                "flow-nexus-logical-delivery-event",
+                <logical_delivery::LogicalDeliveryEventV1 as MemoryDefinition>::schema_hash(),
+            )],
+            "flow_nexus_successor_intents" => &[(
+                successor::SUCCESSOR_INTENT_FAMILY,
+                <successor::SuccessorIntentV1 as MemoryDefinition>::schema_hash(),
+            )],
             "flow_nexus_meta_leave_out_configuration" => &[(
                 "flow-nexus-meta-leave-out-configuration",
                 StoredMetaLeaveOutConfigurationV1::schema_hash(),
@@ -7302,6 +7341,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     send_call::SEND_CALL_FAMILY,
                     <send_call::SendCallV3 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    send_call::SEND_CALL_FAMILY,
+                    <send_call::SendCallV4 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_queue_delivery_requests" => &[
@@ -7336,6 +7379,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     events::FLOW_EVENT_FAMILY,
                     <events::FlowEventsV2 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    events::FLOW_EVENT_FAMILY,
+                    <events::FlowEventsV3 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             _ => &[],
@@ -7973,6 +8020,277 @@ mod tests {
             assert!(
                 matches!(&events[1], signal_flow::Event::Stopped(stop) if stop.native_session_id_option.as_deref() == Some("old-session") && stop.last_assistant_message_option.is_none())
             );
+        }
+    }
+
+    /// A store written before Continuity, before a session's end was an
+    /// event, before a successor could be owed for an ordered Refresh or a
+    /// Replace, and before a queued request could be withdrawn, opens with
+    /// every one of those families upgraded, and opens again unchanged: its
+    /// declarations Maintained at the core Addresses alone, its events,
+    /// successors, deliveries and send calls as they were kept.
+    #[test]
+    fn a_store_before_continuity_and_withdrawal_upgrades_and_reopens() {
+        use super::events::{EventV3, FlowEventsV3};
+        use super::logical_delivery::{CurrentLogicalDeliveryV1, LogicalDeliveryEventV1};
+        use super::metaflow_declaration::{
+            AvailabilityV3, ConfigureMetaflowV3, ReadsMetaflowDeclarations,
+            StoredMetaMetaflowConfigurationV3,
+        };
+        use super::send_call::{AcceptedV4, SendCallV4, SendOutcomeV4};
+        use super::send_v31::{DeliverySnapshotV31, DeliveryStateV31, RefusalV31, SendAcceptanceV31};
+        use super::successor::{
+            OwesSuccessors, SuccessionCause, SuccessionCauseV1, SuccessorIntent, SuccessorIntentV1,
+        };
+        use super::MemoryDefinition;
+        use crate::store::logical_delivery::RecordsLogicalDeliveries;
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        drop(fixture.configured_store());
+        let tables = [
+            "flow_nexus_flow_events",
+            "flow_nexus_successor_intents",
+            "flow_nexus_logical_delivery_current",
+            "flow_nexus_logical_delivery_events",
+            "flow_nexus_send_calls",
+            "flow_nexus_meta_metaflow_configuration",
+        ];
+        let database = redb::Database::open(fixture.path()).unwrap();
+        let write = database.begin_write().unwrap();
+        {
+            let mut catalog = write.open_table(super::SEMA_CATALOG_TABLE).unwrap();
+            for name in tables {
+                catalog.remove(name).unwrap();
+            }
+        }
+        for name in tables {
+            write
+                .delete_table(redb::TableDefinition::<&str, &[u8]>::new(name))
+                .unwrap();
+        }
+        write.commit().unwrap();
+        drop(database);
+        let core = Address {
+            aspect: Aspect::Mind,
+            topic: "core".into(),
+            layer: Layer::Secondary,
+        };
+        let elsewhere = Address {
+            aspect: Aspect::Mind,
+            topic: "flow".into(),
+            layer: Layer::Primary,
+        };
+        let snapshot = DeliverySnapshotV31 {
+            delivery_cursor: 7,
+            logical_delivery_id: "logical-old".into(),
+            sent_by: signal_flow::SentBy::Sender(elsewhere.clone()),
+            address: core.clone(),
+            delivery_state: DeliveryStateV31::Failed(RefusalV31::Direct("gone".into())),
+        };
+        let key = crate::generated::send_tool::ToolCallKey {
+            thread_id: "thread-old".into(),
+            turn_id: "turn-old".into(),
+            call_id: "call-old".into(),
+        };
+        let mut engine = Engine::open(EngineOpen::new(
+            fixture.path(),
+            SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+        ))
+        .unwrap();
+        let events = engine
+            .register_table::<FlowEventsV3>(TableDescriptor::new(
+                TableName::new(tables[0]),
+                FamilyName::new("flow-nexus-flow-events"),
+                FlowEventsV3::schema_hash(),
+            ))
+            .unwrap();
+        engine
+            .assert(Assertion::new(
+                events,
+                FlowEventsV3 {
+                    flow_id: "old-flow".into(),
+                    event_vector: vec![EventV3::Started, EventV3::ToolUsed("Bash".into())],
+                },
+            ))
+            .unwrap();
+        let successors = engine
+            .register_table::<SuccessorIntentV1>(TableDescriptor::new(
+                TableName::new(tables[1]),
+                FamilyName::new("flow-nexus-successor-intent"),
+                SuccessorIntentV1::schema_hash(),
+            ))
+            .unwrap();
+        engine
+            .assert(Assertion::new(
+                successors,
+                SuccessorIntentV1 {
+                    address: core.clone(),
+                    predecessor: "old-flow".into(),
+                    cause: SuccessionCauseV1::Exit,
+                    launch_request_id: String::new(),
+                },
+            ))
+            .unwrap();
+        let current = engine
+            .register_table::<CurrentLogicalDeliveryV1>(TableDescriptor::new(
+                TableName::new(tables[2]),
+                FamilyName::new("flow-nexus-logical-delivery-current"),
+                CurrentLogicalDeliveryV1::schema_hash(),
+            ))
+            .unwrap();
+        engine
+            .assert(Assertion::new(
+                current,
+                CurrentLogicalDeliveryV1 {
+                    snapshot: snapshot.clone(),
+                },
+            ))
+            .unwrap();
+        let delivery_events = engine
+            .register_table::<LogicalDeliveryEventV1>(TableDescriptor::new(
+                TableName::new(tables[3]),
+                FamilyName::new("flow-nexus-logical-delivery-event"),
+                LogicalDeliveryEventV1::schema_hash(),
+            ))
+            .unwrap();
+        engine
+            .assert(Assertion::new(
+                delivery_events,
+                LogicalDeliveryEventV1 {
+                    snapshot: snapshot.clone(),
+                },
+            ))
+            .unwrap();
+        let calls = engine
+            .register_table::<SendCallV4>(TableDescriptor::new(
+                TableName::new(tables[4]),
+                FamilyName::new("flow-nexus-send-call"),
+                SendCallV4::schema_hash(),
+            ))
+            .unwrap();
+        engine
+            .assert(Assertion::new(
+                calls,
+                SendCallV4 {
+                    tool_call_key: key.clone(),
+                    content_sha256: "sha-old".into(),
+                    send_outcome: SendOutcomeV4::Accepted(AcceptedV4 {
+                        sender: elsewhere.clone(),
+                        target: core.clone(),
+                        send_acceptance: SendAcceptanceV31 {
+                            logical_delivery_id: "logical-old".into(),
+                            delivery_cursor: 7,
+                            delivery_state: DeliveryStateV31::Queued,
+                        },
+                    }),
+                },
+            ))
+            .unwrap();
+        let declarations = engine
+            .register_table::<StoredMetaMetaflowConfigurationV3>(TableDescriptor::new(
+                TableName::new(tables[5]),
+                FamilyName::new("flow-nexus-meta-metaflow-configuration"),
+                StoredMetaMetaflowConfigurationV3::schema_hash(),
+            ))
+            .unwrap();
+        for (address, availability) in [
+            (core.clone(), AvailabilityV3::OnDemand),
+            (elsewhere.clone(), AvailabilityV3::Required),
+        ] {
+            engine
+                .assert(Assertion::new(
+                    declarations,
+                    StoredMetaMetaflowConfigurationV3 {
+                        metaflow: ConfigureMetaflowV3 {
+                            address,
+                            system_modules: vec!["spirit:core".into()],
+                            user_modules: vec![],
+                            flow_kind: signal_flow::FlowKind::Regular,
+                            tool_set: signal_flow::ToolSet::Default,
+                            availability,
+                            purpose: "Kept.".into(),
+                            records: vec![],
+                        },
+                    },
+                ))
+                .unwrap();
+        }
+        drop(engine);
+        for _ in 0..2 {
+            let store = fixture.configured_store();
+            assert_eq!(
+                super::events::RecordsHarnessEvents::events(&store, "old-flow")
+                    .unwrap()
+                    .unwrap(),
+                vec![
+                    signal_flow::Event::Started,
+                    signal_flow::Event::ToolUsed("Bash".into())
+                ]
+            );
+            assert_eq!(
+                store.successor_intent(&core).unwrap(),
+                Some(SuccessorIntent {
+                    address: core.clone(),
+                    predecessor: "old-flow".into(),
+                    cause: SuccessionCause::Exit,
+                    launch_request_id: String::new(),
+                })
+            );
+            let upgraded: signal_flow::DeliverySnapshot = snapshot.clone().into();
+            assert_eq!(
+                upgraded.delivery_state,
+                signal_flow::DeliveryState::Failed(signal_flow::Refusal::Direct("gone".into()))
+            );
+            assert_eq!(
+                store
+                    .logical_delivery_snapshot(&"logical-old".to_owned())
+                    .unwrap(),
+                Some(upgraded.clone())
+            );
+            assert_eq!(
+                store
+                    .engine
+                    .match_records(QueryPlan::all(store.logical_deliveries.events))
+                    .unwrap()
+                    .records()
+                    .iter()
+                    .map(|event| event.snapshot.clone())
+                    .collect::<Vec<_>>(),
+                vec![upgraded]
+            );
+            let kept = store
+                .engine
+                .match_records(QueryPlan::all(store.send_calls))
+                .unwrap()
+                .records()
+                .to_vec();
+            assert!(
+                matches!(
+                    kept.as_slice(),
+                    [call] if call.tool_call_key == key
+                        && matches!(
+                            &call.send_outcome,
+                            crate::generated::send_tool::SendOutcome::Accepted(accepted)
+                                if accepted.send_acceptance.delivery_state
+                                    == signal_flow::DeliveryState::Queued
+                        )
+                ),
+                "{kept:?}"
+            );
+            assert_eq!(
+                store
+                    .metaflow_declaration(&core)
+                    .unwrap()
+                    .expect("core declared")
+                    .continuity,
+                meta_signal_flow::Continuity::Maintained
+            );
+            let other = store
+                .metaflow_declaration(&elsewhere)
+                .unwrap()
+                .expect("other declared");
+            assert_eq!(other.continuity, meta_signal_flow::Continuity::OnDemand);
+            assert_eq!(other.purpose, "Kept.");
         }
     }
 

@@ -278,9 +278,19 @@ impl MutatesMetaflows for FlowStore {
             }
             return Ok(Response::Refused(refusal));
         }
+        let sender_option = self
+            .stored_metaflow(&request.lock.sender)?
+            .and_then(|stored| match stored.metaflow.state {
+                flow_ethos::State::Awake(flow_id) => Some(meta_signal_flow::Sender {
+                    address: request.lock.sender.clone(),
+                    flow_id,
+                }),
+                _ => None,
+            });
         self.accept_logical_delivery(
             &request.lock.address,
             SentBy::Sender(request.lock.sender.clone()),
+            sender_option,
             request.delivery,
             request.message,
             Some(VerifiedDeliveryLock {
@@ -619,6 +629,7 @@ impl QueuesFlowRequest for FlowStore {
         let response = self.accept_logical_delivery(
             address,
             request.sent_by,
+            None,
             request.delivery,
             request.message,
             None,

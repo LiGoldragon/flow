@@ -14,7 +14,6 @@
 //! system prompt.
 
 use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
-use crate::delivery::body::RendersNativeContent;
 pub use crate::generated::starter::{
     AssemblesComposedLaunch, CarriesFlowId, ComposesLaunch, ComposesVerifiedContext,
     ContextRequest, FitsOneMessage, HarnessedProfile, JoinsContextAndBrief, LeanStart,
@@ -27,8 +26,8 @@ use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     Address, Aspect, ComposedLaunch, CompositionRefusal, ContextRefusal, FirstPromptPayload,
-    HarnessKind, LaunchProfile, Layer, LeaveOut, LeaveOutRefusal, PromptPart, QueueEntry,
-    SystemPrompt, TargetReceiptRequest,
+    HarnessKind, LaunchProfile, Layer, LeaveOut, LeaveOutRefusal, PromptPart, SystemPrompt,
+    TargetReceiptRequest,
 };
 use std::collections::HashSet;
 
@@ -603,26 +602,6 @@ impl ComposesLaunch for LaunchComposer {
             &parts,
             &leave_outs,
         ))
-    }
-}
-
-/// The recipient-facing content a metaflow's queued requests become in a
-/// flow's prompt, oldest first. Priority and sender accounting stay in the
-/// durable queue and never enter native user text.
-pub trait RendersQueuedWork {
-    fn prompt_text(&self) -> String;
-}
-
-impl RendersQueuedWork for [QueueEntry] {
-    fn prompt_text(&self) -> String {
-        let mut text = String::new();
-        for (index, request) in self.iter().enumerate() {
-            if index > 0 {
-                text.push('\n');
-            }
-            text.push_str(&request.message.native_content());
-        }
-        text
     }
 }
 
@@ -1394,19 +1373,6 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert!(composed.system_prompt.system_prompt_text.len() > 140_000);
-    }
-
-    #[test]
-    fn native_queue_text_contains_only_the_recipient_facing_content() {
-        use super::RendersQueuedWork;
-        use signal_flow::{QueueEntry, Request, SentBy};
-        let order = QueueEntry {
-            logical_delivery_id: "logical-delivery-0000000000000001".into(),
-            sent_by: SentBy::Flow,
-            delivery: signal_flow::Delivery::Queue,
-            message: signal_flow::Message::Soft(Request::Order("investigate".into())),
-        };
-        assert_eq!([order].prompt_text(), "investigate");
     }
 
     #[test]

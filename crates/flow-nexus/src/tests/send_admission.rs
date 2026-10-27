@@ -192,7 +192,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
         claude_seat(&fixture, 40_000);
-        fixture.accept_pane_operations(
+        let operations = fixture.accept_pane_operations(
             vec![
                 codex_agent_in("pane-1", "terminal-pane-1"),
                 claude_agent(&fixture),
@@ -219,16 +219,22 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
         let transcript = claude_transcript(&fixture);
         let typed = fixture.directory.path().join("pane-typed.txt");
-        let writer = std::thread::spawn(move || {
+        let operations_for_writer = operations.clone();
+        let writer = (!duplicate).then(|| std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(12);
-            while !std::fs::read_to_string(&typed)
-                .unwrap_or_default()
-                .contains("real direct receipt")
-            {
-                assert!(Instant::now() < deadline, "direct message never submitted");
+            let native_text = loop {
+                let text = std::fs::read_to_string(&typed).unwrap_or_default();
+                if text.contains("real direct receipt") {
+                    break text.trim_end().to_owned();
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "direct message never submitted; operations: {}",
+                    std::fs::read_to_string(&operations_for_writer).unwrap_or_default()
+                );
                 std::thread::sleep(Duration::from_millis(10));
-            }
-            let row = serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"direct-native-receipt", "message":{"content":"real direct receipt"}});
+            };
+            let row = serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"direct-native-receipt", "message":{"content":native_text}});
             writeln!(
                 std::fs::OpenOptions::new()
                     .append(true)
@@ -237,7 +243,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 "{row}"
             )
             .unwrap();
-        });
+        }));
         let request = Request::Notice("real direct receipt".into());
         let message = if hard {
             Message::HardAbrupt(request)
@@ -287,20 +293,8 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             assert!(answer.pending.is_none());
             answer.response
         };
-        writer.join().unwrap();
-        if duplicate {
-            assert!(
-                matches!(
-                    answer,
-                    Response::Failed(signal_flow::SendFailure {
-                        send_failure_reason: signal_flow::SendFailureReason::ReceiptUncertain,
-                        ..
-                    })
-                ),
-                "{:?}",
-                answer
-            );
-            continue;
+        if let Some(writer) = writer {
+            writer.join().unwrap();
         }
         let Response::Sent(receipt) = answer else {
             use crate::store::queue_delivery::AccountsQueueDelivery;
@@ -318,7 +312,11 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         assert_eq!(receipt.native_receipt.native_session_id, CLAUDE_SESSION);
         assert_eq!(
             receipt.native_receipt.native_prompt_id,
-            "direct-native-receipt"
+            if duplicate {
+                "fixture-receipt"
+            } else {
+                "direct-native-receipt"
+            }
         );
         assert!(!receipt.logical_delivery_id.is_empty());
         assert!(

@@ -1,4 +1,4 @@
-use datom_codec::{Budget, Composable, DatomForming, Datomizable, Form};
+use datom_codec::{Actualizing, Budget, Composable, DatomForming, Datomizable, Form, Potential};
 use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
 use protos::{BoundedProtosizable, Compactable, Protosizable, ReaderBudget};
 use signal_flow::{Delivery, Message, Query, Recipient, Response, SendRequest};
@@ -30,13 +30,67 @@ trait TextualizesFlowReply {
 }
 
 impl ParsesFlowCommand for FlowClient {
-    fn parse_command(&self, mut arguments: impl Iterator<Item = String>) -> Result<Query, String> {
-        let Some(value) = arguments.next() else {
-            return Err("usage: flow '<one inline Query datom>'".into());
-        };
-        if arguments.next().is_some() {
+    fn parse_command(&self, arguments: impl Iterator<Item = String>) -> Result<Query, String> {
+        let mut arguments = arguments.collect::<Vec<_>>();
+        // The message edge is intentionally plain words: callers do not have
+        // to manufacture datom syntax.  The Nexus still receives the same
+        // typed Send as the datom surface.
+        if arguments.len() >= 4 && !arguments[0].contains('.') {
+            let address = format!("{{ {} }}", arguments.remove(0));
+            let priority = arguments.remove(0).to_ascii_lowercase();
+            let kind = arguments.remove(0).to_ascii_lowercase();
+            let mut budget = Budget {
+                remaining: 65_536,
+                reader: ReaderBudget { remaining: 65_536 },
+                depth: 0,
+                maximum_depth: 1_024,
+            };
+            let recipient = Recipient::Address(
+                Potential::<signal_flow::Address>::from(address)
+                    .actualize(&mut budget)
+                    .map_err(|error| format!("invalid recipient: {error:?}"))?,
+            );
+            let request = match kind.as_str() {
+                "order" | "result" | "notice" | "question" if arguments.len() == 1 => {
+                    let words = arguments.remove(0);
+                    match kind.as_str() {
+                        "order" => signal_flow::Request::Order(words),
+                        "result" => signal_flow::Request::Result(words),
+                        "notice" => signal_flow::Request::Notice(words),
+                        _ => signal_flow::Request::Question(words),
+                    }
+                }
+                "psyche" if arguments.len() == 2 => {
+                    signal_flow::Request::Psyche(flow_ethos::Said {
+                        context: arguments.remove(0),
+                        verbatim: arguments.remove(0),
+                    })
+                }
+                _ => {
+                    return Err(
+                        "usage: flow '<address>' <hard-abrupt|middle-abrupt|soft> <order|result|notice|question|psyche> <words>"
+                            .into(),
+                    );
+                }
+            };
+            let message = match priority.as_str() {
+                "hardabrupt" | "hard-abrupt" => Message::HardAbrupt(request),
+                "middleabrupt" | "middle-abrupt" => Message::MiddleAbrupt(request),
+                "soft" => Message::Soft(request),
+                _ => return Err("priority must be hard-abrupt, middle-abrupt, or soft".into()),
+            };
+            return Ok(Query::Send(SendRequest {
+                recipient,
+                delivery: Delivery::Wake,
+                message,
+            }));
+        }
+        if arguments.len() != 1 {
             return Err("usage: flow '<one inline Query datom>'".into());
         }
+        let Some(value) = arguments.into_iter().next() else {
+            return Err("usage: flow '<one inline Query datom>'".into());
+        };
         let mut budget = Budget {
             remaining: 65_536,
             reader: ReaderBudget { remaining: 65_536 },
@@ -209,6 +263,48 @@ mod tests {
                 .expect("DeliverAll parses"),
             Query::DeliverAll(_)
         ));
+    }
+
+    #[test]
+    fn plain_message_arguments_become_a_typed_send() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        let Query::Send(send) = client
+            .parse_command(
+                [
+                    "Psyche core Secondary",
+                    "soft",
+                    "notice",
+                    "batch 1 is in a commit",
+                ]
+                .into_iter()
+                .map(String::from),
+            )
+            .expect("plain message arguments parse")
+        else {
+            panic!("plain message is Send")
+        };
+        assert_eq!(send.delivery, Delivery::Wake);
+        assert_eq!(
+            send.message,
+            Message::Soft(Request::Notice("batch 1 is in a commit".into()))
+        );
+
+        let Query::Send(abrupt) = client
+            .parse_command(
+                ["Mind flow Secondary", "hard-abrupt", "order", "stop now"]
+                    .into_iter()
+                    .map(String::from),
+            )
+            .unwrap()
+        else {
+            panic!("plain abrupt message is Send")
+        };
+        assert_eq!(
+            abrupt.message,
+            Message::HardAbrupt(Request::Order("stop now".into()))
+        );
     }
 
     #[test]

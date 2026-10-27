@@ -2347,22 +2347,29 @@ mod tests {
         Refused(meta_signal_flow::DeliveryRejection),
     }
 
-    /// The MessageId every fixture letter names: what a recipient reading
-    /// the pane would Acknowledge.
-    const FIXTURE_MESSAGE_ID: &str = "m-7f3a2c";
-
     fn middle_abrupt(text: &str) -> meta_signal_flow::Message {
         meta_signal_flow::Message::MiddleAbrupt(meta_signal_flow::Letter {
-            message_id: FIXTURE_MESSAGE_ID.into(),
-            sender: meta_signal_flow::Sender::Owner,
-            content: meta_signal_flow::Content::Text(text.into()),
+            kind: meta_signal_flow::Kind::Notice,
+            sender: fixture_sender(),
+            body: meta_signal_flow::Body::Words(text.into()),
         })
+    }
+
+    fn fixture_sender() -> meta_signal_flow::Sender {
+        meta_signal_flow::Sender {
+            address: signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "core".into(),
+                layer: signal_flow::Layer::Secondary,
+            },
+            flow_id: "e167d8".into(),
+        }
     }
 
     /// The pane text of a MiddleAbrupt from the owner, written out by hand:
     /// the head comes first, then the id, the sender and the text.
     fn rendered(text: &str) -> String {
-        format!("MiddleAbrupt.{{ {FIXTURE_MESSAGE_ID} Owner Text.«{text}» }}")
+        format!("MiddleAbrupt.{{ Notice {{ {{ Psyche core Secondary }} e167d8 }} Words.«{text}» }}")
     }
 
     fn prompts(operation_log: &std::path::Path) -> Vec<String> {
@@ -2374,7 +2381,7 @@ mod tests {
             .collect()
     }
 
-    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 MiddleAbrupt.{ m-7f3a2c Owner Text.«bare prompt» } --wait --until working --until idle --until done --until blocked --timeout 10000";
+    const OBSERVED_PROMPT: &str = "--session messaging-build agent prompt w1:p3 MiddleAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«bare prompt» } --wait --until working --until idle --until done --until blocked --timeout 10000";
 
     #[test]
     fn observed_send_promotes_a_pending_flow_and_types_only_the_bare_input() {
@@ -3677,6 +3684,7 @@ mod tests {
             .accept_logical_delivery(
                 &recipient,
                 signal_flow::SentBy::Sender(sender.clone()),
+                None,
                 signal_flow::Delivery::Queue,
                 signal_flow::Message::Soft(signal_flow::Request::Order(
                     "resume from durable state".into(),

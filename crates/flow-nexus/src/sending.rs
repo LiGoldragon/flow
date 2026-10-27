@@ -33,7 +33,8 @@ use crate::store::send_call::KeepsSendCalls;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::sent::NamesCodexAppServers;
 use crate::store::{
-    ExistingSeatAdoption, FlowStore, NamesConfiguredModel, ReadsFlowMemory, RegistersExistingFlow,
+    ExistingSeatAdoption, FlowStore, ManagesMetaflowState, NamesConfiguredModel, ReadsFlowMemory,
+    RegistersExistingFlow,
 };
 use crate::waking::{
     HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
@@ -276,9 +277,22 @@ impl SendsRequests for RunningNexus {
                 None
             };
             let direct = direct_lease.is_some();
+            let sender_flow_id = match self.store.list_metaflows() {
+                Ok(metaflows) => metaflows
+                    .into_iter()
+                    .find_map(|metaflow| (metaflow.address == sender).then_some(metaflow.state)),
+                Err(error) => return Response::Refused(Refusal::Store(error.to_string())).into(),
+            };
+            let Some(flow_ethos::State::Awake(sender_flow_id)) = sender_flow_id else {
+                return Response::Refused(Refusal::Unidentified(peer.clone())).into();
+            };
             let admitted = self.store.accept_logical_delivery(
                 &recipient,
-                SentBy::Sender(sender),
+                SentBy::Sender(sender.clone()),
+                Some(meta_signal_flow::Sender {
+                    address: sender,
+                    flow_id: sender_flow_id,
+                }),
                 delivery.clone(),
                 send.message,
                 None,

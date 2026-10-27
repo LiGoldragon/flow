@@ -74,8 +74,8 @@ use crate::codex::{
     CodexTurnHistory, ReadsCodexTurnHistory, SelectsCodexEndpoint, SubmitsQueuedCodexTurn,
 };
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
-use crate::composition::{FreshSeat, JoinsPurpose, RendersQueuedWork};
-use crate::delivery::body::RendersNativeContent;
+use crate::composition::{FreshSeat, JoinsPurpose};
+use crate::delivery::body::{RendersNativeContent, RendersPaneText, ShowsPaneText};
 use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{
     DeliversMessages, FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal,
@@ -90,7 +90,6 @@ use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, Read
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
-use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::events::RecordsHarnessEvents;
@@ -101,6 +100,7 @@ use crate::store::queue_delivery::{
     NativeTranscriptCursor, PrepareQueueDelivery, QueueDeliveryAttempt, QueueDeliveryPhase,
 };
 use crate::store::successor::{OwesSuccessors, ReadsContinuity, SuccessionCause, SuccessorIntent};
+use crate::store::{FlowStore, NamesConfiguredModel};
 use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
@@ -818,6 +818,9 @@ impl ReadsClaudeDelivery for RunningNexus {
         let Some(transcript) = self.claude_transcript(&node) else {
             return ClaudeQueuedHistory::Unreadable;
         };
+        let Some(text) = attempt.prompt_text(&self.store) else {
+            return ClaudeQueuedHistory::Unreadable;
+        };
         transcript.queued_history_after(
             &node.session_id,
             &ClaudeTranscriptCursor {
@@ -825,7 +828,7 @@ impl ReadsClaudeDelivery for RunningNexus {
                 inode: cursor.inode,
                 offset: cursor.offset,
             },
-            &attempt.prompt_text(),
+            &text,
         )
     }
 }
@@ -953,16 +956,73 @@ pub(crate) trait ReconcilesQueueDelivery {
     fn recover_deliveries(&self);
 }
 
+pub(crate) fn render_message(
+    entry: &QueueEntry,
+    sender: meta_signal_flow::Sender,
+) -> meta_signal_flow::Message {
+    let request = match &entry.message {
+        signal_flow::Message::HardAbrupt(request)
+        | signal_flow::Message::MiddleAbrupt(request)
+        | signal_flow::Message::Soft(request) => request,
+    };
+    let (kind, body) = match request {
+        signal_flow::Request::Order(words) => (
+            meta_signal_flow::Kind::Order,
+            meta_signal_flow::Body::Words(words.clone()),
+        ),
+        signal_flow::Request::Question(words) => (
+            meta_signal_flow::Kind::Question,
+            meta_signal_flow::Body::Words(words.clone()),
+        ),
+        signal_flow::Request::Result(words) => (
+            meta_signal_flow::Kind::Result,
+            meta_signal_flow::Body::Words(words.clone()),
+        ),
+        signal_flow::Request::Notice(words) => (
+            meta_signal_flow::Kind::Notice,
+            meta_signal_flow::Body::Words(words.clone()),
+        ),
+        signal_flow::Request::Psyche(said) => (
+            meta_signal_flow::Kind::Psyche,
+            meta_signal_flow::Body::Psyche(meta_signal_flow::Psyche_Data {
+                first_string: said.context.clone(),
+                second_string: said.verbatim.clone(),
+            }),
+        ),
+        signal_flow::Request::Psyches(_) => (
+            meta_signal_flow::Kind::Psyche,
+            meta_signal_flow::Body::Words(request.native_content()),
+        ),
+    };
+    let letter = meta_signal_flow::Letter { kind, sender, body };
+    match &entry.message {
+        signal_flow::Message::HardAbrupt(_) => meta_signal_flow::Message::HardAbrupt(letter),
+        signal_flow::Message::MiddleAbrupt(_) => meta_signal_flow::Message::MiddleAbrupt(letter),
+        signal_flow::Message::Soft(_) => meta_signal_flow::Message::Soft(letter),
+    }
+}
+
 trait RendersAttemptInput {
-    fn prompt_text(&self) -> String;
+    fn prompt_text(&self, store: &FlowStore) -> Option<String>;
     fn as_settled(&self, seat_after: SeatAfter) -> Reconciled;
 }
 
 impl RendersAttemptInput for QueueDeliveryAttempt {
-    fn prompt_text(&self) -> String {
+    fn prompt_text(&self, store: &FlowStore) -> Option<String> {
         match &self.queue_evidence {
-            meta_signal_flow::QueueEvidence::Logical(entry) => [entry.clone()].prompt_text(),
-            meta_signal_flow::QueueEvidence::Legacy(legacy) => legacy.request.native_content(),
+            meta_signal_flow::QueueEvidence::Logical(entry) => store
+                .logical_delivery_sender(&entry.logical_delivery_id)
+                .ok()
+                .flatten()
+                .map(|sender| {
+                    render_message(entry, sender)
+                        .pane_text()
+                        .as_str()
+                        .to_owned()
+                }),
+            meta_signal_flow::QueueEvidence::Legacy(legacy) => {
+                Some(legacy.request.native_content())
+            }
         }
     }
     fn as_settled(&self, seat_after: SeatAfter) -> Reconciled {
@@ -1003,7 +1063,9 @@ impl ReconcilesQueueDelivery for RunningNexus {
             }
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {}
         }
-        let text = attempt.prompt_text();
+        let Some(text) = attempt.prompt_text(&self.store) else {
+            return Reconciled::Refused;
+        };
         let found = match attempt.harness_kind {
             HarnessKind::Claude => match self.claude_delivery_history(attempt) {
                 // A Claude seat takes input while its turn runs, into its
@@ -1118,7 +1180,9 @@ impl ReconcilesQueueDelivery for RunningNexus {
                     attempt.phase,
                     QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
                 )
-                && attempt.prompt_text().prompt_sha256() == prompt.prompt_sha256
+                && attempt
+                    .prompt_text(&self.store)
+                    .is_some_and(|text| text.prompt_sha256() == prompt.prompt_sha256)
         }) else {
             return;
         };
@@ -1830,6 +1894,13 @@ impl PerformsWakeAndDrain for RunningNexus {
                 }
             }
         };
+        let sender = match self
+            .store
+            .logical_delivery_sender(&oldest.logical_delivery_id)
+        {
+            Ok(Some(sender)) => sender,
+            Ok(None) | Err(_) => return refused(drained, Failed_Data::StoreRefused),
+        };
         let attempt = match self.store.prepare_oldest_delivery(
             &address,
             &flow_id,
@@ -1843,27 +1914,9 @@ impl PerformsWakeAndDrain for RunningNexus {
                 return refused(drained, Failed_Data::StoreRefused);
             }
         };
-        let text = [oldest.clone()].prompt_text();
+        let message = render_message(&oldest, sender);
+        let text = message.pane_text().as_str().to_owned();
         if !matches!(oldest.message, signal_flow::Message::Soft(_)) {
-            let input = signal_flow::NativeInput {
-                logical_delivery_id: oldest.logical_delivery_id.clone(),
-                sent_by: oldest.sent_by.clone(),
-                message: oldest.message.clone(),
-            };
-            let letter = meta_signal_flow::Letter {
-                message_id: oldest.logical_delivery_id.clone(),
-                sender: meta_signal_flow::Sender::Owner,
-                content: meta_signal_flow::Content::NativeInput(input),
-            };
-            let message = match &oldest.message {
-                signal_flow::Message::HardAbrupt(_) => {
-                    meta_signal_flow::Message::HardAbrupt(letter)
-                }
-                signal_flow::Message::MiddleAbrupt(_) => {
-                    meta_signal_flow::Message::MiddleAbrupt(letter)
-                }
-                signal_flow::Message::Soft(_) => unreachable!(),
-            };
             let result = self.deliver(meta_signal_flow::DeliveryRequest {
                 delivery_id: attempt.attempt_id.clone(),
                 flow_id: flow_id.clone(),

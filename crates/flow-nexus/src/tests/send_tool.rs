@@ -7,6 +7,7 @@
 
 use super::{ControlsHerdrSnapshot, NexusFixture};
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
+use crate::delivery::body::{RendersPaneText, ShowsPaneText};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
     HandlesSendCall, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,
@@ -19,7 +20,7 @@ use crate::store::send_call::KeepsSendCalls;
 use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
 use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
 use flow_ethos::State;
-use meta_signal_flow::QueueEvidence;
+use meta_signal_flow::{QueueEvidence, Sender};
 use signal_flow::{
     Address, Aspect, Caller, Delivery, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Message,
     Metaflow, PowerLevel, QueueEntry, Request, SentBy,
@@ -47,6 +48,22 @@ fn queue_entry(id: impl Into<String>, queued: TestRequest) -> QueueEntry {
         delivery: Delivery::Wake,
         message: Message::Soft(queued.request),
     }
+}
+
+fn queued_text(entry: &QueueEntry) -> String {
+    let SentBy::Sender(address) = &entry.sent_by else {
+        panic!("queue fixture has a sender")
+    };
+    crate::waking::render_message(
+        entry,
+        meta_signal_flow::Sender {
+            address: address.clone(),
+            flow_id: "e167d8".into(),
+        },
+    )
+    .pane_text()
+    .as_str()
+    .to_owned()
 }
 
 fn address(topic: &str, layer: Layer) -> Address {
@@ -1441,21 +1458,14 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// A woken or drained flow receives only recipient-facing message content.
+/// A woken or drained flow receives the complete message datom.
 #[test]
-fn a_queued_request_is_rendered_as_recipient_content_only() {
-    use crate::composition::RendersQueuedWork;
-    let queue = [
-        queue_entry("render-1", sent(sender_a(), "Carry on.")),
-        QueueEntry {
-            logical_delivery_id: "render-2".into(),
-            sent_by: SentBy::Unknown,
-            delivery: Delivery::Queue,
-            message: Message::Soft(Request::Notice("kept".into())),
-        },
-    ];
-    let prompt = queue.prompt_text();
-    assert_eq!(prompt, "Carry on.\nkept");
+fn a_queued_request_is_rendered_as_a_complete_message_datom() {
+    let entry = queue_entry("render-1", sent(sender_a(), "Carry on."));
+    assert_eq!(
+        queued_text(&entry),
+        "Soft.{ Order { { Mind alpha Tertiary } e167d8 } Words.«Carry on.» }"
+    );
 }
 
 /// The fixture's Codex seat 908786: its thread, and the Address its
@@ -1503,7 +1513,10 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
         .accept_tool_send(
             &key("authorized"),
             "authorized-content",
-            core(),
+            Sender {
+                address: core(),
+                flow_id: "e167d8".into(),
+            },
             &core_primary(),
             Delivery::Wake,
             Message::Soft(Request::Question("source".into())),
@@ -1519,7 +1532,10 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
         .accept_tool_send(
             &key("unauthorized"),
             "unauthorized-content",
-            unauthorized_sender,
+            Sender {
+                address: unauthorized_sender,
+                flow_id: "e167d8".into(),
+            },
             &core_primary(),
             Delivery::Wake,
             Message::Soft(Request::Question("must not enter".into())),
@@ -1609,16 +1625,32 @@ impl SeatsAwakeCodexSeat for NexusFixture {
             ),
             Ok(crate::store::FlowRegistration::Registered(_))
         ));
+        let queue = queue
+            .into_iter()
+            .enumerate()
+            .map(|(index, queued)| queue_entry(format!("seat-{index}"), queued))
+            .collect::<Vec<_>>();
         self.nexus.store.seed_metaflow(Metaflow {
             address: seat_at(),
             state: State::Awake("908786".into()),
             past: vec![],
-            queue: queue
-                .into_iter()
-                .enumerate()
-                .map(|(index, queued)| queue_entry(format!("seat-{index}"), queued))
-                .collect(),
+            queue: queue.clone(),
         });
+        for entry in queue {
+            let SentBy::Sender(address) = entry.sent_by else {
+                panic!("queue fixture has a sender")
+            };
+            self.nexus
+                .store
+                .seed_logical_delivery_sender(
+                    &entry.logical_delivery_id,
+                    meta_signal_flow::Sender {
+                        address,
+                        flow_id: "e167d8".into(),
+                    },
+                )
+                .unwrap();
+        }
         self.awake_target();
     }
 
@@ -1700,7 +1732,7 @@ fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
         !typed.contains("Your brief."),
         "second not offered before receipt: {typed}"
     );
-    assert!(!typed.contains("Psyche core Secondary"));
+    assert!(typed.contains("Psyche core Secondary"));
     assert_eq!(fixture.seat_queue(), vec![psyche, brief]);
 }
 
@@ -1875,7 +1907,6 @@ fn codex_standings(fixture: &NexusFixture) -> Vec<meta_signal_flow::QueueDeliver
 /// The restart settles it from that history and starts no second turn.
 #[test]
 fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
-    use crate::composition::RendersQueuedWork;
     use crate::waking::ReconcilesQueueDelivery;
     let mut fixture = NexusFixture::new();
     let first = from_core(Request::Order("First.".into()));
@@ -1885,7 +1916,7 @@ fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
     fixture.adapter("gpt-sol", &fake);
     let queued = crashed_before_receipt(&fixture);
     assert_eq!(queued, first);
-    let first_text = [queue_entry("seat-0", first.clone())].prompt_text();
+    let first_text = queued_text(&queue_entry("seat-0", first.clone()));
     fake.serve_turn_history(
         1,
         SEAT_THREAD,
@@ -2116,6 +2147,17 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
             message: Message::Soft(order.request),
         }],
     });
+    fixture
+        .nexus
+        .store
+        .seed_logical_delivery_sender(
+            &"logical-delivery-test".to_owned(),
+            meta_signal_flow::Sender {
+                address: core(),
+                flow_id: "e167d8".into(),
+            },
+        )
+        .unwrap();
     fixture.nexus.wake_due(seat_at());
     fixture.nexus.wake_due(seat_at());
 

@@ -25,9 +25,9 @@ use crate::store::{ReadsFlowRows, RecordsReplacement};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
-    CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
-    DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, HarnessProfile,
-    InterruptWitness, Message, Response,
+    CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Delivery, DeliveryGrade,
+    DeliveryRejection, DeliveryRequest, HarnessCommand, HarnessProfile, InterruptWitness, Message,
+    Response,
 };
 use signal_flow::{AgentState, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection};
 
@@ -428,14 +428,6 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
     }
 
     fn retracted_restored_letter(&self) -> bool {
-        // NativeInput is rendered as bare user content. It has no stable
-        // text marker, so matching it could retract an identical human draft.
-        if matches!(
-            &self.request.message.letter().content,
-            Content::NativeInput(_)
-        ) {
-            return false;
-        }
         let herdr = &self.nexus.herdr;
         let route = &self.target.route;
         let harness_kind = &self.target.node.harness_kind;

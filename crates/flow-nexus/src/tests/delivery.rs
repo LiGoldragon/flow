@@ -44,6 +44,15 @@ impl NexusFixture {
             }))
     }
 
+    fn vet_with_gate(&self, message: Message, gate: meta_signal_flow::Gate) -> MetaResponse {
+        self.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
+            gate,
+            delivery_id: "vet".into(),
+            flow_id: "908786".into(),
+            message,
+        }))
+    }
+
     fn blocked_agent(&self) -> serde_json::Value {
         let mut agent = self.current_agent();
         agent["agent_status"] = serde_json::Value::String("blocked".into());
@@ -220,6 +229,78 @@ fn forced_delivery_types_past_a_blocked_state() {
 }
 
 #[test]
+fn vet_applies_the_delivery_gate_without_typing_or_leasing() {
+    use crate::store::context::RecordsContextSize as _;
+    use crate::store::delivery::RecordsDeliveries as _;
+
+    let fixture = NexusFixture::new();
+    let log = fixture.accept_pane_operations(
+        vec![fixture.blocked_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    assert_eq!(
+        fixture.vet_with_gate(middle_abrupt("note"), meta_signal_flow::Gate::Kept),
+        MetaResponse::DeliveryRejected(DeliveryRejection::RecipientBlocked)
+    );
+    assert_eq!(
+        fixture.vet_with_gate(middle_abrupt("note"), meta_signal_flow::Gate::Forced),
+        MetaResponse::Vetted("908786".into())
+    );
+
+    let body = fs::read_to_string(&fixture.snapshot_program)
+        .expect("Herdr fixture")
+        .replace(
+            "\"agent_status\":\"blocked\"",
+            "\"agent_status\":\"working\"",
+        );
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&body);
+    assert_eq!(
+        fixture.vet_with_gate(Message::Soft(letter("later")), meta_signal_flow::Gate::Kept),
+        MetaResponse::DeliveryRejected(DeliveryRejection::RecipientWorking)
+    );
+
+    let body = fs::read_to_string(&fixture.snapshot_program)
+        .expect("Herdr fixture")
+        .replace("\"agent_status\":\"working\"", "\"agent_status\":\"idle\"");
+    FixtureExecutable {
+        path: fixture.snapshot_program.clone(),
+    }
+    .install(&body);
+    fixture.at_secondary_refreshing_at(200_000);
+    fixture
+        .nexus
+        .store
+        .record_context_size("908786", 200_000)
+        .expect("context size recorded");
+    assert_eq!(
+        fixture.vet_with_gate(middle_abrupt("note"), meta_signal_flow::Gate::Kept),
+        MetaResponse::DeliveryRejected(DeliveryRejection::PastThreshold)
+    );
+    assert_eq!(
+        fixture.vet_with_gate(middle_abrupt("note"), meta_signal_flow::Gate::Forced),
+        MetaResponse::Vetted("908786".into())
+    );
+    assert!(prompts(&log).is_empty());
+    assert!(!fixture.operations().contains("agent prompt"));
+    assert_eq!(
+        fixture.nexus.store.delivery("vet").expect("delivery read"),
+        None
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .settle_interrupted_deliveries()
+            .expect("lease read")
+            .is_empty()
+    );
+}
+
+#[test]
 fn a_draft_in_the_composer_is_never_appended_to() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
@@ -228,6 +309,10 @@ fn a_draft_in_the_composer_is_never_appended_to() {
     );
     fixture.show_composer("\u{1b}[1m›\u{1b}[0m half a thought");
     fixture.register_with(FlowLifecycle::Active);
+    assert_eq!(
+        fixture.vet_with_gate(middle_abrupt("a note"), meta_signal_flow::Gate::Forced),
+        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
+    );
     assert_eq!(
         fixture.send("a note"),
         Sent::Refused(DeliveryRejection::ComposerOccupied)

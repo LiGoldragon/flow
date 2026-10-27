@@ -77,6 +77,11 @@ pub struct DeliveryTarget {
     pub profile: HarnessProfile,
 }
 
+struct DeliveryReadiness {
+    agent_state: AgentState,
+    composer_was_blank: bool,
+}
+
 /// Finds the live, routable flow a write is for.
 pub trait FindsDeliveryTarget {
     fn delivery_target(&self, flow_id: &str) -> Result<DeliveryTarget, TargetRefusal>;
@@ -163,16 +168,24 @@ pub trait ReadsLeasedPane {
 
 impl ReadsLeasedPane for RunningNexus {
     fn writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
-        self.writable_state_with(target, false)
+        self.writable_state_with(target, false, true)
     }
 
     fn forced_writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
-        self.writable_state_with(target, true)
+        self.writable_state_with(target, true, true)
     }
 }
 
 impl RunningNexus {
     fn pane_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
+        self.pane_state_with(target, true)
+    }
+
+    fn pane_state_with(
+        &self,
+        target: &DeliveryTarget,
+        record_exit: bool,
+    ) -> Result<AgentState, PaneRefusal> {
         match self.herdr.pane_agent(&target.node) {
             PaneAgent::Present {
                 agent_state,
@@ -182,9 +195,11 @@ impl RunningNexus {
                 Err(PaneRefusal::RouteUnavailable)
             }
             PaneAgent::Absent => {
-                let _ = self.perform(Operation::Record(Record_Data::Exited(
-                    target.node.flow_id.clone(),
-                )));
+                if record_exit {
+                    let _ = self.perform(Operation::Record(Record_Data::Exited(
+                        target.node.flow_id.clone(),
+                    )));
+                }
                 Err(PaneRefusal::RouteUnavailable)
             }
         }
@@ -194,8 +209,9 @@ impl RunningNexus {
         &self,
         target: &DeliveryTarget,
         permit_blocked: bool,
+        record_exit: bool,
     ) -> Result<AgentState, PaneRefusal> {
-        let agent_state = self.pane_state(target)?;
+        let agent_state = self.pane_state_with(target, record_exit)?;
         if agent_state == AgentState::Blocked {
             return if permit_blocked {
                 Ok(agent_state)
@@ -211,6 +227,62 @@ impl RunningNexus {
             Some(false) => Err(PaneRefusal::ComposerOccupied),
             None => Err(PaneRefusal::NotDelivered),
         }
+    }
+
+    fn checked_delivery_target(
+        &self,
+        request: &DeliveryRequest,
+    ) -> Result<DeliveryTarget, DeliveryRejection> {
+        let target = self.delivery_target(&request.flow_id)?;
+        if let Some(refusal) = request.message.refusal(&target.profile) {
+            return Err(DeliveryRejection::BodyRefused(refusal));
+        }
+        match self.store.past_threshold(&target.node.flow_id) {
+            Ok(false) => {}
+            Ok(true) if matches!(request.gate, meta_signal_flow::Gate::Forced) => {}
+            Ok(true) => return Err(DeliveryRejection::PastThreshold),
+            Err(_) => return Err(DeliveryRejection::PersistenceRefused),
+        }
+        Ok(target)
+    }
+
+    fn delivery_readiness(
+        &self,
+        request: &DeliveryRequest,
+        target: &DeliveryTarget,
+        record_exit: bool,
+    ) -> Result<DeliveryReadiness, DeliveryRejection> {
+        let hard = matches!(request.message, Message::HardAbrupt(_));
+        let permit_blocked = matches!(request.gate, meta_signal_flow::Gate::Forced);
+        let mut composer_was_blank = false;
+        let agent_state = if hard {
+            let agent_state = self.pane_state_with(target, record_exit)?;
+            if agent_state == AgentState::Blocked && !permit_blocked {
+                return Err(DeliveryRejection::RecipientBlocked);
+            }
+            match self
+                .herdr
+                .composer_text(&target.route, &target.node.harness_kind)
+            {
+                Some(text) if text.is_empty() => composer_was_blank = true,
+                Some(text) if text.opens_a_letter() => {}
+                Some(_) => return Err(DeliveryRejection::ComposerOccupied),
+                None => return Err(DeliveryRejection::NotDelivered),
+            }
+            agent_state
+        } else {
+            self.writable_state_with(target, permit_blocked, record_exit)?
+        };
+        if matches!(request.message, Message::Soft(_))
+            && !matches!(agent_state, AgentState::Idle | AgentState::Done)
+            && !(permit_blocked && agent_state == AgentState::Blocked)
+        {
+            return Err(DeliveryRejection::RecipientWorking);
+        }
+        Ok(DeliveryReadiness {
+            agent_state,
+            composer_was_blank,
+        })
     }
 }
 
@@ -231,21 +303,10 @@ impl DeliversMessages for RunningNexus {
                 return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
             }
         }
-        let target = match self.delivery_target(&request.flow_id) {
+        let target = match self.checked_delivery_target(&request) {
             Ok(target) => target,
-            Err(refusal) => return Response::DeliveryRejected(refusal.into()),
+            Err(refusal) => return Response::DeliveryRejected(refusal),
         };
-        if let Some(refusal) = request.message.refusal(&target.profile) {
-            return Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
-        }
-        // A flow past its model's refresh threshold is given no new
-        // message.
-        match self.store.past_threshold(&target.node.flow_id) {
-            Ok(false) => {}
-            Ok(true) if matches!(request.gate, meta_signal_flow::Gate::Forced) => {}
-            Ok(true) => return Response::DeliveryRejected(DeliveryRejection::PastThreshold),
-            Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
-        }
         let _lease = self.pane_leases.hold(&target.route);
         match LeasedDelivery::new(self, &request, &target).run() {
             Ok(delivery) => Response::Delivered(delivery),
@@ -254,13 +315,13 @@ impl DeliversMessages for RunningNexus {
     }
 
     fn vet(&self, request: &DeliveryRequest) -> Response {
-        let target = match self.delivery_target(&request.flow_id) {
+        let target = match self.checked_delivery_target(request) {
             Ok(target) => target,
-            Err(refusal) => return Response::DeliveryRejected(refusal.into()),
+            Err(refusal) => return Response::DeliveryRejected(refusal),
         };
-        match request.message.refusal(&target.profile) {
-            Some(refusal) => Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal)),
-            None => Response::Vetted(target.node.flow_id),
+        match self.delivery_readiness(request, &target, false) {
+            Ok(_) => Response::Vetted(target.node.flow_id),
+            Err(refusal) => Response::DeliveryRejected(refusal),
         }
     }
 
@@ -541,44 +602,11 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         // letter nowhere to go, so every later hard letter would cancel the
         // next turn too. A blank composer, or one holding Flow's letter, is
         // interrupted; what the interrupt puts back is settled below.
-        let mut composer_was_blank = false;
-        let mut agent_state = if hard {
-            let agent_state = match self.nexus.herdr.pane_agent(&self.target.node) {
-                PaneAgent::Present {
-                    agent_state,
-                    ready: true,
-                } => agent_state,
-                PaneAgent::Present { ready: false, .. } | PaneAgent::Unreadable => {
-                    return Err(DeliveryRejection::RouteUnavailable);
-                }
-                PaneAgent::Absent => return Err(DeliveryRejection::RouteUnavailable),
-            };
-            match self
-                .nexus
-                .herdr
-                .composer_text(&self.target.route, &self.target.node.harness_kind)
-            {
-                Some(text) if text.is_empty() => composer_was_blank = true,
-                Some(text) if text.opens_a_letter() => {}
-                Some(_) => return Err(DeliveryRejection::ComposerOccupied),
-                None => return Err(DeliveryRejection::NotDelivered),
-            }
-            agent_state
-        } else {
-            if matches!(self.request.gate, meta_signal_flow::Gate::Forced) {
-                self.nexus.forced_writable_state(self.target)?
-            } else {
-                self.nexus.writable_state(self.target)?
-            }
-        };
-        let soft = matches!(self.request.message, Message::Soft(_));
-        if soft
-            && !matches!(agent_state, AgentState::Idle | AgentState::Done)
-            && !(matches!(self.request.gate, meta_signal_flow::Gate::Forced)
-                && agent_state == AgentState::Blocked)
-        {
-            return Err(DeliveryRejection::RecipientWorking);
-        }
+        let readiness = self
+            .nexus
+            .delivery_readiness(self.request, self.target, true)?;
+        let composer_was_blank = readiness.composer_was_blank;
+        let mut agent_state = readiness.agent_state;
         self.step(LeaseStep::Acquired)?;
         let mut interrupt_witness = InterruptWitness::NotRequested;
         if hard && agent_state == AgentState::Working {

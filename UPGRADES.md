@@ -34,7 +34,9 @@ Clear require Gate.Forced there. Flow pins meta-signal-flow 43.0.0.
 
 Batch 3 adds `Gate.Kept` and `Gate.Forced` to privileged delivery, command,
 and retire requests. Kept preserves threshold and continuity refusals; Forced
-overrides them. Existing queued delivery records upgrade as Kept.
+overrides them. `Vet` applies the same target, body, threshold, pane-state and
+composer checks without typing or opening a delivery lease. Existing queued
+delivery records upgrade as Kept.
 
 Pins signal-flow 32.0.0 (e5e9d5) and meta-signal-flow 40.0.0 (f0f214), both
 on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`

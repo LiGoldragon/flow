@@ -3969,7 +3969,7 @@ mod tests {
                         layer: profile.address.layer.clone(),
                         aspect: profile.address.aspect.clone(),
                         model_name: profile.model_name.clone(),
-                    effort: "medium".into(),
+                        effort: "medium".into(),
                     },
                 ]))
                 .expect("model configured");
@@ -5162,7 +5162,7 @@ mod tests {
                         layer: Layer::Quaternary,
                         aspect: Aspect::Field,
                         model_name: "gpt-6-luna".into(),
-                    effort: "medium".into(),
+                        effort: "low".into(),
                     }])
                 )),
             meta_signal_flow::Response::Configured(_)

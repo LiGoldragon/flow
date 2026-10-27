@@ -1,5 +1,12 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 16 adds Claude Code 2.1.294's captured stock prompt as one configured
+Harness datom. Each exact section is a module in prompt order; Flow injects
+the text of kept `Injected` modules ahead of the composed system context,
+while `Retained` and `Absent` text stays the harness's responsibility. The
+capsule keeps `CodeStyle` and witnesses its exact line in the transcript's
+`prompt_snapshot`.
+
 Batch 14 replaces the closed leave-out vocabulary with configured harness
 modules. Each metaflow declaration carries module names; the effective set is
 the harness installation's `LeftOut` union the launch override, or the

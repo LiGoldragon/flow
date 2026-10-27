@@ -303,3 +303,39 @@ pub(super) fn from_legacy_nexus(
         claude,
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use datom_codec::{Actualizing, Budget, Potential};
+    use protos::ReaderBudget;
+
+    fn budget() -> Budget {
+        Budget {
+            remaining: 262_144,
+            reader: ReaderBudget { remaining: 262_144 },
+            depth: 0,
+            maximum_depth: 1_024,
+        }
+    }
+
+    #[test]
+    fn claude_2_1_294_seed_is_one_complete_harness() {
+        let harness = Potential::<meta_signal_flow::Harness>::from(include_str!(
+            "../../../../config/harness/claude-2.1.294.datom"
+        ))
+        .actualize(&mut budget())
+        .expect("Claude 2.1.294 Harness seed composes");
+        assert_eq!(harness.harness_version, "2.1.294");
+        assert_eq!(harness.modules.len(), 62);
+        assert!(harness.modules.iter().any(|module| {
+            module.harness_module_name == "CodeStyle"
+                && matches!(
+                    &module.module_text,
+                    meta_signal_flow::ModuleText::Injected(text)
+                        if text == "Write code that reads like the surrounding code: match its comment density, naming, and idiom."
+                )
+        }));
+        assert!(!harness.left_out.iter().any(|name| name == "Skill"));
+        assert!(harness.left_out.iter().any(|name| name == "CodeStyle"));
+    }
+}

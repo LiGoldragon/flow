@@ -115,7 +115,7 @@ Library
   RendersBrief.[ brief.[ String ] ]
   ResolvesLeftOut.[ effective_left_out.{ [ LeaveOutListing ] [ LeftOut ] } ]
   ComposesVerifiedContext.[ verified_context.{ [ Profiled ] [ Result<VerifiedContext CompositionError> ] }
-                            launch_system_prompt.{ [ Profiled ReadsVerifiedContext SegmentListing ] [ Result<SystemPrompt CompositionError> ] } ]
+                            launch_system_prompt.{ [ Profiled ReadsVerifiedContext SegmentListing LeaveOutListing ] [ Result<SystemPrompt CompositionError> ] } ]
   AssemblesComposedLaunch.[ assembled:{ [ Profiled SystemPrompted Textual SegmentListing LeaveOutListing ] [ ComposedLaunch ] } ]
   ComposesLaunch.[ compose.{ [ Profiled LeaveOutListing ] [ Result<ComposedLaunch CompositionError> ] } ]
   ; A launch whose FlowId is claimed before its harness starts carries its

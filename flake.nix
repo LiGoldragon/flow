@@ -44,7 +44,8 @@
             name = "source";
             filter =
               path: type:
-              (pkgs.lib.hasSuffix ".ethos" path)
+              (type == "directory")
+              || (pkgs.lib.hasSuffix ".ethos" path)
               || (pkgs.lib.hasSuffix ".datom" path)
               || (craneLib.filterCargoSources path type);
           };

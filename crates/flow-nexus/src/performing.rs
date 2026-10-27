@@ -8,7 +8,9 @@ use crate::RunningNexus;
 use crate::codex::{
     AccountsOpenedThread, OpensCodexThread, SelectsCodexEndpoint, SubmitsBoundCodexPart,
 };
-use crate::composition::{ComposesLaunch, CompositionError, HarnessedProfile};
+use crate::composition::{
+    ComposesLaunch, CompositionError, ConfiguresHarnessModules, HarnessedProfile,
+};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Asleep_Data,
     Record_Data_Awoken_Data, Record_Data_Context_Data, Record_Data_Harness_Data,
@@ -248,7 +250,7 @@ impl Performs for RunningNexus {
                     .left_out_option
                     .take()
                     .unwrap_or(declaration_left_out);
-                let mut default = codex_endpoints
+                let harness = codex_endpoints
                     .harnesses
                     .iter()
                     .find(|harness| {
@@ -256,8 +258,12 @@ impl Performs for RunningNexus {
                             && harness.served_models.iter().any(|served| {
                                 served.model_name == profile.model_name
                             })
-                    })
+                    });
+                let mut default = harness
                     .map(|harness| harness.left_out.clone())
+                    .unwrap_or_default();
+                let harness_modules = harness
+                    .map(|harness| harness.modules.clone())
                     .unwrap_or_default();
                 for module in chosen_left_out {
                     if !default.contains(&module) {
@@ -274,7 +280,7 @@ impl Performs for RunningNexus {
                         Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
                     }
                 };
-                match self.composer.compose(
+                match self.composer.with_harness_modules(harness_modules).compose(
                     HarnessedProfile {
                         remembered_flows,
                         harness_kind,

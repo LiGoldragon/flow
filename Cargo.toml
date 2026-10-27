@@ -16,7 +16,7 @@ rkyv = { version = "0.8", default-features = false, features = ["std", "bytechec
 serde_json = "1"
 thiserror = "2"
 signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "2d52fbdfd8c960953ba545203a0c3aaf4c40dbe7" }
-meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "9c80bd2e25c337ee2657b228ce551fa6a795f4eb" }
+meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "9c80bd2c2b5610af7dea4051b8dea2fb1a2e9153" }
 
 # Signal and Meta-Signal also depend on flow-ethos by this Git source. Resolve
 # those workspace edges to this exact leaf package so every shared nominal

@@ -72,7 +72,8 @@ impl ConfiguredStore {
             ConfigurationChange::Models(vec![ConfigureModel {
                 layer: Layer::Primary,
                 aspect: Aspect::Mind,
-                native: "gpt-6-astra".into(),
+                model_name: "gpt-6-astra".into(),
+                    effort: "medium".into(),
             }]),
             ConfigurationChange::Thresholds(vec![ConfigureThreshold {
                 model_name: "claude-fable-5-1".into(),
@@ -287,7 +288,8 @@ fn a_refused_declaration_changes_nothing() {
     let model = |native: &str| ConfigureModel {
         layer: Layer::Secondary,
         aspect: Aspect::Psyche,
-        native: native.into(),
+        model_name: native.into(),
+                    effort: "medium".into(),
     };
     assert_eq!(
         configure(
@@ -316,17 +318,20 @@ fn each_family_is_its_last_declaration() {
         ConfigureModel {
             layer: Layer::Quaternary,
             aspect: Aspect::Psyche,
-            native: "claude-haiku-5-5".into(),
+            model_name: "claude-haiku-5-5".into(),
+                    effort: "medium".into(),
         },
         ConfigureModel {
             layer: Layer::Secondary,
             aspect: Aspect::Mind,
-            native: SOL.into(),
+            model_name: SOL.into(),
+                    effort: "medium".into(),
         },
         ConfigureModel {
             layer: Layer::Secondary,
             aspect: Aspect::Psyche,
-            native: "claude-opus-5-5".into(),
+            model_name: "claude-opus-5-5".into(),
+                    effort: "medium".into(),
         },
     ];
     assert_eq!(

@@ -519,7 +519,8 @@ fn an_order_wakes_an_asleep_primary_fresh() {
             meta_signal_flow::ConfigureModel {
                 layer: Layer::Primary,
                 aspect: Aspect::Mind,
-                native: "claude-fixture".into(),
+                model_name: "claude-fixture".into(),
+                    effort: "medium".into(),
             },
         ]))
         .expect("the Primary's model configured");
@@ -3076,7 +3077,8 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
             meta_signal_flow::ConfigureModel {
                 layer: Layer::Secondary,
                 aspect: Aspect::Mind,
-                native: native.into(),
+                model_name: native.into(),
+                    effort: "medium".into(),
             },
         ]))
         .expect("model configured");
@@ -3517,7 +3519,8 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
                     .map(|(aspect, native)| meta_signal_flow::ConfigureModel {
                         layer: Layer::Secondary,
                         aspect: aspect.clone(),
-                        native: (*native).into(),
+                        model_name: (*native).into(),
+                    effort: "medium".into(),
                     })
                     .collect(),
             ))
@@ -3651,12 +3654,14 @@ impl SetsUpFirstTurnSend for NexusFixture {
                 meta_signal_flow::ConfigureModel {
                     layer: Layer::Secondary,
                     aspect: Aspect::Mind,
-                    native: "claude-fixture".into(),
+                    model_name: "claude-fixture".into(),
+                    effort: "medium".into(),
                 },
                 meta_signal_flow::ConfigureModel {
                     layer: Layer::Tertiary,
                     aspect: Aspect::Field,
-                    native: "fixture-model".into(),
+                    model_name: "fixture-model".into(),
+                    effort: "medium".into(),
                 },
             ]))
             .expect("models configured");

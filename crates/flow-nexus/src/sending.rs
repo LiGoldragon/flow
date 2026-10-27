@@ -410,19 +410,6 @@ impl SendsRequests for RunningNexus {
     }
 }
 
-/// The effort a seat of one Address runs at: medium everywhere, low for an
-/// OpenAI Quaternary.
-pub trait ChoosesEffort {
-    fn effort_of(address: &Address) -> &'static str {
-        match (&address.layer, &address.aspect) {
-            (Layer::Quaternary, Aspect::Mind | Aspect::Field) => "low",
-            _ => "medium",
-        }
-    }
-}
-
-impl ChoosesEffort for RunningNexus {}
-
 /// The Herdr session a launch opens its pane in when its caller runs in
 /// none.
 const DEFAULT_HERDR_SESSION: &str = "default";

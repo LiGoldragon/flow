@@ -17,7 +17,8 @@ pub(super) fn configure(fixture: &NexusFixture, models: &[(Layer, Aspect, &str)]
                 .map(|(layer, aspect, native)| meta_signal_flow::ConfigureModel {
                     layer: layer.clone(),
                     aspect: aspect.clone(),
-                    native: (*native).into(),
+                    model_name: (*native).into(),
+                    effort: "medium".into(),
                 })
                 .collect(),
         ))

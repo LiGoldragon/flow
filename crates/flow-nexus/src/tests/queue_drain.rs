@@ -13,13 +13,13 @@ use super::waking::{
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
-use crate::composition::RendersQueuedWork;
 use crate::generated::operation::Outcome;
 use crate::reporting::RecordsReports;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::SeedsMetaflow;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::waking::{PerformsWakeAndDrain, ReconcilesQueueDelivery, SettlesStopsAtConfirmation};
+use datom_codec::Datomizable;
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{
@@ -27,6 +27,7 @@ use meta_signal_flow::{
     QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data, ResolverIdentity,
     Response as MetaResponse, Undecided,
 };
+use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Delivery, Event, Layer, Message, Metaflow, NativePrompt, NativeStop,
     QueueEntry, Report_Data, Request, Response, SentBy,
@@ -54,18 +55,71 @@ fn from_core(body: &str) -> TestRequest {
     }
 }
 
-/// The text a hand-over types for one queued request.
-fn typed_text(request: &TestRequest) -> String {
-    [queue_entry(request)].prompt_text()
+/// The canonical vector payload a hand-over types.
+fn expected_message(request: &TestRequest) -> meta_signal_flow::Message {
+    let SentBy::Sender(address) = &request.sent_by else {
+        panic!("typed fixture has sender")
+    };
+    let (kind, body) = match &request.request {
+        Request::Order(text) => (
+            meta_signal_flow::Kind::Order,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Question(text) => (
+            meta_signal_flow::Kind::Question,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Result(text) => (
+            meta_signal_flow::Kind::Result,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Notice(text) => (
+            meta_signal_flow::Kind::Notice,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Psyche(said) => (
+            meta_signal_flow::Kind::Psyche,
+            meta_signal_flow::Body::Psyche(meta_signal_flow::PsycheWords {
+                first_string: said.context.clone(),
+                second_string: said.verbatim.clone(),
+            }),
+        ),
+        Request::Psyches(saids) => (
+            meta_signal_flow::Kind::Psyche,
+            meta_signal_flow::Body::Psyches(
+                saids
+                    .iter()
+                    .map(|said| meta_signal_flow::PsycheWords {
+                        first_string: said.context.clone(),
+                        second_string: said.verbatim.clone(),
+                    })
+                    .collect(),
+            ),
+        ),
+    };
+    let letter = meta_signal_flow::Letter {
+        kind,
+        sender: meta_signal_flow::Sender {
+            address: address.clone(),
+            flow_id: "fixture-sender".into(),
+        },
+        body,
+    };
+    match request.delivery {
+        _ => meta_signal_flow::Message::Soft(letter),
+    }
 }
-
-/// The one payload a hand-over types for every queued request, in order.
+fn typed_text(request: &TestRequest) -> String {
+    queue_payload(std::slice::from_ref(request))
+}
 fn queue_payload(requests: &[TestRequest]) -> String {
     requests
         .iter()
-        .map(queue_entry)
+        .map(expected_message)
         .collect::<Vec<_>>()
-        .prompt_text()
+        .datomize(Vec::new())
+        .protosize()
+        .compact()
 }
 
 fn queue_entry(request: &TestRequest) -> QueueEntry {
@@ -80,6 +134,13 @@ fn queue_entry(request: &TestRequest) -> QueueEntry {
 /// The fixture Claude seat Awake at the Secondary address, holding `queue`.
 fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
     claude_seat(fixture, 40_000);
+    let sender_rows = queue
+        .iter()
+        .filter_map(|request| match &request.sent_by {
+            SentBy::Sender(address) => Some((request.logical_delivery_id.clone(), address.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Layer::Secondary),
         state: State::Awake(CLAUDE_SEAT.into()),
@@ -94,6 +155,19 @@ fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
             })
             .collect(),
     });
+    for (id, address) in sender_rows {
+        fixture
+            .nexus
+            .store
+            .seed_logical_delivery_sender(
+                &id,
+                meta_signal_flow::Sender {
+                    address,
+                    flow_id: "fixture-sender".into(),
+                },
+            )
+            .unwrap();
+    }
 }
 
 /// A report as the hook sends it: recorded, answered, then acted on.
@@ -186,6 +260,7 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
         .accept_logical_delivery(
             &target,
             SentBy::Sender(sender.clone()),
+            None,
             Delivery::Queue,
             Message::Soft(Request::Notice("cursor witness".into())),
             None,
@@ -271,7 +346,7 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     assert!(
-        !fixture
+        fixture
             .typed()
             .unwrap_or_default()
             .contains("Psyche core Secondary")
@@ -361,6 +436,32 @@ fn two_queued_claude_requests_go_in_one_payload_and_settle_on_its_receipt() {
     ));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1, "no replay");
     assert_eq!(typed_count(&fixture, "second-request-body"), 1, "no replay");
+}
+
+/// The byte budget applies to the exact vector typed into the pane. Two
+/// individually admissible messages whose one cohort is too large remain
+/// together in the durable queue; no partial vector or native attempt is
+/// created.
+#[test]
+fn an_oversized_typed_cohort_is_neither_split_nor_submitted() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    let first = from_core(&"a".repeat(33_000));
+    let second = from_core(&"b".repeat(33_000));
+    assert!(queue_payload(std::slice::from_ref(&first)).len() < 64 * 1024);
+    assert!(queue_payload(std::slice::from_ref(&second)).len() < 64 * 1024);
+    assert!(queue_payload(&[first.clone(), second.clone()]).len() > 64 * 1024);
+    seat(&fixture, vec![first.clone(), second.clone()]);
+    append_main_rows(&fixture, &[end_turn("before")]);
+
+    report(&fixture, claude_stop(&fixture));
+
+    assert_eq!(queue(&fixture), vec![first, second]);
+    assert!(standings(&fixture).is_empty(), "no native attempt was made");
+    assert!(fixture.typed().is_none(), "nothing reached the pane");
 }
 
 /// A background task's notification takes the main turn before the typed

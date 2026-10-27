@@ -42,7 +42,11 @@ fn elsewhere() -> Address {
 fn entry(id: &str) -> QueueEntry {
     QueueEntry {
         logical_delivery_id: id.into(),
-        sent_by: SentBy::Unknown,
+        sent_by: SentBy::Sender(Address {
+            aspect: Aspect::Psyche,
+            topic: "core".into(),
+            layer: Layer::Secondary,
+        }),
         delivery: Delivery::Queue,
         message: Message::Soft(Request::Order(format!("Order {id}."))),
     }
@@ -392,7 +396,19 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
         .store
         .accept_logical_delivery(
             &seat_address(),
-            SentBy::Unknown,
+            SentBy::Sender(Address {
+                aspect: Aspect::Psyche,
+                topic: "core".into(),
+                layer: Layer::Secondary,
+            }),
+            Some(meta_signal_flow::Sender {
+                address: Address {
+                    aspect: Aspect::Psyche,
+                    topic: "core".into(),
+                    layer: Layer::Secondary,
+                },
+                flow_id: "fixture-sender".into(),
+            }),
             Delivery::Queue,
             Message::Soft(Request::Order("Never handed over.".into())),
             None,

@@ -19,7 +19,7 @@ use crate::caller::{
     CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
 };
 use crate::composition::JoinsPurpose;
-use crate::delivery::body::RendersNativeContent;
+use crate::delivery::body::TypesPaneMessage;
 use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::metaflow::IdentifiesPeerProcess;
@@ -33,7 +33,8 @@ use crate::store::send_call::KeepsSendCalls;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::sent::NamesCodexAppServers;
 use crate::store::{
-    ExistingSeatAdoption, FlowStore, NamesConfiguredModel, ReadsFlowMemory, RegistersExistingFlow,
+    ExistingSeatAdoption, FlowStore, ManagesMetaflowState, NamesConfiguredModel, ReadsFlowMemory,
+    RegistersExistingFlow,
 };
 use crate::waking::{
     HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
@@ -53,29 +54,32 @@ pub const MAX_SEND_PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// Measures a Request as it would appear in the recipient's native prompt.
 pub trait MeasuresSendPayload {
-    fn native_prompt_bytes(&self, sender: &Address) -> usize;
+    fn native_prompt_bytes(&self, sender: &meta_signal_flow::Sender) -> usize;
 }
 
 impl MeasuresSendPayload for Request {
-    fn native_prompt_bytes(&self, sender: &Address) -> usize {
+    fn native_prompt_bytes(&self, sender: &meta_signal_flow::Sender) -> usize {
         Message::Soft(self.clone()).native_prompt_bytes(sender)
     }
 }
 
 impl MeasuresSendPayload for Message {
-    fn native_prompt_bytes(&self, sender: &Address) -> usize {
-        let _ = sender;
-        self.native_content().len()
+    fn native_prompt_bytes(&self, sender: &meta_signal_flow::Sender) -> usize {
+        vec![self.typed_pane_message(sender.clone())]
+            .datomize(Vec::new())
+            .protosize()
+            .compact()
+            .len()
     }
 }
 
 /// Refuses a Send whose complete native prompt rendering exceeds Flow's budget.
 pub trait AdmitsSendPayload {
-    fn oversized_refusal(&self, sender: &Address) -> Option<Refusal>;
+    fn oversized_refusal(&self, sender: &meta_signal_flow::Sender) -> Option<Refusal>;
 }
 
 impl AdmitsSendPayload for Request {
-    fn oversized_refusal(&self, sender: &Address) -> Option<Refusal> {
+    fn oversized_refusal(&self, sender: &meta_signal_flow::Sender) -> Option<Refusal> {
         let actual_bytes = self.native_prompt_bytes(sender);
         (actual_bytes > MAX_SEND_PAYLOAD_BYTES).then_some(Refusal::Oversized(SendPayloadSize {
             actual_bytes: i64::try_from(actual_bytes).unwrap_or(i64::MAX),
@@ -85,7 +89,7 @@ impl AdmitsSendPayload for Request {
 }
 
 impl AdmitsSendPayload for Message {
-    fn oversized_refusal(&self, sender: &Address) -> Option<Refusal> {
+    fn oversized_refusal(&self, sender: &meta_signal_flow::Sender) -> Option<Refusal> {
         let actual_bytes = self.native_prompt_bytes(sender);
         (actual_bytes > MAX_SEND_PAYLOAD_BYTES).then_some(Refusal::Oversized(SendPayloadSize {
             actual_bytes: i64::try_from(actual_bytes).unwrap_or(i64::MAX),
@@ -283,9 +287,22 @@ impl SendsRequests for RunningNexus {
                 None
             };
             let direct = direct_lease.is_some();
+            let sender_flow_id = match self.store.list_metaflows() {
+                Ok(metaflows) => metaflows
+                    .into_iter()
+                    .find_map(|metaflow| (metaflow.address == sender).then_some(metaflow.state)),
+                Err(error) => return Response::Refused(Refusal::Store(error.to_string())).into(),
+            };
+            let Some(flow_ethos::State::Awake(sender_flow_id)) = sender_flow_id else {
+                return Response::Refused(Refusal::Unidentified(peer.clone())).into();
+            };
             let admitted = self.store.accept_logical_delivery(
                 &recipient,
-                SentBy::Sender(sender),
+                SentBy::Sender(sender.clone()),
+                Some(meta_signal_flow::Sender {
+                    address: sender,
+                    flow_id: sender_flow_id,
+                }),
                 delivery.clone(),
                 send.message,
                 None,

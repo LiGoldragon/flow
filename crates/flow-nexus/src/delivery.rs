@@ -11,6 +11,8 @@
 //! typing; that is stated, not solved.
 
 use crate::delivery::body::ShowsPaneText;
+use datom_codec::Datomizable;
+use protos::{Compactable, Protosizable};
 pub mod body;
 pub mod lease;
 
@@ -25,9 +27,9 @@ use crate::store::{ReadsFlowRows, RecordsReplacement};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
-    CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
-    DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, HarnessProfile,
-    InterruptWitness, Message, Response,
+    CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Delivery, DeliveryGrade,
+    DeliveryRejection, DeliveryRequest, HarnessCommand, HarnessProfile, InterruptWitness, Message,
+    Response,
 };
 use signal_flow::{AgentState, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection};
 
@@ -195,6 +197,56 @@ pub trait DeliversMessages {
     fn command(&self, request: CommandRequest) -> Response;
 }
 
+impl RunningNexus {
+    /// Delivers one queued cohort as one canonical vector of complete typed messages.
+    pub(crate) fn deliver_cohort(
+        &self,
+        delivery_id: String,
+        flow_id: String,
+        messages: Vec<Message>,
+    ) -> Response {
+        match self.store.delivery(&delivery_id) {
+            Ok(Some(delivery)) => return Response::Delivered(delivery),
+            Ok(None) => {}
+            Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
+        }
+        let target = match self.delivery_target(&flow_id) {
+            Ok(target) => target,
+            Err(refusal) => return Response::DeliveryRejected(refusal.into()),
+        };
+        for message in &messages {
+            if let Some(refusal) = message.refusal(&target.profile) {
+                return Response::DeliveryRejected(DeliveryRejection::BodyRefused(refusal));
+            }
+        }
+        match self.store.past_threshold(&target.node.flow_id) {
+            Ok(false) => {}
+            Ok(true) => return Response::DeliveryRejected(DeliveryRejection::PastThreshold),
+            Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
+        }
+        let hard = messages
+            .iter()
+            .any(|message| matches!(message, Message::HardAbrupt(_)));
+        let soft = messages
+            .iter()
+            .all(|message| matches!(message, Message::Soft(_)));
+        let text = messages.datomize(Vec::new()).protosize().compact();
+        let request = DeliveryRequest {
+            delivery_id,
+            flow_id,
+            message: messages
+                .into_iter()
+                .next()
+                .expect("a queued cohort is nonempty"),
+        };
+        let _lease = self.pane_leases.hold(&target.route);
+        match LeasedDelivery::new_rendered(self, &request, &target, text, hard, soft).run() {
+            Ok(delivery) => Response::Delivered(delivery),
+            Err(rejection) => Response::DeliveryRejected(rejection),
+        }
+    }
+}
+
 impl DeliversMessages for RunningNexus {
     fn deliver(&self, request: DeliveryRequest) -> Response {
         match self.store.delivery(&request.delivery_id) {
@@ -317,6 +369,9 @@ struct LeasedDelivery<'run> {
     nexus: &'run RunningNexus,
     request: &'run DeliveryRequest,
     target: &'run DeliveryTarget,
+    text: String,
+    hard: bool,
+    soft: bool,
 }
 
 trait RunsLeasedDelivery<'run> {
@@ -324,6 +379,14 @@ trait RunsLeasedDelivery<'run> {
         nexus: &'run RunningNexus,
         request: &'run DeliveryRequest,
         target: &'run DeliveryTarget,
+    ) -> Self;
+    fn new_rendered(
+        nexus: &'run RunningNexus,
+        request: &'run DeliveryRequest,
+        target: &'run DeliveryTarget,
+        text: String,
+        hard: bool,
+        soft: bool,
     ) -> Self;
     fn step(&self, lease_step: LeaseStep) -> Result<(), DeliveryRejection>;
     /// Nothing reached the pane's composer: the lease row goes, and nothing
@@ -359,6 +422,27 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             nexus,
             request,
             target,
+            text: request.message.pane_text().as_str().to_owned(),
+            hard: matches!(request.message, Message::HardAbrupt(_)),
+            soft: matches!(request.message, Message::Soft(_)),
+        }
+    }
+
+    fn new_rendered(
+        nexus: &'run RunningNexus,
+        request: &'run DeliveryRequest,
+        target: &'run DeliveryTarget,
+        text: String,
+        hard: bool,
+        soft: bool,
+    ) -> Self {
+        Self {
+            nexus,
+            request,
+            target,
+            text,
+            hard,
+            soft,
         }
     }
 
@@ -428,14 +512,6 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
     }
 
     fn retracted_restored_letter(&self) -> bool {
-        // NativeInput is rendered as bare user content. It has no stable
-        // text marker, so matching it could retract an identical human draft.
-        if matches!(
-            &self.request.message.letter().content,
-            Content::NativeInput(_)
-        ) {
-            return false;
-        }
         let herdr = &self.nexus.herdr;
         let route = &self.target.route;
         let harness_kind = &self.target.node.harness_kind;
@@ -455,7 +531,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
     }
 
     fn run(&self) -> Result<Delivery, DeliveryRejection> {
-        let hard = matches!(self.request.message, Message::HardAbrupt(_));
+        let hard = self.hard;
         // A hard delivery reads the composer before it presses any key. A
         // text there that is not Flow's own letter refuses it untouched: an
         // interrupt would cancel the recipient's turn and still leave the
@@ -488,7 +564,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         } else {
             self.nexus.writable_state(self.target)?
         };
-        let soft = matches!(self.request.message, Message::Soft(_));
+        let soft = self.soft;
         if soft && !matches!(agent_state, AgentState::Idle | AgentState::Done) {
             return Err(DeliveryRejection::RecipientWorking);
         }
@@ -534,7 +610,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             agent_state = self.nexus.writable_state(self.target)?;
         }
         let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
-        let text = self.request.message.pane_text();
+        let text = &self.text;
         // Whether Herdr saw the recipient react; None when what followed
         // the text is not known.
         let reacted = match self

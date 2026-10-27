@@ -271,7 +271,25 @@ impl MutatesMetaflows for FlowStore {
                 request.lock.address,
             ))));
         };
-        if let Some(refusal) = request.message.oversized_refusal(&request.lock.sender) {
+        let sender_option = self
+            .stored_metaflow(&request.lock.sender)?
+            .and_then(|stored| match stored.metaflow.state {
+                flow_ethos::State::Awake(flow_id) => Some(meta_signal_flow::Sender {
+                    address: request.lock.sender.clone(),
+                    flow_id,
+                }),
+                _ => None,
+            });
+        let Some(sender) = sender_option else {
+            let released = self.release_metaflow_lock(request.lock.clone(), now)?;
+            if released != Response::Released {
+                return Ok(released);
+            }
+            return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
+                request.lock.sender,
+            ))));
+        };
+        if let Some(refusal) = request.message.oversized_refusal(&sender) {
             let released = self.release_metaflow_lock(request.lock.clone(), now)?;
             if released != Response::Released {
                 return Ok(released);
@@ -281,6 +299,7 @@ impl MutatesMetaflows for FlowStore {
         self.accept_logical_delivery(
             &request.lock.address,
             SentBy::Sender(request.lock.sender.clone()),
+            Some(sender),
             request.delivery,
             request.message,
             Some(VerifiedDeliveryLock {
@@ -619,6 +638,7 @@ impl QueuesFlowRequest for FlowStore {
         let response = self.accept_logical_delivery(
             address,
             request.sent_by,
+            None,
             request.delivery,
             request.message,
             None,
@@ -636,6 +656,20 @@ pub(crate) trait SeedsMetaflow {
 #[cfg(test)]
 impl SeedsMetaflow for FlowStore {
     fn seed_metaflow(&self, metaflow: Metaflow) {
+        let fixture_senders = metaflow
+            .queue
+            .iter()
+            .filter_map(|entry| match &entry.sent_by {
+                signal_flow::SentBy::Sender(address) => Some((
+                    entry.logical_delivery_id.clone(),
+                    meta_signal_flow::Sender {
+                        address: address.clone(),
+                        flow_id: "fixture-sender".into(),
+                    },
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let exists = self
             .stored_metaflow(&metaflow.address)
             .expect("metaflow readable")
@@ -649,6 +683,10 @@ impl SeedsMetaflow for FlowStore {
         self.engine.commit_atomic(commit).expect("metaflow seeded");
         self.seed_missing_queued_deliveries()
             .expect("seed queued lifecycle snapshots");
+        for (id, sender) in fixture_senders {
+            self.seed_logical_delivery_sender(&id, sender)
+                .expect("seed typed fixture sender");
+        }
     }
 }
 

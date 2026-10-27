@@ -7,6 +7,7 @@
 
 use super::{ControlsHerdrSnapshot, NexusFixture};
 use crate::codex::{CodexAdapter, ResponderSignal, SelectsCodexEndpoint};
+use crate::delivery::body::TypesPaneMessage;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::send_tool::{
     HandlesSendCall, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,
@@ -18,8 +19,10 @@ use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
 use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
+use datom_codec::Datomizable;
 use flow_ethos::State;
 use meta_signal_flow::QueueEvidence;
+use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Caller, Delivery, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Message,
     Metaflow, PowerLevel, QueueEntry, Request, SentBy,
@@ -865,11 +868,17 @@ fn an_oversized_dynamic_send_is_typed_durable_and_not_queued() {
     let fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.awake_target();
-    let overhead = Request::Order("x".into()).native_prompt_bytes(&sender_a()) - 1;
+    let overhead = Request::Order("x".into()).native_prompt_bytes(&meta_signal_flow::Sender {
+        address: sender_a(),
+        flow_id: "a1a1a1".into(),
+    }) - 1;
     let body = "x".repeat(MAX_SEND_PAYLOAD_BYTES - overhead + 1);
     let request = Request::Order(body.clone());
     assert_eq!(
-        request.native_prompt_bytes(&sender_a()),
+        request.native_prompt_bytes(&meta_signal_flow::Sender {
+            address: sender_a(),
+            flow_id: "a1a1a1".into()
+        }),
         MAX_SEND_PAYLOAD_BYTES + 1
     );
     let call = tool_call(THREAD_A, "call-oversized", &body);
@@ -1431,21 +1440,37 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// A woken or drained flow receives only recipient-facing message content.
+/// A cohort is one parseable vector and retains every message's identity.
 #[test]
-fn a_queued_request_is_rendered_as_recipient_content_only() {
-    use crate::composition::RendersQueuedWork;
-    let queue = [
-        queue_entry("render-1", sent(sender_a(), "Carry on.")),
-        QueueEntry {
-            logical_delivery_id: "render-2".into(),
-            sent_by: SentBy::Unknown,
-            delivery: Delivery::Queue,
-            message: Message::Soft(Request::Notice("kept".into())),
-        },
+fn a_queued_cohort_is_one_vector_of_complete_typed_messages() {
+    use datom_codec::{Actualizing, Budget, Potential};
+    use protos::ReaderBudget;
+    let expected = vec![
+        Message::HardAbrupt(Request::Order("Carry on.".into())).typed_pane_message(
+            meta_signal_flow::Sender {
+                address: sender_a(),
+                flow_id: "a1a1a1".into(),
+            },
+        ),
+        Message::Soft(Request::Notice("kept".into())).typed_pane_message(
+            meta_signal_flow::Sender {
+                address: core(),
+                flow_id: "c0ffee".into(),
+            },
+        ),
     ];
-    let prompt = queue.prompt_text();
-    assert_eq!(prompt, "Carry on.\nkept");
+    let prompt = expected.datomize(Vec::new()).protosize().compact();
+    let mut budget = Budget {
+        remaining: 4096,
+        reader: ReaderBudget { remaining: 4096 },
+        depth: 0,
+        maximum_depth: 1024,
+    };
+    let actual = Potential::<Vec<meta_signal_flow::Message>>::from(prompt.as_str())
+        .actualize(&mut budget)
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.datomize(Vec::new()).protosize().compact(), prompt);
 }
 
 /// The fixture's Codex seat 908786: its thread, and the Address its
@@ -1493,7 +1518,10 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
         .accept_tool_send(
             &key("authorized"),
             "authorized-content",
-            core(),
+            meta_signal_flow::Sender {
+                address: core(),
+                flow_id: "core-flow".into(),
+            },
             &core_primary(),
             Delivery::Wake,
             Message::Soft(Request::Question("source".into())),
@@ -1509,7 +1537,10 @@ fn tool_send_to_core_primary_accepts_only_the_core_secondary() {
         .accept_tool_send(
             &key("unauthorized"),
             "unauthorized-content",
-            unauthorized_sender,
+            meta_signal_flow::Sender {
+                address: unauthorized_sender,
+                flow_id: "other-flow".into(),
+            },
             &core_primary(),
             Delivery::Wake,
             Message::Soft(Request::Question("must not enter".into())),
@@ -1541,6 +1572,21 @@ fn from_core(request: Request) -> TestRequest {
         sent_by: SentBy::Sender(core()),
         request,
     }
+}
+
+fn canonical_test_payload(requests: &[TestRequest]) -> String {
+    requests
+        .iter()
+        .map(|request| {
+            Message::Soft(request.request.clone()).typed_pane_message(meta_signal_flow::Sender {
+                address: core(),
+                flow_id: "fixture-sender".into(),
+            })
+        })
+        .collect::<Vec<_>>()
+        .datomize(Vec::new())
+        .protosize()
+        .compact()
 }
 
 /// The app-server's notification of a turn of `thread` starting or
@@ -1691,7 +1737,7 @@ fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
         typed.find("Make it so.") < typed.find("Your brief."),
         "both, in order: {typed}"
     );
-    assert!(!typed.contains("Psyche core Secondary"));
+    assert!(typed.contains("Psyche core Secondary"));
     assert_eq!(fixture.seat_queue(), vec![]);
 }
 
@@ -1866,7 +1912,6 @@ fn codex_standings(fixture: &NexusFixture) -> Vec<meta_signal_flow::QueueDeliver
 /// The restart settles it from that history and starts no second turn.
 #[test]
 fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
-    use crate::composition::RendersQueuedWork;
     use crate::waking::ReconcilesQueueDelivery;
     let mut fixture = NexusFixture::new();
     let first = from_core(Request::Order("First.".into()));
@@ -1876,7 +1921,7 @@ fn a_codex_turn_a_crash_left_unacknowledged_is_found_in_thread_history() {
     fixture.adapter("gpt-sol", &fake);
     let queued = crashed_before_receipt(&fixture);
     assert_eq!(queued, first);
-    let first_text = [queue_entry("seat-0", first.clone())].prompt_text();
+    let first_text = canonical_test_payload(std::slice::from_ref(&first));
     fake.serve_turn_history(
         1,
         SEAT_THREAD,

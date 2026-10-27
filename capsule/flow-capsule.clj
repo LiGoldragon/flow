@@ -324,10 +324,18 @@
 
 (def scenarios
   [["0 sender seat: Launch { Psyche test Secondary } (Maintained)"
-    (fn []
+   (fn []
       (let [reply (launch secondary)
-            awake (when (str/starts-with? reply "Started.") (watch 30 #(awake-flow secondary)))]
-        {:reply reply :pass (boolean (and (str/starts-with? reply "Started.") awake))
+            awake (when (str/starts-with? reply "Started.") (watch 30 #(awake-flow secondary)))
+            launch-panes (remove #{@driver-pane} (pane-ids))
+            failed-boundary (when-not (str/starts-with? reply "Started.")
+                              (for [pane launch-panes]
+                                {:pane pane
+                                 :process-info (str/trim (:out (herdr "pane" "process-info" "--pane" pane)))
+                                 :agent (str/trim (:out (herdr "agent" "get" pane)))
+                                 :text (pane-text pane)}))]
+        {:reply (str reply (when failed-boundary (str " / boundary " (pr-str failed-boundary))))
+         :pass (boolean (and (str/starts-with? reply "Started.") awake))
          :watched (str "Metaflows: Secondary Awake as " awake "; it is the sender of every Send below")}))]
 
    ["1 launch Quaternary"
@@ -556,6 +564,31 @@
   (fs/create-dirs capsule-home)
   (fs/create-dirs capsule-bin)
   (fs/create-dirs (str capsule-home "/.claude"))
+  ;; The capsule is a fresh private Claude home, not a first-use exercise.
+  ;; Seed only the two UI choices needed to reach the configured harness;
+  ;; no shared project, history or mutable user configuration is copied.
+  (let [first-use (json/generate-string {:hasCompletedOnboarding true
+                                         :lastOnboardingVersion "2.1.294"
+                                         :theme "light"
+                                         :bypassPermissionsModeAccepted true
+                                         :projects {source-root
+                                                    {:allowedTools []
+                                                     :mcpContextUris []
+                                                     :mcpServers {}
+                                                     :enabledMcpjsonServers []
+                                                     :disabledMcpjsonServers []
+                                                     :hasTrustDialogAccepted true
+                                                     :bypassPermissionsModeAccepted true
+                                                     :hasClaudeMdExternalIncludesApproved false
+                                                     :hasClaudeMdExternalIncludesWarningShown false
+                                                     :lastGracefulShutdown false
+                                                     :lastVersionBase "2.1.294"}}})]
+    (spit (str capsule-home "/.claude.json") first-use)
+    ;; With CLAUDE_CONFIG_DIR set, Claude 2.1.294 reads the state file from
+    ;; that directory rather than HOME.
+    (spit (str capsule-home "/.claude/.claude.json") first-use))
+  (spit (str capsule-home "/.claude/settings.json")
+        (json/generate-string {:theme "light"}))
   ;; Authentication is copied into the capsule; every harness write stays private.
   (let [credentials (str claude-root "/.credentials.json")]
     (when (fs/exists? credentials)
@@ -674,7 +707,10 @@
       (let [datom (-> line (str/replace "@SOURCE_ROOT@" source-root) (str/replace "@CAPSULE_RUNTIME@" capsule-runtime)
                       (str/replace "@CURRICULUM_SOCKET@" curriculum-socket)
                       (str/replace "@CAPSULE_HOME@" capsule-home)
-                      (str/replace "@CAPSULE_BIN@" capsule-bin))
+                      (str/replace "@CAPSULE_BIN@" capsule-bin)
+                      (str/replace "@HERDR@" (str (fs/canonicalize (fs/which "herdr"))))
+                      (str/replace "@FLOW_ID@" (str (fs/canonicalize (fs/which "flow-id"))))
+                      (str/replace "@FLOW_HOOK@" (str @package "/bin/flow-hook")))
             [reply exit] (configure-one! datom log)
             family (second (re-find #"^Configure\.([A-Za-z]+)" datom))
             ok (str/starts-with? reply "Configured.")]

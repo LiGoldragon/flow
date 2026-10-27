@@ -735,12 +735,47 @@ impl ClaimsNativeIdentity for HerdrCli {
             return Err(NativeTargetRefusal::IdentityInexact);
         }
         // A remote-resumed Codex TUI reports no agent session: its target is
-        // the thread Flow opened plus the recognized pane. Any session Herdr
-        // does report must be exactly that thread; Claude must report it.
+        // the thread Flow opened plus the recognized pane.  A Flow-owned
+        // Claude is likewise outside Herdr's managed-agent lifecycle.  Herdr
+        // reports its pane state but no `agent_session`; in that case the
+        // exact process argv is the session authority.
         let session = match (agent.get("agent_session"), harness) {
             (Some(session), _) => session,
             (None, HarnessKind::Codex) => return Ok(agent.clone()),
-            (None, HarnessKind::Claude) => return Err(NativeTargetRefusal::NoNativeSession),
+            (None, HarnessKind::Claude) => {
+                if agent
+                    .get("agent_status")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("idle")
+                {
+                    return Err(NativeTargetRefusal::IdentityInexact);
+                }
+                let response = self
+                    .run_json(&[
+                        "--session".into(),
+                        pane.herdr_session_name.clone(),
+                        "pane".into(),
+                        "process-info".into(),
+                        "--pane".into(),
+                        pane.herdr_pane_id.clone(),
+                    ])
+                    .map_err(NativeTargetRefusal::HerdrUnreadable)?;
+                let matches_session = response
+                    .pointer("/result/process_info/foreground_processes")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|process| process.get("argv").and_then(serde_json::Value::as_array))
+                    .any(|argv| {
+                        argv.windows(2).any(|pair| {
+                            pair[0].as_str() == Some("--session-id")
+                                && pair[1].as_str() == Some(native_session_id)
+                        })
+                    });
+                return matches_session
+                    .then(|| agent.clone())
+                    .ok_or(NativeTargetRefusal::IdentityInexact);
+            }
         };
         let expected_source = match harness {
             HarnessKind::Claude => "flow".to_owned(),
@@ -1517,19 +1552,19 @@ impl TitlesClaudeSession for HerdrCli {
         binding: &NativeLaunchBinding,
     ) -> Result<serde_json::Value, TitleRefusal> {
         let pane = &binding.herdr_pane_binding;
-        // Herdr may report a just-bound Claude before its session and its
-        // readiness: it is waited for, never checked once.
-        self.await_pane_rest(pane)
-            .map_err(|_| TitleRefusal::NotReady)?;
+        // Flow-owned Claude is not a Herdr-managed agent, so Herdr's
+        // `agent wait` cannot be its readiness authority.  The target check
+        // below joins Herdr's observed idle pane with the selected session in
+        // the actual foreground argv.
         let mut last = TitleRefusal::NotReady;
         for _ in 0..self.title_readback_attempts() {
             match self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)
             {
                 Ok(agent)
                     if agent
-                        .get("interactive_ready")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true) =>
+                        .get("agent_status")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("idle") =>
                 {
                     return Ok(agent);
                 }
@@ -2317,10 +2352,13 @@ impl ObservesBoundPane for HerdrCli {
     ) -> Result<NativeLaunchBinding, String> {
         launch.binding_matches_launch(pane)?;
         let expected_harness = launch.harness_kind.expected_harness();
-        // Herdr may report a just-started harness before it is ready: it is
-        // waited for, never checked once.
-        self.await_pane_rest(pane)?;
-        if launch.harness_kind == HarnessKind::Claude && reserved.is_some() {
+        let flow_owned_claude = launch.harness_kind == HarnessKind::Claude && reserved.is_some();
+        // Managed launches use Herdr's lifecycle wait.  A Flow-owned Claude
+        // is observed through its exact process and lifecycle hook instead.
+        if !flow_owned_claude {
+            self.await_pane_rest(pane)?;
+        }
+        if flow_owned_claude {
             let selected = self
                 .reserved_native_session_id(launch)
                 .filter(|session| !session.is_empty())
@@ -2346,6 +2384,25 @@ impl ObservesBoundPane for HerdrCli {
         let exact_name = launch.harness_kind == HarnessKind::Claude
             || agent.get("name").and_then(serde_json::Value::as_str)
                 == Some(pane.herdr_agent_name.as_str());
+        // A Flow-owned Claude is not a Herdr-managed launch, so Herdr 0.8.2
+        // reports its supported observed state (`agent_status`) rather than
+        // the managed-launch-only `interactive_ready` field.  The exact
+        // process argv above proves the selected session and model; this
+        // resting state proves the actual TUI has reached its input boundary.
+        let interactive_ready = match launch.harness_kind {
+            HarnessKind::Claude => {
+                agent
+                    .get("agent_status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("idle")
+            }
+            HarnessKind::Codex => {
+                agent
+                    .get("interactive_ready")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            }
+        };
         let exact_pane = exact_name
             && agent.get("agent").and_then(serde_json::Value::as_str) == Some(expected_harness)
             && agent
@@ -2356,10 +2413,7 @@ impl ObservesBoundPane for HerdrCli {
                 == Some(pane.herdr_pane_id.as_str())
             && agent.get("terminal_id").and_then(serde_json::Value::as_str)
                 == Some(pane.herdr_terminal_id.as_str())
-            && agent
-                .get("interactive_ready")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true);
+            && interactive_ready;
         if !exact_pane {
             return Err("Herdr agent does not match the created native pane".into());
         }
@@ -3077,7 +3131,7 @@ case "$*" in
   *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
   *"agent wait"*) [ -f '{wait_refused}' ] && exit 11; rm -f '{missing_agent_session}'; printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
   *"agent start"*) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; if [ "$prev" = --name ]; then title=$a; [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; fi; prev=$a; done; printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
-  *"agent get"*) if [ -f '{pending_record}' ]; then left=$(cat '{record_delay}'); if [ "$left" -le 0 ]; then cat '{pending_record}' >> '{claude_transcript}'; rm -f '{pending_record}'; else printf '%s' $((left - 1)) > '{record_delay}'; fi; fi; reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); [ "$reported_harness" = claude ] && source=flow || source=herdr:$reported_harness; if [ -f '{missing_agent_session}' ] || [ -f '{never_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$source" "$reported_harness"; fi ;;
+  *"agent get"*) if [ -f '{pending_record}' ]; then left=$(cat '{record_delay}'); if [ "$left" -le 0 ]; then cat '{pending_record}' >> '{claude_transcript}'; rm -f '{pending_record}'; else printf '%s' $((left - 1)) > '{record_delay}'; fi; fi; reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); [ "$reported_harness" = claude ] && source=flow || source=herdr:$reported_harness; if [ -f '{missing_agent_session}' ] || [ -f '{never_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","agent_status":"idle","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","agent_status":"idle","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$source" "$reported_harness"; fi ;;
   *"pane process-info"*) command=$(cat '{owned_command}'); session=$(printf '%s' "$command" | sed "s/.*'--session-id' '\([^']*\)'.*/\1/"); model=$(printf '%s' "$command" | sed "s/.*'--model' '\([^']*\)'.*/\1/"); printf '{{"result":{{"process_info":{{"pane_id":"w7:p1","foreground_processes":[{{"pid":42,"name":"claude","argv":["/fixture/claude","--session-id","%s","--model","%s"]}}]}}}}}}\n' "$session" "$model" ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"pane rename w7:p1 "*) printf '%s' "$*" | sed 's/.*pane rename w7:p1 //' > '{label_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
@@ -5325,7 +5379,7 @@ printf '%s\n' "$alias"
     }
 
     #[test]
-    fn claude_readiness_is_waited_for_before_the_title_is_read() {
+    fn flow_owned_claude_readiness_uses_its_process_and_reported_pane() {
         let launch = launch(HarnessKind::Claude);
         let (root, adapter, _, pane) = reserved_claude(&launch);
         adapter
@@ -5334,28 +5388,30 @@ printf '%s\n' "$alias"
         let binding = adapter
             .observe_native_binding(&launch, &pane, Some("123456"))
             .unwrap();
-        // Just bound: Herdr does not show the official session yet; it does
-        // once the harness comes to rest.
+        // A Flow-owned Claude has no Herdr-managed agent session.  Its exact
+        // process and the lifecycle-reported idle pane are the readiness
+        // witness, without a managed `agent wait`.
         fs::write(root.path().join("missing-agent-session"), "absent").unwrap();
         adapter
             .title_native_flow(&launch, &binding)
             .expect("title read once the target is ready");
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
-        let wait = calls
+        let process = calls
             .lines()
-            .position(|line| {
-                line.ends_with("agent wait w7:p1 --until idle --until done --timeout 1000")
-            })
-            .expect("readiness wait");
+            .collect::<Vec<_>>()
+            .iter()
+            .rposition(|line| line.ends_with("pane process-info --pane w7:p1"))
+            .expect("exact process observation");
         let label = calls
             .lines()
             .position(|line| line.contains("pane rename w7:p1 "))
             .expect("Herdr label");
-        assert!(wait < label);
+        assert!(process < label);
+        assert!(!calls.contains("agent wait"));
     }
 
     #[test]
-    fn a_target_that_never_comes_to_rest_is_refused_typed_before_any_rename() {
+    fn a_flow_owned_claude_with_another_process_session_is_refused_before_any_rename() {
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let launch = launch(HarnessKind::Claude);
         let agent_name = launch.launch_agent_name();
@@ -5372,13 +5428,6 @@ printf '%s\n' "$alias"
         let binding = adapter
             .observe_native_binding(&launch, &pane, None)
             .unwrap();
-        fs::write(root.path().join("agent-wait-refused"), "timeout").unwrap();
-        assert_eq!(
-            adapter.title_native_flow(&launch, &binding).unwrap_err(),
-            TitleRefusal::NotReady
-        );
-        // The wait answers, but Herdr shows another native session there.
-        fs::remove_file(root.path().join("agent-wait-refused")).unwrap();
         let mut stale = binding.clone();
         stale.native_session_id = "12345678-1234-4abc-8def-000000000000".into();
         assert_eq!(

@@ -77,7 +77,7 @@ impl ConfiguredStore {
             }]),
             ConfigurationChange::Thresholds(vec![ConfigureThreshold {
                 model_name: "claude-fable-5-1".into(),
-                refresh: 200_000,
+                refresh_tokens: 200_000,
             }]),
         ] {
             configuration
@@ -348,11 +348,11 @@ fn each_family_is_its_last_declaration() {
     let thresholds = vec![
         ConfigureThreshold {
             model_name: "claude-opus-5-5".into(),
-            refresh: 200_000,
+            refresh_tokens: 200_000,
         },
         ConfigureThreshold {
             model_name: "gpt-6.1-sol".into(),
-            refresh: 150_000,
+            refresh_tokens: 150_000,
         },
     ];
     assert_eq!(

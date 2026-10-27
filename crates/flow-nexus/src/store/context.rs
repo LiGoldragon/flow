@@ -165,7 +165,7 @@ impl JudgesThreshold for FlowStore {
         let Some(context) = self.context_size(flow_id)? else {
             return Ok(ThresholdStanding::Unmeasured);
         };
-        let refresh = threshold.refresh;
+        let refresh = threshold.refresh_tokens;
         Ok(if context < refresh {
             ThresholdStanding::Below { context, refresh }
         } else {

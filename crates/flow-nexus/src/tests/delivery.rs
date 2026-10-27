@@ -119,7 +119,7 @@ impl NexusFixture {
             .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
                 meta_signal_flow::ConfigureThreshold {
                     model_name: "claude-opus-5-5".into(),
-                    refresh,
+                    refresh_tokens: refresh,
                 },
             ]))
             .expect("threshold configured");

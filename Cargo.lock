@@ -225,6 +225,7 @@ version = "0.40.0"
 dependencies = [
  "datom-codec",
  "flow-defaults",
+ "flow-ethos",
  "flow-native",
  "protos",
  "rkyv",

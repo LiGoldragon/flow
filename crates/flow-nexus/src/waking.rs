@@ -2144,7 +2144,7 @@ impl WakesInParts for RunningNexus {
             user_modules: fresh.user_modules,
             left_out_option: fresh.left_out_option,
             tool_set: fresh.tool_set,
-            prompt: text.with_purpose(&fresh.purpose),
+            prompt: crate::composition::with_purpose_configured(&text, &fresh.purpose, &self.texts),
         };
         let profile = seat.fresh_profile();
         self.requirements_first(&profile)
@@ -2330,7 +2330,7 @@ impl WakesInParts for RunningNexus {
             user_modules: fresh.user_modules,
             left_out_option: fresh.left_out_option,
             tool_set: fresh.tool_set,
-            prompt: "".with_purpose(&fresh.purpose),
+            prompt: crate::composition::with_purpose_configured("", &fresh.purpose, &self.texts),
         };
         let mut profile = seat.fresh_profile();
         profile.flow_id_option = Some(flow_id.to_owned());

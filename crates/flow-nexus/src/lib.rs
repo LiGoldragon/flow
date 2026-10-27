@@ -55,6 +55,7 @@ pub mod send_tool;
 pub mod sending;
 pub mod store;
 pub mod store_check;
+mod texts;
 pub mod title;
 pub mod values;
 pub mod waking;
@@ -110,6 +111,8 @@ pub struct RunningNexus {
     pub timings: meta_signal_flow::Timings,
     /// The committed size and count limits captured with the startup snapshot.
     pub limits: meta_signal_flow::Limits,
+    /// Authored wording captured with the committed startup snapshot.
+    pub texts: meta_signal_flow::Texts,
     /// Serializes dispatch; see `dispatch_serially`.
     pub dispatch_gate: Mutex<()>,
     /// The exclusive hold on each pane Flow is writing; see
@@ -827,7 +830,8 @@ impl OpensRunningNexus for RunningNexus {
         let snapshot = store
             .configuration_snapshot()?
             .ok_or(store::StoreError::NotConfigured)?;
-        let codex_endpoints = CodexEndpoints::configured(&snapshot);
+        let texts = store.configured_texts()?;
+        let codex_endpoints = CodexEndpoints::configured(&snapshot).with_texts(texts.clone());
         let overlap = codex_endpoints.overlapping_models();
         if !overlap.is_empty() {
             eprintln!(
@@ -848,16 +852,18 @@ impl OpensRunningNexus for RunningNexus {
                 .with_ordinary_socket(&ordinary_socket),
             // A launch's context is composed by the Curriculum Nexus at the
             // socket the configuration names, read as the Nexus opens.
-            composer: LaunchComposer::with_context_and_limits(
+            composer: LaunchComposer::with_context_limits_and_texts(
                 context::ContextComposer::Curriculum(CurriculumComposer::configured(
                     &snapshot.nexus.curriculum_nexus_path,
                     &snapshot.timings,
                     &snapshot.limits,
                 )),
                 snapshot.limits.clone(),
+                texts.clone(),
             ),
             timings: snapshot.timings.clone(),
             limits: snapshot.limits.clone(),
+            texts,
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
@@ -2446,6 +2452,7 @@ mod tests {
                 timeout: Duration::from_secs(1),
                 workspace_root: directory.path().to_path_buf(),
                 limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+                texts: crate::store::texts::seed_texts().expect("authored texts seed"),
             };
             let mut store =
                 FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store");
@@ -2511,6 +2518,7 @@ mod tests {
                 )),
                 timings: crate::store::timings_limits::seed_timings().expect("timings seed"),
                 limits: crate::store::timings_limits::seed_limits().expect("limits seed"),
+                texts: crate::store::texts::seed_texts().expect("texts seed"),
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),

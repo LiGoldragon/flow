@@ -339,7 +339,7 @@ impl LaunchesFlows for RunningNexus {
         // and its seat is told it in its system prompt. A Codex seat is
         // told it when Bind has claimed it, before its first turn.
         let launch = match &reserved {
-            Some(flow_id) => launch.carrying_flow_id(flow_id),
+            Some(flow_id) => self.composer.carry_flow_id(&launch, flow_id),
             None => launch,
         };
         let harness_kind = launch.harness_kind.clone();

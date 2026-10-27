@@ -2431,6 +2431,12 @@ The first bootstrap may be assembled by hand. A collector/import tool is a
 later change and is not part of this release.
 
 
+## 0.40.0 — authored runtime texts
+
+Adds the singleton `Texts` configuration family and store table. Existing stores gain the authored seed on their next staged configuration or full open. Launch identity sections, part headings, Codex briefs, purposed briefs, compaction warnings, and send-tool descriptions are rendered from the committed snapshot; remembered flows are rendered as their typed `Remembering` datom.
+
+Pins meta-signal-flow 56.0.0. Existing harness rows upgrade from v1 to v2 by adding an empty after string to every Flagged argument, preserving their rendered argument vector.
+
 # Batch 11: reports by session and notifications
 
 The ordinary signal contract is signal-flow 37.0.0 and the privileged contract is meta-signal-flow 51.0.0. A harness report identifies either a Flow or a native session; the Nexus resolves session reporters against the adopted seats it holds. Claude's Notification hook records `Notified` events. The flow-events family upgrades from v4 to v5 without changing any archived event.

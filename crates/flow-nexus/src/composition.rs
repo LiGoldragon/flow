@@ -49,6 +49,7 @@ pub struct LaunchComposer {
     context: ContextComposer,
     limits: meta_signal_flow::Limits,
     harness_modules: Vec<meta_signal_flow::HarnessModule>,
+    texts: meta_signal_flow::Texts,
 }
 
 pub(crate) trait ConfiguresHarnessModules {
@@ -121,7 +122,7 @@ impl ComposesSystemPrompt for LaunchComposer {
             }
             text.push_str(&segment);
         }
-        let section = input_0.profile().launch_section(None);
+        let section = render_launch_section(&input_0.profile(), None, &self.texts);
         if !section.is_empty() {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
@@ -147,6 +148,7 @@ impl OpensLaunchComposer for LaunchComposer {
             context,
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
             harness_modules: Vec::new(),
+            texts: crate::store::texts::seed_texts().expect("authored texts seed"),
         }
     }
 }
@@ -160,6 +162,20 @@ impl LaunchComposer {
             context,
             limits,
             harness_modules: Vec::new(),
+            texts: crate::store::texts::seed_texts().expect("authored texts seed"),
+        }
+    }
+
+    pub(crate) fn with_context_limits_and_texts(
+        context: ContextComposer,
+        limits: meta_signal_flow::Limits,
+        texts: meta_signal_flow::Texts,
+    ) -> Self {
+        Self {
+            context,
+            limits,
+            harness_modules: Vec::new(),
+            texts,
         }
     }
 }
@@ -173,32 +189,61 @@ pub trait RendersLaunchSection {
 
 impl RendersLaunchSection for LaunchProfile {
     fn launch_section(&self, flow_id: Option<&str>) -> String {
-        let address = self.address.datomize(Vec::new()).protosize().compact();
-        let mut section = format!(
-            "Metaflow: {address}\nModel: {}\nEffort: {}\nFlow ID: {}\nNative binding: pending\n",
-            self.model_name,
-            self.effort,
-            flow_id.unwrap_or("pending"),
-        );
-        if let Some(predecessor) = &self.flow_id_option {
-            section.push_str(&format!("Predecessor: {predecessor}\n"));
-        }
-        match &self.remembering {
-            signal_flow::Remembering::Predecessors(0) => {}
-            signal_flow::Remembering::Predecessors(depth) => {
-                section.push_str(&format!("Remembering: predecessors, {depth} deep\n"));
-            }
-            signal_flow::Remembering::Custom(flows) => {
-                section.push_str(&format!("Remembering: {}\n", flows.join(", ")));
-            }
-        }
-        section
+        render_launch_section(
+            self,
+            flow_id,
+            &crate::store::texts::seed_texts().expect("authored texts seed"),
+        )
     }
+}
+
+fn render_launch_section(
+    profile: &LaunchProfile,
+    flow_id: Option<&str>,
+    texts: &meta_signal_flow::Texts,
+) -> String {
+    use meta_signal_flow::Slot;
+    let template = if flow_id.is_some() {
+        &texts.launch_section.bound_launch
+    } else {
+        &texts.launch_section.pending_launch
+    };
+    let address = profile.address.datomize(Vec::new()).protosize().compact();
+    let remembering = match &profile.remembering {
+        signal_flow::Remembering::Predecessors(0) => None,
+        remembering => Some(remembering.datomize(Vec::new()).protosize().compact()),
+    };
+    crate::texts::render_template(template, |slot| match slot {
+        Slot::MetaflowAddress => Some(address.clone()),
+        Slot::LaunchModel => Some(profile.model_name.clone()),
+        Slot::LaunchEffort => Some(profile.effort.clone()),
+        Slot::LaunchFlowId => flow_id.map(str::to_owned),
+        Slot::PredecessorId => profile.flow_id_option.clone(),
+        Slot::RememberedFlows => remembering.clone(),
+        _ => None,
+    })
+    .expect("the authored launch-section template uses only launch-section slots")
 }
 
 struct MessageBoundary<'a> {
     harness: &'a HarnessKind,
     limits: &'a meta_signal_flow::Limits,
+    texts: &'a meta_signal_flow::Texts,
+}
+
+fn render_part_header(number: i64, count: i64, texts: &meta_signal_flow::Texts) -> String {
+    use meta_signal_flow::Slot;
+    let template = if number == count {
+        &texts.last_part_header
+    } else {
+        &texts.part_header
+    };
+    crate::texts::render_template(template, |slot| match slot {
+        Slot::PartNumber => Some(number.to_string()),
+        Slot::PartCount => Some(count.to_string()),
+        _ => None,
+    })
+    .expect("the authored part-header template uses only part-number slots")
 }
 
 fn fits_message(harness: &HarnessKind, limits: &meta_signal_flow::Limits, text: &str) -> bool {
@@ -262,13 +307,11 @@ impl JoinsContextAndBrief for [String] {
 impl SplitsStartupMessage for HarnessKind {
     fn part_header<N: PartNumbering>(input: N) -> String {
         let (number, count) = (input.part_number(), input.part_count());
-        if number == count {
-            format!("Startup message, part {number} of {count}, the last.\n\n")
-        } else {
-            format!(
-                "Startup message, part {number} of {count}. More of it follows: do nothing until part {count} of {count} arrives, and answer only that you are waiting for it.\n\n"
-            )
-        }
+        render_part_header(
+            number,
+            count,
+            &crate::store::texts::seed_texts().expect("authored texts seed"),
+        )
     }
 
     fn startup_parts<N: SegmentListing, O: Textual>(
@@ -307,7 +350,12 @@ impl SplitsStartupMessage for HarnessKind {
 
 impl SplitsStartupMessage for MessageBoundary<'_> {
     fn part_header<N: PartNumbering>(input: N) -> String {
-        HarnessKind::part_header(input)
+        let (number, count) = (input.part_number(), input.part_count());
+        render_part_header(
+            number,
+            count,
+            &crate::store::texts::seed_texts().expect("authored texts seed"),
+        )
     }
 
     fn startup_parts<N: SegmentListing, O: Textual>(
@@ -320,7 +368,7 @@ impl SplitsStartupMessage for MessageBoundary<'_> {
         if self.fits_one_message(&whole) {
             return Ok(vec![whole]);
         }
-        let widest = Self::part_header((1, 999_999));
+        let widest = render_part_header(1, 999_999, self.texts);
         let mut chunks: Vec<String> = Vec::new();
         let mut current = String::new();
         for piece in pieces {
@@ -337,7 +385,12 @@ impl SplitsStartupMessage for MessageBoundary<'_> {
         Ok(chunks
             .into_iter()
             .enumerate()
-            .map(|(index, chunk)| format!("{}{chunk}", Self::part_header((index + 1, count))))
+            .map(|(index, chunk)| {
+                format!(
+                    "{}{chunk}",
+                    render_part_header((index + 1) as i64, count as i64, self.texts)
+                )
+            })
             .collect())
     }
 }
@@ -429,16 +482,24 @@ impl ValidatesLaunchProfile for LaunchProfile {
 /// a first turn ends in a presentation.
 impl RendersBrief for HarnessedProfile {
     fn brief(&self) -> String {
-        let profile = &self.launch_profile;
-        let instruction = profile.instruction_prompt.clone();
-        if self.harness_kind == HarnessKind::Claude {
-            return instruction;
-        }
-        format!(
-            "# Flow launch\n\nHarness: Codex\nHerdr session: {}\nRemote control: app-server endpoint\n\n{}",
-            profile.herdr_session_name, instruction,
+        render_brief(
+            self,
+            &crate::store::texts::seed_texts().expect("authored texts seed"),
         )
     }
+}
+
+fn render_brief(profile: &HarnessedProfile, texts: &meta_signal_flow::Texts) -> String {
+    if profile.harness_kind == HarnessKind::Claude {
+        return profile.launch_profile.instruction_prompt.clone();
+    }
+    use meta_signal_flow::Slot;
+    crate::texts::render_template(&texts.codex_brief, |slot| match slot {
+        Slot::HerdrSession => Some(profile.launch_profile.herdr_session_name.clone()),
+        Slot::BriefText => Some(profile.launch_profile.instruction_prompt.clone()),
+        _ => None,
+    })
+    .expect("the authored Codex brief template uses only launch brief slots")
 }
 
 /// The leave-outs a launch takes: its own, else the default its metaflow
@@ -532,6 +593,30 @@ impl CarriesFlowId for ComposedLaunch {
     }
 }
 
+impl LaunchComposer {
+    pub(crate) fn carry_flow_id(&self, launch: &ComposedLaunch, flow_id: &str) -> ComposedLaunch {
+        let previous_section = render_launch_section(&launch.launch_profile, None, &self.texts);
+        let section = render_launch_section(&launch.launch_profile, Some(flow_id), &self.texts);
+        let mut text = launch.system_prompt.system_prompt_text.clone();
+        match text.rfind(&previous_section) {
+            Some(start) => text.replace_range(start..start + previous_section.len(), &section),
+            None => {
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push('\n');
+                text.push_str(&section);
+            }
+        }
+        let mut carried = launch.clone();
+        carried.system_prompt = SystemPrompt {
+            system_prompt_sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+            system_prompt_text: text,
+        };
+        carried
+    }
+}
+
 /// A composed launch from its parts: `prompt_sha256` is SHA-256 over the
 /// exact UTF-8 bytes of the whole first USER message, and each part carries
 /// the SHA-256 of its own exact text. Hashes stay in the store and never
@@ -596,7 +681,7 @@ impl ComposesLaunch for LaunchComposer {
         };
         let left_out = harnessed.effective_left_out(input_1);
         let verified = self.verified_context(&harnessed)?;
-        let brief = harnessed.brief();
+        let brief = render_brief(&harnessed, &self.texts);
         let mut segments = verified.user_segments();
         // The raw records of the flows the launch remembers follow its
         // USER modules, as one segment, ahead of the brief.
@@ -619,6 +704,7 @@ impl ComposesLaunch for LaunchComposer {
         let parts = MessageBoundary {
             harness: &harnessed.harness_kind,
             limits: &self.limits,
+            texts: &self.texts,
         }
         .startup_parts(&segments, &brief)?;
         Ok(Self::assembled(
@@ -676,10 +762,30 @@ pub(crate) trait JoinsPurpose {
 
 impl JoinsPurpose for str {
     fn with_purpose(&self, purpose: &str) -> String {
-        match (purpose.is_empty(), self.is_empty()) {
-            (true, _) => self.to_owned(),
-            (false, true) => purpose.to_owned(),
-            (false, false) => format!("{purpose}\n\n{self}"),
+        with_purpose_configured(
+            self,
+            purpose,
+            &crate::store::texts::seed_texts().expect("authored texts seed"),
+        )
+    }
+}
+
+pub(crate) fn with_purpose_configured(
+    brief: &str,
+    purpose: &str,
+    texts: &meta_signal_flow::Texts,
+) -> String {
+    match (purpose.is_empty(), brief.is_empty()) {
+        (true, _) => brief.to_owned(),
+        (false, true) => purpose.to_owned(),
+        (false, false) => {
+            use meta_signal_flow::Slot;
+            crate::texts::render_template(&texts.purposed_brief, |slot| match slot {
+                Slot::PurposeText => Some(purpose.to_owned()),
+                Slot::BriefText => Some(brief.to_owned()),
+                _ => None,
+            })
+            .expect("the authored purposed-brief template uses only purpose and brief slots")
         }
     }
 }
@@ -898,7 +1004,7 @@ pub(crate) mod tests {
         let system = &composed.system_prompt.system_prompt_text;
         assert!(system.contains("<!-- module: spirit-core -->\nSpirit body.\n"));
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: Custom.[ 836818 ]\n"
         ));
         assert!(!system.contains("Knowledge body."));
         let body = &composed.first_prompt_payload.first_prompt_body;
@@ -976,7 +1082,7 @@ pub(crate) mod tests {
         let carried = composed.carrying_flow_id("a1b2c3");
         let system = &carried.system_prompt.system_prompt_text;
         assert!(system.ends_with(
-            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: 836818\n"
+            "<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\nPredecessor: 1b8ac0\nRemembering: Custom.[ 836818 ]\n"
         ));
         assert_eq!(carried.first_prompt_payload, composed.first_prompt_payload);
         // A launch with no predecessor and no memory gains the section.

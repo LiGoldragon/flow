@@ -1,0 +1,43 @@
+{ { [ Text.«Metaflow: » Slot.MetaflowAddress Text.«
+Model: » Slot.LaunchModel Text.«
+Effort: » Slot.LaunchEffort Text.«
+Flow ID: pending
+Native binding: pending
+» Flagged.{ «Predecessor: » PredecessorId «
+» } Flagged.{ «Remembering: » RememberedFlows «
+» } ]
+    [ Text.«Metaflow: » Slot.MetaflowAddress Text.«
+Model: » Slot.LaunchModel Text.«
+Effort: » Slot.LaunchEffort Text.«
+Flow ID: » Slot.LaunchFlowId Text.«
+Native binding: pending
+» Flagged.{ «Predecessor: » PredecessorId «
+» } Flagged.{ «Remembering: » RememberedFlows «
+» } ] }
+  [ Text.«Startup message, part » Slot.PartNumber Text.« of » Slot.PartCount Text.«. More of it follows: do nothing until part » Slot.PartCount Text.« of » Slot.PartCount Text.« arrives, and answer only that you are waiting for it.
+
+» ]
+  [ Text.«Startup message, part » Slot.PartNumber Text.« of » Slot.PartCount Text.«, the last.
+
+» ]
+  [ Text.«# Flow launch
+
+Harness: Codex
+Herdr session: » Slot.HerdrSession Text.«
+Remote control: app-server endpoint
+
+» Slot.BriefText ]
+  [ Slot.PurposeText Text.«
+
+» Slot.BriefText ]
+  { { [ Text.«Flow warning: flow » Slot.LaunchFlowId Text.« (» Slot.MetaflowAddress Text.«) compacted its context» Flagged.{ « at » ContextSize « tokens» } Text.« while it kept working without being given more work. Its transcript is » Slot.TranscriptFile Text.«.» ]
+      [ Text.«Flow warning: flow » Slot.LaunchFlowId Text.« (» Slot.MetaflowAddress Text.«) compacted its context» Flagged.{ « at » ContextSize « tokens» } Text.« while it kept working without being given more work. Its Claude session is » Slot.SessionId Text.«.» ]
+      [ Text.«Flow warning: flow » Slot.LaunchFlowId Text.« (» Slot.MetaflowAddress Text.«) compacted its context» Flagged.{ « at » ContextSize « tokens» } Text.« while it kept working without being given more work. Its Codex thread is » Slot.ThreadId Text.«.» ] }
+    { [ Text.«Flow warning: flow » Slot.LaunchFlowId Text.« (a flow no metaflow is Awake as) compacted its context» Flagged.{ « at » ContextSize « tokens» } Text.« while it kept working without being given more work. Its transcript is » Slot.TranscriptFile Text.«.» ]
+      [ Text.«Flow warning: flow » Slot.LaunchFlowId Text.« (a flow no metaflow is Awake as) compacted its context» Flagged.{ « at » ContextSize « tokens» } Text.« while it kept working without being given more work. Its Claude session is » Slot.SessionId Text.«.» ]
+      [ Text.«Flow warning: flow » Slot.LaunchFlowId Text.« (a flow no metaflow is Awake as) compacted its context» Flagged.{ « at » ContextSize « tokens» } Text.« while it kept working without being given more work. Its Codex thread is » Slot.ThreadId Text.«.» ] } }
+  [ «Send one request from this flow to the flow at a metaflow Address. Choose whether Flow should wake the recipient or only queue the request, and choose its priority. The answer is a durable logical-delivery acceptance or a typed refusal.»
+    «The Address of the receiving metaflow.»
+    «Wake explicitly wakes the recipient after admission; Queue retains work without requesting a wake.»
+    «How the admitted message is delivered to the recipient.»
+    «Order: work for the target. Question: a question it answers. Result: a result it awaits. Notice: an error or blocker affecting its work.» ] }

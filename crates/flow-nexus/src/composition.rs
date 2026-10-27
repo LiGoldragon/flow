@@ -48,25 +48,73 @@ impl From<ContextRefusal> for CompositionError {
 pub struct LaunchComposer {
     context: ContextComposer,
     limits: meta_signal_flow::Limits,
+    harness_modules: Vec<meta_signal_flow::HarnessModule>,
+}
+
+pub(crate) trait ConfiguresHarnessModules {
+    fn with_harness_modules(&self, modules: Vec<meta_signal_flow::HarnessModule>) -> Self;
+}
+
+impl ConfiguresHarnessModules for LaunchComposer {
+    fn with_harness_modules(&self, modules: Vec<meta_signal_flow::HarnessModule>) -> Self {
+        let mut configured = self.clone();
+        configured.harness_modules = modules;
+        configured
+    }
 }
 
 trait ComposesSystemPrompt {
-    fn compose_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
+    fn compose_system_prompt<
+        N: Profiled,
+        O: ReadsVerifiedContext,
+        P: SegmentListing,
+        Q: LeaveOutListing,
+    >(
         &self,
         profile: N,
         context: O,
         overflow: P,
+        left_out: Q,
     ) -> SystemPrompt;
 }
 
 impl ComposesSystemPrompt for LaunchComposer {
-    fn compose_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
+    fn compose_system_prompt<
+        N: Profiled,
+        O: ReadsVerifiedContext,
+        P: SegmentListing,
+        Q: LeaveOutListing,
+    >(
         &self,
         input_0: N,
         input_1: O,
         input_2: P,
+        input_3: Q,
     ) -> SystemPrompt {
-        let mut text = input_1.system_text();
+        let left_out = input_3.left_out();
+        let mut text = String::new();
+        for module in &self.harness_modules {
+            if left_out.contains(&module.harness_module_name) {
+                continue;
+            }
+            let meta_signal_flow::ModuleText::Injected(stock) = &module.module_text else {
+                continue;
+            };
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(stock);
+        }
+        let context = input_1.system_text();
+        if !context.is_empty() {
+            if !text.is_empty() {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push('\n');
+            }
+            text.push_str(&context);
+        }
         for segment in input_2.segments() {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
@@ -98,6 +146,7 @@ impl OpensLaunchComposer for LaunchComposer {
         Self {
             context,
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+            harness_modules: Vec::new(),
         }
     }
 }
@@ -107,7 +156,11 @@ impl LaunchComposer {
         context: ContextComposer,
         limits: meta_signal_flow::Limits,
     ) -> Self {
-        Self { context, limits }
+        Self {
+            context,
+            limits,
+            harness_modules: Vec::new(),
+        }
     }
 }
 
@@ -432,13 +485,19 @@ impl ComposesVerifiedContext for LaunchComposer {
         Ok(verified)
     }
 
-    fn launch_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
+    fn launch_system_prompt<
+        N: Profiled,
+        O: ReadsVerifiedContext,
+        P: SegmentListing,
+        Q: LeaveOutListing,
+    >(
         &self,
         input_0: N,
         input_1: O,
         input_2: P,
+        input_3: Q,
     ) -> Result<SystemPrompt, CompositionError> {
-        Ok(self.compose_system_prompt(input_0, input_1, input_2))
+        Ok(self.compose_system_prompt(input_0, input_1, input_2, input_3))
     }
 }
 
@@ -550,8 +609,12 @@ impl ComposesLaunch for LaunchComposer {
         // context and the brief are the first message, split into as many
         // prompts as it takes when it does not fit one, sent one right after
         // another, so the start is one model call.
-        let system_prompt =
-            self.launch_system_prompt(&harnessed, &verified, Vec::<String>::new())?;
+        let system_prompt = self.launch_system_prompt(
+            &harnessed,
+            &verified,
+            Vec::<String>::new(),
+            &left_out,
+        )?;
         let body = segments.joined_with(&brief).concat();
         let parts = MessageBoundary {
             harness: &harnessed.harness_kind,
@@ -647,8 +710,8 @@ impl ProfilesFreshSeat for FreshSeat {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        ComposesLaunch, CompositionError, FitsOneMessage, HarnessedProfile, LaunchComposer,
-        OpensLaunchComposer, SplitsStartupMessage,
+        ComposesLaunch, CompositionError, ConfiguresHarnessModules, FitsOneMessage,
+        HarnessedProfile, LaunchComposer, OpensLaunchComposer, SplitsStartupMessage,
     };
     use crate::context::FixtureComposer;
     use signal_flow::{
@@ -840,6 +903,61 @@ pub(crate) mod tests {
         assert!(!system.contains("Knowledge body."));
         let body = &composed.first_prompt_payload.first_prompt_body;
         assert!(!body.contains("Predecessor") && !body.contains("Remembered"));
+    }
+
+    #[test]
+    fn kept_injected_harness_text_precedes_context_and_left_out_text_is_absent() {
+        let modules = vec![
+            meta_signal_flow::HarnessModule {
+                harness_module_name: "CodeStyle".into(),
+                module_text: meta_signal_flow::ModuleText::Injected(
+                    "Write clear code.".into(),
+                ),
+                tools: vec![],
+                switches: vec![],
+            },
+            meta_signal_flow::HarnessModule {
+                harness_module_name: "Identity".into(),
+                module_text: meta_signal_flow::ModuleText::Retained(
+                    "The harness retains this.".into(),
+                ),
+                tools: vec![],
+                switches: vec![],
+            },
+        ];
+        let composer = fixture_composer().with_harness_modules(modules);
+        let kept = composer
+            .compose(
+                HarnessedProfile {
+                    remembered_flows: vec![],
+                    harness_kind: HarnessKind::Claude,
+                    launch_profile: fixture_profile(),
+                },
+                Vec::<String>::new(),
+            )
+            .expect("kept text composes");
+        assert!(kept.system_prompt.system_prompt_text.starts_with(
+            "Write clear code.\n\nThese are your skills, given here; do not reload them."
+        ));
+        assert!(!kept
+            .system_prompt
+            .system_prompt_text
+            .contains("The harness retains this."));
+
+        let omitted = composer
+            .compose(
+                HarnessedProfile {
+                    remembered_flows: vec![],
+                    harness_kind: HarnessKind::Claude,
+                    launch_profile: fixture_profile(),
+                },
+                vec!["CodeStyle".into()],
+            )
+            .expect("left-out text composes");
+        assert!(!omitted
+            .system_prompt
+            .system_prompt_text
+            .contains("Write clear code."));
     }
 
     #[test]

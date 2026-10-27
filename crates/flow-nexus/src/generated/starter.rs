@@ -304,11 +304,17 @@ pub trait ComposesVerifiedContext {
         &self,
         input: N,
     ) -> std::result::Result<flow_nexus::VerifiedContext, flow_nexus::CompositionError>;
-    fn launch_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
+    fn launch_system_prompt<
+        N: Profiled,
+        O: ReadsVerifiedContext,
+        P: SegmentListing,
+        Q: LeaveOutListing,
+    >(
         &self,
         input_0: N,
         input_1: O,
         input_2: P,
+        input_3: Q,
     ) -> std::result::Result<signal_flow::SystemPrompt, flow_nexus::CompositionError>;
 }
 #[rustfmt::skip]

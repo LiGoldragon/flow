@@ -272,6 +272,21 @@
   [native]
   (first (transcript-user-turns native)))
 
+(defn transcript-prompt-snapshot
+  "The text blocks the Claude prompt_snapshot records for one session."
+  [native]
+  (when native
+    (when-let [file (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl")))]
+      (some (fn [line]
+              (let [entry (try (json/parse-string line true) (catch Exception _ nil))
+                    attachment (:attachment entry)]
+                (when (and (= "attachment" (:type entry))
+                           (= "prompt_snapshot" (:type attachment)))
+                  (str (:cliPrefix attachment) "\n"
+                       (str/join "\n" (map #(if (string? %) % (:text %))
+                                                (:systemPrompt attachment)))))))
+            (str/split-lines (slurp (str file)))))))
+
 (defn occurrences [text needle]
   (if text (count (re-seq (re-pattern (java.util.regex.Pattern/quote needle)) text)) 0))
 
@@ -333,20 +348,32 @@
                                 {:pane pane
                                  :process-info (str/trim (:out (herdr "pane" "process-info" "--pane" pane)))
                                  :agent (str/trim (:out (herdr "agent" "get" pane)))
-                                 :text (pane-text pane)}))]
+                                 :text (pane-text pane)}))
+            native (when awake (native-session (inspect secondary)))
+            snapshot (when native (watch 30 #(transcript-prompt-snapshot native)))
+            code-style "Write code that reads like the surrounding code: match its comment density, naming, and idiom."]
         {:reply (str reply (when failed-boundary (str " / boundary " (pr-str failed-boundary))))
-         :pass (boolean (and (str/starts-with? reply "Started.") awake))
-         :watched (str "Metaflows: Secondary Awake as " awake "; it is the sender of every Send below")}))]
+         :pass (boolean (and (str/starts-with? reply "Started.") awake snapshot
+                             (str/includes? snapshot code-style)))
+         :watched (str "Metaflows: Secondary Awake as " awake
+                       "; its prompt_snapshot carries the kept CodeStyle line; it is the sender of every Send below")}))]
 
    ["1 launch Quaternary"
     (fn []
       (let [before (pane-ids)
             reply (launch quaternary)
             after (pane-ids)
-            m (current quaternary)]
+            m (current quaternary)
+            native (when (= :awake (:state m)) (native-session (inspect quaternary)))
+            snapshot (when native (watch 30 #(transcript-prompt-snapshot native)))
+            code-style "Write code that reads like the surrounding code: match its comment density, naming, and idiom."]
         {:reply reply
-         :pass (boolean (and (str/starts-with? reply "Started.") (seq (remove before after)) (= :awake (:state m))))
-         :watched (str "new panes in flow-testing " (vec (remove before after)) "; Metaflows Quaternary " (name (:state m)) " as " (:flow m))}))]
+         :pass (boolean (and (str/starts-with? reply "Started.") (seq (remove before after))
+                             (= :awake (:state m)) snapshot
+                             (not (str/includes? snapshot code-style))))
+         :watched (str "new panes in flow-testing " (vec (remove before after))
+                       "; Metaflows Quaternary " (name (:state m)) " as " (:flow m)
+                       "; its prompt_snapshot omits left-out CodeStyle")}))]
 
    ["2 OnDemand sleep"
     (fn []

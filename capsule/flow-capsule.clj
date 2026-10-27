@@ -664,7 +664,6 @@
           :let [cmd (try (str/replace (slurp (str dir "/cmdline")) "\u0000" " ") (catch Exception _ ""))
                 env (try (slurp (str dir "/environ")) (catch Exception _ ""))]
           :when (or (str/includes? cmd capsule-runtime) (str/includes? cmd store-path)
-                    (str/includes? cmd curriculum-package)
                     (str/includes? env (str "XDG_RUNTIME_DIR=" capsule-runtime "\u0000"))
                     (str/includes? cmd (str "--session " session))
                     (str/includes? env (str "FLOW_SOCKET=" ordinary-socket))

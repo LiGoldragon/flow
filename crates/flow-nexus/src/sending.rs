@@ -13,14 +13,15 @@
 //! of its session's root thread, and a Codex seat Herdr reports no session
 //! for runs the thread its pane resumes in its foreground.
 
+use crate::RunningNexus;
 use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
 use crate::caller::{
     CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
 };
 use crate::composition::JoinsPurpose;
 use crate::delivery::body::RendersNativeContent;
-use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::herdr::ReadsHerdrPanes;
+use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::metaflow::IdentifiesPeerProcess;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -38,11 +39,10 @@ use crate::waking::{
     HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
     SleepsAndWakesSeats, WakePolicy,
 };
-use crate::RunningNexus;
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, LaunchProfile, Launch_Data, Layer,
+    Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data, LaunchProfile, Layer,
     Message, Process, Recipient, Refusal, Request, Response, SendPayloadSize, SendRequest, SentBy,
     StartRejection, Unknown_Data,
 };
@@ -482,7 +482,11 @@ impl LaunchesDeclared for RunningNexus {
             leave_outs_option: None,
             tool_set: declaration.tool_set,
             // The declaration's purpose is composed ahead of the brief.
-            instruction_prompt: launch.instruction_prompt.with_purpose(&declaration.purpose),
+            instruction_prompt: crate::composition::with_purpose_configured(
+                &launch.instruction_prompt,
+                &declaration.purpose,
+                &self.texts,
+            ),
         };
         Ok(match predecessor {
             Some(_) => signal_flow::Query::Replace(profile),

@@ -21,6 +21,7 @@
 //!
 //! The warning is a journal line at warning priority.
 
+use crate::RunningNexus;
 use crate::generated::operation::{Operation, Outcome, Record_Data, Record_Data_Context_Data};
 use crate::performing::Performs;
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
@@ -28,7 +29,6 @@ use crate::store::context::RecordsContextSize;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::waking::ReadsClaudeDelivery;
-use crate::RunningNexus;
 use signal_flow::{Address, Aspect, FlowNode, HarnessKind, Layer};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -233,6 +233,7 @@ pub struct CompactionWarning<'warning> {
     pub session: &'warning str,
     pub transcript: Option<&'warning Path>,
     pub pre_tokens: Option<i64>,
+    pub texts: &'warning meta_signal_flow::Texts,
 }
 
 pub trait RendersCompactionWarning {
@@ -241,25 +242,65 @@ pub trait RendersCompactionWarning {
 
 impl RendersCompactionWarning for CompactionWarning<'_> {
     fn text(&self) -> String {
-        let seat = self.address.map_or_else(
-            || "a flow no metaflow is Awake as".to_owned(),
-            WritesSeat::seat_text,
-        );
-        let size = self
-            .pre_tokens
-            .map(|tokens| format!(" at {tokens} tokens"))
-            .unwrap_or_default();
-        let source = match (self.harness_kind, self.transcript) {
-            (HarnessKind::Claude, Some(transcript)) => {
-                format!("Its transcript is {}.", transcript.display())
+        let template = match (self.address.is_some(), self.harness_kind, self.transcript) {
+            (true, HarnessKind::Claude, Some(_)) => {
+                &self
+                    .texts
+                    .compaction_warning
+                    .seated_compaction
+                    .seated_compaction_transcript
             }
-            (HarnessKind::Claude, None) => format!("Its Claude session is {}.", self.session),
-            (HarnessKind::Codex, _) => format!("Its Codex thread is {}.", self.session),
+            (true, HarnessKind::Claude, None) => {
+                &self
+                    .texts
+                    .compaction_warning
+                    .seated_compaction
+                    .seated_compaction_claude_session
+            }
+            (true, HarnessKind::Codex, _) => {
+                &self
+                    .texts
+                    .compaction_warning
+                    .seated_compaction
+                    .seated_compaction_codex_thread
+            }
+            (false, HarnessKind::Claude, Some(_)) => {
+                &self
+                    .texts
+                    .compaction_warning
+                    .unseated_compaction
+                    .unseated_compaction_transcript
+            }
+            (false, HarnessKind::Claude, None) => {
+                &self
+                    .texts
+                    .compaction_warning
+                    .unseated_compaction
+                    .unseated_compaction_claude_session
+            }
+            (false, HarnessKind::Codex, _) => {
+                &self
+                    .texts
+                    .compaction_warning
+                    .unseated_compaction
+                    .unseated_compaction_codex_thread
+            }
         };
-        format!(
-            "Flow warning: flow {} ({seat}) compacted its context{size} while it kept working without being given more work. {source}",
-            self.flow_id
-        )
+        use meta_signal_flow::Slot;
+        crate::texts::render_template(template, |slot| match slot {
+            Slot::LaunchFlowId => Some(self.flow_id.to_owned()),
+            Slot::MetaflowAddress => self.address.map(WritesSeat::seat_text),
+            Slot::ContextSize => self.pre_tokens.map(|tokens| tokens.to_string()),
+            Slot::TranscriptFile => self.transcript.map(|path| path.display().to_string()),
+            Slot::SessionId if self.harness_kind == &HarnessKind::Claude => {
+                Some(self.session.to_owned())
+            }
+            Slot::ThreadId if self.harness_kind == &HarnessKind::Codex => {
+                Some(self.session.to_owned())
+            }
+            _ => None,
+        })
+        .expect("the authored compaction-warning template matches its selected source")
     }
 }
 
@@ -419,6 +460,7 @@ impl WatchesCompactions for RunningNexus {
             session: &node.session_id,
             transcript: transcript.as_deref(),
             pre_tokens,
+            texts: &self.texts,
         }
         .text();
         let compaction = Compaction {
@@ -593,6 +635,7 @@ mod tests {
             session: "s",
             transcript: Some(&transcript),
             pre_tokens: Some(219141),
+            texts: &crate::store::texts::seed_texts().expect("texts seed"),
         }
         .text();
         assert!(text.starts_with(
@@ -600,5 +643,57 @@ mod tests {
         ));
         assert!(text.contains("Its transcript is /home/li/.claude/projects/p/s.jsonl."));
         assert!(!text.contains("Investigate"));
+    }
+
+    #[test]
+    fn seated_and_unseated_warnings_select_each_source_with_raw_values() {
+        let texts = crate::store::texts::seed_texts().expect("texts seed");
+        let address = Address {
+            aspect: Aspect::Mind,
+            topic: "flow".into(),
+            layer: Layer::Secondary,
+        };
+        let transcript = std::path::PathBuf::from("/raw/transcript.jsonl");
+        for seated in [false, true] {
+            let address = seated.then_some(&address);
+            let transcript_text = CompactionWarning {
+                flow_id: "f",
+                address,
+                harness_kind: &HarnessKind::Claude,
+                session: "raw-session",
+                transcript: Some(&transcript),
+                pre_tokens: Some(0),
+                texts: &texts,
+            }
+            .text();
+            assert!(transcript_text.contains(" at 0 tokens"));
+            assert!(transcript_text.ends_with("Its transcript is /raw/transcript.jsonl."));
+
+            let claude = CompactionWarning {
+                flow_id: "f",
+                address,
+                harness_kind: &HarnessKind::Claude,
+                session: "raw-session",
+                transcript: None,
+                pre_tokens: None,
+                texts: &texts,
+            }
+            .text();
+            assert!(!claude.contains(" tokens"));
+            assert!(claude.ends_with("Its Claude session is raw-session."));
+
+            let codex_with_transcript = CompactionWarning {
+                flow_id: "f",
+                address,
+                harness_kind: &HarnessKind::Codex,
+                session: "raw-thread",
+                transcript: Some(&transcript),
+                pre_tokens: None,
+                texts: &texts,
+            }
+            .text();
+            assert!(codex_with_transcript.ends_with("Its Codex thread is raw-thread."));
+            assert!(!codex_with_transcript.contains("/raw/transcript"));
+        }
     }
 }

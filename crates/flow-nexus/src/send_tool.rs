@@ -50,7 +50,7 @@ use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
-use crate::{store::AnnouncesLaunchChanges, HoldsStopRequest, RunningNexus};
+use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
@@ -65,54 +65,45 @@ use std::{
 /// The tool every Codex thread Flow opens declares.
 pub struct SendTool;
 
-impl DeclaresSendTool for SendTool {
-    fn tool_name() -> ToolName {
-        "send".into()
-    }
-
-    fn tool_spec() -> serde_json::Value {
+impl SendTool {
+    pub(crate) fn tool_spec_with(texts: &meta_signal_flow::Texts) -> serde_json::Value {
+        let descriptions = &texts.send_tool_descriptions;
+        assert_eq!(descriptions.len(), 5, "authored send-tool descriptions");
         serde_json::json!({
             "type": "function",
-            "name": Self::tool_name(),
-            "description": "Send one request from this flow to the flow at a metaflow Address. Choose whether Flow should wake the recipient or only queue the request, and choose its priority. The answer is a durable logical-delivery acceptance or a typed refusal.",
+            "name": "send",
+            "description": descriptions[0],
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "target": {
-                        "type": "object",
-                        "description": "The Address of the receiving metaflow.",
+                        "type": "object", "description": descriptions[1],
                         "properties": {
                             "aspect": { "type": "string", "enum": ["Psyche", "Mind", "Field"] },
                             "topic": { "type": "string", "minLength": 1 },
-                            "layer": {
-                                "type": "string",
-                                "enum": ["Primary", "Secondary", "Tertiary", "Quaternary"]
-                            }
+                            "layer": { "type": "string", "enum": ["Primary", "Secondary", "Tertiary", "Quaternary"] }
                         },
-                        "required": ["aspect", "topic", "layer"],
-                        "additionalProperties": false
+                        "required": ["aspect", "topic", "layer"], "additionalProperties": false
                     },
-                    "delivery": {
-                        "type": "string",
-                        "enum": ["Wake", "Queue"],
-                        "description": "Wake explicitly wakes the recipient after admission; Queue retains work without requesting a wake."
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": ["HardAbrupt", "MiddleAbrupt", "Soft"],
-                        "description": "How the admitted message is delivered to the recipient."
-                    },
-                    "kind": {
-                        "type": "string",
-                        "enum": ["Order", "Question", "Result", "Notice"],
-                        "description": "Order: work for the target. Question: a question it answers. Result: a result it awaits. Notice: an error or blocker affecting its work."
-                    },
+                    "delivery": { "type": "string", "enum": ["Wake", "Queue"], "description": descriptions[2] },
+                    "priority": { "type": "string", "enum": ["HardAbrupt", "MiddleAbrupt", "Soft"], "description": descriptions[3] },
+                    "kind": { "type": "string", "enum": ["Order", "Question", "Result", "Notice"], "description": descriptions[4] },
                     "body": { "type": "string", "minLength": 1 }
                 },
                 "required": ["target", "delivery", "priority", "kind", "body"],
                 "additionalProperties": false
             }
         })
+    }
+}
+
+impl DeclaresSendTool for SendTool {
+    fn tool_name() -> ToolName {
+        "send".into()
+    }
+
+    fn tool_spec() -> serde_json::Value {
+        Self::tool_spec_with(&crate::store::texts::seed_texts().expect("authored texts seed"))
     }
 }
 
@@ -844,7 +835,7 @@ pub(crate) trait RefusesInterruptedCalls {
     fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls;
     /// The answer to one replayed call; true when it came from its record.
     fn interrupted_call_outcome(&self, thread: &str, call: Option<ToolCall>)
-        -> (SendOutcome, bool);
+    -> (SendOutcome, bool);
 }
 
 impl RefusesInterruptedCalls for RunningNexus {

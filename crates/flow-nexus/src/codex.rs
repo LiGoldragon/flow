@@ -5,7 +5,7 @@
 use crate::generated::send_tool::DeclaresSendTool;
 use crate::send_tool::SendTool;
 use crate::store::CodexEndpointConfiguration;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
 use signal_flow::{ComposedLaunch, HarnessKind, PromptDeliveryIntent, PromptDeliveryResult};
 use std::{
@@ -14,16 +14,16 @@ use std::{
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        mpsc::{self, Receiver},
         Arc, Mutex,
+        mpsc::{self, Receiver},
     },
     thread,
     time::{Duration, Instant},
 };
 use thiserror::Error;
 use tungstenite::{
-    protocol::{Role, WebSocket, WebSocketConfig},
     Message,
+    protocol::{Role, WebSocket, WebSocketConfig},
 };
 
 #[cfg(test)]
@@ -40,6 +40,7 @@ pub struct CodexAdapter {
     /// Exact cwd whose native Codex skill catalog is valid for this launch.
     pub workspace_root: PathBuf,
     pub limits: meta_signal_flow::Limits,
+    pub texts: meta_signal_flow::Texts,
 }
 
 #[derive(Clone)]
@@ -58,6 +59,7 @@ pub struct CodexEndpoints {
     pub timeout: Duration,
     pub workspace_root: PathBuf,
     pub limits: meta_signal_flow::Limits,
+    pub texts: meta_signal_flow::Texts,
 }
 
 pub trait SelectsCodexEndpoint {
@@ -108,6 +110,7 @@ impl SelectsCodexEndpoint for CodexEndpoints {
             timeout: self.timeout,
             workspace_root: self.workspace_root.clone(),
             limits: self.limits.clone(),
+            texts: self.texts.clone(),
         })
     }
 }
@@ -196,7 +199,13 @@ impl CodexEndpoints {
             timeout: Duration::from_millis(snapshot.timings.app_server_timeout as u64),
             workspace_root: PathBuf::from(&snapshot.nexus.source_root),
             limits: snapshot.limits.clone(),
+            texts: crate::store::texts::seed_texts().expect("authored texts seed"),
         }
+    }
+
+    pub(crate) fn with_texts(mut self, texts: meta_signal_flow::Texts) -> Self {
+        self.texts = texts;
+        self
     }
 }
 
@@ -1109,7 +1118,7 @@ impl OpensCodexThread for CodexAdapter {
                 "baseInstructions": launch.system_prompt.system_prompt_text,
                 "ephemeral": false,
                 "config": Self::exclusion_config(launch),
-                "dynamicTools": [SendTool::tool_spec()]
+                "dynamicTools": [SendTool::tool_spec_with(&self.texts)]
             }),
         )
         .map_err(<CodexAdapterUnavailable as SendToolRefusal>::named)?;
@@ -1485,7 +1494,7 @@ impl ProbesSendTool for CodexAdapter {
             serde_json::json!({
                 "cwd": self.workspace_root,
                 "ephemeral": true,
-                "dynamicTools": [SendTool::tool_spec()]
+                "dynamicTools": [SendTool::tool_spec_with(&self.texts)]
             }),
             self.timeout,
         );
@@ -2070,6 +2079,7 @@ mod tests {
             timeout: Duration::from_millis(100),
             workspace_root: std::env::current_dir().unwrap(),
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+            texts: crate::store::texts::seed_texts().expect("authored texts seed"),
         }
     }
 
@@ -2111,6 +2121,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             workspace_root: PathBuf::from("/home/test/primary"),
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+            texts: crate::store::texts::seed_texts().expect("authored texts seed"),
         }
     }
 
@@ -2131,7 +2142,9 @@ mod tests {
     #[test]
     fn overlapping_model_routes_fail_closed() {
         let mut endpoints = endpoints();
-        endpoints.endpoints[0].model_names.insert("gpt-6-sol".into());
+        endpoints.endpoints[0]
+            .model_names
+            .insert("gpt-6-sol".into());
         assert!(endpoints.endpoint_for("gpt-6-sol").is_err());
     }
 
@@ -2300,18 +2313,20 @@ mod tests {
             !turn(serde_json::json!([{"type": "text", "text": "the text\n"}]))
                 .carries_user_text("the text")
         );
-        assert!(!turn(serde_json::json!([
-            {"type": "text", "text": "the text"},
-            {"type": "localImage", "path": "/a.png"}
-        ]))
-        .carries_user_text("the text"));
+        assert!(
+            !turn(serde_json::json!([
+                {"type": "text", "text": "the text"},
+                {"type": "localImage", "path": "/a.png"}
+            ]))
+            .carries_user_text("the text")
+        );
         assert!(!serde_json::json!({"items": []}).carries_user_text("the text"));
     }
 
     #[test]
     fn a_codex_part_is_one_text_item_and_nothing_else() {
-        use crate::composition::tests::{fixture_composer, fixture_profile};
         use crate::composition::ComposesLaunch;
+        use crate::composition::tests::{fixture_composer, fixture_profile};
         let profile = fixture_profile();
         let launch = fixture_composer()
             .compose(
@@ -2325,9 +2340,11 @@ mod tests {
             .unwrap();
         let (_, mut intent) = malformed_bound_launch();
         intent.prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
-        intent.prompt_sha256_vector = vec![launch.first_prompt_payload.prompt_part_vector[0]
-            .prompt_sha256
-            .clone()];
+        intent.prompt_sha256_vector = vec![
+            launch.first_prompt_payload.prompt_part_vector[0]
+                .prompt_sha256
+                .clone(),
+        ];
         let params = CodexAdapter::bound_turn_params(&launch, &intent).unwrap();
         let input = params["input"].as_array().unwrap();
         assert_eq!(input.len(), 1);
@@ -2474,8 +2491,8 @@ mod tests {
     /// A Codex launch the fake app-server serves: the fixture's composed
     /// context, leaving the AGENTS.md body and the skill listing out.
     fn lean_codex_launch() -> ComposedLaunch {
-        use crate::composition::tests::{fixture_composer, fixture_profile};
         use crate::composition::ComposesLaunch;
+        use crate::composition::tests::{fixture_composer, fixture_profile};
         fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
@@ -2705,11 +2722,11 @@ mod tests {
     /// recognizes the pane's Codex agent.
     #[test]
     fn a_remote_resumed_tui_binds_to_the_thread_the_app_server_opened() {
+        use crate::herdr::ConfiguresHerdrCli;
         use crate::herdr::launch::{
             ChecksComposedLaunch, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
             StartsNativeHerdrHarness,
         };
-        use crate::herdr::ConfiguresHerdrCli;
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let thread = "12345678-1234-4abc-8def-123456789abc";
         let launch = lean_codex_launch();

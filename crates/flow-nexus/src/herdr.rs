@@ -201,6 +201,7 @@ impl Default for HerdrCli {
                 ),
                 workspace_root: workspace_root.clone(),
                 limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+                texts: crate::store::texts::seed_texts().expect("authored texts seed"),
             },
             timings: crate::store::timings_limits::seed_timings().expect("authored timings seed"),
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
@@ -750,6 +751,7 @@ impl ConfiguresHerdrCli for HerdrCli {
                     .expect("fixture flows root has a parent")
                     .to_path_buf(),
                 limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+                texts: crate::store::texts::seed_texts().expect("authored texts seed"),
             },
             timings,
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),

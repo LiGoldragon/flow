@@ -55,7 +55,7 @@ fn rendered_native_prompt_budget_counts_multibyte_utf8_bytes() {
 }
 
 #[test]
-fn direct_send_to_sleeping_or_unknown_recipient_fails_without_queueing() {
+fn wake_to_sleeping_or_unknown_fails_but_abrupt_queue_is_admitted() {
     use super::{
         ControlsHerdrSnapshot, MarkedProcess, NexusFixture, bind_existing_caller, codex_agent_in,
     };
@@ -142,14 +142,7 @@ fn direct_send_to_sleeping_or_unknown_recipient_fails_without_queueing() {
             },
             Some(&peer),
         );
-        assert!(matches!(
-            answer.response,
-            Response::Failed(signal_flow::SendFailure {
-                send_failure_reason: SendFailureReason::QueueNotPermitted,
-                ..
-            })
-        ));
-        assert!(answer.pending.is_none());
+        assert!(matches!(answer.response, Response::SendAccepted(_)));
     }
     let queued = fixture.nexus.send_request(
         SendRequest {
@@ -169,7 +162,7 @@ fn direct_send_to_sleeping_or_unknown_recipient_fails_without_queueing() {
             .unwrap()
             .queue
             .len(),
-        1
+        3
     );
 }
 

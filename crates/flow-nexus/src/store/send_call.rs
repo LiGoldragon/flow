@@ -15,6 +15,7 @@
 
 use super::send_v31::SendAcceptanceV31;
 use super::send_v32::SendAcceptanceV32;
+use super::send_v33::SendAcceptanceV33;
 use super::{
     FlowStore, NamesLiveFlow, ReadsFlowRows, ReadsLaunchAttempt, StoreError,
     metaflow::{SleepsMetaflows, TakesLaunchAddress},
@@ -32,7 +33,7 @@ use signal_flow::{Address, HarnessKind, SendPayloadSize};
 
 pub(super) const SEND_CALL_TABLE_NAME: TableName = TableName::new("flow_nexus_send_calls");
 pub(super) const SEND_CALL_FAMILY: &str = "flow-nexus-send-call";
-pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v6";
+pub(super) const SEND_CALL_SCHEMA: &str = "flow-nexus-send-call-v7";
 
 /// The record key of a call: each part prefixed by its length, so no two
 /// keys of different parts read alike.
@@ -62,11 +63,71 @@ impl EngineRecord for SendCall {
 
 impl MemoryDefinition for SendCall {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
+        MemoryVersion::new(7)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(SEND_CALL_SCHEMA)
+    }
+}
+
+/// A call as Flow kept it while accepted answers used signal-flow 33.
+/// The send-call shape itself is unchanged; the family advances with the
+/// contract and reads the old acceptance through its exact archived type.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SendCallV6 {
+    pub(super) tool_call_key: ToolCallKey,
+    pub(super) content_sha256: String,
+    pub(super) send_outcome: SendOutcomeV6,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) enum SendOutcomeV6 {
+    Accepted(AcceptedV6),
+    LegacyUnknown(LegacyUnknown_Data),
+    Refused(SendRefusal),
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct AcceptedV6 {
+    pub(super) sender: signal_flow::Sender,
+    pub(super) target: Target,
+    pub(super) send_acceptance: SendAcceptanceV33,
+}
+
+impl EngineRecord for SendCallV6 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.tool_call_key.record_key_text())
+    }
+}
+
+impl MemoryDefinition for SendCallV6 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(6)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-call-v6")
+    }
+}
+
+impl UpgradeFrom<SendCallV6> for SendCall {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: SendCallV6) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            tool_call_key: previous.tool_call_key,
+            content_sha256: previous.content_sha256,
+            send_outcome: match previous.send_outcome {
+                SendOutcomeV6::Accepted(accepted) => SendOutcome::Accepted(Accepted_Data {
+                    sender: accepted.sender,
+                    target: accepted.target,
+                    send_acceptance: accepted.send_acceptance.into(),
+                }),
+                SendOutcomeV6::LegacyUnknown(unknown) => SendOutcome::LegacyUnknown(unknown),
+                SendOutcomeV6::Refused(refusal) => SendOutcome::Refused(refusal),
+            },
+        })
     }
 }
 
@@ -512,6 +573,7 @@ impl DescribesSendCallTable for SendCall {
         .with_predecessor::<SendCallV2>()
         .with_predecessor::<SendCallV4>()
         .with_predecessor::<SendCallV5>()
+        .with_predecessor::<SendCallV6>()
     }
 }
 

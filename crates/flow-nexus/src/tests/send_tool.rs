@@ -724,28 +724,38 @@ fn dynamic_send_requires_explicit_delivery_and_priority() {
 }
 
 #[test]
-fn dynamic_queue_admission_preserves_priority_without_waking() {
+fn dynamic_queue_admission_preserves_abrupt_priorities_without_waking() {
     let fixture = NexusFixture::new();
     fixture.codex_seat("a1a1a1", THREAD_A, "w1:p5", "gpt-sol", sender_a());
     fixture.asleep_at(asleep_target());
-    let mut call = tool_call(THREAD_A, "queue-only", "retain this");
-    call.arguments = serde_json::json!({
-        "target": { "aspect": "Mind", "topic": "flow", "layer": "Secondary" },
-        "delivery": "Queue",
-        "priority": "MiddleAbrupt",
-        "kind": "Order",
-        "body": "retain this"
-    })
-    .to_string();
-    let outcome = fixture.nexus.handle_send_call(call);
-    assert!(matches!(outcome, SendOutcome::Accepted(_)));
+    for (call_id, priority, body) in [
+        ("queue-hard", "HardAbrupt", "retain hard"),
+        ("queue-middle", "MiddleAbrupt", "retain middle"),
+    ] {
+        let mut call = tool_call(THREAD_A, call_id, body);
+        call.arguments = serde_json::json!({
+            "target": { "aspect": "Mind", "topic": "flow", "layer": "Secondary" },
+            "delivery": "Queue",
+            "priority": priority,
+            "kind": "Order",
+            "body": body
+        })
+        .to_string();
+        let outcome = fixture.nexus.handle_send_call(call);
+        assert!(matches!(outcome, SendOutcome::Accepted(_)));
+    }
     let held = fixture.stored_at(&asleep_target());
     assert_eq!(held.state, State::Asleep);
-    assert_eq!(held.queue.len(), 1);
+    assert_eq!(held.queue.len(), 2);
     assert_eq!(held.queue[0].delivery, Delivery::Queue);
     assert_eq!(
         held.queue[0].message,
-        Message::MiddleAbrupt(Request::Order("retain this".into()))
+        Message::HardAbrupt(Request::Order("retain hard".into()))
+    );
+    assert_eq!(held.queue[1].delivery, Delivery::Queue);
+    assert_eq!(
+        held.queue[1].message,
+        Message::MiddleAbrupt(Request::Order("retain middle".into()))
     );
 }
 

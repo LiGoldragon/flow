@@ -5,6 +5,12 @@ on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`
 branch, whose schema it carries. Every ordinary and meta peer repins, and
 Curriculum serves that schema.
 
+- An abrupt request may use `Delivery.Queue`; it enters the recipient's
+  durable queue and answers `SendAccepted` instead of
+  `Failed.QueueNotPermitted`. Pins signal-flow 34.0.0. Send outcomes,
+  send calls, and logical-delivery current/event tables each advance one
+  version; a stored `QueueNotPermitted` reads as
+  `NotSent.«queue not permitted»`.
 - A Send is never refused for the seat's state or its route. A Wake Send to
   a seat with a queue, an outstanding delivery, a hold or a passed context
   threshold is queued and answers `SendAccepted.{ ... Queued }`; the route

@@ -24,6 +24,7 @@ pub(crate) mod send_outcome;
 pub(crate) mod send_server;
 pub(crate) mod send_v31;
 pub(crate) mod send_v32;
+pub(crate) mod send_v33;
 pub(crate) mod sent;
 mod staged_upgrade;
 pub(crate) mod successor;
@@ -3444,8 +3445,20 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<crate::generated::send_tool::SendCall>,
     ) -> Result<TableReference<crate::generated::send_tool::SendCall>, StoreError> {
-        // A v5 family upgrades from v5; one refused at admission names an
+        // Try the newest predecessor first; one refused at admission names an
         // older family, tried next.
+        match self.upgrade_table::<send_call::SendCallV6, crate::generated::send_tool::SendCall>(
+            descriptor.clone(),
+        ) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::SendCallUpgrade(format!("{failure:?}")));
+            }
+        }
         match self.upgrade_table::<send_call::SendCallV5, crate::generated::send_tool::SendCall>(
             descriptor.clone(),
         ) {
@@ -7426,6 +7439,10 @@ pub(crate) trait ReadsFlowMemory {
                     send_outcome::OUTCOME_FAMILY,
                     send_outcome::StoredSendOutcomeV3::schema_hash(),
                 ),
+                (
+                    send_outcome::OUTCOME_FAMILY,
+                    send_outcome::StoredSendOutcomeV4::schema_hash(),
+                ),
             ],
             "flow_nexus_flows" => &[("flow-nexus-flow", FlowRecordV5::schema_hash())],
             "flow_nexus_launch_outcomes" => &[
@@ -7505,6 +7522,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-logical-delivery-current",
                     <logical_delivery::CurrentLogicalDeliveryV2 as MemoryDefinition>::schema_hash(),
                 ),
+                (
+                    "flow-nexus-logical-delivery-current",
+                    <logical_delivery::CurrentLogicalDeliveryV3 as MemoryDefinition>::schema_hash(),
+                ),
             ],
             "flow_nexus_logical_delivery_events" => &[
                 (
@@ -7514,6 +7535,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     "flow-nexus-logical-delivery-event",
                     <logical_delivery::LogicalDeliveryEventV2 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    "flow-nexus-logical-delivery-event",
+                    <logical_delivery::LogicalDeliveryEventV3 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_successor_intents" => &[(
@@ -7558,6 +7583,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     send_call::SEND_CALL_FAMILY,
                     <send_call::SendCallV5 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    send_call::SEND_CALL_FAMILY,
+                    <send_call::SendCallV6 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_queue_delivery_requests" => &[

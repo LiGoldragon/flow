@@ -144,7 +144,9 @@ impl From<SendFailureV31> for SendFailure {
                 SendFailureReasonV31::RecipientUnavailable(address) => {
                     SendFailureReason::RecipientUnavailable(address)
                 }
-                SendFailureReasonV31::QueueNotPermitted => SendFailureReason::QueueNotPermitted,
+                SendFailureReasonV31::QueueNotPermitted => {
+                    SendFailureReason::NotSent("queue not permitted".into())
+                }
                 SendFailureReasonV31::RecipientBusy(address) => {
                     SendFailureReason::from_recipient_busy(&address)
                 }

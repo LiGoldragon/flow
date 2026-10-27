@@ -2,6 +2,7 @@
 
 use super::send_v31::{RefusalV31, SendAcceptanceV31, SendFailureV31};
 use super::send_v32::{RefusalV32, SendAcceptanceV32, SendFailureV32};
+use super::send_v33::{RefusalV33, SendAcceptanceV33, SendFailureV33};
 use super::*;
 use meta_signal_flow::{OrdinarySendOutcome, SendOutcomeRecord};
 use signal_flow::{Address, Process, Response};
@@ -9,7 +10,7 @@ use signal_flow::{Address, Process, Response};
 pub(super) const COUNTER_FAMILY: &str = "flow-nexus-send-outcome-counter";
 pub(super) const COUNTER_SCHEMA: &str = "flow-nexus-send-outcome-counter-v1";
 pub(super) const OUTCOME_FAMILY: &str = "flow-nexus-send-outcome";
-pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v4";
+pub(super) const OUTCOME_SCHEMA: &str = "flow-nexus-send-outcome-v5";
 
 const COUNTER_KEY: &str = "counter";
 const SEND_OUTCOME_COUNTER_TABLE_NAME: TableName =
@@ -50,11 +51,76 @@ impl EngineRecord for StoredSendOutcome {
 
 impl MemoryDefinition for StoredSendOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
+        MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(OUTCOME_SCHEMA)
+    }
+}
+
+/// An ordinary Send's typed answer as signal-flow 33 archived it, read
+/// only by the v4-to-v5 upgrade. `QueueNotPermitted` becomes the archived
+/// `NotSent` reason named by the contract upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OrdinarySendOutcomeV4 {
+    Accepted(SendAcceptanceV33),
+    Refused(RefusalV33),
+    PriorAdmission(meta_signal_flow::PriorSendOutcome),
+    Sent(signal_flow::SendReceipt),
+    Failed(SendFailureV33),
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SendOutcomeRecordV4 {
+    send_outcome_id: String,
+    process_option: Option<Process>,
+    first_address_option: Option<Address>,
+    second_address_option: Option<Address>,
+    request_digest: String,
+    ordinary_send_outcome: OrdinarySendOutcomeV4,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredSendOutcomeV4 {
+    record: SendOutcomeRecordV4,
+}
+impl EngineRecord for StoredSendOutcomeV4 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.record.send_outcome_id.clone())
+    }
+}
+impl MemoryDefinition for StoredSendOutcomeV4 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-send-outcome-v4")
+    }
+}
+impl UpgradeFrom<StoredSendOutcomeV4> for StoredSendOutcome {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredSendOutcomeV4) -> Decision<Self, Self::Refusal> {
+        let old = previous.record;
+        let outcome = match old.ordinary_send_outcome {
+            OrdinarySendOutcomeV4::Accepted(acceptance) => {
+                OrdinarySendOutcome::Accepted(acceptance.into())
+            }
+            OrdinarySendOutcomeV4::Refused(refusal) => OrdinarySendOutcome::Refused(refusal.into()),
+            OrdinarySendOutcomeV4::PriorAdmission(prior) => {
+                OrdinarySendOutcome::PriorAdmission(prior)
+            }
+            OrdinarySendOutcomeV4::Sent(receipt) => OrdinarySendOutcome::Sent(receipt),
+            OrdinarySendOutcomeV4::Failed(failure) => OrdinarySendOutcome::Failed(failure.into()),
+        };
+        Decision::Ready(Self {
+            record: SendOutcomeRecord {
+                send_outcome_id: old.send_outcome_id,
+                process_option: old.process_option,
+                first_address_option: old.first_address_option,
+                second_address_option: old.second_address_option,
+                request_digest: old.request_digest,
+                ordinary_send_outcome: outcome,
+            },
+        })
     }
 }
 
@@ -280,7 +346,8 @@ impl DeclaresSendOutcomeTables for SendOutcomeTables {
             )
             .with_predecessor::<StoredSendOutcomeV1>()
             .with_predecessor::<StoredSendOutcomeV2>()
-            .with_predecessor::<StoredSendOutcomeV3>(),
+            .with_predecessor::<StoredSendOutcomeV3>()
+            .with_predecessor::<StoredSendOutcomeV4>(),
         }
     }
 
@@ -313,6 +380,14 @@ impl UpgradesSendOutcomes for Engine {
         let refused = |failure: &dyn std::fmt::Debug| {
             StoreError::QueueDeliveryUpgrade(format!("sender outcome upgrade: {failure:?}"))
         };
+        match self.upgrade_table::<StoredSendOutcomeV4, StoredSendOutcome>(descriptor.clone()) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => return Err(refused(&failure)),
+        }
         match self.upgrade_table::<StoredSendOutcomeV3, StoredSendOutcome>(descriptor.clone()) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
@@ -488,6 +563,65 @@ mod tests {
                 .to_vec();
             assert_eq!(rows, vec![StoredSendOutcome { record: first }]);
         }
+    }
+
+    #[test]
+    fn v4_queue_not_permitted_upgrades_to_not_sent() {
+        use super::super::send_v33::{SendFailureReasonV33, SendFailureV33};
+        let fixture = tempfile::tempdir().expect("temporary store path");
+        let store_path = fixture.path().join("outcomes.sema");
+        {
+            let mut engine = Engine::open(EngineOpen::new(&store_path, SchemaVersion::new(1)))
+                .expect("ledger store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::<StoredSendOutcomeV4>::new(
+                    SEND_OUTCOME_TABLE_NAME,
+                    FamilyName::new(OUTCOME_FAMILY),
+                    StoredSendOutcomeV4::schema_hash(),
+                ))
+                .expect("v4 family registers");
+            engine
+                .assert(Assertion::new(
+                    outcomes,
+                    StoredSendOutcomeV4 {
+                        record: SendOutcomeRecordV4 {
+                            send_outcome_id: "queue-not-permitted".into(),
+                            process_option: None,
+                            first_address_option: None,
+                            second_address_option: None,
+                            request_digest: "old-request".into(),
+                            ordinary_send_outcome: OrdinarySendOutcomeV4::Failed(SendFailureV33 {
+                                logical_delivery_id_option: None,
+                                send_failure_reason: SendFailureReasonV33::QueueNotPermitted,
+                            }),
+                        },
+                    },
+                ))
+                .expect("old outcome persists");
+        }
+        let descriptors = SendOutcomeTables::descriptors();
+        let mut engine = Engine::open(
+            EngineOpen::new(&store_path, SchemaVersion::new(1))
+                .with_family(&descriptors.counter)
+                .with_family(&descriptors.outcomes),
+        )
+        .expect("ledger store reopens");
+        let tables = open_tables(&mut engine).expect("ledger tables upgrade");
+        let rows = engine
+            .match_records(QueryPlan::all(tables.outcomes))
+            .expect("ledger reads")
+            .records()
+            .to_vec();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].record.ordinary_send_outcome,
+            OrdinarySendOutcome::Failed(signal_flow::SendFailure {
+                logical_delivery_id_option: None,
+                send_failure_reason: signal_flow::SendFailureReason::NotSent(
+                    "queue not permitted".into(),
+                ),
+            })
+        );
     }
 
     /// Outcomes kept under the v2 label, in signal-flow 31's shape, open as

@@ -262,13 +262,6 @@ impl SendsRequests for RunningNexus {
                     None => return Response::Refused(Refusal::NoneAbove).into(),
                 },
             };
-            if abrupt && delivery == Delivery::Queue {
-                return Response::Failed(signal_flow::SendFailure {
-                    logical_delivery_id_option: None,
-                    send_failure_reason: signal_flow::SendFailureReason::QueueNotPermitted,
-                })
-                .into();
-            }
             self.rest_ended_awake(&recipient);
             // Own the address until the direct call has a receipt or a
             // durable non-retryable failure. Background drain/wake may not

@@ -20,8 +20,8 @@ const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
 const CURRENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_current");
 const EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_events");
-pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v3";
-pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v3";
+pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v4";
+pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v4";
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
 
@@ -78,10 +78,39 @@ impl EngineRecord for CurrentLogicalDelivery {
 }
 impl MemoryDefinition for CurrentLogicalDelivery {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(CURRENT_SCHEMA)
+    }
+}
+
+/// A delivery's current snapshot as signal-flow 33 archived it, read only
+/// by the v3-to-v4 upgrade. Its shape is unchanged by removal of the
+/// unrelated `QueueNotPermitted` failure variant.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CurrentLogicalDeliveryV3 {
+    pub snapshot: DeliverySnapshot,
+}
+impl EngineRecord for CurrentLogicalDeliveryV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.snapshot.logical_delivery_id.clone())
+    }
+}
+impl MemoryDefinition for CurrentLogicalDeliveryV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-current-v3")
+    }
+}
+impl UpgradeFrom<CurrentLogicalDeliveryV3> for CurrentLogicalDelivery {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: CurrentLogicalDeliveryV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            snapshot: previous.snapshot,
+        })
     }
 }
 
@@ -152,10 +181,38 @@ impl EngineRecord for LogicalDeliveryEvent {
 }
 impl MemoryDefinition for LogicalDeliveryEvent {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(EVENT_SCHEMA)
+    }
+}
+
+/// A delivery event as signal-flow 33 archived it, read only by the
+/// v3-to-v4 upgrade. The snapshot itself is unchanged.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogicalDeliveryEventV3 {
+    pub snapshot: DeliverySnapshot,
+}
+impl EngineRecord for LogicalDeliveryEventV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(format!("{:020}", self.snapshot.delivery_cursor))
+    }
+}
+impl MemoryDefinition for LogicalDeliveryEventV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-event-v3")
+    }
+}
+impl UpgradeFrom<LogicalDeliveryEventV3> for LogicalDeliveryEvent {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: LogicalDeliveryEventV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            snapshot: previous.snapshot,
+        })
     }
 }
 
@@ -274,14 +331,16 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 CurrentLogicalDelivery::schema_hash(),
             )
             .with_predecessor::<CurrentLogicalDeliveryV1>()
-            .with_predecessor::<CurrentLogicalDeliveryV2>(),
+            .with_predecessor::<CurrentLogicalDeliveryV2>()
+            .with_predecessor::<CurrentLogicalDeliveryV3>(),
             events: TableDescriptor::new(
                 EVENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-event"),
                 LogicalDeliveryEvent::schema_hash(),
             )
             .with_predecessor::<LogicalDeliveryEventV1>()
-            .with_predecessor::<LogicalDeliveryEventV2>(),
+            .with_predecessor::<LogicalDeliveryEventV2>()
+            .with_predecessor::<LogicalDeliveryEventV3>(),
             simplified_replies: TableDescriptor::new(
                 SIMPLIFIED_REPLY_TABLE_NAME,
                 FamilyName::new("flow-nexus-simplified-reply-binding"),
@@ -295,9 +354,8 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
     ) -> Result<LogicalDeliveryTables, StoreError> {
         Ok(LogicalDeliveryTables {
             counter: engine.register_table(descriptors.counter)?,
-            // A v2 family upgrades from v2; one refused at admission is a v1
-            // family, which upgrades from v1.
-            current: match engine.upgrade_table::<CurrentLogicalDeliveryV2, CurrentLogicalDelivery>(
+            // Try the newest predecessor first, then each older family.
+            current: match engine.upgrade_table::<CurrentLogicalDeliveryV3, CurrentLogicalDelivery>(
                 descriptors.current.clone(),
             ) {
                 UpgradeOutcome::Upgraded(receipt) => receipt.table(),
@@ -306,12 +364,29 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 UpgradeOutcome::Failed(failure)
                     if failure.phase() == sema_engine::StoragePhase::Admission =>
                 {
-                    match engine.upgrade_table::<CurrentLogicalDeliveryV1, CurrentLogicalDelivery>(
-                        descriptors.current,
+                    match engine.upgrade_table::<CurrentLogicalDeliveryV2, CurrentLogicalDelivery>(
+                        descriptors.current.clone(),
                     ) {
                         UpgradeOutcome::Upgraded(receipt) => receipt.table(),
                         UpgradeOutcome::AlreadyCurrent(table) => table,
                         UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                        UpgradeOutcome::Failed(failure)
+                            if failure.phase() == sema_engine::StoragePhase::Admission =>
+                        {
+                            match engine
+                                .upgrade_table::<CurrentLogicalDeliveryV1, CurrentLogicalDelivery>(
+                                    descriptors.current,
+                                ) {
+                                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                                UpgradeOutcome::AlreadyCurrent(table) => table,
+                                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                                UpgradeOutcome::Failed(failure) => {
+                                    return Err(StoreError::LogicalDeliveryUpgrade(format!(
+                                        "current deliveries: {failure:?}"
+                                    )));
+                                }
+                            }
+                        }
                         UpgradeOutcome::Failed(failure) => {
                             return Err(StoreError::LogicalDeliveryUpgrade(format!(
                                 "current deliveries: {failure:?}"
@@ -325,7 +400,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                     )));
                 }
             },
-            events: match engine.upgrade_table::<LogicalDeliveryEventV2, LogicalDeliveryEvent>(
+            events: match engine.upgrade_table::<LogicalDeliveryEventV3, LogicalDeliveryEvent>(
                 descriptors.events.clone(),
             ) {
                 UpgradeOutcome::Upgraded(receipt) => receipt.table(),
@@ -334,12 +409,29 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 UpgradeOutcome::Failed(failure)
                     if failure.phase() == sema_engine::StoragePhase::Admission =>
                 {
-                    match engine.upgrade_table::<LogicalDeliveryEventV1, LogicalDeliveryEvent>(
-                        descriptors.events,
+                    match engine.upgrade_table::<LogicalDeliveryEventV2, LogicalDeliveryEvent>(
+                        descriptors.events.clone(),
                     ) {
                         UpgradeOutcome::Upgraded(receipt) => receipt.table(),
                         UpgradeOutcome::AlreadyCurrent(table) => table,
                         UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                        UpgradeOutcome::Failed(failure)
+                            if failure.phase() == sema_engine::StoragePhase::Admission =>
+                        {
+                            match engine
+                                .upgrade_table::<LogicalDeliveryEventV1, LogicalDeliveryEvent>(
+                                    descriptors.events,
+                                ) {
+                                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                                UpgradeOutcome::AlreadyCurrent(table) => table,
+                                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                                UpgradeOutcome::Failed(failure) => {
+                                    return Err(StoreError::LogicalDeliveryUpgrade(format!(
+                                        "delivery events: {failure:?}"
+                                    )));
+                                }
+                            }
+                        }
                         UpgradeOutcome::Failed(failure) => {
                             return Err(StoreError::LogicalDeliveryUpgrade(format!(
                                 "delivery events: {failure:?}"

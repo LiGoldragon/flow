@@ -229,6 +229,44 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
     assert!(filtered.delivery_snapshot_vector.is_empty());
 }
 
+#[test]
+fn abrupt_queue_admission_is_durable_without_waking() {
+    let fixture = NexusFixture::new();
+    let target = address(Layer::Secondary);
+    fixture.nexus.store.seed_metaflow(Metaflow {
+        address: target.clone(),
+        state: State::Asleep,
+        past: vec![],
+        queue: vec![],
+    });
+    for message in [
+        Message::HardAbrupt(Request::Order("hard held".into())),
+        Message::MiddleAbrupt(Request::Order("middle held".into())),
+    ] {
+        let response = fixture
+            .nexus
+            .store
+            .accept_logical_delivery(
+                &target,
+                SentBy::Sender(Address {
+                    aspect: Aspect::Psyche,
+                    topic: "core".into(),
+                    layer: Layer::Secondary,
+                }),
+                Delivery::Queue,
+                message,
+                None,
+            )
+            .expect("abrupt queue admission persists");
+        assert!(matches!(response, Response::SendAccepted(_)));
+    }
+    let stored = stored(&fixture, Layer::Secondary);
+    assert_eq!(stored.state, State::Asleep);
+    assert_eq!(stored.queue.len(), 2);
+    assert!(matches!(stored.queue[0].message, Message::HardAbrupt(_)));
+    assert!(matches!(stored.queue[1].message, Message::MiddleAbrupt(_)));
+}
+
 /// The seat's main turn ended while a background agent still runs: its
 /// sidechain rows follow the main `end_turn` and Herdr shows Working. Its
 /// its own Stop hands over its oldest request; the Prompted fixture records

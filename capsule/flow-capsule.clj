@@ -457,10 +457,10 @@
     (fn []
       (let [flow-id (str (awake-flow secondary))
             pane (sender-pane)
-            refused (flow-meta (str "Retire." flow-id))
+            refused (flow-meta (str "Retire.{ " flow-id " Kept }"))
             kept (and (contains? (pane-ids) pane) (= (str (awake-flow secondary)) flow-id))
             declared (flow-meta (on-demand-secondary))
-            reply (flow-meta (str "Retire." flow-id))
+            reply (flow-meta (str "Retire.{ " flow-id " Kept }"))
             gone (watch 10 #(not (contains? (pane-ids) pane)))
             m (watch 20 #(let [m (current secondary)] (when (not= (str (:flow m)) flow-id) m)))]
         {:reply (str "Retire while Maintained: " refused " / Configure.Metaflows (Secondary OnDemand): "
@@ -684,7 +684,7 @@
         (doseq [m (items (body listed))]
           (let [[a state] (items m)]
             (when (= (head state) "Awake")
-              (swap! steps conj (str "Retire." (body state) " -> " (flow-meta (str "Retire." (body state))))))))))
+              (swap! steps conj (str "Retire.{ " (body state) " Kept } -> " (flow-meta (str "Retire.{ " (body state) " Kept }")))))))))
     (doseq [w (get-in (herdr-json "workspace" "list") [:result :workspaces])]
       (swap! steps conj (str "close workspace " (:workspace_id w) " (" (:label w) ") -> " (str/trim (:out (herdr "workspace" "close" (:workspace_id w)))))))
     (when-let [n @nexus]

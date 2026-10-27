@@ -116,11 +116,7 @@ impl NamesTopic for str {
 /// itself continues a metaflow already admitted, and a request already
 /// attempted is resumed as it was.
 pub(crate) trait AdmitsLaunch {
-    /// The refusal of a new launch whose topic is not camelCase, or of a
-    /// Primary whose Secondary of the same aspect and topic is not Awake
-    /// as a live flow (short term, a Primary is not started without its
-    /// Secondary). A Primary that replaces a flow, or that its metaflow is
-    /// owed as a successor, continues one already admitted.
+    /// The refusal of a new launch whose topic is not camelCase.
     fn admission_refusal(
         &self,
         profile: &LaunchProfile,
@@ -132,8 +128,7 @@ impl AdmitsLaunch for RunningNexus {
         &self,
         profile: &LaunchProfile,
     ) -> Result<Option<StartRejection>, crate::store::StoreError> {
-        use crate::store::metaflow::{SleepsMetaflows, TakesLaunchAddress};
-        use crate::store::successor::OwesSuccessors;
+        use crate::store::ReadsLaunchAttempt;
         if self
             .store
             .launch_attempt(&profile.launch_request_id)?
@@ -145,25 +140,7 @@ impl AdmitsLaunch for RunningNexus {
         if !address.topic.as_str().is_camel_case_topic() {
             return Ok(Some(StartRejection::TopicRefused(address.topic.clone())));
         }
-        if address.layer != signal_flow::Layer::Primary
-            || profile.flow_id_option.is_some()
-            || self.store.successor_intent(address)?.is_some()
-        {
-            return Ok(None);
-        }
-        let secondary = signal_flow::Address {
-            aspect: address.aspect.clone(),
-            topic: address.topic.clone(),
-            layer: signal_flow::Layer::Secondary,
-        };
-        let awake = match self.store.metaflow(&secondary)? {
-            Some(metaflow) => match metaflow.state {
-                flow_ethos::State::Awake(flow_id) => self.store.flow_is_live(&flow_id)?,
-                flow_ethos::State::Asleep => false,
-            },
-            None => false,
-        };
-        Ok((!awake).then_some(StartRejection::NoSecondary))
+        Ok(None)
     }
 }
 

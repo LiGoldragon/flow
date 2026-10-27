@@ -2297,11 +2297,126 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(8)
+        MemoryVersion::new(9)
     }
 
     fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v9")
+    }
+}
+
+/// An outcome archived before declarations named required metaflows.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcomeV8 {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcomeV8,
+}
+impl EngineRecord for StoredLaunchOutcomeV8 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+impl MemoryDefinition for StoredLaunchOutcomeV8 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(8)
+    }
+    fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-launch-outcome-v8")
+    }
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LaunchOutcomeV8 {
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
+    StartRejected(StartRejectionV34),
+    ReplaceRejected(ReplaceRejectionV34),
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum StartRejectionV34 {
+    CompositionRefused(signal_flow::CompositionRefusal),
+    LaunchRequestConflict,
+    LaunchPersistenceRefused,
+    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
+    BindingRefused(signal_flow::BindingRefusal),
+    RegistrationRefused(signal_flow::RegistrationRefusal),
+    IntentPersistenceRefused,
+    OriginUnavailable,
+    AddressAwake,
+    ContextRefused(signal_flow::ContextRefusal),
+    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
+    ModelRefused(signal_flow::ModelRefusal),
+    NoSecondary,
+    Undeclared,
+    TopicRefused(String),
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ReplaceRejectionV34 {
+    PredecessorAbsent,
+    UnknownPredecessor,
+    PredecessorStopped,
+    LaunchRefused(StartRejectionV34),
+    ReapRefused(signal_flow::StopRejection),
+    Locked,
+}
+fn unrecorded_secondary() -> signal_flow::Address {
+    signal_flow::Address {
+        aspect: signal_flow::Aspect::Psyche,
+        topic: "unrecorded".into(),
+        layer: signal_flow::Layer::Secondary,
+    }
+}
+impl From<StartRejectionV34> for StartRejection {
+    fn from(value: StartRejectionV34) -> Self {
+        match value {
+            StartRejectionV34::CompositionRefused(x) => Self::CompositionRefused(x),
+            StartRejectionV34::LaunchRequestConflict => Self::LaunchRequestConflict,
+            StartRejectionV34::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
+            StartRejectionV34::NativeLaunchRefused(x) => Self::NativeLaunchRefused(x),
+            StartRejectionV34::BindingRefused(x) => Self::BindingRefused(x),
+            StartRejectionV34::RegistrationRefused(x) => Self::RegistrationRefused(x),
+            StartRejectionV34::IntentPersistenceRefused => Self::IntentPersistenceRefused,
+            StartRejectionV34::OriginUnavailable => Self::OriginUnavailable,
+            StartRejectionV34::AddressAwake => Self::AddressAwake,
+            StartRejectionV34::ContextRefused(x) => Self::ContextRefused(x),
+            StartRejectionV34::LeaveOutRefused(x) => Self::LeaveOutRefused(x),
+            StartRejectionV34::HarnessSpawnRefused(x) => Self::HarnessSpawnRefused(x),
+            StartRejectionV34::ModelRefused(x) => Self::ModelRefused(x),
+            StartRejectionV34::NoSecondary => Self::RequirementUnmet(unrecorded_secondary()),
+            StartRejectionV34::Undeclared => Self::Undeclared,
+            StartRejectionV34::TopicRefused(x) => Self::TopicRefused(x),
+        }
+    }
+}
+impl From<ReplaceRejectionV34> for ReplaceRejection {
+    fn from(value: ReplaceRejectionV34) -> Self {
+        match value {
+            ReplaceRejectionV34::PredecessorAbsent => Self::PredecessorAbsent,
+            ReplaceRejectionV34::UnknownPredecessor => Self::UnknownPredecessor,
+            ReplaceRejectionV34::PredecessorStopped => Self::PredecessorStopped,
+            ReplaceRejectionV34::LaunchRefused(x) => Self::LaunchRefused(x.into()),
+            ReplaceRejectionV34::ReapRefused(x) => Self::ReapRefused(x),
+            ReplaceRejectionV34::Locked => Self::Locked,
+        }
+    }
+}
+impl From<LaunchOutcomeV8> for LaunchOutcome {
+    fn from(value: LaunchOutcomeV8) -> Self {
+        match value {
+            LaunchOutcomeV8::Started(x) => Self::Started(x),
+            LaunchOutcomeV8::Replaced(x) => Self::Replaced(x),
+            LaunchOutcomeV8::StartRejected(x) => Self::StartRejected(x.into()),
+            LaunchOutcomeV8::ReplaceRejected(x) => Self::ReplaceRejected(x.into()),
+        }
+    }
+}
+impl UpgradeFrom<StoredLaunchOutcomeV8> for StoredLaunchOutcome {
+    type Refusal = EndedAddressOutcome;
+    fn upgrade_from(previous: StoredLaunchOutcomeV8) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            launch_request_id: previous.launch_request_id,
+            launch_outcome: previous.launch_outcome.into(),
+        })
     }
 }
 
@@ -2390,7 +2505,7 @@ impl From<StartRejectionV32> for StartRejection {
             StartRejectionV32::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
             StartRejectionV32::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV32::ModelRefused(refusal) => Self::ModelRefused(refusal),
-            StartRejectionV32::NoSecondary => Self::NoSecondary,
+            StartRejectionV32::NoSecondary => Self::RequirementUnmet(unrecorded_secondary()),
             StartRejectionV32::Undeclared => Self::Undeclared,
             StartRejectionV32::TopicRefused(topic) => Self::TopicRefused(topic),
         }
@@ -2543,7 +2658,7 @@ impl From<StartRejectionV30> for StartRejection {
             StartRejectionV30::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
             StartRejectionV30::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV30::ModelRefused(refusal) => Self::ModelRefused(refusal),
-            StartRejectionV30::NoSecondary => Self::NoSecondary,
+            StartRejectionV30::NoSecondary => Self::RequirementUnmet(unrecorded_secondary()),
             StartRejectionV30::Undeclared => Self::Undeclared,
         }
     }
@@ -3558,12 +3673,20 @@ impl UpgradesFlowFamilies for Engine {
         let admission = |failure: &sema_engine::StorageFailure| {
             failure.phase() == sema_engine::StoragePhase::Admission
         };
+        let from_v7 = descriptor.clone();
         let from_v6 = descriptor.clone();
         let from_v5 = descriptor.clone();
         let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
-        match self.upgrade_table::<StoredLaunchOutcomeV7, StoredLaunchOutcome>(descriptor) {
+        match self.upgrade_table::<StoredLaunchOutcomeV8, StoredLaunchOutcome>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
+            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
+            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
+        }
+        match self.upgrade_table::<StoredLaunchOutcomeV7, StoredLaunchOutcome>(from_v7) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
@@ -4327,6 +4450,7 @@ impl OpensFlowStore for FlowStore {
             StoredLaunchOutcome::schema_hash(),
         )
         .with_predecessor::<StoredLaunchOutcomeV2>()
+        .with_predecessor::<StoredLaunchOutcomeV8>()
         .with_predecessor::<StoredLaunchOutcomeV3>()
         .with_predecessor::<StoredLaunchOutcomeV4>()
         .with_predecessor::<StoredLaunchOutcomeV5>()

@@ -120,6 +120,7 @@ pub(super) fn declare_seat(
             continuity,
             purpose: String::new(),
             records: vec![],
+            requires: vec![],
         }]))
         .expect("metaflow declared");
     fixture

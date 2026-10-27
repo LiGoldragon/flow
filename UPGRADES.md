@@ -1,5 +1,13 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 6 makes launch dependencies declaration data. `ConfigureMetaflow`
+appends `Requires`; archived declarations upgrade with none. Before a new
+launch, Flow starts every required Address not Awake and rejects with
+`RequirementUnmet.Address` when one cannot start. The launch-outcome family
+advances to v9; an archived `NoSecondary` is retained as an unrecorded
+Secondary requirement.
+
+
 Batch 3 adds `Gate.Kept` and `Gate.Forced` to privileged delivery, command,
 and retire requests. Kept preserves threshold and continuity refusals; Forced
 overrides them. Existing queued delivery records upgrade as Kept.

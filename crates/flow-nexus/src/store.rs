@@ -9571,6 +9571,9 @@ mod tests {
         CompositionRefusalV34, LaunchOutcomeV8, ReplaceRejectionV34, StartRejectionV34,
         StoredLaunchOutcomeV8,
     };
+    use super::{
+        CompositionRefusalV37, LaunchOutcomeV9, StartRejectionV37, StoredLaunchOutcomeV9,
+    };
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
     use super::{
         ContextRefusalV30, LaunchOutcomeV6, ReplaceRejectionV30, StartRejectionV30,

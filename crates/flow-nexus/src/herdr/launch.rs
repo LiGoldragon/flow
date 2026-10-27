@@ -494,6 +494,22 @@ impl PreparesClaudePane for HerdrCli {
         pane: &HerdrPaneBinding,
         reserved: Option<&str>,
     ) -> Result<(), String> {
+        let readiness_digest = format!("{:x}", Sha256::digest(pane.herdr_pane_id.as_bytes()));
+        let readiness_path = self
+            .flow_owned_claude_readiness_root
+            .join(format!("claude-ready-{}.sock", &readiness_digest[..12]));
+        let _ = fs::remove_file(&readiness_path);
+        let readiness =
+            std::os::unix::net::UnixDatagram::bind(&readiness_path).map_err(|error| {
+                format!("Flow-owned Claude readiness endpoint could not open: {error}")
+            })?;
+        self.flow_owned_claude_readiness
+            .lock()
+            .map_err(|_| "Flow-owned Claude readiness ownership is unavailable".to_owned())?
+            .insert(
+                pane.herdr_pane_id.clone(),
+                (readiness, readiness_path.clone()),
+            );
         let marker_suffix = format!(
             "{:x}",
             Sha256::digest(
@@ -517,6 +533,7 @@ impl PreparesClaudePane for HerdrCli {
                 &self.executable,
                 &pane.herdr_session_name,
                 &launch.lean_start().environment(),
+                &readiness_path,
             ),
         ])?;
         let response = self.run_json(&[
@@ -1023,6 +1040,7 @@ pub(crate) trait PreparesClaudeEnvironment {
         herdr: &Path,
         herdr_session: &str,
         environment: &[String],
+        readiness_socket: &Path,
     ) -> String;
 }
 
@@ -1034,6 +1052,7 @@ impl PreparesClaudeEnvironment for str {
         herdr: &Path,
         herdr_session: &str,
         environment: &[String],
+        readiness_socket: &Path,
     ) -> String {
         let marker_suffix = self;
         let flow_id = reserved
@@ -1044,11 +1063,12 @@ impl PreparesClaudeEnvironment for str {
             .map(|variable| format!(" && export {}", variable.shell_quoted()))
             .collect::<String>();
         format!(
-            "unset {} && export FLOW_SOCKET={} && export FLOW_HERDR_EXECUTABLE={} && export FLOW_HERDR_SESSION={}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+            "unset {} && export FLOW_SOCKET={} && export FLOW_HERDR_EXECUTABLE={} && export FLOW_HERDR_SESSION={} && export FLOW_CLAUDE_READY_SOCKET={}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
             HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
             socket.to_string_lossy().shell_quoted(),
             herdr.to_string_lossy().shell_quoted(),
             herdr_session.shell_quoted(),
+            readiness_socket.to_string_lossy().shell_quoted(),
             marker_suffix
         )
     }
@@ -2024,58 +2044,19 @@ impl RunsFlowOwnedClaude for HerdrCli {
         pane: &HerdrPaneBinding,
         command: &[String],
     ) -> Result<(), SpawnFailure> {
-        let runtime = &self.flow_owned_claude_readiness_root;
-        let readiness_digest = format!("{:x}", Sha256::digest(pane.herdr_pane_id.as_bytes()));
-        let readiness_name = format!("claude-ready-{}.sock", &readiness_digest[..12]);
-        let readiness_path = runtime.join(readiness_name);
-        let _ = fs::remove_file(&readiness_path);
-        let readiness =
-            std::os::unix::net::UnixDatagram::bind(&readiness_path).map_err(|error| {
-                SpawnFailure::Unattempted(format!(
-                    "Flow-owned Claude readiness endpoint could not open: {error}"
-                ))
-            })?;
-        self.flow_owned_claude_readiness
+        let readiness_path = self
+            .flow_owned_claude_readiness
             .lock()
             .map_err(|_| {
                 SpawnFailure::Unattempted(
                     "Flow-owned Claude readiness ownership is unavailable".into(),
                 )
             })?
-            .insert(
-                pane.herdr_pane_id.clone(),
-                (readiness, readiness_path.clone()),
-            );
-        let readiness_environment = format!(
-            "export FLOW_CLAUDE_READY_SOCKET={}",
-            readiness_path.to_string_lossy().shell_quoted()
-        );
-        let readiness_arguments = [
-            "--session".into(),
-            pane.herdr_session_name.clone(),
-            "pane".into(),
-            "run".into(),
-            pane.herdr_pane_id.clone(),
-            readiness_environment,
-        ];
-        let readiness_output = Command::new(&self.executable)
-            .args(&readiness_arguments)
-            .output()
-            .map_err(|error| {
-                SpawnFailure::Unattempted(format!("Herdr command could not start: {error}"))
+            .get(&pane.herdr_pane_id)
+            .map(|(_, path)| path.clone())
+            .ok_or_else(|| {
+                SpawnFailure::Unattempted("Flow-owned Claude readiness endpoint is absent".into())
             })?;
-        if !readiness_output.status.success() {
-            if let Ok(mut readiness) = self.flow_owned_claude_readiness.lock() {
-                readiness.remove(&pane.herdr_pane_id);
-            }
-            let _ = fs::remove_file(readiness_path);
-            return Err(SpawnFailure::Refused(
-                signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal::from_printed(
-                    &readiness_output.stderr,
-                    &readiness_output.stdout,
-                )),
-            ));
-        }
         let line = command
             .iter()
             .map(|argument| argument.as_str().shell_quoted())
@@ -3699,6 +3680,7 @@ printf '%s\n' "$alias"
                 Path::new("/fixture/herdr"),
                 "fixture-session",
                 &[],
+                Path::new("/fixture/ready.sock"),
             ),
         ));
         for name in HerdrCli::CLAUDE_INHERITED_ENVIRONMENT {
@@ -3731,7 +3713,8 @@ printf '%s\n' "$alias"
                     Path::new("/run/flow.sock"),
                     Path::new("/fixture/herdr"),
                     "fixture-session",
-                    &[]
+                    &[],
+                    Path::new("/fixture/ready.sock")
                 ),
             ))
             .env("FLOW_ID", "0a0a0a")
@@ -3758,7 +3741,8 @@ printf '%s\n' "$alias"
                     Path::new("/run/user/1001/flow-next/it's a $HOME/flow.sock"),
                     Path::new("/fixture/herdr"),
                     "fixture-session",
-                    &[]
+                    &[],
+                    Path::new("/fixture/ready.sock")
                 ),
             ))
             .env("FLOW_SOCKET", "/run/user/1001/flow/flow.sock")

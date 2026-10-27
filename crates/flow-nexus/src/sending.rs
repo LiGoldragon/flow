@@ -42,8 +42,8 @@ use crate::waking::{
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data, LaunchProfile, Layer,
-    Message, Process, Recipient, Refusal, Request, Response, SendPayloadSize, SendRequest, SentBy,
+    Address, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data, LaunchProfile, Layer, Message,
+    Process, Recipient, Refusal, Request, Response, SendPayloadSize, SendRequest, SentBy,
     StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -448,6 +448,11 @@ impl LaunchesDeclared for RunningNexus {
         else {
             return Err(Box::new(Response::Refused(Refusal::NotConfigured)));
         };
+        let effort = self
+            .store
+            .configured_effort(&address)
+            .map_err(store_refused)?
+            .ok_or_else(|| Box::new(Response::Refused(Refusal::NotConfigured)))?;
         // A Launch addressed to an Awake metaflow refreshes it: the flow it
         // is Awake as is replaced by the launch, never typed into.
         let predecessor = self.live_awake_flow(&address);
@@ -462,7 +467,7 @@ impl LaunchesDeclared for RunningNexus {
             user_modules: declaration.user_modules,
             address: address.clone(),
             model_name,
-            effort: Self::effort_of(&address).to_owned(),
+            effort,
             flow_id_option: predecessor.clone(),
             remembering: launch.remembering,
             herdr_session_name,

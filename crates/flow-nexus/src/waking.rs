@@ -80,6 +80,7 @@ use crate::delivery::lease::LeasesPanes;
 use crate::delivery::{
     DeliversMessages, FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal,
 };
+use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data,

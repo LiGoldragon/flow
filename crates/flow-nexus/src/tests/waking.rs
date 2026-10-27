@@ -117,6 +117,7 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
                 continuity: meta_signal_flow::Continuity::Maintained,
                 purpose: String::new(),
                 records: vec![],
+                requires: vec![],
             },
         ]))
         .expect("metaflow declared Maintained");
@@ -4835,12 +4836,12 @@ fn a_nexus_start_forgets_a_successor_already_given_and_wakes_one_owed() {
     );
 }
 
-/// The Secondary starts first: a Start of { Mind flow Primary } whose
+/// A required Secondary starts first: a Start of { Mind flow Primary } whose
 /// declared Secondary sleeps has Flow start that Secondary fresh, confirmed
 /// and Awake, before the Primary's own launch goes on; the Primary is not
-/// refused NoSecondary.
+/// refused RequirementUnmet.
 #[test]
-fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
+fn a_primary_whose_declared_secondary_sleeps_starts_its_requirements_first() {
     use crate::Dispatches;
     let mut fixture = NexusFixture::new();
     ended_claude(&fixture);
@@ -4864,6 +4865,18 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
                 continuity: meta_signal_flow::Continuity::OnDemand,
                 purpose: String::new(),
                 records: vec![],
+                requires: vec![],
+            },
+            meta_signal_flow::ConfigureMetaflow {
+                address: address(Layer::Primary),
+                system_modules: vec![],
+                user_modules: vec![],
+                flow_kind: signal_flow::FlowKind::Regular,
+                tool_set: signal_flow::ToolSet::Default,
+                continuity: meta_signal_flow::Continuity::OnDemand,
+                purpose: String::new(),
+                records: vec![],
+                requires: vec![address(Layer::Secondary)],
             },
         ]))
         .expect("the Secondary is declared");
@@ -4877,7 +4890,9 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
 
     assert_ne!(
         response,
-        signal_flow::Response::StartRejected(signal_flow::StartRejection::NoSecondary),
+        signal_flow::Response::StartRejected(signal_flow::StartRejection::RequirementUnmet(
+            address(Layer::Secondary),
+        )),
         "{}",
         world.calls()
     );

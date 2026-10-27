@@ -54,6 +54,7 @@ fn declare(fixture: &NexusFixture, at: Address) {
             continuity: Continuity::OnDemand,
             purpose: String::new(),
             records: vec![],
+            requires: vec![],
         }]))
         .expect("metaflow declared");
 }

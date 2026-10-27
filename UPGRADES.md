@@ -1,8 +1,17 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 6 makes launch dependencies declaration data. `ConfigureMetaflow`
+appends `Requires`; archived declarations upgrade with none. Before a new
+launch, Flow starts every required Address not Awake and rejects with
+`RequirementUnmet.Address` when one cannot start. The launch-outcome family
+advances to v9; an archived `NoSecondary` is retained as an unrecorded
+Secondary requirement.
+
+>>>>>>> 03d91d3 (Flow batch 6: start declared metaflow requirements)
 Batch 4 adds typed Line, Keys and Clear owner commands and ReadPane. Keys
 carry the exact Herdr keys; they are admitted in a Blocked pane. Line and
 Clear require Gate.Forced there. Flow pins meta-signal-flow 43.0.0.
+
 
 Batch 3 adds `Gate.Kept` and `Gate.Forced` to privileged delivery, command,
 and retire requests. Kept preserves threshold and continuity refusals; Forced

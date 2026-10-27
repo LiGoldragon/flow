@@ -388,6 +388,7 @@ mod tests {
                 continuity: meta_signal_flow::Continuity::OnDemand,
                 purpose: format!("Prints page {index}."),
                 records: vec![],
+                requires: vec![],
             })
             .collect();
         let snapshot = ConfigurationSnapshot {

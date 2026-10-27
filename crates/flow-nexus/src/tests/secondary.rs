@@ -1,13 +1,13 @@
-//! Short term, a Primary is not started without its Secondary, and the
-//! Secondary starts first: Flow starts a declared Secondary itself before a
-//! new Primary of its aspect and topic, and refuses the Primary NoSecondary,
-//! before anything is written, claimed or opened, only when that Secondary
-//! has no declaration and is not Awake as a live flow. A topic is an
-//! uncapitalized camelCase identifier, refused by type when it is not.
+//! A declaration names the metaflows its launches require. Flow starts each
+//! requirement first when it is not Awake, and names the required Address
+//! when it cannot start. With no requirements a launch needs no other seat.
+//! A topic is an uncapitalized camelCase identifier, refused by type when it
+//! is not.
 
 use super::model::{configure, seat};
 use super::{NexusFixture, pane_unopened};
 use crate::Dispatches;
+use crate::store::ManagesMetaflowState;
 use signal_flow::{Aspect, Layer, Query, Response, StartRejection};
 use std::fs;
 
@@ -29,67 +29,36 @@ fn a_secondary_start_needs_no_other_seat() {
     );
 }
 
-fn awake_secondary(fixture: &NexusFixture, topic: &str) {
-    use crate::store::metaflow::SeedsMetaflow;
-    super::waking::claude_seat(fixture, 40_000);
-    fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
-        address: signal_flow::Address {
-            aspect: Aspect::Mind,
-            topic: topic.into(),
-            layer: Layer::Secondary,
-        },
-        state: flow_ethos::State::Awake(super::waking::CLAUDE_SEAT.into()),
-        past: vec![],
-        queue: vec![],
-    });
+fn declaration(
+    address: signal_flow::Address,
+    requires: Vec<signal_flow::Address>,
+) -> meta_signal_flow::ConfigureMetaflow {
+    meta_signal_flow::ConfigureMetaflow {
+        address,
+        system_modules: vec!["spirit-core".into()],
+        user_modules: vec![],
+        flow_kind: signal_flow::FlowKind::Regular,
+        tool_set: signal_flow::ToolSet::Default,
+        continuity: meta_signal_flow::Continuity::OnDemand,
+        purpose: String::new(),
+        records: vec![],
+        requires,
+    }
 }
 
-/// A Start of { Mind topics Primary } whose Secondary has no declaration is
-/// refused NoSecondary before anything is written or opened while that
-/// Secondary is absent or Asleep:
-/// another topic's Secondary or another aspect's does not count. Once that
-/// Secondary is Awake as a live flow, the Start goes on to launch.
+/// A launch with no declared requirements is admitted without another seat.
 #[test]
-fn a_primary_start_is_refused_until_its_secondary_is_awake() {
+fn a_launch_with_no_requirements_needs_no_other_seat() {
     use crate::store::ReadsLaunchAttempt;
-    use crate::store::metaflow::SeedsMetaflow;
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();
     let _ = fs::remove_file(&fixture.snapshot_program);
     configure(&fixture, &[(Layer::Primary, Aspect::Mind, "gpt-6-sol")]);
-    awake_secondary(&fixture, "other");
     let mut primary = seat(Aspect::Mind, Layer::Primary, "gpt-6-sol", "primary-request");
     primary.address.topic = "topics".into();
-    for secondary in [None, Some(flow_ethos::State::Asleep)] {
-        if let Some(state) = secondary {
-            fixture.nexus.store.seed_metaflow(signal_flow::Metaflow {
-                address: signal_flow::Address {
-                    aspect: Aspect::Mind,
-                    topic: "topics".into(),
-                    layer: Layer::Secondary,
-                },
-                state,
-                past: vec![],
-                queue: vec![],
-            });
-        }
-        assert_eq!(
-            fixture.nexus.dispatch(Query::Start(primary.clone())),
-            Response::StartRejected(StartRejection::NoSecondary)
-        );
-        assert_eq!(
-            fixture
-                .nexus
-                .store
-                .launch_attempt("primary-request")
-                .unwrap(),
-            None,
-            "nothing of the refused Start is written"
-        );
-    }
-    awake_secondary(&fixture, "topics");
+
     assert_eq!(
-        fixture.nexus.dispatch(Query::Start(primary.clone())),
+        fixture.nexus.dispatch(Query::Start(primary)),
         Response::StartRejected(pane_unopened())
     );
     assert!(
@@ -98,8 +67,50 @@ fn a_primary_start_is_refused_until_its_secondary_is_awake() {
             .store
             .launch_attempt("primary-request")
             .unwrap()
-            .is_some(),
-        "the admitted Start reserved its attempt"
+            .is_some()
+    );
+}
+
+/// A declaration's missing required metaflow is named before the requested
+/// launch writes an attempt.
+#[test]
+fn an_unstartable_requirement_is_named() {
+    use crate::store::ReadsLaunchAttempt;
+    let fixture = NexusFixture::new();
+    fixture.claims_flow_ids();
+    let _ = fs::remove_file(&fixture.snapshot_program);
+    configure(&fixture, &[(Layer::Primary, Aspect::Mind, "gpt-6-sol")]);
+    let requested = signal_flow::Address {
+        aspect: Aspect::Mind,
+        topic: "topics".into(),
+        layer: Layer::Primary,
+    };
+    let required = signal_flow::Address {
+        aspect: Aspect::Field,
+        topic: "helper".into(),
+        layer: Layer::Tertiary,
+    };
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+            declaration(requested.clone(), vec![required.clone()]),
+        ]))
+        .expect("the requested metaflow is declared");
+    let mut primary = seat(Aspect::Mind, Layer::Primary, "gpt-6-sol", "primary-request");
+    primary.address = requested;
+
+    assert_eq!(
+        fixture.nexus.dispatch(Query::Start(primary)),
+        Response::StartRejected(StartRejection::RequirementUnmet(required))
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .launch_attempt("primary-request")
+            .unwrap(),
+        None
     );
 }
 
@@ -109,6 +120,7 @@ fn a_primary_start_is_refused_until_its_secondary_is_awake() {
 #[test]
 fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
     use crate::Dispatches;
+    use crate::store::ManagesMetaflowState;
     use crate::store::ReadsLaunchAttempt;
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();
@@ -145,6 +157,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
             continuity: meta_signal_flow::Continuity::OnDemand,
             purpose: String::new(),
             records: vec![],
+            requires: vec![],
         };
         assert_eq!(
             fixture
@@ -229,6 +242,7 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
 #[test]
 fn launch_with_a_bad_topic_is_topic_refused() {
     use crate::Dispatches;
+    use crate::store::ManagesMetaflowState;
     use signal_flow::{Address, Launch_Data, Remembering};
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();

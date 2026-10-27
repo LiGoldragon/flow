@@ -12,7 +12,7 @@ use crate::codex::SelectsCodexEndpoint;
 use crate::herdr::ConfiguresHerdrCli;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::AnnouncesLaunchChanges;
-use crate::waking::StartsSecondaryFirst;
+use crate::waking::StartsRequirementsFirst;
 pub use caller::CallerProcess;
 pub use composition::CompositionError;
 pub use context::VerifiedContext;
@@ -152,7 +152,7 @@ impl Dispatches for RunningNexus {
     /// takes it: a new Primary's Secondary is started first, off the gate.
     fn dispatch(&self, query: Query) -> Response {
         match query {
-            Query::Start(profile) => match self.secondary_first(&profile) {
+            Query::Start(profile) => match self.requirements_first(&profile) {
                 Ok(()) => self.dispatch_from(Query::Start(profile), Origin::Unbound),
                 Err(rejection) => Response::StartRejected(rejection),
             },
@@ -865,7 +865,7 @@ impl ServesConnection for Connection {
                     nexus.declared_launch(launch, self.process.as_ref())
                 };
                 match declared {
-                    Ok(Query::Start(profile)) => match nexus.secondary_first(&profile) {
+                    Ok(Query::Start(profile)) => match nexus.requirements_first(&profile) {
                         Ok(()) => nexus.dispatch_serially(Query::Start(profile), origin),
                         Err(rejection) => Response::StartRejected(rejection),
                     },
@@ -878,7 +878,7 @@ impl ServesConnection for Connection {
             // A new Primary's Secondary starts first, off the gate.
             Query::Start(profile) => {
                 let origin = nexus.origin_of(self.peer.peer_process());
-                match nexus.secondary_first(&profile) {
+                match nexus.requirements_first(&profile) {
                     Ok(()) => nexus.dispatch_serially(Query::Start(profile), origin),
                     Err(rejection) => Response::StartRejected(rejection),
                 }
@@ -5173,6 +5173,7 @@ mod tests {
                         continuity: meta_signal_flow::Continuity::OnDemand,
                         purpose: "Publishes the books.".into(),
                         records: vec!["flows/a68420/vision/flow.md".into()],
+                        requires: vec![],
                     }])
                 )),
             meta_signal_flow::Response::Configured(_)

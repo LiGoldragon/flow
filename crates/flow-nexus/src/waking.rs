@@ -528,42 +528,33 @@ pub trait PerformsWakeAndDrain {
     fn drain_all(&self, address: Address) -> Outcome;
 }
 
-/// Short term, the Secondary starts first: a caller's new Primary whose
-/// Secondary of the same aspect and topic is not Awake has that Secondary
-/// started by Flow itself, OnDemand or Maintained, from its declaration, and
-/// the Primary's launch goes on once the Secondary is confirmed. A Secondary
-/// with no declaration is not started, and the Primary is then refused
-/// NoSecondary by its admission.
-pub(crate) trait StartsSecondaryFirst {
-    /// Runs off the dispatch gate, taking it per step as a wake does.
-    /// Refuses only when the declared Secondary could not be started.
-    fn secondary_first(&self, profile: &LaunchProfile) -> Result<(), signal_flow::StartRejection>;
+/// A declaration's required metaflows start first. Flow starts each one
+/// that is not Awake as a live flow, from its own declaration, before the
+/// requested metaflow. A requirement with no declaration, or one that does
+/// not start and confirm, rejects the requested Start naming that Address.
+pub(crate) trait StartsRequirementsFirst {
+    /// Runs off the dispatch gate, taking it per requirement as a wake does.
+    fn requirements_first(
+        &self,
+        profile: &LaunchProfile,
+    ) -> Result<(), signal_flow::StartRejection>;
 }
 
-impl StartsSecondaryFirst for RunningNexus {
-    fn secondary_first(&self, profile: &LaunchProfile) -> Result<(), signal_flow::StartRejection> {
+impl StartsRequirementsFirst for RunningNexus {
+    fn requirements_first(
+        &self,
+        profile: &LaunchProfile,
+    ) -> Result<(), signal_flow::StartRejection> {
         use crate::launching::NamesTopic;
         use crate::store::ReadsLaunchAttempt;
         use crate::store::metaflow::TakesLaunchAddress;
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-        let address = &profile.address;
-        if address.layer != Layer::Primary
-            || profile.flow_id_option.is_some()
-            || !address.topic.as_str().is_camel_case_topic()
+
+        if profile.flow_id_option.is_some() || !profile.address.topic.as_str().is_camel_case_topic()
         {
             return Ok(());
         }
-        let secondary = Address {
-            aspect: address.aspect.clone(),
-            topic: address.topic.clone(),
-            layer: Layer::Secondary,
-        };
-        let Some(lease) = self.waking.hold(&secondary) else {
-            // A wake of the Secondary already runs; the Primary's admission
-            // reads what it came to.
-            return Ok(());
-        };
-        let metaflow = {
+        let requirements = {
             let _turn = self
                 .dispatch_gate
                 .lock()
@@ -572,62 +563,97 @@ impl StartsSecondaryFirst for RunningNexus {
                 self.store.launch_attempt(&profile.launch_request_id),
                 Ok(None)
             );
-            let owed = matches!(self.store.successor_intent(address), Ok(Some(_)));
-            if !new_launch || owed {
+            if !new_launch {
                 return Ok(());
             }
-            if !matches!(self.store.metaflow_declaration(&secondary), Ok(Some(_))) {
-                return Ok(());
+            self.store
+                .metaflow_declaration(&profile.address)
+                .map_err(|_| signal_flow::StartRejection::LaunchPersistenceRefused)?
+                .map(|declaration| declaration.requires)
+                .unwrap_or_default()
+        };
+
+        for required in requirements {
+            if required == profile.address {
+                return Err(signal_flow::StartRejection::RequirementUnmet(required));
             }
-            self.rest_ended_awake(&secondary);
-            match self.store.metaflow(&secondary) {
-                Ok(Some(metaflow)) => match &metaflow.state {
-                    flow_ethos::State::Awake(flow_id)
-                        if matches!(self.store.flow_is_live(flow_id), Ok(true)) =>
-                    {
-                        return Ok(());
+            let Some(lease) = self.waking.hold(&required) else {
+                let awake = {
+                    let _turn = self
+                        .dispatch_gate
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    matches!(
+                        self.store.metaflow(&required),
+                        Ok(Some(Metaflow {
+                            state: flow_ethos::State::Awake(flow_id),
+                            ..
+                        })) if matches!(self.store.flow_is_live(&flow_id), Ok(true))
+                    )
+                };
+                if awake {
+                    continue;
+                }
+                return Err(signal_flow::StartRejection::RequirementUnmet(required));
+            };
+            let metaflow = {
+                let _turn = self
+                    .dispatch_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !matches!(self.store.metaflow_declaration(&required), Ok(Some(_))) {
+                    return Err(signal_flow::StartRejection::RequirementUnmet(required));
+                }
+                self.rest_ended_awake(&required);
+                match self.store.metaflow(&required) {
+                    Ok(Some(metaflow)) => match &metaflow.state {
+                        flow_ethos::State::Awake(flow_id)
+                            if matches!(self.store.flow_is_live(flow_id), Ok(true)) =>
+                        {
+                            continue;
+                        }
+                        _ => metaflow,
+                    },
+                    Ok(None) => Metaflow {
+                        address: required.clone(),
+                        state: flow_ethos::State::Asleep,
+                        past: vec![],
+                        queue: vec![],
+                    },
+                    Err(_) => {
+                        return Err(signal_flow::StartRejection::LaunchPersistenceRefused);
                     }
-                    _ => metaflow,
-                },
-                Ok(None) => Metaflow {
-                    address: secondary.clone(),
-                    state: flow_ethos::State::Asleep,
-                    past: vec![],
-                    queue: vec![],
-                },
-                Err(_) => return Err(signal_flow::StartRejection::LaunchPersistenceRefused),
-            }
-        };
-        let WakePlan::Fresh(fresh) = self.wake_plan(&metaflow) else {
-            return Err(signal_flow::StartRejection::NoSecondary);
-        };
-        let flow_id = self.start_fresh(&metaflow, fresh, "").map_err(|failure| {
-            eprintln!(
-                "flow-nexus: the Secondary of {:?} {} did not start: {failure:?}",
-                secondary.aspect, secondary.topic
-            );
-            signal_flow::StartRejection::NoSecondary
-        })?;
-        {
-            let _turn = self
-                .dispatch_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if self.perform(Operation::Record(Record_Data::Awoken(
-                Record_Data_Awoken_Data {
-                    address: secondary.clone(),
-                    flow_id,
-                    delivered: 0,
-                },
-            ))) != Outcome::Recorded
+                }
+            };
+            let WakePlan::Fresh(fresh) = self.wake_plan(&metaflow) else {
+                return Err(signal_flow::StartRejection::RequirementUnmet(required));
+            };
+            let flow_id = self.start_fresh(&metaflow, fresh, "").map_err(|failure| {
+                eprintln!(
+                    "flow-nexus: required metaflow {:?} {} {:?} did not start: {failure:?}",
+                    required.aspect, required.topic, required.layer
+                );
+                signal_flow::StartRejection::RequirementUnmet(required.clone())
+            })?;
             {
-                return Err(signal_flow::StartRejection::LaunchPersistenceRefused);
+                let _turn = self
+                    .dispatch_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if self.perform(Operation::Record(Record_Data::Awoken(
+                    Record_Data_Awoken_Data {
+                        address: required.clone(),
+                        flow_id,
+                        delivered: 0,
+                    },
+                ))) != Outcome::Recorded
+                {
+                    return Err(signal_flow::StartRejection::LaunchPersistenceRefused);
+                }
             }
+            self.drain_woken(&required, lease);
+            self.settle_stops_at_confirmation();
         }
-        // Work queued for the Secondary is handed to it, as to any woken
-        // flow.
-        self.drain_woken(&secondary, lease);
-        self.settle_stops_at_confirmation();
         Ok(())
     }
 }
@@ -2191,7 +2217,10 @@ impl WakesInParts for RunningNexus {
             tool_set: fresh.tool_set,
             prompt: text.with_purpose(&fresh.purpose),
         };
-        self.start_unbound(seat.fresh_profile())
+        let profile = seat.fresh_profile();
+        self.requirements_first(&profile)
+            .map_err(FreshRefusal::Rejected)?;
+        self.start_unbound(profile)
     }
 
     fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), HandOverRefusal> {

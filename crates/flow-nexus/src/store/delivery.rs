@@ -11,13 +11,14 @@
 use super::{DefaultConfiguration, FlowStore, SeedsConfiguration, StoreError};
 use crate::store::ManagesMetaflowState;
 use meta_signal_flow::{
-    Delivery, DeliveryGrade, DeliveryId, HarnessProfile, InterruptWitness, MessageNexusPath,
-    MetaAspects,
+    Delivery, DeliveryGrade, DeliveryId, DeliveryOutcome, DeliveryResolution, HarnessProfile,
+    InterruptWitness, MessageNexusPath, MetaAspects, ResolveDeliveryRejected_Data,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, EngineRecord, FamilyName, KeyedMutation, QueryPlan, RecordKey, Retraction,
-    SchemaHash, TableDescriptor, TableName, TableReference,
+    Assertion, Decision, EngineRecord, FamilyName, KeyedMutation, MemoryDefinition, MemoryUpgrades,
+    MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash, TableDescriptor, TableName,
+    TableReference, UpgradeFrom,
 };
 use signal_flow::HarnessKind;
 
@@ -31,6 +32,66 @@ pub(super) const DELIVERY_CONFIGURATION_KEY: &str = "delivery";
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub struct StoredDelivery {
     pub delivery: Delivery,
+}
+
+impl MemoryDefinition for StoredDelivery {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-delivery-v2")
+    }
+}
+
+/// A delivery before owners could resolve an uncertain write as explicitly
+/// not presented. Frozen for the v1-to-v2 store upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryGradeV1 {
+    Transported,
+    Presented,
+    Uncertain,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryV1 {
+    pub delivery_id: DeliveryId,
+    pub flow_id: String,
+    pub interrupt_witness: InterruptWitness,
+    pub delivery_grade: DeliveryGradeV1,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct StoredDeliveryV1 {
+    pub delivery: DeliveryV1,
+}
+impl EngineRecord for StoredDeliveryV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.delivery.delivery_id.clone())
+    }
+}
+impl MemoryDefinition for StoredDeliveryV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-delivery-v1")
+    }
+}
+impl UpgradeFrom<StoredDeliveryV1> for StoredDelivery {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredDeliveryV1) -> Decision<Self, Self::Refusal> {
+        let old = previous.delivery;
+        Decision::Ready(Self {
+            delivery: Delivery {
+                delivery_id: old.delivery_id,
+                flow_id: old.flow_id,
+                interrupt_witness: old.interrupt_witness,
+                delivery_grade: match old.delivery_grade {
+                    DeliveryGradeV1::Transported => DeliveryGrade::Transported,
+                    DeliveryGradeV1::Presented => DeliveryGrade::Presented,
+                    DeliveryGradeV1::Uncertain => DeliveryGrade::Uncertain,
+                },
+            },
+        })
+    }
 }
 
 impl EngineRecord for StoredDelivery {
@@ -171,12 +232,25 @@ pub trait RegistersDeliveryTables: Sized {
 
 impl RegistersDeliveryTables for DeliveryTables {
     fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError> {
+        let delivery_descriptor = TableDescriptor::new(
+            DELIVERY_TABLE_NAME,
+            FamilyName::new("flow-nexus-delivery"),
+            SchemaHash::for_label("flow-nexus-delivery-v2"),
+        )
+        .with_predecessor::<StoredDeliveryV1>();
+        let deliveries =
+            match engine.upgrade_table::<StoredDeliveryV1, StoredDelivery>(delivery_descriptor) {
+                sema_engine::UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                sema_engine::UpgradeOutcome::AlreadyCurrent(table) => table,
+                sema_engine::UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                sema_engine::UpgradeOutcome::Failed(failure) => {
+                    return Err(StoreError::NexusUpgrade(format!(
+                        "delivery upgrade: {failure:?}"
+                    )));
+                }
+            };
         Ok(Self {
-            deliveries: engine.register_table(TableDescriptor::new(
-                DELIVERY_TABLE_NAME,
-                FamilyName::new("flow-nexus-delivery"),
-                SchemaHash::for_label("flow-nexus-delivery-v1"),
-            ))?,
+            deliveries,
             pane_leases: engine.register_table(TableDescriptor::new(
                 PANE_LEASE_TABLE_NAME,
                 FamilyName::new("flow-nexus-pane-lease"),
@@ -188,6 +262,42 @@ impl RegistersDeliveryTables for DeliveryTables {
                 SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
             ))?,
         })
+    }
+}
+
+pub trait ResolvesDeliveries {
+    fn resolve_delivery(
+        &self,
+        resolution: DeliveryResolution,
+    ) -> Result<Result<Delivery, ResolveDeliveryRejected_Data>, StoreError>;
+}
+
+impl ResolvesDeliveries for FlowStore {
+    fn resolve_delivery(
+        &self,
+        resolution: DeliveryResolution,
+    ) -> Result<Result<Delivery, ResolveDeliveryRejected_Data>, StoreError> {
+        if resolution.queue_resolution_reason.trim().is_empty() {
+            return Ok(Err(ResolveDeliveryRejected_Data::EmptyReason));
+        }
+        let Some(mut delivery) = self.delivery(&resolution.delivery_id)? else {
+            return Ok(Err(ResolveDeliveryRejected_Data::UnknownDelivery));
+        };
+        if delivery.delivery_grade != DeliveryGrade::Uncertain {
+            return Ok(Err(ResolveDeliveryRejected_Data::NotUncertain));
+        }
+        delivery.delivery_grade = match resolution.delivery_outcome {
+            DeliveryOutcome::Presented => DeliveryGrade::Presented,
+            DeliveryOutcome::NotPresented => DeliveryGrade::NotPresented,
+        };
+        self.engine.mutate_keyed(KeyedMutation::new(
+            self.delivery_tables.deliveries,
+            RecordKey::new(delivery.delivery_id.clone()),
+            StoredDelivery {
+                delivery: delivery.clone(),
+            },
+        ))?;
+        Ok(Ok(delivery))
     }
 }
 
@@ -354,5 +464,30 @@ impl RecordsDeliveries for FlowStore {
             ))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_delivery_upgrade_preserves_each_old_grade() {
+        for (old, expected) in [
+            (DeliveryGradeV1::Transported, DeliveryGrade::Transported),
+            (DeliveryGradeV1::Presented, DeliveryGrade::Presented),
+            (DeliveryGradeV1::Uncertain, DeliveryGrade::Uncertain),
+        ] {
+            let previous = StoredDeliveryV1 {
+                delivery: DeliveryV1 {
+                    delivery_id: "delivery".into(),
+                    flow_id: "flow".into(),
+                    interrupt_witness: InterruptWitness::Unobserved,
+                    delivery_grade: old,
+                },
+            };
+            let Decision::Ready(upgraded) = StoredDelivery::upgrade_from(previous);
+            assert_eq!(upgraded.delivery.delivery_grade, expected);
+        }
     }
 }

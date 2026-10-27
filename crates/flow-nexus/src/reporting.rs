@@ -46,7 +46,8 @@ pub trait RecordsReports {
     /// `waking`). Runs after the
     /// hook has its answer, so the harness never waits on it.
     fn after_report(&self, flow_id: &FlowId, event: &Event);
-    fn read_events(&self, flow_id: FlowId) -> meta_signal_flow::Response;
+    fn read_events(&self, request: meta_signal_flow::ReadEvents_Data)
+    -> meta_signal_flow::Response;
     /// The owner's resolution of one Uncertain hand-over, recorded with the
     /// requesting peer, the reason and the time. Never run by Flow itself.
     fn resolve_queue_delivery(
@@ -196,12 +197,20 @@ impl RecordsReports for RunningNexus {
         }
     }
 
-    fn read_events(&self, flow_id: FlowId) -> meta_signal_flow::Response {
+    fn read_events(
+        &self,
+        request: meta_signal_flow::ReadEvents_Data,
+    ) -> meta_signal_flow::Response {
+        let meta_signal_flow::ReadEvents_Data { flow_id, page } = request;
         match self.store.events(&flow_id) {
-            Ok(Some(event_vector)) => meta_signal_flow::Response::EventsRead(EventsRead_Data {
-                flow_id,
-                event_vector,
-            }),
+            Ok(Some(events)) => {
+                let (event_vector, next_page) = crate::store::page_records(&events, &page);
+                meta_signal_flow::Response::EventsRead(EventsRead_Data {
+                    flow_id,
+                    event_vector,
+                    next_page,
+                })
+            }
             Ok(None) => {
                 meta_signal_flow::Response::ReadEventsRejected(ReadEventsRejected_Data::UnknownFlow)
             }

@@ -106,7 +106,13 @@ fn a_claude_launch_refused_after_reserve_gives_back_its_flow_and_claim() {
     assert_eq!(
         fixture
             .nexus
-            .dispatch_meta(MetaQuery::ReadEvents(flow_id.clone())),
+            .dispatch_meta(MetaQuery::ReadEvents(meta_signal_flow::ReadEvents_Data {
+                flow_id: flow_id.clone(),
+                page: meta_signal_flow::Page {
+                    after: 0,
+                    count: 100
+                },
+            })),
         MetaResponse::ReadEventsRejected(meta_signal_flow::ReadEventsRejected_Data::UnknownFlow)
     );
     assert_eq!(

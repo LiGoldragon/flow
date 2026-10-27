@@ -91,7 +91,7 @@ fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
 fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
         fixture.nexus.report(Report_Data {
-            flow_id: CLAUDE_SEAT.into(),
+            reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
             event: event.clone(),
         }),
         Response::Reported
@@ -685,7 +685,7 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
     );
     assert_eq!(
         fixture.nexus.report(Report_Data {
-            flow_id: CLAUDE_SEAT.into(),
+            reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
             event: foreign_stop(),
         }),
         Response::Reported

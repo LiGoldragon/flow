@@ -27,7 +27,7 @@ use std::sync::Mutex;
 
 pub(super) const FLOW_EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_flow_events");
 pub(super) const FLOW_EVENT_FAMILY: &str = "flow-nexus-flow-events";
-pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v4";
+pub(super) const FLOW_EVENT_SCHEMA: &str = "flow-nexus-flow-events-v5";
 
 /// One flow's harness events, oldest first.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -44,11 +44,66 @@ impl EngineRecord for FlowEvents {
 
 impl MemoryDefinition for FlowEvents {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
+        MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(FLOW_EVENT_SCHEMA)
+    }
+}
+
+/// One flow's events as signal-flow 35 archived them, before notifications.
+/// It is read only by the v4-to-v5 upgrade.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FlowEventsV4 {
+    pub flow_id: String,
+    pub event_vector: Vec<EventV4>,
+}
+
+impl EngineRecord for FlowEventsV4 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+impl MemoryDefinition for FlowEventsV4 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-flow-events-v4")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub enum EventV4 {
+    Started(Option<String>),
+    ToolUsed(String),
+    Stopped(NativeStop),
+    PromptSubmitted(signal_flow::NativePrompt),
+    Ended(Option<String>),
+    Cleared(Option<String>),
+}
+
+impl From<EventV4> for Event {
+    fn from(event: EventV4) -> Self {
+        match event {
+            EventV4::Started(session) => Event::Started(session),
+            EventV4::ToolUsed(tool) => Event::ToolUsed(tool),
+            EventV4::Stopped(stop) => Event::Stopped(stop),
+            EventV4::PromptSubmitted(prompt) => Event::PromptSubmitted(prompt),
+            EventV4::Ended(session) => Event::Ended(session),
+            EventV4::Cleared(session) => Event::Cleared(session),
+        }
+    }
+}
+
+impl UpgradeFrom<FlowEventsV4> for FlowEvents {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: FlowEventsV4) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            flow_id: previous.flow_id,
+            event_vector: previous.event_vector.into_iter().map(Event::from).collect(),
+        })
     }
 }
 
@@ -241,6 +296,7 @@ impl DescribesEventTable for FlowEvents {
         .with_predecessor::<FlowEventsV1>()
         .with_predecessor::<FlowEventsV2>()
         .with_predecessor::<FlowEventsV3>()
+        .with_predecessor::<FlowEventsV4>()
     }
 }
 
@@ -259,11 +315,32 @@ pub trait RegistersEventTables: Sized {
 impl RegistersEventTables for EventTables {
     fn register(engine: &mut sema_engine::Engine) -> Result<Self, StoreError> {
         let descriptor = <FlowEvents as DescribesEventTable>::descriptor();
+        let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
         let from_v1 = descriptor.clone();
-        // A v3 family upgrades from v3; one refused at admission names an
-        // older family, tried next.
-        match engine.upgrade_table::<FlowEventsV3, FlowEvents>(descriptor) {
+        // Try each historical family newest first. An admission failure means
+        // the table carries an older schema, which is tried next.
+        match engine.upgrade_table::<FlowEventsV4, FlowEvents>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => {
+                return Ok(Self {
+                    events: receipt.table(),
+                    append_gate: Mutex::new(()),
+                });
+            }
+            UpgradeOutcome::AlreadyCurrent(events) => {
+                return Ok(Self {
+                    events,
+                    append_gate: Mutex::new(()),
+                });
+            }
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::EventUpgrade(format!("{failure:?}")));
+            }
+        }
+        match engine.upgrade_table::<FlowEventsV3, FlowEvents>(from_v3) {
             UpgradeOutcome::Upgraded(receipt) => {
                 return Ok(Self {
                     events: receipt.table(),
@@ -433,7 +510,8 @@ impl RecordsHarnessEvents for FlowStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        EventRecording, EventV2, FlowEvents, FlowEventsV2, NativeStopV2, RecordsHarnessEvents,
+        EventRecording, EventV2, EventV4, FlowEvents, FlowEventsV2, FlowEventsV4, NativeStopV2,
+        RecordsHarnessEvents,
     };
     use crate::store::{FlowStore, OpensFlowStore, RegistersFlowIdentity};
     use sema_engine::{Decision, UpgradeFrom};
@@ -476,10 +554,36 @@ mod tests {
         vec![
             Event::Started(Some("c0ffee00-0000-4000-8000-000000000001".into())),
             Event::ToolUsed("Bash".into()),
+            Event::Notified("ready".into()),
             stop(),
             Event::Cleared(Some("c0ffee00-0000-4000-8000-000000000001".into())),
             Event::Started(Some("c0ffee00-0000-4000-8000-000000000002".into())),
         ]
+    }
+
+    #[test]
+    fn v4_event_upgrade_preserves_every_archived_event() {
+        let old = FlowEventsV4 {
+            flow_id: "flow".into(),
+            event_vector: vec![
+                EventV4::Started(Some("session".into())),
+                EventV4::ToolUsed("Bash".into()),
+                EventV4::Ended(Some("session".into())),
+            ],
+        };
+        let upgraded = match FlowEvents::upgrade_from(old) {
+            Decision::Ready(upgraded) => upgraded,
+            Decision::Refused(never) => match never {},
+        };
+        assert_eq!(upgraded.flow_id, "flow");
+        assert_eq!(
+            upgraded.event_vector,
+            vec![
+                Event::Started(Some("session".into())),
+                Event::ToolUsed("Bash".into()),
+                Event::Ended(Some("session".into())),
+            ]
+        );
     }
 
     #[test]

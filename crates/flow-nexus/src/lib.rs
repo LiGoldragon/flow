@@ -916,11 +916,14 @@ impl ServesConnection for Connection {
             // and the connection is closed: the harness waits on its hook,
             // and the settling waits on the harness.
             Query::Report(report) => {
-                let (flow_id, event) = (report.flow_id.clone(), report.event.clone());
+                let flow_id = nexus.resolve_reporter(&report.reporter);
+                let event = report.event.clone();
                 let response = nexus.report(report);
                 self.peer.write_response(&response)?;
                 drop(self);
-                if response == Response::Reported {
+                if response == Response::Reported
+                    && let Some(flow_id) = flow_id
+                {
                     nexus.after_report(&flow_id, &event);
                 }
                 return Ok(());
@@ -3746,7 +3749,7 @@ mod tests {
         fixture.register_with(FlowLifecycle::Active);
         let report = |flow_id: &str, event: Event| {
             fixture.nexus.dispatch(Query::Report(Report_Data {
-                flow_id: flow_id.into(),
+                reporter: signal_flow::Reporter::Flow(flow_id.into()),
                 event,
             }))
         };
@@ -3768,6 +3771,14 @@ mod tests {
         );
         assert_eq!(report("908786", Event::Started(None)), Response::Reported);
         assert_eq!(
+            fixture.nexus.dispatch(Query::Report(Report_Data {
+                reporter: signal_flow::Reporter::Session(fixture.node().session_id),
+                event: Event::Notified("ready".into()),
+            })),
+            Response::Reported,
+            "an adopted seat is resolved by its native session"
+        );
+        assert_eq!(
             report("908786", Event::ToolUsed("Bash".into())),
             Response::Reported
         );
@@ -3783,7 +3794,12 @@ mod tests {
                 .dispatch_meta(meta_signal_flow::Query::ReadEvents("908786".into())),
             meta_signal_flow::Response::EventsRead(meta_signal_flow::EventsRead_Data {
                 flow_id: "908786".into(),
-                event_vector: vec![Event::Started(None), Event::ToolUsed("Bash".into()), stop],
+                event_vector: vec![
+                    Event::Started(None),
+                    Event::Notified("ready".into()),
+                    Event::ToolUsed("Bash".into()),
+                    stop
+                ],
             })
         );
     }

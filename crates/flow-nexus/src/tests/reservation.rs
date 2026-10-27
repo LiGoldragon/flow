@@ -61,7 +61,7 @@ printf '%s\n' "$alias"
 
     fn report(&self, flow_id: &str, event: Event) -> Response {
         self.nexus.dispatch(Query::Report(Report_Data {
-            flow_id: flow_id.into(),
+            reporter: signal_flow::Reporter::Flow(flow_id.into()),
             event,
         }))
     }

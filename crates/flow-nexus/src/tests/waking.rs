@@ -2654,7 +2654,7 @@ fn the_hook_has_its_answer_and_its_connection_closed_before_the_rest_wait_ends()
         .expect("ordinary socket listens");
     hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     hook.write_query(&signal_flow::Query::Report(signal_flow::Report_Data {
-        flow_id: CLAUDE_SEAT.into(),
+        reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
         event: claude_stop(fixture),
     }))
     .unwrap();

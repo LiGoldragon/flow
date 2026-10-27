@@ -40,6 +40,7 @@
 (def ordinary-socket (str capsule-runtime "/flow.sock"))
 (def meta-socket (str capsule-runtime "/flow-meta.sock"))
 (def state-root (str home "/.local/state/flow-testing"))
+(def capsule-home (str state-root "/home"))
 (def store-path (str state-root "/flow.sema"))
 (def herdr-session-dir (str home "/.config/herdr/sessions/" session))
 (def curriculum-socket (str capsule-runtime "/curriculum/curriculum.sock"))
@@ -51,6 +52,8 @@
 ;; its flows: the verdict checks that none of the capsule's flows is there.
 (def default-flows (str home "/primary/flows"))
 (def claude-root (str home "/.claude"))
+(def shared-claude-config (str home "/.claude.json"))
+(def shared-claude-config-baseline (atom nil))
 ;; Claude names a project's transcript directory by its working directory,
 ;; every character but a letter or digit written as a dash.
 (def capsule-transcripts (str claude-root "/projects/" (str/replace source-root #"[^A-Za-z0-9]" "-")))
@@ -148,7 +151,11 @@
   "The only environment any capsule process receives."
   ([] (clean-env {}))
   ([extra]
-   (merge {"HOME" home
+   (merge {"HOME" capsule-home
+           ;; Credentials and harness-owned transcripts stay in the configured
+           ;; Claude directory; HOME is private, so Claude's host project
+           ;; registry is never opened or rewritten by the capsule.
+           "CLAUDE_CONFIG_DIR" claude-root
            "USER" (or (System/getenv "USER") "")
            "LOGNAME" (or (System/getenv "LOGNAME") (System/getenv "USER") "")
            "SHELL" (or (System/getenv "SHELL") "/bin/sh")
@@ -515,10 +522,10 @@
       0)))
 
 (defn project-entry?
-  "Whether Claude's shared configuration holds an entry for the capsule's
-  source root; the file is shared with every running Claude and is not written."
+  "Whether Claude's capsule-private configuration holds an entry for the
+  capsule source root."
   []
-  (let [file (str home "/.claude.json")]
+  (let [file (str capsule-home "/.claude.json")]
     (boolean (and (fs/exists? file)
                   (contains? (get (try (json/parse-string (slurp file)) (catch Exception _ {})) "projects" {})
                              source-root)))))
@@ -529,8 +536,13 @@
   (when (fs/exists? herdr-session-dir) (refuse (str "Herdr session " session " already exists; nothing started")))
   (when (fs/exists? capsule-runtime) (refuse (str capsule-runtime " already exists; nothing started")))
   (when (fs/exists? source-parent) (refuse (str source-parent " already exists; nothing started")))
+  (reset! shared-claude-config-baseline
+          {:exists (fs/exists? shared-claude-config)
+           :bytes (when (fs/exists? shared-claude-config)
+                    (java.nio.file.Files/readAllBytes (fs/path shared-claude-config)))})
   (fs/delete-tree state-root)
   (fs/create-dirs state-root)
+  (fs/create-dirs capsule-home)
   (fs/create-dirs capsule-runtime)
   (fs/create-dirs capsule-flows)
   (reset! herdr-server (p/process ["herdr" "--session" session "server"]
@@ -664,7 +676,6 @@
           :let [cmd (try (str/replace (slurp (str dir "/cmdline")) "\u0000" " ") (catch Exception _ ""))
                 env (try (slurp (str dir "/environ")) (catch Exception _ ""))]
           :when (or (str/includes? cmd capsule-runtime) (str/includes? cmd store-path)
-                    (str/includes? cmd curriculum-package)
                     (str/includes? env (str "XDG_RUNTIME_DIR=" capsule-runtime "\u0000"))
                     (str/includes? cmd (str "--session " session))
                     (str/includes? env (str "FLOW_SOCKET=" ordinary-socket))
@@ -708,6 +719,13 @@
     (fs/delete-tree capsule-runtime)
     (doseq [s @steps] (println (str "  " s)))
     (let [sessions (:out (run {} "herdr" "session" "list"))
+          shared-now {:exists (fs/exists? shared-claude-config)
+                      :bytes (when (fs/exists? shared-claude-config)
+                               (java.nio.file.Files/readAllBytes (fs/path shared-claude-config)))}
+          shared-preserved (and (= (:exists @shared-claude-config-baseline) (:exists shared-now))
+                                (java.util.Arrays/equals
+                                  ^bytes (:bytes @shared-claude-config-baseline)
+                                  ^bytes (:bytes shared-now)))
           remaining {:herdr-session (str/includes? sessions session)
                      :processes (vec (or (watch 20 #(let [left (capsule-processes)] (when (empty? left) []))) (capsule-processes)))
                      :store (fs/exists? state-root)
@@ -718,14 +736,16 @@
                      :curriculum-socket (fs/exists? curriculum-socket)
                      :traces (traces @natives-seen)
                      :history-lines (history-lines @natives-seen)
-                     :claude-project-entry (project-entry?)}
+                     :claude-project-entry (project-entry?)
+                     :shared-claude-config-preserved shared-preserved}
           clean (and (not (:herdr-session remaining)) (empty? (:processes remaining)) (not (:store remaining))
                      (not (:sockets remaining)) (not (:source-root remaining)) (empty? (:traces remaining))
                      (not (:curriculum-process remaining)) (not (:curriculum-store remaining))
-                     (not (:curriculum-socket remaining)))]
+                     (not (:curriculum-socket remaining))
+                     (:shared-claude-config-preserved remaining))]
       (print-line {:name "13 teardown" :reply (pr-str remaining) :pass clean
                    :ms (- (System/currentTimeMillis) started)
-                   :watched (str "Herdr session list; /proc cmdline and environ, waiting up to 20 s for capsule processes to end; store, source root, sockets; the Curriculum Nexus process, its context checkouts and socket; traces of the capsule's flows in " default-flows " and " claude-root "; history.jsonl lines naming a capsule session and ~/.claude.json's entry for the source root are reported and left")})
+                   :watched (str "only the preflight-empty Herdr session and capsule-owned paths/process environments; test-owned store, source root, sockets, Curriculum handle/context/socket and flow/session traces; the host ~/.claude.json bytes are baselined and must remain identical while Claude uses the capsule-private HOME")})
       clean)))
 
 (defn -main [& args]

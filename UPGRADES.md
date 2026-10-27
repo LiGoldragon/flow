@@ -7,6 +7,11 @@ harness; configured model service, executable/home/socket, pane profile and
 composer data are read from the committed harness snapshot. The Nexus family
 upgrades v2 to v3 and the new harness family is v1. Default Codex endpoints
 leave Flow. Pins signal-flow 37.0.0 and meta-signal-flow 47.0.0.
+The store migration reads frozen v8 launch outcomes with the corresponding
+launch attempts in one typed context snapshot. A unique attempt supplies the
+Address for `RequirementUnmet`; a missing or conflicting attempt moves the
+exact old outcome archive into the durable quarantined-outcome family with a
+typed reason. The staged store is activated only after every family opens.
 
 Batch 9 makes every operational timing and size/count limit in the overnight
 audit configured data. Fresh stores seed the `Timings` and `Limits` singleton
@@ -19,8 +24,9 @@ Batch 6 makes launch dependencies declaration data. `ConfigureMetaflow`
 appends `Requires`; archived declarations upgrade with none. Before a new
 launch, Flow starts every required Address not Awake and rejects with
 `RequirementUnmet.Address` when one cannot start. The launch-outcome family
-advances to v9; an archived `NoSecondary` is retained as an unrecorded
-Secondary requirement.
+advances to v9; an archived `NoSecondary` becomes `RequirementUnmet` only
+when its historical attempt uniquely supplies the Address;
+otherwise it is kept whole in the durable quarantined-outcome family.
 
 
 Batch 3 adds `Gate.Kept` and `Gate.Forced` to privileged delivery, command,

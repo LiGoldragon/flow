@@ -1444,7 +1444,7 @@ mod tests {
             harness_name: name.into(),
             harness_kind: kind.clone(),
             harness_version: "fixture".into(),
-            executable: if kind == HarnessKind::Claude { "claude".into() } else { "/fixture/codex".into() },
+            executable: if kind == HarnessKind::Claude { "/fixture/claude".into() } else { "/fixture/codex".into() },
             home: "/tmp/fixture-harness".into(),
             control_socket_path_option: if kind == HarnessKind::Codex { Some("unused".into()) } else { None },
             served_models: models.iter().map(|model| meta_signal_flow::HarnessModel { model_name: (*model).into(), recorded: (*model).into() }).collect(),

@@ -167,7 +167,12 @@ impl ConfiguredStore {
                 },
                 compact_line: "/compact".into(),
                 composer: meta_signal_flow::Composer {
-                    glyph: if kind == HarnessKind::Claude { "❯" } else { "›" }.into(),
+                    glyph: if kind == HarnessKind::Claude {
+                        "❯"
+                    } else {
+                        "›"
+                    }
+                    .into(),
                     retraction: if kind == HarnessKind::Claude {
                         meta_signal_flow::Retraction::Keys(vec!["ctrl+c".into()])
                     } else {
@@ -772,5 +777,8 @@ fn a_store_configured_while_stopped_opens_with_the_replaced_value() {
     let nexus = fixture.open();
     assert_eq!(snapshot(&nexus).nexus, replaced);
     assert_eq!(other_rows(&nexus), rows);
-    assert!(!stable_models(&nexus).contains(TERRA));
+    assert!(
+        stable_models(&nexus).contains(TERRA),
+        "replacing Nexus leaves the independently configured harness family whole"
+    );
 }

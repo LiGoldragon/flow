@@ -117,8 +117,10 @@ pub trait WritesPane {
 
     /// Presses the composer's submit key once.
     fn submit(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool {
-        self.composer(harness_kind)
-            .is_some_and(|composer| self.press(route, &composer.submit_keys()))
+        self.composer(harness_kind).is_some_and(|composer| {
+            let keys = composer.submit_keys();
+            !keys.is_empty() && self.press(route, &keys)
+        })
     }
 
     /// Takes back the letter an interrupt put back into the composer.
@@ -412,9 +414,7 @@ impl From<&meta_signal_flow::PaneProfile> for Composer {
     fn from(profile: &meta_signal_flow::PaneProfile) -> Self {
         let retraction = match &profile.composer.retraction {
             meta_signal_flow::Retraction::Keys(keys) => Retraction::Keys(keys.clone()),
-            meta_signal_flow::Retraction::LineByLine(keys) => {
-                Retraction::LineByLine(keys.clone())
-            }
+            meta_signal_flow::Retraction::LineByLine(keys) => Retraction::LineByLine(keys.clone()),
         };
         Self {
             glyph: profile.composer.glyph.chars().next().unwrap_or(' '),

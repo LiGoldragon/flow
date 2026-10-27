@@ -93,6 +93,8 @@ const FLOW_REPLACEMENT_TABLE_NAME: TableName = TableName::new("flow_nexus_replac
 const FLOW_ROLE_TABLE_NAME: TableName = TableName::new("flow_nexus_roles");
 const FLOW_QUARANTINED_LAUNCH_ATTEMPT_TABLE_NAME: TableName =
     TableName::new("flow_nexus_quarantined_launch_attempts");
+const FLOW_QUARANTINED_LAUNCH_OUTCOME_TABLE_NAME: TableName =
+    TableName::new("flow_nexus_quarantined_launch_outcomes");
 const METAFLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_metaflows");
 const METAFLOW_PROCESS_TABLE_NAME: TableName = TableName::new("flow_nexus_metaflow_processes");
 const METAFLOW_LOCK_TABLE_NAME: TableName = TableName::new("flow_nexus_metaflow_locks");
@@ -178,6 +180,7 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_replacements",
     "flow_nexus_roles",
     "flow_nexus_quarantined_launch_attempts",
+    "flow_nexus_quarantined_launch_outcomes",
     "flow_nexus_deliveries",
     "flow_nexus_pane_leases",
     "flow_nexus_delivery_configuration",
@@ -2481,14 +2484,6 @@ impl From<CompositionRefusalV34> for signal_flow::CompositionRefusal {
     }
 }
 
-fn unrecorded_secondary() -> signal_flow::Address {
-    signal_flow::Address {
-        aspect: signal_flow::Aspect::Psyche,
-        topic: "unrecorded".into(),
-        layer: signal_flow::Layer::Secondary,
-    }
-}
-
 impl From<StartRejectionV34> for StartRejection {
     fn from(rejection: StartRejectionV34) -> Self {
         match rejection {
@@ -2507,7 +2502,9 @@ impl From<StartRejectionV34> for StartRejection {
             StartRejectionV34::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
             StartRejectionV34::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV34::ModelRefused(refusal) => Self::ModelRefused(refusal),
-            StartRejectionV34::NoSecondary => Self::RequirementUnmet(unrecorded_secondary()),
+            StartRejectionV34::NoSecondary => {
+                unreachable!("v8 NoSecondary is resolved by the contextual store upgrade")
+            }
             StartRejectionV34::Undeclared => Self::Undeclared,
             StartRejectionV34::TopicRefused(topic) => Self::TopicRefused(topic),
         }
@@ -2535,6 +2532,60 @@ impl From<LaunchOutcomeV8> for LaunchOutcome {
             LaunchOutcomeV8::StartRejected(rejection) => Self::StartRejected(rejection.into()),
             LaunchOutcomeV8::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
         }
+    }
+}
+
+impl LaunchOutcomeV8 {
+    fn needs_requirement_address(&self) -> bool {
+        matches!(self, Self::StartRejected(StartRejectionV34::NoSecondary))
+            || matches!(
+                self,
+                Self::ReplaceRejected(ReplaceRejectionV34::LaunchRefused(
+                    StartRejectionV34::NoSecondary
+                ))
+            )
+    }
+
+    fn with_requirement_address(self, address: Address) -> LaunchOutcome {
+        match self {
+            Self::StartRejected(StartRejectionV34::NoSecondary) => {
+                LaunchOutcome::StartRejected(StartRejection::RequirementUnmet(address))
+            }
+            Self::ReplaceRejected(ReplaceRejectionV34::LaunchRefused(
+                StartRejectionV34::NoSecondary,
+            )) => LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                StartRejection::RequirementUnmet(address),
+            )),
+            other => other.into(),
+        }
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum HistoricalAttemptReason {
+    Missing,
+    Ambiguous,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct QuarantinedLaunchOutcome {
+    launch_request_id: String,
+    archive: Vec<u8>,
+    reason: HistoricalAttemptReason,
+}
+
+impl EngineRecord for QuarantinedLaunchOutcome {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for QuarantinedLaunchOutcome {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-quarantined-launch-outcome-v1")
     }
 }
 
@@ -3479,6 +3530,8 @@ trait UpgradesFlowFamilies {
     fn upgraded_launch_outcomes(
         &mut self,
         descriptor: TableDescriptor<StoredLaunchOutcome>,
+        _attempts: TableReference<StoredLaunchAttempt>,
+        quarantine: TableReference<QuarantinedLaunchOutcome>,
     ) -> Result<TableReference<StoredLaunchOutcome>, StoreError>;
     /// A 0.34 attempts table first moves aside whole each row older than
     /// 0.34's shape, then every row left is carried into the current shape.
@@ -3787,6 +3840,8 @@ impl UpgradesFlowFamilies for Engine {
     fn upgraded_launch_outcomes(
         &mut self,
         descriptor: TableDescriptor<StoredLaunchOutcome>,
+        attempts: TableReference<StoredLaunchAttempt>,
+        quarantine: TableReference<QuarantinedLaunchOutcome>,
     ) -> Result<TableReference<StoredLaunchOutcome>, StoreError> {
         // A store before Simplified and its presentation path were removed
         // holds v8 rows. A 0.40 store before CompositionRefusal holds v7 rows, a 0.35.22
@@ -3811,10 +3866,59 @@ impl UpgradesFlowFamilies for Engine {
         let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
-        match self.upgrade_table::<StoredLaunchOutcomeV8, StoredLaunchOutcome>(descriptor) {
+        let v8 = TableDescriptor::<StoredLaunchOutcomeV8>::new(
+            FLOW_LAUNCH_OUTCOME_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-outcome"),
+            StoredLaunchOutcomeV8::schema_hash(),
+        )
+        .family_identity();
+        if self
+            .catalog()
+            .family_identity(&FLOW_LAUNCH_OUTCOME_TABLE_NAME)
+            == Some(&v8)
+        {
+            self.settle_launch_outcomes(attempts, quarantine)?;
+        }
+        match self.upgrade_table_with_context::<
+            StoredLaunchOutcomeV8,
+            StoredLaunchOutcome,
+            StoredLaunchAttempt,
+            HistoricalAttemptReason,
+            _,
+        >(descriptor, attempts, |previous, attempts| {
+            let needs_address = previous.launch_outcome.needs_requirement_address();
+            let matches = attempts
+                .iter()
+                .filter(|(key, attempt)| {
+                    key == &previous.launch_request_id
+                        && attempt.attempt.launch_request_id == previous.launch_request_id
+                })
+                .collect::<Vec<_>>();
+            let address = match matches.as_slice() {
+                [(_, attempt)] => Some(attempt.attempt.launch_profile.address.clone()),
+                [] if needs_address => return Decision::Refused(HistoricalAttemptReason::Missing),
+                _ if needs_address => {
+                    return Decision::Refused(HistoricalAttemptReason::Ambiguous);
+                }
+                _ => None,
+            };
+            Decision::Ready(StoredLaunchOutcome {
+                launch_request_id: previous.launch_request_id,
+                launch_outcome: match address {
+                    Some(address) => previous.launch_outcome.with_requirement_address(address),
+                    None => previous.launch_outcome.into(),
+                },
+            })
+        }) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
-            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
+            UpgradeOutcome::Refused(refusal) => {
+                return Err(StoreError::LaunchOutcomeUpgrade(format!(
+                    "launch {:?} has {:?} historical attempt",
+                    refusal.key(),
+                    refusal.reason()
+                )));
+            }
             UpgradeOutcome::Failed(failure) if admission(&failure) => {}
             UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
         }
@@ -3999,6 +4103,7 @@ pub struct FlowStore {
     roles: TableReference<StoredRole>,
     meta_configuration_tables: MetaConfigurationTables,
     quarantined_launch_attempts: TableReference<QuarantinedLaunchAttempt>,
+    quarantined_launch_outcomes: TableReference<QuarantinedLaunchOutcome>,
     delivery_tables: DeliveryTables,
     event_tables: events::EventTables,
     context_sizes: TableReference<context::FlowContextSize>,
@@ -4671,6 +4776,12 @@ impl OpensFlowStore for FlowStore {
                 FamilyName::new("flow-nexus-quarantined-launch-attempt"),
                 SchemaHash::for_label("flow-nexus-quarantined-launch-attempt-v1"),
             );
+        let quarantined_launch_outcomes_descriptor =
+            TableDescriptor::<QuarantinedLaunchOutcome>::new(
+                FLOW_QUARANTINED_LAUNCH_OUTCOME_TABLE_NAME,
+                FamilyName::new("flow-nexus-quarantined-launch-outcome"),
+                QuarantinedLaunchOutcome::schema_hash(),
+            );
         let delivery_descriptor = TableDescriptor::<delivery::StoredDelivery>::new(
             delivery::DELIVERY_TABLE_NAME,
             FamilyName::new("flow-nexus-delivery"),
@@ -4728,6 +4839,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&replacements_descriptor)
                 .with_family(&roles_descriptor)
                 .with_family(&quarantined_launch_attempts_descriptor)
+                .with_family(&quarantined_launch_outcomes_descriptor)
                 .with_family(&delivery_descriptor)
                 .with_family(&pane_lease_descriptor)
                 .with_family(&delivery_configuration_descriptor)
@@ -4768,10 +4880,16 @@ impl OpensFlowStore for FlowStore {
         let herdr_routes = engine.register_table(herdr_routes_descriptor)?;
         let quarantined_launch_attempts =
             engine.register_table(quarantined_launch_attempts_descriptor)?;
+        let quarantined_launch_outcomes =
+            engine.register_table(quarantined_launch_outcomes_descriptor)?;
         let (launch_attempts, opening_settlements) = engine
             .upgraded_launch_attempts(launch_attempts_descriptor, quarantined_launch_attempts)?;
         let launch_panes = engine.register_table(launch_panes_descriptor)?;
-        let launch_outcomes = engine.upgraded_launch_outcomes(launch_outcomes_descriptor)?;
+        let launch_outcomes = engine.upgraded_launch_outcomes(
+            launch_outcomes_descriptor,
+            launch_attempts,
+            quarantined_launch_outcomes,
+        )?;
         let replacements = engine.register_table(replacements_descriptor)?;
         let roles = engine.register_table(roles_descriptor)?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
@@ -4812,6 +4930,7 @@ impl OpensFlowStore for FlowStore {
             roles,
             meta_configuration_tables,
             quarantined_launch_attempts,
+            quarantined_launch_outcomes,
             delivery_tables,
             event_tables,
             context_sizes,
@@ -4903,20 +5022,18 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-launch-pane"),
             SchemaHash::for_label("flow-nexus-launch-pane-v1"),
         ))?;
-        let launch_outcomes = engine.upgraded_launch_outcomes(
-            TableDescriptor::new(
-                FLOW_LAUNCH_OUTCOME_TABLE_NAME,
-                FamilyName::new("flow-nexus-launch-outcome"),
-                StoredLaunchOutcome::schema_hash(),
-            )
-            .with_predecessor::<StoredLaunchOutcomeV2>()
-            .with_predecessor::<StoredLaunchOutcomeV3>()
-            .with_predecessor::<StoredLaunchOutcomeV4>()
-            .with_predecessor::<StoredLaunchOutcomeV5>()
-            .with_predecessor::<StoredLaunchOutcomeV6>()
-            .with_predecessor::<StoredLaunchOutcomeV7>()
-            .with_predecessor::<StoredLaunchOutcomeV8>(),
-        )?;
+        let launch_outcomes_descriptor = TableDescriptor::new(
+            FLOW_LAUNCH_OUTCOME_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-outcome"),
+            StoredLaunchOutcome::schema_hash(),
+        )
+        .with_predecessor::<StoredLaunchOutcomeV2>()
+        .with_predecessor::<StoredLaunchOutcomeV3>()
+        .with_predecessor::<StoredLaunchOutcomeV4>()
+        .with_predecessor::<StoredLaunchOutcomeV5>()
+        .with_predecessor::<StoredLaunchOutcomeV6>()
+        .with_predecessor::<StoredLaunchOutcomeV7>()
+        .with_predecessor::<StoredLaunchOutcomeV8>();
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -4932,6 +5049,11 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-quarantined-launch-attempt"),
             SchemaHash::for_label("flow-nexus-quarantined-launch-attempt-v1"),
         ))?;
+        let quarantined_launch_outcomes = engine.register_table(TableDescriptor::new(
+            FLOW_QUARANTINED_LAUNCH_OUTCOME_TABLE_NAME,
+            FamilyName::new("flow-nexus-quarantined-launch-outcome"),
+            QuarantinedLaunchOutcome::schema_hash(),
+        ))?;
         let (launch_attempts, opening_settlements) = engine.upgraded_launch_attempts(
             TableDescriptor::new(
                 FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
@@ -4943,6 +5065,11 @@ impl OpensFlowStore for FlowStore {
             .with_predecessor::<StoredLaunchAttemptV3>()
             .with_predecessor::<StoredLaunchAttemptV4>(),
             quarantined_launch_attempts,
+        )?;
+        let launch_outcomes = engine.upgraded_launch_outcomes(
+            launch_outcomes_descriptor,
+            launch_attempts,
+            quarantined_launch_outcomes,
         )?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
         let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
@@ -4996,6 +5123,7 @@ impl OpensFlowStore for FlowStore {
             roles,
             meta_configuration_tables,
             quarantined_launch_attempts,
+            quarantined_launch_outcomes,
             delivery_tables,
             event_tables,
             context_sizes,
@@ -5700,6 +5828,114 @@ impl SettlesLaunchAttempts for Engine {
             .filter(|quarantined| quarantined.launch_request_id == launch_request_id)
             .cloned()
             .collect())
+    }
+}
+
+trait SettlesLaunchOutcomes {
+    /// Moves a v8 NoSecondary outcome whose historical attempt cannot name
+    /// exactly one Address into a durable archive before the remaining v8
+    /// family is upgraded. The surrounding staged store open activates the
+    /// archive, retraction, and family upgrade together.
+    fn settle_launch_outcomes(
+        &mut self,
+        attempts: TableReference<StoredLaunchAttempt>,
+        quarantine: TableReference<QuarantinedLaunchOutcome>,
+    ) -> Result<(), StoreError>;
+    fn launch_outcome_archives(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError>;
+}
+
+impl SettlesLaunchOutcomes for Engine {
+    fn settle_launch_outcomes(
+        &mut self,
+        _attempts: TableReference<StoredLaunchAttempt>,
+        quarantine: TableReference<QuarantinedLaunchOutcome>,
+    ) -> Result<(), StoreError> {
+        let attempts = self
+            .launch_attempt_archives()?
+            .into_iter()
+            .filter_map(|(key, archive)| {
+                rkyv::from_bytes::<StoredLaunchAttempt, rkyv::rancor::Error>(&archive)
+                    .ok()
+                    .map(|attempt| (key, attempt))
+            })
+            .collect::<Vec<_>>();
+        let mut predecessor = None;
+        for (stored_key, archive) in self.launch_outcome_archives()? {
+            let Ok(previous) =
+                rkyv::from_bytes::<StoredLaunchOutcomeV8, rkyv::rancor::Error>(&archive)
+            else {
+                continue;
+            };
+            if !previous.launch_outcome.needs_requirement_address() {
+                continue;
+            }
+            let exact = attempts
+                .iter()
+                .filter(|(key, attempt)| {
+                    key == &previous.launch_request_id
+                        && attempt.attempt.launch_request_id == previous.launch_request_id
+                })
+                .count();
+            if exact == 1 {
+                continue;
+            }
+            let related = attempts.iter().any(|(key, attempt)| {
+                key == &previous.launch_request_id
+                    || attempt.attempt.launch_request_id == previous.launch_request_id
+            });
+            let reason = if exact > 1 || related || stored_key != previous.launch_request_id {
+                HistoricalAttemptReason::Ambiguous
+            } else {
+                HistoricalAttemptReason::Missing
+            };
+            let old = match predecessor {
+                Some(table) => table,
+                None => {
+                    let table =
+                        self.register_table(TableDescriptor::<StoredLaunchOutcomeV8>::new(
+                            FLOW_LAUNCH_OUTCOME_TABLE_NAME,
+                            FamilyName::new("flow-nexus-launch-outcome"),
+                            StoredLaunchOutcomeV8::schema_hash(),
+                        ))?;
+                    predecessor = Some(table);
+                    table
+                }
+            };
+            self.commit_atomic(
+                self.begin_atomic_commit()
+                    .retract(old, RecordKey::new(stored_key.clone()))
+                    .assert(
+                        quarantine,
+                        QuarantinedLaunchOutcome {
+                            launch_request_id: stored_key,
+                            archive,
+                            reason,
+                        },
+                    ),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn launch_outcome_archives(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        let definition =
+            redb::TableDefinition::<String, &[u8]>::new(FLOW_LAUNCH_OUTCOME_TABLE_NAME.as_str());
+        Ok(self
+            .storage_reader()
+            .read(|transaction| {
+                let table = match transaction.open_table(definition) {
+                    Ok(table) => table,
+                    Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+                    Err(error) => return Err(error.into()),
+                };
+                let mut rows = Vec::new();
+                for entry in redb::ReadableTable::iter(&table)? {
+                    let (key, archive) = entry?;
+                    rows.push((key.value(), archive.value().to_vec()));
+                }
+                Ok(rows)
+            })
+            .map_err(sema_engine::Error::from)?)
     }
 }
 
@@ -7609,6 +7845,10 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-quarantined-launch-attempt",
                 "flow-nexus-quarantined-launch-attempt-v1",
             ),
+            "flow_nexus_quarantined_launch_outcomes" => (
+                "flow-nexus-quarantined-launch-outcome",
+                "flow-nexus-quarantined-launch-outcome-v1",
+            ),
             "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v5"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
@@ -9209,8 +9449,8 @@ mod tests {
     use crate::store::RegistersBindings;
     use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
     use sema_engine::{
-        Assertion, Engine, EngineOpen, EngineRecord, FamilyName, QueryPlan, SchemaHash,
-        SchemaVersion, TableDescriptor, TableName,
+        Assertion, Engine, EngineOpen, EngineRecord, FamilyName, MemoryDefinition, QueryPlan,
+        RecordKey, SchemaHash, SchemaVersion, TableDescriptor, TableName,
     };
     use signal_flow::{
         Address, Aspect, BindingRefusal, Caller, ComposedLaunch, FirstPromptPayload, FlowOrigin,
@@ -9468,6 +9708,42 @@ mod tests {
                 engine
                     .assert(Assertion::new(outcomes, row))
                     .expect("outcome persists");
+            }
+        }
+
+        fn seed_v8_outcomes_replacing(
+            &self,
+            rows: impl IntoIterator<Item = StoredLaunchOutcomeV8>,
+        ) {
+            if self.path().exists() {
+                let database = redb::Database::open(self.path()).expect("store opens directly");
+                let write = database.begin_write().expect("catalog transaction starts");
+                {
+                    let mut catalog = write
+                        .open_table(super::SEMA_CATALOG_TABLE)
+                        .expect("catalog opens");
+                    catalog
+                        .remove(super::FLOW_LAUNCH_OUTCOME_TABLE_NAME.as_str())
+                        .expect("outcome family removes");
+                }
+                let _ = write.delete_table(redb::TableDefinition::<&str, &[u8]>::new(
+                    super::FLOW_LAUNCH_OUTCOME_TABLE_NAME.as_str(),
+                ));
+                write.commit().expect("old outcome family deletion commits");
+            }
+            let mut engine = Engine::open(EngineOpen::new(self.path(), SchemaVersion::new(1)))
+                .expect("outcome store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::new(
+                    super::FLOW_LAUNCH_OUTCOME_TABLE_NAME,
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    StoredLaunchOutcomeV8::schema_hash(),
+                ))
+                .expect("v8 outcome family registers");
+            for row in rows {
+                engine
+                    .assert(Assertion::new(outcomes, row))
+                    .expect("v8 outcome persists");
             }
         }
 
@@ -12140,6 +12416,163 @@ mod tests {
                     signal_flow::CompositionRefusal::InvalidModelName
                 )
             ))
+        );
+    }
+
+    #[test]
+    fn v8_no_secondary_uses_the_unique_attempt_address_and_reopens_idempotently() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        let launch = fixture.composed_launch("v8-requirement", &"7".repeat(64));
+        assert!(matches!(
+            store
+                .reserve_launch_attempt(&launch, Origin::Unbound)
+                .expect("attempt persists"),
+            LaunchAttemptReservation::Reserved(_)
+        ));
+        drop(store);
+        fixture.seed_v8_outcomes_replacing([StoredLaunchOutcomeV8 {
+            launch_request_id: "v8-requirement".into(),
+            launch_outcome: LaunchOutcomeV8::StartRejected(StartRejectionV34::NoSecondary),
+        }]);
+
+        let store = fixture.store();
+        assert_eq!(
+            store
+                .launch_outcome("v8-requirement")
+                .expect("outcome reads"),
+            Some(LaunchOutcome::StartRejected(
+                StartRejection::RequirementUnmet(launch.launch_profile.address.clone())
+            ))
+        );
+        assert!(store
+            .engine
+            .match_records(QueryPlan::all(store.quarantined_launch_outcomes))
+            .expect("archive reads")
+            .records()
+            .is_empty());
+        drop(store);
+
+        let reopened = fixture.store();
+        assert_eq!(
+            reopened
+                .launch_outcome("v8-requirement")
+                .expect("reopened outcome reads"),
+            Some(LaunchOutcome::StartRejected(
+                StartRejection::RequirementUnmet(launch.launch_profile.address)
+            ))
+        );
+    }
+
+    #[test]
+    fn v8_no_secondary_without_its_attempt_is_archived_whole_and_not_fabricated() {
+        let fixture = StoreFixture::new();
+        let initial = fixture.store();
+        initial
+            .reserve_launch_attempt(
+                &fixture.composed_launch("unrelated-attempt", &"8".repeat(64)),
+                Origin::Unbound,
+            )
+            .expect("unrelated attempt persists");
+        drop(initial);
+        let previous = StoredLaunchOutcomeV8 {
+            launch_request_id: "v8-missing-attempt".into(),
+            launch_outcome: LaunchOutcomeV8::ReplaceRejected(ReplaceRejectionV34::LaunchRefused(
+                StartRejectionV34::NoSecondary,
+            )),
+        };
+        let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&previous)
+            .expect("v8 outcome archives")
+            .to_vec();
+        fixture.seed_v8_outcomes_replacing([previous]);
+
+        let store = fixture.store();
+        assert_eq!(
+            store
+                .launch_outcome("v8-missing-attempt")
+                .expect("active outcomes read"),
+            None
+        );
+        assert_eq!(
+            store
+                .engine
+                .match_records(QueryPlan::all(store.quarantined_launch_outcomes))
+                .expect("archive reads")
+                .records(),
+            &[super::QuarantinedLaunchOutcome {
+                launch_request_id: "v8-missing-attempt".into(),
+                archive,
+                reason: super::HistoricalAttemptReason::Missing,
+            }]
+        );
+        drop(store);
+
+        let reopened = fixture.store();
+        assert_eq!(
+            reopened
+                .engine
+                .match_records(QueryPlan::all(reopened.quarantined_launch_outcomes))
+                .expect("reopened archive reads")
+                .records()
+                .len(),
+            1,
+            "reopening neither activates nor duplicates the archived row"
+        );
+    }
+
+    #[test]
+    fn v8_no_secondary_with_a_conflicting_attempt_is_archived_as_ambiguous() {
+        let fixture = StoreFixture::new();
+        let store = fixture.store();
+        store
+            .reserve_launch_attempt(
+                &fixture.composed_launch("different-request", &"6".repeat(64)),
+                Origin::Unbound,
+            )
+            .expect("attempt persists");
+        let conflicting = store
+            .stored_launch_attempt("different-request")
+            .expect("attempt reads")
+            .expect("attempt exists");
+        drop(store);
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("store opens");
+            let attempts = engine
+                .register_table(TableDescriptor::new(
+                    super::FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+                    FamilyName::new("flow-nexus-launch-attempt"),
+                    super::StoredLaunchAttempt::schema_hash(),
+                ))
+                .expect("attempt family registers");
+            engine
+                .assert_keyed(sema_engine::KeyedAssertion::new(
+                    attempts,
+                    RecordKey::new("v8-conflicting-attempt"),
+                    conflicting,
+                ))
+                .expect("conflicting keyed attempt persists");
+        }
+        fixture.seed_v8_outcomes_replacing([StoredLaunchOutcomeV8 {
+            launch_request_id: "v8-conflicting-attempt".into(),
+            launch_outcome: LaunchOutcomeV8::StartRejected(StartRejectionV34::NoSecondary),
+        }]);
+
+        let store = fixture.store();
+        let archived = store
+            .engine
+            .match_records(QueryPlan::all(store.quarantined_launch_outcomes))
+            .expect("archive reads");
+        assert_eq!(archived.records().len(), 1);
+        assert_eq!(
+            archived.records()[0].reason,
+            super::HistoricalAttemptReason::Ambiguous
+        );
+        assert_eq!(
+            store
+                .launch_outcome("v8-conflicting-attempt")
+                .expect("active outcomes read"),
+            None
         );
     }
 

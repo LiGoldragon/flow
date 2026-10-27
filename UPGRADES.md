@@ -1,5 +1,9 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 4 adds typed Line, Keys and Clear owner commands and ReadPane. Keys
+carry the exact Herdr keys; they are admitted in a Blocked pane. Line and
+Clear require Gate.Forced there. Flow pins meta-signal-flow 43.0.0.
+
 Batch 3 adds `Gate.Kept` and `Gate.Forced` to privileged delivery, command,
 and retire requests. Kept preserves threshold and continuity refusals; Forced
 overrides them. Existing queued delivery records upgrade as Kept.

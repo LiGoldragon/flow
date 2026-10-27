@@ -540,6 +540,7 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::Deliver(request) => self.deliver(request),
             meta_signal_flow::Query::Vet(request) => self.vet(&request),
             meta_signal_flow::Query::Command(request) => self.command(request),
+            meta_signal_flow::Query::ReadPane(flow_id) => self.read_pane(&flow_id),
             meta_signal_flow::Query::ResolvePeer(identity) => self.resolve_peer(&identity),
             meta_signal_flow::Query::ReadEvents(flow_id) => self.read_events(flow_id),
             meta_signal_flow::Query::ReadQueueDeliveries(address) => {

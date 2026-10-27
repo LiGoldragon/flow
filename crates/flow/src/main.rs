@@ -31,12 +31,56 @@ trait TextualizesFlowReply {
 
 impl ParsesFlowCommand for FlowClient {
     fn parse_command(&self, mut arguments: impl Iterator<Item = String>) -> Result<Query, String> {
-        let Some(value) = arguments.next() else {
+        let mut arguments = arguments.collect::<Vec<_>>();
+        // The message edge is intentionally plain words: callers do not have
+        // to manufacture datom syntax.  The Nexus still receives the same
+        // typed Send as the datom surface.
+        if arguments.len() >= 3 && !arguments[0].contains('.') {
+            let address = format!("Address.{{ {} }}", arguments.remove(0));
+            let kind = arguments.remove(0).to_ascii_lowercase();
+            let mut budget = Budget {
+                remaining: 65_536,
+                reader: ReaderBudget { remaining: 65_536 },
+                depth: 0,
+                maximum_depth: 1_024,
+            };
+            let recipient = Recipient::Address(
+                Potential::<signal_flow::Address>::from(address)
+                    .actualize(&mut budget)
+                    .map_err(|error| format!("invalid recipient: {error:?}"))?,
+            );
+            let request = match kind.as_str() {
+                "order" | "result" | "notice" | "question" if arguments.len() == 1 => {
+                    let words = arguments.remove(0);
+                    match kind.as_str() {
+                        "order" => signal_flow::Request::Order(words),
+                        "result" => signal_flow::Request::Result(words),
+                        "notice" => signal_flow::Request::Notice(words),
+                        _ => signal_flow::Request::Question(words),
+                    }
+                }
+                "psyche" if arguments.len() == 2 => {
+                    signal_flow::Request::Psyche(flow_ethos::Said {
+                        context: arguments.remove(0),
+                        verbatim: arguments.remove(0),
+                    })
+                }
+                _ => {
+                    return Err(
+                        "usage: flow '<address>' <order|result|notice|question|psyche> <words>"
+                            .into(),
+                    );
+                }
+            };
+            return Ok(Query::Send(SendRequest {
+                recipient,
+                delivery: Delivery::Wake,
+                message: Message::Soft(request),
+            }));
+        }
+        let Some(value) = arguments.into_iter().next() else {
             return Err("usage: flow '<one inline Query datom>'".into());
         };
-        if arguments.next().is_some() {
-            return Err("usage: flow '<one inline Query datom>'".into());
-        }
         let mut budget = Budget {
             remaining: 65_536,
             reader: ReaderBudget { remaining: 65_536 },
@@ -209,6 +253,28 @@ mod tests {
                 .expect("DeliverAll parses"),
             Query::DeliverAll(_)
         ));
+    }
+
+    #[test]
+    fn plain_message_arguments_become_a_typed_send() {
+        let client = FlowClient {
+            socket: "unused".into(),
+        };
+        let Query::Send(send) = client
+            .parse_command(
+                ["Psyche core Secondary", "notice", "batch 1 is in a commit"]
+                    .into_iter()
+                    .map(String::from),
+            )
+            .expect("plain message arguments parse")
+        else {
+            panic!("plain message is Send")
+        };
+        assert_eq!(send.delivery, Delivery::Wake);
+        assert_eq!(
+            send.message,
+            Message::Soft(Request::Notice("batch 1 is in a commit".into()))
+        );
     }
 
     #[test]

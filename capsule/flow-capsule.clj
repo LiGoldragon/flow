@@ -41,6 +41,7 @@
 (def meta-socket (str capsule-runtime "/flow-meta.sock"))
 (def state-root (str home "/.local/state/flow-testing"))
 (def capsule-home (str state-root "/home"))
+(def capsule-bin (str state-root "/bin"))
 (def store-path (str state-root "/flow.sema"))
 (def herdr-session-dir (str home "/.config/herdr/sessions/" session))
 (def curriculum-socket (str capsule-runtime "/curriculum/curriculum.sock"))
@@ -54,6 +55,7 @@
 (def claude-root (str home "/.claude"))
 (def shared-claude-config (str home "/.claude.json"))
 (def shared-claude-config-baseline (atom nil))
+(def host-claude (str (fs/canonicalize (fs/which "claude"))))
 ;; Claude names a project's transcript directory by its working directory,
 ;; every character but a letter or digit written as a dash.
 (def capsule-transcripts (str claude-root "/projects/" (str/replace source-root #"[^A-Za-z0-9]" "-")))
@@ -151,15 +153,11 @@
   "The only environment any capsule process receives."
   ([] (clean-env {}))
   ([extra]
-   (merge {"HOME" capsule-home
-           ;; Credentials and harness-owned transcripts stay in the configured
-           ;; Claude directory; HOME is private, so Claude's host project
-           ;; registry is never opened or rewritten by the capsule.
-           "CLAUDE_CONFIG_DIR" claude-root
+   (merge {"HOME" home
            "USER" (or (System/getenv "USER") "")
            "LOGNAME" (or (System/getenv "LOGNAME") (System/getenv "USER") "")
            "SHELL" (or (System/getenv "SHELL") "/bin/sh")
-           "PATH" (str @package "/bin:" (System/getenv "PATH"))
+           "PATH" (str capsule-bin ":" @package "/bin:" (System/getenv "PATH"))
            "XDG_RUNTIME_DIR" capsule-runtime
            "LANG" (or (System/getenv "LANG") "C.UTF-8")
            "TERM" "xterm-256color"}
@@ -553,6 +551,13 @@
   (fs/delete-tree state-root)
   (fs/create-dirs state-root)
   (fs/create-dirs capsule-home)
+  (fs/create-dirs capsule-bin)
+  ;; Only the harness process named `claude` receives the private HOME. Herdr,
+  ;; Flow and the user's other processes keep their own HOME and configuration.
+  (let [wrapper (str capsule-bin "/claude")]
+    (spit wrapper (str "#!/bin/sh\nexec env HOME='" capsule-home
+                       "' CLAUDE_CONFIG_DIR='" claude-root "' '" host-claude "' \"$@\"\n"))
+    (fs/set-posix-file-permissions wrapper "rwx------"))
   (fs/create-dirs capsule-runtime)
   (fs/create-dirs capsule-flows)
   (reset! herdr-server (p/process ["herdr" "--session" session "server"]
@@ -755,7 +760,7 @@
                      (:shared-claude-config-preserved remaining))]
       (print-line {:name "13 teardown" :reply (pr-str remaining) :pass clean
                    :ms (- (System/currentTimeMillis) started)
-                   :watched (str "only the preflight-empty Herdr session and capsule-owned paths/process environments; test-owned store, source root, sockets, Curriculum handle/context/socket and flow/session traces; the host ~/.claude.json bytes are baselined and must remain identical while Claude uses the capsule-private HOME")})
+                   :watched (str "only the preflight-empty Herdr session and capsule-owned paths/process environments; test-owned store, source root, sockets, Curriculum handle/context/socket and flow/session traces; the host ~/.claude.json bytes are baselined and must remain identical while a capsule-only Claude wrapper supplies the private HOME")})
       clean)))
 
 (defn -main [& args]

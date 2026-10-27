@@ -114,7 +114,6 @@ fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Conti
                 address: address(Layer::Secondary),
                 system_modules: vec!["spirit:core".into(), "intent:flow".into()],
                 user_modules: vec![],
-                flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity,
                 purpose: String::new(),

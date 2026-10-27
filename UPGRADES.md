@@ -24,6 +24,17 @@ on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`
 branch, whose schema it carries. Every ordinary and meta peer repins, and
 Curriculum serves that schema.
 
+- A metaflow has one launch path: `FlowKind` and the Simplified path are
+  removed from both contracts. Metaflow declarations upgrade v4 to v5 and
+  launch attempts v4 to v5 by dropping that position while preserving the
+  declared `ToolSet`; the simplified reply-binding table is retired.
+- The presentation role is the ordinary belief module named by the Psyche
+  core Primary declaration. Curriculum's effective placement from a
+  module's `placement: system | user` header overrides the kind default.
+  `FLOW_CORE_PRESENTATION_PROMPT` and its launch refusal are gone.
+- Launch outcomes upgrade v8 to v9. Archived `InvalidToolSet` and
+  `PresentationUnavailable` composition refusals read as `Unrecorded`; all
+  other outcomes retain their data.
 - An abrupt request may use `Delivery.Queue`; it enters the recipient's
   durable queue and answers `SendAccepted` instead of
   `Failed.QueueNotPermitted`. Pins signal-flow 34.0.0. Send outcomes,

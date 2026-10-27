@@ -298,7 +298,7 @@
   []
   (let [line (first (filter #(str/starts-with? % "Configure.Metaflows.")
                             (str/split-lines (slurp (fs/file libexec "configure.datom")))))]
-    (str/replace-first line "Simplified Explicit.[] Maintained" "Simplified Explicit.[] OnDemand")))
+    (str/replace-first line "Explicit.[] Maintained" "Explicit.[] OnDemand")))
 
 (defn launch [addr] (flow (str "Launch.{ " addr " Predecessors.0 «" brief "» }")))
 

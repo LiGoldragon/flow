@@ -152,7 +152,6 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
             },
             system_modules: vec!["spirit-core".into()],
             user_modules: vec![],
-            flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: meta_signal_flow::Continuity::OnDemand,
             purpose: String::new(),

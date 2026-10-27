@@ -4048,7 +4048,6 @@ mod tests {
                 launch_request_id: launch_request_id.into(),
                 system_modules: vec!["spirit-core".into(), "intent-flow".into()],
                 user_modules: vec!["operation-main-flow".into()],
-                flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 // Each staged launch is the seat of its own Address, its
                 // topic the request id with its hyphens taken out.
@@ -5209,7 +5208,6 @@ mod tests {
                         address: declared.clone(),
                         system_modules: vec!["spirit-core".into()],
                         user_modules: vec!["knowledge-flow".into()],
-                        flow_kind: signal_flow::FlowKind::Regular,
                         tool_set: signal_flow::ToolSet::Default,
                         continuity: meta_signal_flow::Continuity::OnDemand,
                         purpose: "Publishes the books.".into(),

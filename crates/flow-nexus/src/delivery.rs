@@ -155,10 +155,28 @@ pub trait ReadsLeasedPane {
     /// Blocked, and its composer blank. A pane Herdr shows gone records the
     /// flow Exited, where that observation is made.
     fn writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal>;
+    /// The same read for an owner-forced write. A blocked state is then
+    /// writable, while route, readiness and a person's composer remain
+    /// protected exactly as for a kept write.
+    fn forced_writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal>;
 }
 
 impl ReadsLeasedPane for RunningNexus {
     fn writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
+        self.writable_state_with(target, false)
+    }
+
+    fn forced_writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
+        self.writable_state_with(target, true)
+    }
+}
+
+impl RunningNexus {
+    fn writable_state_with(
+        &self,
+        target: &DeliveryTarget,
+        permit_blocked: bool,
+    ) -> Result<AgentState, PaneRefusal> {
         let agent_state = match self.herdr.pane_agent(&target.node) {
             PaneAgent::Present {
                 agent_state,
@@ -174,7 +192,7 @@ impl ReadsLeasedPane for RunningNexus {
                 return Err(PaneRefusal::RouteUnavailable);
             }
         };
-        if agent_state == AgentState::Blocked {
+        if agent_state == AgentState::Blocked && !permit_blocked {
             return Err(PaneRefusal::RecipientBlocked);
         }
         match self
@@ -215,6 +233,7 @@ impl DeliversMessages for RunningNexus {
         // message.
         match self.store.past_threshold(&target.node.flow_id) {
             Ok(false) => {}
+            Ok(true) if matches!(request.gate, meta_signal_flow::Gate::Forced) => {}
             Ok(true) => return Response::DeliveryRejected(DeliveryRejection::PastThreshold),
             Err(_) => return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused),
         }
@@ -243,7 +262,9 @@ impl DeliversMessages for RunningNexus {
         };
         // Compaction is an emergency measure: below its model's refresh
         // threshold it is refused before anything reaches the pane.
-        if request.harness_command == HarnessCommand::Compact {
+        if request.harness_command == HarnessCommand::Compact
+            && matches!(request.gate, meta_signal_flow::Gate::Kept)
+        {
             match self.store.compaction_refusal(&target.node.flow_id) {
                 Ok(None) => {}
                 Ok(Some(refusal)) => {
@@ -486,10 +507,18 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             }
             agent_state
         } else {
-            self.nexus.writable_state(self.target)?
+            if matches!(self.request.gate, meta_signal_flow::Gate::Forced) {
+                self.nexus.forced_writable_state(self.target)?
+            } else {
+                self.nexus.writable_state(self.target)?
+            }
         };
         let soft = matches!(self.request.message, Message::Soft(_));
-        if soft && !matches!(agent_state, AgentState::Idle | AgentState::Done) {
+        if soft
+            && !matches!(agent_state, AgentState::Idle | AgentState::Done)
+            && !(matches!(self.request.gate, meta_signal_flow::Gate::Forced)
+                && agent_state == AgentState::Blocked)
+        {
             return Err(DeliveryRejection::RecipientWorking);
         }
         self.step(LeaseStep::Acquired)?;
@@ -517,13 +546,20 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             // other text it put back into a blank composer is the prompt of
             // the turn it cancelled: that prompt is submitted again, never
             // left behind to hold the pane and never deleted.
-            agent_state = match self.nexus.writable_state(self.target) {
+            let read_after_interrupt = || {
+                if matches!(self.request.gate, meta_signal_flow::Gate::Forced) {
+                    self.nexus.forced_writable_state(self.target)
+                } else {
+                    self.nexus.writable_state(self.target)
+                }
+            };
+            agent_state = match read_after_interrupt() {
                 Ok(agent_state) => agent_state,
                 Err(PaneRefusal::ComposerOccupied)
                     if self.retracted_restored_letter()
                         || (composer_was_blank && self.resubmitted_cancelled_prompt()) =>
                 {
-                    match self.nexus.writable_state(self.target) {
+                    match read_after_interrupt() {
                         Ok(agent_state) => agent_state,
                         Err(refusal) => return self.refuse(refusal.into()),
                     }
@@ -531,7 +567,11 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
                 Err(refusal) => return self.refuse(refusal.into()),
             };
         } else if hard {
-            agent_state = self.nexus.writable_state(self.target)?;
+            agent_state = if matches!(self.request.gate, meta_signal_flow::Gate::Forced) {
+                self.nexus.forced_writable_state(self.target)?
+            } else {
+                self.nexus.writable_state(self.target)?
+            };
         }
         let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
         let text = self.request.message.pane_text();

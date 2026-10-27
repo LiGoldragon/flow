@@ -529,14 +529,16 @@
       (count (filter (fn [line] (some #(str/includes? line %) natives)) (str/split-lines (slurp file))))
       0)))
 
+(defn config-project-entry? [file]
+  (boolean (and (fs/exists? file)
+                (contains? (get (try (json/parse-string (slurp file)) (catch Exception _ {})) "projects" {})
+                           source-root))))
+
 (defn project-entry?
   "Whether Claude's capsule-private configuration holds an entry for the
   capsule source root."
   []
-  (let [file (str capsule-home "/.claude.json")]
-    (boolean (and (fs/exists? file)
-                  (contains? (get (try (json/parse-string (slurp file)) (catch Exception _ {})) "projects" {})
-                             source-root)))))
+  (config-project-entry? (str capsule-home "/.claude.json")))
 
 (defn refuse [why] (binding [*out* *err*] (println "flow-capsule:" why)) (System/exit 2))
 
@@ -547,7 +549,8 @@
   (reset! shared-claude-config-baseline
           {:exists (fs/exists? shared-claude-config)
            :bytes (when (fs/exists? shared-claude-config)
-                    (java.nio.file.Files/readAllBytes (fs/path shared-claude-config)))})
+                    (java.nio.file.Files/readAllBytes (fs/path shared-claude-config)))
+           :capsule-project (config-project-entry? shared-claude-config)})
   (fs/delete-tree state-root)
   (fs/create-dirs state-root)
   (fs/create-dirs capsule-home)
@@ -757,15 +760,17 @@
                      :traces (traces @natives-seen)
                      :history-lines (history-lines @natives-seen)
                      :claude-project-entry (project-entry?)
-                     :shared-claude-config-preserved shared-preserved}
+                     :shared-claude-bytes-unchanged shared-preserved
+                     :shared-capsule-entry-preserved (= (:capsule-project @shared-claude-config-baseline)
+                                                        (config-project-entry? shared-claude-config))}
           clean (and (not (:herdr-session remaining)) (empty? (:processes remaining)) (not (:store remaining))
                      (not (:sockets remaining)) (not (:source-root remaining)) (empty? (:traces remaining))
                      (not (:curriculum-process remaining)) (not (:curriculum-store remaining))
                      (not (:curriculum-socket remaining))
-                     (:shared-claude-config-preserved remaining))]
+                     (:shared-capsule-entry-preserved remaining))]
       (print-line {:name "13 teardown" :reply (pr-str remaining) :pass clean
                    :ms (- (System/currentTimeMillis) started)
-                   :watched (str "only the preflight-empty Herdr session and capsule-owned paths/process environments; test-owned store, source root, sockets, Curriculum handle/context/socket and flow/session traces; the host ~/.claude.json bytes are baselined and must remain identical while a capsule-only Claude wrapper supplies the private HOME")})
+                   :watched (str "only the preflight-empty Herdr session and capsule-owned paths/process environments; test-owned store, source root, sockets, Curriculum handle/context/socket and flow/session traces; the host ~/.claude.json capsule-project entry is baselined and must remain identical; its whole-file byte comparison is reported but does not reject unrelated concurrent writes, while a capsule-only Claude wrapper supplies private HOME and CLAUDE_CONFIG_DIR")})
       clean)))
 
 (defn -main [& args]

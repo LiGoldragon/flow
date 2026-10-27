@@ -14,8 +14,8 @@
 use crate::RunningNexus;
 use crate::binding::{ChecksProcessIdentity, ReadsProcessIdentity};
 use crate::caller::{CallerProcess, LocatesCallerPane, ReadsProcess, ResolvesCaller};
-use crate::store::delivery::RecordsDeliveries;
 use crate::store::ManagesMetaflowState;
+use crate::store::delivery::RecordsDeliveries;
 use meta_signal_flow::{MetaRefusal, ProcessIdentity, ResolverIdentity, Response};
 use signal_flow::CallerResolutionRejection;
 use std::fs;

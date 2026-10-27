@@ -27,6 +27,7 @@ impl NexusFixture {
     fn deliver(&self, delivery_id: &str, message: Message) -> MetaResponse {
         self.nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: delivery_id.into(),
                 flow_id: "908786".into(),
                 message,
@@ -116,6 +117,7 @@ impl NexusFixture {
 
     fn command(&self, harness_command: HarnessCommand) -> MetaResponse {
         self.nexus.dispatch_meta(MetaQuery::Command(CommandRequest {
+            gate: meta_signal_flow::Gate::Kept,
             flow_id: "908786".into(),
             harness_command,
         }))
@@ -351,6 +353,7 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
         );
         assert_eq!(
             fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: "vet".into(),
                 flow_id: "908786".into(),
                 message: middle_abrupt(text),
@@ -373,6 +376,7 @@ fn a_path_and_a_later_command_line_are_ordinary_text() {
         fixture.register_with(FlowLifecycle::Active);
         assert_eq!(
             fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: "vet".into(),
                 flow_id: "908786".into(),
                 message: middle_abrupt(text),
@@ -516,6 +520,7 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Command(CommandRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 flow_id: "908786".into(),
                 harness_command: HarnessCommand::Interrupt,
             })),
@@ -529,6 +534,7 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Command(CommandRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 flow_id: "908786".into(),
                 harness_command: HarnessCommand::Compact,
             })),
@@ -553,6 +559,7 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         resting
             .nexus
             .dispatch_meta(MetaQuery::Command(CommandRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 flow_id: "908786".into(),
                 harness_command: HarnessCommand::Interrupt,
             })),
@@ -760,6 +767,7 @@ fn a_deliver_into_a_flow_past_its_threshold_is_refused() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(meta_signal_flow::DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: "delivery-past".into(),
                 flow_id: "908786".into(),
                 message: middle_abrupt("one more thing"),

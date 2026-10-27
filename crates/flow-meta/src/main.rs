@@ -296,7 +296,7 @@ mod tests {
         };
         let Query::Deliver(request) = client
             .parse_command(
-                ["Deliver.{ m-7f3a2c:7d41e0:0 7d41e0 Soft.{ m-7f3a2c Flow.e167d8 Text.«Stage 1 is deployed; run the tier tests.» } }".into()]
+                ["Deliver.{ m-7f3a2c:7d41e0:0 7d41e0 Soft.{ m-7f3a2c Flow.e167d8 Text.«Stage 1 is deployed; run the tier tests.» } Kept }".into()]
                     .into_iter(),
             )
             .expect("deliver datom parses")

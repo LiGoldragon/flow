@@ -1865,6 +1865,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                 signal_flow::Message::Soft(_) => unreachable!(),
             };
             let result = self.deliver(meta_signal_flow::DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: attempt.attempt_id.clone(),
                 flow_id: flow_id.clone(),
                 message,

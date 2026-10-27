@@ -90,10 +90,12 @@ fn after_retire_the_flow_s_pane_is_closed() {
     let fixture = NexusFixture::new();
     awake_seat(&fixture);
 
-    let meta_signal_flow::Response::FlowRetired(retired) = fixture
-        .nexus
-        .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into()))
-    else {
+    let meta_signal_flow::Response::FlowRetired(retired) = fixture.nexus.dispatch_meta(
+        meta_signal_flow::Query::Retire(meta_signal_flow::Retire_Data {
+            flow_id: CLAUDE_SEAT.into(),
+            gate: meta_signal_flow::Gate::Kept,
+        }),
+    ) else {
         panic!("a live flow is retired")
     };
     assert_eq!(retired.flow_lifecycle, FlowLifecycle::Retired);
@@ -132,9 +134,12 @@ fn retire_of_a_maintained_metaflow_s_flow_is_refused_and_changes_nothing() {
     declare_secondary(&fixture, meta_signal_flow::Continuity::Maintained);
 
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into())),
+        fixture.nexus.dispatch_meta(meta_signal_flow::Query::Retire(
+            meta_signal_flow::Retire_Data {
+                flow_id: CLAUDE_SEAT.into(),
+                gate: meta_signal_flow::Gate::Kept
+            }
+        )),
         meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::Maintained)
     );
     assert!(lifecycle(&fixture).is_live(), "the flow stays live");
@@ -143,10 +148,12 @@ fn retire_of_a_maintained_metaflow_s_flow_is_refused_and_changes_nothing() {
     assert!(fixture.typed().is_none(), "nothing is typed");
 
     declare_secondary(&fixture, meta_signal_flow::Continuity::OnDemand);
-    let meta_signal_flow::Response::FlowRetired(retired) = fixture
-        .nexus
-        .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into()))
-    else {
+    let meta_signal_flow::Response::FlowRetired(retired) = fixture.nexus.dispatch_meta(
+        meta_signal_flow::Query::Retire(meta_signal_flow::Retire_Data {
+            flow_id: CLAUDE_SEAT.into(),
+            gate: meta_signal_flow::Gate::Kept,
+        }),
+    ) else {
         panic!("an OnDemand metaflow's flow is retired")
     };
     assert_eq!(retired.flow_lifecycle, FlowLifecycle::Retired);
@@ -265,9 +272,12 @@ fn a_retire_whose_close_herdr_refuses_answers_close_refused_and_records_nothing(
     close_answers(&fixture, "exit 1");
 
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire(CLAUDE_SEAT.into())),
+        fixture.nexus.dispatch_meta(meta_signal_flow::Query::Retire(
+            meta_signal_flow::Retire_Data {
+                flow_id: CLAUDE_SEAT.into(),
+                gate: meta_signal_flow::Gate::Kept
+            }
+        )),
         meta_signal_flow::Response::RetireRejected(meta_signal_flow::RetireRejection::CloseRefused)
     );
     assert_eq!(lifecycle(&fixture), live);

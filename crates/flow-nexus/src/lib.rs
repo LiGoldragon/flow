@@ -389,7 +389,8 @@ impl Dispatches for RunningNexus {
             // changes nothing, and the declaration's continuity is changed
             // first. Privileged, because it changes what Flow holds of a
             // flow without that flow acting.
-            meta_signal_flow::Query::Retire(flow_id) => {
+            meta_signal_flow::Query::Retire(request) => {
+                let flow_id = request.flow_id;
                 let node = match self.store.flow_node(&flow_id) {
                     Ok(Some(node)) => node,
                     Ok(None) => {
@@ -418,9 +419,13 @@ impl Dispatches for RunningNexus {
                     });
                     match maintained {
                         Ok(Some(meta_signal_flow::Continuity::Maintained)) => {
-                            return meta_signal_flow::Response::RetireRejected(
-                                meta_signal_flow::RetireRejection::Maintained,
-                            );
+                            if matches!(request.gate, meta_signal_flow::Gate::Forced) {
+                                // Forced retirement overrides continuity.
+                            } else {
+                                return meta_signal_flow::Response::RetireRejected(
+                                    meta_signal_flow::RetireRejection::Maintained,
+                                );
+                            }
                         }
                         Ok(_) => {}
                         Err(_) => {
@@ -2301,6 +2306,7 @@ mod tests {
         fn send_to(&self, flow_id: &str, text: &str) -> Sent {
             match self.nexus.dispatch_meta(meta_signal_flow::Query::Deliver(
                 meta_signal_flow::DeliveryRequest {
+                    gate: meta_signal_flow::Gate::Kept,
                     delivery_id: format!("delivery-{flow_id}-{text}"),
                     flow_id: flow_id.into(),
                     message: middle_abrupt(text),
@@ -3764,18 +3770,23 @@ mod tests {
         fixture.register_with(FlowLifecycle::Active);
 
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Query::Retire("unknown".into())),
+            fixture.nexus.dispatch_meta(meta_signal_flow::Query::Retire(
+                meta_signal_flow::Retire_Data {
+                    flow_id: "unknown".into(),
+                    gate: meta_signal_flow::Gate::Kept
+                }
+            )),
             meta_signal_flow::Response::RetireRejected(
                 meta_signal_flow::RetireRejection::UnknownFlow
             )
         );
 
-        let meta_signal_flow::Response::FlowRetired(retired) = fixture
-            .nexus
-            .dispatch_meta(meta_signal_flow::Query::Retire("908786".into()))
-        else {
+        let meta_signal_flow::Response::FlowRetired(retired) = fixture.nexus.dispatch_meta(
+            meta_signal_flow::Query::Retire(meta_signal_flow::Retire_Data {
+                flow_id: "908786".into(),
+                gate: meta_signal_flow::Gate::Kept,
+            }),
+        ) else {
             panic!("a live flow is retired")
         };
         assert_eq!(retired.flow_lifecycle, FlowLifecycle::Retired);
@@ -3785,9 +3796,12 @@ mod tests {
 
         // Retiring it again changes nothing and says so.
         assert_eq!(
-            fixture
-                .nexus
-                .dispatch_meta(meta_signal_flow::Query::Retire("908786".into())),
+            fixture.nexus.dispatch_meta(meta_signal_flow::Query::Retire(
+                meta_signal_flow::Retire_Data {
+                    flow_id: "908786".into(),
+                    gate: meta_signal_flow::Gate::Kept
+                }
+            )),
             meta_signal_flow::Response::RetireRejected(
                 meta_signal_flow::RetireRejection::AlreadyGone
             )

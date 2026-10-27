@@ -29,7 +29,7 @@ fn the_meta_client_reaches_the_default_meta_socket_under_the_runtime_directory()
     let output = Command::new(env!("CARGO_BIN_EXE_flow-meta"))
         .env_clear()
         .env("XDG_RUNTIME_DIR", runtime.path())
-        .arg("Retire.fac697")
+        .arg("Retire.{ fac697 Kept }")
         .output()
         .expect("flow-meta runs");
     assert!(output.status.success(), "{output:?}");

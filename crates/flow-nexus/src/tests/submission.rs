@@ -87,6 +87,7 @@ impl NexusFixture {
     fn deliver_soft(&self, delivery_id: &str, text: &str) -> MetaResponse {
         self.nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: delivery_id.into(),
                 flow_id: "908786".into(),
                 message: Message::Soft(Letter {
@@ -372,6 +373,7 @@ fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: "hard-restored".into(),
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),
@@ -415,6 +417,7 @@ fn a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: "claude-restored".into(),
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),
@@ -459,6 +462,7 @@ fn a_prompt_claudes_interrupt_put_back_is_submitted_again_and_the_hard_abrupt_fo
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: "claude-cancelled".into(),
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),
@@ -501,6 +505,7 @@ fn a_cancelled_prompt_that_will_not_submit_is_left_in_place() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: "claude-stuck".into(),
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),
@@ -535,6 +540,7 @@ fn a_draft_already_in_claudes_composer_refuses_a_hard_abrupt_before_any_key() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: "claude-draft".into(),
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),
@@ -572,6 +578,7 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: "native-letter-shaped-prompt".into(),
                 flow_id: "908786".into(),
                 message,
@@ -596,6 +603,7 @@ fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: "hard-cancelled".into(),
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),

@@ -1918,6 +1918,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         let text = message.pane_text().as_str().to_owned();
         if !matches!(oldest.message, signal_flow::Message::Soft(_)) {
             let result = self.deliver(meta_signal_flow::DeliveryRequest {
+                gate: meta_signal_flow::Gate::Kept,
                 delivery_id: attempt.attempt_id.clone(),
                 flow_id: flow_id.clone(),
                 message,

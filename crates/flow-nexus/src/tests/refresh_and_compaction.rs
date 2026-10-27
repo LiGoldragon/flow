@@ -114,7 +114,6 @@ pub(super) fn declare_seat(
             address: seat_address(),
             system_modules,
             user_modules: vec!["operation-main-flow".into()],
-            flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity,
             purpose: String::new(),

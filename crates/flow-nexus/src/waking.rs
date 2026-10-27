@@ -93,7 +93,6 @@ use crate::send_tool::ServesLaunchCalls;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::events::RecordsHarnessEvents;
-use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{
     AbsenceRecord, AccountsQueueDelivery, NativeDeliveryReceipt, NativeHistoryAnchor,
@@ -757,7 +756,6 @@ trait WakesInParts {
 }
 
 pub(crate) trait ReadsClaudeDelivery {
-    fn simplified_first_input_ready(&self, node: &FlowNode) -> bool;
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf>;
     fn claude_main_turn_ended(&self, node: &FlowNode) -> bool;
     fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor>;
@@ -768,32 +766,6 @@ pub(crate) trait ReadsClaudeDelivery {
 }
 
 impl ReadsClaudeDelivery for RunningNexus {
-    fn simplified_first_input_ready(&self, node: &FlowNode) -> bool {
-        if node.harness_kind != HarnessKind::Claude
-            || node.flow_lifecycle != signal_flow::FlowLifecycle::Active
-            || !self
-                .last_launch_profile(&node.flow_id)
-                .is_some_and(|profile| {
-                    profile.flow_kind == signal_flow::FlowKind::Simplified
-                        && profile.instruction_prompt.trim().is_empty()
-                })
-        {
-            return false;
-        }
-        let Ok(events) = self.store.events(&node.flow_id) else {
-            return false;
-        };
-        if events
-            .unwrap_or_default()
-            .iter()
-            .any(|event| matches!(event, Event::PromptSubmitted(_) | Event::Stopped(_)))
-        {
-            return false;
-        }
-        self.claude_transcript(node)
-            .is_none_or(|path| path.main_turn_unstarted(&node.session_id))
-    }
-
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf> {
         self.herdr
             .native_transcript_root(&HarnessKind::Claude, "")
@@ -803,20 +775,14 @@ impl ReadsClaudeDelivery for RunningNexus {
 
     fn claude_main_turn_ended(&self, node: &FlowNode) -> bool {
         node.harness_kind == HarnessKind::Claude
-            && (self.simplified_first_input_ready(node)
-                || self
-                    .claude_transcript(node)
-                    .is_some_and(|transcript| transcript.main_turn_ended(&node.session_id)))
+            && self
+                .claude_transcript(node)
+                .is_some_and(|transcript| transcript.main_turn_ended(&node.session_id))
     }
 
     fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor> {
         let cursor = match self.claude_transcript(node) {
             Some(transcript) => transcript.claude_cursor()?,
-            None if self.simplified_first_input_ready(node) => ClaudeTranscriptCursor {
-                device: 0,
-                inode: 0,
-                offset: 0,
-            },
             None => return None,
         };
         Some(NativeTranscriptCursor {
@@ -1411,7 +1377,6 @@ impl SleepsAndWakesSeats for RunningNexus {
                 herdr_session_name: last
                     .map(|profile| profile.herdr_session_name)
                     .unwrap_or_else(|| "default".to_owned()),
-                flow_kind: declared.flow_kind.clone(),
                 tool_set: declared.tool_set.clone(),
                 system_modules: declared.system_modules,
                 user_modules: declared.user_modules,
@@ -1420,7 +1385,6 @@ impl SleepsAndWakesSeats for RunningNexus {
             }),
             (_, Some(profile)) => WakePlan::Fresh(FreshContext {
                 herdr_session_name: profile.herdr_session_name,
-                flow_kind: profile.flow_kind.clone(),
                 tool_set: profile.tool_set.clone(),
                 system_modules: profile.system_modules,
                 user_modules: profile.user_modules,
@@ -1847,42 +1811,6 @@ impl PerformsWakeAndDrain for RunningNexus {
         let Some(oldest) = oldest else {
             return Outcome::Drained(drained);
         };
-        let response_request = matches!(
-            &oldest.message,
-            signal_flow::Message::HardAbrupt(
-                signal_flow::Request::Order(_)
-                    | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Psyche(_)
-                    | signal_flow::Request::Psyches(_)
-            ) | signal_flow::Message::MiddleAbrupt(
-                signal_flow::Request::Order(_)
-                    | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Psyche(_)
-                    | signal_flow::Request::Psyches(_)
-            ) | signal_flow::Message::Soft(
-                signal_flow::Request::Order(_)
-                    | signal_flow::Request::Question(_)
-                    | signal_flow::Request::Psyche(_)
-                    | signal_flow::Request::Psyches(_)
-            )
-        );
-        if response_request
-            && self
-                .last_launch_profile(&flow_id)
-                .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified)
-            && let signal_flow::SentBy::Sender(recipient) = &oldest.sent_by
-        {
-            let binding = SimplifiedReplyBinding {
-                flow_id: flow_id.clone(),
-                input_delivery_id: oldest.logical_delivery_id.clone(),
-                source: address.clone(),
-                recipient: recipient.clone(),
-                completed: false,
-            };
-            if self.store.bind_simplified_reply(binding).is_err() {
-                return Outcome::WaitingForTurn(oldest.logical_delivery_id);
-            }
-        }
         if matches!(oldest.message, signal_flow::Message::Soft(_)) {
             let resting = match node.harness_kind {
                 HarnessKind::Codex => self.codex_resting(&flow_id),
@@ -2213,7 +2141,6 @@ impl WakesInParts for RunningNexus {
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,
             leave_outs_option: fresh.leave_outs_option,
-            flow_kind: fresh.flow_kind,
             tool_set: fresh.tool_set,
             prompt: text.with_purpose(&fresh.purpose),
         };
@@ -2400,7 +2327,6 @@ impl WakesInParts for RunningNexus {
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,
             leave_outs_option: fresh.leave_outs_option,
-            flow_kind: fresh.flow_kind,
             tool_set: fresh.tool_set,
             prompt: "".with_purpose(&fresh.purpose),
         };

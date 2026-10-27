@@ -49,7 +49,6 @@ fn declare(fixture: &NexusFixture, at: Address) {
             address: at,
             system_modules: vec!["spirit-core".into(), "intent-flow".into()],
             user_modules: vec!["operation-main-flow".into()],
-            flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             continuity: Continuity::OnDemand,
             purpose: String::new(),

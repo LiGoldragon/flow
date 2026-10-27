@@ -17,20 +17,16 @@
 //! session, and the flow is rebound to that session; its FlowId stays.
 
 use crate::RunningNexus;
-use crate::claude::ReadsClaudeTurns;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Harness_Data,
 };
 use crate::performing::Performs;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::events::RecordsHarnessEvents;
-use crate::store::logical_delivery::{CorePresentationRoute, RecordsLogicalDeliveries};
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{AccountsQueueDelivery, ShowsQueueDelivery};
 use crate::store::{ReadsFlowRows, RebindsNativeSession};
-use crate::waking::{
-    CorrelatesNativeEvents, ReadsClaudeDelivery, ReconcilesQueueDelivery, SleepsAndWakesSeats,
-};
+use crate::waking::{CorrelatesNativeEvents, ReconcilesQueueDelivery, SleepsAndWakesSeats};
 use meta_signal_flow::{
     EventsRead_Data, QueueDeliveriesRead_Data, QueueDeliveryResolution, QueueDeliveryResolved_Data,
     QueueResolutionRecord, ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data,
@@ -147,62 +143,6 @@ impl RecordsReports for RunningNexus {
                 // Stop before its next part.
                 self.store.launch_changes.announce();
                 if self.correlated_stop(flow_id, stop) {
-                    if let Some(answer) = stop
-                        .last_assistant_message_option
-                        .as_deref()
-                        .filter(|answer| !answer.is_empty())
-                    {
-                        let witness = self.store.simplified_reply_receipt(flow_id);
-                        match witness {
-                            Ok(Some((binding, receipt)))
-                                if stop.native_session_id_option.as_deref()
-                                    == Some(receipt.native_session_id.as_str())
-                                    && self
-                                        .store
-                                        .flow_node(flow_id)
-                                        .ok()
-                                        .flatten()
-                                        .is_some_and(|node| {
-                                            self.claude_transcript(&node).is_some_and(
-                                                |transcript| {
-                                                    transcript.assistant_answer_after(
-                                                        &receipt.native_session_id,
-                                                        &receipt.native_prompt_id,
-                                                        answer,
-                                                    )
-                                                },
-                                            )
-                                        }) =>
-                            {
-                                match self.store.deliver_simplified_reply(
-                                    flow_id,
-                                    &binding.input_delivery_id,
-                                    &receipt.native_session_id,
-                                    &receipt.native_prompt_id,
-                                    answer,
-                                ) {
-                                    Ok(Some(recipient)) => {
-                                        self.wake_due(recipient.clone());
-                                        self.drain_awake(&recipient);
-                                        if binding.source.is_core_presentation()
-                                            && binding.recipient != recipient
-                                        {
-                                            self.wake_due(binding.recipient.clone());
-                                            self.drain_awake(&binding.recipient);
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(error) => eprintln!(
-                                        "flow-nexus: simplified result from {flow_id} not delivered: {error:?}"
-                                    ),
-                                }
-                            }
-                            Ok(Some(_)) | Ok(None) => {}
-                            Err(error) => eprintln!(
-                                "flow-nexus: simplified result from {flow_id} not witnessed: {error:?}"
-                            ),
-                        }
-                    }
                     self.settle_stopped(flow_id);
                 } else {
                     eprintln!(

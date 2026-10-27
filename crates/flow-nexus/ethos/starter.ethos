@@ -4,8 +4,7 @@
 ; through Herdr's socket or the Codex app-server, so that a flow's start is
 ; one model call. The system prompt holds spirit and intent; when the USER
 ; text and the brief do not fit one message, the first message is sent in
-; as many parts as it takes, one right after another. A simplified flow
-; keeps all its modules in its own system prompt. The receipt is the
+; as many parts as it takes, one right after another. The receipt is the
 ; message seen, then the flow's first answer.
 ;
 ; A capability takes traits, never concrete values: each value a starter
@@ -21,7 +20,7 @@ Library
 [ signal_flow:[ Address HarnessKind Layer LaunchProfile
                  PromptDeliveryIntent NativeTargetReceipt FlowId
                  SessionId Origin SystemModules UserModules
-                 HerdrSessionName LeaveOuts FlowKind ToolSet
+                 HerdrSessionName LeaveOuts ToolSet
                  LeaveOutRefusal ComposedLaunch
                  ContextRefusal SystemPrompt HerdrPaneBinding
                  PromptDeliveryResult Response Launched
@@ -38,7 +37,7 @@ Library
   HarnessedProfile.{ LaunchProfile HarnessKind RememberedFlows }
   ; What a fresh wake takes from the metaflow's declaration, else its last
   ; launch: the purpose is the declaration's, composed ahead of the brief.
-  FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> FlowKind ToolSet Purpose.String }
+  FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> ToolSet Purpose.String }
   ; A Started launch as its outcome row keeps it; the flow's route is read
   ; from the flow's own row when the reply is made.
   LaunchedRecord.{ FlowId SessionId Origin }

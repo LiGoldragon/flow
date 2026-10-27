@@ -10,8 +10,7 @@
 //! and remembering). The first USER message is the verified USER text, the
 //! remembered flows' records, then the brief; when it does not fit one
 //! message it is sent in as many numbered parts as it takes, one right
-//! after another. A simplified flow keeps its USER modules in its own
-//! system prompt.
+//! after another.
 
 use crate::context::{ComposesFlowContext, ContextComposer, VerifiedContext, VerifiesContext};
 pub use crate::generated::starter::{
@@ -39,8 +38,6 @@ pub enum CompositionError {
     Context(ContextRefusal),
     #[error("the launch's leave-outs were refused: {0:?}")]
     LeaveOut(LeaveOutRefusal),
-    #[error("the Psyche core presentation prompt is unavailable: {0}")]
-    PresentationPromptUnavailable(String),
 }
 
 impl From<ContextRefusal> for CompositionError {
@@ -56,76 +53,21 @@ pub struct LaunchComposer {
     limits: meta_signal_flow::Limits,
 }
 
-trait ComposesPresentationRole {
-    fn presentation_prompt(&self, address: &Address) -> Result<Option<String>, CompositionError>;
-    fn presentation_prompt_from(
-        &self,
-        address: &Address,
-        path: Option<std::ffi::OsString>,
-    ) -> Result<Option<String>, CompositionError>;
-    fn read_presentation_prompt(
-        &self,
-        path: std::ffi::OsString,
-    ) -> Result<String, CompositionError>;
+trait ComposesSystemPrompt {
     fn compose_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
         &self,
         profile: N,
         context: O,
         overflow: P,
-        presentation_prompt: Option<&str>,
     ) -> SystemPrompt;
 }
 
-impl ComposesPresentationRole for LaunchComposer {
-    fn presentation_prompt(&self, address: &Address) -> Result<Option<String>, CompositionError> {
-        self.presentation_prompt_from(address, std::env::var_os("FLOW_CORE_PRESENTATION_PROMPT"))
-    }
-
-    fn presentation_prompt_from(
-        &self,
-        address: &Address,
-        path: Option<std::ffi::OsString>,
-    ) -> Result<Option<String>, CompositionError> {
-        if address.aspect != Aspect::Psyche
-            || address.topic != "core"
-            || address.layer != Layer::Primary
-        {
-            return Ok(None);
-        }
-        let path = path.ok_or_else(|| {
-            CompositionError::PresentationPromptUnavailable(
-                "FLOW_CORE_PRESENTATION_PROMPT is not set".into(),
-            )
-        })?;
-        self.read_presentation_prompt(path).map(Some)
-    }
-
-    fn read_presentation_prompt(
-        &self,
-        path: std::ffi::OsString,
-    ) -> Result<String, CompositionError> {
-        let bytes = std::fs::read(&path).map_err(|error| {
-            CompositionError::PresentationPromptUnavailable(format!(
-                "could not read {}: {error}",
-                std::path::PathBuf::from(&path).display()
-            ))
-        })?;
-        if bytes.is_empty() {
-            return Err(CompositionError::PresentationPromptUnavailable(format!(
-                "{} is empty",
-                std::path::PathBuf::from(&path).display()
-            )));
-        }
-        String::from_utf8(bytes)
-            .map_err(|error| CompositionError::PresentationPromptUnavailable(error.to_string()))
-    }
-
+impl ComposesSystemPrompt for LaunchComposer {
     fn compose_system_prompt<N: Profiled, O: ReadsVerifiedContext, P: SegmentListing>(
         &self,
         input_0: N,
         input_1: O,
         input_2: P,
-        presentation_prompt: Option<&str>,
     ) -> SystemPrompt {
         let mut text = input_1.system_text();
         for segment in input_2.segments() {
@@ -141,13 +83,6 @@ impl ComposesPresentationRole for LaunchComposer {
             }
             text.push('\n');
             text.push_str(&section);
-        }
-        if let Some(prompt) = presentation_prompt {
-            if !text.is_empty() && !text.ends_with('\n') {
-                text.push('\n');
-            }
-            text.push('\n');
-            text.push_str(prompt);
         }
         let system_prompt_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
         SystemPrompt {
@@ -517,8 +452,7 @@ impl ComposesVerifiedContext for LaunchComposer {
         input_1: O,
         input_2: P,
     ) -> Result<SystemPrompt, CompositionError> {
-        let presentation_prompt = self.presentation_prompt(&input_0.profile().address)?;
-        Ok(self.compose_system_prompt(input_0, input_1, input_2, presentation_prompt.as_deref()))
+        Ok(self.compose_system_prompt(input_0, input_1, input_2))
     }
 }
 
@@ -617,42 +551,13 @@ impl ComposesLaunch for LaunchComposer {
         };
         let leave_outs = harnessed.effective_leave_outs(input_1)?;
         let verified = self.verified_context(&harnessed)?;
-        let brief = if harnessed.launch_profile.flow_kind == signal_flow::FlowKind::Simplified {
-            harnessed.launch_profile.instruction_prompt.clone()
-        } else {
-            harnessed.brief()
-        };
+        let brief = harnessed.brief();
         let mut segments = verified.user_segments();
         // The raw records of the flows the launch remembers follow its
         // USER modules, as one segment, ahead of the brief.
         let records = verified.records_text();
         if !records.is_empty() {
             segments.push(records);
-        }
-        if harnessed.launch_profile.flow_kind == signal_flow::FlowKind::Simplified {
-            // A simplified flow must not receive a context-only startup turn:
-            // its first user message belongs to the first queued request.
-            // Keep every declared user module, but compose it into the system
-            // prompt before the literal presentation role. A real initial
-            // instruction remains the first user message; an empty one does
-            // not create a context-only startup turn.
-            let system_prompt = self.launch_system_prompt(&harnessed, &verified, &segments)?;
-            let parts = if brief.is_empty() {
-                Vec::new()
-            } else {
-                MessageBoundary {
-                    harness: &harnessed.harness_kind,
-                    limits: &self.limits,
-                }
-                .startup_parts(Vec::<String>::new(), &brief)?
-            };
-            return Ok(Self::assembled(
-                &harnessed,
-                &system_prompt,
-                &brief,
-                &parts,
-                &leave_outs,
-            ));
         }
         // The system prompt holds spirit and intent alone. The rest of the
         // context and the brief are the first message, split into as many
@@ -690,7 +595,6 @@ pub struct FreshSeat {
     pub system_modules: Vec<String>,
     pub user_modules: Vec<String>,
     pub leave_outs_option: Option<Vec<LeaveOut>>,
-    pub flow_kind: signal_flow::FlowKind,
     pub tool_set: signal_flow::ToolSet,
     pub prompt: String,
 }
@@ -747,7 +651,6 @@ impl ProfilesFreshSeat for FreshSeat {
             remembering: signal_flow::Remembering::Predecessors(1),
             herdr_session_name: self.herdr_session_name.clone(),
             leave_outs_option: self.leave_outs_option.clone(),
-            flow_kind: self.flow_kind.clone(),
             tool_set: self.tool_set.clone(),
             instruction_prompt: self.prompt.clone(),
         }
@@ -757,9 +660,8 @@ impl ProfilesFreshSeat for FreshSeat {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        ComposesLaunch, ComposesPresentationRole, ComposesVerifiedContext, CompositionError,
-        FitsOneMessage, HarnessedProfile, LaunchComposer, OpensLaunchComposer,
-        ReadsVerifiedContext, SplitsStartupMessage,
+        ComposesLaunch, CompositionError, FitsOneMessage, HarnessedProfile, LaunchComposer,
+        OpensLaunchComposer, SplitsStartupMessage,
     };
     use crate::context::FixtureComposer;
     use signal_flow::{
@@ -784,7 +686,6 @@ pub(crate) mod tests {
             remembering: Remembering::Custom(vec!["836818".into()]),
             herdr_session_name: "messaging-build".into(),
             leave_outs_option: None,
-            flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             instruction_prompt: "Carry the bounded task.".into(),
         }
@@ -873,88 +774,6 @@ pub(crate) mod tests {
         );
         assert_eq!("Draft the book.".with_purpose(""), "Draft the book.");
         assert_eq!("".with_purpose("Flow's design."), "Flow's design.");
-    }
-
-    #[test]
-    fn presentation_prompt_is_appended_verbatim_after_the_composed_system_prompt() {
-        use sha2::{Digest, Sha256};
-        let role = "Presentation-maker role\nsecond line\n";
-        let composer = fixture_composer();
-        let profile = HarnessedProfile {
-            remembered_flows: Vec::new(),
-            harness_kind: HarnessKind::Claude,
-            launch_profile: fixture_profile(),
-        };
-        let verified = composer.verified_context(&profile).unwrap();
-        let segments = verified.user_segments();
-        let prompt = composer.compose_system_prompt(&profile, &verified, &segments, Some(role));
-        assert!(prompt.system_prompt_text.ends_with(&format!("\n\n{role}")));
-        assert_eq!(
-            prompt.system_prompt_sha256,
-            format!("{:x}", Sha256::digest(prompt.system_prompt_text.as_bytes()))
-        );
-    }
-
-    #[test]
-    fn presentation_prompt_file_read_preserves_bytes_and_fails_when_unreadable() {
-        let path = std::env::temp_dir().join(format!(
-            "flow-core-presentation-{}-{}.md",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        let contents = b"Exact role line\nsecond line\n";
-        std::fs::write(&path, contents).unwrap();
-        assert_eq!(
-            fixture_composer()
-                .read_presentation_prompt(path.clone().into_os_string())
-                .unwrap()
-                .as_bytes(),
-            contents
-        );
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, b"").unwrap();
-        assert!(
-            fixture_composer()
-                .read_presentation_prompt(path.clone().into_os_string())
-                .is_err()
-        );
-        std::fs::remove_file(&path).unwrap();
-        let missing = path.with_extension("missing").into_os_string();
-        assert!(
-            fixture_composer()
-                .read_presentation_prompt(missing)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn other_addresses_do_not_read_the_presentation_prompt_environment() {
-        let composer = fixture_composer();
-        assert_eq!(
-            composer
-                .presentation_prompt_from(
-                    &Address {
-                        aspect: Aspect::Field,
-                        topic: "core".into(),
-                        layer: Layer::Primary,
-                    },
-                    None,
-                )
-                .unwrap(),
-            None
-        );
-        assert!(
-            composer
-                .presentation_prompt_from(
-                    &Address {
-                        aspect: Aspect::Psyche,
-                        topic: "core".into(),
-                        layer: Layer::Primary,
-                    },
-                    None,
-                )
-                .is_err()
-        );
     }
 
     /// A composer holding one large knowledge module per size.
@@ -1076,48 +895,6 @@ pub(crate) mod tests {
                 .ends_with("<!-- end-module: intent-flow -->\n\nMetaflow: { Field flow Secondary }\nModel: gpt-6-astra\nEffort: medium\nFlow ID: a1b2c3\nNative binding: pending\n")
         );
         assert!(!system.contains("This flow belongs to metaflow"));
-    }
-
-    #[test]
-    fn a_role_after_the_launch_section_stays_last_when_the_flow_id_arrives() {
-        use super::CarriesFlowId;
-        let mut composed = fixture_composer()
-            .compose(
-                crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
-                    harness_kind: HarnessKind::Claude,
-                    launch_profile: fixture_profile(),
-                },
-                Vec::<signal_flow::LeaveOut>::new(),
-            )
-            .unwrap();
-        let role = "Presentation-maker role, unchanged\n";
-        let composer = fixture_composer();
-        let profile = HarnessedProfile {
-            remembered_flows: Vec::new(),
-            harness_kind: HarnessKind::Claude,
-            launch_profile: composed.launch_profile.clone(),
-        };
-        let verified = composer.verified_context(&profile).unwrap();
-        let segments = verified.user_segments();
-        composed.system_prompt =
-            composer.compose_system_prompt(&profile, &verified, &segments, Some(role));
-        let carried = composed.carrying_flow_id("a1b2c3");
-        use sha2::{Digest, Sha256};
-        assert!(carried.system_prompt.system_prompt_text.ends_with(role));
-        assert!(
-            carried
-                .system_prompt
-                .system_prompt_text
-                .contains("Flow ID: a1b2c3\n")
-        );
-        assert_eq!(
-            carried.system_prompt.system_prompt_sha256,
-            format!(
-                "{:x}",
-                Sha256::digest(carried.system_prompt.system_prompt_text.as_bytes())
-            )
-        );
     }
 
     #[test]
@@ -1252,72 +1029,6 @@ pub(crate) mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn simplified_launch_keeps_user_modules_in_system_and_has_no_startup_turn() {
-        // A simplified flow takes whatever tool set it is configured with,
-        // the default included.
-        let mut profile = fixture_profile();
-        profile.flow_kind = signal_flow::FlowKind::Simplified;
-        profile.tool_set = signal_flow::ToolSet::Default;
-        profile.instruction_prompt.clear();
-        let composed = fixture_composer()
-            .compose(
-                HarnessedProfile {
-                    remembered_flows: Vec::new(),
-                    harness_kind: HarnessKind::Claude,
-                    launch_profile: profile,
-                },
-                Vec::<LeaveOut>::new(),
-            )
-            .unwrap();
-        let system = &composed.system_prompt.system_prompt_text;
-        assert!(system.contains("<!-- module: operation-main-flow -->"));
-        assert!(system.contains("<!-- module: knowledge-flow -->"));
-        assert!(composed.first_prompt_payload.first_prompt_body.is_empty());
-        assert!(composed.first_prompt_payload.prompt_part_vector.is_empty());
-    }
-
-    #[test]
-    fn simplified_launch_preserves_a_real_initial_instruction_as_the_first_user_message() {
-        let mut profile = fixture_profile();
-        profile.flow_kind = signal_flow::FlowKind::Simplified;
-        profile.tool_set = signal_flow::ToolSet::Explicit(Vec::new());
-        let composed = fixture_composer()
-            .compose(
-                HarnessedProfile {
-                    remembered_flows: Vec::new(),
-                    harness_kind: HarnessKind::Claude,
-                    launch_profile: profile,
-                },
-                Vec::<LeaveOut>::new(),
-            )
-            .unwrap();
-        assert_eq!(
-            composed.first_prompt_payload.first_prompt_body,
-            "Carry the bounded task."
-        );
-    }
-
-    #[test]
-    fn simplified_codex_launch_does_not_turn_an_empty_instruction_into_metadata() {
-        let mut profile = fixture_profile();
-        profile.flow_kind = signal_flow::FlowKind::Simplified;
-        profile.tool_set = signal_flow::ToolSet::Explicit(Vec::new());
-        profile.instruction_prompt.clear();
-        let composed = fixture_composer()
-            .compose(
-                HarnessedProfile {
-                    remembered_flows: Vec::new(),
-                    harness_kind: HarnessKind::Codex,
-                    launch_profile: profile,
-                },
-                Vec::<LeaveOut>::new(),
-            )
-            .unwrap();
-        assert!(composed.first_prompt_payload.first_prompt_body.is_empty());
-        assert!(composed.first_prompt_payload.prompt_part_vector.is_empty());
     }
 
     /// One USER module larger than one message is not cut and never moved

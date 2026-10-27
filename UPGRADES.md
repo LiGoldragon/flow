@@ -1,5 +1,11 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 12 removes the Simplified launch path and its reply binding. Every launch uses
+one regular shape; a module header may place it in the system or user prompt, and
+presentation instructions arrive through Curriculum context modules. The metaflow
+declaration family advances to v6 and launch outcomes to v10. Pins signal-flow
+38.0.0 and meta-signal-flow 52.0.0.
+
 Batch 10 makes the Address the sole owner of a binding role. Caller roles carry
 their exact Layer; PowerLevel and binding role claims are gone. Role and flow
 families advance one version, upgrading High, Medium, Low and UltraLow to

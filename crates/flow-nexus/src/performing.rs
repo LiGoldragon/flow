@@ -269,12 +269,6 @@ impl Performs for RunningNexus {
                         eprintln!("flow-nexus: launch {request} not composed: {refusal:?}");
                         Outcome::Failed(Failed_Data::CompositionRefused(refusal))
                     }
-                    Err(error @ CompositionError::PresentationPromptUnavailable(_)) => {
-                        eprintln!("flow-nexus: launch {request} not composed: {error}");
-                        Outcome::Failed(Failed_Data::CompositionRefused(
-                            signal_flow::CompositionRefusal::PresentationUnavailable,
-                        ))
-                    }
                 }
             }
             Operation::Reserve(reserve) => self.reserve(reserve),

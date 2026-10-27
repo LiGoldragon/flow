@@ -23,7 +23,7 @@ pub(super) const META_METAFLOW_CONFIGURATION_TABLE_NAME: TableName =
 pub(super) const META_METAFLOW_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-metaflow-configuration";
 pub(super) const META_METAFLOW_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-metaflow-configuration-v5";
+    "flow-nexus-meta-metaflow-configuration-v6";
 
 /// One declared metaflow, keyed by its Address.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -39,66 +39,11 @@ impl EngineRecord for StoredMetaMetaflowConfiguration {
 
 impl MemoryDefinition for StoredMetaMetaflowConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(5)
+        MemoryVersion::new(6)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(META_METAFLOW_CONFIGURATION_SCHEMA)
-    }
-}
-
-/// A declaration archived before it named required metaflows.
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConfigureMetaflowV4 {
-    pub(super) address: Address,
-    pub(super) system_modules: Vec<String>,
-    pub(super) user_modules: Vec<String>,
-    pub(super) flow_kind: signal_flow::FlowKind,
-    pub(super) tool_set: signal_flow::ToolSet,
-    pub(super) continuity: Continuity,
-    pub(super) purpose: String,
-    pub(super) records: Vec<String>,
-}
-
-#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-pub(super) struct StoredMetaMetaflowConfigurationV4 {
-    pub(super) metaflow: ConfigureMetaflowV4,
-}
-
-impl EngineRecord for StoredMetaMetaflowConfigurationV4 {
-    fn record_key(&self) -> RecordKey {
-        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
-    }
-}
-
-impl MemoryDefinition for StoredMetaMetaflowConfigurationV4 {
-    fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
-    }
-
-    fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v4")
-    }
-}
-
-impl UpgradeFrom<StoredMetaMetaflowConfigurationV4> for StoredMetaMetaflowConfiguration {
-    type Refusal = std::convert::Infallible;
-
-    fn upgrade_from(previous: StoredMetaMetaflowConfigurationV4) -> Decision<Self, Self::Refusal> {
-        let previous = previous.metaflow;
-        Decision::Ready(Self {
-            metaflow: ConfigureMetaflow {
-                address: previous.address,
-                system_modules: previous.system_modules,
-                user_modules: previous.user_modules,
-                flow_kind: previous.flow_kind,
-                tool_set: previous.tool_set,
-                continuity: previous.continuity,
-                purpose: previous.purpose,
-                records: previous.records,
-                requires: Vec::new(),
-            },
-        })
     }
 }
 
@@ -143,13 +88,117 @@ pub(super) enum AvailabilityV3 {
     OnDemand,
 }
 
+/// The removed launch kind, retained only to read declarations archived
+/// before every metaflow used the one launch path.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) enum FlowKindV4 {
+    Regular,
+    Simplified,
+}
+
+/// A declaration archived before every metaflow used the one launch path.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConfigureMetaflowV5 {
+    pub(super) address: Address,
+    pub(super) system_modules: Vec<String>,
+    pub(super) user_modules: Vec<String>,
+    pub(super) flow_kind: FlowKindV4,
+    pub(super) tool_set: signal_flow::ToolSet,
+    pub(super) continuity: Continuity,
+    pub(super) purpose: String,
+    pub(super) records: Vec<String>,
+    pub(super) requires: Vec<Address>,
+}
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct StoredMetaMetaflowConfigurationV5 {
+    pub(super) metaflow: ConfigureMetaflowV5,
+}
+impl EngineRecord for StoredMetaMetaflowConfigurationV5 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+    }
+}
+impl MemoryDefinition for StoredMetaMetaflowConfigurationV5 {
+    fn memory_version() -> MemoryVersion { MemoryVersion::new(5) }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v5")
+    }
+}
+impl UpgradeFrom<StoredMetaMetaflowConfigurationV5> for StoredMetaMetaflowConfiguration {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredMetaMetaflowConfigurationV5) -> Decision<Self, Self::Refusal> {
+        let previous = previous.metaflow;
+        Decision::Ready(Self { metaflow: ConfigureMetaflow {
+            address: previous.address,
+            system_modules: previous.system_modules,
+            user_modules: previous.user_modules,
+            tool_set: previous.tool_set,
+            continuity: previous.continuity,
+            purpose: previous.purpose,
+            records: previous.records,
+            requires: previous.requires,
+        }})
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConfigureMetaflowV4 {
+    pub(super) address: Address,
+    pub(super) system_modules: Vec<String>,
+    pub(super) user_modules: Vec<String>,
+    pub(super) flow_kind: FlowKindV4,
+    pub(super) tool_set: signal_flow::ToolSet,
+    pub(super) continuity: Continuity,
+    pub(super) purpose: String,
+    pub(super) records: Vec<String>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct StoredMetaMetaflowConfigurationV4 {
+    pub(super) metaflow: ConfigureMetaflowV4,
+}
+
+impl EngineRecord for StoredMetaMetaflowConfigurationV4 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaMetaflowConfigurationV4 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v4")
+    }
+}
+
+impl UpgradeFrom<StoredMetaMetaflowConfigurationV4> for StoredMetaMetaflowConfiguration {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredMetaMetaflowConfigurationV4) -> Decision<Self, Self::Refusal> {
+        let previous = previous.metaflow;
+        Decision::Ready(Self {
+            metaflow: ConfigureMetaflow {
+                address: previous.address,
+                system_modules: previous.system_modules,
+                user_modules: previous.user_modules,
+                tool_set: previous.tool_set,
+                continuity: previous.continuity,
+                purpose: previous.purpose,
+                records: previous.records,
+                requires: Vec::new(),
+            },
+        })
+    }
+}
+
 /// The archived declaration before Continuity.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConfigureMetaflowV3 {
     pub(super) address: Address,
     pub(super) system_modules: Vec<String>,
     pub(super) user_modules: Vec<String>,
-    pub(super) flow_kind: signal_flow::FlowKind,
+    pub(super) flow_kind: FlowKindV4,
     pub(super) tool_set: signal_flow::ToolSet,
     pub(super) availability: AvailabilityV3,
     pub(super) purpose: String,
@@ -188,7 +237,6 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV3> for StoredMetaMetaflowConfig
                 address: previous.address,
                 system_modules: previous.system_modules,
                 user_modules: previous.user_modules,
-                flow_kind: previous.flow_kind,
                 tool_set: previous.tool_set,
                 purpose: previous.purpose,
                 records: previous.records,
@@ -204,7 +252,7 @@ pub(super) struct ConfigureMetaflowV2 {
     pub(super) address: Address,
     pub(super) system_modules: Vec<String>,
     pub(super) user_modules: Vec<String>,
-    pub(super) flow_kind: signal_flow::FlowKind,
+    pub(super) flow_kind: FlowKindV4,
     pub(super) tool_set: signal_flow::ToolSet,
 }
 
@@ -240,7 +288,6 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV2> for StoredMetaMetaflowConfig
                 address: previous.address,
                 system_modules: previous.system_modules,
                 user_modules: previous.user_modules,
-                flow_kind: previous.flow_kind,
                 tool_set: previous.tool_set,
                 purpose: String::new(),
                 records: Vec::new(),
@@ -290,7 +337,6 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV1> for StoredMetaMetaflowConfig
                 address: previous.address,
                 system_modules: previous.system_modules,
                 user_modules: previous.user_modules,
-                flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 purpose: String::new(),
                 records: Vec::new(),
@@ -312,9 +358,10 @@ impl DescribesMetaflowDeclarationTable for StoredMetaMetaflowConfiguration {
             SchemaHash::for_label(META_METAFLOW_CONFIGURATION_SCHEMA),
         )
         .with_predecessor::<StoredMetaMetaflowConfigurationV1>()
-        .with_predecessor::<StoredMetaMetaflowConfigurationV4>()
         .with_predecessor::<StoredMetaMetaflowConfigurationV2>()
         .with_predecessor::<StoredMetaMetaflowConfigurationV3>()
+        .with_predecessor::<StoredMetaMetaflowConfigurationV4>()
+        .with_predecessor::<StoredMetaMetaflowConfigurationV5>()
     }
 }
 
@@ -331,12 +378,26 @@ impl UpgradesMetaflowDeclarations for Engine {
         descriptor: TableDescriptor<StoredMetaMetaflowConfiguration>,
     ) -> Result<TableReference<StoredMetaMetaflowConfiguration>, StoreError> {
         // Try each archived declaration shape, newest first.
+        let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
         let from_v1 = descriptor.clone();
         match self
-            .upgrade_table::<StoredMetaMetaflowConfigurationV4, StoredMetaMetaflowConfiguration>(
+            .upgrade_table::<StoredMetaMetaflowConfigurationV5, StoredMetaMetaflowConfiguration>(
                 descriptor,
+            ) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+            }
+        }
+        match self
+            .upgrade_table::<StoredMetaMetaflowConfigurationV4, StoredMetaMetaflowConfiguration>(
+                from_v4,
             ) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
@@ -421,13 +482,14 @@ impl ReadsMetaflowDeclarations for FlowStore {
 mod tests {
     use super::{
         AvailabilityV3, ConfigureMetaflowV1, ConfigureMetaflowV2, ConfigureMetaflowV3,
-        ConfigureMetaflowV4, StoredMetaMetaflowConfiguration, StoredMetaMetaflowConfigurationV1,
+        ConfigureMetaflowV4, ConfigureMetaflowV5, FlowKindV4,
+        StoredMetaMetaflowConfiguration, StoredMetaMetaflowConfigurationV1,
         StoredMetaMetaflowConfigurationV2, StoredMetaMetaflowConfigurationV3,
-        StoredMetaMetaflowConfigurationV4,
+        StoredMetaMetaflowConfigurationV4, StoredMetaMetaflowConfigurationV5,
     };
     use meta_signal_flow::Continuity;
     use sema_engine::{Decision, UpgradeFrom};
-    use signal_flow::{Address, Aspect, FlowKind, Layer, ToolSet};
+    use signal_flow::{Address, Aspect, Layer, ToolSet};
 
     fn at(aspect: Aspect, topic: &str, layer: Layer) -> Address {
         Address {
@@ -479,7 +541,6 @@ mod tests {
         let Decision::Ready(upgraded) = StoredMetaMetaflowConfiguration::upgrade_from(previous);
         assert_eq!(upgraded.metaflow.system_modules, ["spirit-core"]);
         assert_eq!(upgraded.metaflow.user_modules, ["vision-book"]);
-        assert_eq!(upgraded.metaflow.flow_kind, FlowKind::Regular);
         assert_eq!(upgraded.metaflow.tool_set, ToolSet::Default);
         assert_eq!(upgraded.metaflow.continuity, Continuity::OnDemand);
     }
@@ -495,13 +556,12 @@ mod tests {
                     address: address.clone(),
                     system_modules: vec!["spirit:core".into()],
                     user_modules: vec![],
-                    flow_kind: FlowKind::Simplified,
+                    flow_kind: FlowKindV4::Simplified,
                     tool_set: ToolSet::Default,
                 },
             };
             let Decision::Ready(upgraded) = StoredMetaMetaflowConfiguration::upgrade_from(previous);
             assert_eq!(upgraded.metaflow.continuity, continuity, "{address:?}");
-            assert_eq!(upgraded.metaflow.flow_kind, FlowKind::Simplified);
             assert!(upgraded.metaflow.purpose.is_empty());
             assert!(upgraded.metaflow.records.is_empty());
         }
@@ -514,7 +574,7 @@ mod tests {
                 address: at(Aspect::Mind, "flow", Layer::Secondary),
                 system_modules: vec!["spirit:core".into()],
                 user_modules: vec!["vision:flow".into()],
-                flow_kind: FlowKind::Regular,
+                flow_kind: FlowKindV4::Regular,
                 tool_set: ToolSet::Default,
                 continuity: Continuity::Maintained,
                 purpose: "Keep Flow running.".into(),
@@ -538,7 +598,7 @@ mod tests {
                         address: address.clone(),
                         system_modules: vec!["spirit:core".into()],
                         user_modules: vec!["vision:flow".into()],
-                        flow_kind: FlowKind::Regular,
+                        flow_kind: FlowKindV4::Regular,
                         tool_set: ToolSet::Default,
                         availability,
                         purpose: "Keeps Flow running.".into(),
@@ -554,5 +614,24 @@ mod tests {
                 assert_eq!(upgraded.metaflow.records, ["flows/a68420/vision/flow.md"]);
             }
         }
+    }
+
+    #[test]
+    fn v4_simplified_declaration_keeps_its_tool_set_on_the_one_launch_path() {
+        let previous = StoredMetaMetaflowConfigurationV4 {
+            metaflow: ConfigureMetaflowV4 {
+                address: at(Aspect::Mind, "judgment", Layer::Secondary),
+                system_modules: vec!["spirit:core".into()],
+                user_modules: vec!["vision:flow".into()],
+                flow_kind: FlowKindV4::Simplified,
+                tool_set: ToolSet::Explicit(Vec::new()),
+                continuity: Continuity::OnDemand,
+                purpose: "Judge one question.".into(),
+                records: vec![],
+            },
+        };
+        let Decision::Ready(upgraded) = StoredMetaMetaflowConfiguration::upgrade_from(previous);
+        assert_eq!(upgraded.metaflow.tool_set, ToolSet::Explicit(Vec::new()));
+        assert_eq!(upgraded.metaflow.purpose, "Judge one question.");
     }
 }

@@ -250,17 +250,22 @@
   (let [node (first (heads-named "Some" (second (items (body (read-datom inspected))))))]
     (some-> node body items second str)))
 
-(defn transcript-first-user
-  "The first user turn of a Claude transcript, as text."
+(defn transcript-user-turns
+  "The user turns of a Claude transcript, as text, in order."
   [native]
   (when native
     (when-let [file (first (fs/glob (str home "/.claude/projects") (str "*/" native ".jsonl")))]
-      (some (fn [line]
+      (keep (fn [line]
               (let [entry (try (json/parse-string line true) (catch Exception _ nil))]
                 (when (= "user" (:type entry))
                   (let [content (get-in entry [:message :content])]
                     (if (string? content) content (json/generate-string content))))))
             (str/split-lines (slurp (str file)))))))
+
+(defn transcript-first-user
+  "The first user turn of a Claude transcript, as text."
+  [native]
+  (first (transcript-user-turns native)))
 
 (defn occurrences [text needle]
   (if text (count (re-seq (re-pattern (java.util.regex.Pattern/quote needle)) text)) 0))
@@ -298,7 +303,7 @@
   []
   (let [line (first (filter #(str/starts-with? % "Configure.Metaflows.")
                             (str/split-lines (slurp (fs/file libexec "configure.datom")))))]
-    (str/replace-first line "Simplified Explicit.[] Maintained" "Simplified Explicit.[] OnDemand")))
+    (str/replace-first line "Explicit.[] Maintained" "Explicit.[] OnDemand")))
 
 (defn launch [addr] (flow (str "Launch.{ " addr " Predecessors.0 «" brief "» }")))
 
@@ -377,14 +382,19 @@
             send-reply (str/trim (:out @sending))
             old-text (pane-text old-pane)
             fresh (str (watch 60 #(let [f (awake-flow quaternary)] (when (and f (not= (str f) old)) f))))
-            first-prompt (watch 30 #(transcript-first-user (native-session (inspect quaternary))))]
+            native (native-session (inspect quaternary))
+            first-prompt (watch 30 #(transcript-first-user native))
+            queued-prompt (watch 60 #(some (fn [turn] (when (str/includes? turn "Tag s5b") turn))
+                                            (transcript-user-turns native)))]
         {:reply (str "Refresh: " refresh-reply " / Send: " send-reply)
          :pass (boolean (and (str/starts-with? send-reply "SendAccepted.")
                              (seq fresh)
-                             (str/includes? (str first-prompt) "Tag s5b")
+                             (not (str/includes? (str first-prompt) "Tag s5b"))
+                             queued-prompt
                              (zero? (occurrences old-text "Tag s5b"))))
          :watched (str "old flow " old " pane " old-pane (if old-text " readable" " gone")
-                       "; fresh flow " fresh " first prompt " (if (str/includes? (str first-prompt) "Tag s5b") "holds" "lacks") " Tag s5b")}))]
+                       "; fresh flow " fresh " startup prompt " (if (str/includes? (str first-prompt) "Tag s5b") "holds" "lacks") " Tag s5b"
+                       "; a later prompt " (if queued-prompt "holds" "lacks") " Tag s5b")}))]
 
    ["6 Maintained Refresh"
     (fn []

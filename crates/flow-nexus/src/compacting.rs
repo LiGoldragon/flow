@@ -40,8 +40,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// How long before the Nexus started a compaction may have been made and
 /// still be raised, when a transcript is first read in this run: a Nexus
 /// restarted in the middle of a flow's work misses none it made just before.
-pub const WATCH_MARGIN_SECONDS: u64 = 600;
-
 /// What Flow keeps of the compactions it watches, in memory.
 #[derive(Debug)]
 pub struct CompactionWatch {
@@ -57,11 +55,21 @@ pub struct CompactionWatch {
 
 impl Default for CompactionWatch {
     fn default() -> Self {
+        Self::with_margin_milliseconds(
+            crate::store::timings_limits::seed_timings()
+                .expect("authored timings seed")
+                .compaction_watch_margin as u64,
+        )
+    }
+}
+
+impl CompactionWatch {
+    pub(crate) fn with_margin_milliseconds(milliseconds: u64) -> Self {
         let started = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or_default();
-        Self::from_floor(started.saturating_sub(WATCH_MARGIN_SECONDS))
+        Self::from_floor(started.saturating_sub(milliseconds / 1000))
     }
 }
 

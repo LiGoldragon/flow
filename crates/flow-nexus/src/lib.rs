@@ -106,6 +106,10 @@ pub struct RunningNexus {
     pub codex_endpoints: CodexEndpoints,
     pub herdr: herdr::HerdrCli,
     pub composer: LaunchComposer,
+    /// The committed timing configuration captured with the startup snapshot.
+    pub timings: meta_signal_flow::Timings,
+    /// The committed size and count limits captured with the startup snapshot.
+    pub limits: meta_signal_flow::Limits,
     /// Serializes dispatch; see `dispatch_serially`.
     pub dispatch_gate: Mutex<()>,
     /// The exclusive hold on each pane Flow is writing; see
@@ -802,7 +806,9 @@ impl OpensRunningNexus for RunningNexus {
             .configuration_snapshot()?
             .ok_or(store::StoreError::NotConfigured)?;
         let runtime = store::RuntimeConfiguration::from(&snapshot.nexus);
-        let codex_endpoints = CodexEndpoints::from(&runtime);
+        let mut codex_endpoints = CodexEndpoints::from(&runtime);
+        codex_endpoints.timeout = Duration::from_millis(snapshot.timings.app_server_timeout as u64);
+        codex_endpoints.limits = snapshot.limits.clone();
         let overlap = codex_endpoints.overlapping_models();
         if !overlap.is_empty() {
             eprintln!(
@@ -819,20 +825,32 @@ impl OpensRunningNexus for RunningNexus {
             herdr: herdr::HerdrCli::default()
                 .with_source_root(&source_root)
                 .with_codex_endpoints(codex_endpoints)
+                .with_runtime_settings(snapshot.timings.clone(), snapshot.limits.clone())
                 .with_ordinary_socket(&ordinary_socket),
             // A launch's context is composed by the Curriculum Nexus at the
             // socket the configuration names, read as the Nexus opens.
-            composer: LaunchComposer::with_context(context::ContextComposer::Curriculum(
-                CurriculumComposer::at(&snapshot.nexus.curriculum_nexus_path),
-            )),
+            composer: LaunchComposer::with_context_and_limits(
+                context::ContextComposer::Curriculum(CurriculumComposer::configured(
+                    &snapshot.nexus.curriculum_nexus_path,
+                    &snapshot.timings,
+                    &snapshot.limits,
+                )),
+                snapshot.limits.clone(),
+            ),
+            timings: snapshot.timings.clone(),
+            limits: snapshot.limits.clone(),
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
             stopping: Stopping::default(),
             launch_calls: send_tool::LaunchCalls::default(),
-            codex_turns: codex_turns::CodexTurns::default(),
-            compactions: compacting::CompactionWatch::default(),
+            codex_turns: codex_turns::CodexTurns::with_remembered_turns(
+                snapshot.limits.remembered_turns as usize,
+            ),
+            compactions: compacting::CompactionWatch::with_margin_milliseconds(
+                snapshot.timings.compaction_watch_margin as u64,
+            ),
         })
     }
 }
@@ -849,9 +867,7 @@ pub struct Connection {
 }
 
 pub trait ServesConnection: Sized {
-    const READ_TIMEOUT: Duration = Duration::from_secs(5);
-    const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-    fn accepted(peer: UnixStream) -> Result<Self, String>;
+    fn accepted(peer: UnixStream, socket_timeout: Duration) -> Result<Self, String>;
     fn serve_sends(
         &mut self,
         nexus: &RunningNexus,
@@ -863,9 +879,9 @@ pub trait ServesConnection: Sized {
 }
 
 impl ServesConnection for Connection {
-    fn accepted(peer: UnixStream) -> Result<Self, String> {
-        peer.set_read_timeout(Some(Self::READ_TIMEOUT))
-            .and_then(|_| peer.set_write_timeout(Some(Self::WRITE_TIMEOUT)))
+    fn accepted(peer: UnixStream, socket_timeout: Duration) -> Result<Self, String> {
+        peer.set_read_timeout(Some(socket_timeout))
+            .and_then(|_| peer.set_write_timeout(Some(socket_timeout)))
             .map_err(|error| error.to_string())?;
         let process = peer
             .peer_process()
@@ -912,7 +928,9 @@ impl ServesConnection for Connection {
     }
 
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
-        let query = self.peer.read_query()?;
+        let query = self
+            .peer
+            .read_query_with_limit(nexus.limits.frame as usize)?;
         let response = match query {
             // Reads of launch state never wait behind a running launch.
             Query::LaunchStatus(launch_request_id) => nexus.launch_status(&launch_request_id),
@@ -1068,7 +1086,9 @@ impl ServesConnection for Connection {
     }
 
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
-        let query = self.peer.read_meta_query()?;
+        let query = self
+            .peer
+            .read_meta_query_with_limit(nexus.limits.frame as usize)?;
         // The peer is read from the kernel; nothing in the query names it.
         let peer = self.peer.peer_process();
         let response = match nexus.meta_refusal(peer) {
@@ -1087,6 +1107,7 @@ impl ServesConnection for Connection {
 
 /// Binds a socket and serves each connection on its own thread.
 pub trait ListensOnSocket {
+    fn socket_timeout(&self) -> Duration;
     fn listen(
         &self,
         socket: &Path,
@@ -1110,7 +1131,7 @@ pub trait ListensOnSocket {
                 }
                 let connection = match peer
                     .map_err(|error| error.to_string())
-                    .and_then(Connection::accepted)
+                    .and_then(|peer| Connection::accepted(peer, self.socket_timeout()))
                 {
                     Ok(connection) => connection,
                     Err(error) => {
@@ -1139,6 +1160,10 @@ pub trait ListensOnSocket {
 }
 
 impl ListensOnSocket for RunningNexus {
+    fn socket_timeout(&self) -> Duration {
+        Duration::from_millis(self.timings.socket_timeout as u64)
+    }
+
     fn stopping(&self) -> bool {
         self.stopping.requested()
     }
@@ -1449,15 +1474,24 @@ impl ServesMeta for RunningNexus {
 /// A Unix stream carries Signal as length-prefixed rkyv frames of at most
 /// 1 MiB.
 pub trait CarriesSignalFrames {
-    const FRAME_LIMIT: usize = 1024 * 1024;
-
     fn write_frame(&mut self, bytes: &[u8]) -> Result<(), String>;
-    fn read_frame(&mut self) -> Result<Vec<u8>, String>;
+    fn read_frame_with_limit(&mut self, frame_limit: usize) -> Result<Vec<u8>, String>;
+    fn read_frame(&mut self) -> Result<Vec<u8>, String> {
+        let limit = crate::store::timings_limits::seed_limits()
+            .map_err(|error| error.to_string())?
+            .frame as usize;
+        self.read_frame_with_limit(limit)
+    }
     fn write_query(&mut self, value: &Query) -> Result<(), String>;
     fn read_query(&mut self) -> Result<Query, String>;
+    fn read_query_with_limit(&mut self, frame_limit: usize) -> Result<Query, String>;
     fn write_response(&mut self, value: &Response) -> Result<(), String>;
     fn read_response(&mut self) -> Result<Response, String>;
     fn read_meta_query(&mut self) -> Result<meta_signal_flow::Query, String>;
+    fn read_meta_query_with_limit(
+        &mut self,
+        frame_limit: usize,
+    ) -> Result<meta_signal_flow::Query, String>;
     fn write_meta_response(&mut self, value: &meta_signal_flow::Response) -> Result<(), String>;
 }
 
@@ -1468,12 +1502,12 @@ impl CarriesSignalFrames for UnixStream {
         self.write_all(bytes).map_err(|e| e.to_string())
     }
 
-    fn read_frame(&mut self) -> Result<Vec<u8>, String> {
+    fn read_frame_with_limit(&mut self, frame_limit: usize) -> Result<Vec<u8>, String> {
         let mut length = [0; 4];
         self.read_exact(&mut length).map_err(|e| e.to_string())?;
         let length = u32::from_be_bytes(length) as usize;
-        if length > Self::FRAME_LIMIT {
-            return Err("Signal frame exceeds 1 MiB".into());
+        if length > frame_limit {
+            return Err("Signal frame exceeds the configured limit".into());
         }
         let mut bytes = vec![0; length];
         self.read_exact(&mut bytes).map_err(|e| e.to_string())?;
@@ -1489,6 +1523,11 @@ impl CarriesSignalFrames for UnixStream {
             .map_err(|e| e.to_string())
     }
 
+    fn read_query_with_limit(&mut self, frame_limit: usize) -> Result<Query, String> {
+        rkyv::from_bytes::<Query, rkyv::rancor::Error>(&self.read_frame_with_limit(frame_limit)?)
+            .map_err(|e| e.to_string())
+    }
+
     fn write_response(&mut self, value: &Response) -> Result<(), String> {
         self.write_frame(&rkyv::to_bytes::<rkyv::rancor::Error>(value).map_err(|e| e.to_string())?)
     }
@@ -1501,6 +1540,16 @@ impl CarriesSignalFrames for UnixStream {
     fn read_meta_query(&mut self) -> Result<meta_signal_flow::Query, String> {
         rkyv::from_bytes::<meta_signal_flow::Query, rkyv::rancor::Error>(&self.read_frame()?)
             .map_err(|e| e.to_string())
+    }
+
+    fn read_meta_query_with_limit(
+        &mut self,
+        frame_limit: usize,
+    ) -> Result<meta_signal_flow::Query, String> {
+        rkyv::from_bytes::<meta_signal_flow::Query, rkyv::rancor::Error>(
+            &self.read_frame_with_limit(frame_limit)?,
+        )
+        .map_err(|e| e.to_string())
     }
 
     fn write_meta_response(&mut self, value: &meta_signal_flow::Response) -> Result<(), String> {
@@ -2222,6 +2271,7 @@ mod tests {
                 },
                 timeout: Duration::from_secs(1),
                 workspace_root: directory.path().to_path_buf(),
+                limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
             };
             let mut store =
                 FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store");
@@ -2244,6 +2294,8 @@ mod tests {
                         ][..],
                     ),
                 )),
+                timings: crate::store::timings_limits::seed_timings().expect("timings seed"),
+                limits: crate::store::timings_limits::seed_limits().expect("limits seed"),
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),

@@ -53,6 +53,7 @@ impl From<ContextRefusal> for CompositionError {
 #[derive(Clone, Debug)]
 pub struct LaunchComposer {
     context: ContextComposer,
+    limits: meta_signal_flow::Limits,
 }
 
 trait ComposesPresentationRole {
@@ -162,7 +163,19 @@ pub trait OpensLaunchComposer {
 
 impl OpensLaunchComposer for LaunchComposer {
     fn with_context(context: ContextComposer) -> Self {
-        Self { context }
+        Self {
+            context,
+            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+        }
+    }
+}
+
+impl LaunchComposer {
+    pub(crate) fn with_context_and_limits(
+        context: ContextComposer,
+        limits: meta_signal_flow::Limits,
+    ) -> Self {
+        Self { context, limits }
     }
 }
 
@@ -198,9 +211,19 @@ impl RendersLaunchSection for LaunchProfile {
     }
 }
 
-pub(crate) const HERDR_REQUEST_LINE_LIMIT: usize = 1024 * 1024;
-const HERDR_ENVELOPE_ALLOWANCE: usize = 1024;
-const CODEX_TEXT_CHARACTER_LIMIT: usize = 1 << 20;
+struct MessageBoundary<'a> {
+    harness: &'a HarnessKind,
+    limits: &'a meta_signal_flow::Limits,
+}
+
+fn fits_message(harness: &HarnessKind, limits: &meta_signal_flow::Limits, text: &str) -> bool {
+    match harness {
+        HarnessKind::Claude => serde_json::to_string(&text).is_ok_and(|encoded| {
+            encoded.len() + limits.herdr_envelope as usize <= limits.herdr_line as usize
+        }),
+        HarnessKind::Codex => text.chars().count() <= limits.codex_text as usize,
+    }
+}
 
 /// What one message and one argument may hold for a harness.
 ///
@@ -215,12 +238,17 @@ const CODEX_TEXT_CHARACTER_LIMIT: usize = 1 << 20;
 impl FitsOneMessage for HarnessKind {
     fn fits_one_message<N: Textual>(&self, input: N) -> bool {
         let text = input.text();
-        match self {
-            HarnessKind::Claude => serde_json::to_string(&text).is_ok_and(|encoded| {
-                encoded.len() + HERDR_ENVELOPE_ALLOWANCE <= HERDR_REQUEST_LINE_LIMIT
-            }),
-            HarnessKind::Codex => text.chars().count() <= CODEX_TEXT_CHARACTER_LIMIT,
-        }
+        fits_message(
+            self,
+            &crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+            &text,
+        )
+    }
+}
+
+impl FitsOneMessage for MessageBoundary<'_> {
+    fn fits_one_message<N: Textual>(&self, input: N) -> bool {
+        fits_message(self.harness, self.limits, &input.text())
     }
 }
 
@@ -270,6 +298,43 @@ impl SplitsStartupMessage for HarnessKind {
         }
         // Packed under the longest header a part can have, so the real one
         // never makes a part overflow.
+        let widest = Self::part_header((1, 999_999));
+        let mut chunks: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for piece in pieces {
+            if !current.is_empty() && !self.fits_one_message(format!("{widest}{current}{piece}")) {
+                chunks.push(std::mem::take(&mut current));
+            }
+            current.push_str(&piece);
+            if !self.fits_one_message(format!("{widest}{current}")) {
+                return Err(ContextRefusal::ModuleTooLarge);
+            }
+        }
+        chunks.push(current);
+        let count = chunks.len();
+        Ok(chunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, chunk)| format!("{}{chunk}", Self::part_header((index + 1, count))))
+            .collect())
+    }
+}
+
+impl SplitsStartupMessage for MessageBoundary<'_> {
+    fn part_header<N: PartNumbering>(input: N) -> String {
+        HarnessKind::part_header(input)
+    }
+
+    fn startup_parts<N: SegmentListing, O: Textual>(
+        &self,
+        input_0: N,
+        input_1: O,
+    ) -> Result<Vec<String>, ContextRefusal> {
+        let pieces = input_0.segments().joined_with(input_1.text());
+        let whole = pieces.concat();
+        if self.fits_one_message(&whole) {
+            return Ok(vec![whole]);
+        }
         let widest = Self::part_header((1, 999_999));
         let mut chunks: Vec<String> = Vec::new();
         let mut current = String::new();
@@ -575,9 +640,11 @@ impl ComposesLaunch for LaunchComposer {
             let parts = if brief.is_empty() {
                 Vec::new()
             } else {
-                harnessed
-                    .harness_kind
-                    .startup_parts(Vec::<String>::new(), &brief)?
+                MessageBoundary {
+                    harness: &harnessed.harness_kind,
+                    limits: &self.limits,
+                }
+                .startup_parts(Vec::<String>::new(), &brief)?
             };
             return Ok(Self::assembled(
                 &harnessed,
@@ -594,7 +661,11 @@ impl ComposesLaunch for LaunchComposer {
         let system_prompt =
             self.launch_system_prompt(&harnessed, &verified, Vec::<String>::new())?;
         let body = segments.joined_with(&brief).concat();
-        let parts = harnessed.harness_kind.startup_parts(&segments, &brief)?;
+        let parts = MessageBoundary {
+            harness: &harnessed.harness_kind,
+            limits: &self.limits,
+        }
+        .startup_parts(&segments, &brief)?;
         Ok(Self::assembled(
             &harnessed,
             &system_prompt,

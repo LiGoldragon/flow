@@ -17,7 +17,10 @@ fn rendered_native_prompt_budget_accepts_exact_boundary_and_refuses_one_byte_ove
     let overhead = Request::Order("a".into()).native_prompt_bytes(&sender) - 1;
     let exact = Request::Order("a".repeat(MAX_SEND_PAYLOAD_BYTES - overhead));
     assert_eq!(exact.native_prompt_bytes(&sender), MAX_SEND_PAYLOAD_BYTES);
-    assert_eq!(exact.oversized_refusal(&sender), None);
+    assert_eq!(
+        exact.oversized_refusal(&sender, MAX_SEND_PAYLOAD_BYTES),
+        None
+    );
 
     let over = Request::Order("a".repeat(MAX_SEND_PAYLOAD_BYTES - overhead + 1));
     assert_eq!(
@@ -25,7 +28,7 @@ fn rendered_native_prompt_budget_accepts_exact_boundary_and_refuses_one_byte_ove
         MAX_SEND_PAYLOAD_BYTES + 1
     );
     assert!(matches!(
-        over.oversized_refusal(&sender),
+        over.oversized_refusal(&sender, MAX_SEND_PAYLOAD_BYTES),
         Some(signal_flow::Refusal::Oversized(signal_flow::SendPayloadSize {
             actual_bytes,
             maximum_bytes,
@@ -44,14 +47,20 @@ fn rendered_native_prompt_budget_counts_multibyte_utf8_bytes() {
         at_boundary.native_prompt_bytes(&sender),
         MAX_SEND_PAYLOAD_BYTES
     );
-    assert_eq!(at_boundary.oversized_refusal(&sender), None);
+    assert_eq!(
+        at_boundary.oversized_refusal(&sender, MAX_SEND_PAYLOAD_BYTES),
+        None
+    );
 
     let over = Request::Order("a".repeat(payload_bytes - 1) + "é");
     assert_eq!(
         over.native_prompt_bytes(&sender),
         MAX_SEND_PAYLOAD_BYTES + 1
     );
-    assert!(over.oversized_refusal(&sender).is_some());
+    assert!(
+        over.oversized_refusal(&sender, MAX_SEND_PAYLOAD_BYTES)
+            .is_some()
+    );
 }
 
 #[test]

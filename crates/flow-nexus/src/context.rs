@@ -44,12 +44,9 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurriculumComposer {
     socket: PathBuf,
+    timeout: Duration,
+    answer_frame_limit: usize,
 }
-
-/// How long one composition may take on the Curriculum socket.
-const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
-/// The largest Curriculum answer frame read: generous for two texts.
-const ANSWER_FRAME_LIMIT: usize = 64 * 1024 * 1024;
 /// The opening line of a rendered context text.
 pub const CONTEXT_OPENING: &str = "These are your skills, given here; do not reload them.";
 
@@ -59,6 +56,28 @@ impl OpensCurriculumComposer for CurriculumComposer {
     fn at<N: Textual>(input: N) -> Self {
         Self {
             socket: PathBuf::from(input.text()),
+            timeout: Duration::from_millis(
+                crate::store::timings_limits::seed_timings()
+                    .expect("authored timings seed")
+                    .curriculum_timeout as u64,
+            ),
+            answer_frame_limit: crate::store::timings_limits::seed_limits()
+                .expect("authored limits seed")
+                .curriculum_answer as usize,
+        }
+    }
+}
+
+impl CurriculumComposer {
+    pub(crate) fn configured(
+        socket: &str,
+        timings: &meta_signal_flow::Timings,
+        limits: &meta_signal_flow::Limits,
+    ) -> Self {
+        Self {
+            socket: PathBuf::from(socket),
+            timeout: Duration::from_millis(timings.curriculum_timeout as u64),
+            answer_frame_limit: limits.curriculum_answer as usize,
         }
     }
 }
@@ -125,8 +144,8 @@ impl ExchangesCurriculumFrames for CurriculumComposer {
         let mut stream = UnixStream::connect(&self.socket)
             .map_err(|error| format!("Curriculum socket unreachable: {error}"))?;
         stream
-            .set_read_timeout(Some(EXCHANGE_TIMEOUT))
-            .and_then(|_| stream.set_write_timeout(Some(EXCHANGE_TIMEOUT)))
+            .set_read_timeout(Some(self.timeout))
+            .and_then(|_| stream.set_write_timeout(Some(self.timeout)))
             .map_err(|error| error.to_string())?;
         stream
             .write_all(&length.to_be_bytes())
@@ -138,7 +157,7 @@ impl ExchangesCurriculumFrames for CurriculumComposer {
             .read_exact(&mut prefix)
             .map_err(|error| format!("answer not read: {error}"))?;
         let length = u32::from_be_bytes(prefix) as usize;
-        if length > ANSWER_FRAME_LIMIT {
+        if length > self.answer_frame_limit {
             return Err("answer frame exceeds its limit".into());
         }
         let mut frame = vec![0_u8; length];

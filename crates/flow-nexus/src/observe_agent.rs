@@ -154,7 +154,11 @@ impl ObservesAgent for RunningNexus {
             .ok_or("Herdr session socket not found")?;
         let mut events = HerdrEvents::subscribe(&socket, &route.herdr_pane_id)?;
         loop {
-            let Some(event) = events.next_event(&|| self.stopping.requested())? else {
+            let Some(event) = events.next_event(
+                &|| self.stopping.requested(),
+                std::time::Duration::from_millis(self.timings.agent_observe_poll as u64),
+            )?
+            else {
                 // Herdr closed the subscription: the session is gone. The
                 // pane is read once more before the flow is recorded ended.
                 if let Some((node, _)) = self.observable(flow_id)
@@ -213,11 +217,13 @@ struct HerdrEvents {
 
 trait SubscribesHerdrEvents: Sized {
     fn subscribe(socket: &std::path::Path, pane_id: &str) -> Result<Self, String>;
-    /// How often a waiting subscription looks whether the Nexus is stopping.
-    const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(500);
     /// The next event about this pane; None when Herdr closes the stream,
     /// an error once `stopping` holds.
-    fn next_event(&mut self, stopping: &dyn Fn() -> bool) -> Result<Option<PaneEvent>, String>;
+    fn next_event(
+        &mut self,
+        stopping: &dyn Fn() -> bool,
+        stop_poll: std::time::Duration,
+    ) -> Result<Option<PaneEvent>, String>;
 }
 
 impl SubscribesHerdrEvents for HerdrEvents {
@@ -257,10 +263,14 @@ impl SubscribesHerdrEvents for HerdrEvents {
         Ok(events)
     }
 
-    fn next_event(&mut self, stopping: &dyn Fn() -> bool) -> Result<Option<PaneEvent>, String> {
+    fn next_event(
+        &mut self,
+        stopping: &dyn Fn() -> bool,
+        stop_poll: std::time::Duration,
+    ) -> Result<Option<PaneEvent>, String> {
         self.reader
             .get_ref()
-            .set_read_timeout(Some(Self::STOP_POLL))
+            .set_read_timeout(Some(stop_poll))
             .map_err(|error| error.to_string())?;
         loop {
             if stopping() {

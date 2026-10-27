@@ -2280,7 +2280,7 @@ impl WakesInParts for RunningNexus {
         }
         let Some(tokens) = self
             .claude_transcript(&node)
-            .and_then(|transcript| transcript.context_tokens())
+            .and_then(|transcript| transcript.context_tokens(self.limits.context_tail as u64))
         else {
             eprintln!("flow-nexus: flow {flow_id} stopped with no context size readable");
             return;

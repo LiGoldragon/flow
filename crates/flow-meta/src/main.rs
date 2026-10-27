@@ -409,6 +409,24 @@ mod tests {
             send_servers: vec![],
             metaflows: rows.clone(),
             investigation: None,
+            timings: meta_signal_flow::Timings {
+                socket_timeout: 5000, curriculum_timeout: 30000, app_server_timeout: 10000,
+                send_wait: 10000, prompt_reply_timeout: 30000, launch_rest_wait: 30000,
+                pane_rest_wait: 15000, agent_start_timeout: 30000,
+                environment_ready_timeout: 5000, prompt_observation_timeout: 10000,
+                interrupt_wait: 3000, submission_spacing: 350, title_readback_interval: 250,
+                agent_observe_poll: 500, send_tool_first_wait: 1000,
+                send_tool_longest_wait: 60000, send_tool_serving_slice: 50,
+                send_tool_replay_window: 2000, compaction_watch_margin: 600000,
+            },
+            limits: meta_signal_flow::Limits {
+                send_body: 65536, frame: 1048576, curriculum_answer: 67108864,
+                app_server_header: 16384, app_server_message: 67108864,
+                context_tail: 4194304, herdr_line: 1048576, herdr_envelope: 1024,
+                codex_text: 1048576, history_page: 16, history_pages: 16,
+                remembered_turns: 64, interrupt_presses: 3, submission_reads: 12,
+                title_readbacks: 40, output_lines: 50,
+            },
         };
         let printed = Response::Configuration(snapshot)
             .datomize(vec![])

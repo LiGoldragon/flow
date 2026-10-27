@@ -48,20 +48,14 @@ pub trait WritesPane {
     /// The composer is read this many times, each `SUBMISSION_SPACING` after
     /// the last: long enough for Herdr's CR, sent 300 ms after the text, and
     /// a harness's render of a large paste.
-    const SUBMISSION_READS: usize = 12;
-    const SUBMISSION_SPACING: std::time::Duration = std::time::Duration::from_millis(350);
-    /// Each press is given `INTERRUPT_WAIT_MILLISECONDS` to show.
-    const INTERRUPT_PRESSES: usize = 3;
-    /// How long each interrupt press is given to show: an interrupted turn
-    /// stops within a second or two.
-    const INTERRUPT_WAIT_MILLISECONDS: &'static str = "3000";
+    fn timings(&self) -> &meta_signal_flow::Timings;
+    fn limits(&self) -> &meta_signal_flow::Limits;
     /// The composer is at the bottom of the screen.
     const COMPOSER_LINES: &'static str = "12";
     /// How long a Stopped seat is given to show resting. Claude runs its
     /// Stop hook while its spinner is still on screen, and Herdr reads its
     /// state from the screen, so Herdr shows it working for a moment after
     /// the turn has ended.
-    const REST_WAIT_MILLISECONDS: &'static str = "15000";
 
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent;
     /// The pane's visible screen exactly as Herdr reads it.
@@ -99,9 +93,11 @@ pub trait WritesPane {
     /// subscribe to.
     fn submission(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Submission {
         let mut submission = Submission::Unreadable;
-        for _ in 0..Self::SUBMISSION_READS {
+        for _ in 0..self.limits().submission_reads as usize {
             // The first read waits too, past Herdr's delayed CR.
-            std::thread::sleep(Self::SUBMISSION_SPACING);
+            std::thread::sleep(std::time::Duration::from_millis(
+                self.timings().submission_spacing as u64,
+            ));
             match self.composer_is_blank(route, harness_kind) {
                 Some(true) => return Submission::Seen,
                 Some(false) => submission = Submission::Unseen,
@@ -157,7 +153,7 @@ pub trait WritesPane {
     /// same keys pressed again a moment later stop it. The keys go only into
     /// an agent still seen Working, never into a resting one.
     fn interrupt(&self, route: &HerdrRoute, keys: &[String]) -> Interruption {
-        for press in 0..Self::INTERRUPT_PRESSES {
+        for press in 0..self.limits().interrupt_presses as usize {
             if !self.press(route, keys) {
                 return if press == 0 {
                     Interruption::Refused
@@ -196,6 +192,13 @@ pub enum Submission {
 }
 
 impl WritesPane for HerdrCli {
+    fn timings(&self) -> &meta_signal_flow::Timings {
+        &self.timings
+    }
+
+    fn limits(&self) -> &meta_signal_flow::Limits {
+        &self.limits
+    }
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return PaneAgent::Absent;
@@ -293,7 +296,20 @@ impl WritesPane for HerdrCli {
             text,
         ]);
         if observe {
-            command.args(PromptReply::OBSERVATION);
+            let timeout = self.timings.prompt_observation_timeout.to_string();
+            command.args([
+                "--wait",
+                "--until",
+                "working",
+                "--until",
+                "idle",
+                "--until",
+                "done",
+                "--until",
+                "blocked",
+                "--timeout",
+                timeout.as_str(),
+            ]);
         }
         let Ok(output) = command.output() else {
             return Placement::Refused;
@@ -309,6 +325,7 @@ impl WritesPane for HerdrCli {
     }
 
     fn left_working(&self, route: &HerdrRoute) -> bool {
+        let timeout = self.timings.interrupt_wait.to_string();
         Command::new(&self.executable)
             .args([
                 "--session",
@@ -323,13 +340,14 @@ impl WritesPane for HerdrCli {
                 "--until",
                 "blocked",
                 "--timeout",
-                Self::INTERRUPT_WAIT_MILLISECONDS,
+                timeout.as_str(),
             ])
             .output()
             .is_ok_and(|output| output.status.success())
     }
 
     fn rested(&self, route: &HerdrRoute) -> bool {
+        let timeout = self.timings.pane_rest_wait.to_string();
         Command::new(&self.executable)
             .args([
                 "--session",
@@ -342,7 +360,7 @@ impl WritesPane for HerdrCli {
                 "--until",
                 "done",
                 "--timeout",
-                Self::REST_WAIT_MILLISECONDS,
+                timeout.as_str(),
             ])
             .output()
             .is_ok_and(|output| output.status.success())

@@ -44,7 +44,9 @@
             name = "source";
             filter =
               path: type:
-              (pkgs.lib.hasSuffix ".ethos" path) || (craneLib.filterCargoSources path type);
+              (pkgs.lib.hasSuffix ".ethos" path)
+              || (pkgs.lib.hasSuffix ".datom" path)
+              || (craneLib.filterCargoSources path type);
           };
           commonArgs = {
             inherit src;

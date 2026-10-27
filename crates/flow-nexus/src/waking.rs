@@ -2112,6 +2112,10 @@ impl WakesInParts for RunningNexus {
             }
             Err(_) => return Err(FreshRefusal::Failed(Failed_Data::StoreRefused)),
         };
+        let effort = match self.store.configured_effort(address) {
+            Ok(Some(effort)) => effort,
+            Ok(None) | Err(_) => return Err(FreshRefusal::Failed(Failed_Data::StoreRefused)),
+        };
         let launch_request_id = format!(
             "wake-{}-{}",
             metaflow.past.len(),
@@ -2124,7 +2128,7 @@ impl WakesInParts for RunningNexus {
             address: address.clone(),
             launch_request_id: launch_request_id.clone(),
             model_name: model,
-            effort: <Self as crate::sending::ChoosesEffort>::effort_of(address).into(),
+            effort,
             herdr_session_name: fresh.herdr_session_name,
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,
@@ -2259,6 +2263,10 @@ impl WakesInParts for RunningNexus {
             Ok(Some(model)) => model,
             Ok(None) | Err(_) => return AtStop::Kept(KeptAtStop::RefreshUnplaceable),
         };
+        let effort = match self.store.configured_effort(&address) {
+            Ok(Some(effort)) => effort,
+            Ok(None) | Err(_) => return AtStop::Kept(KeptAtStop::RefreshUnplaceable),
+        };
         // The intent names the replacement's launch request, so a Nexus
         // that takes it up again resumes that launch; a launch already
         // refused is not resumed, and a new one is owed in its place.
@@ -2304,7 +2312,7 @@ impl WakesInParts for RunningNexus {
             address: address.clone(),
             launch_request_id: launch_request_id.clone(),
             model_name: model,
-            effort: <Self as crate::sending::ChoosesEffort>::effort_of(&address).into(),
+            effort,
             herdr_session_name: fresh.herdr_session_name,
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,

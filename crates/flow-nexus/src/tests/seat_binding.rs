@@ -99,7 +99,8 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
             meta_signal_flow::ConfigureModel {
                 layer: Layer::Secondary,
                 aspect: Aspect::Mind,
-                native: "gpt-6-sol".into(),
+                model_name: "gpt-6-sol".into(),
+                    effort: "medium".into(),
             },
         ]))
         .unwrap();

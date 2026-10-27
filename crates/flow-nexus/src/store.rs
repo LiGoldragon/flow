@@ -953,11 +953,11 @@ impl EngineRecord for StoredMetaModelConfiguration {
 
 impl MemoryDefinition for StoredMetaModelConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(2)
+        MemoryVersion::new(3)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-meta-model-configuration-v2")
+        SchemaHash::for_label("flow-nexus-meta-model-configuration-v3")
     }
 }
 
@@ -1004,7 +1004,8 @@ impl UpgradeFrom<StoredMetaModelConfigurationV1> for StoredMetaModelConfiguratio
             model: ConfigureModel {
                 layer,
                 aspect: Aspect::Psyche,
-                native,
+                model_name: native,
+                effort: "medium".into(),
             },
         })
     }
@@ -1129,6 +1130,7 @@ impl EngineRecord for StoredMetaLeaveOutConfigurationV1 {
 pub(crate) trait NamesConfiguredModel {
     /// The model configured for the Address's layer and aspect, if any.
     fn configured_model(&self, address: &Address) -> Result<Option<String>, StoreError>;
+    fn configured_effort(&self, address: &Address) -> Result<Option<String>, StoreError>;
 }
 
 impl NamesConfiguredModel for FlowStore {
@@ -1139,7 +1141,17 @@ impl NamesConfiguredModel for FlowStore {
             .match_records(QueryPlan::key(self.meta_configuration_tables.models, key))?
             .records()
             .first()
-            .map(|stored| stored.model.native.clone()))
+            .map(|stored| stored.model.model_name.clone()))
+    }
+
+    fn configured_effort(&self, address: &Address) -> Result<Option<String>, StoreError> {
+        let key = RecordKey::new(FlowStore::model_record_key(&address.layer, &address.aspect));
+        Ok(self
+            .engine
+            .match_records(QueryPlan::key(self.meta_configuration_tables.models, key))?
+            .records()
+            .first()
+            .map(|stored| stored.model.effort.clone()))
     }
 }
 
@@ -9013,7 +9025,8 @@ mod tests {
                 meta_signal_flow::ConfigureModel {
                     layer: Layer::Secondary,
                     aspect: Aspect::Mind,
-                    native: "gpt-sol".into(),
+                    model_name: "gpt-sol".into(),
+                    effort: "medium".into(),
                 },
             ]))
             .expect("owner model configured");
@@ -12651,7 +12664,8 @@ mod tests {
             .map(|(layer, native)| meta_signal_flow::ConfigureModel {
                 layer: layer.clone(),
                 aspect: Aspect::Psyche,
-                native: (*native).into(),
+                model_name: (*native).into(),
+                effort: "medium".into(),
             })
             .collect::<Vec<_>>();
         for reopening in 0..2 {
@@ -12815,7 +12829,8 @@ mod tests {
                 .map(|(layer, native)| meta_signal_flow::ConfigureModel {
                     layer: layer.clone(),
                     aspect: Aspect::Psyche,
-                    native: (*native).into(),
+                    model_name: (*native).into(),
+                    effort: "medium".into(),
                 })
                 .collect::<Vec<_>>()
         );

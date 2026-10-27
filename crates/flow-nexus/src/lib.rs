@@ -1678,7 +1678,8 @@ mod tests {
                 meta_signal_flow::ConfigureModel {
                     layer: Layer::Secondary,
                     aspect: Aspect::Mind,
-                    native: "gpt-sol".into(),
+                    model_name: "gpt-sol".into(),
+                    effort: "medium".into(),
                 },
             ]))
             .expect("existing binding model declared");
@@ -3967,7 +3968,8 @@ mod tests {
                     meta_signal_flow::ConfigureModel {
                         layer: profile.address.layer.clone(),
                         aspect: profile.address.aspect.clone(),
-                        native: profile.model_name.clone(),
+                        model_name: profile.model_name.clone(),
+                    effort: "medium".into(),
                     },
                 ]))
                 .expect("model configured");
@@ -5159,7 +5161,8 @@ mod tests {
                     ConfigurationChange::Models(vec![ConfigureModel {
                         layer: Layer::Quaternary,
                         aspect: Aspect::Field,
-                        native: "gpt-6-luna".into(),
+                        model_name: "gpt-6-luna".into(),
+                    effort: "medium".into(),
                     }])
                 )),
             meta_signal_flow::Response::Configured(_)

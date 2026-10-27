@@ -128,7 +128,8 @@ pub(super) fn declare_seat(
         .configure_change(ConfigurationChange::Models(vec![ConfigureModel {
             layer: Layer::Secondary,
             aspect: Aspect::Mind,
-            native: "fixture-model".into(),
+            model_name: "fixture-model".into(),
+                    effort: "medium".into(),
         }]))
         .expect("successor model configured");
 }

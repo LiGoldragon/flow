@@ -661,6 +661,154 @@ pub trait ConfiguresHerdrCli {
     fn at(executable: PathBuf, flows_root: PathBuf) -> Self;
 }
 
+#[cfg(test)]
+fn fixture_pane_profile(kind: HarnessKind) -> meta_signal_flow::PaneProfile {
+    meta_signal_flow::PaneProfile {
+        command_sigil_vector: if kind == HarnessKind::Claude {
+            vec!["/".into(), "!".into(), "#".into()]
+        } else {
+            vec!["/".into(), "!".into()]
+        },
+        interrupt_keys: if kind == HarnessKind::Claude {
+            vec!["esc".into(), "esc".into()]
+        } else {
+            vec!["esc".into()]
+        },
+        submit_keys: if kind == HarnessKind::Claude {
+            vec!["enter".into()]
+        } else {
+            vec![]
+        },
+        compact_line: "/compact".into(),
+        composer: if kind == HarnessKind::Claude {
+            meta_signal_flow::Composer {
+                glyph: "❯".into(),
+                retraction: meta_signal_flow::Retraction::Keys(vec!["ctrl+c".into()]),
+                composer_lines: 12,
+                retracted_lines: 32,
+            }
+        } else {
+            meta_signal_flow::Composer {
+                glyph: "›".into(),
+                retraction: meta_signal_flow::Retraction::LineByLine(vec![
+                    "ctrl+u".into(),
+                    "backspace".into(),
+                ]),
+                composer_lines: 12,
+                retracted_lines: 32,
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_harnesses(root: &Path) -> Vec<meta_signal_flow::Harness> {
+    use meta_signal_flow::{Flagged_Data, Harness, HarnessModel, Joined_Data, Piece, Slot};
+    vec![
+        Harness {
+            harness_name: "fixture-claude".into(),
+            harness_kind: HarnessKind::Claude,
+            harness_version: "fixture".into(),
+            executable: "/fixture/claude".into(),
+            home: root.join("claude-home").display().to_string(),
+            control_socket_path_option: None,
+            served_models: [
+                "model-current",
+                "claude-fable-5-1",
+                "claude-haiku-5-5",
+                "haiku",
+            ]
+            .into_iter()
+            .map(|model| HarnessModel {
+                model_name: model.into(),
+                recorded: model.into(),
+            })
+            .collect(),
+            modules: vec![],
+            left_out: vec![],
+            arguments: vec![
+                Piece::Text("--settings".into()),
+                Piece::Slot(Slot::SettingsText),
+                Piece::Text("--remote-control".into()),
+                Piece::Slot(Slot::Title),
+                Piece::Text("--name".into()),
+                Piece::Slot(Slot::Title),
+                Piece::Text("--system-prompt-file".into()),
+                Piece::Slot(Slot::PromptFile),
+                Piece::Flagged(Flagged_Data {
+                    string: "--session-id".into(),
+                    slot: Slot::SessionId,
+                }),
+                Piece::Text("--model".into()),
+                Piece::Slot(Slot::LaunchModel),
+                Piece::Text("--effort".into()),
+                Piece::Slot(Slot::LaunchEffort),
+                Piece::Slot(Slot::ModuleSwitches),
+                Piece::Flagged(Flagged_Data {
+                    string: "--disallowedTools".into(),
+                    slot: Slot::DeniedTools,
+                }),
+                Piece::Flagged(Flagged_Data {
+                    string: "--tools".into(),
+                    slot: Slot::AllowedTools,
+                }),
+            ],
+            settings: vec![],
+            parameters: vec![],
+            unset: vec![],
+            pane_profile: fixture_pane_profile(HarnessKind::Claude),
+        },
+        Harness {
+            harness_name: "fixture-codex".into(),
+            harness_kind: HarnessKind::Codex,
+            harness_version: "fixture".into(),
+            executable: "/fixture/codex".into(),
+            home: root.join("codex-home").display().to_string(),
+            control_socket_path_option: Some("/tmp/stable-codex.sock".into()),
+            served_models: [
+                "model-current",
+                "fixture-model",
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
+            ]
+                .into_iter()
+                .map(|model| HarnessModel {
+                    model_name: model.into(),
+                    recorded: model.into(),
+                })
+                .collect(),
+            modules: vec![],
+            left_out: vec![],
+            arguments: vec![
+                Piece::Text("--remote".into()),
+                Piece::Joined(Joined_Data {
+                    string: "unix://".into(),
+                    slot: Slot::RemoteSocket,
+                }),
+                Piece::Text("--model".into()),
+                Piece::Slot(Slot::LaunchModel),
+                Piece::Text("-c".into()),
+                Piece::Joined(Joined_Data {
+                    string: "model_reasoning_effort=".into(),
+                    slot: Slot::LaunchEffort,
+                }),
+                Piece::Text("-c".into()),
+                Piece::Text("tui.terminal_title=[\"thread-title\"]".into()),
+                Piece::Slot(Slot::ModuleSwitches),
+                Piece::Flagged(Flagged_Data {
+                    string: "resume".into(),
+                    slot: Slot::ThreadId,
+                }),
+            ],
+            settings: vec![],
+            parameters: vec![],
+            unset: vec![],
+            pane_profile: fixture_pane_profile(HarnessKind::Codex),
+        },
+    ]
+}
+
 impl ConfiguresHerdrCli for HerdrCli {
     fn with_installations(
         mut self,
@@ -743,7 +891,7 @@ impl ConfiguresHerdrCli for HerdrCli {
                         model_names: BTreeSet::from(["gpt-6-sol".into(), "gpt-6-luna".into()]),
                     },
                 ],
-                harnesses: Vec::new(),
+                harnesses: fixture_harnesses(&fixture_root),
                 timeout: std::time::Duration::from_millis(100),
                 workspace_root: flows_root
                     .parent()

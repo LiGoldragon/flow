@@ -1461,6 +1461,57 @@ mod tests {
         name: &str,
         models: &[&str],
     ) -> meta_signal_flow::Harness {
+        use meta_signal_flow::{Flagged_Data, Joined_Data, Piece, Slot};
+        let arguments = match kind {
+            HarnessKind::Claude => vec![
+                Piece::Text("--settings".into()),
+                Piece::Slot(Slot::SettingsText),
+                Piece::Text("--remote-control".into()),
+                Piece::Slot(Slot::Title),
+                Piece::Text("--name".into()),
+                Piece::Slot(Slot::Title),
+                Piece::Text("--system-prompt-file".into()),
+                Piece::Slot(Slot::PromptFile),
+                Piece::Flagged(Flagged_Data {
+                    string: "--session-id".into(),
+                    slot: Slot::SessionId,
+                }),
+                Piece::Text("--model".into()),
+                Piece::Slot(Slot::LaunchModel),
+                Piece::Text("--effort".into()),
+                Piece::Slot(Slot::LaunchEffort),
+                Piece::Slot(Slot::ModuleSwitches),
+                Piece::Flagged(Flagged_Data {
+                    string: "--disallowedTools".into(),
+                    slot: Slot::DeniedTools,
+                }),
+                Piece::Flagged(Flagged_Data {
+                    string: "--tools".into(),
+                    slot: Slot::AllowedTools,
+                }),
+            ],
+            HarnessKind::Codex => vec![
+                Piece::Text("--remote".into()),
+                Piece::Joined(Joined_Data {
+                    string: "unix://".into(),
+                    slot: Slot::RemoteSocket,
+                }),
+                Piece::Text("--model".into()),
+                Piece::Slot(Slot::LaunchModel),
+                Piece::Text("-c".into()),
+                Piece::Joined(Joined_Data {
+                    string: "model_reasoning_effort=".into(),
+                    slot: Slot::LaunchEffort,
+                }),
+                Piece::Text("-c".into()),
+                Piece::Text("tui.terminal_title=[\"thread-title\"]".into()),
+                Piece::Slot(Slot::ModuleSwitches),
+                Piece::Flagged(Flagged_Data {
+                    string: "resume".into(),
+                    slot: Slot::ThreadId,
+                }),
+            ],
+        };
         meta_signal_flow::Harness {
             harness_name: name.into(),
             harness_kind: kind.clone(),
@@ -1485,7 +1536,7 @@ mod tests {
                 .collect(),
             modules: vec![],
             left_out: vec![],
-            arguments: vec![],
+            arguments,
             settings: vec![],
             parameters: vec![],
             unset: vec![],

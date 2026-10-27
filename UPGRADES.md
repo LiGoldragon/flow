@@ -1,5 +1,12 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 15 renders each native harness command from its configured
+`Harness.Arguments` template. Literal arguments, joined values, optional
+flagged values and ordered multi-value module switches retain the configured
+order; a required or unsupported slot refuses before Herdr starts the agent.
+Existing Harness v1 rows already carry the templates installed by Batch 13,
+so their storage shape does not change.
+
 Batch 13 makes every harness installation configured data. The privileged
 contract carries an arbitrary `Harnesses` family and Nexus v3 carries the
 flows root, Flow executables and default Herdr session. A fresh store has no

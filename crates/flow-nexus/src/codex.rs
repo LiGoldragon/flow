@@ -2107,7 +2107,7 @@ mod tests {
                     ]),
                 },
             ],
-            harnesses: Vec::new(),
+            harnesses: crate::herdr::fixture_harnesses(std::path::Path::new("/home/test/native-transcripts")),
             timeout: Duration::from_secs(10),
             workspace_root: PathBuf::from("/home/test/primary"),
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),

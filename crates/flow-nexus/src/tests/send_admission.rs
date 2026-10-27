@@ -1,6 +1,6 @@
-use crate::sending::{AdmitsSendPayload, MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
-use crate::store::ReadsFlowMemory;
+use crate::sending::{AdmitsSendPayload, MeasuresSendPayload, MAX_SEND_PAYLOAD_BYTES};
 use crate::store::metaflow::SleepsMetaflows;
+use crate::store::ReadsFlowMemory;
 use flow_ethos::{Address, Aspect, Layer, Request};
 
 fn sender() -> Address {
@@ -57,20 +57,19 @@ fn rendered_native_prompt_budget_counts_multibyte_utf8_bytes() {
         over.native_prompt_bytes(&sender),
         MAX_SEND_PAYLOAD_BYTES + 1
     );
-    assert!(
-        over.oversized_refusal(&sender, MAX_SEND_PAYLOAD_BYTES)
-            .is_some()
-    );
+    assert!(over
+        .oversized_refusal(&sender, MAX_SEND_PAYLOAD_BYTES)
+        .is_some());
 }
 
 #[test]
 fn wake_to_sleeping_or_unknown_fails_but_abrupt_queue_is_admitted() {
     use super::{
-        ControlsHerdrSnapshot, MarkedProcess, NexusFixture, bind_existing_caller, codex_agent_in,
+        bind_existing_caller, codex_agent_in, ControlsHerdrSnapshot, MarkedProcess, NexusFixture,
     };
     use crate::sending::SendsRequests;
-    use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::FlowStore;
     use signal_flow::{
         Delivery, Message, Metaflow, Recipient, Response, SendFailureReason, SendRequest,
     };
@@ -114,16 +113,14 @@ fn wake_to_sleeping_or_unknown_fails_but_abrupt_queue_is_admitted() {
             answer.response
         );
         assert!(answer.pending.is_none());
-        assert!(
-            fixture
-                .nexus
-                .store
-                .metaflow(&target)
-                .unwrap()
-                .unwrap()
-                .queue
-                .is_empty()
-        );
+        assert!(fixture
+            .nexus
+            .store
+            .metaflow(&target)
+            .unwrap()
+            .unwrap()
+            .queue
+            .is_empty());
     }
     let unknown = Address {
         topic: "unknown-direct-target".into(),
@@ -178,16 +175,16 @@ fn wake_to_sleeping_or_unknown_fails_but_abrupt_queue_is_admitted() {
 #[test]
 fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
     use super::waking::{
-        CLAUDE_SEAT, CLAUDE_SESSION, append_main_rows, claude_agent, claude_seat,
-        claude_transcript, end_turn,
+        append_main_rows, claude_agent, claude_seat, claude_transcript, end_turn, CLAUDE_SEAT,
+        CLAUDE_SESSION,
     };
     use super::{
-        ControlsHerdrSnapshot, MarkedProcess, NexusFixture, PromptFixture, bind_existing_caller,
-        codex_agent_in,
+        bind_existing_caller, codex_agent_in, ControlsHerdrSnapshot, MarkedProcess, NexusFixture,
+        PromptFixture,
     };
     use crate::sending::SendsRequests;
-    use crate::store::FlowStore;
     use crate::store::metaflow::SeedsMetaflow;
+    use crate::store::FlowStore;
     use signal_flow::{Delivery, Message, Metaflow, Recipient, Response, SendRequest};
     use std::io::Write;
     use std::time::{Duration, Instant};
@@ -328,16 +325,14 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             }
         );
         assert!(!receipt.logical_delivery_id.is_empty());
-        assert!(
-            fixture
-                .nexus
-                .store
-                .metaflow(&target)
-                .unwrap()
-                .unwrap()
-                .queue
-                .is_empty()
-        );
+        assert!(fixture
+            .nexus
+            .store
+            .metaflow(&target)
+            .unwrap()
+            .unwrap()
+            .queue
+            .is_empty());
     }
 }
 

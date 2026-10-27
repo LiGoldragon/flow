@@ -559,6 +559,7 @@ impl ComposesLaunch for LaunchComposer {
         if !records.is_empty() {
             segments.push(records);
         }
+
         // The system prompt holds spirit and intent alone. The rest of the
         // context and the brief are the first message, split into as many
         // prompts as it takes when it does not fit one, sent one right after
@@ -755,12 +756,10 @@ pub(crate) mod tests {
                 Vec::<LeaveOut>::new(),
             )
             .unwrap();
-        assert!(
-            !forgetting
-                .first_prompt_payload
-                .first_prompt_body
-                .contains("A crazy idea.")
-        );
+        assert!(!forgetting
+            .first_prompt_payload
+            .first_prompt_body
+            .contains("A crazy idea."));
     }
 
     /// A declaration's purpose goes ahead of the brief; either stands alone
@@ -957,19 +956,15 @@ pub(crate) mod tests {
                     let identity = format!(
                         "Metaflow: {{ {aspect_name} coreTopic {layer_name} }}\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
                     );
-                    assert!(
-                        composed
-                            .system_prompt
-                            .system_prompt_text
-                            .contains(&identity)
-                    );
+                    assert!(composed
+                        .system_prompt
+                        .system_prompt_text
+                        .contains(&identity));
                     assert!(!composed.system_prompt.system_prompt_text.contains("Role:"));
-                    assert!(
-                        !composed
-                            .first_prompt_payload
-                            .first_prompt_body
-                            .contains("Role:")
-                    );
+                    assert!(!composed
+                        .first_prompt_payload
+                        .first_prompt_body
+                        .contains("Role:"));
                 }
             }
         }
@@ -1006,13 +1001,11 @@ pub(crate) mod tests {
                     parts.len()
                 )));
             }
-            assert!(
-                parts
-                    .last()
-                    .unwrap()
-                    .prompt_part_text
-                    .ends_with("Carry the bounded task.")
-            );
+            assert!(parts
+                .last()
+                .unwrap()
+                .prompt_part_text
+                .ends_with("Carry the bounded task."));
             for name in &names {
                 let marker = format!("<!-- module: {name} -->");
                 assert!(
@@ -1268,34 +1261,30 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(composed.leave_outs, [LeaveOut::GitInstructions]);
         profile.leave_outs_option = Some(Vec::new());
-        assert!(
-            composer
-                .compose(
-                    crate::composition::HarnessedProfile {
-                        remembered_flows: Vec::new(),
-                        harness_kind: harness.clone(),
-                        launch_profile: profile.clone()
-                    },
-                    default.clone()
-                )
-                .unwrap()
-                .leave_outs
-                .is_empty()
-        );
+        assert!(composer
+            .compose(
+                crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
+                    harness_kind: harness.clone(),
+                    launch_profile: profile.clone()
+                },
+                default.clone()
+            )
+            .unwrap()
+            .leave_outs
+            .is_empty());
         // A Start may leave out ToolSearch while other tools remain.
         profile.leave_outs_option = Some(vec![LeaveOut::ToolSearch]);
-        assert!(
-            composer
-                .compose(
-                    crate::composition::HarnessedProfile {
-                        remembered_flows: Vec::new(),
-                        harness_kind: harness.clone(),
-                        launch_profile: profile.clone()
-                    },
-                    default
-                )
-                .is_ok()
-        );
+        assert!(composer
+            .compose(
+                crate::composition::HarnessedProfile {
+                    remembered_flows: Vec::new(),
+                    harness_kind: harness.clone(),
+                    launch_profile: profile.clone()
+                },
+                default
+            )
+            .is_ok());
     }
 
     #[test]

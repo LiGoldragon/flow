@@ -6,7 +6,7 @@ use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
 use crate::waking::RestsEndedAwake;
-use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
+use crate::{store::metaflow::MutatesMetaflows, RunningNexus};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};

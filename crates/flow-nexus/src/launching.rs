@@ -3,38 +3,38 @@
 //! a launch request — its attempt, its outcome, and whether it replaces a
 //! predecessor.
 
-use crate::HoldsStopRequest;
 use crate::delivery::lease::LeasesPanes;
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, PaneLaunch, Record_Data, Record_Data_Settled_Data,
     Register_Data, Reserve_Data, Reserved_Data, Submit_Data, Title_Data,
 };
 use crate::generated::starter::CarriesFlowId;
-use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::{ChecksComposedLaunch, ObservesNativeLaunchBinding};
+use crate::herdr::ReadsHerdrPanes;
 use crate::performing::ClassifiesNativeLaunchFailure;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
-use crate::store::NamesConfiguredModel;
-use crate::store::NamesLiveFlow;
-use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::TakesLaunchAddress;
 use crate::store::opened_thread::RecordsOpenedThreads;
+use crate::store::NamesConfiguredModel;
+use crate::store::NamesLiveFlow;
+use crate::store::ReadsLaunchInspectionRecords;
 use crate::store::{
     AnnouncesLaunchChanges, ReadsCreatedLaunchPane, RecordsCreatedLaunchPane,
     RecordsNativeLaunchBinding,
 };
 use crate::store::{AnswersLaunchOutcome, LaunchedRecord, ReplacedRecord};
-use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation};
+use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation, WakePolicy};
+use crate::HoldsStopRequest;
 use crate::{
-    RunningNexus,
-    herdr::{PaneOwnership, PanePresence, launch::AcceptsLaunchRegistration},
+    herdr::{launch::AcceptsLaunchRegistration, PaneOwnership, PanePresence},
     store::{
         LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,
         RecordsLaunchOutcome, RecordsReplacement, Replacement, StoreError,
     },
+    RunningNexus,
 };
 use signal_flow::{
     BindingRefusal, ComposedLaunch, EndpointSelection, Event, FlowLifecycle, FlowNode, HarnessKind,

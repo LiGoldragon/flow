@@ -21,7 +21,6 @@
 //!
 //! The warning is a journal line at warning priority.
 
-use crate::RunningNexus;
 use crate::generated::operation::{Operation, Outcome, Record_Data, Record_Data_Context_Data};
 use crate::performing::Performs;
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
@@ -29,6 +28,7 @@ use crate::store::context::RecordsContextSize;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::waking::ReadsClaudeDelivery;
+use crate::RunningNexus;
 use signal_flow::{Address, Aspect, FlowNode, HarnessKind, Layer};
 use std::collections::{HashMap, HashSet};
 use std::fs;

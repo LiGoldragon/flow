@@ -13,15 +13,14 @@
 //! of its session's root thread, and a Codex seat Herdr reports no session
 //! for runs the thread its pane resumes in its foreground.
 
-use crate::RunningNexus;
 use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
 use crate::caller::{
     CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
 };
 use crate::composition::JoinsPurpose;
 use crate::delivery::body::RendersNativeContent;
-use crate::herdr::ReadsHerdrPanes;
 use crate::herdr::launch::ClaimsNativeIdentity;
+use crate::herdr::ReadsHerdrPanes;
 use crate::metaflow::IdentifiesPeerProcess;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -40,11 +39,12 @@ use crate::waking::{
     HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
     SleepsAndWakesSeats,
 };
+use crate::RunningNexus;
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data, LaunchProfile, Layer, Message,
-    Process, Recipient, Refusal, Request, Response, SendPayloadSize, SendRequest, SentBy,
+    Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, LaunchProfile, Launch_Data, Layer,
+    Message, Process, Recipient, Refusal, Request, Response, SendPayloadSize, SendRequest, SentBy,
     StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};

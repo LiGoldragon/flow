@@ -4,7 +4,6 @@
 //! answer is one generated `Outcome`. The launch, stop, retire and delivery
 //! paths decide what to do next; this is the only place they act.
 
-use crate::RunningNexus;
 use crate::codex::{
     AccountsOpenedThread, OpensCodexThread, SelectsCodexEndpoint, SubmitsBoundCodexPart,
 };
@@ -30,6 +29,7 @@ use crate::store::{
 use crate::store::{ManagesMetaflowState, ReadsFlowRows};
 use crate::title::TitleRefused;
 use crate::waking::PerformsWakeAndDrain;
+use crate::RunningNexus;
 use signal_flow::{
     HarnessKind, LaunchAttemptReservation, NativeLaunchFailure, NativeLaunchRefusal,
     NativeLaunchStage, Response, StartRejection,
@@ -218,22 +218,28 @@ impl Performs for RunningNexus {
         match operation {
             // A model that is not exact on its harness is never launched: its
             // receipt could not match the model the transcript records.
-            Operation::Compose(profile)
-                if !self.codex_endpoints.launches_exactly(&profile.model_name) =>
-            {
-                eprintln!(
-                    "flow-nexus: launch {} not composed: model {} is not an exact native model",
-                    profile.launch_request_id, profile.model_name
-                );
-                Outcome::Failed(Failed_Data::CompositionRefused(
-                    signal_flow::CompositionRefusal::InexactModel,
-                ))
-            }
             Operation::Compose(profile) => {
+                // Harness installations are a configured family. Read the
+                // committed snapshot for this composition rather than the
+                // adapters the long-running process opened with: Configure
+                // takes effect on the next use of the family.
+                let codex_endpoints = match self.store.configuration_snapshot() {
+                    Ok(Some(snapshot)) => crate::codex::CodexEndpoints::configured(&snapshot),
+                    _ => return Outcome::Failed(Failed_Data::StoreRefused),
+                };
+                if !codex_endpoints.launches_exactly(&profile.model_name) {
+                    eprintln!(
+                        "flow-nexus: launch {} not composed: model {} is not an exact native model",
+                        profile.launch_request_id, profile.model_name
+                    );
+                    return Outcome::Failed(Failed_Data::CompositionRefused(
+                        signal_flow::CompositionRefusal::InexactModel,
+                    ));
+                }
                 // A Start naming no leave-outs takes its metaflow's default
                 // for the harness it starts on, and none when that harness
                 // has no default.
-                let harness_kind = self.codex_endpoints.harness_for(&profile.model_name);
+                let harness_kind = codex_endpoints.harness_for(&profile.model_name);
                 let default = self
                     .store
                     .default_leave_outs(&profile.address, &harness_kind)

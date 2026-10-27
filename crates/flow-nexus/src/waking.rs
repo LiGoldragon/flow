@@ -65,7 +65,6 @@
 //! [`WakingMetaflows`], so a second request starts no second wake and a
 //! turn end does not drain the waking seat.
 
-use crate::RunningNexus;
 use crate::claude::{
     ClaudeQueuedHistory, ClaudeTranscriptCursor, LocatesClaudeTranscript, MeasuresClaudeContext,
     ReadsClaudeTurns,
@@ -105,6 +104,7 @@ use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
+use crate::RunningNexus;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
@@ -544,9 +544,9 @@ impl StartsRequirementsFirst for RunningNexus {
         profile: &LaunchProfile,
     ) -> Result<(), signal_flow::StartRejection> {
         use crate::launching::NamesTopic;
-        use crate::store::ReadsLaunchAttempt;
         use crate::store::metaflow::TakesLaunchAddress;
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
+        use crate::store::ReadsLaunchAttempt;
 
         if profile.flow_id_option.is_some() || !profile.address.topic.as_str().is_camel_case_topic()
         {

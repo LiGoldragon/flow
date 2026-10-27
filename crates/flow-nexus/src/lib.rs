@@ -1,8 +1,8 @@
 //! Flow Nexus dispatches typed ordinary and privileged Signal requests.
 
+use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::ManagesMetaflowState;
 use crate::store::ReadsFlowMemory;
-use crate::store::send_outcome::RecordsSendOutcomes;
 // The generated roots name this crate's types by its name: Operation names
 // the Memory root's `flow_nexus::LaunchOutcome`, and Memory the starter's
 // `flow_nexus::LaunchedRecord`.
@@ -64,7 +64,7 @@ use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
 use composition::{LaunchComposer, OpensLaunchComposer};
 use context::{CurriculumComposer, OpensCurriculumComposer};
-use delivery::{DeliversMessages, lease::LeasesPanes};
+use delivery::{lease::LeasesPanes, DeliversMessages};
 use generated::operation::{Operation, Outcome, Record_Data};
 use generated::starter::DerivesOrigin;
 use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch};
@@ -89,8 +89,8 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -350,9 +350,9 @@ impl Dispatches for RunningNexus {
                             meta_signal_flow::ConfigureRejection::DuplicateEntry,
                         )
                     }
-                    Err(store::StoreError::CodexModelsOverlap) => {
+                    Err(store::StoreError::ModelServedTwice(model)) => {
                         meta_signal_flow::Response::ConfigureRejected(
-                            meta_signal_flow::ConfigureRejection::CodexModelsOverlap,
+                            meta_signal_flow::ConfigureRejection::ModelServedTwice(model),
                         )
                     }
                     Err(store::StoreError::LeaveOutNotForHarness) => {
@@ -372,9 +372,9 @@ impl Dispatches for RunningNexus {
             }
             meta_signal_flow::Query::ConsumeReset(request) => self
                 .codex_endpoints
-                .next
-                .model_names
+                .endpoints
                 .first()
+                .and_then(|endpoint| endpoint.model_names.first())
                 .ok_or(())
                 .and_then(|model| self.codex_endpoints.adapter_for(model).map_err(|_| ()))
                 .and_then(|adapter| adapter.consume_reset_credit(&request).map_err(|_| ()))
@@ -805,17 +805,14 @@ impl OpensRunningNexus for RunningNexus {
         let snapshot = store
             .configuration_snapshot()?
             .ok_or(store::StoreError::NotConfigured)?;
-        let runtime = store::RuntimeConfiguration::from(&snapshot.nexus);
-        let mut codex_endpoints = CodexEndpoints::from(&runtime);
-        codex_endpoints.timeout = Duration::from_millis(snapshot.timings.app_server_timeout as u64);
-        codex_endpoints.limits = snapshot.limits.clone();
+        let codex_endpoints = CodexEndpoints::configured(&snapshot);
         let overlap = codex_endpoints.overlapping_models();
         if !overlap.is_empty() {
             eprintln!(
                 "flow-nexus: models selected by both Codex endpoints are unavailable: {overlap:?}"
             );
         }
-        let source_root = PathBuf::from(&runtime.source_root);
+        let source_root = PathBuf::from(&snapshot.nexus.source_root);
         // The socket this Nexus serves: a changed one takes effect only on
         // restart, so the store's value at open is the one being served.
         let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
@@ -823,7 +820,7 @@ impl OpensRunningNexus for RunningNexus {
             store,
             codex_endpoints: codex_endpoints.clone(),
             herdr: herdr::HerdrCli::default()
-                .with_source_root(&source_root)
+                .with_installations(&snapshot.nexus, &snapshot.harnesses)
                 .with_codex_endpoints(codex_endpoints)
                 .with_runtime_settings(snapshot.timings.clone(), snapshot.limits.clone())
                 .with_ordinary_socket(&ordinary_socket),
@@ -1617,6 +1614,30 @@ mod tests {
         time::Duration,
     };
 
+    fn fixture_harness(kind: HarnessKind, name: &str, models: &[&str]) -> meta_signal_flow::Harness {
+        meta_signal_flow::Harness {
+            harness_name: name.into(),
+            harness_kind: kind.clone(),
+            harness_version: "fixture".into(),
+            executable: if kind == HarnessKind::Claude { "claude".into() } else { "/fixture/codex".into() },
+            home: "/tmp/fixture-harness".into(),
+            control_socket_path_option: if kind == HarnessKind::Codex { Some("unused".into()) } else { None },
+            served_models: models.iter().map(|model| meta_signal_flow::HarnessModel { model_name: (*model).into(), recorded: (*model).into() }).collect(),
+            modules: vec![], left_out: vec![], arguments: vec![], settings: vec![], parameters: vec![], unset: vec![],
+            pane_profile: meta_signal_flow::PaneProfile {
+                command_sigil_vector: if kind == HarnessKind::Claude { vec!["/".into(), "!".into(), "#".into()] } else { vec!["/".into(), "!".into()] },
+                interrupt_keys: if kind == HarnessKind::Claude { vec!["esc".into(), "esc".into()] } else { vec!["esc".into()] },
+                submit_keys: if kind == HarnessKind::Claude { vec!["enter".into()] } else { vec![] },
+                compact_line: "/compact".into(),
+                composer: meta_signal_flow::Composer {
+                    glyph: if kind == HarnessKind::Claude { "❯".into() } else { "›".into() },
+                    retraction: if kind == HarnessKind::Claude { meta_signal_flow::Retraction::Keys(vec!["ctrl+c".into()]) } else { meta_signal_flow::Retraction::LineByLine(vec!["ctrl+u".into(), "backspace".into()]) },
+                    composer_lines: 12, retracted_lines: 32,
+                },
+            },
+        }
+    }
+
     struct NexusFixture {
         directory: tempfile::TempDir,
         nexus: RunningNexus,
@@ -1629,8 +1650,8 @@ mod tests {
 
     #[test]
     fn metaflows_do_not_advertise_undeclared_sleeping_history() {
-        use crate::store::ManagesMetaflowState;
         use crate::store::metaflow::SeedsMetaflow;
+        use crate::store::ManagesMetaflowState;
         let fixture = NexusFixture::new();
         let address = signal_flow::Address {
             aspect: Aspect::Psyche,
@@ -2245,39 +2266,67 @@ mod tests {
             )
             .expect("fixture flow claim");
             let snapshot_program = directory.path().join("herdr-fixture");
+            let mut harnesses = vec![
+                fixture_harness(HarnessKind::Codex, "codex", &["unused", "fixture-model", "gpt-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-luna"]),
+                fixture_harness(HarnessKind::Claude, "claude", &["claude-fixture", "claude-haiku-5-5", "claude-opus-5-5", "claude-fable-5-1"]),
+            ];
+            harnesses.iter_mut().find(|h| h.harness_kind == HarnessKind::Claude).expect("Claude fixture").home = directory.path().join("native-transcripts/claude").to_string_lossy().into_owned();
             let codex_endpoints = CodexEndpoints {
-                stable: CodexEndpoint {
-                    client_path: PathBuf::from("/fixture/codex"),
-                    home: directory.path().join("codex-home"),
-                    socket: "unused".into(),
-                    transcript_root: directory.path().join("native-transcripts/codex"),
-                    model_names: BTreeSet::from([
-                        "unused".into(),
-                        "fixture-model".into(),
-                        "gpt-sol".into(),
-                    ]),
-                },
-                next: CodexEndpoint {
-                    client_path: PathBuf::from("/fixture/codex-next"),
-                    home: directory.path().join("codex-next-home"),
-                    socket: "unused-next".into(),
-                    transcript_root: directory.path().join("native-transcripts/codex-next"),
-                    model_names: BTreeSet::from(["gpt-6-sol".into(), "gpt-6-luna".into()]),
-                },
+                endpoints: vec![
+                    CodexEndpoint {
+                        client_path: PathBuf::from("/fixture/codex"),
+                        home: directory.path().join("codex-home"),
+                        socket: "unused".into(),
+                        transcript_root: directory.path().join("native-transcripts/codex"),
+                        model_names: BTreeSet::from([
+                            "unused".into(),
+                            "fixture-model".into(),
+                            "gpt-sol".into(),
+                        ]),
+                    },
+                    CodexEndpoint {
+                        client_path: PathBuf::from("/fixture/codex-next"),
+                        home: directory.path().join("codex-next-home"),
+                        socket: "unused-next".into(),
+                        transcript_root: directory.path().join("native-transcripts/codex-next"),
+                        model_names: BTreeSet::from(["gpt-6-sol".into(), "gpt-6-luna".into()]),
+                    },
+                ],
+                harnesses: harnesses.clone(),
                 timeout: Duration::from_secs(1),
                 workspace_root: directory.path().to_path_buf(),
                 limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
             };
             let mut store =
                 FlowStore::open(&directory.path().join("flow.sema")).expect("fixture store");
+            use crate::store::ManagesMetaflowState as _;
             store.set_native_owner_environment_for_tests(crate::store::NativeOwnerEnvironment {
                 host_id: "isolated-test-host".into(),
                 boot_id: "isolated-test-boot".into(),
             });
+            store.configure_change(meta_signal_flow::ConfigurationChange::Harnesses(harnesses.clone())).expect("fixture harnesses configured");
+            let fixture_nexus = meta_signal_flow::ConfigureNexus {
+                source_root: directory.path().to_string_lossy().into_owned(),
+                flows_root: flows_root.to_string_lossy().into_owned(),
+                meta_aspects: vec![Aspect::Psyche, Aspect::Mind, Aspect::Field],
+                message_nexus_path: directory.path().join("message.sock").to_string_lossy().into_owned(),
+                message_nexus_binary: "/fixture/message-nexus".into(),
+                curriculum_nexus_path: directory.path().join("curriculum.sock").to_string_lossy().into_owned(),
+                lease: 60,
+                executables: meta_signal_flow::Executables {
+                    herdr: snapshot_program.to_string_lossy().into_owned(),
+                    flow_id_claimer: directory.path().join("native-transcripts/flow-id").to_string_lossy().into_owned(),
+                    hook: "flow-hook".into(),
+                },
+                default_herdr_session: "default".into(),
+            };
+            store.configure_change(meta_signal_flow::ConfigurationChange::Nexus(fixture_nexus)).expect("fixture Nexus configured");
+            let installation = store.configuration_snapshot().expect("fixture snapshot").expect("fixture configured");
             let nexus = RunningNexus {
                 store,
                 codex_endpoints: codex_endpoints.clone(),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
+                    .with_installations(&installation.nexus, &harnesses)
                     .with_codex_endpoints(codex_endpoints),
                 composer: LaunchComposer::with_context(crate::context::ContextComposer::Fixture(
                     FixtureComposer::from(
@@ -2433,7 +2482,7 @@ mod tests {
             let claude_transcript = claude_session.map(|session| {
                 self.directory
                     .path()
-                    .join("native-transcripts/claude/-home-li-primary")
+                    .join("native-transcripts/claude/projects/-home-li-primary")
                     .join(format!("{session}.jsonl"))
             });
             let body = format!(
@@ -2732,14 +2781,12 @@ mod tests {
         launch.record_native_intent(&fixture.nexus);
         launch.bind(&fixture.nexus);
         launch.register_and_acknowledge(&fixture.nexus);
-        assert!(
-            fixture
-                .nexus
-                .store
-                .metaflow_awake_as("908786")
-                .unwrap()
-                .is_some()
-        );
+        assert!(fixture
+            .nexus
+            .store
+            .metaflow_awake_as("908786")
+            .unwrap()
+            .is_some());
 
         fixture
             .nexus
@@ -2775,13 +2822,11 @@ mod tests {
         let launch = fixture.staged_launch("bare-pane-request", None);
         launch.reserve(&fixture.nexus);
         launch.record_native_intent(&fixture.nexus);
-        assert!(
-            fixture
-                .nexus
-                .store
-                .record_created_launch_pane(launch.pane.clone())
-                .unwrap()
-        );
+        assert!(fixture
+            .nexus
+            .store
+            .record_created_launch_pane(launch.pane.clone())
+            .unwrap());
         fixture
             .nexus
             .store
@@ -2812,22 +2857,18 @@ mod tests {
             LaunchTeardown::Kept(PaneOwnership::Unidentified)
         );
         assert!(fs::read_to_string(&log).unwrap_or_default().is_empty());
-        assert!(
-            fixture
-                .nexus
-                .store
-                .recoverable_launch_pane("bare-pane-request")
-                .unwrap()
-                .is_some()
-        );
+        assert!(fixture
+            .nexus
+            .store
+            .recoverable_launch_pane("bare-pane-request")
+            .unwrap()
+            .is_some());
         // The thread the launch opened is the pane's session.
-        assert!(
-            fixture
-                .nexus
-                .store
-                .record_opened_thread("bare-pane-request", "bare-pane-thread")
-                .unwrap()
-        );
+        assert!(fixture
+            .nexus
+            .store
+            .record_opened_thread("bare-pane-request", "bare-pane-thread")
+            .unwrap());
         assert_eq!(
             fixture
                 .nexus
@@ -3219,8 +3260,8 @@ mod tests {
 
     #[test]
     fn adoption_of_a_historical_owner_without_process_proof_refuses_without_touching_queue() {
-        use crate::store::ManagesMetaflowState;
         use crate::store::metaflow::SeedsMetaflow;
+        use crate::store::ManagesMetaflowState;
         let fixture = NexusFixture::new();
         let address = signal_flow::Address {
             aspect: Aspect::Mind,
@@ -3303,8 +3344,8 @@ mod tests {
 
     #[test]
     fn same_verified_owner_can_refresh_without_changing_queued_logical_work() {
-        use crate::store::ManagesMetaflowState;
         use crate::store::metaflow::SeedsMetaflow;
+        use crate::store::ManagesMetaflowState;
         let fixture = NexusFixture::new();
         let binding = existing_binding("a001", "pane-1");
         let address = signal_flow::Address {
@@ -4474,39 +4515,31 @@ mod tests {
         }
 
         fn record_native_intent(&self, nexus: &RunningNexus) {
-            assert!(
-                nexus
-                    .store
-                    .record_native_launch_intent(NativeLaunchIntent {
-                        launch_request_id: self.profile.launch_request_id.clone(),
-                        prompt_sha256: self.composed.first_prompt_payload.prompt_sha256.clone(),
-                        system_prompt_sha256: self
-                            .composed
-                            .system_prompt
-                            .system_prompt_sha256
-                            .clone(),
-                        harness_kind: HarnessKind::Codex,
-                        model_name: self.profile.model_name.clone(),
-                        effort: self.profile.effort.clone(),
-                        prompt_sha256_vector: self
-                            .composed
-                            .first_prompt_payload
-                            .prompt_part_vector
-                            .iter()
-                            .map(|part| part.prompt_sha256.clone())
-                            .collect(),
-                    })
-                    .unwrap()
-            );
+            assert!(nexus
+                .store
+                .record_native_launch_intent(NativeLaunchIntent {
+                    launch_request_id: self.profile.launch_request_id.clone(),
+                    prompt_sha256: self.composed.first_prompt_payload.prompt_sha256.clone(),
+                    system_prompt_sha256: self.composed.system_prompt.system_prompt_sha256.clone(),
+                    harness_kind: HarnessKind::Codex,
+                    model_name: self.profile.model_name.clone(),
+                    effort: self.profile.effort.clone(),
+                    prompt_sha256_vector: self
+                        .composed
+                        .first_prompt_payload
+                        .prompt_part_vector
+                        .iter()
+                        .map(|part| part.prompt_sha256.clone())
+                        .collect(),
+                })
+                .unwrap());
         }
 
         fn bind(&self, nexus: &RunningNexus) {
-            assert!(
-                nexus
-                    .store
-                    .record_native_launch_binding(self.binding.clone())
-                    .unwrap()
-            );
+            assert!(nexus
+                .store
+                .record_native_launch_binding(self.binding.clone())
+                .unwrap());
         }
 
         /// Registers the bound flow in the role its profile names, as
@@ -4538,17 +4571,15 @@ mod tests {
                     },
                 )
                 .unwrap();
-            assert!(
-                nexus
-                    .store
-                    .record_registration_acknowledgement(RegistrationAcknowledgement {
-                        launch_request_id: self.profile.launch_request_id.clone(),
-                        flow_id: self.binding.flow_id.clone(),
-                        native_session_id: self.binding.native_session_id.clone(),
-                        herdr_pane_binding: self.pane.clone(),
-                    })
-                    .unwrap()
-            );
+            assert!(nexus
+                .store
+                .record_registration_acknowledgement(RegistrationAcknowledgement {
+                    launch_request_id: self.profile.launch_request_id.clone(),
+                    flow_id: self.binding.flow_id.clone(),
+                    native_session_id: self.binding.native_session_id.clone(),
+                    herdr_pane_binding: self.pane.clone(),
+                })
+                .unwrap());
         }
 
         fn record_prompt_intent(&mut self, nexus: &RunningNexus) {
@@ -4581,24 +4612,20 @@ mod tests {
                     },
                 ),
             };
-            assert!(
-                nexus
-                    .store
-                    .record_prompt_delivery_intent(intent.clone())
-                    .unwrap()
-            );
+            assert!(nexus
+                .store
+                .record_prompt_delivery_intent(intent.clone())
+                .unwrap());
             self.intent = Some(intent);
         }
 
         fn record_ambiguity(&self, nexus: &RunningNexus) {
-            assert!(
-                nexus
-                    .store
-                    .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
-                        self.intent.clone().expect("prompt intent recorded"),
-                    ))
-                    .unwrap()
-            );
+            assert!(nexus
+                .store
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
+                    self.intent.clone().expect("prompt intent recorded"),
+                ))
+                .unwrap());
         }
 
         fn stage_to_ambiguity(&mut self, nexus: &RunningNexus) {
@@ -4707,11 +4734,9 @@ mod tests {
             fixture.nexus.dispatch(Query::Replace(launch.request())),
             Response::Replaced(replaced) if replaced.flow_id == "fac697"
         ));
-        assert!(
-            fs::read_to_string(calls)
-                .expect("Herdr call log")
-                .contains("pane close")
-        );
+        assert!(fs::read_to_string(calls)
+            .expect("Herdr call log")
+            .contains("pane close"));
         assert!(fixture.routable("908786"));
     }
 
@@ -4807,10 +4832,10 @@ mod tests {
     /// settled by that end, and the Address takes a fresh launch.
     #[test]
     fn an_unconfirmed_launch_stopped_leaves_its_address_to_a_fresh_start() {
-        use crate::store::ReadsLaunchAttempt as _;
         use crate::store::address_hold::HoldsLaunchAddress as _;
         use crate::store::metaflow::SleepsMetaflows as _;
         use crate::store::metaflow::TakesLaunchAddress as _;
+        use crate::store::ReadsLaunchAttempt as _;
         let fixture = NexusFixture::new();
         fixture.herdr_for_replacement(0);
         let mut seat = fixture.staged_launch("seat-request", None);
@@ -4875,14 +4900,12 @@ mod tests {
         seat.stage_to_ambiguity(&fixture.nexus);
         assert!(fixture.nexus.store.record_stopped("908786").unwrap());
         fixture.nexus.store.leave_stale_hold("908786", &address);
-        assert!(
-            fixture
-                .nexus
-                .store
-                .address_hold("908786")
-                .unwrap()
-                .is_some()
-        );
+        assert!(fixture
+            .nexus
+            .store
+            .address_hold("908786")
+            .unwrap()
+            .is_some());
 
         let mut fresh = fixture.staged_launch("fresh-request", None);
         fresh.profile.address = address.clone();
@@ -5310,8 +5333,8 @@ mod tests {
     #[test]
     fn a_send_is_authenticated_and_primary_coordination_is_refused() {
         use crate::sending::SendsRequests;
-        use crate::store::ReadsFlowMemory;
         use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
+        use crate::store::ReadsFlowMemory;
         use signal_flow::{
             Address, Delivery, Layer, Message, Metaflow, QueueEntry, Recipient, Refusal, Request,
             SendRequest, SentBy,

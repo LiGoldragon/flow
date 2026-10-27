@@ -11,9 +11,9 @@
 //! metaflow Asleep and retracts every lock it holds as a sender, and a
 //! Maintained metaflow so ended is woken into its successor.
 
-use crate::herdr::HerdrCli;
 use crate::herdr::pane::ReadsAgentStatus;
 use crate::herdr::pane::{PaneAgent, WritesPane};
+use crate::herdr::HerdrCli;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::{HoldsStopRequest, RunningNexus};
 use signal_flow::{

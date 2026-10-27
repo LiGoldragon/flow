@@ -54,7 +54,7 @@ use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
 };
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
-use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
+use crate::{store::AnnouncesLaunchChanges, HoldsStopRequest, RunningNexus};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
@@ -882,7 +882,7 @@ pub(crate) trait RefusesInterruptedCalls {
     fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls;
     /// The answer to one replayed call; true when it came from its record.
     fn interrupted_call_outcome(&self, thread: &str, call: Option<ToolCall>)
-    -> (SendOutcome, bool);
+        -> (SendOutcome, bool);
 }
 
 impl RefusesInterruptedCalls for RunningNexus {

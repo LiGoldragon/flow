@@ -261,8 +261,8 @@ trait RunsConfigurationStartup {
                 Err(StoreError::DuplicateConfigurationEntry) => {
                     MetaResponse::ConfigureRejected(ConfigureRejection::DuplicateEntry)
                 }
-                Err(StoreError::CodexModelsOverlap) => {
-                    MetaResponse::ConfigureRejected(ConfigureRejection::CodexModelsOverlap)
+                Err(StoreError::ModelServedTwice(model)) => {
+                    MetaResponse::ConfigureRejected(ConfigureRejection::ModelServedTwice(model))
                 }
                 Err(StoreError::LeaveOutNotForHarness) => {
                     MetaResponse::ConfigureRejected(ConfigureRejection::LeaveOutNotForHarness)
@@ -569,18 +569,18 @@ mod tests {
         };
         ConfigurationChange::Nexus(ConfigureNexus {
             source_root: "/tmp/source".into(),
-            stable_codex: codex("gpt-stable-test"),
-            next_codex: codex("gpt-next-test"),
-            harness_profiles: vec![],
-            meta_aspects: vec![
-                meta_signal_flow::Aspect::Psyche,
-                meta_signal_flow::Aspect::Mind,
-                meta_signal_flow::Aspect::Field,
-            ],
+            flows_root: "/tmp/flows".into(),
+            meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
             message_nexus_path: message_socket.into(),
             message_nexus_binary: binary.into(),
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease: 60,
+            executables: meta_signal_flow::Executables {
+                herdr: "herdr".into(),
+                flow_id_claimer: "flow-id".into(),
+                hook: "flow-hook".into(),
+            },
+            default_herdr_session: "default".into(),
         })
     }
 

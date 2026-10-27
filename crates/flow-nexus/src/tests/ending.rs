@@ -5,12 +5,12 @@
 //! never closed.
 
 use super::refreshing::close_answers;
-use super::waking::{CLAUDE_SEAT, CLAUDE_SESSION, address, claude_agent, claude_seat};
+use super::waking::{address, claude_agent, claude_seat, CLAUDE_SEAT, CLAUDE_SESSION};
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
-use crate::Dispatches;
 use crate::reporting::RecordsReports;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
+use crate::Dispatches;
 use flow_ethos::State;
 use signal_flow::{Event, FlowLifecycle, Layer, Metaflow, Report_Data, Response};
 use std::fs;

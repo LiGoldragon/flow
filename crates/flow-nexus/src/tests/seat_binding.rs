@@ -6,8 +6,8 @@
 //! reports it, or a Codex agent that reports no session and whose pane
 //! resumes it in its foreground.
 
-use super::NexusFixture;
 use super::waking::SpawnedProcess;
+use super::NexusFixture;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::sending::{BindsSeats, IdentifiesSender};
 use crate::store::metaflow::SleepsMetaflows;
@@ -183,7 +183,7 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
 
 #[test]
 fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
-    use super::waking::{CLAUDE_SEAT, claude_agent, claude_seat, metaflow};
+    use super::waking::{claude_agent, claude_seat, metaflow, CLAUDE_SEAT};
     use super::{ControlsHerdrSnapshot, MarkedProcess};
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::{ReadsFlowRows, RegistersFlowIdentity};

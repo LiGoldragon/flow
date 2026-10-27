@@ -1,7 +1,10 @@
 //! What MetaBindExisting checks of a container and each flow it binds
 //! before any binding reaches the store.
 
-use crate::{RunningNexus, store::ReadsFlowRows};
+use crate::{
+    store::{NamesConfiguredModel, ReadsFlowRows},
+    RunningNexus,
+};
 use meta_signal_flow::{
     FlowBinding, FlowBindingRefusalReason, FlowBindingResult, FlowContainer, ProcessIdentity,
     RefusedFlowBinding,

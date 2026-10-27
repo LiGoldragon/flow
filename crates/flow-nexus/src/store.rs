@@ -11,6 +11,7 @@ pub mod context;
 mod created_pane;
 pub mod delivery;
 pub mod events;
+pub(crate) mod harness;
 pub(crate) mod launch_cleanup;
 pub(crate) mod logical_delivery;
 pub(crate) mod metaflow;
@@ -212,6 +213,7 @@ const RUNNING_ADDED_TABLES: &[&str] = &["flow_nexus_native_owner_proofs"];
 // 0.35.19 on. It records each ordinary Send outcome from 0.38.1 on.
 /// The tables a running store holds once this Flow has opened it.
 const ADDED_LATER_TABLES: &[&str] = &[
+    "flow_nexus_meta_harness_configuration",
     "flow_nexus_flow_context_sizes",
     "flow_nexus_address_holds",
     "flow_nexus_meta_leave_out_configuration",
@@ -239,6 +241,7 @@ const ADDED_LATER_TABLES: &[&str] = &[
 /// The tables a configuration-only store may hold beside its own, each
 /// added by a later Flow.
 const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
+    "flow_nexus_meta_harness_configuration",
     "flow_nexus_meta_leave_out_configuration",
     "flow_nexus_meta_send_server_configuration",
     "flow_nexus_meta_model_threshold_configuration",
@@ -312,10 +315,16 @@ impl SeedsConfiguration for DefaultConfiguration {
     }
 
     fn runtime_configuration(&self) -> RuntimeConfiguration {
+        let absent_endpoint = || CodexEndpointConfiguration {
+            client_path: String::new(),
+            home: String::new(),
+            socket: String::new(),
+            model_names: Vec::new(),
+        };
         RuntimeConfiguration {
             source_root: self.source_root().to_string_lossy().into_owned(),
-            stable_codex: CodexEndpointConfiguration::from(self.stable_codex()),
-            next_codex: CodexEndpointConfiguration::from(self.next_codex()),
+            stable_codex: absent_endpoint(),
+            next_codex: absent_endpoint(),
         }
     }
 
@@ -330,17 +339,6 @@ impl SeedsConfiguration for DefaultConfiguration {
             ],
             meta_aspects: vec![Aspect::Psyche, Aspect::Mind, Aspect::Field],
             message_nexus_path: String::new(),
-        }
-    }
-}
-
-impl From<flow_defaults::DefaultCodexEndpoint> for CodexEndpointConfiguration {
-    fn from(endpoint: flow_defaults::DefaultCodexEndpoint) -> Self {
-        Self {
-            client_path: endpoint.client_path,
-            home: endpoint.home,
-            socket: endpoint.socket,
-            model_names: endpoint.model_names,
         }
     }
 }
@@ -387,16 +385,6 @@ impl From<&CodexEndpointConfiguration> for meta_signal_flow::CodexEndpoint {
 
 impl From<&Configuration> for RuntimeConfiguration {
     fn from(configuration: &Configuration) -> Self {
-        Self {
-            source_root: configuration.source_root.clone(),
-            stable_codex: CodexEndpointConfiguration::from(&configuration.stable_codex),
-            next_codex: CodexEndpointConfiguration::from(&configuration.next_codex),
-        }
-    }
-}
-
-impl From<&ConfigureNexus> for RuntimeConfiguration {
-    fn from(configuration: &ConfigureNexus) -> Self {
         Self {
             source_root: configuration.source_root.clone(),
             stable_codex: CodexEndpointConfiguration::from(&configuration.stable_codex),
@@ -3768,7 +3756,7 @@ pub enum StoreError {
     #[error("meta configuration is not configured")]
     NotConfigured,
     #[error("a Codex model names both the stable and the next endpoint")]
-    CodexModelsOverlap,
+    ModelServedTwice(String),
     #[error("a leave-out default names a leave-out of another harness than its own")]
     LeaveOutNotForHarness,
     #[error("the topic {0} is not an uncapitalized camelCase identifier")]
@@ -4344,6 +4332,7 @@ impl UpgradesFlowFamilies for Engine {
 
 pub(crate) struct MetaConfigurationTables {
     nexus: TableReference<StoredMetaNexusConfiguration>,
+    harnesses: TableReference<harness::StoredHarness>,
     models: TableReference<StoredMetaModelConfiguration>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
     leave_outs: TableReference<StoredMetaLeaveOutConfiguration>,
@@ -4365,6 +4354,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
         Ok(Self {
             nexus: engine
                 .upgraded_nexus_configuration(StoredMetaNexusConfiguration::descriptor())?,
+            harnesses: engine.register_table(harness::StoredHarness::descriptor())?,
             models: engine.upgraded_models(StoredMetaModelConfiguration::descriptor())?,
             thresholds,
             leave_outs: engine
@@ -4455,7 +4445,7 @@ pub trait ConfiguresOnlyStore: Sized {
         &self,
     ) -> Result<(meta_signal_flow::Timings, meta_signal_flow::Limits), StoreError>;
     fn configure_change(&self, change: ConfigurationChange)
-    -> Result<ConfigureOutcome, StoreError>;
+        -> Result<ConfigureOutcome, StoreError>;
     fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError>;
     fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError>;
 }
@@ -4477,6 +4467,11 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
 
     fn open_in_place(path: &Path) -> Result<Self, StoreError> {
         let recognized = FlowStore::recognize_flow_memory(path)?;
+        let legacy_nexus = if recognized {
+            nexus_configuration::legacy_nexus(path)?
+        } else {
+            None
+        };
         let state_descriptor = TableDescriptor::<FlowStoreState>::new(
             FLOW_STATE_TABLE_NAME,
             FamilyName::new("flow-nexus-state"),
@@ -4498,6 +4493,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
         );
         let meta_nexus_descriptor = StoredMetaNexusConfiguration::descriptor();
+        let meta_harnesses_descriptor = harness::StoredHarness::descriptor();
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
@@ -4519,6 +4515,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&runtime_configuration_descriptor)
                 .with_family(&delivery_configuration_descriptor)
                 .with_family(&meta_nexus_descriptor)
+                .with_family(&meta_harnesses_descriptor)
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
                 .with_family(&meta_leave_outs_descriptor)
@@ -4534,6 +4531,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
             nexus: engine.upgraded_nexus_configuration(meta_nexus_descriptor)?,
+            harnesses: engine.register_table(meta_harnesses_descriptor)?,
             models: engine.upgraded_models(meta_models_descriptor)?,
             thresholds: engine.upgraded_thresholds(meta_thresholds_descriptor)?,
             leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
@@ -4543,6 +4541,26 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             timings: engine.register_timings()?,
             limits: engine.register_limits()?,
         };
+        if let Some(legacy) = legacy_nexus {
+            let harnesses_empty = engine
+                .match_records(QueryPlan::all(meta_configuration_tables.harnesses))?
+                .records()
+                .is_empty();
+            if harnesses_empty {
+                let models = engine
+                    .match_records(QueryPlan::all(meta_configuration_tables.models))?
+                    .records()
+                    .iter()
+                    .map(|row| row.model.clone())
+                    .collect::<Vec<_>>();
+                let migrated = harness::from_legacy_nexus(&legacy, &models);
+                FlowStore::replace_configuration_family(
+                    &engine,
+                    meta_configuration_tables.harnesses,
+                    migrated,
+                )?;
+            }
+        }
         if !recognized {
             engine.assert(Assertion::new(
                 state,
@@ -4919,9 +4937,9 @@ trait ReadsFlowStore {
 
 trait WritesFlowStore {
     fn reserve_start(&self, flow_type: String, origin: Origin)
-    -> Result<PendingLaunch, StoreError>;
+        -> Result<PendingLaunch, StoreError>;
     fn record_thread(&self, pending: &PendingLaunch, thread_id: String)
-    -> Result<bool, StoreError>;
+        -> Result<bool, StoreError>;
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError>;
     /// Writes the attempt's next state, keeping what its row knows of the
     /// context its seat started with.
@@ -5485,7 +5503,7 @@ pub(crate) trait ManagesMetaflowState: Sized {
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
     /// Replace one configuration family whole with its declaration.
     fn configure_change(&self, change: ConfigurationChange)
-    -> Result<ConfigureOutcome, StoreError>;
+        -> Result<ConfigureOutcome, StoreError>;
     /// The refresh threshold configured for one model, if any.
     fn configured_threshold(
         &self,
@@ -5855,9 +5873,6 @@ impl ConfiguresFlowStore for FlowStore {
     }
 
     fn runtime_configuration(&self) -> Result<RuntimeConfiguration, StoreError> {
-        if let Some(snapshot) = self.configuration_snapshot()? {
-            return Ok(RuntimeConfiguration::from(&snapshot.nexus));
-        }
         let records = self
             .engine
             .match_records(QueryPlan::key(
@@ -8019,6 +8034,12 @@ pub(crate) trait ReadsFlowMemory {
                     StoredMetaNexusConfiguration::schema_hash(),
                 ));
             }
+            "flow_nexus_meta_harness_configuration" => {
+                return Some((
+                    "flow-nexus-meta-harness-configuration",
+                    harness::StoredHarness::schema_hash(),
+                ));
+            }
             "flow_nexus_meta_model_configuration" => {
                 return Some((
                     "flow-nexus-meta-model-configuration",
@@ -8611,6 +8632,7 @@ pub(crate) trait ReadsFlowMemory {
             _ => return Err(StoreError::StateInvariant),
         };
         let models_rows = engine.match_records(QueryPlan::all(tables.models))?;
+        let harness_rows = engine.match_records(QueryPlan::all(tables.harnesses))?;
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
         let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
@@ -8619,6 +8641,7 @@ pub(crate) trait ReadsFlowMemory {
         let timings_rows = engine.match_records(QueryPlan::all(tables.timings))?;
         let limits_rows = engine.match_records(QueryPlan::all(tables.limits))?;
         if models_rows.database_marker() != marker
+            || harness_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
             || leave_out_rows.database_marker() != marker
@@ -8647,6 +8670,12 @@ pub(crate) trait ReadsFlowMemory {
             .map(|stored| stored.model.clone())
             .collect::<Vec<_>>();
         models.sort_by_key(|model| FlowStore::model_record_key(&model.layer, &model.aspect));
+        let mut harnesses = harness_rows
+            .records()
+            .iter()
+            .map(|stored| stored.harness.clone())
+            .collect::<Vec<_>>();
+        harnesses.sort_by(|left, right| left.harness_name.cmp(&right.harness_name));
         let mut thresholds = thresholds_rows
             .records()
             .iter()
@@ -8683,6 +8712,7 @@ pub(crate) trait ReadsFlowMemory {
         metaflows.sort_by_key(|metaflow| FlowStore::address_record_key(&metaflow.address));
         Ok(Some(ConfigurationSnapshot {
             nexus,
+            harnesses,
             models,
             thresholds,
             default_leave_outs,
@@ -8791,21 +8821,30 @@ pub(crate) trait ReadsFlowMemory {
             return Err(StoreError::TopicRefused(refused.topic.clone()));
         }
         match change {
-            ConfigurationChange::Nexus(nexus) => {
-                if nexus
-                    .stable_codex
-                    .model_name_vector
+            ConfigurationChange::Harnesses(harnesses) => {
+                let mut models = std::collections::BTreeSet::new();
+                for model in harnesses
                     .iter()
-                    .any(|model| nexus.next_codex.model_name_vector.contains(model))
+                    .flat_map(|harness| harness.served_models.iter())
                 {
-                    return Err(StoreError::CodexModelsOverlap);
+                    if !models.insert(model.model_name.clone()) {
+                        return Err(StoreError::ModelServedTwice(model.model_name.clone()));
+                    }
                 }
                 FlowStore::replace_configuration_family(
                     engine,
-                    tables.nexus,
-                    vec![StoredMetaNexusConfiguration { nexus }],
+                    tables.harnesses,
+                    harnesses
+                        .into_iter()
+                        .map(|harness| harness::StoredHarness { harness })
+                        .collect(),
                 )
             }
+            ConfigurationChange::Nexus(nexus) => FlowStore::replace_configuration_family(
+                engine,
+                tables.nexus,
+                vec![StoredMetaNexusConfiguration { nexus }],
+            ),
             ConfigurationChange::Models(models) => FlowStore::replace_configuration_family(
                 engine,
                 tables.models,
@@ -9030,7 +9069,6 @@ mod tests {
     /// successors, deliveries and send calls as they were kept.
     #[test]
     fn a_store_before_continuity_and_withdrawal_upgrades_and_reopens() {
-        use super::MemoryDefinition;
         use super::events::{EventV3, FlowEventsV3};
         use super::logical_delivery::{CurrentLogicalDeliveryV1, LogicalDeliveryEventV1};
         use super::metaflow_declaration::{
@@ -9044,6 +9082,7 @@ mod tests {
         use super::successor::{
             OwesSuccessors, SuccessionCause, SuccessionCauseV1, SuccessorIntent, SuccessorIntentV1,
         };
+        use super::MemoryDefinition;
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         let fixture = StoreFixture::new();
         fixture.configured();
@@ -9306,35 +9345,29 @@ mod tests {
         store
             .reserve_launch_attempt(&launch, fixture.origin())
             .expect("launch reservation");
-        assert!(
-            store
-                .record_native_launch_intent(NativeLaunchIntent {
-                    launch_request_id: "created-pane".into(),
-                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                    harness_kind: HarnessKind::Codex,
-                    model_name: launch.launch_profile.model_name.clone(),
-                    effort: launch.launch_profile.effort.clone(),
-                    system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                    prompt_sha256_vector: launch
-                        .first_prompt_payload
-                        .prompt_part_vector
-                        .iter()
-                        .map(|part| part.prompt_sha256.clone())
-                        .collect(),
-                })
-                .expect("intent persists")
-        );
+        assert!(store
+            .record_native_launch_intent(NativeLaunchIntent {
+                launch_request_id: "created-pane".into(),
+                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: HarnessKind::Codex,
+                model_name: launch.launch_profile.model_name.clone(),
+                effort: launch.launch_profile.effort.clone(),
+                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: launch
+                    .first_prompt_payload
+                    .prompt_part_vector
+                    .iter()
+                    .map(|part| part.prompt_sha256.clone())
+                    .collect(),
+            })
+            .expect("intent persists"));
         let pane = fixture.pane("created-pane");
-        assert!(
-            store
-                .record_created_launch_pane(pane.clone())
-                .expect("pane persists")
-        );
-        assert!(
-            !store
-                .record_created_launch_pane(pane.clone())
-                .expect("pane cannot be replaced")
-        );
+        assert!(store
+            .record_created_launch_pane(pane.clone())
+            .expect("pane persists"));
+        assert!(!store
+            .record_created_launch_pane(pane.clone())
+            .expect("pane cannot be replaced"));
         assert_eq!(
             store
                 .request_harness_start("created-pane")
@@ -9355,11 +9388,9 @@ mod tests {
                 .expect("recoverable pane"),
             Some(pane)
         );
-        assert!(
-            reopened
-                .orphan_launch_pane("created-pane")
-                .expect("orphan persists")
-        );
+        assert!(reopened
+            .orphan_launch_pane("created-pane")
+            .expect("orphan persists"));
         assert_eq!(
             reopened
                 .recoverable_launch_pane("created-pane")
@@ -9594,9 +9625,9 @@ mod tests {
     use super::{LaunchOutcomeV7, ReplaceRejectionV32, StartRejectionV32, StoredLaunchOutcomeV7};
     use super::{LaunchedRecord, ReplacedRecord};
     use super::{LaysOutDefaults, SeedsConfiguration};
-    use crate::store::RegistersBindings;
     use crate::store::delivery::RecordsDeliveries;
     use crate::store::delivery::{LeaseStep, PaneLease};
+    use crate::store::RegistersBindings;
     use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
     use sema_engine::{
         Assertion, Engine, EngineOpen, EngineRecord, FamilyName, QueryPlan, SchemaHash,
@@ -9684,14 +9715,18 @@ mod tests {
                 .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                     meta_signal_flow::ConfigureNexus {
                         source_root: settings.source_root,
-                        stable_codex: settings.stable_codex,
-                        next_codex: settings.next_codex,
-                        harness_profiles: settings.harness_profile_vector,
+                        flows_root: "/tmp/flows".into(),
                         meta_aspects: settings.meta_aspects,
                         message_nexus_path: settings.message_nexus_path,
                         message_nexus_binary: "/fixture/message-nexus".into(),
                         curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                         lease: 60,
+                        executables: meta_signal_flow::Executables {
+                            herdr: "herdr".into(),
+                            flow_id_claimer: "flow-id".into(),
+                            hook: "flow-hook".into(),
+                        },
+                        default_herdr_session: "default".into(),
                     },
                 ))
                 .expect("configuration commits");
@@ -9950,16 +9985,12 @@ mod tests {
                 .map(|part| part.prompt_sha256.clone())
                 .collect(),
         };
-        assert!(
-            store
-                .record_native_launch_intent(intent.clone())
-                .expect("first external intent persists")
-        );
-        assert!(
-            !store
-                .record_native_launch_intent(intent)
-                .expect("a repeated external intent is refused")
-        );
+        assert!(store
+            .record_native_launch_intent(intent.clone())
+            .expect("first external intent persists"));
+        assert!(!store
+            .record_native_launch_intent(intent)
+            .expect("a repeated external intent is refused"));
         assert!(matches!(
             store
                 .reserve_launch_attempt(&launch, origin.clone())
@@ -9999,24 +10030,22 @@ mod tests {
         store
             .reserve_launch_attempt(&launch, fixture.origin())
             .expect("reservation persists");
-        assert!(
-            store
-                .record_native_launch_intent(NativeLaunchIntent {
-                    launch_request_id: "request-boundary".into(),
-                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                    harness_kind: HarnessKind::Claude,
-                    model_name: launch.launch_profile.model_name.clone(),
-                    effort: launch.launch_profile.effort.clone(),
-                    system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                    prompt_sha256_vector: launch
-                        .first_prompt_payload
-                        .prompt_part_vector
-                        .iter()
-                        .map(|part| part.prompt_sha256.clone())
-                        .collect(),
-                })
-                .unwrap()
-        );
+        assert!(store
+            .record_native_launch_intent(NativeLaunchIntent {
+                launch_request_id: "request-boundary".into(),
+                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: HarnessKind::Claude,
+                model_name: launch.launch_profile.model_name.clone(),
+                effort: launch.launch_profile.effort.clone(),
+                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: launch
+                    .first_prompt_payload
+                    .prompt_part_vector
+                    .iter()
+                    .map(|part| part.prompt_sha256.clone())
+                    .collect(),
+            })
+            .unwrap());
         let pane = fixture.pane("request-boundary");
         let binding = NativeLaunchBinding {
             launch_request_id: "request-boundary".into(),
@@ -10026,16 +10055,14 @@ mod tests {
             herdr_pane_binding: pane.clone(),
         };
         assert!(store.record_native_launch_binding(binding).unwrap());
-        assert!(
-            store
-                .record_registration_acknowledgement(RegistrationAcknowledgement {
-                    launch_request_id: "request-boundary".into(),
-                    flow_id: "native-flow".into(),
-                    native_session_id: "native-session".into(),
-                    herdr_pane_binding: pane.clone(),
-                })
-                .unwrap()
-        );
+        assert!(store
+            .record_registration_acknowledgement(RegistrationAcknowledgement {
+                launch_request_id: "request-boundary".into(),
+                flow_id: "native-flow".into(),
+                native_session_id: "native-session".into(),
+                herdr_pane_binding: pane.clone(),
+            })
+            .unwrap());
         let intent = PromptDeliveryIntent {
             launch_request_id: "request-boundary".into(),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
@@ -10058,33 +10085,25 @@ mod tests {
                 transcript_root_inode: "99143".into(),
             }),
         };
-        assert!(
-            !store
-                .record_prompt_delivery_intent(intent.clone())
-                .expect("part hashes other than the native intent's are refused")
-        );
+        assert!(!store
+            .record_prompt_delivery_intent(intent.clone())
+            .expect("part hashes other than the native intent's are refused"));
         let mut exact = intent;
         exact.prompt_sha256_vector = vec![launch.first_prompt_payload.prompt_sha256.clone()];
-        assert!(
-            !store
-                .record_prompt_delivery_intent(exact.clone())
-                .expect("mismatching boundary is refused")
-        );
+        assert!(!store
+            .record_prompt_delivery_intent(exact.clone())
+            .expect("mismatching boundary is refused"));
         let NativeTranscriptBoundary::Absent(absence) = &mut exact.native_transcript_boundary
         else {
             panic!("absence fixture")
         };
         absence.native_session_id = "native-session".into();
-        assert!(
-            store
-                .record_prompt_delivery_intent(exact.clone())
-                .expect("exact pre-send evidence persists")
-        );
-        assert!(
-            !store
-                .record_prompt_delivery_intent(exact.clone())
-                .expect("one-shot prompt intent cannot be replayed")
-        );
+        assert!(store
+            .record_prompt_delivery_intent(exact.clone())
+            .expect("exact pre-send evidence persists"));
+        assert!(!store
+            .record_prompt_delivery_intent(exact.clone())
+            .expect("one-shot prompt intent cannot be replayed"));
         drop(store);
         let reopened = fixture.store();
         assert_eq!(
@@ -10095,11 +10114,9 @@ mod tests {
                 .prompt_delivery_intent_option,
             Some(exact.clone())
         );
-        assert!(
-            reopened
-                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(exact.clone()))
-                .unwrap()
-        );
+        assert!(reopened
+            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(exact.clone()))
+            .unwrap());
         let mut cursor_intent = exact.clone();
         cursor_intent.native_transcript_boundary =
             NativeTranscriptBoundary::Existing(NativeTranscriptCursor {
@@ -10111,13 +10128,9 @@ mod tests {
                 transcript_prefix_sha256:
                     "5555555555555555555555555555555555555555555555555555555555555555".into(),
             });
-        assert!(
-            reopened
-                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
-                    cursor_intent.clone(),
-                ))
-                .expect("fresh transcript advances the durable boundary")
-        );
+        assert!(reopened
+            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(cursor_intent.clone(),))
+            .expect("fresh transcript advances the durable boundary"));
         assert_eq!(
             reopened
                 .launch_attempt("request-boundary")
@@ -10126,44 +10139,34 @@ mod tests {
                 .prompt_delivery_intent_option,
             Some(cursor_intent.clone())
         );
-        assert!(
-            !reopened
-                .record_prompt_delivery_result(PromptDeliveryResult::Observed(
-                    NativeTargetReceipt {
-                        launch_request_id: cursor_intent.launch_request_id.clone(),
-                        prompt_sha256: cursor_intent.prompt_sha256.clone(),
-                        flow_id: cursor_intent.flow_id.clone(),
-                        native_session_id: cursor_intent.native_session_id.clone(),
-                        native_turn_id: "native-turn".into(),
-                        receipt_sha256:
-                            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-                                .into(),
-                        model_name: cursor_intent.model_name.clone(),
-                        effort: cursor_intent.effort.clone(),
-                        prompt_sha256_vector: cursor_intent.prompt_sha256_vector.clone(),
-                    }
-                ))
-                .expect("caller-shaped receipt is validated before promotion")
-        );
-        assert!(
-            reopened
-                .record_prompt_delivery_result(PromptDeliveryResult::Observed(
-                    NativeTargetReceipt {
-                        launch_request_id: cursor_intent.launch_request_id,
-                        prompt_sha256: cursor_intent.prompt_sha256,
-                        flow_id: cursor_intent.flow_id,
-                        native_session_id: cursor_intent.native_session_id,
-                        native_turn_id: "native-turn".into(),
-                        receipt_sha256:
-                            "4444444444444444444444444444444444444444444444444444444444444444"
-                                .into(),
-                        model_name: cursor_intent.model_name,
-                        effort: cursor_intent.effort,
-                        prompt_sha256_vector: cursor_intent.prompt_sha256_vector,
-                    }
-                ))
-                .expect("authentic receipt promotes ambiguity")
-        );
+        assert!(!reopened
+            .record_prompt_delivery_result(PromptDeliveryResult::Observed(NativeTargetReceipt {
+                launch_request_id: cursor_intent.launch_request_id.clone(),
+                prompt_sha256: cursor_intent.prompt_sha256.clone(),
+                flow_id: cursor_intent.flow_id.clone(),
+                native_session_id: cursor_intent.native_session_id.clone(),
+                native_turn_id: "native-turn".into(),
+                receipt_sha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    .into(),
+                model_name: cursor_intent.model_name.clone(),
+                effort: cursor_intent.effort.clone(),
+                prompt_sha256_vector: cursor_intent.prompt_sha256_vector.clone(),
+            }))
+            .expect("caller-shaped receipt is validated before promotion"));
+        assert!(reopened
+            .record_prompt_delivery_result(PromptDeliveryResult::Observed(NativeTargetReceipt {
+                launch_request_id: cursor_intent.launch_request_id,
+                prompt_sha256: cursor_intent.prompt_sha256,
+                flow_id: cursor_intent.flow_id,
+                native_session_id: cursor_intent.native_session_id,
+                native_turn_id: "native-turn".into(),
+                receipt_sha256: "4444444444444444444444444444444444444444444444444444444444444444"
+                    .into(),
+                model_name: cursor_intent.model_name,
+                effort: cursor_intent.effort,
+                prompt_sha256_vector: cursor_intent.prompt_sha256_vector,
+            }))
+            .expect("authentic receipt promotes ambiguity"));
     }
 
     /// A first message sent in parts: each next part is recorded submitted
@@ -10190,41 +10193,35 @@ mod tests {
         store
             .reserve_launch_attempt(&launch, fixture.origin())
             .expect("reservation persists");
-        assert!(
-            store
-                .record_native_launch_intent(NativeLaunchIntent {
-                    launch_request_id: "request-parts".into(),
-                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                    system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                    harness_kind: HarnessKind::Codex,
-                    model_name: launch.launch_profile.model_name.clone(),
-                    effort: launch.launch_profile.effort.clone(),
-                    prompt_sha256_vector: vec!["a".repeat(64), "b".repeat(64)],
-                })
-                .unwrap()
-        );
+        assert!(store
+            .record_native_launch_intent(NativeLaunchIntent {
+                launch_request_id: "request-parts".into(),
+                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                harness_kind: HarnessKind::Codex,
+                model_name: launch.launch_profile.model_name.clone(),
+                effort: launch.launch_profile.effort.clone(),
+                prompt_sha256_vector: vec!["a".repeat(64), "b".repeat(64)],
+            })
+            .unwrap());
         let pane = fixture.pane("request-parts");
-        assert!(
-            store
-                .record_native_launch_binding(NativeLaunchBinding {
-                    launch_request_id: "request-parts".into(),
-                    flow_id: "parts-flow".into(),
-                    native_session_id: "parts-session".into(),
-                    harness_kind: HarnessKind::Codex,
-                    herdr_pane_binding: pane.clone(),
-                })
-                .unwrap()
-        );
-        assert!(
-            store
-                .record_registration_acknowledgement(RegistrationAcknowledgement {
-                    launch_request_id: "request-parts".into(),
-                    flow_id: "parts-flow".into(),
-                    native_session_id: "parts-session".into(),
-                    herdr_pane_binding: pane.clone(),
-                })
-                .unwrap()
-        );
+        assert!(store
+            .record_native_launch_binding(NativeLaunchBinding {
+                launch_request_id: "request-parts".into(),
+                flow_id: "parts-flow".into(),
+                native_session_id: "parts-session".into(),
+                harness_kind: HarnessKind::Codex,
+                herdr_pane_binding: pane.clone(),
+            })
+            .unwrap());
+        assert!(store
+            .record_registration_acknowledgement(RegistrationAcknowledgement {
+                launch_request_id: "request-parts".into(),
+                flow_id: "parts-flow".into(),
+                native_session_id: "parts-session".into(),
+                herdr_pane_binding: pane.clone(),
+            })
+            .unwrap());
         let first = PromptDeliveryIntent {
             launch_request_id: "request-parts".into(),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
@@ -10246,11 +10243,9 @@ mod tests {
             }),
         };
         assert!(store.record_prompt_delivery_intent(first.clone()).unwrap());
-        assert!(
-            store
-                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(first.clone()))
-                .unwrap()
-        );
+        assert!(store
+            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(first.clone()))
+            .unwrap());
         let receipt = |intent: &PromptDeliveryIntent| NativeTargetReceipt {
             launch_request_id: intent.launch_request_id.clone(),
             prompt_sha256: intent.prompt_sha256.clone(),
@@ -10288,11 +10283,9 @@ mod tests {
         let mut second = first.clone();
         second.parts_submitted = 2;
         second.stops_reported = 3;
-        assert!(
-            store
-                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(second.clone()))
-                .unwrap()
-        );
+        assert!(store
+            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(second.clone()))
+            .unwrap());
         assert_eq!(
             store
                 .launch_attempt("request-parts")
@@ -10301,11 +10294,9 @@ mod tests {
                 .prompt_delivery_intent_option,
             Some(second.clone())
         );
-        assert!(
-            store
-                .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt(&second)))
-                .unwrap()
-        );
+        assert!(store
+            .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt(&second)))
+            .unwrap());
     }
 
     impl OpensFixtureStore for StoreFixture {
@@ -10331,11 +10322,9 @@ mod tests {
                 .reserve_pending_start(Query::Start(self.launch_profile("legacy-start-1")))
                 .expect("start reserves")
                 .expect("flow type is accepted");
-            assert!(
-                store
-                    .record_pending_thread(&pending, "thread-1".into())
-                    .expect("thread persists")
-            );
+            assert!(store
+                .record_pending_thread(&pending, "thread-1".into())
+                .expect("thread persists"));
             let response = store
                 .confirm_started(&pending.flow_id)
                 .expect("start confirms");
@@ -10366,19 +10355,13 @@ mod tests {
             "/run/user/4242/flow/flow-meta.sock"
         );
         assert_eq!(configuration.source_root, "/home/someone/primary");
-        assert_eq!(
-            configuration.stable_codex.control_socket_path,
-            "/home/someone/.codex/app-server-control/app-server-control.sock"
-        );
+        assert!(configuration.stable_codex.control_socket_path.is_empty());
         let runtime = store
             .runtime_configuration()
             .expect("runtime configuration");
         assert_eq!(runtime.source_root, "/home/someone/primary");
-        assert_eq!(
-            runtime.stable_codex.socket,
-            "/home/someone/.codex/app-server-control/app-server-control.sock"
-        );
-        assert_eq!(runtime.next_codex.home, "/home/someone/.codex-next");
+        assert!(runtime.stable_codex.socket.is_empty());
+        assert!(runtime.next_codex.home.is_empty());
         assert_eq!(
             defaults.store_path(),
             std::path::Path::new("/home/someone/.local/state/flow/flow.sema")
@@ -10528,15 +10511,19 @@ mod tests {
         config
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
+                    source_root: settings.source_root.clone(),
+                    flows_root: "/tmp/flows".into(),
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    executables: meta_signal_flow::Executables {
+                        herdr: "herdr".into(),
+                        flow_id_claimer: "flow-id".into(),
+                        hook: "flow-hook".into(),
+                    },
+                    default_herdr_session: "default".into(),
                 },
             ))
             .expect("configuration commits");
@@ -10556,12 +10543,10 @@ mod tests {
 
         let config = ConfigurationOnlyStore::open(&path)
             .expect("configuration-only listener reopens recognized Memory");
-        assert!(
-            config
-                .configuration_snapshot()
-                .expect("snapshot reads")
-                .is_some()
-        );
+        assert!(config
+            .configuration_snapshot()
+            .expect("snapshot reads")
+            .is_some());
         drop(config);
 
         let reopened = FlowStore::open_configured(&path).expect("configured Memory resumes");
@@ -10591,15 +10576,19 @@ mod tests {
         config
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
+                    source_root: settings.source_root.clone(),
+                    flows_root: "/tmp/flows".into(),
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    executables: meta_signal_flow::Executables {
+                        herdr: "herdr".into(),
+                        flow_id_claimer: "flow-id".into(),
+                        hook: "flow-hook".into(),
+                    },
+                    default_herdr_session: "default".into(),
                 },
             ))
             .expect("configuration commits");
@@ -10613,12 +10602,10 @@ mod tests {
             let mut catalog = write
                 .open_table(super::SEMA_CATALOG_TABLE)
                 .expect("catalog opens");
-            assert!(
-                catalog
-                    .remove("flow_nexus_flow_context_sizes")
-                    .expect("catalog entry removes")
-                    .is_some()
-            );
+            assert!(catalog
+                .remove("flow_nexus_flow_context_sizes")
+                .expect("catalog entry removes")
+                .is_some());
         }
         write.commit().expect("catalog commits");
         drop(database);
@@ -10664,15 +10651,19 @@ mod tests {
         config
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
+                    source_root: settings.source_root.clone(),
+                    flows_root: "/tmp/flows".into(),
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    executables: meta_signal_flow::Executables {
+                        herdr: "herdr".into(),
+                        flow_id_claimer: "flow-id".into(),
+                        hook: "flow-hook".into(),
+                    },
+                    default_herdr_session: "default".into(),
                 },
             ))
             .expect("configuration commits");
@@ -10763,15 +10754,19 @@ mod tests {
         config
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
+                    source_root: settings.source_root.clone(),
+                    flows_root: "/tmp/flows".into(),
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    executables: meta_signal_flow::Executables {
+                        herdr: "herdr".into(),
+                        flow_id_claimer: "flow-id".into(),
+                        hook: "flow-hook".into(),
+                    },
+                    default_herdr_session: "default".into(),
                 },
             ))
             .expect("configuration commits");
@@ -10785,12 +10780,10 @@ mod tests {
             let mut catalog = write
                 .open_table(super::SEMA_CATALOG_TABLE)
                 .expect("catalog opens");
-            assert!(
-                catalog
-                    .remove("flow_nexus_address_holds")
-                    .expect("catalog entry removes")
-                    .is_some()
-            );
+            assert!(catalog
+                .remove("flow_nexus_address_holds")
+                .expect("catalog entry removes")
+                .is_some());
         }
         write.commit().expect("catalog commits");
         drop(database);
@@ -11213,20 +11206,16 @@ mod tests {
 
         let store = fixture.store();
         let quarantined = match store.opening_settlements.as_slice() {
-            [
-                LaunchAttemptSettlement::SetAside {
-                    launch_request_id: earlier,
-                    from: ArchivedLaunchAttemptShape::BeforeSystemPromptBundle,
-                },
-                LaunchAttemptSettlement::SetAside {
-                    launch_request_id: before_address,
-                    from: ArchivedLaunchAttemptShape::BeforeAddress,
-                },
-                LaunchAttemptSettlement::Quarantined {
-                    launch_request_id: unreadable,
-                    decode_error,
-                },
-            ] => {
+            [LaunchAttemptSettlement::SetAside {
+                launch_request_id: earlier,
+                from: ArchivedLaunchAttemptShape::BeforeSystemPromptBundle,
+            }, LaunchAttemptSettlement::SetAside {
+                launch_request_id: before_address,
+                from: ArchivedLaunchAttemptShape::BeforeAddress,
+            }, LaunchAttemptSettlement::Quarantined {
+                launch_request_id: unreadable,
+                decode_error,
+            }] => {
                 assert_eq!(earlier, EarlierLaunchAttemptRows::EARLIER_REQUEST);
                 assert_eq!(
                     before_address,
@@ -11259,12 +11248,10 @@ mod tests {
             assert_eq!(store.launch_attempt(request).unwrap(), None);
         }
         // The 0.34 row is carried, not set aside.
-        assert!(
-            store
-                .launch_attempt(EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST)
-                .unwrap()
-                .is_some()
-        );
+        assert!(store
+            .launch_attempt(EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST)
+            .unwrap()
+            .is_some());
         // Every whole-table read answers again.
         assert!(store.ambiguous_launch_attempts().is_ok());
         assert_eq!(store.flow_nodes().unwrap().len(), 1);
@@ -11684,12 +11671,10 @@ mod tests {
             store.list_metaflows().expect("metaflows list").len() as u64,
             after["flow_nexus_metaflows"]
         );
-        assert!(
-            store
-                .configuration_snapshot()
-                .expect("snapshot reads")
-                .is_some()
-        );
+        assert!(store
+            .configuration_snapshot()
+            .expect("snapshot reads")
+            .is_some());
         let attempts = store
             .engine
             .match_records(QueryPlan::all(store.launch_attempts))
@@ -11698,12 +11683,10 @@ mod tests {
             .to_vec();
         for stored in &attempts {
             let request = &stored.attempt.launch_request_id;
-            assert!(
-                store
-                    .launch_attempt(request)
-                    .expect("attempt reads")
-                    .is_some()
-            );
+            assert!(store
+                .launch_attempt(request)
+                .expect("attempt reads")
+                .is_some());
             store.launch_outcome(request).expect("outcome reads");
         }
         drop(store);
@@ -13272,7 +13255,7 @@ mod tests {
         assert_eq!(nexus.message_nexus_path, "/fixture/message.sock");
         assert_eq!(nexus.message_nexus_binary, "/fixture/message-nexus");
         assert_eq!(nexus.lease, 45);
-        assert_eq!(nexus.next_codex.model_name_vector, ["gpt-next"]);
+        assert_eq!(nexus.flows_root, "/fixture/source/flows");
         assert!(
             nexus
                 .curriculum_nexus_path
@@ -13305,15 +13288,19 @@ mod tests {
         config
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
+                    source_root: settings.source_root.clone(),
+                    flows_root: "/tmp/flows".into(),
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    executables: meta_signal_flow::Executables {
+                        herdr: "herdr".into(),
+                        flow_id_claimer: "flow-id".into(),
+                        hook: "flow-hook".into(),
+                    },
+                    default_herdr_session: "default".into(),
                 },
             ))
             .expect("Nexus configured");
@@ -13462,12 +13449,10 @@ mod tests {
                     HarnessKind::Claude => HarnessKind::Codex,
                     HarnessKind::Codex => HarnessKind::Claude,
                 };
-                assert!(
-                    store
-                        .default_leave_outs(&entry.address, &other)
-                        .expect("default reads")
-                        .is_empty()
-                );
+                assert!(store
+                    .default_leave_outs(&entry.address, &other)
+                    .expect("default reads")
+                    .is_empty());
             }
         }
         // The configuration-only open reads the same family.
@@ -13502,11 +13487,9 @@ mod tests {
             .default_leave_outs;
         assert_eq!(carried.len(), defaults.len());
         for (address, leave_outs) in &defaults {
-            assert!(
-                carried
-                    .iter()
-                    .any(|entry| entry.address == *address && entry.leave_outs == *leave_outs)
-            );
+            assert!(carried
+                .iter()
+                .any(|entry| entry.address == *address && entry.leave_outs == *leave_outs));
         }
         drop(configuration);
         use super::ManagesMetaflowState;
@@ -13705,9 +13688,9 @@ mod tests {
     /// events; a second open carries nothing again.
     #[test]
     fn a_0_35_11_store_upgrades_models_leave_outs_and_events_in_one_open() {
+        use super::events::{EventBeforeIdentity, RecordsHarnessEvents};
         use super::ManagesMetaflowState;
         use super::NamesConfiguredModel;
-        use super::events::{EventBeforeIdentity, RecordsHarnessEvents};
         use crate::lean::BelongsToHarness;
         use signal_flow::{Address, Event, NativeStop};
         let fixture = StoreFixture::new();

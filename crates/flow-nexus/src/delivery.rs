@@ -14,7 +14,6 @@ use crate::delivery::body::ShowsPaneText;
 pub mod body;
 pub mod lease;
 
-use crate::RunningNexus;
 use crate::compacting::WatchesCompactions;
 use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::pane::{Interruption, PaneAgent, Placement, Submission, WritesPane};
@@ -22,6 +21,7 @@ use crate::performing::Performs;
 use crate::store::context::{JudgesCompaction, JudgesThreshold};
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::{ReadsFlowRows, RecordsReplacement};
+use crate::RunningNexus;
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{

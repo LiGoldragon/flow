@@ -50,8 +50,7 @@ pub trait WritesPane {
     /// a harness's render of a large paste.
     fn timings(&self) -> &meta_signal_flow::Timings;
     fn limits(&self) -> &meta_signal_flow::Limits;
-    /// The composer is at the bottom of the screen.
-    const COMPOSER_LINES: &'static str = "12";
+    fn composer(&self, harness_kind: &HarnessKind) -> Option<Composer>;
     /// How long a Stopped seat is given to show resting. Claude runs its
     /// Stop hook while its spinner is still on screen, and Herdr reads its
     /// state from the screen, so Herdr shows it working for a moment after
@@ -120,7 +119,8 @@ pub trait WritesPane {
 
     /// Presses the composer's submit key once.
     fn submit(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool {
-        self.press(route, &Composer::of(harness_kind).submit_keys())
+        self.composer(harness_kind)
+            .is_some_and(|composer| self.press(route, &composer.submit_keys()))
     }
 
     /// Takes back the letter an interrupt put back into the composer.
@@ -135,13 +135,15 @@ pub trait WritesPane {
     /// pressed only while the composer is seen holding a letter, since a
     /// second one into an empty composer would quit Claude.
     fn retract(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> bool {
-        self.press(route, &Composer::of(harness_kind).retract_keys())
+        self.composer(harness_kind)
+            .is_some_and(|composer| self.press(route, &composer.retract_keys()))
     }
 
     /// Takes back a text of `lines` lines the composer still holds: a kill
     /// to the line's start, then a join onto the line above, for each line.
     fn take_back(&self, route: &HerdrRoute, harness_kind: &HarnessKind, lines: usize) -> bool {
-        self.press(route, &Composer::of(harness_kind).take_back_keys(lines))
+        self.composer(harness_kind)
+            .is_some_and(|composer| self.press(route, &composer.take_back_keys(lines)))
     }
 
     /// Presses the interrupt keys into a working agent until it is seen
@@ -199,6 +201,14 @@ impl WritesPane for HerdrCli {
     fn limits(&self) -> &meta_signal_flow::Limits {
         &self.limits
     }
+
+    fn composer(&self, harness_kind: &HarnessKind) -> Option<Composer> {
+        self.codex_endpoints
+            .harnesses
+            .iter()
+            .find(|harness| &harness.harness_kind == harness_kind)
+            .map(|harness| Composer::from(&harness.pane_profile))
+    }
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return PaneAgent::Absent;
@@ -240,7 +250,7 @@ impl WritesPane for HerdrCli {
         }
     }
 
-    fn screen(&self, route: &HerdrRoute) -> Option<String> {
+    fn screen(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String> {
         let output = Command::new(&self.executable)
             .args([
                 "--session",
@@ -251,7 +261,7 @@ impl WritesPane for HerdrCli {
                 "--source",
                 "visible",
                 "--lines",
-                Self::COMPOSER_LINES,
+                &self.composer(harness_kind)?.composer_lines.to_string(),
                 "--format",
                 "ansi",
             ])
@@ -264,7 +274,8 @@ impl WritesPane for HerdrCli {
     }
 
     fn composer_text(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String> {
-        Composer::of(harness_kind).text(&self.screen(route)?)
+        self.composer(harness_kind)?
+            .text(&self.screen(route, harness_kind)?)
     }
 
     fn press(&self, route: &HerdrRoute, keys: &[String]) -> bool {
@@ -389,16 +400,36 @@ impl ReadsAgentStatus for Option<&str> {
 /// knowledge of the version witnessed, not a setup value, so it lives here.
 struct Composer {
     glyph: char,
+    submit_keys: Vec<String>,
+    composer_lines: usize,
+    retracted_lines: usize,
     /// What empties a composer an interrupt put a letter back into.
     retraction: Retraction,
 }
 
 /// How a harness's composer is emptied of a letter an interrupt restored.
 enum Retraction {
-    /// One key that empties the composer in any edit mode.
-    Key(&'static str),
+    Keys(Vec<String>),
     /// Line by line, as `take_back_keys`.
-    LineByLine,
+    LineByLine(Vec<String>),
+}
+
+impl From<&meta_signal_flow::PaneProfile> for Composer {
+    fn from(profile: &meta_signal_flow::PaneProfile) -> Self {
+        let retraction = match &profile.composer.retraction {
+            meta_signal_flow::Retraction::Keys(keys) => Retraction::Keys(keys.clone()),
+            meta_signal_flow::Retraction::LineByLine(keys) => {
+                Retraction::LineByLine(keys.clone())
+            }
+        };
+        Self {
+            glyph: profile.composer.glyph.chars().next().unwrap_or(' '),
+            submit_keys: profile.submit_keys.clone(),
+            composer_lines: profile.composer.composer_lines.max(1) as usize,
+            retracted_lines: profile.composer.retracted_lines.max(1) as usize,
+            retraction,
+        }
+    }
 }
 
 trait KeysComposer {
@@ -413,30 +444,33 @@ trait KeysComposer {
     /// taken back line by line, generously, since a restored text's length
     /// is not known and the keys do nothing to an empty composer.
     fn retract_keys(&self) -> Vec<String>;
-    const RETRACTED_LINES: usize = 32;
     fn take_back_keys(&self, lines: usize) -> Vec<String>;
 }
 
 impl KeysComposer for Composer {
     fn submit_keys(&self) -> Vec<String> {
-        vec!["enter".to_owned()]
+        self.submit_keys.clone()
     }
 
     fn retract_keys(&self) -> Vec<String> {
-        match self.retraction {
-            Retraction::Key(key) => vec![key.to_owned()],
-            Retraction::LineByLine => self.take_back_keys(Self::RETRACTED_LINES),
+        match &self.retraction {
+            Retraction::Keys(keys) => keys.clone(),
+            Retraction::LineByLine(_) => self.take_back_keys(self.retracted_lines),
         }
     }
 
     fn take_back_keys(&self, lines: usize) -> Vec<String> {
-        (0..lines.max(1))
-            .flat_map(|_| ["ctrl+u".to_owned(), "backspace".to_owned()])
-            .collect()
+        match &self.retraction {
+            Retraction::Keys(keys) => keys.clone(),
+            Retraction::LineByLine(keys) => (0..lines.max(1))
+                .flat_map(|_| keys.iter().cloned())
+                .collect(),
+        }
     }
 }
 
 trait ReadsComposer {
+    #[cfg(test)]
     fn of(harness_kind: &HarnessKind) -> Self;
     /// The composer is the last line opening with the glyph. It holds no
     /// text when nothing follows the glyph but a placeholder, which both
@@ -447,15 +481,22 @@ trait ReadsComposer {
 }
 
 impl ReadsComposer for Composer {
+    #[cfg(test)]
     fn of(harness_kind: &HarnessKind) -> Self {
         match harness_kind {
             HarnessKind::Claude => Self {
                 glyph: '❯',
-                retraction: Retraction::Key("ctrl+c"),
+                submit_keys: vec!["enter".into()],
+                composer_lines: 12,
+                retracted_lines: 32,
+                retraction: Retraction::Keys(vec!["ctrl+c".into()]),
             },
             HarnessKind::Codex => Self {
                 glyph: '›',
-                retraction: Retraction::LineByLine,
+                submit_keys: vec![],
+                composer_lines: 12,
+                retracted_lines: 32,
+                retraction: Retraction::LineByLine(vec!["ctrl+u".into(), "backspace".into()]),
             },
         }
     }

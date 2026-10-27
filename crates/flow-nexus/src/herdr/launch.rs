@@ -7,7 +7,7 @@
 //! typed through Herdr's socket API, one JSON request line, never as a
 //! process argument.
 
-use super::{DecodesFlowClaim, FlowClaim, HerdrCli, claude_paste};
+use super::{claude_paste, DecodesFlowClaim, FlowClaim, HerdrCli};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
 pub use crate::generated::starter::StartupProgress;
@@ -2801,8 +2801,6 @@ pub(crate) mod tests {
     };
     use crate::composition::{FitsOneMessage, SplitsStartupMessage};
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-    use crate::herdr::ConfiguresHerdrCli;
-    use crate::herdr::HerdrCli;
     use crate::herdr::launch::ChecksComposedLaunch;
     use crate::herdr::launch::ClaimsNativeIdentity;
     use crate::herdr::launch::PreparesClaudeEnvironment;
@@ -2811,6 +2809,8 @@ pub(crate) mod tests {
     use crate::herdr::launch::TitlesClaudeSession;
     use crate::herdr::launch::{ChecksTypedCommand, HoldsSystemPrompt, SpawnFailure};
     use crate::herdr::launch::{NativeTargetRefusal, TitleRefusal};
+    use crate::herdr::ConfiguresHerdrCli;
+    use crate::herdr::HerdrCli;
     use crate::title::ShowsNativeTitle;
     use signal_flow::{
         Aspect, ComposedLaunch, Effort, FirstPromptPayload, HarnessKind, HerdrPaneBinding,
@@ -3087,11 +3087,8 @@ printf '%s\n' "$alias"
         assert!(!start.contains(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG));
         // The harness starts with no positional prompt; the one first prompt
         // travels later in a single app-server turn/start.
-        assert!(
-            start.ends_with(
-                "-c model_reasoning_effort=high -c tui.terminal_title=[\"thread-title\"]"
-            )
-        );
+        assert!(start
+            .ends_with("-c model_reasoning_effort=high -c tui.terminal_title=[\"thread-title\"]"));
         assert!(!start.contains('$'));
         assert!(!calls.contains("agent prompt"));
     }
@@ -3446,12 +3443,10 @@ printf '%s\n' "$alias"
                 .flow_id,
             "123456"
         );
-        assert!(
-            adapter
-                .observe_native_binding(&launch, &pane, Some("abcdef"))
-                .unwrap_err()
-                .contains("does not name the FlowId Flow reserved")
-        );
+        assert!(adapter
+            .observe_native_binding(&launch, &pane, Some("abcdef"))
+            .unwrap_err()
+            .contains("does not name the FlowId Flow reserved"));
     }
 
     #[test]
@@ -3483,20 +3478,16 @@ printf '%s\n' "$alias"
 
         let mut wrong_pane = pane.clone();
         wrong_pane.herdr_pane_id = "w7:p9".into();
-        assert!(
-            adapter
-                .observe_native_binding(&launch, &wrong_pane, Some("123456"))
-                .unwrap_err()
-                .contains("does not match the created native pane")
-        );
+        assert!(adapter
+            .observe_native_binding(&launch, &wrong_pane, Some("123456"))
+            .unwrap_err()
+            .contains("does not match the created native pane"));
 
         fs::write(root.path().join("reported-harness"), "codex").unwrap();
-        assert!(
-            adapter
-                .observe_native_binding(&launch, &pane, Some("123456"))
-                .unwrap_err()
-                .contains("does not match the created native pane")
-        );
+        assert!(adapter
+            .observe_native_binding(&launch, &pane, Some("123456"))
+            .unwrap_err()
+            .contains("does not match the created native pane"));
     }
 
     #[test]
@@ -3516,12 +3507,10 @@ printf '%s\n' "$alias"
             .expect("started");
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(calls.contains("--session-id"));
-        assert!(
-            adapter
-                .observe_native_binding(&launch, &pane, Some("123456"))
-                .unwrap_err()
-                .contains("conflicts with the Flow-selected Claude session")
-        );
+        assert!(adapter
+            .observe_native_binding(&launch, &pane, Some("123456"))
+            .unwrap_err()
+            .contains("conflicts with the Flow-selected Claude session"));
     }
 
     #[test]
@@ -3759,12 +3748,10 @@ printf '%s\n' "$alias"
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
-        assert!(
-            adapter
-                .observe_native_binding(&launch, &pane, None)
-                .unwrap_err()
-                .contains("observed native identity")
-        );
+        assert!(adapter
+            .observe_native_binding(&launch, &pane, None)
+            .unwrap_err()
+            .contains("observed native identity"));
         let flow_id_calls =
             fs::read_to_string(root.path().join("flow-id-calls")).expect("flow-id calls");
         assert!(flow_id_calls.contains(&format!(
@@ -3777,12 +3764,10 @@ printf '%s\n' "$alias"
         let missing_pane = missing_adapter
             .create_launch_pane(&launch)
             .expect("created missing-identity pane");
-        assert!(
-            missing_adapter
-                .observe_native_binding(&launch, &missing_pane, None)
-                .unwrap_err()
-                .contains("empty native identity")
-        );
+        assert!(missing_adapter
+            .observe_native_binding(&launch, &missing_pane, None)
+            .unwrap_err()
+            .contains("empty native identity"));
     }
 
     #[test]
@@ -3796,12 +3781,10 @@ printf '%s\n' "$alias"
             &agent_name,
         );
         adapter.flows_root = root.path().join("not-flows");
-        assert!(
-            adapter
-                .create_launch_pane(&launch)
-                .unwrap_err()
-                .contains("directory named flows")
-        );
+        assert!(adapter
+            .create_launch_pane(&launch)
+            .unwrap_err()
+            .contains("directory named flows"));
         assert!(!root.path().join("calls").exists());
     }
 
@@ -3957,22 +3940,14 @@ printf '%s\n' "$alias"
             .observe_attached_codex_binding(&launch, &pane, native_session)
             .expect("the opened thread binds");
         assert_eq!(binding.native_session_id, native_session);
-        assert!(
-            adapter
-                .observe_attached_codex_binding(
-                    &launch,
-                    &pane,
-                    "87654321-4321-4cba-8fed-cba987654321"
-                )
-                .unwrap_err()
-                .contains("another thread than Flow opened")
-        );
+        assert!(adapter
+            .observe_attached_codex_binding(&launch, &pane, "87654321-4321-4cba-8fed-cba987654321")
+            .unwrap_err()
+            .contains("another thread than Flow opened"));
         let claude = super::tests::launch(HarnessKind::Claude);
-        assert!(
-            adapter
-                .attach_codex_harness(&claude, &pane, native_session)
-                .is_err()
-        );
+        assert!(adapter
+            .attach_codex_harness(&claude, &pane, native_session)
+            .is_err());
     }
 
     /// Herdr reports no agent session for a TUI that remote-resumed a
@@ -4002,19 +3977,15 @@ printf '%s\n' "$alias"
         assert_eq!(binding.flow_id, "123456");
         assert_eq!(binding.harness_kind, HarnessKind::Codex);
         // Without Herdr's own report, the attached thread is still required.
-        assert!(
-            adapter
-                .observe_attached_codex_binding(&launch, &pane, "")
-                .is_err()
-        );
+        assert!(adapter
+            .observe_attached_codex_binding(&launch, &pane, "")
+            .is_err());
         // A pane Herdr recognizes as another harness does not bind.
         fs::write(root.path().join("reported-harness"), "claude").unwrap();
-        assert!(
-            adapter
-                .observe_attached_codex_binding(&launch, &pane, native_session)
-                .unwrap_err()
-                .contains("does not match the created native pane")
-        );
+        assert!(adapter
+            .observe_attached_codex_binding(&launch, &pane, native_session)
+            .unwrap_err()
+            .contains("does not match the created native pane"));
     }
 
     /// The Codex target is the thread Flow opened and the recognized pane:
@@ -4063,11 +4034,9 @@ printf '%s\n' "$alias"
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
-        assert!(
-            adapter
-                .verify_native_target(&pane, native_session, &HarnessKind::Codex)
-                .is_ok()
-        );
+        assert!(adapter
+            .verify_native_target(&pane, native_session, &HarnessKind::Codex)
+            .is_ok());
         assert_eq!(
             adapter
                 .verify_native_target(&pane, other, &HarnessKind::Codex)
@@ -4075,11 +4044,9 @@ printf '%s\n' "$alias"
             NativeTargetRefusal::IdentityInexact
         );
         fs::write(root.path().join("never-agent-session"), "absent").unwrap();
-        assert!(
-            adapter
-                .verify_native_target(&pane, other, &HarnessKind::Codex)
-                .is_ok()
-        );
+        assert!(adapter
+            .verify_native_target(&pane, other, &HarnessKind::Codex)
+            .is_ok());
     }
 
     /// The transcript is the authority for the Codex thread when Herdr
@@ -4417,13 +4384,11 @@ printf '%s\n' "$alias"
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         let intent = registered_intent(&adapter, &launch, pane, native_session);
         fs::write(root.path().join("reported-harness"), "codex").expect("changed harness");
-        assert!(
-            adapter
-                .observe_native_target_receipt(&intent)
-                .unwrap_err()
-                .to_string()
-                .contains("native identity is no longer exact")
-        );
+        assert!(adapter
+            .observe_native_target_receipt(&intent)
+            .unwrap_err()
+            .to_string()
+            .contains("native identity is no longer exact"));
     }
 
     /// A Claude cursor sits past the transcript's end when the first part
@@ -4448,33 +4413,27 @@ printf '%s\n' "$alias"
         let intent = registered_intent(&adapter, &launch, pane, native_session);
 
         fs::write(&transcript, "").expect("truncate transcript");
-        assert!(
-            adapter
-                .observe_native_target_receipt(&intent)
-                .unwrap_err()
-                .to_string()
-                .contains("truncated")
-        );
+        assert!(adapter
+            .observe_native_target_receipt(&intent)
+            .unwrap_err()
+            .to_string()
+            .contains("truncated"));
 
         fs::write(&transcript, "{\"type\":\"xxxx\"}\n").expect("rewrite transcript prefix");
-        assert!(
-            adapter
-                .observe_native_target_receipt(&intent)
-                .unwrap_err()
-                .to_string()
-                .contains("prefix changed")
-        );
+        assert!(adapter
+            .observe_native_target_receipt(&intent)
+            .unwrap_err()
+            .to_string()
+            .contains("prefix changed"));
 
         let replacement = root.path().join("replacement.jsonl");
         fs::write(&replacement, "{\"type\":\"user\"}\n").expect("replacement transcript");
         fs::rename(&replacement, &transcript).expect("replace transcript inode");
-        assert!(
-            adapter
-                .observe_native_target_receipt(&intent)
-                .unwrap_err()
-                .to_string()
-                .contains("file was replaced")
-        );
+        assert!(adapter
+            .observe_native_target_receipt(&intent)
+            .unwrap_err()
+            .to_string()
+            .contains("file was replaced"));
     }
 
     /// Claude Code 2.1.294 keeps a long typed message inside its native
@@ -4962,12 +4921,10 @@ printf '%s\n' "$alias"
             prompts[1]["params"]["text"],
             parts[1].prompt_part_text.as_str()
         );
-        assert!(
-            prompts[0]["params"]["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("Startup message, part 1 of 2.")
-        );
+        assert!(prompts[0]["params"]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Startup message, part 1 of 2."));
         next.parts_submitted = 3;
         assert!(adapter.submit_startup_part(&launch, &next).is_err());
         assert_eq!(socket_prompts(&root).len(), 2);
@@ -5393,15 +5350,15 @@ printf '%s\n' "$alias"
         .install(&format!(
                 "#!/bin/sh\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nprintf '%b' '{frames}'\nsleep 2\n"
             ));
-        adapter.codex_endpoints.stable.client_path = proxy;
+        adapter.codex_endpoints.endpoints[0].client_path = proxy;
         adapter
             .codex_endpoints
-            .stable
+            .endpoints[0]
             .model_names
             .insert("gpt-6-astra".into());
         adapter
             .codex_endpoints
-            .next
+            .endpoints[1]
             .model_names
             .remove("gpt-6-astra");
         let pane = adapter.create_launch_pane(&launch).unwrap();
@@ -5492,15 +5449,15 @@ printf '%s\n' "$alias"
         .install(&format!(
                 "#!/bin/sh\nwhile IFS= read -r line; do line=$(printf '%s' \"$line\" | tr -d '\\r'); [ -z \"$line\" ] && break; done\nprintf '%b' 'HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\\r\\n'\nprintf '%b' '{frames}'\nsleep 2\n"
             ));
-        adapter.codex_endpoints.stable.client_path = proxy;
+        adapter.codex_endpoints.endpoints[0].client_path = proxy;
         adapter
             .codex_endpoints
-            .stable
+            .endpoints[0]
             .model_names
             .insert("gpt-6-astra".into());
         adapter
             .codex_endpoints
-            .next
+            .endpoints[1]
             .model_names
             .remove("gpt-6-astra");
         let pane = adapter.create_launch_pane(&launch).expect("created pane");

@@ -4,8 +4,8 @@
 
 use crate::generated::send_tool::DeclaresSendTool;
 use crate::send_tool::SendTool;
-use crate::store::{CodexEndpointConfiguration, RuntimeConfiguration};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use crate::store::CodexEndpointConfiguration;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use sha1::{Digest, Sha1};
 use signal_flow::{ComposedLaunch, HarnessKind, PromptDeliveryIntent, PromptDeliveryResult};
 use std::{
@@ -14,16 +14,16 @@ use std::{
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        Arc, Mutex,
         mpsc::{self, Receiver},
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
 };
 use thiserror::Error;
 use tungstenite::{
-    Message,
     protocol::{Role, WebSocket, WebSocketConfig},
+    Message,
 };
 
 #[cfg(test)]
@@ -53,8 +53,8 @@ pub struct CodexEndpoint {
 
 #[derive(Clone)]
 pub struct CodexEndpoints {
-    pub stable: CodexEndpoint,
-    pub next: CodexEndpoint,
+    pub endpoints: Vec<CodexEndpoint>,
+    pub harnesses: Vec<meta_signal_flow::Harness>,
     pub timeout: Duration,
     pub workspace_root: PathBuf,
     pub limits: meta_signal_flow::Limits,
@@ -69,23 +69,34 @@ pub trait SelectsCodexEndpoint {
 
 impl SelectsCodexEndpoint for CodexEndpoints {
     fn overlapping_models(&self) -> BTreeSet<String> {
-        self.stable
-            .model_names
-            .intersection(&self.next.model_names)
-            .cloned()
-            .collect()
+        let mut seen = BTreeSet::new();
+        let mut overlap = BTreeSet::new();
+        for model in self
+            .endpoints
+            .iter()
+            .flat_map(|endpoint| endpoint.model_names.iter())
+        {
+            if !seen.insert(model.clone()) {
+                overlap.insert(model.clone());
+            }
+        }
+        overlap
     }
 
     fn endpoint_for(&self, model: &str) -> Result<&CodexEndpoint, CodexAdapterUnavailable> {
-        let stable = self.stable.model_names.contains(model);
-        let next = self.next.model_names.contains(model);
-        match (stable, next) {
-            (true, false) => Ok(&self.stable),
-            (false, true) => Ok(&self.next),
-            _ => Err(CodexAdapterUnavailable::Protocol(
-                "Codex model does not select exactly one configured endpoint".into(),
-            )),
+        let mut matching = self
+            .endpoints
+            .iter()
+            .filter(|endpoint| endpoint.model_names.contains(model));
+        let endpoint = matching.next().ok_or_else(|| {
+            CodexAdapterUnavailable::Protocol("no configured Codex harness serves the model".into())
+        })?;
+        if matching.next().is_some() {
+            return Err(CodexAdapterUnavailable::Protocol(
+                "more than one configured Codex harness serves the model".into(),
+            ));
         }
+        Ok(endpoint)
     }
 
     fn adapter_for(&self, model: &str) -> Result<CodexAdapter, CodexAdapterUnavailable> {
@@ -115,23 +126,31 @@ impl SelectsCodexEndpoint for CodexEndpoints {
 /// never launched.
 impl crate::generated::starter::DerivesHarness for CodexEndpoints {
     fn harness_for<N: crate::generated::starter::Textual>(&self, input: N) -> HarnessKind {
-        match self.adapter_for(&input.text()) {
-            Ok(_) => HarnessKind::Codex,
-            Err(_) => HarnessKind::Claude,
-        }
+        let model = input.text();
+        self.harnesses
+            .iter()
+            .find(|harness| {
+                harness
+                    .served_models
+                    .iter()
+                    .any(|served| served.model_name == model)
+            })
+            .map(|harness| harness.harness_kind.clone())
+            .unwrap_or(HarnessKind::Claude)
     }
 
     fn launches_exactly<N: crate::generated::starter::Textual>(&self, input: N) -> bool {
         let model = input.text();
-        match crate::generated::starter::DerivesHarness::harness_for(self, model.as_str()) {
-            HarnessKind::Codex => true,
-            HarnessKind::Claude => model.strip_prefix("claude-").is_some_and(|name| {
-                !name.is_empty()
-                    && name.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
-                    })
-            }),
-        }
+        self.harnesses
+            .iter()
+            .filter(|harness| {
+                harness
+                    .served_models
+                    .iter()
+                    .any(|served| served.model_name == model)
+            })
+            .count()
+            == 1
     }
 }
 
@@ -148,14 +167,35 @@ impl From<&CodexEndpointConfiguration> for CodexEndpoint {
     }
 }
 
-impl From<&RuntimeConfiguration> for CodexEndpoints {
-    fn from(configuration: &RuntimeConfiguration) -> Self {
+impl CodexEndpoints {
+    pub fn configured(snapshot: &meta_signal_flow::ConfigurationSnapshot) -> Self {
+        let endpoints = snapshot
+            .harnesses
+            .iter()
+            .filter(|harness| harness.harness_kind == HarnessKind::Codex)
+            .filter_map(|harness| {
+                harness
+                    .control_socket_path_option
+                    .as_ref()
+                    .map(|socket| CodexEndpoint {
+                        client_path: PathBuf::from(&harness.executable),
+                        home: PathBuf::from(&harness.home),
+                        socket: socket.clone(),
+                        transcript_root: PathBuf::from(&harness.home).join("sessions"),
+                        model_names: harness
+                            .served_models
+                            .iter()
+                            .map(|served| served.model_name.clone())
+                            .collect(),
+                    })
+            })
+            .collect();
         Self {
-            stable: CodexEndpoint::from(&configuration.stable_codex),
-            next: CodexEndpoint::from(&configuration.next_codex),
-            timeout: Duration::ZERO,
-            workspace_root: PathBuf::from(&configuration.source_root),
-            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+            endpoints,
+            harnesses: snapshot.harnesses.clone(),
+            timeout: Duration::from_millis(snapshot.timings.app_server_timeout as u64),
+            workspace_root: PathBuf::from(&snapshot.nexus.source_root),
+            limits: snapshot.limits.clone(),
         }
     }
 }
@@ -2046,24 +2086,28 @@ mod tests {
 
     fn endpoints() -> CodexEndpoints {
         CodexEndpoints {
-            stable: CodexEndpoint {
-                client_path: PathBuf::from("/profile/bin/codex"),
-                home: PathBuf::from("/home/test/.codex"),
-                socket: "/home/test/.codex/app-server-control/app-server-control.sock".into(),
-                transcript_root: PathBuf::from("/home/test/.codex/sessions"),
-                model_names: BTreeSet::from(["gpt-5.6-sol".into()]),
-            },
-            next: CodexEndpoint {
-                client_path: PathBuf::from("/profile/bin/codex-next"),
-                home: PathBuf::from("/home/test/.codex-next"),
-                socket: "/home/test/.codex-next/app-server-control/app-server-control.sock".into(),
-                transcript_root: PathBuf::from("/home/test/.codex-next/sessions"),
-                model_names: BTreeSet::from([
-                    "gpt-6-astra".into(),
-                    "gpt-6-sol".into(),
-                    "gpt-6-luna".into(),
-                ]),
-            },
+            endpoints: vec![
+                CodexEndpoint {
+                    client_path: PathBuf::from("/profile/bin/codex"),
+                    home: PathBuf::from("/home/test/.codex"),
+                    socket: "/home/test/.codex/app-server-control/app-server-control.sock".into(),
+                    transcript_root: PathBuf::from("/home/test/.codex/sessions"),
+                    model_names: BTreeSet::from(["gpt-5.6-sol".into()]),
+                },
+                CodexEndpoint {
+                    client_path: PathBuf::from("/profile/bin/codex-next"),
+                    home: PathBuf::from("/home/test/.codex-next"),
+                    socket: "/home/test/.codex-next/app-server-control/app-server-control.sock"
+                        .into(),
+                    transcript_root: PathBuf::from("/home/test/.codex-next/sessions"),
+                    model_names: BTreeSet::from([
+                        "gpt-6-astra".into(),
+                        "gpt-6-sol".into(),
+                        "gpt-6-luna".into(),
+                    ]),
+                },
+            ],
+            harnesses: Vec::new(),
             timeout: Duration::from_secs(10),
             workspace_root: PathBuf::from("/home/test/primary"),
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
@@ -2087,7 +2131,7 @@ mod tests {
     #[test]
     fn overlapping_model_routes_fail_closed() {
         let mut endpoints = endpoints();
-        endpoints.stable.model_names.insert("gpt-6-sol".into());
+        endpoints.endpoints[0].model_names.insert("gpt-6-sol".into());
         assert!(endpoints.endpoint_for("gpt-6-sol").is_err());
     }
 
@@ -2256,20 +2300,18 @@ mod tests {
             !turn(serde_json::json!([{"type": "text", "text": "the text\n"}]))
                 .carries_user_text("the text")
         );
-        assert!(
-            !turn(serde_json::json!([
-                {"type": "text", "text": "the text"},
-                {"type": "localImage", "path": "/a.png"}
-            ]))
-            .carries_user_text("the text")
-        );
+        assert!(!turn(serde_json::json!([
+            {"type": "text", "text": "the text"},
+            {"type": "localImage", "path": "/a.png"}
+        ]))
+        .carries_user_text("the text"));
         assert!(!serde_json::json!({"items": []}).carries_user_text("the text"));
     }
 
     #[test]
     fn a_codex_part_is_one_text_item_and_nothing_else() {
-        use crate::composition::ComposesLaunch;
         use crate::composition::tests::{fixture_composer, fixture_profile};
+        use crate::composition::ComposesLaunch;
         let profile = fixture_profile();
         let launch = fixture_composer()
             .compose(
@@ -2283,11 +2325,9 @@ mod tests {
             .unwrap();
         let (_, mut intent) = malformed_bound_launch();
         intent.prompt_sha256 = launch.first_prompt_payload.prompt_sha256.clone();
-        intent.prompt_sha256_vector = vec![
-            launch.first_prompt_payload.prompt_part_vector[0]
-                .prompt_sha256
-                .clone(),
-        ];
+        intent.prompt_sha256_vector = vec![launch.first_prompt_payload.prompt_part_vector[0]
+            .prompt_sha256
+            .clone()];
         let params = CodexAdapter::bound_turn_params(&launch, &intent).unwrap();
         let input = params["input"].as_array().unwrap();
         assert_eq!(input.len(), 1);
@@ -2434,8 +2474,8 @@ mod tests {
     /// A Codex launch the fake app-server serves: the fixture's composed
     /// context, leaving the AGENTS.md body and the skill listing out.
     fn lean_codex_launch() -> ComposedLaunch {
-        use crate::composition::ComposesLaunch;
         use crate::composition::tests::{fixture_composer, fixture_profile};
+        use crate::composition::ComposesLaunch;
         fixture_composer()
             .compose(
                 crate::composition::HarnessedProfile {
@@ -2665,11 +2705,11 @@ mod tests {
     /// recognizes the pane's Codex agent.
     #[test]
     fn a_remote_resumed_tui_binds_to_the_thread_the_app_server_opened() {
-        use crate::herdr::ConfiguresHerdrCli;
         use crate::herdr::launch::{
             ChecksComposedLaunch, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
             StartsNativeHerdrHarness,
         };
+        use crate::herdr::ConfiguresHerdrCli;
         let _guard = FAKE_PROXY_LOCK.lock().expect("fake proxy test lock");
         let thread = "12345678-1234-4abc-8def-123456789abc";
         let launch = lean_codex_launch();
@@ -2688,8 +2728,8 @@ mod tests {
         ];
         let (_proxy, executable, record) = RecordingFakeProxy.install_probed(&frames);
         let mut codex_endpoints = endpoints();
-        codex_endpoints.next.client_path = executable;
-        codex_endpoints.next.socket = "/tmp/fake-codex-next.sock".into();
+        codex_endpoints.endpoints[1].client_path = executable;
+        codex_endpoints.endpoints[1].socket = "/tmp/fake-codex-next.sock".into();
         codex_endpoints.timeout = Duration::from_secs(5);
         codex_endpoints.workspace_root = std::env::current_dir().unwrap();
         let opened = codex_endpoints

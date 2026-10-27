@@ -183,9 +183,8 @@ fn a_claude_start_herdr_refuses_is_answered_with_herdrs_own_refusal() {
 printf '%s\n' "$*" >> '{log}'
 case "$*" in
   *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
-  *"pane run"*) sh -c "$6" > '{marker}' ;;
+  *"pane run"*) case "$6" in unset\ *) sh -c "$6" > '{marker}' ;; *) printf '%s\n' '{{"error":{{"code":"invalid_agent_argument","message":"agent arguments cannot be encoded safely for the target shell"}},"id":"cli:pane:run"}}' >&2; exit 1 ;; esac ;;
   *"pane wait-output"*) line=$(grep -F FLOW_CLAUDE_ENV_READY_ '{marker}'); printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
-  *"agent start"*) printf '%s\n' '{{"error":{{"code":"invalid_agent_argument","message":"agent arguments cannot be encoded safely for the target shell"}},"id":"cli:agent:start"}}' >&2; exit 1 ;;
   *"pane close"*) printf '%s\n' '{{"result":{{}}}}' ;;
   *) exit 64 ;;
 esac
@@ -221,9 +220,9 @@ esac
     let calls = fs::read_to_string(&log).expect("Herdr calls");
     let start = calls
         .lines()
-        .find(|line| line.contains("agent start"))
+        .find(|line| line.contains("pane run") && line.contains("/fixture/claude"))
         .expect("the start reached Herdr");
-    assert!(start.contains(" --system-prompt-file /proc/"));
+    assert!(start.contains(" '--system-prompt-file' '/proc/"));
     assert!(!start.contains("--system-prompt "));
 }
 

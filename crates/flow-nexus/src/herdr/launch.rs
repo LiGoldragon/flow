@@ -2850,7 +2850,6 @@ pub(crate) mod tests {
                 herdr_session_name: "flowlaunch42".into(),
                 leave_outs_option: None,
                 instruction_prompt: "do the work".into(),
-                flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
             },
             system_prompt: SystemPrompt {

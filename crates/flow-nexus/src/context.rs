@@ -265,14 +265,22 @@ impl VerifiesContext for VerifiedContext {
         };
         let system_rows = placed(StartupPlacement::System);
         let user_rows = placed(StartupPlacement::User);
-        let present = |identities: &[String], placed: &[ContextProvenance]| {
-            identities
-                .iter()
-                .all(|identity| placed.iter().any(|row| &row.module_identity == identity))
-        };
-        if !present(&request.system_modules, &system_rows)
-            || !present(&request.user_modules, &user_rows)
-        {
+        // Curriculum applies a module header's declared placement and
+        // reports the effective placement in each provenance row. The
+        // request's two lists carry only the kind-based default, so verify
+        // the requested identities independently of where Curriculum put
+        // them.
+        let requested: Vec<&String> = request
+            .system_modules
+            .iter()
+            .chain(request.user_modules.iter())
+            .collect();
+        if requested.iter().any(|identity| {
+            rows.iter()
+                .filter(|row| &row.module_identity == *identity)
+                .count()
+                != 1
+        }) {
             return Err(ContextRefusal::ModuleMissing);
         }
         let ordered = |placed: &[ContextProvenance]| {
@@ -514,6 +522,25 @@ mod tests {
     }
 
     #[test]
+    fn curriculums_effective_header_placement_overrides_the_kind_default() {
+        let requested = request();
+        let mut effective = requested.clone();
+        effective
+            .user_modules
+            .retain(|module| module != "knowledge-flow");
+        effective.system_modules.push("knowledge-flow".into());
+        let composition = fixture().compose_flow_context(&effective).unwrap();
+        let verified = VerifiedContext::verified(&requested, composition).unwrap();
+        assert!(verified.system_text().contains("Knowledge body."));
+        assert!(
+            !verified
+                .user_segments()
+                .concat()
+                .contains("Knowledge body.")
+        );
+    }
+
+    #[test]
     fn a_payload_that_differs_from_its_hash_is_refused() {
         let request = request();
         let mut composition = fixture().compose_flow_context(&request).unwrap();
@@ -536,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn a_requested_module_absent_at_its_placement_is_refused() {
+    fn a_requested_module_absent_from_curriculums_answer_is_refused() {
         let request = request();
         let mut composition = fixture().compose_flow_context(&request).unwrap();
         composition

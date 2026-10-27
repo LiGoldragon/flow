@@ -236,20 +236,19 @@ and its digest, which Flow verifies). The records follow the USER modules in
 the first message, ahead of the brief. A wake, a refresh and an exit's
 successor remember their predecessor, `Predecessors.1`.
 
-A module is placed by its kind, whichever list of the launch names it:
-spirit and intent (`spirit:…`, `intent:…`, or a legacy name before its
-first hyphen) in the system prompt, every other kind in the first message
-with the remembered flows' records. An identity is `type:subject` or a
-hyphenated name not yet in that form.
+A module's `placement: system | user` header decides its effective
+placement. The module kind supplies the default when the header says
+nothing: spirit and intent (`spirit:…`, `intent:…`, or a legacy name before
+its first hyphen) in the system prompt, every other kind in the first
+message with the remembered flows' records. An identity is `type:subject`
+or a hyphenated name not yet in that form.
 
 A start is one model call. Every module the launch names is in the system
 prompt or the first USER message, and the first USER message is sent once:
 when the USER modules and the brief do not fit one message (Herdr's 1 MiB
 request line for Claude, the app-server's 1 << 20 characters for Codex), it
 is sent in as many parts as it takes, one right after another, each part
-headed with its number; no USER module ever joins the system prompt, which
-holds spirit and intent alone. A simplified flow keeps all its modules in
-its own system prompt. The system prompt travels in no argument:
+headed with its number. The system prompt travels in no argument:
 Claude reads it from the Nexus's in-memory file and a Codex thread is given
 it as its base instructions. A brief that alone does not fit refuses.
 
@@ -501,8 +500,7 @@ attempted continue a metaflow already admitted. Configure refuses an
 Address with such a topic `ConfigureRejected.TopicRefused`, a Send
 whose recipient Address names one is refused `Refused.TopicRefused`
 before anything is queued, and a Codex send tool call whose target names
-one is refused `Refused.TopicRefused.«topic»`, its recorded answer. A simplified
-flow starts with an explicit empty tool set whatever tool set it names. A metaflow is never ended:
+one is refused `Refused.TopicRefused.«topic»`, its recorded answer. A metaflow is never ended:
 it is Awake or Asleep. No environment variable is laid over the stored values;
 `Configure` is their only way in. The adapter is outside the Signal wire boundary: the
 Codex app-server conversation is WebSocket/JSON-RPC through the configured

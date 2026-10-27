@@ -111,7 +111,6 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
                 address,
                 system_modules: vec!["spirit-core".into(), "intent-flow".into()],
                 user_modules: vec!["operation-main-flow".into()],
-                flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity: meta_signal_flow::Continuity::Maintained,
                 purpose: String::new(),
@@ -785,7 +784,6 @@ fn last_launch_context() -> WakePlan {
         herdr_session_name: "fixture-session".into(),
         system_modules: vec!["spirit-core".into(), "intent-flow".into()],
         user_modules: vec!["operation-main-flow".into()],
-        flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         leave_outs_option: None,
         purpose: String::new(),
@@ -825,7 +823,6 @@ fn a_fresh_wake_composes_modules_without_queued_work() {
         launch_request_id: "wake-0-1".into(),
         model_name: "claude-fixture".into(),
         effort: "medium".into(),
-        flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         herdr_session_name: "fixture-session".into(),
         system_modules: vec!["spirit-core".into(), "intent-flow".into()],
@@ -1014,29 +1011,17 @@ pub(super) fn ended_claude(fixture: &NexusFixture) -> LaunchedClaude {
     launched_claude_ended_by(fixture, |store| store.record_stopped("abc123").unwrap())
 }
 
-fn ended_simplified_claude(fixture: &NexusFixture) -> LaunchedClaude {
-    launched_claude_ended_by_with(fixture, signal_flow::FlowKind::Simplified, "", |store| {
-        store.record_stopped("abc123").unwrap()
-    })
-}
-
 /// The launched Claude flow abc123, ended by `end`. The fixture Herdr logs
 /// every call and lists no agent; a wake replaces it with the fresh world.
 pub(super) fn launched_claude_ended_by(
     fixture: &NexusFixture,
     end: impl FnOnce(&crate::store::FlowStore) -> bool,
 ) -> LaunchedClaude {
-    launched_claude_ended_by_with(
-        fixture,
-        signal_flow::FlowKind::Regular,
-        "fixture instruction",
-        end,
-    )
+    launched_claude_ended_by_with(fixture, "fixture instruction", end)
 }
 
 fn launched_claude_ended_by_with(
     fixture: &NexusFixture,
-    flow_kind: signal_flow::FlowKind,
     instruction_prompt: &str,
     end: impl FnOnce(&crate::store::FlowStore) -> bool,
 ) -> LaunchedClaude {
@@ -1044,12 +1029,7 @@ fn launched_claude_ended_by_with(
         launch_request_id: "launched-request".into(),
         system_modules: vec!["spirit-core".into(), "intent-flow".into()],
         user_modules: vec!["operation-main-flow".into()],
-        flow_kind: flow_kind.clone(),
-        tool_set: if flow_kind == signal_flow::FlowKind::Simplified {
-            signal_flow::ToolSet::Explicit(Vec::new())
-        } else {
-            signal_flow::ToolSet::Default
-        },
+        tool_set: signal_flow::ToolSet::Default,
         address: signal_flow::Address {
             aspect: Aspect::Mind,
             topic: "flow".into(),
@@ -1325,74 +1305,6 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     let old = fixture.nexus.store.flow_node("abc123").unwrap().unwrap();
     assert_eq!(old.session_id, seat.session);
     assert_eq!(old.flow_lifecycle, FlowLifecycle::Stopped);
-}
-
-#[test]
-fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
-    let mut fixture = NexusFixture::new();
-    ended_simplified_claude(&fixture);
-    let at = address(Layer::Secondary);
-    let sender = Address {
-        aspect: Aspect::Psyche,
-        topic: "core".into(),
-        layer: Layer::Secondary,
-    };
-    fixture.nexus.store.seed_metaflow(metaflow(
-        Layer::Secondary,
-        State::Asleep,
-        vec!["abc123"],
-        vec![],
-    ));
-    fixture.nexus.store.seed_metaflow(Metaflow {
-        address: sender.clone(),
-        state: State::Asleep,
-        past: vec![],
-        queue: vec![],
-    });
-    let signal_flow::Response::SendAccepted(input) = fixture
-        .nexus
-        .store
-        .accept_logical_delivery(
-            &at,
-            SentBy::Sender(sender.clone()),
-            Delivery::Wake,
-            Message::Soft(Request::Order("judge this".into())),
-            None,
-        )
-        .unwrap()
-    else {
-        panic!("the waking request is accepted")
-    };
-    let world = fixture.fresh_claude_world();
-
-    fixture.nexus.wake_due(at.clone());
-
-    // The woken OnDemand seat answers its one request and, with nothing
-    // queued, sleeps at its rest: its flow is the metaflow's last.
-    let woken = stored(&fixture, Layer::Secondary);
-    let flow_id = match &woken.state {
-        State::Awake(flow_id) => flow_id.clone(),
-        State::Asleep => match woken.past.last() {
-            Some(flow_id) if flow_id != "abc123" => flow_id.clone(),
-            _ => panic!("simplified flow was woken: {woken:?}; {}", world.calls()),
-        },
-    };
-    assert!(woken.queue.is_empty(), "the first request was submitted");
-    let turns = world.user_turns(&fixture);
-    assert_eq!(turns.len(), 1, "no synthetic empty startup turn: {turns:?}");
-    assert!(
-        turns[0].contains("judge this"),
-        "actual request is the first turn: {turns:?}"
-    );
-    let (binding, receipt) = fixture
-        .nexus
-        .store
-        .simplified_reply_receipt(&flow_id)
-        .unwrap()
-        .expect("the exact first input receipt binds its sender");
-    assert_eq!(binding.input_delivery_id, input.logical_delivery_id);
-    assert_eq!(binding.recipient, sender);
-    assert_eq!(receipt.native_session_id, world.session());
 }
 
 #[test]
@@ -3091,7 +3003,6 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         address: address(Layer::Secondary),
         model_name: "fixture-model".into(),
         effort: "medium".into(),
-        flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         flow_id_option: None,
         remembering: signal_flow::Remembering::Predecessors(0),
@@ -3193,7 +3104,6 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         system_modules: profile.system_modules.clone(),
         user_modules: profile.user_modules.clone(),
         leave_outs_option: None,
-        flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
         prompt: queue.clone().unsent().prompt_text(),
     }
@@ -3596,7 +3506,6 @@ impl SetsUpFirstTurnSend for NexusFixture {
             launch_request_id: "first-turn-send".into(),
             system_modules: vec!["spirit-core".into(), "intent-flow".into()],
             user_modules: vec!["operation-main-flow".into()],
-            flow_kind: signal_flow::FlowKind::Regular,
             tool_set: signal_flow::ToolSet::Default,
             address: Address {
                 aspect: Aspect::Field,
@@ -4841,7 +4750,6 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_secondary_first() {
                 address: address(Layer::Secondary),
                 system_modules: vec!["spirit-core".into(), "intent-flow".into()],
                 user_modules: vec!["operation-main-flow".into()],
-                flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 continuity: meta_signal_flow::Continuity::OnDemand,
                 purpose: String::new(),

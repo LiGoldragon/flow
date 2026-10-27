@@ -29,7 +29,6 @@ pub struct FreshContext {
     pub system_modules: signal_flow::SystemModules,
     pub user_modules: signal_flow::UserModules,
     pub leave_outs_option: std::option::Option<signal_flow::LeaveOuts>,
-    pub flow_kind: signal_flow::FlowKind,
     pub tool_set: signal_flow::ToolSet,
     pub purpose: Purpose,
 }

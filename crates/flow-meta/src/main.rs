@@ -363,7 +363,7 @@ mod tests {
     fn thirty_one_printed_metaflows_roundtrip_without_head_whitespace() {
         use super::ParsesMetaDatom;
         use meta_signal_flow::{ConfigurationSnapshot, ConfigureMetaflow, Response};
-        use signal_flow::{Address, Aspect, FlowKind, Layer, ToolSet};
+        use signal_flow::{Address, Aspect, Layer, ToolSet};
         let endpoint = || meta_signal_flow::CodexEndpoint {
             client_path: "/opt/codex".into(),
             home: "/tmp/codex".into(),
@@ -379,7 +379,6 @@ mod tests {
                 },
                 system_modules: vec!["spirit-core".into()],
                 user_modules: vec![],
-                flow_kind: FlowKind::Regular,
                 tool_set: match index % 3 {
                     0 => ToolSet::Default,
                     1 => ToolSet::Explicit(vec![]),

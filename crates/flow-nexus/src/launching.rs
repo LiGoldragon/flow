@@ -539,18 +539,6 @@ impl LaunchesFlows for RunningNexus {
         {
             return Response::StartRejected(StartRejection::IntentPersistenceRefused);
         }
-        // A simplified seat has no synthetic startup turn. It is ready after
-        // registration and title; its first model turn must be the queued
-        // request, submitted by the ordinary wake/drain path.
-        if launch.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
-            && launch
-                .first_prompt_payload
-                .first_prompt_body
-                .trim()
-                .is_empty()
-        {
-            return self.confirmed(&binding.flow_id);
-        }
         match self.perform(Operation::Submit(Submit_Data {
             composed_launch: launch,
             prompt_delivery_intent: delivery_intent.clone(),

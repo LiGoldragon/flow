@@ -137,13 +137,9 @@ generated `signal-flow` Datom types rather than assembling positional text.
 The old `flow start ...`, `flow restart ...`, and `flow resolve ...` argument
 forms are rejected.
 
-A metaflow declaration sets `FlowKind` (`Regular` or `Simplified`) and
-`ToolSet` (`Default` or `Explicit.[ ... ]`). A simplified flow carries its
-own system modules. Claude receives a declared tool set exactly as declared
-(the empty set as `--tools ""`) and the default as no tool flag at all,
-whatever the flow's kind. A simplified flow's first queued request is
-submitted after the idle native seat is bound, without a synthetic startup
-turn. The Stop
+A metaflow declaration sets its `ToolSet` (`Default` or
+`Explicit.[ ... ]`). Claude receives a declared tool set exactly as declared
+(the empty set as `--tools ""`) and the default as no tool flag at all. The Stop
 hook's `last_assistant_message` becomes a `Result` to the sender of the
 consumed request. The response binding follows that request's native
 receipt, rather than whichever sender wrote most recently.
@@ -152,17 +148,16 @@ Flow passes no tool restriction of its own: every tool list is
 configuration, and a seat declared `Regular Default` launches with every
 tool and subagent.
 
-For the `Psyche core Primary` simplified presentation, the witnessed final source is queued
+For the `Psyche core Primary` presentation, the witnessed final source is queued
 unchanged as one Order to `Psyche book Tertiary`; Secondary receives only a
 notification. Completion and both queues commit atomically, so replayed
 Stop hooks create no second publication path.
 
-The core presentation launch reads its final literal authored role from
-`FLOW_CORE_PRESENTATION_PROMPT`. The declared service supplies that file;
-missing, unreadable or empty content refuses the launch. Its bytes follow
-the composed modules and identity metadata, and the final text is hashed.
-Claude Code receives the whole authored text through
-`--system-prompt-file`; this makes no claim about hidden vendor context.
+The presentation role is an ordinary belief module named in the metaflow
+declaration. Curriculum reports each module's effective placement from its
+header; that placement overrides the module kind's default. Claude Code
+receives the composed system text through `--system-prompt-file`; this makes
+no claim about hidden vendor context.
 
 `flow-meta reset <idempotency-key>` asks the Codex app-server to consume the
 next eligible reset credit. `flow-meta reset <idempotency-key> <credit-id>`

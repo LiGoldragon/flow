@@ -1464,11 +1464,98 @@ impl EngineRecord for StoredLaunchAttempt {
 
 impl MemoryDefinition for StoredLaunchAttempt {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(4)
+        MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-attempt-v5")
+    }
+}
+
+/// The launch-attempt shape before the removed FlowKind position.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchAttemptV4 {
+    attempt: LaunchAttemptV4,
+    context: LaunchContext,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct LaunchAttemptV4 {
+    launch_request_id: String,
+    launch_profile: LaunchProfileV4,
+    prompt_sha256: String,
+    origin: Origin,
+    launch_attempt_phase: LaunchAttemptPhase,
+    native_launch_intent_option: Option<NativeLaunchIntent>,
+    native_launch_binding_option: Option<NativeLaunchBinding>,
+    registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
+    prompt_delivery_intent_option: Option<PromptDeliveryIntent>,
+    prompt_delivery_result_option: Option<PromptDeliveryResult>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct LaunchProfileV4 {
+    launch_request_id: String,
+    system_modules: Vec<String>,
+    user_modules: Vec<String>,
+    remembering: Remembering,
+    address: Address,
+    model_name: String,
+    effort: String,
+    flow_id_option: Option<String>,
+    herdr_session_name: String,
+    leave_outs_option: Option<Vec<LeaveOut>>,
+    flow_kind: metaflow_declaration::FlowKindV4,
+    tool_set: signal_flow::ToolSet,
+    instruction_prompt: String,
+}
+
+impl EngineRecord for StoredLaunchAttemptV4 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.attempt.launch_request_id.clone())
+    }
+}
+impl MemoryDefinition for StoredLaunchAttemptV4 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(4)
+    }
+    fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-launch-attempt-v4")
+    }
+}
+impl UpgradeFrom<StoredLaunchAttemptV4> for StoredLaunchAttempt {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredLaunchAttemptV4) -> Decision<Self, Self::Refusal> {
+        let attempt = previous.attempt;
+        let profile = attempt.launch_profile;
+        Decision::Ready(Self {
+            attempt: LaunchAttempt {
+                launch_request_id: attempt.launch_request_id,
+                launch_profile: LaunchProfile {
+                    launch_request_id: profile.launch_request_id,
+                    system_modules: profile.system_modules,
+                    user_modules: profile.user_modules,
+                    remembering: profile.remembering,
+                    address: profile.address,
+                    model_name: profile.model_name,
+                    effort: profile.effort,
+                    flow_id_option: profile.flow_id_option,
+                    herdr_session_name: profile.herdr_session_name,
+                    leave_outs_option: profile.leave_outs_option,
+                    tool_set: profile.tool_set,
+                    instruction_prompt: profile.instruction_prompt,
+                },
+                prompt_sha256: attempt.prompt_sha256,
+                origin: attempt.origin,
+                launch_attempt_phase: attempt.launch_attempt_phase,
+                native_launch_intent_option: attempt.native_launch_intent_option,
+                native_launch_binding_option: attempt.native_launch_binding_option,
+                registration_acknowledgement_option: attempt.registration_acknowledgement_option,
+                prompt_delivery_intent_option: attempt.prompt_delivery_intent_option,
+                prompt_delivery_result_option: attempt.prompt_delivery_result_option,
+            },
+            context: previous.context,
+        })
     }
 }
 
@@ -1529,7 +1616,7 @@ struct LaunchProfileV3 {
     remembered_flow_vector: Vec<RememberedFlow>,
     herdr_session_name: String,
     leave_outs_option: Option<Vec<LeaveOut>>,
-    flow_kind: signal_flow::FlowKind,
+    flow_kind: metaflow_declaration::FlowKindV4,
     tool_set: signal_flow::ToolSet,
     instruction_prompt: String,
 }
@@ -1570,7 +1657,6 @@ impl UpgradeFrom<StoredLaunchAttemptV3> for StoredLaunchAttempt {
                     flow_id_option: profile.flow_id_option,
                     herdr_session_name: profile.herdr_session_name,
                     leave_outs_option: profile.leave_outs_option,
-                    flow_kind: profile.flow_kind,
                     tool_set: profile.tool_set,
                     instruction_prompt: profile.instruction_prompt,
                 },
@@ -1661,7 +1747,6 @@ impl UpgradeFrom<StoredLaunchAttemptV2> for StoredLaunchAttempt {
                     flow_id_option: profile.flow_id_option,
                     herdr_session_name: profile.herdr_session_name,
                     leave_outs_option: profile.leave_outs_option,
-                    flow_kind: signal_flow::FlowKind::Regular,
                     tool_set: signal_flow::ToolSet::Default,
                     instruction_prompt: profile.instruction_prompt,
                 },
@@ -1890,7 +1975,6 @@ impl UpgradeFrom<StoredLaunchAttemptV1> for StoredLaunchAttempt {
                     flow_id_option: profile.flow_id_option,
                     herdr_session_name: profile.herdr_session_name,
                     leave_outs_option: Some(Vec::new()),
-                    flow_kind: signal_flow::FlowKind::Regular,
                     tool_set: signal_flow::ToolSet::Default,
                     instruction_prompt: profile.instruction_prompt,
                 },
@@ -2297,11 +2381,169 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(9)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v9")
+    }
+}
+
+/// The launch outcome archived before signal-flow removed the two
+/// composition refusals that belonged to Simplified and presentation
+/// launches. Those refusals have no current meaning and become Unrecorded.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcomeV8 {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcomeV8,
+}
+
+impl EngineRecord for StoredLaunchOutcomeV8 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredLaunchOutcomeV8 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(8)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-launch-outcome-v8")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LaunchOutcomeV8 {
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
+    StartRejected(StartRejectionV34),
+    ReplaceRejected(ReplaceRejectionV34),
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum CompositionRefusalV34 {
+    InvalidLaunchRequestId,
+    InvalidModelName,
+    InvalidEffort,
+    InvalidToolSet,
+    InvalidHerdrSessionName,
+    InvalidSystemModules,
+    InvalidUserModules,
+    InvalidRemembering,
+    InexactModel,
+    Unconfigured,
+    PresentationUnavailable,
+    Unrecorded,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum StartRejectionV34 {
+    CompositionRefused(CompositionRefusalV34),
+    LaunchRequestConflict,
+    LaunchPersistenceRefused,
+    NativeLaunchRefused(signal_flow::NativeLaunchRefusal),
+    BindingRefused(signal_flow::BindingRefusal),
+    RegistrationRefused(signal_flow::RegistrationRefusal),
+    IntentPersistenceRefused,
+    OriginUnavailable,
+    AddressAwake,
+    ContextRefused(signal_flow::ContextRefusal),
+    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
+    ModelRefused(signal_flow::ModelRefusal),
+    NoSecondary,
+    Undeclared,
+    TopicRefused(String),
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ReplaceRejectionV34 {
+    PredecessorAbsent,
+    UnknownPredecessor,
+    PredecessorStopped,
+    LaunchRefused(StartRejectionV34),
+    ReapRefused(signal_flow::StopRejection),
+    Locked,
+}
+
+impl From<CompositionRefusalV34> for signal_flow::CompositionRefusal {
+    fn from(refusal: CompositionRefusalV34) -> Self {
+        match refusal {
+            CompositionRefusalV34::InvalidLaunchRequestId => Self::InvalidLaunchRequestId,
+            CompositionRefusalV34::InvalidModelName => Self::InvalidModelName,
+            CompositionRefusalV34::InvalidEffort => Self::InvalidEffort,
+            CompositionRefusalV34::InvalidToolSet
+            | CompositionRefusalV34::PresentationUnavailable => Self::Unrecorded,
+            CompositionRefusalV34::InvalidHerdrSessionName => Self::InvalidHerdrSessionName,
+            CompositionRefusalV34::InvalidSystemModules => Self::InvalidSystemModules,
+            CompositionRefusalV34::InvalidUserModules => Self::InvalidUserModules,
+            CompositionRefusalV34::InvalidRemembering => Self::InvalidRemembering,
+            CompositionRefusalV34::InexactModel => Self::InexactModel,
+            CompositionRefusalV34::Unconfigured => Self::Unconfigured,
+            CompositionRefusalV34::Unrecorded => Self::Unrecorded,
+        }
+    }
+}
+
+impl From<StartRejectionV34> for StartRejection {
+    fn from(rejection: StartRejectionV34) -> Self {
+        match rejection {
+            StartRejectionV34::CompositionRefused(refusal) => {
+                Self::CompositionRefused(refusal.into())
+            }
+            StartRejectionV34::LaunchRequestConflict => Self::LaunchRequestConflict,
+            StartRejectionV34::LaunchPersistenceRefused => Self::LaunchPersistenceRefused,
+            StartRejectionV34::NativeLaunchRefused(refusal) => Self::NativeLaunchRefused(refusal),
+            StartRejectionV34::BindingRefused(refusal) => Self::BindingRefused(refusal),
+            StartRejectionV34::RegistrationRefused(refusal) => Self::RegistrationRefused(refusal),
+            StartRejectionV34::IntentPersistenceRefused => Self::IntentPersistenceRefused,
+            StartRejectionV34::OriginUnavailable => Self::OriginUnavailable,
+            StartRejectionV34::AddressAwake => Self::AddressAwake,
+            StartRejectionV34::ContextRefused(refusal) => Self::ContextRefused(refusal),
+            StartRejectionV34::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+            StartRejectionV34::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
+            StartRejectionV34::ModelRefused(refusal) => Self::ModelRefused(refusal),
+            StartRejectionV34::NoSecondary => Self::NoSecondary,
+            StartRejectionV34::Undeclared => Self::Undeclared,
+            StartRejectionV34::TopicRefused(topic) => Self::TopicRefused(topic),
+        }
+    }
+}
+
+impl From<ReplaceRejectionV34> for ReplaceRejection {
+    fn from(rejection: ReplaceRejectionV34) -> Self {
+        match rejection {
+            ReplaceRejectionV34::PredecessorAbsent => Self::PredecessorAbsent,
+            ReplaceRejectionV34::UnknownPredecessor => Self::UnknownPredecessor,
+            ReplaceRejectionV34::PredecessorStopped => Self::PredecessorStopped,
+            ReplaceRejectionV34::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
+            ReplaceRejectionV34::ReapRefused(rejection) => Self::ReapRefused(rejection),
+            ReplaceRejectionV34::Locked => Self::Locked,
+        }
+    }
+}
+
+impl From<LaunchOutcomeV8> for LaunchOutcome {
+    fn from(outcome: LaunchOutcomeV8) -> Self {
+        match outcome {
+            LaunchOutcomeV8::Started(launched) => Self::Started(launched),
+            LaunchOutcomeV8::Replaced(replaced) => Self::Replaced(replaced),
+            LaunchOutcomeV8::StartRejected(rejection) => Self::StartRejected(rejection.into()),
+            LaunchOutcomeV8::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
+        }
+    }
+}
+
+impl UpgradeFrom<StoredLaunchOutcomeV8> for StoredLaunchOutcome {
+    type Refusal = EndedAddressOutcome;
+
+    fn upgrade_from(previous: StoredLaunchOutcomeV8) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            launch_request_id: previous.launch_request_id,
+            launch_outcome: previous.launch_outcome.into(),
+        })
     }
 }
 
@@ -3542,7 +3784,8 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<StoredLaunchOutcome>,
     ) -> Result<TableReference<StoredLaunchOutcome>, StoreError> {
-        // A 0.40 store before CompositionRefusal holds v7 rows, a 0.35.22
+        // A store before Simplified and its presentation path were removed
+        // holds v8 rows. A 0.40 store before CompositionRefusal holds v7 rows, a 0.35.22
         // to 0.39 store v6 rows, a 0.35.6 to 0.35.21 store v5
         // rows, a 0.35.3 to 0.35.5 store v4 rows, a 0.35.2 store v3 rows and
         // a 0.34 store v2 rows; the
@@ -3558,12 +3801,20 @@ impl UpgradesFlowFamilies for Engine {
         let admission = |failure: &sema_engine::StorageFailure| {
             failure.phase() == sema_engine::StoragePhase::Admission
         };
+        let from_v7 = descriptor.clone();
         let from_v6 = descriptor.clone();
         let from_v5 = descriptor.clone();
         let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
-        match self.upgrade_table::<StoredLaunchOutcomeV7, StoredLaunchOutcome>(descriptor) {
+        match self.upgrade_table::<StoredLaunchOutcomeV8, StoredLaunchOutcome>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
+            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
+            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
+        }
+        match self.upgrade_table::<StoredLaunchOutcomeV7, StoredLaunchOutcome>(from_v7) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
             UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
@@ -3629,10 +3880,16 @@ impl UpgradesFlowFamilies for Engine {
             StoredLaunchAttemptV2::schema_hash(),
         )
         .family_identity();
-        let current_predecessor = TableDescriptor::<StoredLaunchAttemptV3>::new(
+        let third_predecessor = TableDescriptor::<StoredLaunchAttemptV3>::new(
             FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-attempt"),
             StoredLaunchAttemptV3::schema_hash(),
+        )
+        .family_identity();
+        let current_predecessor = TableDescriptor::<StoredLaunchAttemptV4>::new(
+            FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
+            FamilyName::new("flow-nexus-launch-attempt"),
+            StoredLaunchAttemptV4::schema_hash(),
         )
         .family_identity();
         let family = self
@@ -3655,6 +3912,8 @@ impl UpgradesFlowFamilies for Engine {
             self.upgrade_table::<StoredLaunchAttemptV1, StoredLaunchAttempt>(descriptor)
         } else if family.as_ref() == Some(&second_predecessor) {
             self.upgrade_table::<StoredLaunchAttemptV2, StoredLaunchAttempt>(descriptor)
+        } else if family.as_ref() == Some(&third_predecessor) {
+            self.upgrade_table::<StoredLaunchAttemptV3, StoredLaunchAttempt>(descriptor)
         } else {
             debug_assert!(
                 family.is_none()
@@ -3662,7 +3921,7 @@ impl UpgradesFlowFamilies for Engine {
                     || family.as_ref() == Some(&descriptor.family_identity()),
                 "launch-attempt family has an undeclared identity"
             );
-            self.upgrade_table::<StoredLaunchAttemptV3, StoredLaunchAttempt>(descriptor)
+            self.upgrade_table::<StoredLaunchAttemptV4, StoredLaunchAttempt>(descriptor)
         };
         let table = match upgrade {
             UpgradeOutcome::Upgraded(receipt) => receipt.table(),
@@ -4315,7 +4574,8 @@ impl OpensFlowStore for FlowStore {
         )
         .with_predecessor::<StoredLaunchAttemptV1>()
         .with_predecessor::<StoredLaunchAttemptV2>()
-        .with_predecessor::<StoredLaunchAttemptV3>();
+        .with_predecessor::<StoredLaunchAttemptV3>()
+        .with_predecessor::<StoredLaunchAttemptV4>();
         let launch_panes_descriptor = TableDescriptor::<StoredLaunchPane>::new(
             FLOW_LAUNCH_PANE_TABLE_NAME,
             FamilyName::new("flow-nexus-launch-pane"),
@@ -4331,7 +4591,8 @@ impl OpensFlowStore for FlowStore {
         .with_predecessor::<StoredLaunchOutcomeV4>()
         .with_predecessor::<StoredLaunchOutcomeV5>()
         .with_predecessor::<StoredLaunchOutcomeV6>()
-        .with_predecessor::<StoredLaunchOutcomeV7>();
+        .with_predecessor::<StoredLaunchOutcomeV7>()
+        .with_predecessor::<StoredLaunchOutcomeV8>();
         let replacements_descriptor = TableDescriptor::<Replacement>::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -4428,8 +4689,7 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&send_outcome_descriptors.outcomes)
                 .with_family(&logical_delivery_descriptors.counter)
                 .with_family(&logical_delivery_descriptors.current)
-                .with_family(&logical_delivery_descriptors.events)
-                .with_family(&logical_delivery_descriptors.simplified_replies),
+                .with_family(&logical_delivery_descriptors.events),
         )?;
         let flows = engine.upgraded_flows(flows_descriptor)?;
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
@@ -4588,7 +4848,8 @@ impl OpensFlowStore for FlowStore {
             .with_predecessor::<StoredLaunchOutcomeV4>()
             .with_predecessor::<StoredLaunchOutcomeV5>()
             .with_predecessor::<StoredLaunchOutcomeV6>()
-            .with_predecessor::<StoredLaunchOutcomeV7>(),
+            .with_predecessor::<StoredLaunchOutcomeV7>()
+            .with_predecessor::<StoredLaunchOutcomeV8>(),
         )?;
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
@@ -4613,7 +4874,8 @@ impl OpensFlowStore for FlowStore {
             )
             .with_predecessor::<StoredLaunchAttemptV1>()
             .with_predecessor::<StoredLaunchAttemptV2>()
-            .with_predecessor::<StoredLaunchAttemptV3>(),
+            .with_predecessor::<StoredLaunchAttemptV3>()
+            .with_predecessor::<StoredLaunchAttemptV4>(),
             quarantined_launch_attempts,
         )?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
@@ -5766,21 +6028,14 @@ impl ReservesLaunchAttempt for FlowStore {
 
 impl RecordsNativeLaunchIntent for FlowStore {
     fn record_native_launch_intent(&self, intent: NativeLaunchIntent) -> Result<bool, StoreError> {
-        use sha2::{Digest, Sha256};
         let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
             return Ok(false);
         };
-        let empty_simplified_start = intent.prompt_sha256_vector.is_empty()
-            && stored.attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
-            && matches!(&stored.attempt.launch_profile.tool_set,
-                signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
-            && stored.attempt.launch_profile.instruction_prompt.is_empty()
-            && intent.prompt_sha256 == format!("{:x}", Sha256::digest([]));
         if stored.attempt.launch_attempt_phase != LaunchAttemptPhase::Reserved
             || stored.attempt.prompt_sha256 != intent.prompt_sha256
             || stored.attempt.launch_profile.model_name != intent.model_name
             || stored.attempt.launch_profile.effort != intent.effort
-            || (intent.prompt_sha256_vector.is_empty() && !empty_simplified_start)
+            || intent.prompt_sha256_vector.is_empty()
             || !intent
                 .prompt_sha256_vector
                 .iter()
@@ -5876,7 +6131,6 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         &self,
         intent: PromptDeliveryIntent,
     ) -> Result<bool, StoreError> {
-        use sha2::{Digest, Sha256};
         let Some(mut stored) = self.stored_launch_attempt(&intent.launch_request_id)? else {
             return Ok(false);
         };
@@ -5892,16 +6146,9 @@ impl RecordsPromptDeliveryIntent for FlowStore {
         };
         // The first part is the one about to be submitted; no Stop count
         // can be negative.
-        let empty_simplified_start = native_intent.prompt_sha256_vector.is_empty()
-            && native_intent.prompt_sha256 == format!("{:x}", Sha256::digest([]))
-            && intent.prompt_sha256 == native_intent.prompt_sha256
-            && stored.attempt.launch_profile.flow_kind == signal_flow::FlowKind::Simplified
-            && matches!(&stored.attempt.launch_profile.tool_set,
-                signal_flow::ToolSet::Explicit(tools) if tools.is_empty())
-            && stored.attempt.launch_profile.instruction_prompt.is_empty();
         let valid_parts = intent.prompt_sha256_vector == native_intent.prompt_sha256_vector
             && if native_intent.prompt_sha256_vector.is_empty() {
-                empty_simplified_start && intent.parts_submitted == 0
+                false
             } else {
                 intent.parts_submitted == 1
             }
@@ -7351,10 +7598,6 @@ pub(crate) trait ReadsFlowMemory {
                 "flow-nexus-logical-delivery-event",
                 logical_delivery::EVENT_SCHEMA,
             ),
-            "flow_nexus_simplified_reply_bindings" => (
-                "flow-nexus-simplified-reply-binding",
-                "flow-nexus-simplified-reply-binding-v1",
-            ),
             "flow_nexus_compactions" => {
                 (compaction::COMPACTION_FAMILY, compaction::COMPACTION_SCHEMA)
             }
@@ -7470,6 +7713,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-launch-outcome",
                     StoredLaunchOutcomeV7::schema_hash(),
                 ),
+                (
+                    "flow-nexus-launch-outcome",
+                    SchemaHash::for_label("flow-nexus-launch-outcome-v8"),
+                ),
             ],
             "flow_nexus_launch_attempts" => &[
                 (
@@ -7484,6 +7731,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-launch-attempt",
                     StoredLaunchAttemptV3::schema_hash(),
                 ),
+                (
+                    "flow-nexus-launch-attempt",
+                    StoredLaunchAttemptV4::schema_hash(),
+                ),
             ],
             "flow_nexus_meta_metaflow_configuration" => &[
                 (
@@ -7497,6 +7748,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
                     SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v3"),
+                ),
+                (
+                    metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
+                    SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v4"),
                 ),
             ],
             "flow_nexus_metaflows" => &[
@@ -8153,8 +8408,6 @@ impl ReadsFlowMemory for FlowStore {}
 #[cfg(test)]
 mod tests {
     use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
-    use crate::store::logical_delivery::{RecordsLogicalDeliveries, SimplifiedReplyBinding};
-    use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
     use crate::store::queue_delivery::AccountsQueueDelivery;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
@@ -8253,7 +8506,6 @@ mod tests {
             let declaration = store.metaflow_declaration(&address).unwrap().unwrap();
             assert_eq!(declaration.system_modules, ["system"]);
             assert_eq!(declaration.user_modules, ["user"]);
-            assert_eq!(declaration.flow_kind, signal_flow::FlowKind::Regular);
             assert_eq!(declaration.tool_set, signal_flow::ToolSet::Default);
             let events = super::events::RecordsHarnessEvents::events(&store, "old-flow")
                 .unwrap()
@@ -8449,7 +8701,7 @@ mod tests {
                             address,
                             system_modules: vec!["spirit:core".into()],
                             user_modules: vec![],
-                            flow_kind: signal_flow::FlowKind::Regular,
+                            flow_kind: super::metaflow_declaration::FlowKindV4::Regular,
                             tool_set: signal_flow::ToolSet::Default,
                             availability,
                             purpose: "Kept.".into(),
@@ -8538,322 +8790,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn simplified_reply_requires_consumed_input_and_queues_once_to_its_sender() {
-        use signal_flow::{
-            Address, Aspect, DeliveryState, Layer, Message, Metaflow, NativeReceipt, Request,
-            Response, SentBy,
-        };
-        let fixture = StoreFixture::new();
-        let store = fixture.store();
-        let source = Address {
-            aspect: Aspect::Mind,
-            topic: "judgment".into(),
-            layer: Layer::Secondary,
-        };
-        let recipient = Address {
-            aspect: Aspect::Psyche,
-            topic: "core".into(),
-            layer: Layer::Secondary,
-        };
-        for address in [&source, &recipient] {
-            store.seed_metaflow(Metaflow {
-                address: address.clone(),
-                state: flow_ethos::State::Asleep,
-                past: Vec::new(),
-                queue: Vec::new(),
-            });
-        }
-        let Response::SendAccepted(input) = store
-            .accept_logical_delivery(
-                &source,
-                SentBy::Sender(recipient.clone()),
-                flow_ethos::Delivery::Wake,
-                Message::Soft(Request::Order("judge this".into())),
-                None,
-            )
-            .unwrap()
-        else {
-            panic!("input accepted")
-        };
-        assert_eq!(
-            store
-                .deliver_simplified_reply(
-                    "simplified",
-                    &input.logical_delivery_id,
-                    "claude-session",
-                    "prompt-1",
-                    "unsolicited startup Stop"
-                )
-                .unwrap(),
-            None,
-            "an unsolicited Stop has no waking request to answer"
-        );
-        assert_eq!(
-            store
-                .deliver_simplified_reply(
-                    "regular-flow",
-                    &input.logical_delivery_id,
-                    "claude-session",
-                    "prompt-1",
-                    "ordinary final message"
-                )
-                .unwrap(),
-            None,
-            "regular flows do not acquire a simplified reply binding"
-        );
-        store
-            .bind_simplified_reply(SimplifiedReplyBinding {
-                flow_id: "simplified".into(),
-                input_delivery_id: input.logical_delivery_id.clone(),
-                source: source.clone(),
-                recipient: recipient.clone(),
-                completed: false,
-            })
-            .unwrap();
-        assert_eq!(
-            store
-                .deliver_simplified_reply(
-                    "simplified",
-                    &input.logical_delivery_id,
-                    "claude-session",
-                    "prompt-1",
-                    "answer"
-                )
-                .unwrap(),
-            None,
-            "a Stop before the native input receipt cannot send an unrelated answer"
-        );
-        store
-            .transition_logical_delivery(
-                &input.logical_delivery_id,
-                DeliveryState::Delivered(NativeReceipt {
-                    harness_kind: flow_ethos::HarnessKind::Claude,
-                    native_session_id: "claude-session".into(),
-                    native_prompt_id: "prompt-1".into(),
-                }),
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .deliver_simplified_reply(
-                    "simplified",
-                    &input.logical_delivery_id,
-                    "claude-session",
-                    "prompt-1",
-                    "answer"
-                )
-                .unwrap(),
-            Some(recipient.clone())
-        );
-        assert_eq!(
-            store
-                .deliver_simplified_reply(
-                    "simplified",
-                    &input.logical_delivery_id,
-                    "claude-session",
-                    "prompt-1",
-                    "answer"
-                )
-                .unwrap(),
-            None,
-            "a repeated Stop must not duplicate its Result"
-        );
-        let queued = store.metaflow(&recipient).unwrap().unwrap().queue;
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].sent_by, SentBy::Sender(source));
-        assert_eq!(
-            queued[0].message,
-            Message::Soft(Request::Result("answer".into()))
-        );
-        assert_eq!(queued[0].delivery, flow_ethos::Delivery::Wake);
-
-        // A completed judgment may subsequently be woken by another sender;
-        // its next result must follow that new logical input, not the prior
-        // sender retained in the old binding.
-        let second_sender = Address {
-            aspect: Aspect::Field,
-            topic: "review".into(),
-            layer: Layer::Secondary,
-        };
-        store.seed_metaflow(Metaflow {
-            address: second_sender.clone(),
-            state: flow_ethos::State::Asleep,
-            past: Vec::new(),
-            queue: Vec::new(),
-        });
-        let Response::SendAccepted(second_input) = store
-            .accept_logical_delivery(
-                &second_sender,
-                SentBy::Sender(recipient.clone()),
-                flow_ethos::Delivery::Wake,
-                Message::Soft(Request::Question("second judgment".into())),
-                None,
-            )
-            .unwrap()
-        else {
-            panic!("second input accepted")
-        };
-        store
-            .bind_simplified_reply(SimplifiedReplyBinding {
-                flow_id: "simplified".into(),
-                input_delivery_id: second_input.logical_delivery_id.clone(),
-                source: second_sender.clone(),
-                recipient: recipient.clone(),
-                completed: false,
-            })
-            .unwrap();
-        store
-            .transition_logical_delivery(
-                &second_input.logical_delivery_id,
-                DeliveryState::Delivered(NativeReceipt {
-                    harness_kind: flow_ethos::HarnessKind::Claude,
-                    native_session_id: "claude-session".into(),
-                    native_prompt_id: "prompt-2".into(),
-                }),
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .deliver_simplified_reply(
-                    "simplified",
-                    &second_input.logical_delivery_id,
-                    "claude-session",
-                    "prompt-2",
-                    "second answer"
-                )
-                .unwrap(),
-            Some(recipient.clone())
-        );
-        assert_eq!(
-            store
-                .deliver_simplified_reply(
-                    "simplified",
-                    &second_input.logical_delivery_id,
-                    "claude-session",
-                    "prompt-2",
-                    "second answer"
-                )
-                .unwrap(),
-            None,
-            "duplicate Stop for the next input also queues exactly once"
-        );
-        let queued = store.metaflow(&recipient).unwrap().unwrap().queue;
-        assert_eq!(queued.len(), 2);
-        assert_eq!(queued[1].sent_by, SentBy::Sender(second_sender));
-        assert_eq!(
-            queued[1].message,
-            Message::Soft(Request::Result("second answer".into()))
-        );
-    }
-
-    #[test]
-    fn core_presentation_is_queued_as_is_once_and_secondary_gets_only_a_notice() {
-        use signal_flow::{
-            Address, Aspect, DeliveryState, Layer, Message, Metaflow, NativeReceipt, Request,
-            Response, SentBy,
-        };
-        let fixture = StoreFixture::new();
-        let store = fixture.store();
-        let source = Address {
-            aspect: Aspect::Psyche,
-            topic: "core".into(),
-            layer: Layer::Primary,
-        };
-        let sender = Address {
-            aspect: Aspect::Psyche,
-            topic: "core".into(),
-            layer: Layer::Secondary,
-        };
-        let book = Address {
-            aspect: Aspect::Psyche,
-            topic: "book".into(),
-            layer: Layer::Tertiary,
-        };
-        for address in [&source, &sender, &book] {
-            store.seed_metaflow(Metaflow {
-                address: address.clone(),
-                state: flow_ethos::State::Asleep,
-                past: Vec::new(),
-                queue: Vec::new(),
-            });
-        }
-        let Response::SendAccepted(input) = store
-            .accept_logical_delivery(
-                &source,
-                SentBy::Sender(sender.clone()),
-                flow_ethos::Delivery::Wake,
-                Message::Soft(Request::Question("review this book source".into())),
-                None,
-            )
-            .unwrap()
-        else {
-            panic!("core Secondary may wake core Primary")
-        };
-        store
-            .bind_simplified_reply(SimplifiedReplyBinding {
-                flow_id: "simplified-core-primary".into(),
-                input_delivery_id: input.logical_delivery_id.clone(),
-                source: source.clone(),
-                recipient: sender.clone(),
-                completed: false,
-            })
-            .unwrap();
-        store
-            .transition_logical_delivery(
-                &input.logical_delivery_id,
-                DeliveryState::Delivered(NativeReceipt {
-                    harness_kind: flow_ethos::HarnessKind::Claude,
-                    native_session_id: "claude-core-primary".into(),
-                    native_prompt_id: "prompt-core".into(),
-                }),
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .deliver_simplified_reply(
-                    "simplified-core-primary",
-                    &input.logical_delivery_id,
-                    "claude-core-primary",
-                    "prompt-core",
-                    "verbatim presentation body",
-                )
-                .unwrap(),
-            Some(book.clone())
-        );
-        assert_eq!(
-            store
-                .deliver_simplified_reply(
-                    "simplified-core-primary",
-                    &input.logical_delivery_id,
-                    "claude-core-primary",
-                    "prompt-core",
-                    "verbatim presentation body",
-                )
-                .unwrap(),
-            None,
-            "replayed Stop cannot create another book order or notice"
-        );
-        let book_queue = store.metaflow(&book).unwrap().unwrap().queue;
-        assert_eq!(book_queue.len(), 1);
-        assert_eq!(book_queue[0].sent_by, SentBy::Sender(source.clone()));
-        assert_eq!(
-            book_queue[0].message,
-            Message::Soft(Request::Order("verbatim presentation body".into()))
-        );
-        let secondary_queue = store.metaflow(&sender).unwrap().unwrap().queue;
-        assert_eq!(secondary_queue.len(), 1);
-        assert_eq!(secondary_queue[0].sent_by, SentBy::Sender(source));
-        let Message::Soft(Request::Notice(notice)) = &secondary_queue[0].message else {
-            panic!("the core Secondary gets a Notice, not a duplicate body")
-        };
-        assert!(
-            notice.contains("queued"),
-            "queued is not delivered: {notice}"
-        );
-        assert!(!notice.contains("handed"));
-        assert!(!notice.contains("verbatim presentation body"));
-    }
     #[test]
     fn created_pane_survives_reopen_and_a_second_failed_binding_is_orphaned() {
         let fixture = StoreFixture::new();
@@ -9137,6 +9073,10 @@ mod tests {
         );
     }
 
+    use super::{
+        CompositionRefusalV34, LaunchOutcomeV8, ReplaceRejectionV34, StartRejectionV34,
+        StoredLaunchOutcomeV8,
+    };
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
     use super::{
         ContextRefusalV30, LaunchOutcomeV6, ReplaceRejectionV30, StartRejectionV30,
@@ -9429,7 +9369,6 @@ mod tests {
                 herdr_session_name: "fixture-session".into(),
                 leave_outs_option: None,
                 instruction_prompt: "fixture instruction".into(),
-                flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
             }
         }
@@ -9474,60 +9413,6 @@ mod tests {
                 herdr_pane_id: "w1:p1".into(),
                 herdr_terminal_id: "fixture-terminal".into(),
             }
-        }
-    }
-
-    #[test]
-    fn zero_part_intent_requires_a_proven_empty_tool_free_simplified_launch() {
-        use sha2::{Digest, Sha256};
-        let empty_hash = format!("{:x}", Sha256::digest([]));
-        for case in 0..6 {
-            let fixture = StoreFixture::new();
-            let store = fixture.store();
-            let mut launch = fixture.composed_launch("idle-judgment", &empty_hash);
-            launch.harness_kind = HarnessKind::Claude;
-            launch.launch_profile.flow_kind = signal_flow::FlowKind::Simplified;
-            launch.launch_profile.tool_set = signal_flow::ToolSet::Explicit(Vec::new());
-            launch.launch_profile.instruction_prompt.clear();
-            launch.first_prompt_payload.first_prompt_body.clear();
-            launch.first_prompt_payload.prompt_part_vector.clear();
-            match case {
-                1 => launch.launch_profile.flow_kind = signal_flow::FlowKind::Regular,
-                2 => launch.launch_profile.instruction_prompt = "Actual request".into(),
-                3 => launch.launch_profile.tool_set = signal_flow::ToolSet::Default,
-                4 => launch.harness_kind = HarnessKind::Codex,
-                5 => launch.first_prompt_payload.prompt_sha256 = "1".repeat(64),
-                _ => {}
-            }
-            assert!(matches!(
-                store
-                    .reserve_launch_attempt(&launch, fixture.origin())
-                    .unwrap(),
-                LaunchAttemptReservation::Reserved(_)
-            ));
-            let intent = NativeLaunchIntent {
-                launch_request_id: launch.launch_profile.launch_request_id.clone(),
-                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                harness_kind: launch.harness_kind.clone(),
-                model_name: launch.launch_profile.model_name.clone(),
-                effort: launch.launch_profile.effort.clone(),
-                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                prompt_sha256_vector: Vec::new(),
-            };
-            assert_eq!(
-                store.record_native_launch_intent(intent).unwrap(),
-                case == 0 || case == 4,
-                "only the proven empty simplified startup is admitted, case {case}"
-            );
-            let attempt = store.launch_attempt("idle-judgment").unwrap().unwrap();
-            assert_eq!(
-                attempt.launch_attempt_phase,
-                if case == 0 || case == 4 {
-                    LaunchAttemptPhase::NativeLaunchIntentRecorded
-                } else {
-                    LaunchAttemptPhase::Reserved
-                }
-            );
         }
     }
 
@@ -11389,7 +11274,6 @@ mod tests {
                 remembering: signal_flow::Remembering::Custom(vec!["e51411".into()]),
                 herdr_session_name: "messaging-build".into(),
                 leave_outs_option: Some(Vec::new()),
-                flow_kind: signal_flow::FlowKind::Regular,
                 tool_set: signal_flow::ToolSet::Default,
                 instruction_prompt: "0.34 instruction".into(),
             },
@@ -12122,6 +12006,74 @@ mod tests {
                 "the v5 outcome for {request} survives the family upgrade"
             );
         }
+    }
+
+    /// A v8 outcome holding the two removed composition refusals opens with
+    /// either refusal as Unrecorded; the surrounding rejection shape stays.
+    #[test]
+    fn v8_launch_outcomes_remove_simplified_and_presentation_refusals() {
+        let fixture = StoreFixture::new();
+        let rows = vec![
+            StoredLaunchOutcomeV8 {
+                launch_request_id: "v8-tool-set".into(),
+                launch_outcome: LaunchOutcomeV8::StartRejected(
+                    StartRejectionV34::CompositionRefused(CompositionRefusalV34::InvalidToolSet),
+                ),
+            },
+            StoredLaunchOutcomeV8 {
+                launch_request_id: "v8-presentation".into(),
+                launch_outcome: LaunchOutcomeV8::ReplaceRejected(
+                    ReplaceRejectionV34::LaunchRefused(StartRejectionV34::CompositionRefused(
+                        CompositionRefusalV34::PresentationUnavailable,
+                    )),
+                ),
+            },
+            StoredLaunchOutcomeV8 {
+                launch_request_id: "v8-model".into(),
+                launch_outcome: LaunchOutcomeV8::StartRejected(
+                    StartRejectionV34::CompositionRefused(CompositionRefusalV34::InvalidModelName),
+                ),
+            },
+        ];
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("outcome store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_launch_outcomes"),
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    SchemaHash::for_label("flow-nexus-launch-outcome-v8"),
+                ))
+                .expect("v8 outcome family registers");
+            for row in rows {
+                engine
+                    .assert(Assertion::new(outcomes, row))
+                    .expect("v8 outcome persists");
+            }
+        }
+        let store = fixture.store();
+        let unrecorded =
+            StartRejection::CompositionRefused(signal_flow::CompositionRefusal::Unrecorded);
+        assert_eq!(
+            store.launch_outcome("v8-tool-set").expect("outcome reads"),
+            Some(LaunchOutcome::StartRejected(unrecorded.clone()))
+        );
+        assert_eq!(
+            store
+                .launch_outcome("v8-presentation")
+                .expect("outcome reads"),
+            Some(LaunchOutcome::ReplaceRejected(
+                ReplaceRejection::LaunchRefused(unrecorded)
+            ))
+        );
+        assert_eq!(
+            store.launch_outcome("v8-model").expect("outcome reads"),
+            Some(LaunchOutcome::StartRejected(
+                StartRejection::CompositionRefused(
+                    signal_flow::CompositionRefusal::InvalidModelName
+                )
+            ))
+        );
     }
 
     /// A 0.40 store's outcomes archived before a composition refusal kept
@@ -13408,7 +13360,7 @@ mod v3_attempts {
                     remembered_flow_vector: remembered,
                     herdr_session_name: "default".into(),
                     leave_outs_option: None,
-                    flow_kind: signal_flow::FlowKind::Regular,
+                    flow_kind: super::metaflow_declaration::FlowKindV4::Regular,
                     tool_set: signal_flow::ToolSet::Default,
                     instruction_prompt: "Carry on.".into(),
                 },

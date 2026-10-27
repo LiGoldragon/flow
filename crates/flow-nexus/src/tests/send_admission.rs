@@ -365,7 +365,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
                 layer: Layer::Secondary,
                 aspect: Aspect::Mind,
                 model_name: "gpt-6-sol".into(),
-                    effort: "medium".into(),
+                effort: "medium".into(),
             },
         ]))
         .unwrap();

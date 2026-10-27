@@ -100,7 +100,7 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
                 layer: Layer::Secondary,
                 aspect: Aspect::Mind,
                 model_name: "gpt-6-sol".into(),
-                    effort: "medium".into(),
+                effort: "medium".into(),
             },
         ]))
         .unwrap();

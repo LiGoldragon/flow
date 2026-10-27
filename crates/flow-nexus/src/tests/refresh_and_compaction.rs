@@ -129,7 +129,7 @@ pub(super) fn declare_seat(
             layer: Layer::Secondary,
             aspect: Aspect::Mind,
             model_name: "fixture-model".into(),
-                    effort: "medium".into(),
+            effort: "medium".into(),
         }]))
         .expect("successor model configured");
 }

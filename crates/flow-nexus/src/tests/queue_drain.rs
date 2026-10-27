@@ -13,7 +13,7 @@ use super::waking::{
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
-use crate::composition::RendersQueuedWork;
+use crate::delivery::body::{RendersPaneText, ShowsPaneText};
 use crate::generated::operation::Outcome;
 use crate::reporting::RecordsReports;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
@@ -25,7 +25,7 @@ use flow_native::DigestsPrompt;
 use meta_signal_flow::{
     ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueDeliveryStanding,
     QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data, ResolverIdentity,
-    Response as MetaResponse, Undecided,
+    Response as MetaResponse, Sender, Undecided,
 };
 use signal_flow::{
     Address, Aspect, Delivery, Event, Layer, Message, Metaflow, NativePrompt, NativeStop,
@@ -56,7 +56,19 @@ fn from_core(body: &str) -> TestRequest {
 
 /// The text a hand-over types for one queued request.
 fn typed_text(request: &TestRequest) -> String {
-    [queue_entry(request)].prompt_text()
+    crate::waking::render_message(
+        &queue_entry(request),
+        Sender {
+            address: match &request.sent_by {
+                SentBy::Sender(address) => address.clone(),
+                SentBy::Unknown | SentBy::Flow => panic!("queue fixture has a sender"),
+            },
+            flow_id: "e167d8".into(),
+        },
+    )
+    .pane_text()
+    .as_str()
+    .to_owned()
 }
 
 fn queue_entry(request: &TestRequest) -> QueueEntry {
@@ -71,6 +83,7 @@ fn queue_entry(request: &TestRequest) -> QueueEntry {
 /// The fixture Claude seat Awake at the Secondary address, holding `queue`.
 fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
     claude_seat(fixture, 40_000);
+    let queue_for_senders = queue.clone();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Layer::Secondary),
         state: State::Awake(CLAUDE_SEAT.into()),
@@ -85,6 +98,22 @@ fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
             })
             .collect(),
     });
+    for request in queue_for_senders {
+        let SentBy::Sender(sender) = request.sent_by else {
+            panic!("queue fixture has a sender")
+        };
+        fixture
+            .nexus
+            .store
+            .seed_logical_delivery_sender(
+                &request.logical_delivery_id,
+                Sender {
+                    address: sender,
+                    flow_id: "e167d8".into(),
+                },
+            )
+            .expect("queue fixture sender");
+    }
 }
 
 /// A report as the hook sends it: recorded, answered, then acted on.
@@ -177,6 +206,7 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
         .accept_logical_delivery(
             &target,
             SentBy::Sender(sender.clone()),
+            None,
             Delivery::Queue,
             Message::Soft(Request::Notice("cursor witness".into())),
             None,
@@ -253,6 +283,7 @@ fn abrupt_queue_admission_is_durable_without_waking() {
                     topic: "core".into(),
                     layer: Layer::Secondary,
                 }),
+                None,
                 Delivery::Queue,
                 message,
                 None,
@@ -300,7 +331,7 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 0);
     assert!(
-        !fixture
+        fixture
             .typed()
             .unwrap_or_default()
             .contains("Psyche core Secondary")
@@ -463,7 +494,7 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
     assert!(typed.find("first-request-body") < typed.find("second-request-body"));
     assert_eq!(typed.matches("first-request-body").count(), 1);
     assert_eq!(typed.matches("second-request-body").count(), 1);
-    assert!(!typed.contains("Psyche core Secondary"));
+    assert!(typed.contains("Psyche core Secondary"));
     assert!(standings(&fixture).is_empty());
 }
 
@@ -637,6 +668,20 @@ fn a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it() {
         past: vec![],
         queue: vec![queue_entry(&first)],
     });
+    fixture
+        .nexus
+        .store
+        .seed_logical_delivery_sender(
+            &first.logical_delivery_id,
+            Sender {
+                address: match &first.sent_by {
+                    SentBy::Sender(address) => address.clone(),
+                    _ => unreachable!(),
+                },
+                flow_id: "e167d8".into(),
+            },
+        )
+        .unwrap();
     append_main_rows(&fixture, &[end_turn("first-turn")]);
     report(&fixture, claude_stop(&fixture));
     report(&fixture, foreign_stop());

@@ -781,6 +781,7 @@ fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
                 .accept_logical_delivery(
                     &target,
                     SentBy::Sender(sender.clone()),
+                    None,
                     Delivery::Queue,
                     Message::Soft(request),
                     None,

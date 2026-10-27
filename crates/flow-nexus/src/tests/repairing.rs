@@ -393,6 +393,7 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
         .accept_logical_delivery(
             &seat_address(),
             SentBy::Unknown,
+            None,
             Delivery::Queue,
             Message::Soft(Request::Order("Never handed over.".into())),
             None,

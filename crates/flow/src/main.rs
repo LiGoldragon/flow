@@ -30,13 +30,14 @@ trait TextualizesFlowReply {
 }
 
 impl ParsesFlowCommand for FlowClient {
-    fn parse_command(&self, mut arguments: impl Iterator<Item = String>) -> Result<Query, String> {
+    fn parse_command(&self, arguments: impl Iterator<Item = String>) -> Result<Query, String> {
         let mut arguments = arguments.collect::<Vec<_>>();
         // The message edge is intentionally plain words: callers do not have
         // to manufacture datom syntax.  The Nexus still receives the same
         // typed Send as the datom surface.
-        if arguments.len() >= 3 && !arguments[0].contains('.') {
-            let address = format!("Address.{{ {} }}", arguments.remove(0));
+        if arguments.len() >= 4 && !arguments[0].contains('.') {
+            let address = format!("{{ {} }}", arguments.remove(0));
+            let priority = arguments.remove(0).to_ascii_lowercase();
             let kind = arguments.remove(0).to_ascii_lowercase();
             let mut budget = Budget {
                 remaining: 65_536,
@@ -67,16 +68,25 @@ impl ParsesFlowCommand for FlowClient {
                 }
                 _ => {
                     return Err(
-                        "usage: flow '<address>' <order|result|notice|question|psyche> <words>"
+                        "usage: flow '<address>' <hard-abrupt|middle-abrupt|soft> <order|result|notice|question|psyche> <words>"
                             .into(),
                     );
                 }
             };
+            let message = match priority.as_str() {
+                "hardabrupt" | "hard-abrupt" => Message::HardAbrupt(request),
+                "middleabrupt" | "middle-abrupt" => Message::MiddleAbrupt(request),
+                "soft" => Message::Soft(request),
+                _ => return Err("priority must be hard-abrupt, middle-abrupt, or soft".into()),
+            };
             return Ok(Query::Send(SendRequest {
                 recipient,
                 delivery: Delivery::Wake,
-                message: Message::Soft(request),
+                message,
             }));
+        }
+        if arguments.len() != 1 {
+            return Err("usage: flow '<one inline Query datom>'".into());
         }
         let Some(value) = arguments.into_iter().next() else {
             return Err("usage: flow '<one inline Query datom>'".into());
@@ -262,9 +272,14 @@ mod tests {
         };
         let Query::Send(send) = client
             .parse_command(
-                ["Psyche core Secondary", "notice", "batch 1 is in a commit"]
-                    .into_iter()
-                    .map(String::from),
+                [
+                    "Psyche core Secondary",
+                    "soft",
+                    "notice",
+                    "batch 1 is in a commit",
+                ]
+                .into_iter()
+                .map(String::from),
             )
             .expect("plain message arguments parse")
         else {
@@ -274,6 +289,21 @@ mod tests {
         assert_eq!(
             send.message,
             Message::Soft(Request::Notice("batch 1 is in a commit".into()))
+        );
+
+        let Query::Send(abrupt) = client
+            .parse_command(
+                ["Mind flow Secondary", "hard-abrupt", "order", "stop now"]
+                    .into_iter()
+                    .map(String::from),
+            )
+            .unwrap()
+        else {
+            panic!("plain abrupt message is Send")
+        };
+        assert_eq!(
+            abrupt.message,
+            Message::HardAbrupt(Request::Order("stop now".into()))
         );
     }
 

@@ -5,6 +5,13 @@ on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`
 branch, whose schema it carries. Every ordinary and meta peer repins, and
 Curriculum serves that schema.
 
+- Pins meta-signal-flow 42.0.0. Pane deliveries are complete datoms:
+  priority-headed `Letter.{ Kind Sender Body }`, with the sender Address and
+  Flow ID resolved at ordinary Send admission. Logical-delivery current
+  Memory upgrades v4 to v5; older queued work remains intact without an
+  invented sender identity. The plain CLI message form requires address,
+  priority, kind, and words.
+
 - An abrupt request may use `Delivery.Queue`; it enters the recipient's
   durable queue and answers `SendAccepted` instead of
   `Failed.QueueNotPermitted`. Pins signal-flow 34.0.0. Send outcomes,

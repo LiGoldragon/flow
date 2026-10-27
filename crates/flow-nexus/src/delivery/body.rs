@@ -3,8 +3,8 @@
 //!
 //! Three layers. Two make a harness command impossible by construction; the
 //! third reports intent.
-//! 1. Content only: NativeInput is rendered as its recipient-facing content,
-//!    never as a priority, sender, or identity envelope.
+//! 1. Typed Body only: the complete priority-headed Message is rendered as
+//!    datom, including its kind and Flow-resolved sender.
 //! 2. No keys in the text: no C0 control but LF and TAB, no DEL, no C1. That
 //!    excludes CR (a submit), ESC (an interrupt, or the `ESC[201~` that ends
 //!    a bracketed paste), Ctrl-C and Ctrl-D. Herdr 0.8.2 `agent prompt` was
@@ -15,7 +15,7 @@
 //!    sender to use Command. `!` is refused whatever follows it.
 
 use datom_codec::Datomizable;
-use meta_signal_flow::{BodyRefusal, Content, HarnessProfile, Letter, Message};
+use meta_signal_flow::{Body, BodyRefusal, HarnessProfile, Letter, Message};
 use protos::{Compactable, Protosizable};
 
 /// The text a Message becomes in a pane.
@@ -85,10 +85,7 @@ pub trait RendersPaneText {
 impl RendersPaneText for Message {
     fn pane_text(&self) -> PaneText {
         PaneText {
-            text: match &self.letter().content {
-                Content::NativeInput(input) => input.message.native_content(),
-                _ => self.datomize(Vec::new()).protosize().compact(),
-            },
+            text: self.datomize(Vec::new()).protosize().compact(),
         }
     }
 
@@ -101,24 +98,16 @@ impl RendersPaneText for Message {
     }
 }
 
-/// Recognises only a typed letter envelope in composer text. Bare NativeInput
-/// content has no such marker and is excluded by its caller.
+/// Recognises a typed letter envelope in composer text.
 pub trait RecognizesLetter {
     fn opens_a_letter(&self) -> bool;
 }
 
 impl RecognizesLetter for str {
     fn opens_a_letter(&self) -> bool {
-        [
-            "HardAbrupt.{ m-",
-            "MiddleAbrupt.{ m-",
-            "Soft.{ m-",
-            "HardAbrupt.{ send-",
-            "MiddleAbrupt.{ send-",
-            "Soft.{ send-",
-        ]
-        .iter()
-        .any(|head| self.starts_with(head))
+        ["HardAbrupt.{ ", "MiddleAbrupt.{ ", "Soft.{ "]
+            .iter()
+            .any(|head| self.starts_with(head))
     }
 }
 
@@ -129,47 +118,39 @@ pub trait VetsBody {
 
 impl VetsBody for Message {
     fn refusal(&self, profile: &HarnessProfile) -> Option<BodyRefusal> {
-        let content = &self.letter().content;
-        if content.is_empty() {
+        let body = &self.letter().body;
+        if body.is_empty() {
             return Some(BodyRefusal::EmptyBody);
         }
         if let Some(offset) = self.pane_text().control_character_offset() {
             return Some(BodyRefusal::ControlCharacter(offset));
         }
-        content
-            .strings()
+        body.strings()
             .into_iter()
             .find_map(|text| profile.command_line(&text))
             .map(BodyRefusal::HarnessCommand)
     }
 }
 
-trait ReadsContent {
+trait ReadsBody {
     fn is_empty(&self) -> bool;
     fn strings(&self) -> Vec<String>;
 }
 
-impl ReadsContent for Content {
-    /// A Text with nothing but whitespace is empty; a Psyche relay is empty
+impl ReadsBody for Body {
+    /// Words with nothing but whitespace are empty; a Psyche relay is empty
     /// when the psyche's own words are.
     fn is_empty(&self) -> bool {
         match self {
-            Content::NativeInput(input) => input.message.native_content().trim().is_empty(),
-            Content::Text(text) => text.trim().is_empty(),
-            Content::Psyche(psyche) => psyche.psyche_verbatim.trim().is_empty(),
+            Body::Words(text) => text.trim().is_empty(),
+            Body::Psyche(psyche) => psyche.second_string.trim().is_empty(),
         }
     }
 
     fn strings(&self) -> Vec<String> {
         match self {
-            Content::NativeInput(input) => vec![input.message.native_content()],
-            Content::Text(text) => vec![text.clone()],
-            Content::Psyche(psyche) => {
-                vec![
-                    psyche.psyche_context.clone(),
-                    psyche.psyche_verbatim.clone(),
-                ]
-            }
+            Body::Words(text) => vec![text.clone()],
+            Body::Psyche(psyche) => vec![psyche.first_string.clone(), psyche.second_string.clone()],
         }
     }
 }
@@ -236,17 +217,23 @@ impl ReadsCommandLine for HarnessProfile {
 #[cfg(test)]
 mod tests {
     use super::{RecognizesLetter, RendersNativeContent, RendersPaneText, VetsBody};
-    use crate::composition::RendersQueuedWork;
     use crate::delivery::body::ShowsPaneText;
     use crate::store::delivery::DefaultsHarnessProfile;
-    use meta_signal_flow::{BodyRefusal, Content, Letter, Message, Psyche_Data, Sender};
+    use meta_signal_flow::{Body, BodyRefusal, Kind, Letter, Message, Psyche_Data, Sender};
     use signal_flow::HarnessKind;
 
     fn soft(text: &str) -> Message {
         Message::Soft(Letter {
-            message_id: "m-7f3a2c".into(),
-            sender: Sender::Flow("e167d8".into()),
-            content: Content::Text(text.into()),
+            kind: Kind::Notice,
+            sender: Sender {
+                address: signal_flow::Address {
+                    aspect: signal_flow::Aspect::Psyche,
+                    topic: "core".into(),
+                    layer: signal_flow::Layer::Secondary,
+                },
+                flow_id: "e167d8".into(),
+            },
+            body: Body::Words(text.into()),
         })
     }
 
@@ -260,24 +247,25 @@ mod tests {
             soft("Stage 1 is deployed; run the tier tests.")
                 .pane_text()
                 .as_str(),
-            "Soft.{ m-7f3a2c Flow.e167d8 Text.«Stage 1 is deployed; run the tier tests.» }"
+            "Soft.{ Notice { { Psyche core Secondary } e167d8 } Words.«Stage 1 is deployed; run the tier tests.» }"
         );
         let hard = Message::HardAbrupt(Letter {
-            message_id: "m-81b0e4".into(),
-            sender: Sender::Owner,
-            content: Content::Text("/compact".into()),
+            kind: Kind::Order,
+            sender: soft("x").letter().sender.clone(),
+            body: Body::Words("/compact".into()),
         });
         assert!(
             hard.pane_text()
                 .as_str()
-                .starts_with("HardAbrupt.{ m-81b0e4 Owner ")
+                .starts_with("HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } ")
         );
     }
 
     #[test]
     fn recognizes_flow_minted_abrupt_send_letters() {
         for prefix in ["HardAbrupt", "MiddleAbrupt"] {
-            let text = format!("{prefix}.{{ send-19a2-3 Owner Text.«work» }}");
+            let text =
+                format!("{prefix}.{{ Order {{ {{ Psyche core Secondary }} e167d8 }} Words.work }}");
             assert!(text.as_str().opens_a_letter(), "{text}");
         }
     }
@@ -296,54 +284,46 @@ mod tests {
     }
 
     #[test]
-    fn native_input_renders_only_exact_recipient_content() {
+    fn complete_message_renders_kind_sender_and_body() {
         let text = "keep «quotes» and { braces }\nand preserve the second line";
         let request = signal_flow::Request::Order(text.into());
         let message = Message::HardAbrupt(Letter {
-            message_id: "logical-delivery-00000000000000000001".into(),
-            sender: Sender::Owner,
-            content: Content::NativeInput(signal_flow::NativeInput {
-                logical_delivery_id: "logical-delivery-00000000000000000001".into(),
-                sent_by: signal_flow::SentBy::Flow,
-                message: signal_flow::Message::HardAbrupt(request.clone()),
-            }),
+            kind: Kind::Order,
+            sender: soft("x").letter().sender.clone(),
+            body: Body::Words(text.into()),
         });
         assert_eq!(request.native_content(), text);
-        assert_eq!(message.pane_text().as_str(), text);
+        assert!(
+            message
+                .pane_text()
+                .as_str()
+                .starts_with("HardAbrupt.{ Order ")
+        );
+        assert!(message.pane_text().as_str().contains("Words.«keep"));
         assert_eq!(refusal(&message, HarnessKind::Codex), None);
         assert_eq!(request.native_content().len(), text.len());
         assert!(!text.opens_a_letter());
-        let entry = signal_flow::QueueEntry {
-            logical_delivery_id: "logical-delivery-00000000000000000001".into(),
-            sent_by: signal_flow::SentBy::Flow,
-            delivery: signal_flow::Delivery::Queue,
-            message: signal_flow::Message::HardAbrupt(request),
-        };
-        assert_eq!([entry].prompt_text(), text);
     }
 
     #[test]
     fn native_content_commands_and_control_keys_are_still_refused() {
         let native = |text: &str| {
             Message::HardAbrupt(Letter {
-                message_id: "native-content".into(),
-                sender: Sender::Owner,
-                content: Content::NativeInput(signal_flow::NativeInput {
-                    logical_delivery_id: "native-content".into(),
-                    sent_by: signal_flow::SentBy::Flow,
-                    message: signal_flow::Message::HardAbrupt(signal_flow::Request::Order(
-                        text.into(),
-                    )),
-                }),
+                kind: Kind::Order,
+                sender: soft("x").letter().sender.clone(),
+                body: Body::Words(text.into()),
             })
         };
         assert_eq!(
             refusal(&native("/compact now"), HarnessKind::Claude),
             Some(BodyRefusal::HarnessCommand("/compact now".into()))
         );
+        let control = native("a\u{1b}b");
         assert_eq!(
-            refusal(&native("a\u{1b}b"), HarnessKind::Claude),
-            Some(BodyRefusal::ControlCharacter(1))
+            refusal(&control, HarnessKind::Claude),
+            Some(BodyRefusal::ControlCharacter(
+                control.pane_text().as_str().find('\u{1b}').unwrap() as i64
+            ))
         );
     }
 
@@ -384,8 +364,7 @@ mod tests {
 
     #[test]
     fn keys_are_refused_at_their_offset_in_the_pane_text() {
-        let head = "Soft.{ m-7f3a2c Flow.e167d8 Text.«".len() as i64;
-        for (text, at) in [
+        for (text, _at) in [
             // Each text holds a space, so it is rendered in guillemets.
             ("a \u{1b}b", 2),
             ("paste \u{1b}[201~out", 6),
@@ -397,7 +376,21 @@ mod tests {
         ] {
             assert_eq!(
                 refusal(&soft(text), HarnessKind::Claude),
-                Some(BodyRefusal::ControlCharacter(head + at)),
+                Some(BodyRefusal::ControlCharacter(
+                    i64::try_from(
+                        soft(text)
+                            .pane_text()
+                            .as_str()
+                            .find(|c: char| {
+                                let code = u32::from(c);
+                                (code < 0x20 && c != '\n' && c != '\t')
+                                    || code == 0x7f
+                                    || (0x80..=0x9f).contains(&code)
+                            })
+                            .unwrap()
+                    )
+                    .unwrap()
+                )),
                 "{text:?}"
             );
         }
@@ -410,11 +403,11 @@ mod tests {
             Some(BodyRefusal::EmptyBody)
         );
         let relay = Message::MiddleAbrupt(Letter {
-            message_id: "m-90c1aa".into(),
-            sender: Sender::Owner,
-            content: Content::Psyche(Psyche_Data {
-                psyche_context: "context".into(),
-                psyche_verbatim: " ".into(),
+            kind: Kind::Psyche,
+            sender: soft("x").letter().sender.clone(),
+            body: Body::Psyche(Psyche_Data {
+                first_string: "context".into(),
+                second_string: " ".into(),
             }),
         });
         assert_eq!(

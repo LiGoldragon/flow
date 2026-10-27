@@ -48,6 +48,7 @@ struct HarnessHook {
     herdr_executable: Option<PathBuf>,
     herdr_session: Option<String>,
     herdr_pane_id: Option<String>,
+    readiness_socket: Option<PathBuf>,
 }
 
 /// What the hook does with one event.
@@ -105,6 +106,7 @@ impl ReadsHookInput for HarnessHook {
             herdr_pane_id: env::var("HERDR_PANE_ID")
                 .ok()
                 .filter(|pane| !pane.is_empty()),
+            readiness_socket: env::var_os("FLOW_CLAUDE_READY_SOCKET").map(PathBuf::from),
         }
     }
 }
@@ -147,7 +149,18 @@ impl ReportsOwnedClaudeLifecycle for HarnessHook {
             command.args(["--agent-session-id", session]);
         }
         match command.output() {
-            Ok(output) if output.status.success() => format!("lifecycle-{state}"),
+            Ok(output) if output.status.success() => {
+                if self.event_name() == "SessionStart"
+                    && let Some(socket) = &self.readiness_socket
+                    && let Ok(sender) = std::os::unix::net::UnixDatagram::unbound()
+                {
+                    // This endpoint carries only an event edge. The typed
+                    // Herdr report above and the actual argv carry and
+                    // validate the session identity.
+                    let _ = sender.send_to(&[], socket);
+                }
+                format!("lifecycle-{state}")
+            }
             Ok(output) => format!(
                 "lifecycle-refused:{}",
                 String::from_utf8_lossy(&output.stderr)
@@ -306,6 +319,7 @@ mod tests {
             herdr_executable: None,
             herdr_session: None,
             herdr_pane_id: None,
+            readiness_socket: None,
         }
     }
 
@@ -489,6 +503,7 @@ mod tests {
             herdr_executable: Some(executable),
             herdr_session: Some("flow-session".into()),
             herdr_pane_id: Some("w7:p1".into()),
+            readiness_socket: None,
         };
 
         assert_eq!(hook.lifecycle_run(), "lifecycle-idle");

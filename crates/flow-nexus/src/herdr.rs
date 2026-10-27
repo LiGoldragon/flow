@@ -141,6 +141,13 @@ pub struct HerdrCli {
     /// by launch request, held from the start until its session has bound.
     pub(crate) held_system_prompts:
         std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
+    /// One blocking, launch-owned readiness endpoint per Flow-owned Claude
+    /// pane.  SessionStart sends the selected native identity to it; binding
+    /// consumes it once and removes the endpoint.
+    pub(crate) flow_owned_claude_readiness: std::sync::Mutex<
+        std::collections::HashMap<String, (std::os::unix::net::UnixDatagram, std::path::PathBuf)>,
+    >,
+    pub(crate) flow_owned_claude_readiness_root: PathBuf,
 }
 
 impl Default for HerdrCli {
@@ -174,6 +181,12 @@ impl Default for HerdrCli {
                 .unwrap_or_else(|| PathBuf::from("flow-hook")),
             ordinary_socket: defaults.ordinary_socket_path(),
             held_system_prompts: Default::default(),
+            flow_owned_claude_readiness: Default::default(),
+            flow_owned_claude_readiness_root: defaults
+                .ordinary_socket_path()
+                .parent()
+                .unwrap_or_else(|| Path::new("/"))
+                .to_path_buf(),
         }
     }
 }
@@ -342,6 +355,10 @@ impl ConfiguresHerdrCli for HerdrCli {
 
     fn with_ordinary_socket(mut self, ordinary_socket: &std::path::Path) -> Self {
         self.ordinary_socket = ordinary_socket.to_path_buf();
+        self.flow_owned_claude_readiness_root = ordinary_socket
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf();
         self
     }
 
@@ -409,6 +426,8 @@ impl ConfiguresHerdrCli for HerdrCli {
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
             held_system_prompts: Default::default(),
+            flow_owned_claude_readiness: Default::default(),
+            flow_owned_claude_readiness_root: fixture_root.to_path_buf(),
         }
     }
 }
@@ -945,10 +964,10 @@ impl DecodesFlowClaim for FlowClaim {
 #[cfg(test)]
 mod tests {
     use super::{HerdrCli, VerifiesFlowClaim};
-    use crate::herdr::pane::ReadsAgentStatus;
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
     use crate::herdr::ReadsHerdrSnapshot;
+    use crate::herdr::pane::ReadsAgentStatus;
     use signal_flow::{
         EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
         HerdrRouteSelection, Origin,

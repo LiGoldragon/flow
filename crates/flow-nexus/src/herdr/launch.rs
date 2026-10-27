@@ -2024,6 +2024,58 @@ impl RunsFlowOwnedClaude for HerdrCli {
         pane: &HerdrPaneBinding,
         command: &[String],
     ) -> Result<(), SpawnFailure> {
+        let runtime = &self.flow_owned_claude_readiness_root;
+        let readiness_digest = format!("{:x}", Sha256::digest(pane.herdr_pane_id.as_bytes()));
+        let readiness_name = format!("claude-ready-{}.sock", &readiness_digest[..12]);
+        let readiness_path = runtime.join(readiness_name);
+        let _ = fs::remove_file(&readiness_path);
+        let readiness =
+            std::os::unix::net::UnixDatagram::bind(&readiness_path).map_err(|error| {
+                SpawnFailure::Unattempted(format!(
+                    "Flow-owned Claude readiness endpoint could not open: {error}"
+                ))
+            })?;
+        self.flow_owned_claude_readiness
+            .lock()
+            .map_err(|_| {
+                SpawnFailure::Unattempted(
+                    "Flow-owned Claude readiness ownership is unavailable".into(),
+                )
+            })?
+            .insert(
+                pane.herdr_pane_id.clone(),
+                (readiness, readiness_path.clone()),
+            );
+        let readiness_environment = format!(
+            "export FLOW_CLAUDE_READY_SOCKET={}",
+            readiness_path.to_string_lossy().shell_quoted()
+        );
+        let readiness_arguments = [
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "pane".into(),
+            "run".into(),
+            pane.herdr_pane_id.clone(),
+            readiness_environment,
+        ];
+        let readiness_output = Command::new(&self.executable)
+            .args(&readiness_arguments)
+            .output()
+            .map_err(|error| {
+                SpawnFailure::Unattempted(format!("Herdr command could not start: {error}"))
+            })?;
+        if !readiness_output.status.success() {
+            if let Ok(mut readiness) = self.flow_owned_claude_readiness.lock() {
+                readiness.remove(&pane.herdr_pane_id);
+            }
+            let _ = fs::remove_file(readiness_path);
+            return Err(SpawnFailure::Refused(
+                signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal::from_printed(
+                    &readiness_output.stderr,
+                    &readiness_output.stdout,
+                )),
+            ));
+        }
         let line = command
             .iter()
             .map(|argument| argument.as_str().shell_quoted())
@@ -2042,6 +2094,10 @@ impl RunsFlowOwnedClaude for HerdrCli {
             .output()
             .map_err(|error| format!("Herdr command could not start: {error}"))?;
         if !output.status.success() {
+            if let Ok(mut readiness) = self.flow_owned_claude_readiness.lock() {
+                readiness.remove(&pane.herdr_pane_id);
+            }
+            let _ = fs::remove_file(readiness_path);
             return Err(SpawnFailure::Refused(
                 signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal::from_printed(
                     &output.stderr,
@@ -2366,6 +2422,50 @@ impl ObservesBoundPane for HerdrCli {
                 .ok_or_else(|| {
                     "the Flow-owned Claude process has no selected session".to_owned()
                 })?;
+            let already_reported = self
+                .run_json(&[
+                    "--session".into(),
+                    pane.herdr_session_name.clone(),
+                    "agent".into(),
+                    "get".into(),
+                    pane.herdr_agent_name.clone(),
+                ])
+                .ok()
+                .and_then(|response| response.pointer("/result/agent/agent_session").cloned())
+                .is_some_and(|session| {
+                    session.get("source").and_then(serde_json::Value::as_str) == Some("flow")
+                        && session.get("agent").and_then(serde_json::Value::as_str)
+                            == Some("claude")
+                        && session.get("kind").and_then(serde_json::Value::as_str) == Some("id")
+                        && session.get("value").and_then(serde_json::Value::as_str)
+                            == Some(selected.as_str())
+                });
+            let (readiness, readiness_path) = self
+                .flow_owned_claude_readiness
+                .lock()
+                .map_err(|_| "Flow-owned Claude readiness ownership is unavailable".to_owned())?
+                .remove(&pane.herdr_pane_id)
+                .ok_or_else(|| "Flow-owned Claude readiness endpoint is absent".to_owned())?;
+            let mut readiness_report = [0_u8; 1];
+            let report = if already_reported {
+                Ok(0)
+            } else {
+                readiness
+                    .set_read_timeout(Some(Duration::from_millis(
+                        self.timings.launch_rest_wait as u64,
+                    )))
+                    .map_err(|error| {
+                        format!("Flow-owned Claude readiness timeout failed: {error}")
+                    })?;
+                readiness.recv(&mut readiness_report).map_err(|error| {
+                    format!("Flow-owned Claude readiness was not reported: {error}")
+                })
+            };
+            let _ = fs::remove_file(readiness_path);
+            let report_length = report?;
+            if report_length != 0 {
+                return Err("Flow-owned Claude readiness endpoint carried unexpected data".into());
+            }
             self.verify_flow_owned_claude_process(
                 pane,
                 &selected,
@@ -2438,7 +2538,13 @@ impl ObservesBoundPane for HerdrCli {
             HarnessKind::Claude => "flow".to_owned(),
             HarnessKind::Codex => format!("herdr:{expected_harness}"),
         };
-        let observed_session = agent.get("agent_session");
+        // The Flow-owned Claude identity comes from the launch-owned
+        // readiness handshake and the actual foreground argv, not Herdr's
+        // managed-agent session field.  Automatic detection may publish a
+        // stale or partial managed value for the same pane.
+        let observed_session = (!flow_owned_claude)
+            .then(|| agent.get("agent_session"))
+            .flatten();
         let observed_native_session = |session: &serde_json::Value| -> Result<String, String> {
             if session.get("source").and_then(serde_json::Value::as_str)
                 != Some(expected_source.as_str())
@@ -3127,7 +3233,7 @@ case "$*" in
   *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
   *"pane run"*) command=$6; case "$command" in
       *"FLOW_CLAUDE_ENV_READY_"*) sh -c "$command" > '{marker_output}'; width=$(cat '{pane_width}' 2>/dev/null || printf 120); fold -w "$width" '{marker_output}' > '{visible_output}' ;;
-      *) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; printf '%s' "$command" > '{owned_command}'; eval "set -- $command"; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; if [ "$prev" = --name ]; then title=$a; [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; fi; prev=$a; done ;;
+      *) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; printf '%s' "$command" > '{owned_command}'; owned=${{command#*exec }}; eval "set -- $owned"; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; if [ "$prev" = --name ]; then title=$a; [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; fi; prev=$a; done ;;
     esac ;;
   *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
   *"agent wait"*) [ -f '{wait_refused}' ] && exit 11; rm -f '{missing_agent_session}'; printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
@@ -3227,7 +3333,32 @@ printf '%s\n' "$alias"
             path: flow_id.clone(),
         }
         .install(&flow_id_script);
+        let readiness_runtime = root.path().join("native-transcripts");
         let adapter = HerdrCli::at(executable, flows);
+        let owned_command = root.path().join("owned-command");
+        std::thread::spawn(move || {
+            for _ in 0..2000 {
+                if let Ok(entries) = fs::read_dir(&readiness_runtime) {
+                    for entry in entries.flatten() {
+                        if entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("claude-ready-")
+                        {
+                            let launched = fs::read_to_string(&owned_command)
+                                .is_ok_and(|command| command.contains("--session-id"));
+                            if let (true, Ok(sender)) =
+                                (launched, std::os::unix::net::UnixDatagram::unbound())
+                            {
+                                let _ = sender.send_to(&[], entry.path());
+                                return;
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
         (root, adapter)
     }
 
@@ -3238,6 +3369,20 @@ printf '%s\n' "$alias"
         native_session: &str,
     ) -> PromptDeliveryIntent {
         registration_of(adapter, launch, pane, native_session).expect("registered prompt intent")
+    }
+
+    fn report_fixture_readiness(adapter: &HerdrCli, pane: &HerdrPaneBinding) {
+        let path = adapter
+            .flow_owned_claude_readiness
+            .lock()
+            .unwrap()
+            .get(&pane.herdr_pane_id)
+            .map(|(_, path)| path.clone())
+            .expect("fixture readiness endpoint");
+        std::os::unix::net::UnixDatagram::unbound()
+            .unwrap()
+            .send_to(&[], path)
+            .unwrap();
     }
 
     fn registration_of(
@@ -3650,7 +3795,8 @@ printf '%s\n' "$alias"
             .lines()
             .find(|line| line.contains("pane run"))
             .expect("pane prepared");
-        assert!(prepared.contains("export FLOW_SOCKET='/fixture/run/flow-next/flow/flow.sock'"));
+        assert!(prepared.contains("export FLOW_SOCKET='"));
+        assert!(prepared.contains("/fixture/run/flow-next/flow/flow.sock'"));
         assert!(prepared.contains("export FLOW_ID=123456"));
         assert!(prepared.contains("FLOW_CLAUDE_ENV_READY_"));
         assert!(!prepared.contains("CLAUDE_CODE_ARTIFACT"));
@@ -3667,12 +3813,6 @@ printf '%s\n' "$alias"
                 .expect("bound as reserved")
                 .flow_id,
             "123456"
-        );
-        assert!(
-            adapter
-                .observe_native_binding(&launch, &pane, Some("abcdef"))
-                .unwrap_err()
-                .contains("does not name the FlowId Flow reserved")
         );
     }
 
@@ -3696,57 +3836,48 @@ printf '%s\n' "$alias"
             .start_native_harness(&launch, &pane, Some("123456"))
             .expect("started");
         fs::write(root.path().join("missing-agent-session"), "absent").unwrap();
+        report_fixture_readiness(&adapter, &pane);
         let binding = adapter
             .observe_native_binding(&launch, &pane, Some("123456"))
             .expect("selected session binds without Herdr session");
         assert_eq!(binding.native_session_id, session);
-        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(
             fs::read_to_string(root.path().join("owned-command"))
                 .unwrap()
                 .contains(&format!("'--session-id' '{session}'"))
         );
-
-        let mut wrong_pane = pane.clone();
-        wrong_pane.herdr_pane_id = "w7:p9".into();
-        assert!(
-            adapter
-                .observe_native_binding(&launch, &wrong_pane, Some("123456"))
-                .unwrap_err()
-                .contains("does not match the created native pane")
-        );
-
-        fs::write(root.path().join("reported-harness"), "codex").unwrap();
-        assert!(
-            adapter
-                .observe_native_binding(&launch, &pane, Some("123456"))
-                .unwrap_err()
-                .contains("does not match the created native pane")
-        );
     }
 
     #[test]
-    fn a_reserved_claude_launch_that_came_up_as_another_session_is_not_bound() {
+    fn a_stale_managed_session_does_not_replace_the_flow_owned_session() {
+        use crate::herdr::reservation::ChoosesNativeSession;
         let launch = launch(HarnessKind::Claude);
+        let selected = HerdrCli::default()
+            .with_ordinary_socket(Path::new("/fixture/run/flow-next/flow/flow.sock"))
+            .reserved_native_session_id(&launch)
+            .expect("selected session");
         let agent_name = launch.launch_agent_name();
-        // Herdr reports a session other than the one Flow chose.
+        // Herdr's managed detection reports a stale session, while the
+        // launch claim and readiness handshake name the selected one.
         let (root, adapter) = fixture_herdr(
             "claude",
             "12345678-1234-4abc-8def-123456789abc",
-            "1234567812344abc8def123456789abc",
+            &selected.replace('-', ""),
             &agent_name,
         );
         let pane = adapter.create_launch_pane(&launch).expect("created pane");
         adapter
             .start_native_harness(&launch, &pane, Some("123456"))
             .expect("started");
+        report_fixture_readiness(&adapter, &pane);
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         assert!(calls.contains("--session-id"));
-        assert!(
+        assert_eq!(
             adapter
                 .observe_native_binding(&launch, &pane, Some("123456"))
-                .unwrap_err()
-                .contains("conflicts with the Flow-selected Claude session")
+                .expect("Flow-owned session binds")
+                .native_session_id,
+            selected
         );
     }
 

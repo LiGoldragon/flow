@@ -520,7 +520,7 @@ fn an_order_wakes_an_asleep_primary_fresh() {
                 layer: Layer::Primary,
                 aspect: Aspect::Mind,
                 model_name: "claude-fixture".into(),
-                    effort: "medium".into(),
+                effort: "medium".into(),
             },
         ]))
         .expect("the Primary's model configured");
@@ -3078,7 +3078,7 @@ fn configure_secondary_model(fixture: &NexusFixture, native: &str) {
                 layer: Layer::Secondary,
                 aspect: Aspect::Mind,
                 model_name: native.into(),
-                    effort: "medium".into(),
+                effort: "medium".into(),
             },
         ]))
         .expect("model configured");
@@ -3520,7 +3520,7 @@ fn a_fresh_wake_takes_the_model_of_its_layer_and_aspect() {
                         layer: Layer::Secondary,
                         aspect: aspect.clone(),
                         model_name: (*native).into(),
-                    effort: "medium".into(),
+                        effort: "medium".into(),
                     })
                     .collect(),
             ))

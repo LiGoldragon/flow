@@ -3445,15 +3445,6 @@ mod tests {
         binding
     }
 
-    fn duplicate(flow_binding_result: &meta_signal_flow::FlowBindingResult) -> bool {
-        matches!(
-            flow_binding_result,
-            meta_signal_flow::FlowBindingResult::Refused(refused)
-                if refused.flow_binding_refusal_reason
-                    == meta_signal_flow::FlowBindingRefusalReason::DuplicateFlowId
-        )
-    }
-
     #[test]
     fn a_matching_binding_of_a_flow_already_held_asserts_only_its_role() {
         use crate::store::ReadsFlowRoles;

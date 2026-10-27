@@ -13681,9 +13681,7 @@ mod v3_attempts {
                 model_name: "gpt-sol".into(),
             },
         };
-        let Decision::Ready(current) = super::StoredRole::upgrade_from(previous) else {
-            panic!("role upgrade is total")
-        };
+        let Decision::Ready(current) = super::StoredRole::upgrade_from(previous);
         assert_eq!(current.caller.layer, Layer::Secondary);
     }
 
@@ -13700,9 +13698,7 @@ mod v3_attempts {
             lifecycle: super::FlowLifecycle::Active,
             generation: 1,
         };
-        let Decision::Ready(current) = super::FlowRecord::upgrade_from(previous) else {
-            panic!("flow upgrade is total")
-        };
+        let Decision::Ready(current) = super::FlowRecord::upgrade_from(previous);
         assert_eq!(current.flow_type, "Mind:Secondary:gpt-sol");
     }
 }

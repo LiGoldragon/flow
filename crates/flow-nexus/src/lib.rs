@@ -510,8 +510,8 @@ impl Dispatches for RunningNexus {
                     Ok(node) => {
                         let role = signal_flow::Caller {
                             flow_id: flow_id.clone(),
-                            aspect: binding.aspect.clone(),
-                            power_level: binding.power_level.clone(),
+                            aspect: request.address.aspect.clone(),
+                            layer: request.address.layer.clone(),
                             model_name: binding.model_name.clone(),
                         };
                         match self
@@ -1602,9 +1602,8 @@ mod tests {
         Aspect, Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
         HerdrPaneBinding, HerdrRoute, HerdrRouteSelection, LaunchAttemptPhase, LaunchProfile,
         LaunchStatusOutcome, Layer, NativeLaunchBinding, NativeLaunchIntent,
-        NativeTranscriptAbsence, NativeTranscriptBoundary, Origin, PowerLevel,
-        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement, Response,
-        StartRejection,
+        NativeTranscriptAbsence, NativeTranscriptBoundary, Origin, PromptDeliveryIntent,
+        PromptDeliveryResult, Query, RegistrationAcknowledgement, Response, StartRejection,
     };
     use std::{
         collections::BTreeSet,
@@ -1894,8 +1893,6 @@ mod tests {
     fn existing_binding(flow_id: &str, pane: &str) -> meta_signal_flow::FlowBinding {
         meta_signal_flow::FlowBinding {
             flow_id: flow_id.into(),
-            aspect: Aspect::Mind,
-            power_level: PowerLevel::Medium,
             model_name: "gpt-sol".into(),
             harness_kind: HarnessKind::Codex,
             native_session_id: "01a0b22ce24f7452994064490878680f".into(),
@@ -2051,14 +2048,9 @@ mod tests {
         let _ = fs::remove_file(&socket_path);
         let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
         let address = signal_flow::Address {
-            aspect: binding.aspect.clone(),
+            aspect: Aspect::Mind,
             topic: "core".into(),
-            layer: match binding.power_level {
-                signal_flow::PowerLevel::High => signal_flow::Layer::Primary,
-                signal_flow::PowerLevel::Medium => signal_flow::Layer::Secondary,
-                signal_flow::PowerLevel::Low => signal_flow::Layer::Tertiary,
-                signal_flow::PowerLevel::UltraLow => signal_flow::Layer::Quaternary,
-            },
+            layer: signal_flow::Layer::Secondary,
         };
         let meta_signal_flow::Response::BoundExisting(bound) = fixture.nexus.dispatch_meta_from(
             meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
@@ -3238,8 +3230,8 @@ mod tests {
         previous.flow_lifecycle = FlowLifecycle::Active;
         let previous_role = Caller {
             flow_id: previous.flow_id.clone(),
-            aspect: Aspect::Mind,
-            power_level: PowerLevel::Medium,
+            aspect: address.aspect.clone(),
+            layer: address.layer.clone(),
             model_name: "gpt-sol".into(),
         };
         fixture
@@ -3313,7 +3305,7 @@ mod tests {
         let fixture = NexusFixture::new();
         let binding = existing_binding("a001", "pane-1");
         let address = signal_flow::Address {
-            aspect: binding.aspect.clone(),
+            aspect: Aspect::Mind,
             topic: "core".into(),
             layer: Layer::Secondary,
         };
@@ -3415,53 +3407,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn adoption_refuses_an_address_whose_role_does_not_match_without_partial_rows() {
-        use crate::store::ManagesMetaflowState;
-        let fixture = NexusFixture::new();
-        let socket_path = fixture.directory.path().join("herdr-role-mismatch.sock");
-        let _listener = UnixListener::bind(&socket_path).expect("live Herdr fixture socket");
-        let binding = existing_binding("a007", "pane-1");
-        let response = with_bound_world(&fixture, &[&binding], || {
-            fixture.nexus.dispatch_meta_from(
-                meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
-                    flow_container: flow_container(&socket_path),
-                    address: signal_flow::Address {
-                        aspect: Aspect::Mind,
-                        topic: "message".into(),
-                        layer: Layer::Primary,
-                    },
-                    flow_binding: binding.clone(),
-                }),
-                Some(adoption_resolver()),
-            )
-        });
-        assert!(matches!(
-            response,
-            meta_signal_flow::Response::BoundExisting(meta_signal_flow::BoundExisting {
-                flow_binding_result: meta_signal_flow::FlowBindingResult::Refused(
-                    meta_signal_flow::RefusedFlowBinding {
-                        flow_binding_refusal_reason:
-                            meta_signal_flow::FlowBindingRefusalReason::RoleMismatch,
-                        ..
-                    }
-                ),
-                ..
-            })
-        ));
-        assert!(matches!(
-            fixture
-                .nexus
-                .dispatch(Query::ResolveRecipient("a007".into())),
-            Response::RecipientResolutionRejected(
-                signal_flow::RecipientResolutionRejection::UnknownFlow
-            )
-        ));
-        assert!(fixture.nexus.store.list_metaflows().unwrap().is_empty());
-    }
-
-    /// A Codex pane as Herdr 0.8.2 reports a rested imported Codex flow: done,
-    /// with no `interactive_ready` key (the live 26c50c, 2026-09-25).
+    /// A rested imported Codex pane.
     fn rested_imported_codex_agent() -> serde_json::Value {
         serde_json::json!({
             "agent":"codex", "agent_status":"done", "name":"agent-w1:p3",
@@ -3469,11 +3415,7 @@ mod tests {
         })
     }
 
-    /// Herdr omits `name` for a pane it was never given one for. The label
-    /// is not part of the binding and is no part of the presentation either:
-    /// a nameless recipient seen reacting is Presented, as any other is.
-    /// Grading through `current_route`, which re-reads the name, settled
-    /// every such delivery Uncertain.
+    /// The same pane without a display name.
     fn nameless_rested_codex_agent() -> serde_json::Value {
         let mut agent = rested_imported_codex_agent();
         agent.as_object_mut().expect("agent object").remove("name");
@@ -3596,14 +3538,9 @@ mod tests {
                     meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
                         flow_container: flow_container(&socket_path),
                         address: signal_flow::Address {
-                            aspect: binding.aspect.clone(),
+                            aspect: Aspect::Mind,
                             topic: "core".into(),
-                            layer: match binding.power_level {
-                                PowerLevel::High => Layer::Primary,
-                                PowerLevel::Medium => Layer::Secondary,
-                                PowerLevel::Low => Layer::Tertiary,
-                                PowerLevel::UltraLow => Layer::Quaternary,
-                            },
+                            layer: Layer::Secondary,
                         },
                         flow_binding: binding,
                     }),
@@ -3647,7 +3584,7 @@ mod tests {
         let role = Caller {
             flow_id: "908786".into(),
             aspect: Aspect::Mind,
-            power_level: PowerLevel::Medium,
+            layer: Layer::Secondary,
             model_name: "gpt-sol".into(),
         };
         for _ in 0..2 {
@@ -3693,36 +3630,6 @@ mod tests {
             assert_eq!(listed(&fixture), before);
         }
 
-        // A role once recorded is not replaced by a different one.
-        assert!(!duplicate(&rebind(
-            &fixture,
-            binding_of_registered_row(&fixture)
-        )));
-        let mut other_role = binding_of_registered_row(&fixture);
-        other_role.power_level = PowerLevel::High;
-        let refused_role = rebind(&fixture, other_role);
-        assert!(
-            matches!(
-                &refused_role,
-                meta_signal_flow::FlowBindingResult::Refused(
-                    meta_signal_flow::RefusedFlowBinding {
-                        flow_binding_refusal_reason:
-                            meta_signal_flow::FlowBindingRefusalReason::RoleMismatch,
-                        ..
-                    }
-                )
-            ),
-            "{refused_role:?}"
-        );
-        assert_eq!(
-            fixture
-                .nexus
-                .store
-                .role("908786")
-                .expect("role read")
-                .map(|role| role.power_level),
-            Some(PowerLevel::Medium)
-        );
         assert_eq!(listed(&fixture), before);
     }
 
@@ -4625,9 +4532,7 @@ mod tests {
                     signal_flow::Caller {
                         flow_id: self.binding.flow_id.clone(),
                         aspect: self.profile.address.aspect.clone(),
-                        power_level: <RunningNexus as crate::waking::WakePolicy>::power_of(
-                            &self.profile.address.layer,
-                        ),
+                        layer: self.profile.address.layer.clone(),
                         model_name: self.profile.model_name.clone(),
                     },
                 )
@@ -5214,14 +5119,9 @@ mod tests {
                 meta_signal_flow::Query::MetaBindExisting(meta_signal_flow::MetaBindExisting {
                     flow_container: flow_container(&socket_path),
                     address: signal_flow::Address {
-                        aspect: binding.aspect.clone(),
+                        aspect: Aspect::Mind,
                         topic: "core".into(),
-                        layer: match binding.power_level {
-                            PowerLevel::High => Layer::Primary,
-                            PowerLevel::Medium => Layer::Secondary,
-                            PowerLevel::Low => Layer::Tertiary,
-                            PowerLevel::UltraLow => Layer::Quaternary,
-                        },
+                        layer: Layer::Secondary,
                     },
                     flow_binding: binding,
                 }),
@@ -5256,7 +5156,7 @@ mod tests {
         Caller {
             flow_id: "a001".into(),
             aspect: Aspect::Mind,
-            power_level: PowerLevel::Medium,
+            layer: Layer::Secondary,
             model_name: "gpt-sol".into(),
         }
     }

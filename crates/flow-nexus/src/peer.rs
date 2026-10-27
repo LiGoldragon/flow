@@ -13,10 +13,8 @@
 
 use crate::RunningNexus;
 use crate::binding::{ChecksProcessIdentity, ReadsProcessIdentity};
-use crate::caller::{CallerPane, CallerProcess, LocatesCallerPane, ReadsProcess, ResolvesCaller};
+use crate::caller::{CallerProcess, LocatesCallerPane, ReadsProcess, ResolvesCaller};
 use crate::store::ManagesMetaflowState;
-use crate::store::ReadsFlowRoles;
-use crate::store::delivery::RecordsDeliveries;
 use meta_signal_flow::{MetaRefusal, ProcessIdentity, ResolverIdentity, Response};
 use signal_flow::CallerResolutionRejection;
 use std::fs;
@@ -63,10 +61,14 @@ impl AdmitsMetaPeer for RunningNexus {
                 snapshot.nexus.message_nexus_binary,
                 snapshot.nexus.meta_aspects,
             ),
-            Ok(None) => match self.store.delivery_configuration() {
-                Ok(legacy) => (legacy.message_nexus_path, legacy.meta_aspects),
-                Err(_) => return Some(MetaRefusal::PeerUnknown),
-            },
+            Ok(None) => (
+                String::new(),
+                vec![
+                    signal_flow::Aspect::Psyche,
+                    signal_flow::Aspect::Mind,
+                    signal_flow::Aspect::Field,
+                ],
+            ),
             Err(_) => return Some(MetaRefusal::PeerUnknown),
         };
         if !message_binary.is_empty() && peer.executable() == fs::canonicalize(&message_binary).ok()
@@ -76,12 +78,7 @@ impl AdmitsMetaPeer for RunningNexus {
         let pane = peer.caller_pane(&self.herdr);
         let caller = match self.resolve_caller(pane.clone(), None) {
             signal_flow::Response::CallerResolved(caller) => caller,
-            // In a pane that holds a flow whose role Flow does not know: a
-            // flow still, never the owner.
-            _ if pane.as_ref().is_some_and(|pane| self.pane_holds_flow(pane)) => {
-                return Some(MetaRefusal::PeerUnknown);
-            }
-            // In no pane, or in a pane that holds no flow: the owner.
+            // An unbound pane is admitted under its process identity.
             _ => return None,
         };
         if meta_aspects.contains(&caller.aspect) {
@@ -111,20 +108,5 @@ impl NamesMetaPeer for RunningNexus {
             process_identity,
             flow_id_option,
         })
-    }
-}
-
-/// Whether a pane holds a live flow, whatever its role.
-trait FindsFlowInPane {
-    fn pane_holds_flow(&self, pane: &CallerPane) -> bool;
-}
-
-impl FindsFlowInPane for RunningNexus {
-    fn pane_holds_flow(&self, pane: &CallerPane) -> bool {
-        self.store
-            .flows_in_pane(&pane.herdr_session_name, &pane.herdr_pane_id)
-            .map(|flows| !flows.is_empty())
-            // A store that cannot say is not taken to mean no flow.
-            .unwrap_or(true)
     }
 }

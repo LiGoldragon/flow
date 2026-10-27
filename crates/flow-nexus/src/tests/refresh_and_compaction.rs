@@ -21,8 +21,7 @@ use meta_signal_flow::{
     ConfigurationChange, ConfigureMetaflow, ConfigureModel, ConfigureThreshold, Continuity,
 };
 use signal_flow::{
-    Address, Aspect, Caller, Delivery, FlowLifecycle, Layer, Message, Metaflow, PowerLevel,
-    Request, SentBy,
+    Address, Aspect, Caller, Delivery, FlowLifecycle, Layer, Message, Metaflow, Request, SentBy,
 };
 use std::fs;
 use std::io::Write;
@@ -43,7 +42,7 @@ pub(super) fn seat_refreshing_at(fixture: &NexusFixture, refresh: i64) {
     fixture.nexus.store.seed_role(Caller {
         flow_id: CLAUDE_SEAT.into(),
         aspect: Aspect::Mind,
-        power_level: PowerLevel::Medium,
+        layer: Layer::Secondary,
         model_name: CLAUDE_MODEL.into(),
     });
     fixture

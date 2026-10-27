@@ -1,5 +1,12 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 10 makes the Address the sole owner of a binding role. Caller roles carry
+their exact Layer; PowerLevel and binding role claims are gone. Role and flow
+families advance one version, upgrading High, Medium, Low and UltraLow to
+Primary, Secondary, Tertiary and Quaternary. Fresh meta aspects are Psyche,
+Mind and Field, and an unbound pane is admitted by process. Pins signal-flow
+36.0.0 and meta-signal-flow 50.0.0.
+
 Batch 9 makes every operational timing and size/count limit in the overnight
 audit configured data. Fresh stores seed the `Timings` and `Limits` singleton
 families from committed Datom files; existing stores gain those families with

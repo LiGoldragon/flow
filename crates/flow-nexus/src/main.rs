@@ -572,7 +572,11 @@ mod tests {
             stable_codex: codex("gpt-stable-test"),
             next_codex: codex("gpt-next-test"),
             harness_profiles: vec![],
-            meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
+            meta_aspects: vec![
+                meta_signal_flow::Aspect::Psyche,
+                meta_signal_flow::Aspect::Mind,
+                meta_signal_flow::Aspect::Field,
+            ],
             message_nexus_path: message_socket.into(),
             message_nexus_binary: binary.into(),
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),

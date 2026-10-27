@@ -1,17 +1,13 @@
 //! What MetaBindExisting checks of a container and each flow it binds
 //! before any binding reaches the store.
 
-use crate::{
-    RunningNexus,
-    store::{NamesConfiguredModel, ReadsFlowRows},
-};
+use crate::{RunningNexus, store::ReadsFlowRows};
 use meta_signal_flow::{
     FlowBinding, FlowBindingRefusalReason, FlowBindingResult, FlowContainer, ProcessIdentity,
     RefusedFlowBinding,
 };
 use signal_flow::{
     Address, EndpointSelection, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection, Origin,
-    PowerLevel,
 };
 use std::{
     fs,
@@ -133,20 +129,11 @@ impl VerifiesAdoptedSeat for RunningNexus {
     fn verified_seat_node(
         &self,
         herdr_session_name: &str,
-        address: &Address,
+        _address: &Address,
         binding: &FlowBinding,
     ) -> Result<FlowNode, FlowBindingRefusalReason> {
-        if !binding.is_well_formed()
-            || binding.aspect != address.aspect
-            || binding.power_level
-                != match address.layer {
-                    signal_flow::Layer::Primary => PowerLevel::High,
-                    signal_flow::Layer::Secondary => PowerLevel::Medium,
-                    signal_flow::Layer::Tertiary => PowerLevel::Low,
-                    signal_flow::Layer::Quaternary => PowerLevel::UltraLow,
-                }
-        {
-            return Err(FlowBindingRefusalReason::RoleMismatch);
+        if !binding.is_well_formed() {
+            return Err(FlowBindingRefusalReason::AnatomyMismatch);
         }
         if !binding.process_identity.is_live_process() {
             return Err(FlowBindingRefusalReason::DeadProcess);
@@ -156,13 +143,6 @@ impl VerifiesAdoptedSeat for RunningNexus {
             .works_in(&binding.working_directory)
         {
             return Err(FlowBindingRefusalReason::AnatomyMismatch);
-        }
-        let configured_model = self
-            .store
-            .configured_model(address)
-            .map_err(|_| FlowBindingRefusalReason::HerdrUnreadable)?;
-        if configured_model.as_deref() != Some(binding.model_name.as_str()) {
-            return Err(FlowBindingRefusalReason::RoleMismatch);
         }
         self.herdr
             .verify_existing_binding(herdr_session_name, binding)?;

@@ -71,10 +71,9 @@ use signal_flow::{
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute,
     HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
     LaunchProfile, Launched, Layer, LeaveOut, Lock, Metaflow, NativeLaunchBinding,
-    NativeLaunchIntent, NativeTranscriptBoundary, Origin, PowerLevel, Process,
-    PromptDeliveryIntent, PromptDeliveryResult, Query, RecipientResolutionRejection,
-    RegistrationAcknowledgement, Remembering, ReplaceRejection, Replaced, Request, Response,
-    RouteReadiness, StartRejection,
+    NativeLaunchIntent, NativeTranscriptBoundary, Origin, Process, PromptDeliveryIntent,
+    PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
+    Remembering, ReplaceRejection, Replaced, Request, Response, RouteReadiness, StartRejection,
 };
 
 /// Applies the meta wire's index cursor to an already ordered snapshot.
@@ -330,7 +329,7 @@ impl SeedsConfiguration for DefaultConfiguration {
                 HarnessKind::Claude.default_profile(),
                 HarnessKind::Codex.default_profile(),
             ],
-            meta_aspects: vec![Aspect::Psyche],
+            meta_aspects: vec![Aspect::Psyche, Aspect::Mind, Aspect::Field],
             message_nexus_path: String::new(),
         }
     }
@@ -1335,11 +1334,61 @@ impl EngineRecord for FlowRecord {
 
 impl MemoryDefinition for FlowRecord {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
+        MemoryVersion::new(7)
     }
 
     fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-flow-v7")
+    }
+}
+
+/// A flow row before role names changed from power to layer.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FlowRecordV6 {
+    flow_id: String,
+    flow_type: String,
+    origin: Origin,
+    thread_id: Option<String>,
+    harness_kind: HarnessKind,
+    endpoint_selection: EndpointSelection,
+    lifecycle: FlowLifecycle,
+    generation: u64,
+}
+
+impl EngineRecord for FlowRecordV6 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.flow_id.clone())
+    }
+}
+
+impl MemoryDefinition for FlowRecordV6 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(6)
+    }
+    fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-flow-v6")
+    }
+}
+
+impl UpgradeFrom<FlowRecordV6> for FlowRecord {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: FlowRecordV6) -> Decision<Self, Self::Refusal> {
+        let flow_type = previous
+            .flow_type
+            .replace(":High:", ":Primary:")
+            .replace(":Medium:", ":Secondary:")
+            .replace(":Low:", ":Tertiary:")
+            .replace(":UltraLow:", ":Quaternary:");
+        Decision::Ready(Self {
+            flow_id: previous.flow_id,
+            flow_type,
+            origin: previous.origin,
+            thread_id: previous.thread_id,
+            harness_kind: previous.harness_kind,
+            endpoint_selection: previous.endpoint_selection,
+            lifecycle: previous.lifecycle,
+            generation: previous.generation,
+        })
     }
 }
 
@@ -1424,9 +1473,58 @@ struct StoredRole {
     caller: Caller,
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct CallerV1 {
+    flow_id: String,
+    aspect: Aspect,
+    power_level: PowerLevel,
+    model_name: String,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredRoleV1 {
+    caller: CallerV1,
+}
+
+impl EngineRecord for StoredRoleV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.caller.flow_id.clone())
+    }
+}
+impl MemoryDefinition for StoredRoleV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-role-v1")
+    }
+}
+impl UpgradeFrom<StoredRoleV1> for StoredRole {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredRoleV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            caller: Caller {
+                flow_id: previous.caller.flow_id,
+                aspect: previous.caller.aspect,
+                layer: previous.caller.power_level.into(),
+                model_name: previous.caller.model_name,
+            },
+        })
+    }
+}
+
 impl EngineRecord for StoredRole {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.caller.flow_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredRole {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-role-v2")
     }
 }
 
@@ -1946,7 +2044,7 @@ impl UpgradeFrom<StoredLaunchAttemptV1> for StoredLaunchAttempt {
                 })
                 .collect(),
             skills: profile.skill_name_vector,
-            power_level: profile.power_level,
+            layer: profile.power_level.into(),
             harness_kind: profile.harness_kind,
             bundle_file: profile.system_prompt_bundle_file,
             origin_clue: OriginClue {
@@ -2016,6 +2114,25 @@ struct LaunchAttemptBeforeModules {
     registration_acknowledgement_option: Option<RegistrationAcknowledgement>,
     prompt_delivery_intent_option: Option<PromptDeliveryIntentBeforeModules>,
     prompt_delivery_result_option: Option<PromptDeliveryResultBeforeModules>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum PowerLevel {
+    High,
+    Medium,
+    Low,
+    UltraLow,
+}
+
+impl From<PowerLevel> for Layer {
+    fn from(value: PowerLevel) -> Self {
+        match value {
+            PowerLevel::High => Layer::Primary,
+            PowerLevel::Medium => Layer::Secondary,
+            PowerLevel::Low => Layer::Tertiary,
+            PowerLevel::UltraLow => Layer::Quaternary,
+        }
+    }
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -2203,7 +2320,7 @@ impl NamesKeptLaunchRole for QuarantinedLaunchAttempt {
             .map(|_| Caller {
                 flow_id: flow_id.into(),
                 aspect,
-                power_level,
+                layer: power_level.into(),
                 model_name,
             })
     }
@@ -3433,6 +3550,10 @@ trait UpgradesFlowFamilies {
         &mut self,
         descriptor: TableDescriptor<FlowRecord>,
     ) -> Result<TableReference<FlowRecord>, StoreError>;
+    fn upgraded_roles(
+        &mut self,
+        descriptor: TableDescriptor<StoredRole>,
+    ) -> Result<TableReference<StoredRole>, StoreError>;
     fn upgraded_launch_outcomes(
         &mut self,
         descriptor: TableDescriptor<StoredLaunchOutcome>,
@@ -3750,7 +3871,31 @@ impl UpgradesFlowFamilies for Engine {
         &mut self,
         descriptor: TableDescriptor<FlowRecord>,
     ) -> Result<TableReference<FlowRecord>, StoreError> {
-        match self.upgrade_table::<FlowRecordV5, FlowRecord>(descriptor) {
+        match self.upgrade_table::<FlowRecordV6, FlowRecord>(descriptor.clone()) {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission =>
+            {
+                match self.upgrade_table::<FlowRecordV5, FlowRecord>(descriptor) {
+                    UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+                    UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+                    UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                    UpgradeOutcome::Failed(failure) => {
+                        Err(StoreError::FlowUpgrade(format!("{failure:?}")))
+                    }
+                }
+            }
+            UpgradeOutcome::Failed(failure) => Err(StoreError::FlowUpgrade(format!("{failure:?}"))),
+        }
+    }
+
+    fn upgraded_roles(
+        &mut self,
+        descriptor: TableDescriptor<StoredRole>,
+    ) -> Result<TableReference<StoredRole>, StoreError> {
+        match self.upgrade_table::<StoredRoleV1, StoredRole>(descriptor) {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
             UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
@@ -4525,7 +4670,8 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-flow"),
             FlowRecord::schema_hash(),
         )
-        .with_predecessor::<FlowRecordV5>();
+        .with_predecessor::<FlowRecordV5>()
+        .with_predecessor::<FlowRecordV6>();
         let native_owner_proofs_descriptor = NativeOwnerProofRecord::descriptor();
         let state_descriptor = TableDescriptor::<FlowStoreState>::new(
             FLOW_STATE_TABLE_NAME,
@@ -4599,8 +4745,9 @@ impl OpensFlowStore for FlowStore {
         let roles_descriptor = TableDescriptor::<StoredRole>::new(
             FLOW_ROLE_TABLE_NAME,
             FamilyName::new("flow-nexus-role"),
-            SchemaHash::for_label("flow-nexus-role-v1"),
-        );
+            SchemaHash::for_label("flow-nexus-role-v2"),
+        )
+        .with_predecessor::<StoredRoleV1>();
         let quarantined_launch_attempts_descriptor =
             TableDescriptor::<QuarantinedLaunchAttempt>::new(
                 FLOW_QUARANTINED_LAUNCH_ATTEMPT_TABLE_NAME,
@@ -4711,7 +4858,7 @@ impl OpensFlowStore for FlowStore {
         let launch_panes = engine.register_table(launch_panes_descriptor)?;
         let launch_outcomes = engine.upgraded_launch_outcomes(launch_outcomes_descriptor)?;
         let replacements = engine.register_table(replacements_descriptor)?;
-        let roles = engine.register_table(roles_descriptor)?;
+        let roles = engine.upgraded_roles(roles_descriptor)?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
         let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
         let event_tables =
@@ -4792,7 +4939,8 @@ impl OpensFlowStore for FlowStore {
                 FamilyName::new("flow-nexus-flow"),
                 FlowRecord::schema_hash(),
             )
-            .with_predecessor::<FlowRecordV5>(),
+            .with_predecessor::<FlowRecordV5>()
+            .with_predecessor::<FlowRecordV6>(),
         )?;
         let native_owner_proofs = engine.register_table(NativeOwnerProofRecord::descriptor())?;
         let state = engine.register_table(TableDescriptor::new(
@@ -4859,11 +5007,14 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-replacement"),
             SchemaHash::for_label("flow-nexus-replacement-v1"),
         ))?;
-        let roles = engine.register_table(TableDescriptor::new(
-            FLOW_ROLE_TABLE_NAME,
-            FamilyName::new("flow-nexus-role"),
-            SchemaHash::for_label("flow-nexus-role-v1"),
-        ))?;
+        let roles = engine.upgraded_roles(
+            TableDescriptor::new(
+                FLOW_ROLE_TABLE_NAME,
+                FamilyName::new("flow-nexus-role"),
+                SchemaHash::for_label("flow-nexus-role-v2"),
+            )
+            .with_predecessor::<StoredRoleV1>(),
+        )?;
         let quarantined_launch_attempts = engine.register_table(TableDescriptor::new(
             FLOW_QUARANTINED_LAUNCH_ATTEMPT_TABLE_NAME,
             FamilyName::new("flow-nexus-quarantined-launch-attempt"),
@@ -5692,9 +5843,7 @@ impl AdoptsLegacyRoles for FlowStore {
                     .map(|_| Caller {
                         flow_id: flow.flow_id.clone(),
                         aspect: attempt.launch_profile.address.aspect.clone(),
-                        power_level: <crate::RunningNexus as crate::waking::WakePolicy>::power_of(
-                            &attempt.launch_profile.address.layer,
-                        ),
+                        layer: attempt.launch_profile.address.layer.clone(),
                         model_name: attempt.launch_profile.model_name.clone(),
                     })
             });
@@ -5728,18 +5877,18 @@ impl ReadsLegacyRole for FlowRecord {
             "Field" => Aspect::Field,
             _ => return None,
         };
-        let power_level = match parts.next()? {
-            "High" => PowerLevel::High,
-            "Medium" => PowerLevel::Medium,
-            "Low" => PowerLevel::Low,
-            "UltraLow" => PowerLevel::UltraLow,
+        let layer = match parts.next()? {
+            "High" | "Primary" => Layer::Primary,
+            "Medium" | "Secondary" => Layer::Secondary,
+            "Low" | "Tertiary" => Layer::Tertiary,
+            "UltraLow" | "Quaternary" => Layer::Quaternary,
             _ => return None,
         };
         let model_name = parts.next().filter(|model| !model.is_empty())?;
         Some(Caller {
             flow_id: self.flow_id.clone(),
             aspect,
-            power_level,
+            layer,
             model_name: model_name.into(),
         })
     }
@@ -5776,20 +5925,6 @@ impl RegistersExistingFlow for FlowStore {
         binding: &meta_signal_flow::FlowBinding,
     ) -> Result<ExistingSeatAdoption, StoreError> {
         use meta_signal_flow::FlowBindingRefusalReason as Refusal;
-        if role.flow_id != flow_node.flow_id || role.aspect != address.aspect {
-            return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
-        }
-        let expected_power = match address.layer {
-            Layer::Primary => PowerLevel::High,
-            Layer::Secondary => PowerLevel::Medium,
-            Layer::Tertiary => PowerLevel::Low,
-            Layer::Quaternary => PowerLevel::UltraLow,
-        };
-        if role.power_level != expected_power
-            || self.configured_model(&address)?.as_deref() != Some(role.model_name.as_str())
-        {
-            return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
-        }
         let HerdrRouteSelection::Available(route) = flow_node.herdr_route_selection.clone() else {
             return Ok(ExistingSeatAdoption::Refused(Refusal::AnatomyMismatch));
         };
@@ -5862,12 +5997,6 @@ impl RegistersExistingFlow for FlowStore {
                     Refusal::NativeIdentityMismatch,
                 ));
             }
-            if self
-                .role(&flow_node.flow_id)?
-                .is_some_and(|stored| stored != role)
-            {
-                return Ok(ExistingSeatAdoption::Refused(Refusal::RoleMismatch));
-            }
         }
         let lifecycle = match flow_node.flow_lifecycle {
             SignalFlowLifecycle::Pending | SignalFlowLifecycle::Active => FlowLifecycle::Active,
@@ -5879,10 +6008,7 @@ impl RegistersExistingFlow for FlowStore {
         };
         let flow_record = FlowRecord {
             flow_id: flow_node.flow_id.clone(),
-            flow_type: format!(
-                "{:?}:{:?}:{}",
-                role.aspect, role.power_level, role.model_name
-            ),
+            flow_type: format!("{:?}:{:?}:{}", role.aspect, role.layer, role.model_name),
             origin: flow_node.origin.clone(),
             thread_id: Some(flow_node.session_id.clone()),
             harness_kind: flow_node.harness_kind.clone(),
@@ -6949,7 +7075,7 @@ impl WritesFlowStore for FlowStore {
                         flow_type,
                         origin: origin.clone(),
                         thread_id: None,
-                        harness_kind: HarnessKind::Codex,
+                        harness_kind: signal_flow::HarnessKind::Codex,
                         endpoint_selection: EndpointSelection::Available(
                             signal_flow::Available_Data {
                                 endpoint_path: stable_socket,
@@ -7322,7 +7448,7 @@ impl EarlierLaunchAttemptRows {
             flow_id: self.bound_flow_id.clone(),
             session_id: format!("{}-session", self.bound_flow_id),
             harness_kind: HarnessKind::Claude,
-            endpoint_selection: EndpointSelection::Unavailable,
+            endpoint_selection: signal_flow::EndpointSelection::Unavailable,
             herdr_route_selection: HerdrRouteSelection::Available(HerdrRoute {
                 herdr_session_name: "messaging-build".into(),
                 herdr_agent_name: "psyche-opus-earlier".into(),
@@ -7558,7 +7684,7 @@ pub(crate) trait ReadsFlowMemory {
                 ));
             }
             "flow_nexus_replacements" => ("flow-nexus-replacement", "flow-nexus-replacement-v1"),
-            "flow_nexus_roles" => ("flow-nexus-role", "flow-nexus-role-v1"),
+            "flow_nexus_roles" => ("flow-nexus-role", "flow-nexus-role-v2"),
             "flow_nexus_quarantined_launch_attempts" => (
                 "flow-nexus-quarantined-launch-attempt",
                 "flow-nexus-quarantined-launch-attempt-v1",
@@ -9374,8 +9500,6 @@ mod tests {
         let binding =
             |flow_id: &str, pid: i64, uid: i64, start: String| meta_signal_flow::FlowBinding {
                 flow_id: flow_id.into(),
-                aspect: Aspect::Mind,
-                power_level: PowerLevel::Medium,
                 model_name: "gpt-sol".into(),
                 harness_kind: HarnessKind::Claude,
                 native_session_id: format!("session-{flow_id}"),
@@ -9400,7 +9524,7 @@ mod tests {
         let role = |flow_id: &str| Caller {
             flow_id: flow_id.into(),
             aspect: Aspect::Mind,
-            power_level: PowerLevel::Medium,
+            layer: Layer::Secondary,
             model_name: "gpt-sol".into(),
         };
         assert!(matches!(
@@ -9479,7 +9603,7 @@ mod tests {
         HarnessKind, HerdrPaneBinding, LaunchAttemptPhase, LaunchAttemptReservation, LaunchProfile,
         Layer, NativeLaunchBinding, NativeLaunchIntent, NativeTargetReceipt,
         NativeTranscriptAbsence, NativeTranscriptBoundary, NativeTranscriptCursor, Origin,
-        PowerLevel, PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
+        PromptDeliveryIntent, PromptDeliveryResult, Query, RegistrationAcknowledgement,
         ReplaceRejection, Response, StartRejection, StopRejection, TargetReceiptRequest,
     };
 
@@ -11118,7 +11242,7 @@ mod tests {
             Some(signal_flow::Caller {
                 flow_id: "bound-old".into(),
                 aspect: Aspect::Mind,
-                power_level: PowerLevel::Medium,
+                layer: Layer::Secondary,
                 model_name: "gpt-sol".into(),
             })
         );
@@ -11228,7 +11352,7 @@ mod tests {
             Some(signal_flow::Caller {
                 flow_id: "launched-earlier".into(),
                 aspect: Aspect::Psyche,
-                power_level: PowerLevel::Medium,
+                layer: Layer::Secondary,
                 model_name: "claude-opus-5-5".into(),
             })
         );
@@ -11771,7 +11895,7 @@ mod tests {
                     source_sha256: "cd".repeat(32),
                 }],
                 skills: vec!["operation-main-flow".into()],
-                power_level: PowerLevel::Medium,
+                layer: Layer::Secondary,
                 harness_kind: HarnessKind::Codex,
                 bundle_file: "/kept/bundles/flow34.md".into(),
                 origin_clue: OriginClue {
@@ -11805,7 +11929,7 @@ mod tests {
         let role = signal_flow::Caller {
             flow_id: "psyche-high".into(),
             aspect: Aspect::Psyche,
-            power_level: PowerLevel::High,
+            layer: Layer::Primary,
             model_name: "claude-opus-5-5".into(),
         };
         let node = pane_node("psyche-high", "w1:p3");
@@ -13052,7 +13176,7 @@ mod tests {
                             stable_codex: endpoint("stable"),
                             next_codex: endpoint("next"),
                             harness_profiles: vec![],
-                            meta_aspects: vec![Aspect::Psyche],
+                            meta_aspects: vec![Aspect::Psyche, Aspect::Mind, Aspect::Field],
                             message_nexus_path: "/fixture/message.sock".into(),
                             message_nexus_binary: "/fixture/message-nexus".into(),
                             lease: 45,
@@ -13815,5 +13939,41 @@ mod v3_attempts {
             panic!("threshold upgrade is total")
         };
         assert_eq!(current.threshold.refresh_tokens, 150_000);
+    }
+
+    #[test]
+    fn a_power_role_upgrades_to_the_exact_layer() {
+        use sema_engine::{Decision, UpgradeFrom};
+        let previous = super::StoredRoleV1 {
+            caller: super::CallerV1 {
+                flow_id: "908786".into(),
+                aspect: Aspect::Mind,
+                power_level: super::PowerLevel::Medium,
+                model_name: "gpt-sol".into(),
+            },
+        };
+        let Decision::Ready(current) = super::StoredRole::upgrade_from(previous) else {
+            panic!("role upgrade is total")
+        };
+        assert_eq!(current.caller.layer, Layer::Secondary);
+    }
+
+    #[test]
+    fn a_power_named_flow_type_upgrades_to_the_layer_name() {
+        use sema_engine::{Decision, UpgradeFrom};
+        let previous = super::FlowRecordV6 {
+            flow_id: "908786".into(),
+            flow_type: "Mind:Medium:gpt-sol".into(),
+            origin: Origin::Unbound,
+            thread_id: None,
+            harness_kind: signal_flow::HarnessKind::Codex,
+            endpoint_selection: signal_flow::EndpointSelection::Unavailable,
+            lifecycle: super::FlowLifecycle::Active,
+            generation: 1,
+        };
+        let Decision::Ready(current) = super::FlowRecord::upgrade_from(previous) else {
+            panic!("flow upgrade is total")
+        };
+        assert_eq!(current.flow_type, "Mind:Secondary:gpt-sol");
     }
 }

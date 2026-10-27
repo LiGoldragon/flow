@@ -152,6 +152,7 @@ pub trait HoldsWakingMetaflows {
     /// Holds the metaflow for a wake; None when a wake already holds it.
     fn hold(&self, address: &Address) -> Option<WakingLease<'_>>;
     fn is_waking(&self, address: &Address) -> bool;
+    fn release(&self, address: &Address);
 }
 
 impl HoldsWakingMetaflows for WakingMetaflows {
@@ -164,6 +165,13 @@ impl HoldsWakingMetaflows for WakingMetaflows {
             held: self,
             address: address.clone(),
         })
+    }
+
+    fn release(&self, address: &Address) {
+        self.waking
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(address);
     }
 
     fn is_waking(&self, address: &Address) -> bool {

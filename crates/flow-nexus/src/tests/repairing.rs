@@ -308,7 +308,7 @@ fn rebind_pane_moves_the_current_flow_to_its_new_pane() {
     fixture.nexus.store.seed_metaflow(asleep);
     assert_eq!(
         rebind(Rebinding::Pane("w1:p9".into()), seat_address()),
-        MetaResponse::RebindRejected(RebindRejected_Data::NotAwake)
+        MetaResponse::RebindRejected(RebindRejected_Data::FlowNotLive)
     );
     assert!(!herdr_closed_anything(&fixture));
     assert!(fixture.typed().is_none());
@@ -371,10 +371,8 @@ fn rebind_flow_makes_another_flow_current() {
     let mut asleep = metaflow;
     asleep.state = State::Asleep;
     fixture.nexus.store.seed_metaflow(asleep);
-    assert_eq!(
-        rebind(CLAUDE_SEAT),
-        MetaResponse::RebindRejected(RebindRejected_Data::NotAwake)
-    );
+    assert_eq!(rebind(CLAUDE_SEAT), MetaResponse::Rebound(seat_address()));
+    assert_eq!(stored(&fixture).state, State::Awake(CLAUDE_SEAT.into()));
 }
 
 /// Withdraw takes one queued request out and leaves the rest. A request
@@ -471,4 +469,61 @@ fn withdraw_takes_one_request_out_and_closes_its_attempt() {
         withdraw("withdraw-1", elsewhere()),
         MetaResponse::WithdrawRejected(WithdrawRejected_Data::UnknownAddress)
     );
+}
+
+/// Store-only queue and metaflow repairs mutate Memory without touching Herdr.
+#[test]
+fn owner_repairs_queue_sleep_and_forget_without_harness_action() {
+    use meta_signal_flow::{Enqueue_Data, Requeue_Data};
+    let fixture = NexusFixture::new();
+    awake_seat(&fixture, vec![entry("first")]);
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Enqueue(Enqueue_Data {
+                address: seat_address(),
+                queue_entry: entry("second"),
+            })),
+        MetaResponse::Enqueued("second".into())
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Requeue(Requeue_Data {
+                address: seat_address(),
+                logical_delivery_id: "second".into(),
+                position: 0,
+            })),
+        MetaResponse::Requeued("second".into())
+    );
+    assert_eq!(
+        stored(&fixture).queue,
+        vec![entry("second"), entry("first")]
+    );
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Sleep(seat_address())),
+        MetaResponse::Slept(seat_address())
+    );
+    assert_eq!(stored(&fixture).state, State::Asleep);
+    assert!(!herdr_closed_anything(&fixture));
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Forget(seat_address())),
+        MetaResponse::Forgotten(seat_address())
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&seat_address())
+            .unwrap()
+            .is_none()
+    );
+    assert!(!herdr_closed_anything(&fixture));
 }

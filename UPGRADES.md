@@ -7,7 +7,6 @@ launch, Flow starts every required Address not Awake and rejects with
 advances to v9; an archived `NoSecondary` is retained as an unrecorded
 Secondary requirement.
 
->>>>>>> 03d91d3 (Flow batch 6: start declared metaflow requirements)
 Batch 4 adds typed Line, Keys and Clear owner commands and ReadPane. Keys
 carry the exact Herdr keys; they are admitted in a Blocked pane. Line and
 Clear require Gate.Forced there. Flow pins meta-signal-flow 43.0.0.
@@ -22,12 +21,18 @@ on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`
 branch, whose schema it carries. Every ordinary and meta peer repins, and
 Curriculum serves that schema.
 
+- Store-only recovery repins meta-signal-flow 42 and adds owner repairs for
+  queued work, metaflow state, launch settlement, successors, lifecycle,
+  in-memory holds, context, quarantine, and extended rebind. These operations
+  mutate Flow memory without acting on a harness.
+>>>>>>> d805a0b (Flow batch 7: add store-only recovery operations)
 - Pins meta-signal-flow 42.0.0. Pane deliveries are complete datoms:
   priority-headed `Letter.{ Kind Sender Body }`, with the sender Address and
   Flow ID resolved at ordinary Send admission. Logical-delivery current
   Memory upgrades v4 to v5; older queued work remains intact without an
   invented sender identity. The plain CLI message form requires address,
   priority, kind, and words.
+
 
 - An abrupt request may use `Delivery.Queue`; it enters the recipient's
   durable queue and answers `SendAccepted` instead of

@@ -518,8 +518,8 @@ impl Dispatches for RunningNexus {
                                 meta_signal_flow::FlowBindingResult::Bound(
                                     meta_signal_flow::BoundFlowBinding {
                                         flow_id,
-                                        flow_lifecycle:
-                                            meta_signal_flow::FlowLifecycle::AdoptedActive,
+                                        binding_lifecycle:
+                                            meta_signal_flow::BindingLifecycle::AdoptedActive,
                                     },
                                 )
                             }
@@ -574,6 +574,143 @@ impl Dispatches for RunningNexus {
             meta_signal_flow::Query::Rebind(rebind) => {
                 use crate::repairing::RepairsFromMeta;
                 self.rebind(rebind)
+            }
+            meta_signal_flow::Query::Enqueue(request) => {
+                use crate::store::repair::RepairsStoredState;
+                let id = request.queue_entry.logical_delivery_id.clone();
+                match self
+                    .store
+                    .enqueue_repair(&request.address, request.queue_entry)
+                {
+                    Ok(Ok(())) => meta_signal_flow::Response::Enqueued(id),
+                    Ok(Err(reason)) => meta_signal_flow::Response::QueueRepairRejected(reason),
+                    Err(_) => meta_signal_flow::Response::QueueRepairRejected(
+                        meta_signal_flow::QueueRepairRejected_Data::StoreRefused,
+                    ),
+                }
+            }
+            meta_signal_flow::Query::Requeue(request) => {
+                use crate::store::repair::RepairsStoredState;
+                match self.store.requeue_repair(
+                    &request.address,
+                    &request.logical_delivery_id,
+                    request.position,
+                ) {
+                    Ok(Ok(())) => meta_signal_flow::Response::Requeued(request.logical_delivery_id),
+                    Ok(Err(reason)) => meta_signal_flow::Response::QueueRepairRejected(reason),
+                    Err(_) => meta_signal_flow::Response::QueueRepairRejected(
+                        meta_signal_flow::QueueRepairRejected_Data::StoreRefused,
+                    ),
+                }
+            }
+            meta_signal_flow::Query::Sleep(address) => {
+                use crate::store::repair::RepairsStoredState;
+                match self.store.sleep_repair(&address) {
+                    Ok(Ok(())) => meta_signal_flow::Response::Slept(address),
+                    Ok(Err(reason)) => meta_signal_flow::Response::QueueRepairRejected(reason),
+                    Err(_) => meta_signal_flow::Response::QueueRepairRejected(
+                        meta_signal_flow::QueueRepairRejected_Data::StoreRefused,
+                    ),
+                }
+            }
+            meta_signal_flow::Query::Forget(address) => {
+                use crate::store::repair::RepairsStoredState;
+                match self.store.forget_repair(&address) {
+                    Ok(Ok(())) => meta_signal_flow::Response::Forgotten(address),
+                    Ok(Err(reason)) => meta_signal_flow::Response::QueueRepairRejected(reason),
+                    Err(_) => meta_signal_flow::Response::QueueRepairRejected(
+                        meta_signal_flow::QueueRepairRejected_Data::StoreRefused,
+                    ),
+                }
+            }
+            meta_signal_flow::Query::SettleLaunch(request) => {
+                use crate::store::repair::RepairsStoredState;
+                match self
+                    .store
+                    .settle_launch_repair(&request.launch_request_id, request.settlement)
+                {
+                    Ok(Ok(())) => {
+                        meta_signal_flow::Response::LaunchSettled(request.launch_request_id)
+                    }
+                    Ok(Err(reason)) => meta_signal_flow::Response::SettleLaunchRejected(reason),
+                    Err(_) => meta_signal_flow::Response::SettleLaunchRejected(
+                        meta_signal_flow::SettleLaunchRejected_Data::StoreRefused,
+                    ),
+                }
+            }
+            meta_signal_flow::Query::ForgetSuccessor(address) => {
+                use crate::store::successor::OwesSuccessors;
+                match self.store.successor_intent(&address) {
+                    Ok(None) => meta_signal_flow::Response::ForgetSuccessorRejected(
+                        meta_signal_flow::ForgetSuccessorRejected_Data::NotOwed,
+                    ),
+                    Ok(Some(_)) => match self.store.forget_successor(&address) {
+                        Ok(()) => meta_signal_flow::Response::SuccessorForgotten(address),
+                        Err(_) => meta_signal_flow::Response::ForgetSuccessorRejected(
+                            meta_signal_flow::ForgetSuccessorRejected_Data::StoreRefused,
+                        ),
+                    },
+                    Err(_) => meta_signal_flow::Response::ForgetSuccessorRejected(
+                        meta_signal_flow::ForgetSuccessorRejected_Data::StoreRefused,
+                    ),
+                }
+            }
+            meta_signal_flow::Query::SetLifecycle(request) => {
+                use crate::store::repair::RepairsStoredState;
+                match self
+                    .store
+                    .set_lifecycle_repair(&request.flow_id, request.flow_lifecycle)
+                {
+                    Ok(true) => meta_signal_flow::Response::LifecycleSet(request.flow_id),
+                    Ok(false) => meta_signal_flow::Response::SetLifecycleRejected(
+                        meta_signal_flow::SetLifecycleRejected_Data::UnknownFlow,
+                    ),
+                    Err(_) => meta_signal_flow::Response::SetLifecycleRejected(
+                        meta_signal_flow::SetLifecycleRejected_Data::StoreRefused,
+                    ),
+                }
+            }
+            meta_signal_flow::Query::ReleaseHolds(address) => {
+                use crate::delivery::lease::LeasesPanes;
+                use crate::waking::HoldsWakingMetaflows;
+                self.waking.release(&address);
+                if let Ok(Some(metaflow)) =
+                    crate::store::repair::RepairsMetaflows::inspection(&self.store, &address)
+                    && let Some(node) = metaflow.binding.flow_node_option
+                    && let HerdrRouteSelection::Available(route) = node.herdr_route_selection
+                {
+                    self.pane_leases.release(&route);
+                }
+                meta_signal_flow::Response::HoldsReleased(address)
+            }
+            meta_signal_flow::Query::ReadContext(flow_id) => {
+                use crate::store::repair::RepairsStoredState;
+                match self.store.context_repair(&flow_id) {
+                    Ok(Some((context_tokens_option, refresh_tokens_option))) => {
+                        meta_signal_flow::Response::ContextRead(
+                            meta_signal_flow::ContextRead_Data {
+                                flow_id,
+                                context_tokens_option,
+                                refresh_tokens_option,
+                            },
+                        )
+                    }
+                    Ok(None) => meta_signal_flow::Response::ReadContextRejected(
+                        meta_signal_flow::ReadContextRejected_Data::UnknownFlow,
+                    ),
+                    Err(_) => meta_signal_flow::Response::ReadContextRejected(
+                        meta_signal_flow::ReadContextRejected_Data::StoreRefused,
+                    ),
+                }
+            }
+            meta_signal_flow::Query::ReadQuarantine => {
+                use crate::store::repair::RepairsStoredState;
+                match self.store.quarantined_repairs() {
+                    Ok(rows) => meta_signal_flow::Response::QuarantineRead(rows),
+                    Err(error) => meta_signal_flow::Response::Refused(
+                        meta_signal_flow::StoreRefusal::Store(error.to_string()),
+                    ),
+                }
             }
             meta_signal_flow::Query::Withdraw(withdraw) => {
                 use crate::repairing::RepairsFromMeta;
@@ -2817,8 +2954,8 @@ mod tests {
             &bound.flow_binding_result,
             meta_signal_flow::FlowBindingResult::Bound(binding)
                 if binding.flow_id == "a001"
-                    && binding.flow_lifecycle
-                        == meta_signal_flow::FlowLifecycle::AdoptedActive
+                    && binding.binding_lifecycle
+                        == meta_signal_flow::BindingLifecycle::AdoptedActive
         ));
 
         let Response::RecipientResolved(node) = fixture

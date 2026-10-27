@@ -44,9 +44,18 @@ pub struct PaneLease<'leases> {
 /// Takes the exclusive hold on a pane, waiting while another write holds it.
 pub trait LeasesPanes {
     fn hold(&self, route: &HerdrRoute) -> PaneLease<'_>;
+    fn release(&self, route: &HerdrRoute);
 }
 
 impl LeasesPanes for PaneLeases {
+    fn release(&self, route: &HerdrRoute) {
+        self.held
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&LeasedPane::from(route));
+        self.released.notify_all();
+    }
+
     fn hold(&self, route: &HerdrRoute) -> PaneLease<'_> {
         let pane = LeasedPane::from(route);
         let mut held = self

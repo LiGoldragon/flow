@@ -8,11 +8,10 @@
 //! ReadQueueDeliveries.
 
 use super::waking::{
-    CLAUDE_SEAT, CLAUDE_SESSION, address, append_main_rows, claude_agent, claude_seat, claude_stop,
-    end_turn, stored, working_claude_agent,
+    address, append_main_rows, claude_agent, claude_seat, claude_stop, end_turn, stored,
+    working_claude_agent, CLAUDE_SEAT, CLAUDE_SESSION,
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
-use crate::Dispatches;
 use crate::composition::RendersQueuedWork;
 use crate::generated::operation::Outcome;
 use crate::reporting::RecordsReports;
@@ -20,6 +19,7 @@ use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::SeedsMetaflow;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::waking::{PerformsWakeAndDrain, ReconcilesQueueDelivery, SettlesStopsAtConfirmation};
+use crate::Dispatches;
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{
@@ -299,12 +299,10 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 0);
-    assert!(
-        !fixture
-            .typed()
-            .unwrap_or_default()
-            .contains("Psyche core Secondary")
-    );
+    assert!(!fixture
+        .typed()
+        .unwrap_or_default()
+        .contains("Psyche core Secondary"));
     assert_eq!(queue(&fixture), vec![second]);
     assert_eq!(
         stored(&fixture, Layer::Secondary).state,
@@ -444,18 +442,16 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
         .store
         .read_logical_delivery_snapshots(&first_sender, None)
         .unwrap();
-    assert!(
-        settled_late
-            .delivery_snapshot_vector
-            .iter()
-            .any(|snapshot| {
-                snapshot.logical_delivery_id == first.logical_delivery_id
-                    && matches!(
-                        &snapshot.delivery_state,
-                        signal_flow::DeliveryState::Delivered(_)
-                    )
-            })
-    );
+    assert!(settled_late
+        .delivery_snapshot_vector
+        .iter()
+        .any(|snapshot| {
+            snapshot.logical_delivery_id == first.logical_delivery_id
+                && matches!(
+                    &snapshot.delivery_state,
+                    signal_flow::DeliveryState::Delivered(_)
+                )
+        }));
     assert!(queue(&fixture).is_empty());
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
@@ -780,12 +776,10 @@ fn stuck_hand_over(fixture: &NexusFixture, queue: Vec<TestRequest>) -> String {
             Undecided::AbsenceUnprovable
         )))
     ));
-    assert!(
-        standings
-            .iter()
-            .skip(1)
-            .all(|standing| matches!(standing, QueueDeliveryStanding::Uncertain(_)))
-    );
+    assert!(standings
+        .iter()
+        .skip(1)
+        .all(|standing| matches!(standing, QueueDeliveryStanding::Uncertain(_))));
     attempt_id(fixture)
 }
 

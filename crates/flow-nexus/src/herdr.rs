@@ -11,7 +11,7 @@ use crate::codex::{CodexEndpoint, CodexEndpoints};
 use std::collections::BTreeSet;
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
@@ -147,13 +147,6 @@ impl Default for HerdrCli {
     fn default() -> Self {
         use crate::store::{LaysOutDefaults, ReadsAnchors};
         let defaults = crate::store::DefaultConfiguration::from_environment();
-        let home = defaults.home.clone();
-        // The Codex endpoints here are placeholders: the Nexus replaces them
-        // with the configured ones (`with_codex_endpoints`).
-        let codex_home = home.join(".codex");
-        let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".claude"));
         let workspace_root = defaults.source_root();
         let flows_root = workspace_root.join("flows");
         Self {
@@ -161,30 +154,8 @@ impl Default for HerdrCli {
             flow_id_executable: PathBuf::from("flow-id"),
             flows_root: flows_root.clone(),
             codex_endpoints: CodexEndpoints {
-                stable: CodexEndpoint {
-                    client_path: PathBuf::from("/fixture/codex"),
-                    home: codex_home.clone(),
-                    socket: home
-                        .join(".codex/app-server-control/app-server-control.sock")
-                        .to_string_lossy()
-                        .into_owned(),
-                    transcript_root: codex_home.join("sessions"),
-                    model_names: BTreeSet::from(["gpt-5.6-sol".into()]),
-                },
-                next: CodexEndpoint {
-                    client_path: PathBuf::from("/fixture/codex-next"),
-                    home: home.join(".codex-next"),
-                    socket: home
-                        .join(".codex-next/app-server-control/app-server-control.sock")
-                        .to_string_lossy()
-                        .into_owned(),
-                    transcript_root: home.join(".codex-next/sessions"),
-                    model_names: BTreeSet::from([
-                        "gpt-6-astra".into(),
-                        "gpt-6-sol".into(),
-                        "gpt-6-luna".into(),
-                    ]),
-                },
+                endpoints: Vec::new(),
+                harnesses: Vec::new(),
                 timeout: std::time::Duration::from_millis(
                     crate::store::timings_limits::seed_timings()
                         .expect("authored timings seed")
@@ -195,8 +166,8 @@ impl Default for HerdrCli {
             },
             timings: crate::store::timings_limits::seed_timings().expect("authored timings seed"),
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
-            claude_transcript_root: claude_home.join("projects"),
-            claude_daemon: crate::claude::ClaudeDaemon::under(&claude_home),
+            claude_transcript_root: PathBuf::new(),
+            claude_daemon: crate::claude::ClaudeDaemon::under(Path::new("")),
             harness_hook: std::env::current_exe()
                 .ok()
                 .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
@@ -326,6 +297,11 @@ impl ReadsPromptReply for PromptReply {
 }
 
 pub trait ConfiguresHerdrCli {
+    fn with_installations(
+        self,
+        nexus: &meta_signal_flow::ConfigureNexus,
+        harnesses: &[meta_signal_flow::Harness],
+    ) -> Self;
     fn with_codex_endpoints(self, codex_endpoints: CodexEndpoints) -> Self;
     /// The ordinary socket this Nexus serves, as its store configures it.
     fn with_ordinary_socket(self, ordinary_socket: &std::path::Path) -> Self;
@@ -341,6 +317,24 @@ pub trait ConfiguresHerdrCli {
 }
 
 impl ConfiguresHerdrCli for HerdrCli {
+    fn with_installations(
+        mut self,
+        nexus: &meta_signal_flow::ConfigureNexus,
+        harnesses: &[meta_signal_flow::Harness],
+    ) -> Self {
+        self.executable = PathBuf::from(&nexus.executables.herdr);
+        self.flow_id_executable = PathBuf::from(&nexus.executables.flow_id_claimer);
+        self.harness_hook = PathBuf::from(&nexus.executables.hook);
+        self.flows_root = PathBuf::from(&nexus.flows_root);
+        if let Some(claude) = harnesses
+            .iter()
+            .find(|harness| harness.harness_kind == HarnessKind::Claude)
+        {
+            self.claude_transcript_root = PathBuf::from(&claude.home).join("projects");
+            self.claude_daemon = crate::claude::ClaudeDaemon::under(&PathBuf::from(&claude.home));
+        }
+        self
+    }
     fn with_codex_endpoints(mut self, codex_endpoints: CodexEndpoints) -> Self {
         self.codex_endpoints = codex_endpoints;
         self
@@ -381,20 +375,26 @@ impl ConfiguresHerdrCli for HerdrCli {
             flow_id_executable: fixture_root.join("flow-id"),
             flows_root: flows_root.clone(),
             codex_endpoints: CodexEndpoints {
-                stable: CodexEndpoint {
-                    client_path: PathBuf::from("/fixture/codex"),
-                    home: fixture_root.join("codex-home"),
-                    socket: "/tmp/stable-codex.sock".into(),
-                    transcript_root: fixture_root.join("codex"),
-                    model_names: BTreeSet::from(["model-current".into(), "fixture-model".into()]),
-                },
-                next: CodexEndpoint {
-                    client_path: PathBuf::from("/fixture/codex-next"),
-                    home: fixture_root.join("codex-next-home"),
-                    socket: "/tmp/next-codex.sock".into(),
-                    transcript_root: fixture_root.join("codex-next"),
-                    model_names: BTreeSet::from(["gpt-6-sol".into(), "gpt-6-luna".into()]),
-                },
+                endpoints: vec![
+                    CodexEndpoint {
+                        client_path: PathBuf::from("/fixture/codex"),
+                        home: fixture_root.join("codex-home"),
+                        socket: "/tmp/stable-codex.sock".into(),
+                        transcript_root: fixture_root.join("codex"),
+                        model_names: BTreeSet::from([
+                            "model-current".into(),
+                            "fixture-model".into(),
+                        ]),
+                    },
+                    CodexEndpoint {
+                        client_path: PathBuf::from("/fixture/codex-next"),
+                        home: fixture_root.join("codex-next-home"),
+                        socket: "/tmp/next-codex.sock".into(),
+                        transcript_root: fixture_root.join("codex-next"),
+                        model_names: BTreeSet::from(["gpt-6-sol".into(), "gpt-6-luna".into()]),
+                    },
+                ],
+                harnesses: Vec::new(),
                 timeout: std::time::Duration::from_millis(100),
                 workspace_root: flows_root
                     .parent()
@@ -945,10 +945,10 @@ impl DecodesFlowClaim for FlowClaim {
 #[cfg(test)]
 mod tests {
     use super::{HerdrCli, VerifiesFlowClaim};
+    use crate::herdr::pane::ReadsAgentStatus;
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
     use crate::herdr::ReadsHerdrSnapshot;
-    use crate::herdr::pane::ReadsAgentStatus;
     use signal_flow::{
         EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
         HerdrRouteSelection, Origin,

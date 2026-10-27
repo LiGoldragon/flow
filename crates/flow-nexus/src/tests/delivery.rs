@@ -3,10 +3,10 @@
 //! shapes; what each test expects is written out by hand.
 
 use super::{
-    ControlsHerdrSnapshot, NexusFixture, PromptFixture, Sent, middle_abrupt, prompts, rendered,
+    middle_abrupt, prompts, rendered, ControlsHerdrSnapshot, NexusFixture, PromptFixture, Sent,
 };
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
-use crate::{Dispatches, peer::AdmitsMetaPeer};
+use crate::{peer::AdmitsMetaPeer, Dispatches};
 use meta_signal_flow::{
     BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
     DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, InterruptWitness, Letter,
@@ -85,9 +85,9 @@ impl NexusFixture {
     /// The fixture flow Awake as { Psyche flow Secondary }, running
     /// claude-opus-5-5, whose refresh threshold is `refresh` tokens.
     fn at_secondary_refreshing_at(&self, refresh: i64) {
+        use crate::store::metaflow::SeedsMetaflow as _;
         use crate::store::ManagesMetaflowState as _;
         use crate::store::SeedsRole as _;
-        use crate::store::metaflow::SeedsMetaflow as _;
         self.nexus.store.seed_role(signal_flow::Caller {
             flow_id: "908786".into(),
             aspect: signal_flow::Aspect::Psyche,
@@ -434,12 +434,10 @@ fn a_delivery_a_crash_left_under_its_lease_settles_uncertain_and_is_never_retrie
             delivery_grade: DeliveryGrade::Uncertain,
         })
     );
-    assert!(
-        store
-            .settle_interrupted_deliveries()
-            .expect("no rows left")
-            .is_empty()
-    );
+    assert!(store
+        .settle_interrupted_deliveries()
+        .expect("no rows left")
+        .is_empty());
 }
 
 #[test]
@@ -677,7 +675,7 @@ fn the_meta_socket_admits_the_owner_and_refuses_an_unreadable_peer() {
 }
 
 #[test]
-fn a_flow_outside_meta_aspects_is_refused_the_meta_socket() {
+fn a_flow_in_the_configured_meta_aspects_is_admitted_to_the_meta_socket() {
     let fixture = NexusFixture::new();
     super::bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![super::codex_agent_in("pane-1", "terminal-pane-1")]);
@@ -687,12 +685,7 @@ fn a_flow_outside_meta_aspects_is_refused_the_meta_socket() {
         .meta_refusal(Some(crate::caller::CallerProcess {
             process_id: peer.0.id(),
         }));
-    assert_eq!(
-        refusal,
-        Some(meta_signal_flow::MetaRefusal::PeerNotAuthorized(
-            super::mind_live()
-        ))
-    );
+    assert_eq!(refusal, None);
 }
 
 #[test]

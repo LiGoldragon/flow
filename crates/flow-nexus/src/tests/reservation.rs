@@ -5,8 +5,8 @@
 //! and a launch refused after Reserve gives back the flow and the claim.
 
 use super::NexusFixture;
-use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::Dispatches;
 use meta_signal_flow::{Query as MetaQuery, Response as MetaResponse};
 use signal_flow::{Event, Query, Report_Data, Response, StartRejection};
 use std::fs;
@@ -241,19 +241,17 @@ impl NexusFixture {
         launch.pane.herdr_agent_name = launch.composed.launch_agent_name();
         launch.reserve(&self.nexus);
         launch.record_native_intent(&self.nexus);
-        assert!(
-            self.nexus
-                .store
-                .record_created_launch_pane(launch.pane.clone())
-                .unwrap()
-        );
-        assert!(
-            self.nexus
-                .store
-                .request_harness_start(launch_request_id)
-                .unwrap()
-                .is_some()
-        );
+        assert!(self
+            .nexus
+            .store
+            .record_created_launch_pane(launch.pane.clone())
+            .unwrap());
+        assert!(self
+            .nexus
+            .store
+            .request_harness_start(launch_request_id)
+            .unwrap()
+            .is_some());
         let agent = serde_json::json!({"result":{"agent":{
             "name":launch.pane.herdr_agent_name,
             "agent":"codex",
@@ -289,13 +287,11 @@ fn a_codex_launch_recovered_after_its_start_binds_to_the_recorded_thread() {
     use crate::store::opened_thread::RecordsOpenedThreads;
     let fixture = NexusFixture::new();
     let launch = fixture.codex_launch_left_after_spawn("recovered-request");
-    assert!(
-        fixture
-            .nexus
-            .store
-            .record_opened_thread("recovered-request", super::STAGED_SESSION)
-            .unwrap()
-    );
+    assert!(fixture
+        .nexus
+        .store
+        .record_opened_thread("recovered-request", super::STAGED_SESSION)
+        .unwrap());
     let Response::LaunchPending(attempt) = fixture.nexus.dispatch(Query::Start(launch.request()))
     else {
         panic!("the recovered launch is pending with its binding");

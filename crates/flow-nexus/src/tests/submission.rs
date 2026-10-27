@@ -7,8 +7,8 @@
 //! occupied and was parked for good.
 
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
-use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
+use crate::Dispatches;
 use meta_signal_flow::{
     Content, Delivery, DeliveryGrade, DeliveryRejection, DeliveryRequest, InterruptWitness, Letter,
     Message, Query as MetaQuery, Response as MetaResponse, Sender,
@@ -256,15 +256,15 @@ fn delivered(delivery_id: &str, delivery_grade: DeliveryGrade) -> MetaResponse {
 fn a_letter_herdr_calls_prompted_but_the_composer_still_holds_is_not_presented() {
     let fixture = NexusFixture::new();
     fixture.resting_recipient(Composer::SubmitsOnEnter);
-    // Herdr answered agent_prompted after a state change; the composer
-    // kept the letter until Flow pressed the submit key once itself. The
-    // reaction Herdr saw was not this letter's, so it is Transported.
+    // This configured Codex installation has no submit key: its ordinary
+    // line placement submits itself. The fixture deliberately keeps the
+    // line, so the claimed prompt event cannot prove submission.
     assert_eq!(
         fixture.deliver_soft("stuck-1", "when you rest"),
-        delivered("stuck-1", DeliveryGrade::Transported)
+        delivered("stuck-1", DeliveryGrade::Uncertain)
     );
-    assert_eq!(fixture.key_presses(), ["enter"]);
-    assert_eq!(fixture.composer_holds(), None);
+    assert!(fixture.key_presses().is_empty());
+    assert!(fixture.composer_holds().is_some());
 }
 
 #[test]
@@ -275,10 +275,11 @@ fn a_letter_that_will_not_submit_is_taken_back_and_parked() {
         fixture.deliver_soft("stuck-2", "first line\nsecond line"),
         MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
     );
-    // One submit, then a kill-line and a join for each line of the letter.
+    // No submit key is configured; the configured line-by-line retraction
+    // takes the stuck two-line letter back out.
     assert_eq!(
         fixture.key_presses(),
-        ["enter", "ctrl+u backspace ctrl+u backspace"]
+        ["ctrl+u backspace ctrl+u backspace"]
     );
     assert_eq!(fixture.composer_holds(), None, "the pane is free again");
     // Nothing of a taken-back letter is kept: Message may deliver it again
@@ -326,7 +327,7 @@ fn a_letter_seen_leaving_the_composer_is_presented_with_no_key_pressed() {
 }
 
 /// Herdr's `agent_prompt_stalled` follows typed input: the letter may sit
-/// in the composer. It is submitted there too, and the pane is let go.
+/// in the composer. With no configured submit key the result is uncertain.
 #[test]
 fn a_stalled_prompt_left_in_the_composer_is_submitted() {
     let fixture = NexusFixture::new();
@@ -338,10 +339,10 @@ fn a_stalled_prompt_left_in_the_composer_is_submitted() {
     fixture.register_with(FlowLifecycle::Active);
     assert_eq!(
         fixture.deliver_soft("stalled-1", "when you rest"),
-        delivered("stalled-1", DeliveryGrade::Transported)
+        delivered("stalled-1", DeliveryGrade::Uncertain)
     );
-    assert_eq!(fixture.key_presses(), ["enter"]);
-    assert_eq!(fixture.composer_holds(), None);
+    assert!(fixture.key_presses().is_empty());
+    assert!(fixture.composer_holds().is_some());
 }
 
 fn hard_abrupt(text: &str) -> Message {
@@ -595,7 +596,7 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
 }
 
 #[test]
-fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
+fn a_cancelled_codex_prompt_is_preserved_when_no_resubmit_key_is_configured() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.current_agent()],
@@ -612,15 +613,9 @@ fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
                 flow_id: "908786".into(),
                 message: hard_abrupt("stop"),
             })),
-        MetaResponse::Delivered(_)
+        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
     ));
-    assert_eq!(fixture.key_presses(), ["esc", "enter"]);
-    assert_eq!(
-        fixture.resubmitted().as_deref(),
-        Some("half a thought of my own")
-    );
-    assert_eq!(
-        fixture.typed().as_deref(),
-        Some("HardAbrupt.{ m-7f3a2c Owner Text.stop }")
-    );
+    assert_eq!(fixture.key_presses(), ["esc"]);
+    assert_eq!(fixture.resubmitted(), None);
+    assert_eq!(fixture.typed(), None);
 }

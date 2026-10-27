@@ -1,5 +1,5 @@
+use flow_defaults::{DefaultConfiguration, ReadsAnchors, LaysOutDefaults};
 use datom_codec::{Actualizing, Budget, Datomizable, Potential};
-use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
 use meta_signal_flow::{CreditSelection, Query, ResetRequest, Response};
 use protos::{Compactable, Protosizable, ReaderBudget};
 use std::{
@@ -20,7 +20,7 @@ trait ParsesMetaCommand {
     }
 
     fn registration_usage() -> String {
-        "usage: flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> [endpoint]".into()
+        "usage: flow-meta register-codex|register-claude <flow-id> <session-id> <herdr-session> <herdr-agent> <herdr-pane> <herdr-terminal> <endpoint>".into()
     }
 }
 trait CallsMetaNexus {
@@ -84,7 +84,9 @@ impl ParsesMetaCommand for FlowMetaClient {
                 let Some(herdr_terminal_id) = arguments.next() else {
                     return Err(Self::registration_usage());
                 };
-                let endpoint = arguments.next();
+                let Some(endpoint_path) = arguments.next() else {
+                    return Err(Self::registration_usage());
+                };
                 if arguments.next().is_some() {
                     return Err(Self::registration_usage());
                 }
@@ -93,15 +95,6 @@ impl ParsesMetaCommand for FlowMetaClient {
                 } else {
                     signal_flow::HarnessKind::Claude
                 };
-                let endpoint_path = endpoint.unwrap_or_else(|| {
-                    if harness_kind == signal_flow::HarnessKind::Codex {
-                        DefaultConfiguration::from_environment()
-                            .stable_codex()
-                            .socket
-                    } else {
-                        String::new()
-                    }
-                });
                 let endpoint_selection = if endpoint_path.is_empty() {
                     signal_flow::EndpointSelection::Unavailable
                 } else {
@@ -199,22 +192,20 @@ mod tests {
 
     #[test]
     fn configuration_uses_the_current_typed_nexus_change() {
-        let endpoint = || meta_signal_flow::CodexEndpoint {
-            client_path: "/opt/codex".into(),
-            home: "/tmp/codex".into(),
-            control_socket_path: "/tmp/codex.sock".into(),
-            model_name_vector: vec!["fixture".into()],
-        };
         let nexus = ConfigureNexus {
             source_root: "/source".into(),
-            stable_codex: endpoint(),
-            next_codex: endpoint(),
-            harness_profiles: vec![],
+            flows_root: "/source/flows".into(),
             meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
             message_nexus_path: "/run/message.sock".into(),
             message_nexus_binary: "/opt/message-nexus".into(),
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease: 60,
+            executables: meta_signal_flow::Executables {
+                herdr: "/opt/herdr".into(),
+                flow_id_claimer: "/opt/flow-id".into(),
+                hook: "/opt/flow-hook".into(),
+            },
+            default_herdr_session: "default".into(),
         };
         let query = Query::Configure(ConfigurationChange::Nexus(nexus.clone()));
         let datom = query.datomize(vec![]).protosize().compact();
@@ -341,6 +332,7 @@ mod tests {
                     "recipient",
                     "w1:p2",
                     "term-current",
+                    "",
                 ]
                 .map(String::from)
                 .into_iter(),
@@ -364,12 +356,6 @@ mod tests {
         use super::ParsesMetaDatom;
         use meta_signal_flow::{ConfigurationSnapshot, ConfigureMetaflow, Response};
         use signal_flow::{Address, Aspect, Layer, ToolSet};
-        let endpoint = || meta_signal_flow::CodexEndpoint {
-            client_path: "/opt/codex".into(),
-            home: "/tmp/codex".into(),
-            control_socket_path: "/tmp/codex.sock".into(),
-            model_name_vector: vec!["fixture".into()],
-        };
         let rows: Vec<_> = (0..31)
             .map(|index| ConfigureMetaflow {
                 address: Address {
@@ -393,15 +379,20 @@ mod tests {
         let snapshot = ConfigurationSnapshot {
             nexus: ConfigureNexus {
                 source_root: "/source".into(),
-                stable_codex: endpoint(),
-                next_codex: endpoint(),
-                harness_profiles: vec![],
+                flows_root: "/source/flows".into(),
                 meta_aspects: vec![Aspect::Psyche],
                 message_nexus_path: "/run/message.sock".into(),
                 message_nexus_binary: "/opt/message-nexus".into(),
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 60,
+                executables: meta_signal_flow::Executables {
+                    herdr: "/opt/herdr".into(),
+                    flow_id_claimer: "/opt/flow-id".into(),
+                    hook: "/opt/flow-hook".into(),
+                },
+                default_herdr_session: "default".into(),
             },
+            harnesses: vec![],
             models: vec![],
             thresholds: vec![],
             default_leave_outs: vec![],

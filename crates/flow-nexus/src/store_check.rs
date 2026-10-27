@@ -114,15 +114,19 @@ mod tests {
         config
             .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
                 meta_signal_flow::ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
+                    source_root: settings.source_root.clone(),
+                    flows_root: "/tmp/flows".into(),
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: "/fixture/message-nexus".into(),
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 60,
+                    executables: meta_signal_flow::Executables {
+                        herdr: "herdr".into(),
+                        flow_id_claimer: "flow-id".into(),
+                        hook: "flow-hook".into(),
+                    },
+                    default_herdr_session: "default".into(),
                 },
             ))
             .unwrap();

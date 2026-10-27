@@ -727,15 +727,19 @@ mod tests {
                 ConfigurationOnlyStore::open(&path).expect("new configuration store");
             configuration
                 .configure_change(ConfigurationChange::Nexus(ConfigureNexus {
-                    source_root: settings.source_root,
-                    stable_codex: settings.stable_codex,
-                    next_codex: settings.next_codex,
-                    harness_profiles: settings.harness_profile_vector,
+                    source_root: settings.source_root.clone(),
+                    flows_root: "/tmp/flows".into(),
                     meta_aspects: settings.meta_aspects,
                     message_nexus_path: settings.message_nexus_path,
                     message_nexus_binary: binary,
                     curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                     lease: 30,
+                    executables: meta_signal_flow::Executables {
+                        herdr: "herdr".into(),
+                        flow_id_claimer: "flow-id".into(),
+                        hook: "flow-hook".into(),
+                    },
+                    default_herdr_session: "default".into(),
                 }))
                 .expect("Nexus configuration");
             drop(configuration);
@@ -849,15 +853,13 @@ mod tests {
                 .unwrap(),
             Response::Refused(Refusal::Unknown(_))
         ));
-        assert!(
-            fixture
-                .store
-                .metaflow(&target)
-                .unwrap()
-                .unwrap()
-                .queue
-                .is_empty()
-        );
+        assert!(fixture
+            .store
+            .metaflow(&target)
+            .unwrap()
+            .unwrap()
+            .queue
+            .is_empty());
         assert!(matches!(
             fixture
                 .store
@@ -881,13 +883,11 @@ mod tests {
             fixture.store.metaflow(&target).unwrap().unwrap().queue[0].message,
             flow_ethos::Message::Soft(body)
         );
-        assert!(
-            fixture
-                .store
-                .stored_metaflow_lock(&lock.address)
-                .unwrap()
-                .is_none()
-        );
+        assert!(fixture
+            .store
+            .stored_metaflow_lock(&lock.address)
+            .unwrap()
+            .is_none());
         assert!(matches!(
             fixture
                 .store

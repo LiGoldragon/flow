@@ -5,8 +5,8 @@
 //! `Withdraw` takes one queued request out and closes the attempt that
 //! holds it back.
 
-use super::refresh_and_compaction::{SUCCESSOR_REQUEST, staged_refresh_successor};
-use super::waking::{CLAUDE_SEAT, address, claude_agent, claude_seat};
+use super::refresh_and_compaction::{staged_refresh_successor, SUCCESSOR_REQUEST};
+use super::waking::{address, claude_agent, claude_seat, CLAUDE_SEAT};
 use super::{ControlsHerdrSnapshot, NexusFixture};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
@@ -18,8 +18,8 @@ use crate::store::{ManagesMetaflowState, ReadsFlowRoles, ReadsFlowRows, Register
 use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::State;
 use meta_signal_flow::{
-    Attempt, InspectRejected_Data, Query as MetaQuery, QueueDeliveryStanding, Rebind_Data,
-    RebindRejected_Data, Rebinding, Response as MetaResponse, Withdraw_Data, WithdrawRejected_Data,
+    Attempt, InspectRejected_Data, Query as MetaQuery, QueueDeliveryStanding, RebindRejected_Data,
+    Rebind_Data, Rebinding, Response as MetaResponse, WithdrawRejected_Data, Withdraw_Data,
 };
 use signal_flow::{
     Address, Aspect, Delivery, DeliveryState, HarnessKind, HerdrRoute, HerdrRouteSelection, Layer,
@@ -136,14 +136,18 @@ fn inspect_answers_the_metaflow_whole() {
         .configure_change(meta_signal_flow::ConfigurationChange::Nexus(
             meta_signal_flow::ConfigureNexus {
                 source_root: root.clone(),
-                stable_codex: endpoint("stable"),
-                next_codex: endpoint("next"),
-                harness_profiles: vec![],
+                flows_root: "/tmp/flows".into(),
                 meta_aspects: vec![Aspect::Psyche],
                 message_nexus_path: format!("{root}/message.sock"),
                 message_nexus_binary: format!("{root}/message-nexus"),
                 curriculum_nexus_path: "/fixture/curriculum.sock".into(),
                 lease: 60,
+                executables: meta_signal_flow::Executables {
+                    herdr: "herdr".into(),
+                    flow_id_claimer: "flow-id".into(),
+                    hook: "flow-hook".into(),
+                },
+                default_herdr_session: "default".into(),
             },
         ))
         .expect("Nexus configured");

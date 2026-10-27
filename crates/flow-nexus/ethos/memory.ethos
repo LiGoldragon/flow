@@ -6,9 +6,13 @@
 
 Memory
 [ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection ]
+  meta_signal_flow:[ Harness Timings Limits ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ] ]
 [ LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
                   StartRejected.StartRejection
                   ReplaceRejected.ReplaceRejection ]
-  Replacement.{ LaunchRequestId Predecessor.String } ]
+  Replacement.{ LaunchRequestId Predecessor.String }
+  HarnessRecord.{ Harness }
+  TimingRecord.{ Timings }
+  LimitRecord.{ Limits } ]

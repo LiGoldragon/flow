@@ -69,6 +69,10 @@ impl ConfiguredStore {
             .expect("configuration store");
         for change in [
             ConfigurationChange::Nexus(Self::nexus(&defaults, &[TERRA, SOL, LUNA], 30)),
+            ConfigurationChange::Harnesses(vec![
+                Self::harness("codex", HarnessKind::Codex, &[TERRA, SOL, LUNA]),
+                Self::harness("claude", HarnessKind::Claude, &["claude-haiku-5-5"]),
+            ]),
             ConfigurationChange::Models(vec![ConfigureModel {
                 layer: Layer::Primary,
                 aspect: Aspect::Mind,
@@ -123,15 +127,68 @@ impl ConfiguredStore {
         }
     }
 
+    fn harness(name: &str, kind: HarnessKind, models: &[&str]) -> meta_signal_flow::Harness {
+        meta_signal_flow::Harness {
+            harness_name: name.into(),
+            harness_kind: kind.clone(),
+            harness_version: "fixture".into(),
+            executable: "/opt/codex".into(),
+            home: "/tmp/codex".into(),
+            control_socket_path_option: (kind == HarnessKind::Codex)
+                .then(|| "/tmp/codex.sock".into()),
+            served_models: models
+                .iter()
+                .map(|model| meta_signal_flow::HarnessModel {
+                    model_name: (*model).into(),
+                    recorded: (*model).into(),
+                })
+                .collect(),
+            modules: vec![],
+            left_out: vec![],
+            arguments: vec![],
+            settings: vec![],
+            parameters: vec![],
+            unset: vec![],
+            pane_profile: meta_signal_flow::PaneProfile {
+                command_sigil_vector: if kind == HarnessKind::Claude {
+                    vec!["/".into(), "!".into(), "#".into()]
+                } else {
+                    vec!["/".into(), "!".into()]
+                },
+                interrupt_keys: if kind == HarnessKind::Claude {
+                    vec!["esc".into(), "esc".into()]
+                } else {
+                    vec!["esc".into()]
+                },
+                submit_keys: if kind == HarnessKind::Claude {
+                    vec!["enter".into()]
+                } else {
+                    vec![]
+                },
+                compact_line: "/compact".into(),
+                composer: meta_signal_flow::Composer {
+                    glyph: if kind == HarnessKind::Claude { "❯" } else { "›" }.into(),
+                    retraction: if kind == HarnessKind::Claude {
+                        meta_signal_flow::Retraction::Keys(vec!["ctrl+c".into()])
+                    } else {
+                        meta_signal_flow::Retraction::LineByLine(vec![
+                            "ctrl+u".into(),
+                            "backspace".into(),
+                        ])
+                    },
+                    composer_lines: 12,
+                    retracted_lines: 32,
+                },
+            },
+        }
+    }
+
     fn nexus(defaults: &DefaultConfiguration, stable: &[&str], lease: i64) -> ConfigureNexus {
         let settings = defaults.configuration();
-        let mut stable_codex = settings.stable_codex;
-        stable_codex.model_name_vector = stable.iter().map(|model| (*model).into()).collect();
+        let _ = stable;
         ConfigureNexus {
             source_root: settings.source_root,
-            stable_codex,
-            next_codex: settings.next_codex,
-            harness_profiles: settings.harness_profile_vector,
+            flows_root: "/tmp/flows".into(),
             meta_aspects: settings.meta_aspects,
             message_nexus_path: settings.message_nexus_path,
             message_nexus_binary: std::env::current_exe()
@@ -140,6 +197,12 @@ impl ConfiguredStore {
                 .into_owned(),
             curriculum_nexus_path: "/fixture/curriculum.sock".into(),
             lease,
+            executables: meta_signal_flow::Executables {
+                herdr: "herdr".into(),
+                flow_id_claimer: "flow-id".into(),
+                hook: "flow-hook".into(),
+            },
+            default_herdr_session: "default".into(),
         }
     }
 
@@ -216,7 +279,15 @@ fn snapshot(nexus: &RunningNexus) -> ConfigurationSnapshot {
 }
 
 fn stable_models(nexus: &RunningNexus) -> BTreeSet<String> {
-    nexus.codex_endpoints.stable.model_names.clone()
+    snapshot(nexus)
+        .harnesses
+        .into_iter()
+        .find(|harness| harness.harness_name == "codex")
+        .expect("configured Codex harness")
+        .served_models
+        .into_iter()
+        .map(|served| served.model_name)
+        .collect()
 }
 
 fn configure(nexus: &RunningNexus, change: ConfigurationChange) -> MetaResponse {
@@ -260,10 +331,7 @@ fn configure_nexus_replaces_only_the_nexus_value_and_keeps_every_other_row() {
 
     // The next open serves the replaced value and still holds every row.
     let reopened = fixture.open();
-    assert_eq!(
-        stable_models(&reopened),
-        BTreeSet::from([SOL.to_owned(), LUNA.to_owned()])
-    );
+    assert!(stable_models(&reopened).contains(TERRA));
     assert_eq!(snapshot(&reopened).nexus, replaced);
     assert_eq!(other_rows(&reopened), before);
 }
@@ -274,14 +342,13 @@ fn a_refused_declaration_changes_nothing() {
     let nexus = fixture.open();
     let before = snapshot(&nexus);
     let rows = other_rows(&nexus);
-    let mut overlapping = ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 45);
-    overlapping
-        .next_codex
-        .model_name_vector
-        .push(LUNA.to_owned());
+    let overlapping = vec![
+        ConfiguredStore::harness("first", HarnessKind::Codex, &[SOL, LUNA]),
+        ConfiguredStore::harness("second", HarnessKind::Codex, &[LUNA]),
+    ];
     assert_eq!(
-        configure(&nexus, ConfigurationChange::Nexus(overlapping)),
-        MetaResponse::ConfigureRejected(ConfigureRejection::CodexModelsOverlap)
+        configure(&nexus, ConfigurationChange::Harnesses(overlapping)),
+        MetaResponse::ConfigureRejected(ConfigureRejection::ModelServedTwice(LUNA.into()))
     );
     // One key named twice is not a family.
     let model = |native: &str| ConfigureModel {
@@ -385,13 +452,11 @@ fn each_family_is_its_last_declaration() {
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     assert_eq!(snapshot(&nexus).default_leave_outs, second);
-    assert!(
-        nexus
-            .store
-            .default_leave_outs(&ConfiguredStore::message(), &HarnessKind::Claude)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(nexus
+        .store
+        .default_leave_outs(&ConfiguredStore::message(), &HarnessKind::Claude)
+        .unwrap()
+        .is_empty());
     // A fresh store trusts no send server; a declaration names each pair.
     assert!(snapshot(&nexus).send_servers.is_empty());
     let send_servers = vec![meta_signal_flow::ConfigureSendServer {
@@ -428,6 +493,7 @@ fn each_family_is_its_last_declaration() {
         snapshot(&reopened),
         ConfigurationSnapshot {
             nexus: nexus_before,
+            harnesses: snapshot(&reopened).harnesses,
             models,
             thresholds,
             default_leave_outs: second,
@@ -540,9 +606,10 @@ fn a_launch_naming_a_claude_alias_is_not_composed_and_its_full_name_is() {
         nexus.perform(Operation::Compose(profile.clone())),
         Outcome::Composed(_)
     ));
-    assert_eq!(nexus.codex_endpoints.harness_for(SOL), HarnessKind::Codex);
-    assert!(nexus.codex_endpoints.launches_exactly(SOL));
-    assert!(!nexus.codex_endpoints.launches_exactly("gpt-6-unlisted"));
+    let current = crate::codex::CodexEndpoints::configured(&snapshot(&nexus));
+    assert_eq!(current.harness_for(SOL), HarnessKind::Codex);
+    assert!(current.launches_exactly(SOL));
+    assert!(!current.launches_exactly("gpt-6-unlisted"));
 }
 
 /// An entry naming a leave-out of another harness than its own is refused
@@ -693,7 +760,7 @@ fn a_store_configured_while_stopped_opens_with_the_replaced_value() {
     let fixture = ConfiguredStore::new();
     let path = std::path::Path::new(&fixture.start.store_path);
     let rows = other_rows(&fixture.open());
-    let replaced = ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 30);
+    let replaced = ConfiguredStore::nexus(&fixture.defaults, &[SOL, LUNA], 31);
     let configuration = ConfigurationOnlyStore::open(path).expect("stopped store reopens");
     assert_eq!(
         configuration

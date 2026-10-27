@@ -12,12 +12,12 @@ use crate::generated::send_tool::{
     HandlesSendCall, ReadsToolCall, SendCall, SendOutcome, SendRefusal, ToolCall, ToolCallKey,
 };
 use crate::send_tool::{DescribesSendInvocation, RespondsToSendCalls, SendTool, ServesSendTool};
-use crate::sending::{MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
+use crate::sending::{MeasuresSendPayload, MAX_SEND_PAYLOAD_BYTES};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
 use crate::store::send_call::KeepsSendCalls;
 use crate::store::{AnnouncesLaunchChanges, RecordsFlowLifecycle, RegistersFlowIdentity};
-use crate::{HoldsStopRequest, generated::send_tool::DeclaresSendTool};
+use crate::{generated::send_tool::DeclaresSendTool, HoldsStopRequest};
 use flow_ethos::State;
 use meta_signal_flow::QueueEvidence;
 use signal_flow::{
@@ -455,10 +455,10 @@ impl SeatsCodexFlows for NexusFixture {
     fn adapter(&mut self, model: &str, fake: &FakeAppServer) -> CodexAdapter {
         let endpoints = &mut self.nexus.codex_endpoints;
         endpoints.timeout = Duration::from_secs(5);
-        if endpoints.stable.model_names.contains(model) {
-            endpoints.stable.client_path = fake.executable.clone();
+        if endpoints.endpoints[0].model_names.contains(model) {
+            endpoints.endpoints[0].client_path = fake.executable.clone();
         } else {
-            endpoints.next.client_path = fake.executable.clone();
+            endpoints.endpoints[1].client_path = fake.executable.clone();
         }
         endpoints
             .adapter_for(model)
@@ -587,13 +587,11 @@ fn a_replayed_call_of_a_retired_or_superseded_flow_is_refused() {
     assert_eq!(replayed, SendOutcome::Refused(SendRefusal::FlowEnded));
     // Superseded: a fresh wake made the metaflow Awake as a successor.
     let call_b = tool_call(THREAD_B, "call-b", "pending while superseded");
-    assert!(
-        fixture
-            .nexus
-            .store
-            .sleep_metaflow(&sender_b(), "b2b2b2")
-            .unwrap()
-    );
+    assert!(fixture
+        .nexus
+        .store
+        .sleep_metaflow(&sender_b(), "b2b2b2")
+        .unwrap());
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: sender_b(),
         state: State::Awake("b3b3b3".into()),
@@ -824,14 +822,12 @@ fn a_malformed_call_is_refused_and_recorded() {
         SendOutcome::Refused(SendRefusal::Malformed)
     );
     assert!(fixture.target_queue().is_empty());
-    assert!(
-        fixture
-            .nexus
-            .store
-            .send_call(&call.tool_call_key)
-            .unwrap()
-            .is_some()
-    );
+    assert!(fixture
+        .nexus
+        .store
+        .send_call(&call.tool_call_key)
+        .unwrap()
+        .is_some());
 }
 
 /// A target whose topic is not an uncapitalized camelCase identifier is
@@ -973,14 +969,14 @@ fn start_first_turn(
 #[ignore = "needs FLOW_SEND_TOOL_WITNESS_CODEX and FLOW_SEND_TOOL_WITNESS_SOCKET naming a scratch codex app-server"]
 fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
     use crate::codex::{ExchangesOnSubscription, OpensCodexThread, ProxyEvent, SubscribesThread};
-    use crate::composition::ComposesLaunch;
     use crate::composition::tests::{fixture_composer, fixture_profile};
+    use crate::composition::ComposesLaunch;
     use sha2::{Digest, Sha256};
     let client = std::env::var_os("FLOW_SEND_TOOL_WITNESS_CODEX").expect("codex client");
     let socket = std::env::var("FLOW_SEND_TOOL_WITNESS_SOCKET").expect("app-server socket");
     let mut fixture = NexusFixture::new();
-    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
-    fixture.nexus.codex_endpoints.next.socket = socket;
+    fixture.nexus.codex_endpoints.endpoints[1].client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.endpoints[1].socket = socket;
     fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
     let adapter = fixture
         .nexus
@@ -1109,8 +1105,8 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
 #[ignore = "needs FLOW_SEND_TOOL_WITNESS_CODEX, FLOW_SEND_TOOL_WITNESS_SOCKET and FLOW_SEND_TOOL_WITNESS_HOME naming a scratch codex app-server"]
 fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     use crate::codex::OpensCodexThread;
-    use crate::composition::ComposesLaunch;
     use crate::composition::tests::{fixture_composer, fixture_profile};
+    use crate::composition::ComposesLaunch;
     use crate::send_tool::ServesLaunchCalls;
     use crate::store::opened_thread::RecordsOpenedThreads;
     use crate::store::{RecordsNativeLaunchIntent, ReservesLaunchAttempt};
@@ -1119,8 +1115,8 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     let socket = std::env::var("FLOW_SEND_TOOL_WITNESS_SOCKET").expect("app-server socket");
     let home = PathBuf::from(std::env::var_os("FLOW_SEND_TOOL_WITNESS_HOME").expect("codex home"));
     let mut fixture = NexusFixture::new();
-    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
-    fixture.nexus.codex_endpoints.next.socket = socket;
+    fixture.nexus.codex_endpoints.endpoints[1].client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.endpoints[1].socket = socket;
     fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
     let adapter = fixture
         .nexus
@@ -1157,26 +1153,24 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
         .store
         .reserve_launch_attempt(&launch, signal_flow::Origin::Unbound)
         .unwrap();
-    assert!(
-        fixture
-            .nexus
-            .store
-            .record_native_launch_intent(signal_flow::NativeLaunchIntent {
-                launch_request_id: profile.launch_request_id.clone(),
-                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                harness_kind: signal_flow::HarnessKind::Codex,
-                model_name: profile.model_name.clone(),
-                effort: profile.effort.clone(),
-                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                prompt_sha256_vector: launch
-                    .first_prompt_payload
-                    .prompt_part_vector
-                    .iter()
-                    .map(|part| part.prompt_sha256.clone())
-                    .collect(),
-            })
-            .unwrap()
-    );
+    assert!(fixture
+        .nexus
+        .store
+        .record_native_launch_intent(signal_flow::NativeLaunchIntent {
+            launch_request_id: profile.launch_request_id.clone(),
+            prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+            harness_kind: signal_flow::HarnessKind::Codex,
+            model_name: profile.model_name.clone(),
+            effort: profile.effort.clone(),
+            system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+            prompt_sha256_vector: launch
+                .first_prompt_payload
+                .prompt_part_vector
+                .iter()
+                .map(|part| part.prompt_sha256.clone())
+                .collect(),
+        })
+        .unwrap());
     super::waking::ended_claude(&fixture);
     let world = super::waking::WakesFreshClaude::fresh_claude_world(&mut fixture);
     fixture.asleep_at(asleep_target());
@@ -1189,12 +1183,10 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
     let nexus = &fixture.nexus;
     let (thread, mut connection) = adapter
         .open_thread(&launch, &mut |thread| {
-            assert!(
-                nexus
-                    .store
-                    .record_opened_thread(&profile.launch_request_id, thread)
-                    .unwrap()
-            );
+            assert!(nexus
+                .store
+                .record_opened_thread(&profile.launch_request_id, thread)
+                .unwrap());
             eprintln!("witness thread {thread} recorded before its first turn");
             Ok("{ Field flow Secondary witness }".into())
         })
@@ -1257,8 +1249,8 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
 #[ignore = "needs the FLOW_SEND_TOOL_WITNESS variables and FLOW_INTERRUPTED_LAUNCH_STATE"]
 fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
     use crate::codex::OpensCodexThread;
-    use crate::composition::ComposesLaunch;
     use crate::composition::tests::{fixture_composer, fixture_profile};
+    use crate::composition::ComposesLaunch;
     use crate::store::opened_thread::RecordsOpenedThreads;
     use crate::store::{RecordsNativeLaunchIntent, ReservesLaunchAttempt};
     use sha2::{Digest, Sha256};
@@ -1268,8 +1260,8 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
     let state =
         PathBuf::from(std::env::var_os("FLOW_INTERRUPTED_LAUNCH_STATE").expect("state directory"));
     let mut fixture = NexusFixture::new();
-    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
-    fixture.nexus.codex_endpoints.next.socket = socket;
+    fixture.nexus.codex_endpoints.endpoints[1].client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.endpoints[1].socket = socket;
     fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
     let adapter = fixture
         .nexus
@@ -1303,36 +1295,32 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
         .store
         .reserve_launch_attempt(&launch, signal_flow::Origin::Unbound)
         .unwrap();
-    assert!(
-        fixture
-            .nexus
-            .store
-            .record_native_launch_intent(signal_flow::NativeLaunchIntent {
-                launch_request_id: profile.launch_request_id.clone(),
-                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                harness_kind: signal_flow::HarnessKind::Codex,
-                model_name: profile.model_name.clone(),
-                effort: profile.effort.clone(),
-                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                prompt_sha256_vector: launch
-                    .first_prompt_payload
-                    .prompt_part_vector
-                    .iter()
-                    .map(|part| part.prompt_sha256.clone())
-                    .collect(),
-            })
-            .unwrap()
-    );
+    assert!(fixture
+        .nexus
+        .store
+        .record_native_launch_intent(signal_flow::NativeLaunchIntent {
+            launch_request_id: profile.launch_request_id.clone(),
+            prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+            harness_kind: signal_flow::HarnessKind::Codex,
+            model_name: profile.model_name.clone(),
+            effort: profile.effort.clone(),
+            system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+            prompt_sha256_vector: launch
+                .first_prompt_payload
+                .prompt_part_vector
+                .iter()
+                .map(|part| part.prompt_sha256.clone())
+                .collect(),
+        })
+        .unwrap());
     fixture.asleep_at(asleep_target());
     let nexus = &fixture.nexus;
     let (thread, mut connection) = adapter
         .open_thread(&launch, &mut |thread| {
-            assert!(
-                nexus
-                    .store
-                    .record_opened_thread(&profile.launch_request_id, thread)
-                    .unwrap()
-            );
+            assert!(nexus
+                .store
+                .record_opened_thread(&profile.launch_request_id, thread)
+                .unwrap());
             Ok("{ Field flow Secondary witness }".into())
         })
         .expect("the thread opens and is named");
@@ -1381,8 +1369,8 @@ fn witness_interrupted_launch_second_half_is_reconciled_at_restart() {
     let mut fixture = NexusFixture::with_store(|store| {
         std::fs::copy(state.join("flow.sema"), store).expect("store restored");
     });
-    fixture.nexus.codex_endpoints.next.client_path = PathBuf::from(client);
-    fixture.nexus.codex_endpoints.next.socket = socket;
+    fixture.nexus.codex_endpoints.endpoints[1].client_path = PathBuf::from(client);
+    fixture.nexus.codex_endpoints.endpoints[1].socket = socket;
     fixture.nexus.codex_endpoints.timeout = Duration::from_secs(60);
 
     fixture.nexus.reconcile_interrupted_launches();
@@ -2031,9 +2019,9 @@ fn a_completion_on_another_thread_drains_nothing() {
 fn codex_resolved_absent(
     first_event: crate::codex_turns::TurnEvent,
 ) -> (NexusFixture, FakeAppServer, TestRequest) {
+    use crate::codex_turns::TracksCodexTurns;
     use crate::Dispatches;
     use crate::DispatchesSerially;
-    use crate::codex_turns::TracksCodexTurns;
     use meta_signal_flow::{QueueDeliveryResolution, QueueResolutionOutcome};
     let mut fixture = NexusFixture::new();
     let first = from_core(Request::Order("First.".into()));

@@ -2,7 +2,7 @@
 //! settings come from the committed Meta configuration snapshot.
 
 use crate::store::{ConfiguresOnlyStore, LaysOutDefaults};
-use crate::{OpensRunningNexus, RunningNexus, store::ConfigurationOnlyStore};
+use crate::{store::ConfigurationOnlyStore, OpensRunningNexus, RunningNexus};
 use meta_signal_flow::{ConfigurationChange, ConfigureNexus};
 use signal_flow::Start;
 
@@ -18,9 +18,7 @@ fn a_launch_receives_the_socket_from_each_typed_start() {
     config
         .configure_change(ConfigurationChange::Nexus(ConfigureNexus {
             source_root: directory.path().to_string_lossy().into_owned(),
-            stable_codex: endpoint(directory.path(), "stable"),
-            next_codex: endpoint(directory.path(), "next"),
-            harness_profiles: vec![],
+            flows_root: "/tmp/flows".into(),
             meta_aspects: vec![meta_signal_flow::Aspect::Psyche],
             message_nexus_path: directory
                 .path()
@@ -38,6 +36,12 @@ fn a_launch_receives_the_socket_from_each_typed_start() {
                 .to_string_lossy()
                 .into_owned(),
             lease: 60,
+            executables: meta_signal_flow::Executables {
+                herdr: "herdr".into(),
+                flow_id_claimer: "flow-id".into(),
+                hook: "flow-hook".into(),
+            },
+            default_herdr_session: "default".into(),
         }))
         .expect("whole typed Nexus configuration commits");
     drop(config);

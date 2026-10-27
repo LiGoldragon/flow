@@ -22,11 +22,11 @@
 //! ResolvePeer (meta) answers the same question for a process named by
 //! Message, which reads its own peer from the kernel.
 
-use crate::RunningNexus;
 use crate::generated::starter::{CallerProcessing, DerivesOrigin};
 use crate::herdr::PanePresence;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::{ReadsFlowRoles, ReadsFlowRows, StoreError};
+use crate::RunningNexus;
 use signal_flow::{Caller, CallerResolutionRejection, FlowId, FlowNode, Response};
 use std::collections::BTreeSet;
 use std::{fs, os::unix::net::UnixStream, path::PathBuf};
@@ -339,8 +339,10 @@ impl NamesRootThread for crate::codex::CodexEndpoints {
     fn root_thread(&self, thread: &str) -> String {
         use crate::herdr::launch::{NamesCodexThread, ReadsLaunchFiles};
         use std::io::BufRead;
-        let roots: BTreeSet<&PathBuf> = [&self.stable.transcript_root, &self.next.transcript_root]
-            .into_iter()
+        let roots: BTreeSet<&PathBuf> = self
+            .endpoints
+            .iter()
+            .map(|endpoint| &endpoint.transcript_root)
             .collect();
         let mut found = Vec::new();
         for root in roots {

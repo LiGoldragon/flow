@@ -7,15 +7,15 @@
 //! the metaflow is held, nothing reaches the ending flow and a Send queues.
 
 use super::refresh_and_compaction::{
-    SUCCESSOR_REQUEST, declare_seat, owe_staged_successor, staged_refresh_successor,
+    declare_seat, owe_staged_successor, staged_refresh_successor, SUCCESSOR_REQUEST,
 };
 use super::waking::{
-    CLAUDE_SEAT, ReadsFreshWorld, WakesFreshClaude, address, claude_agent, claude_seat,
-    launched_claude_ended_by,
+    address, claude_agent, claude_seat, launched_claude_ended_by, ReadsFreshWorld,
+    WakesFreshClaude, CLAUDE_SEAT,
 };
 use super::{
-    ControlsHerdrSnapshot, MarkedProcess, NexusFixture, PromptFixture, bind_existing_caller,
-    codex_agent_in,
+    bind_existing_caller, codex_agent_in, ControlsHerdrSnapshot, MarkedProcess, NexusFixture,
+    PromptFixture,
 };
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::sending::SendsRequests;
@@ -713,14 +713,12 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
                     else {
                         panic!("the oldest request is prepared")
                     };
-                    assert!(
-                        fixture
-                            .nexus
-                            .store
-                            .outstanding_delivery(&seat_address())
-                            .unwrap()
-                            .is_some()
-                    );
+                    assert!(fixture
+                        .nexus
+                        .store
+                        .outstanding_delivery(&seat_address())
+                        .unwrap()
+                        .is_some());
                 }
                 Busy::PastThreshold => {
                     super::refresh_and_compaction::seat_refreshing_at(&fixture, 200_000);

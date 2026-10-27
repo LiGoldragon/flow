@@ -17,15 +17,6 @@ pub struct DefaultConfiguration {
     pub runtime_directory: PathBuf,
 }
 
-/// One Codex app-server endpoint as the defaults name it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DefaultCodexEndpoint {
-    pub client_path: String,
-    pub home: String,
-    pub socket: String,
-    pub model_names: Vec<String>,
-}
-
 /// The process's own user, the one whose anchors are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessUser {
@@ -97,13 +88,6 @@ pub trait LaysOutDefaults {
     const ORDINARY_SOCKET: &str = "flow.sock";
     const META_SOCKET: &str = "flow-meta.sock";
     const SOURCE_ROOT: &str = "primary";
-    const STABLE_CODEX_CLIENT: &str = "codex-stable-flow-client";
-    const STABLE_CODEX_HOME: &str = ".codex";
-    const STABLE_CODEX_MODELS: [&str; 2] = ["gpt-5.6-sol", "gpt-5.6-luna"];
-    const NEXT_CODEX_CLIENT: &str = "codex-next-flow-client";
-    const NEXT_CODEX_HOME: &str = ".codex-next";
-    const NEXT_CODEX_MODELS: [&str; 3] = ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"];
-    const CODEX_CONTROL_SOCKET: &str = "app-server-control/app-server-control.sock";
     const CURRICULUM_SOCKET: &str = "curriculum/curriculum.sock";
 
     fn home(&self) -> &Path;
@@ -138,34 +122,6 @@ pub trait LaysOutDefaults {
         self.runtime_directory().join(Self::CURRICULUM_SOCKET)
     }
 
-    fn stable_codex(&self) -> DefaultCodexEndpoint {
-        self.codex_endpoint(
-            Self::STABLE_CODEX_CLIENT,
-            Self::STABLE_CODEX_HOME,
-            &Self::STABLE_CODEX_MODELS,
-        )
-    }
-
-    fn next_codex(&self) -> DefaultCodexEndpoint {
-        self.codex_endpoint(
-            Self::NEXT_CODEX_CLIENT,
-            Self::NEXT_CODEX_HOME,
-            &Self::NEXT_CODEX_MODELS,
-        )
-    }
-
-    fn codex_endpoint(&self, client: &str, home: &str, models: &[&str]) -> DefaultCodexEndpoint {
-        let home = self.home().join(home);
-        DefaultCodexEndpoint {
-            client_path: client.into(),
-            socket: home
-                .join(Self::CODEX_CONTROL_SOCKET)
-                .to_string_lossy()
-                .into_owned(),
-            home: home.to_string_lossy().into_owned(),
-            model_names: models.iter().map(|model| (*model).to_owned()).collect(),
-        }
-    }
 }
 
 impl LaysOutDefaults for DefaultConfiguration {
@@ -204,10 +160,6 @@ mod tests {
         assert_eq!(
             defaults.curriculum_socket_path(),
             Path::new("/run/user/4242/curriculum/curriculum.sock")
-        );
-        assert_eq!(
-            defaults.stable_codex().socket,
-            "/home/someone/.codex/app-server-control/app-server-control.sock"
         );
     }
 }

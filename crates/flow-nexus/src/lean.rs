@@ -194,18 +194,14 @@ mod tests {
             tool_set: ToolSet::Explicit(Vec::new()),
         };
         assert!(launch.refusal().is_none());
-        assert!(
-            launch
-                .arguments()
-                .windows(2)
-                .any(|args| args == ["--tools", ""])
-        );
-        assert!(
-            !launch
-                .environment()
-                .iter()
-                .any(|variable| variable.starts_with("CLAUDE_CODE_ARTIFACT"))
-        );
+        assert!(launch
+            .arguments()
+            .windows(2)
+            .any(|args| args == ["--tools", ""]));
+        assert!(!launch
+            .environment()
+            .iter()
+            .any(|variable| variable.starts_with("CLAUDE_CODE_ARTIFACT")));
     }
 
     /// The tool set is configuration: a declared list is passed exactly as
@@ -278,16 +274,12 @@ mod tests {
             lean(HarnessKind::Claude, &[LeaveOut::BashTool]).refusal(),
             None
         );
-        assert!(
-            lean(HarnessKind::Claude, &[LeaveOut::BashTool])
-                .disallowed_tools()
-                .contains(&"Bash".to_owned())
-        );
-        assert!(
-            lean(HarnessKind::Claude, &[LeaveOut::ToolSearch])
-                .disallowed_tools()
-                .contains(&"ToolSearch".to_owned())
-        );
+        assert!(lean(HarnessKind::Claude, &[LeaveOut::BashTool])
+            .disallowed_tools()
+            .contains(&"Bash".to_owned()));
+        assert!(lean(HarnessKind::Claude, &[LeaveOut::ToolSearch])
+            .disallowed_tools()
+            .contains(&"ToolSearch".to_owned()));
         assert_eq!(
             lean(HarnessKind::Claude, &[LeaveOut::SkillTool]).refusal(),
             Some(LeaveOutRefusal::NeedsWorkflowLeftOut(LeaveOut::SkillTool))

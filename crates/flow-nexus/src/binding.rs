@@ -2,8 +2,8 @@
 //! before any binding reaches the store.
 
 use crate::{
-    RunningNexus,
     store::{NamesConfiguredModel, ReadsFlowRows},
+    RunningNexus,
 };
 use meta_signal_flow::{
     FlowBinding, FlowBindingRefusalReason, FlowBindingResult, FlowContainer, ProcessIdentity,

@@ -1,5 +1,13 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 13 makes every harness installation configured data. The privileged
+contract carries an arbitrary `Harnesses` family and Nexus v3 carries the
+flows root, Flow executables and default Herdr session. A fresh store has no
+harness; configured model service, executable/home/socket, pane profile and
+composer data are read from the committed harness snapshot. The Nexus family
+upgrades v2 to v3 and the new harness family is v1. Default Codex endpoints
+leave Flow. Pins signal-flow 37.0.0 and meta-signal-flow 47.0.0.
+
 Batch 9 makes every operational timing and size/count limit in the overnight
 audit configured data. Fresh stores seed the `Timings` and `Limits` singleton
 families from committed Datom files; existing stores gain those families with

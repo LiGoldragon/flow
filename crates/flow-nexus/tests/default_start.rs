@@ -92,35 +92,21 @@ fn wait_successfully(nexus: &mut StartedNexus) {
     }
 }
 
-fn endpoint(name: &str, home: &Path) -> meta_signal_flow::CodexEndpoint {
-    meta_signal_flow::CodexEndpoint {
-        client_path: format!("/opt/{name}-client"),
-        home: home.join(name).to_string_lossy().into_owned(),
-        control_socket_path: home
-            .join(name)
-            .join("control.sock")
-            .to_string_lossy()
-            .into_owned(),
-        model_name_vector: vec![format!("{name}-model")],
-    }
-}
-
 fn configuration(_start: &Start, home: &Path) -> meta_signal_flow::ConfigureNexus {
     meta_signal_flow::ConfigureNexus {
         source_root: home.join("source").to_string_lossy().into_owned(),
-        stable_codex: endpoint("stable", home),
-        next_codex: endpoint("next", home),
-        harness_profiles: vec![meta_signal_flow::HarnessProfile {
-            harness_kind: signal_flow::HarnessKind::Codex,
-            command_sigil_vector: vec!["/".into()],
-            interrupt_keys: vec!["esc".into()],
-            submit_keys: Vec::new(),
-        }],
+        flows_root: home.join("source/flows").to_string_lossy().into_owned(),
         meta_aspects: vec![flow_ethos::Aspect::Psyche, flow_ethos::Aspect::Mind],
         message_nexus_path: "/run/message.sock".into(),
         message_nexus_binary: "/opt/message-nexus".into(),
         curriculum_nexus_path: "/fixture/curriculum.sock".into(),
         lease: 60,
+        executables: meta_signal_flow::Executables {
+            herdr: "/opt/herdr".into(),
+            flow_id_claimer: "/opt/flow-id".into(),
+            hook: "/opt/flow-hook".into(),
+        },
+        default_herdr_session: "default".into(),
     }
 }
 
@@ -227,7 +213,7 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
         stored.source_root,
         home.path().join("source").to_string_lossy().into_owned()
     );
-    assert_eq!(stored.stable_codex.client_path, "/opt/stable-client");
+    assert_eq!(stored.executables.herdr, "/opt/herdr");
     assert!(
         !home.path().join(".local/state/flow/flow.sema").exists(),
         "FLOW_ variables and defaults do not redirect typed StorePath"

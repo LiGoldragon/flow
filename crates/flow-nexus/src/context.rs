@@ -294,17 +294,12 @@ impl VerifiesContext for VerifiedContext {
             .iter()
             .chain(request.user_modules.iter())
             .collect();
-        if rows.len() != requested.len()
-            || requested.iter().any(|identity| {
-                rows.iter()
-                    .filter(|row| &row.module_identity == *identity)
-                    .count()
-                    != 1
-            })
-            || rows
-                .iter()
-                .any(|row| !requested.contains(&&row.module_identity))
-        {
+        if requested.iter().any(|identity| {
+            rows.iter()
+                .filter(|row| &row.module_identity == *identity)
+                .count()
+                != 1
+        }) {
             return Err(ContextRefusal::ModuleMissing);
         }
         let ordered = |placed: &[ContextProvenance]| {
@@ -460,8 +455,8 @@ impl ComposesFlowContext for FixtureComposer {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTEXT_OPENING, ComposesFlowContext, ContextRequest, FixtureComposer,
-        ReadsVerifiedContext, SelectsStartup, VerifiedContext, VerifiesContext,
+        ComposesFlowContext, ContextRequest, FixtureComposer, ReadsVerifiedContext, SelectsStartup,
+        VerifiedContext, VerifiesContext, CONTEXT_OPENING,
     };
     use crate::generated::curriculum::Target;
     use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Layer};
@@ -556,12 +551,10 @@ mod tests {
         let composition = fixture().compose_flow_context(&effective).unwrap();
         let verified = VerifiedContext::verified(&requested, composition).unwrap();
         assert!(verified.system_text().contains("Knowledge body."));
-        assert!(
-            !verified
-                .user_segments()
-                .concat()
-                .contains("Knowledge body.")
-        );
+        assert!(!verified
+            .user_segments()
+            .concat()
+            .contains("Knowledge body."));
     }
 
     #[test]

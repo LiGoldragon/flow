@@ -307,7 +307,16 @@ impl RecordsDeliveries for FlowStore {
     fn delivery_configuration(&self) -> Result<DeliveryConfiguration, StoreError> {
         if let Some(snapshot) = self.configuration_snapshot()? {
             return Ok(DeliveryConfiguration {
-                harness_profile_vector: snapshot.nexus.harness_profiles,
+                harness_profile_vector: snapshot
+                    .harnesses
+                    .into_iter()
+                    .map(|harness| HarnessProfile {
+                        harness_kind: harness.harness_kind,
+                        command_sigil_vector: harness.pane_profile.command_sigil_vector,
+                        interrupt_keys: harness.pane_profile.interrupt_keys,
+                        submit_keys: harness.pane_profile.submit_keys,
+                    })
+                    .collect(),
                 meta_aspects: snapshot.nexus.meta_aspects,
                 message_nexus_path: snapshot.nexus.message_nexus_path,
             });

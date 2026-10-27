@@ -4,13 +4,13 @@
 //! `Withdraw` takes one queued request out of its queue and closes the
 //! attempt that holds it back.
 
-use crate::RunningNexus;
 use crate::herdr::{PaneRoute, ReadsHerdrPanes};
-use crate::store::ReadsFlowRows;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
+use crate::store::ReadsFlowRows;
+use crate::RunningNexus;
 use meta_signal_flow::{
-    InspectRejected_Data, Rebind_Data, RebindRejected_Data, Rebinding, Response, StoreRefusal,
+    InspectRejected_Data, RebindRejected_Data, Rebind_Data, Rebinding, Response, StoreRefusal,
     Withdraw_Data,
 };
 use signal_flow::{Address, HerdrRouteSelection};

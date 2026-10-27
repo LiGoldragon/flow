@@ -267,11 +267,10 @@ mod tests {
             sender: Sender::Owner,
             content: Content::Text("/compact".into()),
         });
-        assert!(
-            hard.pane_text()
-                .as_str()
-                .starts_with("HardAbrupt.{ m-81b0e4 Owner ")
-        );
+        assert!(hard
+            .pane_text()
+            .as_str()
+            .starts_with("HardAbrupt.{ m-81b0e4 Owner "));
     }
 
     #[test]

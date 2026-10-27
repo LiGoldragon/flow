@@ -257,8 +257,8 @@ impl ReadsRecoveryFiles for RecoveryFiles {}
 mod tests {
     use super::*;
     use std::{
-        sync::Arc,
         sync::atomic::{AtomicUsize, Ordering},
+        sync::Arc,
     };
 
     #[derive(Clone)]

@@ -12502,6 +12502,70 @@ mod tests {
         }
     }
 
+    /// The immediately preceding launch-outcome shape keeps required
+    /// addresses exactly and turns only the removed composition refusals
+    /// into Unrecorded.
+    #[test]
+    fn v9_launch_outcomes_preserve_requirements_and_remove_old_refusals() {
+        let fixture = StoreFixture::new();
+        let required = signal_flow::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: "review".into(),
+            layer: signal_flow::Layer::Tertiary,
+        };
+        let rows = vec![
+            StoredLaunchOutcomeV9 {
+                launch_request_id: "v9-requirement".into(),
+                launch_outcome: LaunchOutcomeV9::StartRejected(
+                    StartRejectionV37::RequirementUnmet(required.clone()),
+                ),
+            },
+            StoredLaunchOutcomeV9 {
+                launch_request_id: "v9-simplified".into(),
+                launch_outcome: LaunchOutcomeV9::StartRejected(
+                    StartRejectionV37::CompositionRefused(
+                        CompositionRefusalV37::InvalidToolSet,
+                    ),
+                ),
+            },
+        ];
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("outcome store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_launch_outcomes"),
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    SchemaHash::for_label("flow-nexus-launch-outcome-v9"),
+                ))
+                .expect("v9 outcome family registers");
+            for row in rows {
+                engine
+                    .assert(Assertion::new(outcomes, row))
+                    .expect("v9 outcome persists");
+            }
+        }
+        let store = fixture.store();
+        assert_eq!(
+            store
+                .launch_outcome("v9-requirement")
+                .expect("outcome reads"),
+            Some(LaunchOutcome::StartRejected(
+                StartRejection::RequirementUnmet(required)
+            ))
+        );
+        assert_eq!(
+            store
+                .launch_outcome("v9-simplified")
+                .expect("outcome reads"),
+            Some(LaunchOutcome::StartRejected(
+                StartRejection::CompositionRefused(
+                    signal_flow::CompositionRefusal::Unrecorded
+                )
+            ))
+        );
+    }
+
     /// A v8 outcome holding the two removed composition refusals opens with
     /// either refusal as Unrecorded; the surrounding rejection shape stays.
     #[test]

@@ -45,6 +45,9 @@ use std::{
 struct HarnessHook {
     input: serde_json::Value,
     flow_id: Option<String>,
+    herdr_executable: Option<PathBuf>,
+    herdr_session: Option<String>,
+    herdr_pane_id: Option<String>,
 }
 
 /// What the hook does with one event.
@@ -79,6 +82,13 @@ trait ReportsThroughCli {
     fn run(&self) -> String;
 }
 
+/// Reports the lifecycle Flow owns for a Claude process it started in a
+/// Herdr pane. Herdr remains the pane owner; this hook is the native
+/// handshake which makes readiness and later prompt transitions explicit.
+trait ReportsOwnedClaudeLifecycle {
+    fn lifecycle_run(&self) -> String;
+}
+
 impl ReadsHookInput for HarnessHook {
     fn from_environment() -> Self {
         let mut text = String::new();
@@ -88,6 +98,63 @@ impl ReadsHookInput for HarnessHook {
             flow_id: env::var("FLOW_ID")
                 .ok()
                 .filter(|flow_id| !flow_id.is_empty()),
+            herdr_executable: env::var_os("FLOW_HERDR_EXECUTABLE").map(PathBuf::from),
+            herdr_session: env::var("FLOW_HERDR_SESSION")
+                .ok()
+                .filter(|session| !session.is_empty()),
+            herdr_pane_id: env::var("HERDR_PANE_ID")
+                .ok()
+                .filter(|pane| !pane.is_empty()),
+        }
+    }
+}
+
+impl ReportsOwnedClaudeLifecycle for HarnessHook {
+    fn lifecycle_run(&self) -> String {
+        let (Some(herdr), Some(session), Some(pane)) = (
+            &self.herdr_executable,
+            &self.herdr_session,
+            &self.herdr_pane_id,
+        ) else {
+            return "lifecycle-unconfigured".into();
+        };
+        let state = match self.event_name().as_str() {
+            "SessionStart" | "Stop" => "idle",
+            "UserPromptSubmit" | "PostToolUse" => "working",
+            "SessionEnd" => "unknown",
+            _ => return "lifecycle-unchanged".into(),
+        };
+        let mut command = Command::new(herdr);
+        command.args([
+            "--session",
+            session,
+            "pane",
+            "report-agent",
+            pane,
+            "--source",
+            "flow",
+            "--agent",
+            "claude",
+            "--state",
+            state,
+        ]);
+        if let Some(session) = self
+            .input
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|session| !session.is_empty())
+        {
+            command.args(["--agent-session-id", session]);
+        }
+        match command.output() {
+            Ok(output) if output.status.success() => format!("lifecycle-{state}"),
+            Ok(output) => format!(
+                "lifecycle-refused:{}",
+                String::from_utf8_lossy(&output.stderr)
+                    .trim_end()
+                    .replace('\n', " ")
+            ),
+            Err(error) => format!("lifecycle-unattempted:{error}"),
         }
     }
 }
@@ -214,18 +281,31 @@ impl ReportsThroughCli for HarnessHook {
 }
 
 fn main() -> ExitCode {
-    eprintln!("{}", HarnessHook::from_environment().run());
+    let hook = HarnessHook::from_environment();
+    let lifecycle = hook.lifecycle_run();
+    let report = hook.run();
+    if matches!(
+        lifecycle.as_str(),
+        "lifecycle-unconfigured" | "lifecycle-unchanged"
+    ) {
+        eprintln!("{report}");
+    } else {
+        eprintln!("{lifecycle}\t{report}");
+    }
     ExitCode::SUCCESS
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChoosesHookCall, HarnessHook, HookCall};
+    use super::{ChoosesHookCall, HarnessHook, HookCall, ReportsOwnedClaudeLifecycle};
 
     fn hook(input: serde_json::Value, flow_id: Option<&str>) -> HarnessHook {
         HarnessHook {
             input,
             flow_id: flow_id.map(str::to_owned),
+            herdr_executable: None,
+            herdr_session: None,
+            herdr_pane_id: None,
         }
     }
 
@@ -379,6 +459,43 @@ mod tests {
             .call(),
             HookCall::Nothing(_)
         ));
+    }
+
+    /// Flow's owned Claude hook reports the exact pane, lifecycle source,
+    /// harness, state and native session through the configured Herdr
+    /// executable. This is the readiness handshake for the process Flow
+    /// started, rather than Herdr's automatic executable detection.
+    #[test]
+    fn a_flow_owned_claude_session_reports_its_readiness_identity() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("arguments");
+        let executable = directory.path().join("herdr");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\n", log.display()),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let hook = HarnessHook {
+            input: serde_json::json!({
+                "hook_event_name": "SessionStart",
+                "session_id": "native-session"
+            }),
+            flow_id: Some("5a4d0b".into()),
+            herdr_executable: Some(executable),
+            herdr_session: Some("flow-session".into()),
+            herdr_pane_id: Some("w7:p1".into()),
+        };
+
+        assert_eq!(hook.lifecycle_run(), "lifecycle-idle");
+        assert_eq!(
+            std::fs::read_to_string(log).unwrap().trim_end(),
+            "--session flow-session pane report-agent w7:p1 --source flow --agent claude --state idle --agent-session-id native-session"
+        );
     }
 
     /// The hook's datom is one the Flow CLI reads as the Report it means.

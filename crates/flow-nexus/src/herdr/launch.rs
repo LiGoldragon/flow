@@ -365,7 +365,7 @@ impl PromptsThroughHerdrSocket for HerdrCli {
         let request = serde_json::json!({
             "id": format!("flow:prompt:{}", pane.launch_request_id),
             "method": "agent.prompt",
-            "params": { "target": pane.herdr_agent_name, "text": text }
+            "params": { "target": pane.herdr_pane_id, "text": text }
         });
         let mut line = serde_json::to_string(&request)
             .map_err(|error| format!("Herdr prompt request not encoded: {error}"))?;
@@ -514,6 +514,8 @@ impl PreparesClaudePane for HerdrCli {
             marker_suffix.claude_environment_preparation(
                 reserved,
                 &self.ordinary_socket,
+                &self.executable,
+                &pane.herdr_session_name,
                 &launch.lean_start().environment(),
             ),
         ])?;
@@ -741,8 +743,12 @@ impl ClaimsNativeIdentity for HerdrCli {
             (None, HarnessKind::Codex) => return Ok(agent.clone()),
             (None, HarnessKind::Claude) => return Err(NativeTargetRefusal::NoNativeSession),
         };
+        let expected_source = match harness {
+            HarnessKind::Claude => "flow".to_owned(),
+            HarnessKind::Codex => format!("herdr:{expected_harness}"),
+        };
         if session.get("source").and_then(serde_json::Value::as_str)
-            != Some(format!("herdr:{expected_harness}").as_str())
+            != Some(expected_source.as_str())
             || session.get("agent").and_then(serde_json::Value::as_str) != Some(expected_harness)
             || session.get("kind").and_then(serde_json::Value::as_str) != Some("id")
             || session.get("value").and_then(serde_json::Value::as_str) != Some(native_session_id)
@@ -979,6 +985,8 @@ pub(crate) trait PreparesClaudeEnvironment {
         &self,
         reserved: Option<&str>,
         socket: &Path,
+        herdr: &Path,
+        herdr_session: &str,
         environment: &[String],
     ) -> String;
 }
@@ -988,6 +996,8 @@ impl PreparesClaudeEnvironment for str {
         &self,
         reserved: Option<&str>,
         socket: &Path,
+        herdr: &Path,
+        herdr_session: &str,
         environment: &[String],
     ) -> String {
         let marker_suffix = self;
@@ -999,9 +1009,11 @@ impl PreparesClaudeEnvironment for str {
             .map(|variable| format!(" && export {}", variable.shell_quoted()))
             .collect::<String>();
         format!(
-            "unset {} && export FLOW_SOCKET={}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+            "unset {} && export FLOW_SOCKET={} && export FLOW_HERDR_EXECUTABLE={} && export FLOW_HERDR_SESSION={}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
             HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
             socket.to_string_lossy().shell_quoted(),
+            herdr.to_string_lossy().shell_quoted(),
+            herdr_session.shell_quoted(),
             marker_suffix
         )
     }
@@ -1948,9 +1960,63 @@ impl SpawnsNativeHarness for HerdrCli {
             self.release_system_prompt(&launch.launch_profile.launch_request_id);
             return Err(SpawnFailure::Refused(cause));
         }
+        if launch.harness_kind == HarnessKind::Claude {
+            return self.run_flow_owned_claude(pane, &typed).inspect_err(|_| {
+                self.release_system_prompt(&launch.launch_profile.launch_request_id)
+            });
+        }
         // No positional prompt: the first USER message is typed after.
         self.run_agent_start(&arguments)
             .inspect_err(|_| self.release_system_prompt(&launch.launch_profile.launch_request_id))
+    }
+}
+
+/// Starts the exact configured Claude command in the pane Herdr owns. Flow
+/// owns this process lifecycle: Herdr receives one safely quoted shell line,
+/// while the native hooks report the session and readiness back as Flow's
+/// explicit lifecycle authority.
+pub(crate) trait RunsFlowOwnedClaude {
+    fn run_flow_owned_claude(
+        &self,
+        pane: &HerdrPaneBinding,
+        command: &[String],
+    ) -> Result<(), SpawnFailure>;
+}
+
+impl RunsFlowOwnedClaude for HerdrCli {
+    fn run_flow_owned_claude(
+        &self,
+        pane: &HerdrPaneBinding,
+        command: &[String],
+    ) -> Result<(), SpawnFailure> {
+        let line = command
+            .iter()
+            .map(|argument| argument.as_str().shell_quoted())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let arguments = [
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "pane".into(),
+            "run".into(),
+            pane.herdr_pane_id.clone(),
+            line,
+        ];
+        let output = Command::new(&self.executable)
+            .args(&arguments)
+            .output()
+            .map_err(|error| format!("Herdr command could not start: {error}"))?;
+        if !output.status.success() {
+            return Err(SpawnFailure::Refused(
+                signal_flow::SpawnRefusalCause::Herdr(signal_flow::HerdrRefusal::from_printed(
+                    &output.stderr,
+                    &output.stdout,
+                )),
+            ));
+        }
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .map(|_| ())
+            .map_err(|error| SpawnFailure::from(format!("Herdr returned unreadable JSON: {error}")))
     }
 }
 
@@ -2161,20 +2227,28 @@ pub(crate) trait WaitsForPaneRest {
 
 impl WaitsForPaneRest for HerdrCli {
     fn await_pane_rest(&self, pane: &HerdrPaneBinding) -> Result<(), String> {
-        self.run_status(&[
-            "--session".into(),
-            pane.herdr_session_name.clone(),
-            "agent".into(),
-            "wait".into(),
-            pane.herdr_pane_id.clone(),
-            "--until".into(),
-            "idle".into(),
-            "--until".into(),
-            "done".into(),
-            "--timeout".into(),
-            self.timings.launch_rest_wait.to_string(),
-        ])
-        .map_err(|_| Self::NOT_READY.to_owned())
+        for _ in 0..self.title_readback_attempts() {
+            if self
+                .run_status(&[
+                    "--session".into(),
+                    pane.herdr_session_name.clone(),
+                    "agent".into(),
+                    "wait".into(),
+                    pane.herdr_pane_id.clone(),
+                    "--until".into(),
+                    "idle".into(),
+                    "--until".into(),
+                    "done".into(),
+                    "--timeout".into(),
+                    self.timings.launch_rest_wait.to_string(),
+                ])
+                .is_ok()
+            {
+                return Ok(());
+            }
+            std::thread::sleep(self.title_readback_interval());
+        }
+        Err(Self::NOT_READY.to_owned())
     }
 }
 
@@ -2246,6 +2320,19 @@ impl ObservesBoundPane for HerdrCli {
         // Herdr may report a just-started harness before it is ready: it is
         // waited for, never checked once.
         self.await_pane_rest(pane)?;
+        if launch.harness_kind == HarnessKind::Claude && reserved.is_some() {
+            let selected = self
+                .reserved_native_session_id(launch)
+                .filter(|session| !session.is_empty())
+                .ok_or_else(|| {
+                    "the Flow-owned Claude process has no selected session".to_owned()
+                })?;
+            self.verify_flow_owned_claude_process(
+                pane,
+                &selected,
+                &launch.launch_profile.model_name,
+            )?;
+        }
         let response = self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
@@ -2256,8 +2343,10 @@ impl ObservesBoundPane for HerdrCli {
         let agent = response
             .pointer("/result/agent")
             .ok_or_else(|| "Herdr agent get returned no agent record".to_owned())?;
-        let exact_pane = agent.get("name").and_then(serde_json::Value::as_str)
-            == Some(pane.herdr_agent_name.as_str())
+        let exact_name = launch.harness_kind == HarnessKind::Claude
+            || agent.get("name").and_then(serde_json::Value::as_str)
+                == Some(pane.herdr_agent_name.as_str());
+        let exact_pane = exact_name
             && agent.get("agent").and_then(serde_json::Value::as_str) == Some(expected_harness)
             && agent
                 .get("workspace_id")
@@ -2290,7 +2379,10 @@ impl ObservesBoundPane for HerdrCli {
                 .map(str::to_owned),
             HarnessKind::Claude => None,
         };
-        let expected_source = format!("herdr:{expected_harness}");
+        let expected_source = match launch.harness_kind {
+            HarnessKind::Claude => "flow".to_owned(),
+            HarnessKind::Codex => format!("herdr:{expected_harness}"),
+        };
         let observed_session = agent.get("agent_session");
         let observed_native_session = |session: &serde_json::Value| -> Result<String, String> {
             if session.get("source").and_then(serde_json::Value::as_str)
@@ -2299,9 +2391,7 @@ impl ObservesBoundPane for HerdrCli {
                     != Some(expected_harness)
                 || session.get("kind").and_then(serde_json::Value::as_str) != Some("id")
             {
-                return Err(
-                    "native identity did not come from the official Herdr integration".into(),
-                );
+                return Err("native identity did not come from the launch lifecycle owner".into());
             }
             session
                 .get("value")
@@ -2351,6 +2441,57 @@ impl ObservesBoundPane for HerdrCli {
             harness_kind: launch.harness_kind.clone(),
             herdr_pane_binding: pane.clone(),
         })
+    }
+}
+
+/// Reads the pane's actual foreground process set rather than using agent
+/// detection as launch authority. The exact command was authored and typed
+/// by Flow; after an installation wrapper execs its child, the selected
+/// session and model remain in the actual child's argv and bind it to this
+/// launch.
+pub(crate) trait VerifiesFlowOwnedClaudeProcess {
+    fn verify_flow_owned_claude_process(
+        &self,
+        pane: &HerdrPaneBinding,
+        session: &str,
+        model: &str,
+    ) -> Result<(), String>;
+}
+
+impl VerifiesFlowOwnedClaudeProcess for HerdrCli {
+    fn verify_flow_owned_claude_process(
+        &self,
+        pane: &HerdrPaneBinding,
+        session: &str,
+        model: &str,
+    ) -> Result<(), String> {
+        let response = self.run_json(&[
+            "--session".into(),
+            pane.herdr_session_name.clone(),
+            "pane".into(),
+            "process-info".into(),
+            "--pane".into(),
+            pane.herdr_pane_id.clone(),
+        ])?;
+        let processes = response
+            .pointer("/result/process_info/foreground_processes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "Herdr process-info returned no foreground process set".to_owned())?;
+        let matches_pair = |argv: &[serde_json::Value], flag: &str, value: &str| {
+            argv.windows(2)
+                .any(|pair| pair[0].as_str() == Some(flag) && pair[1].as_str() == Some(value))
+        };
+        processes
+            .iter()
+            .filter_map(|process| process.get("argv").and_then(serde_json::Value::as_array))
+            .any(|argv| {
+                matches_pair(argv, "--session-id", session) && matches_pair(argv, "--model", model)
+            })
+            .then_some(())
+            .ok_or_else(|| {
+                "the Flow-owned Claude process does not carry the selected session and model"
+                    .to_owned()
+            })
     }
 }
 
@@ -2822,6 +2963,7 @@ pub(crate) mod tests {
     use crate::herdr::launch::ClaimsNativeIdentity;
     use crate::herdr::launch::PreparesClaudeEnvironment;
     use crate::herdr::launch::PreparesClaudePane;
+    use crate::herdr::launch::QuotesForShell;
     use crate::herdr::launch::ReadsLaunchText;
     use crate::herdr::launch::TitlesClaudeSession;
     use crate::herdr::launch::{ChecksTypedCommand, HoldsSystemPrompt, SpawnFailure};
@@ -2928,11 +3070,15 @@ pub(crate) mod tests {
 printf '%s\n' "$*" >> '{calls}'
 case "$*" in
   *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
-  *"pane run"*) sh -c "$6" > '{marker_output}'; width=$(cat '{pane_width}' 2>/dev/null || printf 120); fold -w "$width" '{marker_output}' > '{visible_output}' ;;
+  *"pane run"*) command=$6; case "$command" in
+      *"FLOW_CLAUDE_ENV_READY_"*) sh -c "$command" > '{marker_output}'; width=$(cat '{pane_width}' 2>/dev/null || printf 120); fold -w "$width" '{marker_output}' > '{visible_output}' ;;
+      *) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; printf '%s' "$command" > '{owned_command}'; eval "set -- $command"; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; if [ "$prev" = --name ]; then title=$a; [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; fi; prev=$a; done; printf '%s\n' '{{"result":{{}}}}' ;;
+    esac ;;
   *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
   *"agent wait"*) [ -f '{wait_refused}' ] && exit 11; rm -f '{missing_agent_session}'; printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;
   *"agent start"*) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; if [ "$prev" = --name ]; then title=$a; [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; fi; prev=$a; done; printf '%s\n' '{{"result":{{"agent":{{"name":"{agent_name}"}}}}}}' ;;
-  *"agent get"*) if [ -f '{pending_record}' ]; then left=$(cat '{record_delay}'); if [ "$left" -le 0 ]; then cat '{pending_record}' >> '{claude_transcript}'; rm -f '{pending_record}'; else printf '%s' $((left - 1)) > '{record_delay}'; fi; fi; reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); if [ -f '{missing_agent_session}' ] || [ -f '{never_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"herdr:%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$reported_harness" "$reported_harness"; fi ;;
+  *"agent get"*) if [ -f '{pending_record}' ]; then left=$(cat '{record_delay}'); if [ "$left" -le 0 ]; then cat '{pending_record}' >> '{claude_transcript}'; rm -f '{pending_record}'; else printf '%s' $((left - 1)) > '{record_delay}'; fi; fi; reported_harness=$(cat '{reported_harness}'); title=$(cat '{title_file}' 2>/dev/null); [ "$reported_harness" = claude ] && source=flow || source=herdr:$reported_harness; if [ -f '{missing_agent_session}' ] || [ -f '{never_agent_session}' ]; then printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s"}}}}}}\n' "$reported_harness" "$title"; else printf '{{"result":{{"agent":{{"name":"{agent_name}","agent":"%s","workspace_id":"w7","pane_id":"w7:p1","terminal_id":"term-native","interactive_ready":true,"terminal_title_stripped":"%s","agent_session":{{"source":"%s","agent":"%s","kind":"id","value":"{native_session}"}}}}}}}}\n' "$reported_harness" "$title" "$source" "$reported_harness"; fi ;;
+  *"pane process-info"*) command=$(cat '{owned_command}'); session=$(printf '%s' "$command" | sed "s/.*'--session-id' '\([^']*\)'.*/\1/"); model=$(printf '%s' "$command" | sed "s/.*'--model' '\([^']*\)'.*/\1/"); printf '{{"result":{{"process_info":{{"pane_id":"w7:p1","foreground_processes":[{{"pid":42,"name":"claude","argv":["/fixture/claude","--session-id","%s","--model","%s"]}}]}}}}}}\n' "$session" "$model" ;;
   *"agent prompt"*) printf '%s\n' '{{"result":{{"accepted":true}}}}' ;;
   *"pane rename w7:p1 "*) printf '%s' "$*" | sed 's/.*pane rename w7:p1 //' > '{label_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
   *"pane report-metadata w7:p1 "*) [ -f '{display_refused}' ] && exit 14; printf '%s' "$*" | sed 's/.*--display-agent //' > '{display_file}'; printf '%s\n' '{{"result":{{}}}}' ;;
@@ -2951,6 +3097,7 @@ esac
             never_agent_session = root.path().join("never-agent-session").display(),
             wait_refused = root.path().join("agent-wait-refused").display(),
             marker_output = root.path().join("marker-unwrapped").display(),
+            owned_command = root.path().join("owned-command").display(),
             visible_output = root.path().join("marker-visible").display(),
             pane_width = root.path().join("pane-width").display(),
             title_file = root.path().join("native-title").display(),
@@ -3136,11 +3283,8 @@ printf '%s\n' "$alias"
             fs::read_to_string(root.path().join("system-prompt-read")).unwrap(),
             text
         );
-        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
-        let start = calls
-            .lines()
-            .find(|line| line.contains("agent start"))
-            .expect("one start line: no argument broke it");
+        let start = fs::read_to_string(root.path().join("owned-command"))
+            .expect("one owned command: no argument broke it");
         assert!(!start.contains("First line."));
         assert!(!start.contains("Last line"));
     }
@@ -3289,9 +3433,10 @@ printf '%s\n' "$alias"
             .start_native_harness(&launch, &pane, Some("123456"))
             .expect("started");
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
-        assert!(calls.contains(" --disable-slash-commands"));
-        assert!(calls.contains(" --disallowedTools Skill,Workflow"));
-        assert!(calls.contains(r#""attribution":{"commit":"","pr":""}"#));
+        let start = fs::read_to_string(root.path().join("owned-command")).unwrap();
+        assert!(start.contains("'--disable-slash-commands'"));
+        assert!(start.contains("'--disallowedTools' 'Skill,Workflow'"));
+        assert!(start.contains(r#""attribution":{"commit":"","pr":""}"#));
         let prepared = calls
             .lines()
             .find(|line| line.contains("pane run"))
@@ -3348,7 +3493,13 @@ printf '%s\n' "$alias"
         let mut command = std::process::Command::new("sh");
         command.arg("-c").arg(format!(
             "{}; {checks}",
-            ("test-marker").claude_environment_preparation(None, Path::new("/run/flow.sock"), &[]),
+            ("test-marker").claude_environment_preparation(
+                None,
+                Path::new("/run/flow.sock"),
+                Path::new("/fixture/herdr"),
+                "fixture-session",
+                &[],
+            ),
         ));
         for name in HerdrCli::CLAUDE_INHERITED_ENVIRONMENT {
             command.env(name, "/home/li/.claude/jobs/108ab020");
@@ -3378,6 +3529,8 @@ printf '%s\n' "$alias"
                 ("test-marker").claude_environment_preparation(
                     Some("5a4d0b"),
                     Path::new("/run/flow.sock"),
+                    Path::new("/fixture/herdr"),
+                    "fixture-session",
                     &[]
                 ),
             ))
@@ -3403,6 +3556,8 @@ printf '%s\n' "$alias"
                 ("test-marker").claude_environment_preparation(
                     None,
                     Path::new("/run/user/1001/flow-next/it's a $HOME/flow.sock"),
+                    Path::new("/fixture/herdr"),
+                    "fixture-session",
                     &[]
                 ),
             ))
@@ -3444,11 +3599,8 @@ printf '%s\n' "$alias"
         assert!(prepared.contains("export FLOW_ID=123456"));
         assert!(prepared.contains("FLOW_CLAUDE_ENV_READY_"));
         assert!(!prepared.contains("CLAUDE_CODE_ARTIFACT"));
-        let start = calls
-            .lines()
-            .find(|line| line.contains("agent start"))
-            .expect("agent start");
-        assert!(start.contains(&format!(" --session-id {session} ")));
+        let start = fs::read_to_string(root.path().join("owned-command")).unwrap();
+        assert!(start.contains(&format!("'--session-id' '{session}'")));
         let flow_id_calls = fs::read_to_string(root.path().join("flow-id-calls")).unwrap();
         assert!(flow_id_calls.starts_with(&format!(
             "claude --flows-root {} --parent-session {session}|",
@@ -3494,7 +3646,11 @@ printf '%s\n' "$alias"
             .expect("selected session binds without Herdr session");
         assert_eq!(binding.native_session_id, session);
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
-        assert!(calls.contains(&format!(" --session-id {session} ")));
+        assert!(
+            fs::read_to_string(root.path().join("owned-command"))
+                .unwrap()
+                .contains(&format!("'--session-id' '{session}'"))
+        );
 
         let mut wrong_pane = pane.clone();
         wrong_pane.herdr_pane_id = "w7:p9".into();
@@ -3558,10 +3714,8 @@ printf '%s\n' "$alias"
             .expect("started without prompt");
         let calls_after_start =
             fs::read_to_string(root.path().join("calls")).expect("launch calls");
-        let start_call = calls_after_start
-            .lines()
-            .find(|line| line.contains("agent start"))
-            .expect("agent start call");
+        let start_call = fs::read_to_string(root.path().join("owned-command"))
+            .expect("Flow-owned start command");
         // The Remote Control name is the title, the same string as the
         // session name; no other name is given.
         let title = launch
@@ -3583,50 +3737,34 @@ printf '%s\n' "$alias"
             SYSTEM_TEXT,
             "the harness read the composed system prompt whole from the held file"
         );
-        assert!(start_call.ends_with(&format!(
-            "-- --settings {} --remote-control {title} --name {title} --system-prompt-file {system_prompt_file} --session-id {session} --model model-current --effort high",
-            concat!(
-                r#"{"hooks":{"#,
-                r#""Notification":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
-                r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
-                r#""SessionEnd":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
-                r#""SessionStart":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
-                r#""Stop":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
-                r#""UserPromptSubmit":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}]},"#,
-                r#""permissions":{"defaultMode":"bypassPermissions"}}"#
-            ),
-        )));
-        // The flag settings name the launch's own mode, which suppresses the
+        for pair in [
+            format!("'--remote-control' {}", title.shell_quoted()),
+            format!("'--name' {}", title.shell_quoted()),
+            format!("'--system-prompt-file' '{}'", system_prompt_file),
+            format!("'--session-id' '{session}'"),
+            "'--model' 'model-current'".into(),
+            "'--effort' 'high'".into(),
+        ] {
+            assert!(start_call.contains(&pair), "{pair}: {start_call}");
+        }
+        for event in [
+            "Notification",
+            "PostToolUse",
+            "SessionEnd",
+            "SessionStart",
+            "Stop",
+            "UserPromptSubmit",
+        ] {
+            assert!(start_call.contains(event), "missing {event}: {start_call}");
+        }        // The flag settings name the launch's own mode, which suppresses the
         // auto-mode default offer, and carry the harness hook on SessionStart,
         // every PostToolUse, UserPromptSubmit, Notification, Stop and SessionEnd; no
         // settings file is written.
-        assert_eq!(start_call.matches(" --settings ").count(), 1);
+        assert_eq!(start_call.matches("'--settings'").count(), 1);
         // Each flag once in the pane's argv: the installed wrapper execs
         // `.claude-wrapped --dangerously-skip-permissions "$@"`, so Flow's
         // own arguments never carry that flag.
-        let flow_arguments = start_call
-            .split_once(" -- ")
-            .expect("agent arguments")
-            .1
-            .split(' ')
-            .filter(|argument| !SYSTEM_TEXT.split(' ').any(|word| word == *argument))
-            .collect::<Vec<_>>();
-        let pane_argv = std::iter::once(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG)
-            .chain(flow_arguments.iter().copied())
-            .collect::<Vec<_>>();
-        for flag in pane_argv
-            .iter()
-            .filter(|argument| argument.starts_with("--"))
-        {
-            assert_eq!(
-                pane_argv
-                    .iter()
-                    .filter(|argument| *argument == flag)
-                    .count(),
-                1,
-                "{flag} appears more than once in {pane_argv:?}"
-            );
-        }
+        assert!(!start_call.contains(HerdrCli::CLAUDE_SKIP_PERMISSIONS_FLAG));
         assert!(!start_call.contains("launch-42"));
         assert!(
             !start_call.contains("--remote-control flow-"),
@@ -3641,11 +3779,11 @@ printf '%s\n' "$alias"
             .lines()
             .position(|line| line.contains("pane wait-output"))
             .expect("Claude environment preparation receipt");
-        let agent_start = calls_after_start
+        let owned_start = calls_after_start
             .lines()
-            .position(|line| line.contains("agent start"))
+            .position(|line| line.contains("pane run w7:p1 '/fixture/claude'"))
             .expect("Claude start");
-        assert!(pane_run < pane_wait && pane_wait < agent_start);
+        assert!(pane_run < pane_wait && pane_wait < owned_start);
         let wait_call = calls_after_start
             .lines()
             .find(|line| line.contains("pane wait-output"))
@@ -3700,7 +3838,7 @@ printf '%s\n' "$alias"
         let prompts = socket_prompts(&root);
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0]["method"], "agent.prompt");
-        assert_eq!(prompts[0]["params"]["target"], agent_name.as_str());
+        assert_eq!(prompts[0]["params"]["target"], pane.herdr_pane_id);
         assert_eq!(prompts[0]["params"]["text"], "composed body");
         let all_calls = fs::read_to_string(root.path().join("calls")).expect("all launch calls");
         assert!(!all_calls.contains("agent prompt"));
@@ -3723,6 +3861,13 @@ printf '%s\n' "$alias"
             adapter
                 .prepare_claude_pane_environment(&launch, &pane, None)
                 .unwrap();
+            fs::write(
+                root.path().join("owned-command"),
+                format!(
+                    "'/fixture/claude' '--session-id' '{native_session}' '--model' 'model-current'"
+                ),
+            )
+            .unwrap();
             let unwrapped = fs::read_to_string(root.path().join("marker-unwrapped")).unwrap();
             let visible = fs::read_to_string(root.path().join("marker-visible")).unwrap();
             assert!(unwrapped.trim().len() > 54);
@@ -3755,6 +3900,11 @@ printf '%s\n' "$alias"
             adapter
                 .prepare_claude_pane_environment(&launch, &pane, None)
                 .unwrap();
+            fs::write(
+                root.path().join("owned-command"),
+                format!("'/fixture/claude' '--session-id' '{native}' '--model' 'model-current'"),
+            )
+            .unwrap();
             let refusal = adapter
                 .observe_native_binding(&launch, &pane, None)
                 .unwrap_err();
@@ -5020,14 +5170,13 @@ printf '%s\n' "$alias"
             .start_native_harness(&launch, &pane, Some("123456"))
             .expect("started without prompt");
         let expected = "{ Psyche flow Secondary 123456 }";
-        let calls = fs::read_to_string(root.path().join("calls")).unwrap();
-        let start = calls
-            .lines()
-            .find(|line| line.contains("agent start"))
-            .expect("agent start");
+        let start = fs::read_to_string(root.path().join("owned-command")).unwrap();
         // The title is a launch argument, beside the slash-command leave-out.
-        assert!(start.contains(&format!(" --name {expected} ")), "{start}");
-        assert!(start.contains(" --disable-slash-commands"), "{start}");
+        assert!(
+            start.contains(&format!("'--name' {}", expected.shell_quoted())),
+            "{start}"
+        );
+        assert!(start.contains("'--disable-slash-commands'"), "{start}");
         let binding = adapter
             .observe_native_binding(&launch, &pane, Some("123456"))
             .expect("claimed binding");
@@ -5579,7 +5728,7 @@ printf '%s\n' "$alias"
                 .position(|line| line.contains(needle))
                 .unwrap_or_else(|| panic!("{needle}: {calls}"))
         };
-        let start = order("agent start");
+        let start = order("pane run w7:p1 '/fixture/claude'");
         assert!(order("workspace rename w7 ") < start, "{title}: {calls}");
         assert!(order("pane report-metadata w7:p1 ") < start, "{calls}");
     }

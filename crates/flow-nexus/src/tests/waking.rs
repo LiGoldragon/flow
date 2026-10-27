@@ -1207,7 +1207,7 @@ impl ReadsFreshWorld for FreshWorld {
     fn claude_starts(&self) -> usize {
         self.calls()
             .lines()
-            .filter(|line| line.contains("agent start") && line.contains("--session-id"))
+            .filter(|line| line.contains("pane run") && line.contains("'/fixture/claude'") && line.contains("'--session-id'"))
             .count()
     }
 
@@ -1285,7 +1285,7 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     assert!(
         world
             .calls()
-            .contains(&format!("--session-id {new_session}")),
+            .contains(&format!("'--session-id' '{new_session}'")),
         "{}",
         world.calls()
     );
@@ -2737,7 +2737,7 @@ term=term-fresh; [ "$ws" = 7 ] || term="term-fresh-$ws"
 agent() {{
   harness=$(cat "$S/harness"); title=$(cat "$S/title" 2>/dev/null)
   session=''
-  [ "$harness" = claude ] && session=$(printf ',"agent_session":{{"source":"herdr:claude","agent":"claude","kind":"id","value":"%s"}}' "$(cat "$S/session")")
+  [ "$harness" = claude ] && session=$(printf ',"agent_session":{{"source":"flow","agent":"claude","kind":"id","value":"%s"}}' "$(cat "$S/session")")
   printf '{{"name":"%s","agent":"%s","agent_status":"idle","workspace_id":"w%s","pane_id":"%s","terminal_id":"%s","interactive_ready":true,"terminal_title_stripped":"%s"%s}}' "$(cat "$S/name")" "$harness" "$ws" "$pane" "$term" "$title" "$session"
 }}
 case "$*" in
@@ -2745,7 +2745,27 @@ case "$*" in
     if [ -f "$S/workspace" ]; then ws=$((ws + 1)); fi; printf '%s' "$ws" > "$S/workspace"
     term=term-fresh; [ "$ws" = 7 ] || term="term-fresh-$ws"
     printf '{{"result":{{"workspace":{{"workspace_id":"w%s"}},"root_pane":{{"pane_id":"w%s:p1","terminal_id":"%s"}}}}}}\n' "$ws" "$ws" "$term" ;;
-  *"pane run"*) sh -c "$6" > "$S/marker" ;;
+  *"pane run"*)
+    case "$6" in
+      unset\ *) sh -c "$6" > "$S/marker" ;;
+      *)
+        printf '%s' "$6" > "$S/owned-command"
+        eval "set -- $6"
+        harness=claude; printf '%s' "$harness" > "$S/harness"
+        prev=
+        for a in "$@"; do
+          case "$prev" in
+            --session-id) printf '%s' "$a" > "$S/session" ;;
+            --name) printf '%s' "$a" > "$S/title" ;;
+            --model) printf '%s' "$a" > "$S/model" ;;
+          esac
+          prev=$a
+        done
+        printf '%s' "$(cat "$S/title")" > "$S/name"
+        printf '{{"type":"custom-title","customTitle":"%s","sessionId":"%s"}}\n' "$(cat "$S/title")" "$(cat "$S/session")" >> '{claude_root}/'"$(cat "$S/session")"'.jsonl'
+        printf '%s\n' '{{"result":{{}}}}'
+        ;;
+    esac ;;
   *"pane wait-output"*) line=$(grep -F FLOW_CLAUDE_ENV_READY_ "$S/marker"); printf '{{"result":{{"pane_id":"%s","matched_line":"%s"}}}}\n' "$pane" "$line" ;;
   *"agent start"*)
     printf '%s' "$5" > "$S/name"; harness=codex; prev=
@@ -2788,7 +2808,12 @@ case "$*" in
   *"pane get "*) printf '{{"result":{{"pane":{{"pane_id":"%s","terminal_id":"%s","label":"%s","display_agent":"%s"}}}}}}\n' "$pane" "$term" "$(cat "$S/label")" "$(cat "$S/display-agent")" ;;
   *"workspace rename "*) printf '%s' "$6" > "$S/workspace-label-$5"; printf '%s\n' '{{"result":{{}}}}' ;;
   *"workspace get "*) printf '{{"result":{{"workspace":{{"workspace_id":"%s","label":"%s"}}}}}}\n' "$5" "$(cat "$S/workspace-label-$5" 2>/dev/null)" ;;
-  *"pane process-info"*) printf '{{"result":{{"process_info":{{"pane_id":"%s","foreground_processes":[{{"pid":%s}}]}}}}}}\n' "$pane" "$(cat "$S/pid" 2>/dev/null || printf 1)" ;;
+  *"pane process-info"*)
+    if [ -f "$S/owned-command" ]; then
+      printf '{{"result":{{"process_info":{{"pane_id":"%s","foreground_processes":[{{"pid":1,"name":"claude","argv":["/fixture/claude","--session-id","%s","--model","%s"]}}]}}}}}}\n' "$pane" "$(cat "$S/session")" "$(cat "$S/model")"
+    else
+      printf '{{"result":{{"process_info":{{"pane_id":"%s","foreground_processes":[{{"pid":%s}}]}}}}}}\n' "$pane" "$(cat "$S/pid" 2>/dev/null || printf 1)"
+    fi ;;
   *"pane close"*) printf '%s\n' '{{"result":{{}}}}' ;;
   *"agent read"*) printf '%s\n' '❯ ' ;;
   *"agent prompt"*)
@@ -3224,7 +3249,7 @@ fn a_sleeping_claude_address_wakes_fresh_to_a_new_session_and_binds_to_it() {
     assert_eq!(old_after.flow_lifecycle, FlowLifecycle::Stopped);
     let calls = fs::read_to_string(world.state.join("calls")).unwrap();
     assert!(
-        calls.contains(&format!("--session-id {new_session}")),
+        calls.contains(&format!("'--session-id' '{new_session}'")),
         "{calls}"
     );
     assert!(!calls.contains(&seat.session), "{calls}");

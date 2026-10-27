@@ -22,7 +22,7 @@ const CLEARED_SUCCESSOR_SESSION: &str = "c1a0de00-0000-4000-8000-000000000002";
 fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
         fixture.nexus.report(Report_Data {
-            flow_id: CLAUDE_SEAT.into(),
+            reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
             event: event.clone(),
         }),
         Response::Reported

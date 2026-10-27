@@ -1,15 +1,16 @@
 //! `flow-hook`: the Claude Code command hook Flow writes into every Claude
 //! flow it launches. Claude Code runs it on SessionStart, PostToolUse,
-//! UserPromptSubmit, Stop and SessionEnd with the event as JSON on stdin; it turns the
-//! event into one `Report.{ FlowId Event }` datom and hands it to the `flow`
+//! UserPromptSubmit, Notification, Stop and SessionEnd with the event as JSON on stdin; it turns the
+//! event into one `Report.{ Reporter Event }` datom and hands it to the `flow`
 //! CLI beside it, which is the only thing here that speaks Signal.
 //!
-//!   SessionStart     -> Report.{ «FLOW_ID» Started.Some.«session_id» }
-//!   PostToolUse      -> Report.{ «FLOW_ID» ToolUsed.«tool_name» }
-//!   UserPromptSubmit -> Report.{ «FLOW_ID» PromptSubmitted.{ Some.«session_id» Some.«prompt_id» SHA256 } }
-//!   Stop             -> Report.{ «FLOW_ID» Stopped.{ Some.«session_id» Some.«transcript_path» Some.«last_assistant_message» } }
-//!   SessionEnd       -> Report.{ «FLOW_ID» Ended.Some.«session_id» }
-//!   SessionEnd clear -> Report.{ «FLOW_ID» Cleared.Some.«session_id» }
+//!   SessionStart     -> Report.{ Flow.«FLOW_ID» Started.Some.«session_id» }
+//!   PostToolUse      -> Report.{ Flow.«FLOW_ID» ToolUsed.«tool_name» }
+//!   UserPromptSubmit -> Report.{ Flow.«FLOW_ID» PromptSubmitted.{ Some.«session_id» Some.«prompt_id» SHA256 } }
+//!   Notification     -> Report.{ Flow.«FLOW_ID» Notified.«message» }
+//!   Stop             -> Report.{ Flow.«FLOW_ID» Stopped.{ Some.«session_id» Some.«transcript_path» Some.«last_assistant_message» } }
+//!   SessionEnd       -> Report.{ Flow.«FLOW_ID» Ended.Some.«session_id» }
+//!   SessionEnd clear -> Report.{ Flow.«FLOW_ID» Cleared.Some.«session_id» }
 //!
 //! A SessionEnd whose reason is `clear` is a session change, not an exit:
 //! the harness goes on in the session the SessionStart after it names.
@@ -116,8 +117,18 @@ impl ChoosesHookCall for HarnessHook {
     }
 
     fn call(&self) -> HookCall {
-        let Some(flow_id) = &self.flow_id else {
-            return HookCall::Nothing("no FLOW_ID in the harness environment");
+        let reporter = match &self.flow_id {
+            Some(flow_id) => format!("Flow.{}", flow_id.quoted()),
+            None => match self
+                .input
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(session_id) if !session_id.is_empty() => {
+                    format!("Session.{}", session_id.quoted())
+                }
+                _ => return HookCall::Nothing("no flow or session identity in the harness event"),
+            },
         };
         let event = match self.event_name().as_str() {
             "SessionStart" => format!("Started.{}", self.optional("session_id")),
@@ -140,6 +151,14 @@ impl ChoosesHookCall for HarnessHook {
                     None => return HookCall::Nothing("UserPromptSubmit without a prompt"),
                 }
             }
+            "Notification" => match self
+                .input
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(message) => format!("Notified.{}", message.quoted()),
+                None => return HookCall::Nothing("Notification without a message"),
+            },
             // A session /clear ended: the harness goes on in a new
             // session, so the flow has not exited.
             "SessionEnd"
@@ -159,7 +178,7 @@ impl ChoosesHookCall for HarnessHook {
             ),
             _ => return HookCall::Nothing("no Report for this event"),
         };
-        HookCall::Report(format!("Report.{{ {} {event} }}", flow_id.quoted()))
+        HookCall::Report(format!("Report.{{ {reporter} {event} }}"))
     }
 }
 
@@ -220,7 +239,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Started.Some.«s» }".into())
+            HookCall::Report("Report.{ Flow.«5a4d0b» Started.Some.«s» }".into())
         );
         assert_eq!(
             hook(
@@ -228,7 +247,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» ToolUsed.«Bash» }".into())
+            HookCall::Report("Report.{ Flow.«5a4d0b» ToolUsed.«Bash» }".into())
         );
         assert_eq!(
             hook(
@@ -239,7 +258,8 @@ mod tests {
             )
             .call(),
             HookCall::Report(
-                "Report.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» Some.«answer» } }".into()
+                "Report.{ Flow.«5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» Some.«answer» } }"
+                    .into()
             )
         );
         assert_eq!(
@@ -248,7 +268,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Stopped.{ None None None } }".into())
+            HookCall::Report("Report.{ Flow.«5a4d0b» Stopped.{ None None None } }".into())
         );
         assert_eq!(
             hook(
@@ -257,7 +277,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Stopped.{ None None Some.«» } }".into())
+            HookCall::Report("Report.{ Flow.«5a4d0b» Stopped.{ None None Some.«» } }".into())
         );
         assert_eq!(
             hook(
@@ -266,7 +286,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
+            HookCall::Report("Report.{ Flow.«5a4d0b» Ended.Some.«s» }".into())
         );
         assert_eq!(
             hook(
@@ -275,7 +295,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Ended.Some.«s» }".into())
+            HookCall::Report("Report.{ Flow.«5a4d0b» Ended.Some.«s» }".into())
         );
     }
 
@@ -291,7 +311,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Cleared.Some.«s1» }".into())
+            HookCall::Report("Report.{ Flow.«5a4d0b» Cleared.Some.«s1» }".into())
         );
         assert_eq!(
             hook(
@@ -300,7 +320,7 @@ mod tests {
                 Some("5a4d0b")
             )
             .call(),
-            HookCall::Report("Report.{ «5a4d0b» Started.Some.«s2» }".into())
+            HookCall::Report("Report.{ Flow.«5a4d0b» Started.Some.«s2» }".into())
         );
     }
 
@@ -324,7 +344,7 @@ mod tests {
                 )
                 .call(),
                 HookCall::Report(format!(
-                    "Report.{{ «5a4d0b» PromptSubmitted.{{ Some.«s» Some.«p» {digest} }} }}"
+                    "Report.{{ Flow.«5a4d0b» PromptSubmitted.{{ Some.«s» Some.«p» {digest} }} }}"
                 ))
             );
         }
@@ -344,10 +364,17 @@ mod tests {
             hook(serde_json::json!({"hook_event_name": "Stop"}), None).call(),
             HookCall::Nothing(_)
         ));
+        assert_eq!(
+            hook(
+                serde_json::json!({"hook_event_name": "Notification", "session_id": "s", "message": "ready"}),
+                None
+            ).call(),
+            HookCall::Report("Report.{ Session.«s» Notified.«ready» }".into())
+        );
         assert!(matches!(
             hook(
-                serde_json::json!({"hook_event_name": "Notification"}),
-                Some("5a4d0b")
+                serde_json::json!({"hook_event_name": "Notification", "session_id": "s"}),
+                None
             )
             .call(),
             HookCall::Nothing(_)
@@ -379,7 +406,7 @@ mod tests {
                 "transcript_path": "/t/a »b».jsonl"})
             ),
             signal_flow::Query::Report(signal_flow::Report_Data {
-                flow_id: "5a4d0b".into(),
+                reporter: signal_flow::Reporter::Flow("5a4d0b".into()),
                 event: signal_flow::Event::Stopped(signal_flow::NativeStop {
                     native_session_id_option: Some("s".into()),
                     transcript_path_option: Some("/t/a »b».jsonl".into()),
@@ -391,7 +418,7 @@ mod tests {
             read(serde_json::json!({"hook_event_name": "UserPromptSubmit",
                 "session_id": "s", "prompt": "abc"})),
             signal_flow::Query::Report(signal_flow::Report_Data {
-                flow_id: "5a4d0b".into(),
+                reporter: signal_flow::Reporter::Flow("5a4d0b".into()),
                 event: signal_flow::Event::PromptSubmitted(signal_flow::NativePrompt {
                     native_session_id_option: Some("s".into()),
                     prompt_id_option: None,
@@ -404,14 +431,14 @@ mod tests {
             read(serde_json::json!({"hook_event_name": "SessionEnd",
                 "session_id": "s1", "reason": "clear"})),
             signal_flow::Query::Report(signal_flow::Report_Data {
-                flow_id: "5a4d0b".into(),
+                reporter: signal_flow::Reporter::Flow("5a4d0b".into()),
                 event: signal_flow::Event::Cleared(Some("s1".into())),
             })
         );
         assert_eq!(
             read(serde_json::json!({"hook_event_name": "SessionStart", "session_id": "s2"})),
             signal_flow::Query::Report(signal_flow::Report_Data {
-                flow_id: "5a4d0b".into(),
+                reporter: signal_flow::Reporter::Flow("5a4d0b".into()),
                 event: signal_flow::Event::Started(Some("s2".into())),
             })
         );
@@ -439,7 +466,7 @@ mod tests {
                 .actualize(&mut budget)
                 .unwrap(),
             signal_flow::Query::Report(signal_flow::Report_Data {
-                flow_id: "5a4d0b".into(),
+                reporter: signal_flow::Reporter::Flow("5a4d0b".into()),
                 event: signal_flow::Event::ToolUsed("Bash".into()),
             })
         );

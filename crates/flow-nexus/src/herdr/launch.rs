@@ -477,6 +477,7 @@ impl PreparesClaudePane for HerdrCli {
                 "SessionStart": hook,
                 "PostToolUse": every_tool,
                 "UserPromptSubmit": hook,
+                "Notification": hook,
                 "Stop": hook,
                 "SessionEnd": hook,
             }
@@ -3572,6 +3573,7 @@ printf '%s\n' "$alias"
             "-- --settings {} --remote-control {title} --name {title} --system-prompt-file {system_prompt_file} --session-id {session} --model model-current --effort high",
             concat!(
                 r#"{"hooks":{"#,
+                r#""Notification":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
                 r#""PostToolUse":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}],"matcher":"*"}],"#,
                 r#""SessionEnd":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
                 r#""SessionStart":[{"hooks":[{"command":"/fixture/bin/flow-hook","type":"command"}]}],"#,
@@ -3582,7 +3584,7 @@ printf '%s\n' "$alias"
         )));
         // The flag settings name the launch's own mode, which suppresses the
         // auto-mode default offer, and carry the harness hook on SessionStart,
-        // every PostToolUse, UserPromptSubmit, Stop and SessionEnd; no
+        // every PostToolUse, UserPromptSubmit, Notification, Stop and SessionEnd; no
         // settings file is written.
         assert_eq!(start_call.matches(" --settings ").count(), 1);
         // Each flag once in the pane's argv: the installed wrapper execs

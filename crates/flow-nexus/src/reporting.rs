@@ -1,4 +1,4 @@
-//! A harness event reaches Flow as `Report.{ FlowId Event }`, sent by the
+//! A harness event reaches Flow as `Report.{ Reporter Event }`, sent by the
 //! flow's hook through the Flow CLI. It is one Operation, Record.Harness,
 //! which appends the event to the events Flow's Memory holds for that flow.
 //! A FlowId Flow does not hold is refused as `Refused.UnknownFlow`, never
@@ -36,9 +36,10 @@ use meta_signal_flow::{
     QueueResolutionRecord, ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data,
     ResolveQueueDeliveryRejected_Data, ResolverIdentity,
 };
-use signal_flow::{Address, Event, FlowId, Report_Data, Response};
+use signal_flow::{Address, Event, FlowId, Report_Data, Reporter, Response};
 
 pub trait RecordsReports {
+    fn resolve_reporter(&self, reporter: &Reporter) -> Option<FlowId>;
     fn report(&self, report: Report_Data) -> Response;
     /// What a recorded report sets going once it is answered: a `Stopped`
     /// flow's context size is written, and its resting seat is handed its
@@ -61,8 +62,32 @@ pub trait RecordsReports {
 }
 
 impl RecordsReports for RunningNexus {
+    fn resolve_reporter(&self, reporter: &Reporter) -> Option<FlowId> {
+        match reporter {
+            Reporter::Flow(flow_id) => Some(flow_id.clone()),
+            Reporter::Session(session_id) => {
+                let nodes = self.store.flow_nodes().ok()?;
+                let mut matches = nodes
+                    .into_iter()
+                    .filter(|node| node.session_id == *session_id);
+                let found = matches.next()?;
+                matches.next().is_none().then_some(found.flow_id)
+            }
+        }
+    }
+
     fn report(&self, report: Report_Data) -> Response {
-        let Report_Data { flow_id, event } = report;
+        let Report_Data { reporter, event } = report;
+        let unresolved = match &reporter {
+            Reporter::Flow(flow_id) => flow_id.clone(),
+            Reporter::Session(session_id) => session_id.clone(),
+        };
+        let Some(flow_id) = self.resolve_reporter(&reporter) else {
+            eprintln!("flow-nexus: Report reporter {reporter:?} does not resolve to one flow");
+            return Response::Refused(signal_flow::Refusal::Unknown(
+                signal_flow::Unknown_Data::FlowId(unresolved),
+            ));
+        };
         match self.perform(Operation::Record(Record_Data::Harness(
             Record_Data_Harness_Data {
                 flow_id: flow_id.clone(),
@@ -193,7 +218,7 @@ impl RecordsReports for RunningNexus {
             }
             // A cleared session is not an exit: the harness goes on in the
             // session the next Started names.
-            Event::Started(_) | Event::ToolUsed(_) | Event::Cleared(_) => {}
+            Event::Started(_) | Event::ToolUsed(_) | Event::Notified(_) | Event::Cleared(_) => {}
         }
     }
 
@@ -313,7 +338,10 @@ impl FollowsClearedSession for RunningNexus {
                     Some(cleared.as_deref() == Some(node.session_id.as_str()))
                 }
                 Event::Started(_) | Event::Ended(_) => Some(false),
-                Event::ToolUsed(_) | Event::Stopped(_) | Event::PromptSubmitted(_) => None,
+                Event::ToolUsed(_)
+                | Event::Notified(_)
+                | Event::Stopped(_)
+                | Event::PromptSubmitted(_) => None,
             })
             .unwrap_or(false);
         if !cleared_own {

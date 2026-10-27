@@ -59,7 +59,7 @@ fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
             .try_recv()
             .expect("the hook reached the launching Nexus"),
         signal_flow::Query::Report(signal_flow::Report_Data {
-            flow_id: "5a4d0b".into(),
+            reporter: signal_flow::Reporter::Flow("5a4d0b".into()),
             event: signal_flow::Event::Stopped(signal_flow::NativeStop {
                 native_session_id_option: Some("s".into()),
                 transcript_path_option: Some("/t/s.jsonl".into()),
@@ -69,7 +69,7 @@ fn the_hook_reports_to_the_socket_its_launching_nexus_exported() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "Stop\tReport.{ «5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» None } }\t0\tReported\n"
+        "Stop\tReport.{ Flow.«5a4d0b» Stopped.{ Some.«s» Some.«/t/s.jsonl» None } }\t0\tReported\n"
     );
     assert!(!runtime.join("flow/flow.sock").exists());
 }

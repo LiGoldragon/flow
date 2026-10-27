@@ -5444,13 +5444,34 @@ impl AppliesFlowQuery for FlowStore {
             )),
             Query::Report(report) => {
                 use events::{EventRecording, RecordsHarnessEvents};
-                match self.record_event(&report.flow_id, report.event)? {
-                    EventRecording::Recorded => Ok(Response::Reported),
-                    EventRecording::UnknownFlow => {
-                        Ok(Response::Refused(signal_flow::Refusal::Unknown(
-                            signal_flow::Unknown_Data::FlowId(report.flow_id),
-                        )))
+                let unresolved = match &report.reporter {
+                    signal_flow::Reporter::Flow(flow_id) => flow_id.clone(),
+                    signal_flow::Reporter::Session(session_id) => session_id.clone(),
+                };
+                let flow_id = match report.reporter {
+                    signal_flow::Reporter::Flow(flow_id) => Some(flow_id),
+                    signal_flow::Reporter::Session(session_id) => {
+                        let mut matches = self
+                            .flow_nodes()?
+                            .into_iter()
+                            .filter(|node| node.session_id == session_id);
+                        let found = matches.next();
+                        (matches.next().is_none())
+                            .then_some(found)
+                            .flatten()
+                            .map(|node| node.flow_id)
                     }
+                };
+                let Some(flow_id) = flow_id else {
+                    return Ok(Response::Refused(signal_flow::Refusal::Unknown(
+                        signal_flow::Unknown_Data::FlowId(unresolved),
+                    )));
+                };
+                match self.record_event(&flow_id, report.event)? {
+                    EventRecording::Recorded => Ok(Response::Reported),
+                    EventRecording::UnknownFlow => Ok(Response::Refused(
+                        signal_flow::Refusal::Unknown(signal_flow::Unknown_Data::FlowId(flow_id)),
+                    )),
                 }
             }
         }

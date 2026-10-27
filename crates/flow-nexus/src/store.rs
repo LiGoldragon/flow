@@ -101,7 +101,7 @@ const META_THRESHOLD_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_model_threshold_configuration");
 const META_THRESHOLD_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-model-threshold-configuration";
 const META_THRESHOLD_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-model-threshold-configuration-v1";
+    "flow-nexus-meta-model-threshold-configuration-v2";
 const META_INVESTIGATION_CONFIGURATION_TABLE_NAME: TableName =
     TableName::new("flow_nexus_meta_investigation_configuration");
 const META_INVESTIGATION_CONFIGURATION_FAMILY: &str = "flow-nexus-meta-investigation-configuration";
@@ -1032,6 +1032,53 @@ struct StoredMetaThresholdConfiguration {
     threshold: ConfigureThreshold,
 }
 
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct ConfigureThresholdV1 {
+    model_name: String,
+    refresh: i64,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredMetaThresholdConfigurationV1 {
+    threshold: ConfigureThresholdV1,
+}
+
+impl EngineRecord for StoredMetaThresholdConfigurationV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.threshold.model_name.clone())
+    }
+}
+
+impl MemoryDefinition for StoredMetaThresholdConfigurationV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-model-threshold-configuration-v1")
+    }
+}
+
+impl MemoryDefinition for StoredMetaThresholdConfiguration {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label(META_THRESHOLD_CONFIGURATION_SCHEMA)
+    }
+}
+
+impl UpgradeFrom<StoredMetaThresholdConfigurationV1> for StoredMetaThresholdConfiguration {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredMetaThresholdConfigurationV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            threshold: ConfigureThreshold {
+                model_name: previous.threshold.model_name,
+                refresh_tokens: previous.threshold.refresh,
+            },
+        })
+    }
+}
+
 impl EngineRecord for StoredMetaThresholdConfiguration {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(self.threshold.model_name.clone())
@@ -1049,6 +1096,7 @@ impl DescribesThresholdTable for StoredMetaThresholdConfiguration {
             FamilyName::new(META_THRESHOLD_CONFIGURATION_FAMILY),
             SchemaHash::for_label(META_THRESHOLD_CONFIGURATION_SCHEMA),
         )
+        .with_predecessor::<StoredMetaThresholdConfigurationV1>()
     }
 }
 
@@ -3215,6 +3263,10 @@ trait UpgradesFlowFamilies {
         &mut self,
         descriptor: TableDescriptor<StoredMetaModelConfiguration>,
     ) -> Result<TableReference<StoredMetaModelConfiguration>, StoreError>;
+    fn upgraded_thresholds(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaThresholdConfiguration>,
+    ) -> Result<TableReference<StoredMetaThresholdConfiguration>, StoreError>;
     /// The metaflow an Address hold found is carried the same way.
     fn upgraded_address_holds(
         &mut self,
@@ -3260,6 +3312,23 @@ trait UpgradesFlowFamilies {
 }
 
 impl UpgradesFlowFamilies for Engine {
+    fn upgraded_thresholds(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaThresholdConfiguration>,
+    ) -> Result<TableReference<StoredMetaThresholdConfiguration>, StoreError> {
+        match self
+            .upgrade_table::<StoredMetaThresholdConfigurationV1, StoredMetaThresholdConfiguration>(
+                descriptor,
+            ) {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => {
+                Err(StoreError::ModelUpgrade(format!("{failure:?}")))
+            }
+        }
+    }
+
     fn upgraded_models(
         &mut self,
         descriptor: TableDescriptor<StoredMetaModelConfiguration>,
@@ -3692,11 +3761,13 @@ trait RegistersMetaConfigurationTables: Sized {
 
 impl RegistersMetaConfigurationTables for MetaConfigurationTables {
     fn register(engine: &mut Engine) -> Result<Self, StoreError> {
+        let thresholds =
+            engine.upgraded_thresholds(StoredMetaThresholdConfiguration::descriptor())?;
         Ok(Self {
             nexus: engine
                 .upgraded_nexus_configuration(StoredMetaNexusConfiguration::descriptor())?,
             models: engine.upgraded_models(StoredMetaModelConfiguration::descriptor())?,
-            thresholds: engine.register_table(StoredMetaThresholdConfiguration::descriptor())?,
+            thresholds,
             leave_outs: engine
                 .upgraded_leave_out_defaults(StoredMetaLeaveOutConfiguration::descriptor())?,
             send_servers: engine.register_table(
@@ -3856,7 +3927,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_configuration_tables = MetaConfigurationTables {
             nexus: engine.upgraded_nexus_configuration(meta_nexus_descriptor)?,
             models: engine.upgraded_models(meta_models_descriptor)?,
-            thresholds: engine.register_table(meta_thresholds_descriptor)?,
+            thresholds: engine.upgraded_thresholds(meta_thresholds_descriptor)?,
             leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
@@ -13479,5 +13550,22 @@ mod v3_attempts {
             Remembering::Custom(vec!["36b71b".into(), "e3c8c1".into()])
         );
         assert_eq!(named.launch_profile.address.topic, "flow");
+    }
+
+    #[test]
+    fn a_threshold_upgrade_preserves_its_token_count() {
+        use sema_engine::{Decision, UpgradeFrom};
+        let previous = super::StoredMetaThresholdConfigurationV1 {
+            threshold: super::ConfigureThresholdV1 {
+                model_name: "gpt-sol".into(),
+                refresh: 150_000,
+            },
+        };
+        let Decision::Ready(current) =
+            super::StoredMetaThresholdConfiguration::upgrade_from(previous)
+        else {
+            panic!("threshold upgrade is total")
+        };
+        assert_eq!(current.threshold.refresh_tokens, 150_000);
     }
 }

@@ -75,6 +75,22 @@ use signal_flow::{
     RouteReadiness, StartRejection,
 };
 
+/// Applies the meta wire's index cursor to an already ordered snapshot.
+/// `after` is the number of rows consumed; `next_page` is the cursor for
+/// the next request and is absent once the snapshot is exhausted.
+pub(crate) fn page_records<T: Clone>(
+    records: &[T],
+    page: &meta_signal_flow::Page,
+) -> (Vec<T>, meta_signal_flow::NextPage) {
+    let start = usize::try_from(page.after.max(0))
+        .unwrap_or(usize::MAX)
+        .min(records.len());
+    let count = usize::try_from(page.count.max(0)).unwrap_or(usize::MAX);
+    let end = start.saturating_add(count).min(records.len());
+    let next = (end < records.len()).then(|| i64::try_from(end).unwrap_or(i64::MAX));
+    (records[start..end].to_vec(), next)
+}
+
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
 const FLOW_NATIVE_OWNER_PROOF_TABLE_NAME: TableName =
     TableName::new("flow_nexus_native_owner_proofs");
@@ -4558,8 +4574,9 @@ impl OpensFlowStore for FlowStore {
         let delivery_descriptor = TableDescriptor::<delivery::StoredDelivery>::new(
             delivery::DELIVERY_TABLE_NAME,
             FamilyName::new("flow-nexus-delivery"),
-            SchemaHash::for_label("flow-nexus-delivery-v1"),
-        );
+            delivery::StoredDelivery::schema_hash(),
+        )
+        .with_predecessor::<delivery::StoredDeliveryV1>();
         let pane_lease_descriptor = TableDescriptor::<delivery::PaneLease>::new(
             delivery::PANE_LEASE_TABLE_NAME,
             FamilyName::new("flow-nexus-pane-lease"),
@@ -7514,7 +7531,12 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_metaflow_locks" => {
                 ("flow-nexus-metaflow-lock", "flow-nexus-metaflow-lock-v1")
             }
-            "flow_nexus_deliveries" => ("flow-nexus-delivery", "flow-nexus-delivery-v1"),
+            "flow_nexus_deliveries" => {
+                return Some((
+                    "flow-nexus-delivery",
+                    delivery::StoredDelivery::schema_hash(),
+                ));
+            }
             "flow_nexus_pane_leases" => ("flow-nexus-pane-lease", "flow-nexus-pane-lease-v1"),
             "flow_nexus_delivery_configuration" => (
                 "flow-nexus-delivery-configuration",
@@ -7633,6 +7655,10 @@ pub(crate) trait ReadsFlowMemory {
                 && identity.schema_hash() == schema_hash
         };
         let predecessors: &[(&str, SchemaHash)] = match table_key {
+            "flow_nexus_deliveries" => &[(
+                "flow-nexus-delivery",
+                delivery::StoredDeliveryV1::schema_hash(),
+            )],
             "flow_nexus_send_outcomes" => &[
                 (
                     send_outcome::OUTCOME_FAMILY,

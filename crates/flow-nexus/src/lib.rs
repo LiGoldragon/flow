@@ -555,10 +555,45 @@ impl Dispatches for RunningNexus {
                     ),
                 }
             }
-            meta_signal_flow::Query::ReadSendOutcomes => match self.store.read_send_outcomes() {
-                Ok(records) => meta_signal_flow::Response::SendOutcomesRead(records),
-                Err(_) => meta_signal_flow::Response::ReadSendOutcomesRejected(
-                    meta_signal_flow::ReadSendOutcomesRejected_Data::StoreRefused,
+            meta_signal_flow::Query::ReadSendOutcomes(page) => {
+                match self.store.read_send_outcomes() {
+                    Ok(records) => {
+                        let (send_outcome_record_vector, next_page) =
+                            store::page_records(&records, &page);
+                        meta_signal_flow::Response::SendOutcomesRead(
+                            meta_signal_flow::SendOutcomesRead_Data {
+                                send_outcome_record_vector,
+                                next_page,
+                            },
+                        )
+                    }
+                    Err(_) => meta_signal_flow::Response::ReadSendOutcomesRejected(
+                        meta_signal_flow::ReadSendOutcomesRejected_Data::StoreRefused,
+                    ),
+                }
+            }
+            meta_signal_flow::Query::ResolveDelivery(resolution) => {
+                use store::delivery::ResolvesDeliveries;
+                match self.store.resolve_delivery(resolution) {
+                    Ok(Ok(delivery)) => meta_signal_flow::Response::DeliveryResolved(delivery),
+                    Ok(Err(rejection)) => {
+                        meta_signal_flow::Response::ResolveDeliveryRejected(rejection)
+                    }
+                    Err(_) => meta_signal_flow::Response::ResolveDeliveryRejected(
+                        meta_signal_flow::ResolveDeliveryRejected_Data::StoreRefused,
+                    ),
+                }
+            }
+            meta_signal_flow::Query::ListFlows(page) => match self.store.flow_nodes() {
+                Ok(nodes) => {
+                    let (flow_node_vector, next_page) = store::page_records(&nodes, &page);
+                    meta_signal_flow::Response::FlowsListed(meta_signal_flow::FlowsListed_Data {
+                        flow_node_vector,
+                        next_page,
+                    })
+                }
+                Err(_) => meta_signal_flow::Response::ListFlowsRejected(
+                    meta_signal_flow::ListFlowsRejected_Data::StoreRefused,
                 ),
             },
             meta_signal_flow::Query::ResolveQueueDelivery(resolution) => match resolver {
@@ -1651,8 +1686,24 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch_meta(meta_signal_flow::Query::ReadSendOutcomes),
-            meta_signal_flow::Response::SendOutcomesRead(records)
+                .dispatch_meta(meta_signal_flow::Query::ReadSendOutcomes(
+                    meta_signal_flow::Page { after: 0, count: 2 }
+                )),
+            meta_signal_flow::Response::SendOutcomesRead(meta_signal_flow::SendOutcomesRead_Data {
+                send_outcome_record_vector: records[..2].to_vec(),
+                next_page: Some(2),
+            })
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::ReadSendOutcomes(
+                    meta_signal_flow::Page { after: 2, count: 2 }
+                )),
+            meta_signal_flow::Response::SendOutcomesRead(meta_signal_flow::SendOutcomesRead_Data {
+                send_outcome_record_vector: records[2..].to_vec(),
+                next_page: None,
+            })
         );
     }
 
@@ -3878,7 +3929,15 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch_meta(meta_signal_flow::Query::ReadEvents("0a0a0a".into())),
+                .dispatch_meta(meta_signal_flow::Query::ReadEvents(
+                    meta_signal_flow::ReadEvents_Data {
+                        flow_id: "0a0a0a".into(),
+                        page: meta_signal_flow::Page {
+                            after: 0,
+                            count: 100
+                        },
+                    }
+                )),
             meta_signal_flow::Response::ReadEventsRejected(
                 meta_signal_flow::ReadEventsRejected_Data::UnknownFlow
             ),
@@ -3898,12 +3957,122 @@ mod tests {
         assert_eq!(
             fixture
                 .nexus
-                .dispatch_meta(meta_signal_flow::Query::ReadEvents("908786".into())),
+                .dispatch_meta(meta_signal_flow::Query::ReadEvents(
+                    meta_signal_flow::ReadEvents_Data {
+                        flow_id: "908786".into(),
+                        page: meta_signal_flow::Page { after: 0, count: 2 },
+                    }
+                )),
             meta_signal_flow::Response::EventsRead(meta_signal_flow::EventsRead_Data {
                 flow_id: "908786".into(),
-                event_vector: vec![Event::Started(None), Event::ToolUsed("Bash".into()), stop],
+                event_vector: vec![Event::Started(None), Event::ToolUsed("Bash".into())],
+                next_page: Some(2),
             })
         );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::ReadEvents(
+                    meta_signal_flow::ReadEvents_Data {
+                        flow_id: "908786".into(),
+                        page: meta_signal_flow::Page { after: 2, count: 2 },
+                    }
+                )),
+            meta_signal_flow::Response::EventsRead(meta_signal_flow::EventsRead_Data {
+                flow_id: "908786".into(),
+                event_vector: vec![stop],
+                next_page: None,
+            })
+        );
+    }
+
+    #[test]
+    fn owner_resolves_only_uncertain_deliveries_and_the_resolution_is_durable() {
+        use crate::store::delivery::{RecordsDeliveries, ResolvesDeliveries};
+        let fixture = NexusFixture::new();
+        let uncertain = meta_signal_flow::Delivery {
+            delivery_id: "d-uncertain".into(),
+            flow_id: "908786".into(),
+            interrupt_witness: meta_signal_flow::InterruptWitness::Unobserved,
+            delivery_grade: meta_signal_flow::DeliveryGrade::Uncertain,
+        };
+        fixture
+            .nexus
+            .store
+            .settle_delivery(uncertain.clone())
+            .unwrap();
+        let resolution = meta_signal_flow::DeliveryResolution {
+            delivery_id: uncertain.delivery_id.clone(),
+            delivery_outcome: meta_signal_flow::DeliveryOutcome::NotPresented,
+            queue_resolution_reason: "owner inspected recipient transcript".into(),
+        };
+        let response = fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::ResolveDelivery(resolution.clone()));
+        let expected = meta_signal_flow::Delivery {
+            delivery_grade: meta_signal_flow::DeliveryGrade::NotPresented,
+            ..uncertain.clone()
+        };
+        assert_eq!(
+            response,
+            meta_signal_flow::Response::DeliveryResolved(expected.clone())
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .delivery(&uncertain.delivery_id)
+                .unwrap(),
+            Some(expected)
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .dispatch_meta(meta_signal_flow::Query::ResolveDelivery(resolution)),
+            meta_signal_flow::Response::ResolveDeliveryRejected(
+                meta_signal_flow::ResolveDeliveryRejected_Data::NotUncertain
+            )
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .resolve_delivery(meta_signal_flow::DeliveryResolution {
+                    delivery_id: "missing".into(),
+                    delivery_outcome: meta_signal_flow::DeliveryOutcome::Presented,
+                    queue_resolution_reason: "witness".into(),
+                })
+                .unwrap(),
+            Err(meta_signal_flow::ResolveDeliveryRejected_Data::UnknownDelivery)
+        );
+        assert_eq!(
+            fixture
+                .nexus
+                .store
+                .resolve_delivery(meta_signal_flow::DeliveryResolution {
+                    delivery_id: "missing".into(),
+                    delivery_outcome: meta_signal_flow::DeliveryOutcome::Presented,
+                    queue_resolution_reason: "  ".into(),
+                })
+                .unwrap(),
+            Err(meta_signal_flow::ResolveDeliveryRejected_Data::EmptyReason)
+        );
+    }
+
+    #[test]
+    fn list_flows_pages_the_ordered_snapshot() {
+        let fixture = NexusFixture::new();
+        let response = fixture
+            .nexus
+            .dispatch_meta(meta_signal_flow::Query::ListFlows(meta_signal_flow::Page {
+                after: 0,
+                count: 1,
+            }));
+        let meta_signal_flow::Response::FlowsListed(first) = response else {
+            panic!("expected listed flows")
+        };
+        assert!(first.flow_node_vector.is_empty());
+        assert_eq!(first.next_page, None);
     }
 
     #[test]

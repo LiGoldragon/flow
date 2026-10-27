@@ -21,6 +21,12 @@ on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`
 branch, whose schema it carries. Every ordinary and meta peer repins, and
 Curriculum serves that schema.
 
+- Pins meta-signal-flow 42.0.0. `ReadEvents`, `ReadSendOutcomes`, and
+  `ListFlows` return bounded pages with continuation cursors. Owners can
+  settle an `Uncertain` pane delivery as `Presented` or `NotPresented`, with
+  their reason, through `ResolveDelivery`. Delivery Memory upgrades v1 to
+  v2; all three earlier grades retain their exact meanings.
+>>>>>>> 787b498 (Add paged meta reads and delivery resolution)
 - Refresh threshold configuration names `RefreshTokens`; the threshold family advances
   from v1 to v2 preserving the numeric value. A successor's `Refresh` cause is unit.
 - Store-only recovery repins meta-signal-flow 42 and adds owner repairs for
@@ -33,6 +39,7 @@ Curriculum serves that schema.
   Memory upgrades v4 to v5; older queued work remains intact without an
   invented sender identity. The plain CLI message form requires address,
   priority, kind, and words.
+
 
 
 - An abrupt request may use `Delivery.Queue`; it enters the recipient's

@@ -64,6 +64,8 @@ pub trait WritesPane {
     const REST_WAIT_MILLISECONDS: &'static str = "15000";
 
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent;
+    /// The pane's visible screen exactly as Herdr reads it.
+    fn screen(&self, route: &HerdrRoute) -> Option<String>;
     /// Whether the composer holds no text of its own: `None` when the screen
     /// could not be read or shows no composer.
     /// The text the composer holds, empty when it holds none of its own:
@@ -235,7 +237,7 @@ impl WritesPane for HerdrCli {
         }
     }
 
-    fn composer_text(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String> {
+    fn screen(&self, route: &HerdrRoute) -> Option<String> {
         let output = Command::new(&self.executable)
             .args([
                 "--session",
@@ -255,7 +257,11 @@ impl WritesPane for HerdrCli {
         if !output.status.success() {
             return None;
         }
-        Composer::of(harness_kind).text(&String::from_utf8_lossy(&output.stdout))
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn composer_text(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String> {
+        Composer::of(harness_kind).text(&self.screen(route)?)
     }
 
     fn press(&self, route: &HerdrRoute, keys: &[String]) -> bool {

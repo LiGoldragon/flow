@@ -27,7 +27,7 @@ use lease::LeasesPanes;
 use meta_signal_flow::{
     CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
     DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, HarnessProfile,
-    InterruptWitness, Message, Response,
+    InterruptWitness, Message, PaneRead_Data, ReadPaneRejected_Data, Response,
 };
 use signal_flow::{AgentState, FlowLifecycle, FlowNode, HerdrRoute, HerdrRouteSelection};
 
@@ -172,28 +172,36 @@ impl ReadsLeasedPane for RunningNexus {
 }
 
 impl RunningNexus {
-    fn writable_state_with(
-        &self,
-        target: &DeliveryTarget,
-        permit_blocked: bool,
-    ) -> Result<AgentState, PaneRefusal> {
-        let agent_state = match self.herdr.pane_agent(&target.node) {
+    fn pane_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
+        match self.herdr.pane_agent(&target.node) {
             PaneAgent::Present {
                 agent_state,
                 ready: true,
-            } => agent_state,
+            } => Ok(agent_state),
             PaneAgent::Present { ready: false, .. } | PaneAgent::Unreadable => {
-                return Err(PaneRefusal::RouteUnavailable);
+                Err(PaneRefusal::RouteUnavailable)
             }
             PaneAgent::Absent => {
                 let _ = self.perform(Operation::Record(Record_Data::Exited(
                     target.node.flow_id.clone(),
                 )));
-                return Err(PaneRefusal::RouteUnavailable);
+                Err(PaneRefusal::RouteUnavailable)
             }
-        };
-        if agent_state == AgentState::Blocked && !permit_blocked {
-            return Err(PaneRefusal::RecipientBlocked);
+        }
+    }
+
+    fn writable_state_with(
+        &self,
+        target: &DeliveryTarget,
+        permit_blocked: bool,
+    ) -> Result<AgentState, PaneRefusal> {
+        let agent_state = self.pane_state(target)?;
+        if agent_state == AgentState::Blocked {
+            return if permit_blocked {
+                Ok(agent_state)
+            } else {
+                Err(PaneRefusal::RecipientBlocked)
+            };
         }
         match self
             .herdr
@@ -211,6 +219,7 @@ pub trait DeliversMessages {
     fn deliver(&self, request: DeliveryRequest) -> Response;
     fn vet(&self, request: &DeliveryRequest) -> Response;
     fn command(&self, request: CommandRequest) -> Response;
+    fn read_pane(&self, flow_id: &str) -> Response;
 }
 
 impl DeliversMessages for RunningNexus {
@@ -274,7 +283,16 @@ impl DeliversMessages for RunningNexus {
             }
         }
         let _lease = self.pane_leases.hold(&target.route);
-        let agent_state = match self.writable_state(&target) {
+        let state = match &request.harness_command {
+            HarnessCommand::Keys(_) => self.pane_state(&target),
+            HarnessCommand::Line(_) | HarnessCommand::Clear
+                if matches!(request.gate, meta_signal_flow::Gate::Forced) =>
+            {
+                self.forced_writable_state(&target)
+            }
+            _ => self.writable_state(&target),
+        };
+        let agent_state = match state {
             Ok(agent_state) => agent_state,
             Err(refusal) => return Response::CommandRejected(refusal.into()),
         };
@@ -309,12 +327,60 @@ impl DeliversMessages for RunningNexus {
                     Placement::Placed { observed: false } => CommandGrade::Transported,
                 }
             }
+            HarnessCommand::Line(ref line) => match self.herdr.place(&target.route, &line, true) {
+                Placement::Refused => {
+                    return Response::CommandRejected(CommandRejection::NotDelivered);
+                }
+                Placement::Uncertain => CommandGrade::Uncertain,
+                Placement::Placed { observed: true } => CommandGrade::Observed,
+                Placement::Placed { observed: false } => CommandGrade::Transported,
+            },
+            HarnessCommand::Keys(ref keys) => {
+                if !self.herdr.press(&target.route, keys) {
+                    return Response::CommandRejected(CommandRejection::NotDelivered);
+                }
+                CommandGrade::Transported
+            }
+            HarnessCommand::Clear => {
+                if !self.herdr.retract(&target.route, &target.node.harness_kind) {
+                    return Response::CommandRejected(CommandRejection::NotDelivered);
+                }
+                CommandGrade::Transported
+            }
         };
         Response::Commanded(CommandOutcome {
             flow_id: target.node.flow_id,
             harness_command: request.harness_command,
             command_grade,
         })
+    }
+
+    fn read_pane(&self, flow_id: &str) -> Response {
+        let node = match self.store.flow_node(flow_id) {
+            Ok(Some(node)) => node,
+            Ok(None) => return Response::ReadPaneRejected(ReadPaneRejected_Data::UnknownFlow),
+            Err(_) => return Response::ReadPaneRejected(ReadPaneRejected_Data::HerdrUnavailable),
+        };
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return Response::ReadPaneRejected(ReadPaneRejected_Data::RouteUnavailable);
+        };
+        let agent_state = match self.herdr.pane_agent(&node) {
+            PaneAgent::Present { agent_state, .. } => agent_state,
+            PaneAgent::Absent => {
+                return Response::ReadPaneRejected(ReadPaneRejected_Data::RouteUnavailable);
+            }
+            PaneAgent::Unreadable => {
+                return Response::ReadPaneRejected(ReadPaneRejected_Data::HerdrUnavailable);
+            }
+        };
+        match self.herdr.screen(route) {
+            Some(screen) => Response::PaneRead(PaneRead_Data {
+                flow_id: node.flow_id,
+                agent_state,
+                screen,
+            }),
+            None => Response::ReadPaneRejected(ReadPaneRejected_Data::HerdrUnavailable),
+        }
     }
 }
 

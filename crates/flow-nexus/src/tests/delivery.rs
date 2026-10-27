@@ -10,7 +10,8 @@ use crate::{Dispatches, peer::AdmitsMetaPeer};
 use meta_signal_flow::{
     BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Content, Delivery,
     DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, InterruptWitness, Letter,
-    Message, Query as MetaQuery, Response as MetaResponse, Sender,
+    Message, PaneRead_Data, Query as MetaQuery, ReadPaneRejected_Data, Response as MetaResponse,
+    Sender,
 };
 use signal_flow::{AgentObservation, AgentState, FlowLifecycle, ObserveSelection, Query, Response};
 use std::fs;
@@ -603,6 +604,85 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         "nothing to interrupt, and no Escape into a resting agent"
     );
     assert!(!resting.operations().contains("send-keys"));
+}
+
+#[test]
+fn line_keys_clear_and_read_pane_use_the_exact_bound_pane() {
+    let fixture = NexusFixture::new();
+    let log = fixture.accept_pane_operations(
+        vec![fixture.settled_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+
+    assert!(matches!(
+        fixture.command(HarnessCommand::Line("owner line".into())),
+        MetaResponse::Commanded(CommandOutcome {
+            command_grade: CommandGrade::Observed,
+            ..
+        })
+    ));
+    assert!(matches!(
+        fixture.command(HarnessCommand::Keys(vec!["enter".into()])),
+        MetaResponse::Commanded(_)
+    ));
+    assert!(matches!(
+        fixture.command(HarnessCommand::Clear),
+        MetaResponse::Commanded(_)
+    ));
+    assert!(fixture.operations().contains("pane send-keys w1:p3 enter"));
+    assert!(fixture.operations().contains("pane send-keys w1:p3 ctrl+u"));
+    assert!(prompts(&log).iter().any(|line| line.contains("owner line")));
+
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::ReadPane("908786".into())),
+        MetaResponse::PaneRead(PaneRead_Data {
+            flow_id: "908786".into(),
+            agent_state: AgentState::Idle,
+            screen: "❯ \n› \n".into(),
+        })
+    );
+    assert_eq!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::ReadPane("unknown".into())),
+        MetaResponse::ReadPaneRejected(ReadPaneRejected_Data::UnknownFlow)
+    );
+}
+
+#[test]
+fn blocked_commands_follow_their_gate() {
+    for command in [HarnessCommand::Line("answer".into()), HarnessCommand::Clear] {
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(
+            vec![fixture.blocked_agent()],
+            PromptFixture::Prompted("w1:p3"),
+        );
+        fixture.register_with(FlowLifecycle::Active);
+        assert_eq!(
+            fixture.command(command),
+            MetaResponse::CommandRejected(CommandRejection::RecipientBlocked)
+        );
+    }
+
+    for command in [
+        HarnessCommand::Line("answer".into()),
+        HarnessCommand::Keys(vec!["enter".into()]),
+        HarnessCommand::Clear,
+    ] {
+        let fixture = NexusFixture::new();
+        fixture.accept_pane_operations(
+            vec![fixture.blocked_agent()],
+            PromptFixture::Prompted("w1:p3"),
+        );
+        fixture.register_with(FlowLifecycle::Active);
+        assert!(matches!(
+            fixture.command_with_gate(command, meta_signal_flow::Gate::Forced),
+            MetaResponse::Commanded(_)
+        ));
+    }
 }
 
 /// Compaction is an emergency measure: a Compact is refused, before any

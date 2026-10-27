@@ -57,9 +57,11 @@ Curriculum serves that schema.
 - Pins meta-signal-flow 42.0.0. Pane deliveries are complete datoms:
   priority-headed `Letter.{ Kind Sender Body }`, with the sender Address and
   Flow ID resolved at ordinary Send admission. Logical-delivery current
-  Memory upgrades v4 to v5; older queued work remains intact without an
-  invented sender identity. The plain CLI message form requires address,
-  priority, kind, and words.
+  Memory upgrades v4 to v6. Older queued work remains whole without an
+  invented sender identity: a typed `MissingHistoricalSender` disposition
+  quarantines it from runnable delivery while later valid work retains its
+  order. Queue-delivery requests advance to v6 to retain that disposition.
+  The plain CLI message form requires address, priority, kind, and words.
 
 
 

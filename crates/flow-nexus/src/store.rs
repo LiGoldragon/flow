@@ -5216,6 +5216,7 @@ impl OpensFlowStore for FlowStore {
         store.state()?;
         store.archive_legacy_queue()?;
         store.seed_missing_queued_deliveries()?;
+        store.quarantine_missing_historical_senders()?;
         store
             .configuration_snapshot()?
             .ok_or(StoreError::NotConfigured)?;
@@ -5397,6 +5398,7 @@ impl OpensFlowStore for FlowStore {
         };
         store.archive_legacy_queue()?;
         store.seed_missing_queued_deliveries()?;
+        store.quarantine_missing_historical_senders()?;
         if store
             .engine
             .match_records(QueryPlan::key(store.state, RecordKey::new(STATE_KEY)))?
@@ -8110,7 +8112,7 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_requests" => (
                 "flow-nexus-queue-delivery-request",
-                "flow-nexus-queue-delivery-request-v5",
+                "flow-nexus-queue-delivery-request-v6",
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
@@ -8252,6 +8254,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-logical-delivery-current",
                     <logical_delivery::CurrentLogicalDeliveryV4 as MemoryDefinition>::schema_hash(),
                 ),
+                (
+                    "flow-nexus-logical-delivery-current",
+                    <logical_delivery::CurrentLogicalDeliveryV5 as MemoryDefinition>::schema_hash(),
+                ),
             ],
             "flow_nexus_logical_delivery_events" => &[
                 (
@@ -8327,6 +8333,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     "flow-nexus-queue-delivery-request",
                     <queue_delivery::StoredDeliveryRequestV4 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    "flow-nexus-queue-delivery-request",
+                    <queue_delivery::StoredDeliveryRequestV5 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_queue_delivery_attempts" => &[
@@ -9571,9 +9581,7 @@ mod tests {
         CompositionRefusalV34, LaunchOutcomeV8, ReplaceRejectionV34, StartRejectionV34,
         StoredLaunchOutcomeV8,
     };
-    use super::{
-        CompositionRefusalV37, LaunchOutcomeV9, StartRejectionV37, StoredLaunchOutcomeV9,
-    };
+    use super::{CompositionRefusalV37, LaunchOutcomeV9, StartRejectionV37, StoredLaunchOutcomeV9};
     use super::{Configuration, ConfiguresOnlyStore, ReadsFlowMemory};
     use super::{
         ContextRefusalV30, LaunchOutcomeV6, ReplaceRejectionV30, StartRejectionV30,
@@ -12526,9 +12534,7 @@ mod tests {
             StoredLaunchOutcomeV9 {
                 launch_request_id: "v9-simplified".into(),
                 launch_outcome: LaunchOutcomeV9::StartRejected(
-                    StartRejectionV37::CompositionRefused(
-                        CompositionRefusalV37::InvalidToolSet,
-                    ),
+                    StartRejectionV37::CompositionRefused(CompositionRefusalV37::InvalidToolSet),
                 ),
             },
         ];
@@ -12562,9 +12568,7 @@ mod tests {
                 .launch_outcome("v9-simplified")
                 .expect("outcome reads"),
             Some(LaunchOutcome::StartRejected(
-                StartRejection::CompositionRefused(
-                    signal_flow::CompositionRefusal::Unrecorded
-                )
+                StartRejection::CompositionRefused(signal_flow::CompositionRefusal::Unrecorded)
             ))
         );
     }

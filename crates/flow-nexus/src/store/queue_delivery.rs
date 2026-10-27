@@ -9,7 +9,7 @@
 //! proves the request never reached the seat ends an attempt Absent, with
 //! that proof recorded, and only then may the request be handed over again.
 
-use super::logical_delivery::RecordsLogicalDeliveries;
+use super::logical_delivery::{LogicalSenderIdentity, RecordsLogicalDeliveries};
 use super::*;
 use flow_ethos::Request;
 use meta_signal_flow::{
@@ -87,6 +87,37 @@ enum RequestState {
     /// delivery journal as Uncertain, but is no longer an active queue item
     /// and must never be handed over again automatically.
     Parked,
+    /// Its complete queue evidence is retained, but the admission predates
+    /// the sender identity needed to render a typed Message.
+    QuarantinedMissingHistoricalSender,
+}
+
+impl RequestState {
+    fn is_quarantined(&self) -> bool {
+        matches!(
+            self,
+            Self::Parked | Self::QuarantinedMissingHistoricalSender
+        )
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum RequestStateV5 {
+    Queued,
+    Settled,
+    Unsent,
+    Parked,
+}
+
+impl From<RequestStateV5> for RequestState {
+    fn from(previous: RequestStateV5) -> Self {
+        match previous {
+            RequestStateV5::Queued => Self::Queued,
+            RequestStateV5::Settled => Self::Settled,
+            RequestStateV5::Unsent => Self::Unsent,
+            RequestStateV5::Parked => Self::Parked,
+        }
+    }
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -126,11 +157,48 @@ impl EngineRecord for StoredDeliveryRequest {
 
 impl MemoryDefinition for StoredDeliveryRequest {
     fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(6)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-queue-delivery-request-v6")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredDeliveryRequestV5 {
+    request_id: String,
+    address: Address,
+    queue_evidence: QueueEvidence,
+    state: RequestStateV5,
+}
+
+impl EngineRecord for StoredDeliveryRequestV5 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.request_id.clone())
+    }
+}
+
+impl MemoryDefinition for StoredDeliveryRequestV5 {
+    fn memory_version() -> MemoryVersion {
         MemoryVersion::new(5)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-queue-delivery-request-v5")
+    }
+}
+
+impl UpgradeFrom<StoredDeliveryRequestV5> for StoredDeliveryRequest {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredDeliveryRequestV5) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            request_id: previous.request_id,
+            address: previous.address,
+            queue_evidence: previous.queue_evidence,
+            state: previous.state.into(),
+        })
     }
 }
 
@@ -508,6 +576,18 @@ pub(crate) trait DeclaresQueueDeliveryTables: Sized {
         engine: &mut Engine,
         descriptor: TableDescriptor<StoredDeliveryRequest>,
     ) -> Result<TableReference<StoredDeliveryRequest>, StoreError> {
+        match engine
+            .upgrade_table::<StoredDeliveryRequestV5, StoredDeliveryRequest>(descriptor.clone())
+        {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::QueueDeliveryUpgrade(format!("{failure:?}")));
+            }
+        }
         let from_v4 = descriptor.clone();
         match engine
             .upgrade_table::<StoredDeliveryRequestV4, StoredDeliveryRequest>(descriptor.clone())
@@ -590,7 +670,8 @@ impl DeclaresQueueDeliveryTables for QueueDeliveryTables {
             )
             .with_predecessor::<StoredDeliveryRequestV2>()
             .with_predecessor::<StoredDeliveryRequestV3>()
-            .with_predecessor::<StoredDeliveryRequestV4>(),
+            .with_predecessor::<StoredDeliveryRequestV4>()
+            .with_predecessor::<StoredDeliveryRequestV5>(),
             TableDescriptor::new(
                 DELIVERY_ATTEMPT_TABLE_NAME,
                 FamilyName::new("flow-nexus-queue-delivery-attempt"),
@@ -620,13 +701,15 @@ pub trait AccountsQueueDelivery {
     /// Original request and attempt records are kept, never reclassified
     /// as delivered or absent and never correlated by matching bodies.
     fn archive_legacy_queue(&self) -> Result<(), StoreError>;
+    /// Preserve a queue row whose historical sender cannot be recovered, but
+    /// remove it from runnable order with an explicit durable disposition.
+    fn quarantine_missing_historical_senders(&self) -> Result<(), StoreError>;
     fn observe_legacy_archive(
         &self,
     ) -> Result<Vec<meta_signal_flow::LegacyArchiveEntry>, StoreError>;
     /// Kept archive identities are not eligible pending sender deliveries.
     /// Their original lifecycle events and native evidence remain unchanged.
-    fn archived_legacy_request_ids(&self)
-    -> Result<std::collections::BTreeSet<String>, StoreError>;
+    fn quarantined_request_ids(&self) -> Result<std::collections::BTreeSet<String>, StoreError>;
 
     /// Gives the oldest queued request distinct durable request, attempt and
     /// native request identities before any native send occurs.
@@ -760,7 +843,7 @@ impl ReadsQueueDelivery for FlowStore {
                 return None;
             }
             match self.request_state(&attempt.request_id) {
-                Ok(Some(RequestState::Parked)) => None,
+                Ok(Some(state)) if state.is_quarantined() => None,
                 Ok(_) => Some(Ok(attempt)),
                 Err(error) => Some(Err(error)),
             }
@@ -853,6 +936,84 @@ impl AccountsQueueDelivery for FlowStore {
         Ok(())
     }
 
+    fn quarantine_missing_historical_senders(&self) -> Result<(), StoreError> {
+        let missing = self
+            .engine
+            .match_records(QueryPlan::all(self.logical_deliveries.current))?
+            .records()
+            .iter()
+            .filter_map(|current| {
+                matches!(
+                    current.sender_identity,
+                    LogicalSenderIdentity::MissingHistoricalSender
+                )
+                .then(|| current.snapshot.logical_delivery_id.clone())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let requests = self
+            .engine
+            .match_records(QueryPlan::all(self.queue_delivery.requests))?
+            .records()
+            .to_vec();
+        let mut commit = self.engine.begin_atomic_commit();
+        let mut changed = false;
+        for metaflow in self.list_metaflows()? {
+            let mut stored = self
+                .stored_metaflow(&metaflow.address)?
+                .ok_or(StoreError::StateInvariant)?;
+            let mut runnable = Vec::with_capacity(metaflow.queue.len());
+            let mut removed = false;
+            for entry in metaflow.queue {
+                if !missing.contains(&entry.logical_delivery_id) {
+                    runnable.push(entry);
+                    continue;
+                }
+                let request_id = entry.logical_delivery_id.clone();
+                let evidence = QueueEvidence::Logical(entry);
+                match requests
+                    .iter()
+                    .find(|request| request.request_id == request_id)
+                {
+                    Some(request)
+                        if request.address == metaflow.address
+                            && request.queue_evidence == evidence =>
+                    {
+                        if request.state != RequestState::QuarantinedMissingHistoricalSender {
+                            let mut quarantined = request.clone();
+                            quarantined.state = RequestState::QuarantinedMissingHistoricalSender;
+                            commit = commit.mutate(self.queue_delivery.requests, quarantined);
+                        }
+                    }
+                    Some(_) => return Err(StoreError::StateInvariant),
+                    None => {
+                        commit = commit.assert(
+                            self.queue_delivery.requests,
+                            StoredDeliveryRequest {
+                                request_id,
+                                address: metaflow.address.clone(),
+                                queue_evidence: evidence,
+                                state: RequestState::QuarantinedMissingHistoricalSender,
+                            },
+                        );
+                    }
+                }
+                removed = true;
+            }
+            if removed {
+                stored.metaflow.queue = runnable;
+                commit = commit.mutate(self.metaflows, stored);
+                changed = true;
+            }
+        }
+        if changed {
+            self.engine.commit_atomic(commit)?;
+        }
+        Ok(())
+    }
+
     fn observe_legacy_archive(
         &self,
     ) -> Result<Vec<meta_signal_flow::LegacyArchiveEntry>, StoreError> {
@@ -883,9 +1044,7 @@ impl AccountsQueueDelivery for FlowStore {
         Ok(archive)
     }
 
-    fn archived_legacy_request_ids(
-        &self,
-    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+    fn quarantined_request_ids(&self) -> Result<std::collections::BTreeSet<String>, StoreError> {
         let rows = self
             .engine
             .match_records(QueryPlan::all(self.queue_delivery.requests))?;
@@ -893,9 +1052,10 @@ impl AccountsQueueDelivery for FlowStore {
             .records()
             .iter()
             .filter(|request| {
-                request.state == RequestState::Parked
-                    && (matches!(request.queue_evidence, QueueEvidence::Legacy(_))
-                        || request.request_id.starts_with("legacy:"))
+                request.state == RequestState::QuarantinedMissingHistoricalSender
+                    || (request.state == RequestState::Parked
+                        && (matches!(request.queue_evidence, QueueEvidence::Legacy(_))
+                            || request.request_id.starts_with("legacy:")))
             })
             .map(|request| request.request_id.clone())
             .collect())
@@ -911,6 +1071,7 @@ impl AccountsQueueDelivery for FlowStore {
     ) -> Result<PrepareQueueDelivery, StoreError> {
         // Also protects callers that encounter migrated data after opening.
         self.archive_legacy_queue()?;
+        self.quarantine_missing_historical_senders()?;
         if let Some(attempt) = self.outstanding_for(address)? {
             return Ok(PrepareQueueDelivery::Outstanding(attempt));
         }
@@ -1441,9 +1602,11 @@ impl AccountsQueueDelivery for FlowStore {
     fn recover_outstanding_deliveries(&self) -> Result<Vec<QueueDeliveryAttempt>, StoreError> {
         let mut outstanding = Vec::new();
         for mut attempt in self.delivery_attempts()? {
-            if self.request_state(&attempt.request_id)? == Some(RequestState::Parked)
-                && (matches!(attempt.queue_evidence, QueueEvidence::Legacy(_))
-                    || attempt.request_id.starts_with("legacy:"))
+            let request_state = self.request_state(&attempt.request_id)?;
+            if request_state == Some(RequestState::QuarantinedMissingHistoricalSender)
+                || (request_state == Some(RequestState::Parked)
+                    && (matches!(attempt.queue_evidence, QueueEvidence::Legacy(_))
+                        || attempt.request_id.starts_with("legacy:")))
             {
                 continue;
             }
@@ -1652,6 +1815,146 @@ mod tests {
             turn_id: "turn-9".into(),
             native_receipt: r#"{"id":3,"result":{}}"#.into(),
         }
+    }
+
+    #[test]
+    fn missing_historical_sender_is_quarantined_while_the_next_message_delivers() {
+        let (fixture, store) = Fixture::new();
+        let before = store.metaflow(&address()).unwrap().unwrap();
+        let missing_id = before.queue[0].logical_delivery_id.clone();
+        let next = before.queue[1].clone();
+        let rows = store
+            .engine
+            .match_records(QueryPlan::key(
+                store.logical_deliveries.current,
+                RecordKey::new(missing_id.clone()),
+            ))
+            .unwrap();
+        let [current] = rows.records() else {
+            panic!("the first queued lifecycle exists")
+        };
+        let mut current = current.clone();
+        current.sender_identity = LogicalSenderIdentity::MissingHistoricalSender;
+        store
+            .engine
+            .commit_atomic(
+                store
+                    .engine
+                    .begin_atomic_commit()
+                    .mutate(store.logical_deliveries.current, current),
+            )
+            .unwrap();
+
+        store.quarantine_missing_historical_senders().unwrap();
+        assert_eq!(
+            store.metaflow(&address()).unwrap().unwrap().queue,
+            vec![next.clone()]
+        );
+        assert_eq!(
+            store.request_state(&missing_id).unwrap(),
+            Some(RequestState::QuarantinedMissingHistoricalSender)
+        );
+        assert!(
+            store
+                .delivery_attempts()
+                .unwrap()
+                .iter()
+                .all(|attempt| attempt.request_id != missing_id)
+        );
+        let sender = match before.queue[0].sent_by.clone() {
+            SentBy::Sender(sender) => sender,
+            _ => unreachable!(),
+        };
+        let observed = store
+            .read_logical_delivery_snapshots(&sender, None)
+            .unwrap();
+        assert!(
+            observed
+                .delivery_snapshot_vector
+                .iter()
+                .all(|snapshot| snapshot.logical_delivery_id != missing_id)
+        );
+        let PrepareQueueDelivery::Prepared(prepared) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "thread-next",
+                HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(None),
+            )
+            .unwrap()
+        else {
+            panic!("the valid message behind the quarantine is prepared")
+        };
+        assert_eq!(prepared.queue_evidence, QueueEvidence::Logical(next));
+
+        drop(store);
+        let reopened = fixture.reopen();
+        reopened.quarantine_missing_historical_senders().unwrap();
+        assert_eq!(
+            reopened.request_state(&missing_id).unwrap(),
+            Some(RequestState::QuarantinedMissingHistoricalSender)
+        );
+        assert!(
+            reopened
+                .delivery_attempts()
+                .unwrap()
+                .iter()
+                .all(|attempt| attempt.request_id != missing_id)
+        );
+    }
+
+    #[test]
+    fn missing_sender_quarantine_is_atomic_when_existing_evidence_conflicts() {
+        let (_fixture, store) = Fixture::new();
+        let before = store.metaflow(&address()).unwrap().unwrap();
+        let missing = before.queue[0].clone();
+        let rows = store
+            .engine
+            .match_records(QueryPlan::key(
+                store.logical_deliveries.current,
+                RecordKey::new(missing.logical_delivery_id.clone()),
+            ))
+            .unwrap();
+        let [current] = rows.records() else {
+            panic!("the queued lifecycle exists")
+        };
+        let mut current = current.clone();
+        current.sender_identity = LogicalSenderIdentity::MissingHistoricalSender;
+        let conflicting = StoredDeliveryRequest {
+            request_id: missing.logical_delivery_id.clone(),
+            address: Address {
+                aspect: flow_ethos::Aspect::Field,
+                topic: "different".into(),
+                layer: flow_ethos::Layer::Secondary,
+            },
+            queue_evidence: QueueEvidence::Logical(missing),
+            state: RequestState::Queued,
+        };
+        store
+            .engine
+            .commit_atomic(
+                store
+                    .engine
+                    .begin_atomic_commit()
+                    .mutate(store.logical_deliveries.current, current)
+                    .assert(store.queue_delivery.requests, conflicting.clone()),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.quarantine_missing_historical_senders(),
+            Err(StoreError::StateInvariant)
+        ));
+        assert_eq!(store.metaflow(&address()).unwrap(), Some(before));
+        let rows = store
+            .engine
+            .match_records(QueryPlan::key(
+                store.queue_delivery.requests,
+                RecordKey::new(conflicting.request_id.clone()),
+            ))
+            .unwrap();
+        assert_eq!(rows.records(), &[conflicting]);
     }
 
     #[test]
@@ -2867,7 +3170,8 @@ mod tests {
                                 RequestState::Queued => RequestStateV4::Queued,
                                 RequestState::Settled => RequestStateV4::Settled,
                                 RequestState::Unsent => RequestStateV4::Unsent,
-                                RequestState::Parked => {
+                                RequestState::Parked
+                                | RequestState::QuarantinedMissingHistoricalSender => {
                                     unreachable!("old fixture has no parked row")
                                 }
                             },

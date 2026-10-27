@@ -637,7 +637,10 @@ impl QueuesFlowRequest for FlowStore {
         let response = self.accept_logical_delivery(
             address,
             request.sent_by,
-            None,
+            Some(meta_signal_flow::Sender {
+                address: address.clone(),
+                flow_id: "fixture-flow-nexus".into(),
+            }),
             request.delivery,
             request.message,
             None,
@@ -655,6 +658,7 @@ pub(crate) trait SeedsMetaflow {
 #[cfg(test)]
 impl SeedsMetaflow for FlowStore {
     fn seed_metaflow(&self, metaflow: Metaflow) {
+        let queued = metaflow.queue.clone();
         let exists = self
             .stored_metaflow(&metaflow.address)
             .expect("metaflow readable")
@@ -668,6 +672,18 @@ impl SeedsMetaflow for FlowStore {
         self.engine.commit_atomic(commit).expect("metaflow seeded");
         self.seed_missing_queued_deliveries()
             .expect("seed queued lifecycle snapshots");
+        for entry in queued {
+            if let SentBy::Sender(address) = entry.sent_by {
+                self.seed_logical_delivery_sender(
+                    &entry.logical_delivery_id,
+                    meta_signal_flow::Sender {
+                        address,
+                        flow_id: "fixture-sender".into(),
+                    },
+                )
+                .expect("seed queued sender identity");
+            }
+        }
     }
 }
 

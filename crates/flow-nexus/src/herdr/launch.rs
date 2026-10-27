@@ -2014,9 +2014,10 @@ impl RunsFlowOwnedClaude for HerdrCli {
                 )),
             ));
         }
-        serde_json::from_slice::<serde_json::Value>(&output.stdout)
-            .map(|_| ())
-            .map_err(|error| SpawnFailure::from(format!("Herdr returned unreadable JSON: {error}")))
+        // `herdr pane run` is a status-only command: unlike the query
+        // commands, success is deliberately silent.  Its exit status is the
+        // complete acknowledgement that the line and Enter were accepted.
+        Ok(())
     }
 }
 
@@ -3072,7 +3073,7 @@ case "$*" in
   *"workspace create"*) printf '%s\n' '{{"result":{{"workspace":{{"workspace_id":"w7"}},"root_pane":{{"pane_id":"w7:p1","terminal_id":"term-native"}}}}}}' ;;
   *"pane run"*) command=$6; case "$command" in
       *"FLOW_CLAUDE_ENV_READY_"*) sh -c "$command" > '{marker_output}'; width=$(cat '{pane_width}' 2>/dev/null || printf 120); fold -w "$width" '{marker_output}' > '{visible_output}' ;;
-      *) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; printf '%s' "$command" > '{owned_command}'; eval "set -- $command"; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; if [ "$prev" = --name ]; then title=$a; [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; fi; prev=$a; done; printf '%s\n' '{{"result":{{}}}}' ;;
+      *) [ -f '{start_refused}' ] && {{ cat '{start_refused}' >&2; exit 1; }}; printf '%s' "$command" > '{owned_command}'; eval "set -- $command"; prev=; for a in "$@"; do [ "$prev" = --system-prompt-file ] && cat "$a" > '{system_read}'; if [ "$prev" = --name ]; then title=$a; [ -f '{title_override}' ] && title=$(cat '{title_override}'); printf '%s' "$title" > '{title_file}'; record=$(printf '{{"type":"custom-title","customTitle":"%s","sessionId":"{native_session}"}}' "$title"); if [ -f '{record_delay}' ]; then printf '%s\n' "$record" > '{pending_record}'; else printf '%s\n' "$record" >> '{claude_transcript}'; fi; fi; prev=$a; done ;;
     esac ;;
   *"pane wait-output"*) case "$*" in *"--source recent-unwrapped"*) ;; *) exit 9 ;; esac; marker=$(printf '%s\n' "$*" | sed 's/.*--match \([^ ]*\).*/\1/'); line=$(grep -Fx "$marker" '{marker_output}') || exit 10; printf '{{"result":{{"pane_id":"w7:p1","matched_line":"%s"}}}}\n' "$line" ;;
   *"agent wait"*) [ -f '{wait_refused}' ] && exit 11; rm -f '{missing_agent_session}'; printf '%s\n' '{{"result":{{"status":"idle"}}}}' ;;

@@ -25,9 +25,18 @@ fn letter(text: &str) -> Letter {
 
 impl NexusFixture {
     fn deliver(&self, delivery_id: &str, message: Message) -> MetaResponse {
+        self.deliver_with_gate(delivery_id, message, meta_signal_flow::Gate::Kept)
+    }
+
+    fn deliver_with_gate(
+        &self,
+        delivery_id: &str,
+        message: Message,
+        gate: meta_signal_flow::Gate,
+    ) -> MetaResponse {
         self.nexus
             .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
+                gate,
                 delivery_id: delivery_id.into(),
                 flow_id: "908786".into(),
                 message,
@@ -116,8 +125,16 @@ impl NexusFixture {
     }
 
     fn command(&self, harness_command: HarnessCommand) -> MetaResponse {
+        self.command_with_gate(harness_command, meta_signal_flow::Gate::Kept)
+    }
+
+    fn command_with_gate(
+        &self,
+        harness_command: HarnessCommand,
+        gate: meta_signal_flow::Gate,
+    ) -> MetaResponse {
         self.nexus.dispatch_meta(MetaQuery::Command(CommandRequest {
-            gate: meta_signal_flow::Gate::Kept,
+            gate,
             flow_id: "908786".into(),
             harness_command,
         }))
@@ -180,6 +197,25 @@ fn a_blocked_recipient_is_refused_at_every_tier() {
         assert!(fixture.operations().is_empty(), "no key and no text");
         assert!(prompts(&log).is_empty());
     }
+}
+
+#[test]
+fn forced_delivery_types_past_a_blocked_state() {
+    let fixture = NexusFixture::new();
+    let log = fixture.accept_pane_operations(
+        vec![fixture.blocked_agent()],
+        PromptFixture::Prompted("w1:p3"),
+    );
+    fixture.register_with(FlowLifecycle::Active);
+    assert!(matches!(
+        fixture.deliver_with_gate(
+            "forced-blocked",
+            Message::Soft(letter("answer the dialog")),
+            meta_signal_flow::Gate::Forced,
+        ),
+        MetaResponse::Delivered(_)
+    ));
+    assert_eq!(prompts(&log).len(), 1);
 }
 
 #[test]
@@ -617,6 +653,11 @@ fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
     assert!(prompts(&log).is_empty(), "nothing reached the pane");
     assert!(!fixture.operations().contains("send-keys"));
 
+    assert!(matches!(
+        fixture.command_with_gate(HarnessCommand::Compact, meta_signal_flow::Gate::Forced,),
+        MetaResponse::Commanded(_)
+    ));
+
     fixture
         .nexus
         .store
@@ -633,6 +674,8 @@ fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
     assert_eq!(
         prompts(&log),
         vec![
+            "--session messaging-build agent prompt w1:p3 /compact --wait --until working --until idle --until done --until blocked --timeout 10000"
+                .to_owned(),
             "--session messaging-build agent prompt w1:p3 /compact --wait --until working --until idle --until done --until blocked --timeout 10000"
                 .to_owned()
         ]
@@ -781,4 +824,13 @@ fn a_deliver_into_a_flow_past_its_threshold_is_refused() {
         MetaResponse::DeliveryRejected(meta_signal_flow::DeliveryRejection::PastThreshold)
     );
     assert!(prompts(&log).is_empty(), "nothing reached the pane");
+
+    assert!(matches!(
+        fixture.deliver_with_gate(
+            "delivery-forced-past",
+            middle_abrupt("owner override"),
+            meta_signal_flow::Gate::Forced,
+        ),
+        MetaResponse::Delivered(_)
+    ));
 }

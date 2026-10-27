@@ -552,11 +552,16 @@
   (fs/create-dirs state-root)
   (fs/create-dirs capsule-home)
   (fs/create-dirs capsule-bin)
+  (fs/create-dirs (str capsule-home "/.claude"))
+  ;; Authentication is copied into the capsule; every harness write stays private.
+  (let [credentials (str claude-root "/.credentials.json")]
+    (when (fs/exists? credentials)
+      (fs/copy credentials (str capsule-home "/.claude/.credentials.json") {:replace-existing true})))
   ;; Only the harness process named `claude` receives the private HOME. Herdr,
   ;; Flow and the user's other processes keep their own HOME and configuration.
   (let [wrapper (str capsule-bin "/claude")]
     (spit wrapper (str "#!/bin/sh\nexec env HOME='" capsule-home
-                       "' CLAUDE_CONFIG_DIR='" claude-root "' '" host-claude "' \"$@\"\n"))
+                       "' CLAUDE_CONFIG_DIR='" (str capsule-home "/.claude") "' '" host-claude "' \"$@\"\n"))
     (fs/set-posix-file-permissions wrapper "rwx------"))
   (fs/create-dirs capsule-runtime)
   (fs/create-dirs capsule-flows)

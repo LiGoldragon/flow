@@ -71,7 +71,7 @@ fn awake_seat(fixture: &NexusFixture, queue: Vec<Request>) {
             .enumerate()
             .map(|(index, request)| signal_flow::QueueEntry {
                 logical_delivery_id: format!("refreshing-test-{index}"),
-                sent_by: SentBy::Unknown,
+                sent_by: SentBy::Sender(seat_address()),
                 delivery: Delivery::Queue,
                 message: Message::Soft(request),
             })

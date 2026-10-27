@@ -37,7 +37,7 @@ use crate::store::{
 };
 use crate::waking::{
     HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
-    SleepsAndWakesSeats, WakePolicy,
+    SleepsAndWakesSeats,
 };
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
@@ -729,8 +729,6 @@ impl BindsSeats for RunningNexus {
         };
         let binding = meta_signal_flow::FlowBinding {
             flow_id: flow_id.clone(),
-            aspect: address.aspect.clone(),
-            power_level: Self::power_of(&address.layer),
             model_name: model_name.clone(),
             harness_kind: harness_kind.clone(),
             native_session_id: native_session_id.clone(),
@@ -745,7 +743,7 @@ impl BindsSeats for RunningNexus {
         let role = Caller {
             flow_id: flow_id.clone(),
             aspect: address.aspect.clone(),
-            power_level: Self::power_of(&address.layer),
+            layer: address.layer.clone(),
             model_name,
         };
         match self.verified_seat_node(&seat.herdr_session_name, &address, &binding) {

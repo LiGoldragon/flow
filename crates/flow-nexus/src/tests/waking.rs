@@ -31,7 +31,7 @@ use flow_ethos::State;
 use signal_flow::{
     Address, Aspect, Delivery, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind,
     HerdrRoute, HerdrRouteSelection, LaunchProfile, Layer, Message, Metaflow, NativeLaunchBinding,
-    NativeLaunchIntent, Origin, PowerLevel, QueueEntry, Request, SentBy,
+    NativeLaunchIntent, Origin, QueueEntry, Request, SentBy,
 };
 use std::fs;
 
@@ -1819,7 +1819,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             signal_flow::Caller {
                 flow_id: "5e4de7".into(),
                 aspect: Aspect::Field,
-                power_level: PowerLevel::UltraLow,
+                layer: Layer::Quaternary,
                 model_name: "haiku".into(),
             },
         )
@@ -2012,7 +2012,7 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
     use crate::store::{FlowStore, ReadsFlowMemory};
     use signal_flow::{
         Caller, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
-        HerdrRouteSelection, Origin, PowerLevel, Response,
+        HerdrRouteSelection, Origin, Response,
     };
 
     let fixture = NexusFixture::new();
@@ -2047,7 +2047,7 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
             Caller {
                 flow_id: "deliver-all-sender".into(),
                 aspect: Aspect::Field,
-                power_level: PowerLevel::UltraLow,
+                layer: Layer::Quaternary,
                 model_name: "haiku".into(),
             },
         )
@@ -2262,7 +2262,7 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
             signal_flow::Caller {
                 flow_id: "41fa34".into(),
                 aspect: Aspect::Mind,
-                power_level: PowerLevel::Low,
+                layer: Layer::Tertiary,
                 model_name: "gpt-6.1-luna".into(),
             },
         )

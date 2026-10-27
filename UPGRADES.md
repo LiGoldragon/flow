@@ -1,9 +1,17 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
-Pins signal-flow 32.0.0 (e5e9d5) and meta-signal-flow 40.0.0 (f0f214), both
+Pins signal-flow 35.0.0 (d062d0) and meta-signal-flow 43.0.0 (13deea), both
 on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`
 branch, whose schema it carries. Every ordinary and meta peer repins, and
 Curriculum serves that schema.
+
+- Refresh threshold configuration names `RefreshTokens`; the threshold family advances
+  from v1 to v2 preserving the numeric value. A successor's `Refresh` cause is unit.
+- Caller roles carry their exact `Layer`; `PowerLevel` and binding role claims are gone.
+  A bound flow takes its role from the requested `Address`, while its binding carries
+  observed native facts. Role and flow families advance one version, upgrading
+  High/Medium/Low/UltraLow to Primary/Secondary/Tertiary/Quaternary. Fresh meta
+  aspects are Psyche, Mind and Field, and an unbound pane is admitted by process.
 
 - Store-only recovery repins meta-signal-flow 42 and adds owner repairs for
   queued work, metaflow state, launch settlement, successors, lifecycle,

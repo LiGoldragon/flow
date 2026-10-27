@@ -90,7 +90,7 @@ impl NexusFixture {
         self.nexus.store.seed_role(signal_flow::Caller {
             flow_id: "908786".into(),
             aspect: signal_flow::Aspect::Psyche,
-            power_level: signal_flow::PowerLevel::Medium,
+            layer: signal_flow::Layer::Secondary,
             model_name: "claude-opus-5-5".into(),
         });
         self.nexus.store.seed_metaflow(signal_flow::Metaflow {
@@ -108,7 +108,7 @@ impl NexusFixture {
             .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
                 meta_signal_flow::ConfigureThreshold {
                     model_name: "claude-opus-5-5".into(),
-                    refresh,
+                    refresh_tokens: refresh,
                 },
             ]))
             .expect("threshold configured");
@@ -670,7 +670,7 @@ fn the_meta_socket_admits_the_owner_and_refuses_an_unreadable_peer() {
 }
 
 #[test]
-fn a_flow_outside_meta_aspects_is_refused_the_meta_socket() {
+fn every_seeded_aspect_is_admitted_to_the_meta_socket() {
     let fixture = NexusFixture::new();
     super::bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![super::codex_agent_in("pane-1", "terminal-pane-1")]);
@@ -680,16 +680,11 @@ fn a_flow_outside_meta_aspects_is_refused_the_meta_socket() {
         .meta_refusal(Some(crate::caller::CallerProcess {
             process_id: peer.0.id(),
         }));
-    assert_eq!(
-        refusal,
-        Some(meta_signal_flow::MetaRefusal::PeerNotAuthorized(
-            super::mind_live()
-        ))
-    );
+    assert_eq!(refusal, None);
 }
 
 #[test]
-fn a_flow_whose_role_flow_does_not_know_is_not_taken_for_the_owner() {
+fn a_flow_whose_role_flow_does_not_know_is_admitted_by_process() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.current_agent()],
@@ -704,7 +699,7 @@ fn a_flow_whose_role_flow_does_not_know_is_not_taken_for_the_owner() {
             .meta_refusal(Some(crate::caller::CallerProcess {
                 process_id: peer.0.id(),
             })),
-        Some(meta_signal_flow::MetaRefusal::PeerUnknown)
+        None
     );
 }
 

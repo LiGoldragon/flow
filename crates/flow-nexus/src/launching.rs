@@ -27,7 +27,7 @@ use crate::store::{
     RecordsNativeLaunchBinding,
 };
 use crate::store::{AnswersLaunchOutcome, LaunchedRecord, ReplacedRecord};
-use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation, WakePolicy};
+use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation};
 use crate::{
     RunningNexus,
     herdr::{PaneOwnership, PanePresence, launch::AcceptsLaunchRegistration},
@@ -469,7 +469,7 @@ impl LaunchesFlows for RunningNexus {
         let caller = signal_flow::Caller {
             flow_id: binding.flow_id.clone(),
             aspect: launch.launch_profile.address.aspect.clone(),
-            power_level: Self::power_of(&launch.launch_profile.address.layer),
+            layer: launch.launch_profile.address.layer.clone(),
             model_name: launch.launch_profile.model_name.clone(),
         };
         let registered = match self.perform(Operation::Register(Register_Data {

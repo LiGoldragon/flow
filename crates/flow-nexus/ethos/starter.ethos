@@ -18,7 +18,7 @@
 ; a generated type's fields are public.
 
 Library
-[ signal_flow:[ Address HarnessKind PowerLevel LaunchProfile
+[ signal_flow:[ Address HarnessKind Layer LaunchProfile
                  PromptDeliveryIntent NativeTargetReceipt FlowId
                  SessionId Origin SystemModules UserModules
                  HerdrSessionName LeaveOuts FlowKind ToolSet
@@ -57,7 +57,7 @@ Library
   NativeSkill.{ SkillName.String SkillPath.String SkillSha256.String }
   NativeSkills.Vector<NativeSkill>
   OriginClue.{ FlowId SessionId TurnId.String }
-  ContextBeforeModules.{ LaunchSources Skills.Vector<String> PowerLevel HarnessKind BundleFile.String OriginClue LaunchIntentSkills.Option<Vector<String>> IntentSkills.Option<NativeSkills> ResultSkills.Option<NativeSkills> }
+  ContextBeforeModules.{ LaunchSources Skills.Vector<String> Layer HarnessKind BundleFile.String OriginClue LaunchIntentSkills.Option<Vector<String>> IntentSkills.Option<NativeSkills> ResultSkills.Option<NativeSkills> }
   LaunchContext.[ Modules
                   BeforeModules.ContextBeforeModules ]
   ; What the native transcript shows of a first USER message: Received is

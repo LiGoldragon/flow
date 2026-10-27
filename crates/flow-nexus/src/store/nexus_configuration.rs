@@ -185,7 +185,11 @@ mod tests {
                 model_name_vector: vec![],
             },
             harness_profiles: vec![],
-            meta_aspects: vec![signal_flow::Aspect::Psyche],
+            meta_aspects: vec![
+                signal_flow::Aspect::Psyche,
+                signal_flow::Aspect::Mind,
+                signal_flow::Aspect::Field,
+            ],
             message_nexus_path: "/srv/message.sock".into(),
             message_nexus_binary: "/usr/bin/message-nexus".into(),
             lease: 60,

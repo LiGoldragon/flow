@@ -109,7 +109,7 @@ use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
-    Layer, Metaflow, NativePrompt, NativeStop, Origin, PowerLevel, QueueEntry, Response,
+    Layer, Metaflow, NativePrompt, NativeStop, Origin, QueueEntry, Response,
 };
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -120,16 +120,6 @@ pub trait WakePolicy {
     /// or Done. Working, Blocked or unreadable is not resting.
     fn rests_at(agent_state: &AgentState) -> bool {
         matches!(agent_state, AgentState::Idle | AgentState::Done)
-    }
-
-    /// The power a fresh seat is registered with, by its layer.
-    fn power_of(layer: &Layer) -> PowerLevel {
-        match layer {
-            Layer::Primary => PowerLevel::High,
-            Layer::Secondary => PowerLevel::Medium,
-            Layer::Tertiary => PowerLevel::Low,
-            Layer::Quaternary => PowerLevel::UltraLow,
-        }
     }
 }
 

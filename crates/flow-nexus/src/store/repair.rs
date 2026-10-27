@@ -75,7 +75,7 @@ impl RepairsMetaflows for FlowStore {
             address: intent.address,
             predecessor: intent.predecessor,
             succession_cause: match intent.cause {
-                super::successor::SuccessionCause::Refresh => WireSuccessionCause::Refresh(0),
+                super::successor::SuccessionCause::Refresh => WireSuccessionCause::Refresh,
                 super::successor::SuccessionCause::Exit => WireSuccessionCause::Exit,
                 super::successor::SuccessionCause::Ordered => WireSuccessionCause::Ordered,
                 super::successor::SuccessionCause::Replace => WireSuccessionCause::Replace,
@@ -361,7 +361,7 @@ impl RepairsStoredState for FlowStore {
         let threshold = match self.flow_model(flow_id)? {
             Some(model) => self
                 .configured_threshold(&model)?
-                .map(|configured| configured.refresh),
+                .map(|configured| configured.refresh_tokens),
             None => None,
         };
         Ok(Some((context, threshold)))

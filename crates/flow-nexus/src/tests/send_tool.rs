@@ -22,7 +22,7 @@ use flow_ethos::State;
 use meta_signal_flow::QueueEvidence;
 use signal_flow::{
     Address, Aspect, Caller, Delivery, FlowNode, HerdrRoute, HerdrRouteSelection, Layer, Message,
-    Metaflow, PowerLevel, QueueEntry, Request, SentBy,
+    Metaflow, QueueEntry, Request, SentBy,
 };
 use std::{
     path::{Path, PathBuf},
@@ -411,7 +411,7 @@ impl SeatsCodexFlows for NexusFixture {
                 Caller {
                     flow_id: flow_id.into(),
                     aspect: Aspect::Mind,
-                    power_level: PowerLevel::Medium,
+                    layer: Layer::Secondary,
                     model_name: model.into(),
                 },
             )
@@ -1603,7 +1603,7 @@ impl SeatsAwakeCodexSeat for NexusFixture {
                 Caller {
                     flow_id: "908786".into(),
                     aspect: Aspect::Mind,
-                    power_level: PowerLevel::Medium,
+                    layer: Layer::Secondary,
                     model_name: "gpt-sol".into(),
                 },
             ),

@@ -103,7 +103,7 @@ pub type ResultSkills = std::option::Option<NativeSkills>;
 pub struct ContextBeforeModules {
     pub launch_sources: LaunchSources,
     pub skills: Skills,
-    pub power_level: signal_flow::PowerLevel,
+    pub layer: signal_flow::Layer,
     pub harness_kind: signal_flow::HarnessKind,
     pub bundle_file: BundleFile,
     pub origin_clue: OriginClue,

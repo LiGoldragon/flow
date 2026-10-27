@@ -15,8 +15,8 @@ flow-ethos = { path = "crates/flow-ethos", features = ["datom"] }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 serde_json = "1"
 thiserror = "2"
-signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "2d52fbdfd8c960953ba545203a0c3aaf4c40dbe7" }
-meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "f1bb9eb37ff597501acc7ec8e9a3b5b0dc885084" }
+signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "1071ae25e0fee5aa7d0235a34b06dabb3c701a9e" }
+meta-signal-flow = { git = "https://github.com/LiGoldragon/meta-signal-flow", rev = "aaead952914a9945b1d194a260c73ce026dfc009" }
 
 # Signal and Meta-Signal also depend on flow-ethos by this Git source. Resolve
 # those workspace edges to this exact leaf package so every shared nominal

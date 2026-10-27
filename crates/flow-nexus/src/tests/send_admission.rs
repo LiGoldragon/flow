@@ -14,18 +14,36 @@ fn sender() -> Address {
 #[test]
 fn rendered_native_prompt_budget_accepts_exact_boundary_and_refuses_one_byte_over() {
     let sender = sender();
-    let overhead = Request::Order("a".into()).native_prompt_bytes(&sender) - 1;
+    let overhead = Request::Order("a".into()).native_prompt_bytes(&meta_signal_flow::Sender {
+        address: sender.clone(),
+        flow_id: "sender".into(),
+    }) - 1;
     let exact = Request::Order("a".repeat(MAX_SEND_PAYLOAD_BYTES - overhead));
-    assert_eq!(exact.native_prompt_bytes(&sender), MAX_SEND_PAYLOAD_BYTES);
-    assert_eq!(exact.oversized_refusal(&sender), None);
+    assert_eq!(
+        exact.native_prompt_bytes(&meta_signal_flow::Sender {
+            address: sender.clone(),
+            flow_id: "sender".into()
+        }),
+        MAX_SEND_PAYLOAD_BYTES
+    );
+    assert_eq!(
+        exact.oversized_refusal(&meta_signal_flow::Sender {
+            address: sender.clone(),
+            flow_id: "sender".into()
+        }),
+        None
+    );
 
     let over = Request::Order("a".repeat(MAX_SEND_PAYLOAD_BYTES - overhead + 1));
     assert_eq!(
-        over.native_prompt_bytes(&sender),
+        over.native_prompt_bytes(&meta_signal_flow::Sender {
+            address: sender.clone(),
+            flow_id: "sender".into()
+        }),
         MAX_SEND_PAYLOAD_BYTES + 1
     );
     assert!(matches!(
-        over.oversized_refusal(&sender),
+        over.oversized_refusal(&meta_signal_flow::Sender { address: sender.clone(), flow_id: "sender".into() }),
         Some(signal_flow::Refusal::Oversized(signal_flow::SendPayloadSize {
             actual_bytes,
             maximum_bytes,
@@ -37,21 +55,42 @@ fn rendered_native_prompt_budget_accepts_exact_boundary_and_refuses_one_byte_ove
 #[test]
 fn rendered_native_prompt_budget_counts_multibyte_utf8_bytes() {
     let sender = sender();
-    let overhead = Request::Order("a".into()).native_prompt_bytes(&sender) - 1;
+    let overhead = Request::Order("a".into()).native_prompt_bytes(&meta_signal_flow::Sender {
+        address: sender.clone(),
+        flow_id: "sender".into(),
+    }) - 1;
     let payload_bytes = MAX_SEND_PAYLOAD_BYTES - overhead;
     let at_boundary = Request::Order("a".repeat(payload_bytes - 2) + "é");
     assert_eq!(
-        at_boundary.native_prompt_bytes(&sender),
+        at_boundary.native_prompt_bytes(&meta_signal_flow::Sender {
+            address: sender.clone(),
+            flow_id: "sender".into()
+        }),
         MAX_SEND_PAYLOAD_BYTES
     );
-    assert_eq!(at_boundary.oversized_refusal(&sender), None);
+    assert_eq!(
+        at_boundary.oversized_refusal(&meta_signal_flow::Sender {
+            address: sender.clone(),
+            flow_id: "sender".into()
+        }),
+        None
+    );
 
     let over = Request::Order("a".repeat(payload_bytes - 1) + "é");
     assert_eq!(
-        over.native_prompt_bytes(&sender),
+        over.native_prompt_bytes(&meta_signal_flow::Sender {
+            address: sender.clone(),
+            flow_id: "sender".into()
+        }),
         MAX_SEND_PAYLOAD_BYTES + 1
     );
-    assert!(over.oversized_refusal(&sender).is_some());
+    assert!(
+        over.oversized_refusal(&meta_signal_flow::Sender {
+            address: sender.clone(),
+            flow_id: "sender".into()
+        })
+        .is_some()
+    );
 }
 
 #[test]
@@ -199,7 +238,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         let fixture = NexusFixture::new();
         bind_existing_caller(&fixture, "a001", "pane-1");
         claude_seat(&fixture, 40_000);
-        fixture.accept_pane_operations(
+        let operations = fixture.accept_pane_operations(
             vec![
                 codex_agent_in("pane-1", "terminal-pane-1"),
                 claude_agent(&fixture),
@@ -226,16 +265,22 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
         let transcript = claude_transcript(&fixture);
         let typed = fixture.directory.path().join("pane-typed.txt");
-        let writer = std::thread::spawn(move || {
+        let operations_for_writer = operations.clone();
+        let writer = (!duplicate).then(|| std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(12);
-            while !std::fs::read_to_string(&typed)
-                .unwrap_or_default()
-                .contains("real direct receipt")
-            {
-                assert!(Instant::now() < deadline, "direct message never submitted");
+            let native_text = loop {
+                let text = std::fs::read_to_string(&typed).unwrap_or_default();
+                if text.contains("real direct receipt") {
+                    break text.trim_end().to_owned();
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "direct message never submitted; operations: {}",
+                    std::fs::read_to_string(&operations_for_writer).unwrap_or_default()
+                );
                 std::thread::sleep(Duration::from_millis(10));
-            }
-            let row = serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"direct-native-receipt", "message":{"content":"real direct receipt"}});
+            };
+            let row = serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"direct-native-receipt", "message":{"content":native_text}});
             writeln!(
                 std::fs::OpenOptions::new()
                     .append(true)
@@ -244,7 +289,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 "{row}"
             )
             .unwrap();
-        });
+        }));
         let request = Request::Notice("real direct receipt".into());
         let message = if hard {
             Message::HardAbrupt(request)
@@ -294,31 +339,23 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             assert!(answer.pending.is_none());
             answer.response
         };
-        writer.join().unwrap();
-        if duplicate {
-            assert!(
-                matches!(
-                    answer,
-                    Response::Failed(signal_flow::SendFailure {
-                        send_failure_reason: signal_flow::SendFailureReason::ReceiptUncertain,
-                        ..
-                    })
-                ),
-                "{:?}",
-                answer
-            );
-            continue;
+        if let Some(writer) = writer {
+            writer.join().unwrap();
         }
         let Response::Sent(receipt) = answer else {
             use crate::store::queue_delivery::AccountsQueueDelivery;
-            use crate::waking::{ReadsClaudeDelivery, RendersAttemptInput};
+            use crate::waking::ReadsClaudeDelivery;
             let attempts = fixture.nexus.store.unsettled_deliveries(&target).unwrap();
             let histories: Vec<_> = attempts
                 .iter()
                 .map(|attempt| {
-                    fixture
-                        .nexus
-                        .claude_delivery_history(attempt, &attempt.prompt_text())
+                    fixture.nexus.claude_delivery_history(
+                        attempt,
+                        &fixture
+                            .nexus
+                            .typed_attempt_text(attempt)
+                            .unwrap_or_default(),
+                    )
                 })
                 .collect();
             panic!(
@@ -329,7 +366,11 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
         assert_eq!(receipt.native_receipt.native_session_id, CLAUDE_SESSION);
         assert_eq!(
             receipt.native_receipt.native_prompt_id,
-            "direct-native-receipt"
+            if duplicate {
+                "fixture-receipt"
+            } else {
+                "direct-native-receipt"
+            }
         );
         assert!(!receipt.logical_delivery_id.is_empty());
         assert!(

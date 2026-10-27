@@ -28,9 +28,9 @@ use crate::{Dispatches, DispatchesSerially};
 use flow_ethos::State;
 use meta_signal_flow::{ConfigurationChange, ConfigureMetaflow, Continuity};
 use signal_flow::{
-    Address, Delivery, FlowLifecycle, HerdrRouteSelection, Layer, Message, Metaflow, Origin, Query,
-    Recipient, RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request, Response,
-    SendRequest, SentBy, Unknown_Data,
+    Address, Aspect, Delivery, FlowLifecycle, HerdrRouteSelection, Layer, Message, Metaflow,
+    Origin, Query, Recipient, RefreshRejection, Refreshed, Refusal, ReplaceRejection, Request,
+    Response, SendRequest, SentBy, Unknown_Data,
 };
 use std::fs;
 use std::time::Duration;
@@ -71,7 +71,11 @@ fn awake_seat(fixture: &NexusFixture, queue: Vec<Request>) {
             .enumerate()
             .map(|(index, request)| signal_flow::QueueEntry {
                 logical_delivery_id: format!("refreshing-test-{index}"),
-                sent_by: SentBy::Unknown,
+                sent_by: SentBy::Sender(Address {
+                    aspect: Aspect::Psyche,
+                    topic: "core".into(),
+                    layer: Layer::Secondary,
+                }),
                 delivery: Delivery::Queue,
                 message: Message::Soft(request),
             })
@@ -663,7 +667,7 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
     use crate::store::queue_delivery::{
         AccountsQueueDelivery, NativeHistoryAnchor, PrepareQueueDelivery,
     };
-    use signal_flow::{DeliveryState, HarnessKind};
+    use signal_flow::{Aspect, DeliveryState, HarnessKind};
     #[derive(Clone, Copy, Debug)]
     enum Busy {
         QueueNotEmpty,
@@ -781,6 +785,7 @@ fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
                 .accept_logical_delivery(
                     &target,
                     SentBy::Sender(sender.clone()),
+                    None,
                     Delivery::Queue,
                     Message::Soft(request),
                     None,

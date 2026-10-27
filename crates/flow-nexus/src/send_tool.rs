@@ -44,11 +44,15 @@ use crate::generated::send_tool::{
     ReadsToolCall, SendArguments, SendCall, SendInvocation, SendKind, SendOutcome, SendPriority,
     SendRefusal, ToolCall, ToolCallCarrying, ToolCallKey, ToolName,
 };
+use crate::herdr::launch::ClaimsNativeIdentity;
 use crate::launching::NamesTopic;
 use crate::sending::{AdmitsSendPayload, MintsId};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
+use crate::store::opened_thread::RecordsOpenedThreads;
 use crate::store::send_call::KeepsSendCalls;
-use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows};
+use crate::store::{
+    ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
+};
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
 use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
@@ -388,6 +392,40 @@ impl HandlesSendCall for RunningNexus {
                 Ok(Ok(sender)) => sender,
                 Ok(Err(refusal)) => return Self::refused(refusal),
                 Err(error) => return store_refused(error),
+            };
+            let sender_flow_id = match self.store.list_metaflows() {
+                Ok(metaflows) => metaflows
+                    .into_iter()
+                    .find_map(|metaflow| (metaflow.address == sender).then_some(metaflow.state)),
+                Err(error) => return store_refused(error),
+            };
+            let sender_flow_id = match sender_flow_id {
+                Some(flow_ethos::State::Awake(flow_id)) => Some(flow_id),
+                _ => match self.store.thread_launch(&root_thread) {
+                    Ok(Some(launch_request_id)) => {
+                        match self.store.launch_attempt(&launch_request_id) {
+                            Ok(Some(attempt)) => attempt
+                                .native_launch_binding_option
+                                .map(|binding| binding.flow_id),
+                            Ok(None) => None,
+                            Err(error) => return store_refused(error),
+                        }
+                    }
+                    Ok(None) => None,
+                    Err(error) => return store_refused(error),
+                },
+            };
+            let sender_flow_id = sender_flow_id.or_else(|| {
+                self.herdr
+                    .claim_flow_identity(&HarnessKind::Codex, &root_thread)
+                    .ok()
+            });
+            let Some(sender_flow_id) = sender_flow_id else {
+                return Self::refused(SendRefusal::NotAwake);
+            };
+            let sender = meta_signal_flow::Sender {
+                address: sender,
+                flow_id: sender_flow_id,
             };
             let content_sha256 = call.content_sha256();
             match self.store.send_call(key) {

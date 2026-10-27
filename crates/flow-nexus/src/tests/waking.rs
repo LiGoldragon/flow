@@ -6,7 +6,7 @@
 
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::RunningNexus;
-use crate::composition::{ComposesLaunch, FreshSeat, RendersQueuedWork};
+use crate::composition::{ComposesLaunch, FreshSeat};
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::operation::{Operation, Outcome};
 use crate::generated::starter::ProfilesFreshSeat;
@@ -410,10 +410,21 @@ fn a_request_to_an_idle_awake_claude_flow_is_delivered_into_its_pane() {
     assert_eq!(fixture.nexus.settle_stopped(CLAUDE_SEAT), AtStop::Idle);
     assert!(fixture.typed().is_none(), "nothing typed while idle");
 
-    let mut idle = stored(&fixture, Layer::Secondary);
-    idle.queue
-        .push(Request::Order("Read the new ruling.".into()).unsent());
-    fixture.nexus.store.seed_metaflow(idle);
+    fixture
+        .nexus
+        .store
+        .accept_logical_delivery(
+            &address(Layer::Secondary),
+            SentBy::Sender(address(Layer::Primary)),
+            Some(meta_signal_flow::Sender {
+                address: address(Layer::Primary),
+                flow_id: "e167d8".into(),
+            }),
+            Delivery::Wake,
+            Message::Soft(Request::Order("Read the new ruling.".into())),
+            None,
+        )
+        .unwrap();
     fixture.nexus.wake_due(address(Layer::Secondary));
 
     let typed = fixture.typed().expect("typed into the live pane");
@@ -815,11 +826,7 @@ fn every_wake_composes_a_fresh_flow_from_the_last_launch_whatever_its_end() {
 #[test]
 fn a_fresh_wake_composes_modules_without_queued_work() {
     let fixture = NexusFixture::new();
-    let queue = [
-        Request::Order("first".into()),
-        Request::Question("second".into()),
-    ];
-    let text = queue.to_vec().unsent().prompt_text();
+    let text = "first\nsecond".to_owned();
     let seat = FreshSeat {
         address: address(Layer::Secondary),
         launch_request_id: "wake-0-1".into(),
@@ -1355,6 +1362,10 @@ fn a_simplified_wake_sends_the_first_soft_request_without_an_empty_turn() {
         .accept_logical_delivery(
             &at,
             SentBy::Sender(sender.clone()),
+            Some(meta_signal_flow::Sender {
+                address: sender.clone(),
+                flow_id: "e167d8".into(),
+            }),
             Delivery::Wake,
             Message::Soft(Request::Order("judge this".into())),
             None,
@@ -1900,7 +1911,10 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
         panic!("the identified sender locks the recipient")
     };
     let oversized = Request::Order("x".repeat(crate::sending::MAX_SEND_PAYLOAD_BYTES + 1));
-    let expected_size = oversized.native_prompt_bytes(&sender_address);
+    let expected_size = oversized.native_prompt_bytes(&meta_signal_flow::Sender {
+        address: sender_address.clone(),
+        flow_id: "sender".into(),
+    });
     let refusal = Response::Refused(signal_flow::Refusal::Oversized(
         signal_flow::SendPayloadSize {
             actual_bytes: expected_size as i64,
@@ -1999,7 +2013,7 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
     assert!(
         turns
             .iter()
-            .all(|turn| !turn.contains(&[sent.clone()].prompt_text())),
+            .all(|turn| !turn.contains("Run the tier tests.")),
         "{turns:?}"
     );
 }
@@ -3195,7 +3209,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         leave_outs_option: None,
         flow_kind: signal_flow::FlowKind::Regular,
         tool_set: signal_flow::ToolSet::Default,
-        prompt: queue.clone().unsent().prompt_text(),
+        prompt: "A".into(),
     }
     .fresh_profile();
     let title = fresh.native_title(FRESH_CODEX_FLOW).unwrap();
@@ -3404,6 +3418,7 @@ fn a_refused_wake_keeps_its_queue_and_each_delivery_names_why() {
                 .accept_logical_delivery(
                     &at,
                     SentBy::Sender(sender.clone()),
+                    None,
                     Delivery::Queue,
                     Message::Soft(Request::Order(body.into())),
                     None,

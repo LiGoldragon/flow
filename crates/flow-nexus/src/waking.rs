@@ -74,12 +74,11 @@ use crate::codex::{
     CodexTurnHistory, ReadsCodexTurnHistory, SelectsCodexEndpoint, SubmitsQueuedCodexTurn,
 };
 use crate::codex_turns::{SettlesRestingCodexSeats, TracksCodexTurns};
-use crate::composition::{FreshSeat, JoinsPurpose, RendersQueuedWork};
-use crate::delivery::body::RendersNativeContent;
+use crate::composition::{FreshSeat, JoinsPurpose};
+
+use crate::delivery::body::TypesPaneMessage;
 use crate::delivery::lease::LeasesPanes;
-use crate::delivery::{
-    DeliversMessages, FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal,
-};
+use crate::delivery::{FindsDeliveryTarget, PaneRefusal, ReadsLeasedPane, TargetRefusal};
 use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Asleep_Data, Record_Data_Awoken_Data,
     Record_Data_Context_Data,
@@ -90,6 +89,7 @@ use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, Read
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
+use crate::sending::MAX_SEND_PAYLOAD_BYTES;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -105,8 +105,10 @@ use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
+use datom_codec::Datomizable;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
+use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, AgentState, Event, FlowId, FlowNode, HarnessKind, HerdrRouteSelection, LaunchProfile,
     Layer, Metaflow, NativePrompt, NativeStop, Origin, PowerLevel, QueueEntry, Response,
@@ -964,17 +966,10 @@ pub(crate) trait ReconcilesQueueDelivery {
 }
 
 pub(crate) trait RendersAttemptInput {
-    fn prompt_text(&self) -> String;
     fn as_settled(&self, seat_after: SeatAfter) -> Reconciled;
 }
 
 impl RendersAttemptInput for QueueDeliveryAttempt {
-    fn prompt_text(&self) -> String {
-        match &self.queue_evidence {
-            meta_signal_flow::QueueEvidence::Logical(entry) => [entry.clone()].prompt_text(),
-            meta_signal_flow::QueueEvidence::Legacy(legacy) => legacy.request.native_content(),
-        }
-    }
     fn as_settled(&self, seat_after: SeatAfter) -> Reconciled {
         match &self.queue_evidence {
             meta_signal_flow::QueueEvidence::Logical(entry) => {
@@ -982,6 +977,31 @@ impl RendersAttemptInput for QueueDeliveryAttempt {
             }
             meta_signal_flow::QueueEvidence::Legacy(_) => Reconciled::Refused,
         }
+    }
+}
+
+impl RunningNexus {
+    fn typed_queue_message(&self, entry: &QueueEntry) -> Option<meta_signal_flow::Message> {
+        let sender = self
+            .store
+            .logical_delivery_sender(&entry.logical_delivery_id)
+            .ok()??;
+        Some(entry.message.typed_pane_message(sender))
+    }
+
+    fn typed_queue_cohort(&self, entries: &[QueueEntry]) -> Option<Vec<meta_signal_flow::Message>> {
+        entries
+            .iter()
+            .map(|entry| self.typed_queue_message(entry))
+            .collect()
+    }
+
+    pub(crate) fn typed_attempt_text(&self, attempt: &QueueDeliveryAttempt) -> Option<String> {
+        let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+            return None;
+        };
+        let messages = self.typed_queue_cohort(std::slice::from_ref(entry))?;
+        Some(messages.datomize(Vec::new()).protosize().compact())
     }
 }
 
@@ -1861,6 +1881,16 @@ impl PerformsWakeAndDrain for RunningNexus {
                 }
             }
         };
+        let Some(messages) = self.typed_queue_cohort(&cohort) else {
+            return refused(drained, Failed_Data::StoreRefused);
+        };
+        let text = messages.datomize(Vec::new()).protosize().compact();
+        // The native budget applies to what the pane actually receives. A
+        // cohort is indivisible, so an oversized cohort stays entirely in
+        // the durable queue and no native attempt is created.
+        if text.len() > MAX_SEND_PAYLOAD_BYTES {
+            return refused(drained, Failed_Data::StoreRefused);
+        }
         let attempt = match self.store.prepare_oldest_delivery(
             &address,
             &flow_id,
@@ -1874,7 +1904,6 @@ impl PerformsWakeAndDrain for RunningNexus {
                 return refused(drained, Failed_Data::StoreRefused);
             }
         };
-        let text = cohort.prompt_text();
         let absent = |observation: String| {
             self.store
                 .mark_delivery_absent(
@@ -1887,40 +1916,11 @@ impl PerformsWakeAndDrain for RunningNexus {
                 .unwrap_or(false)
         };
         if !cohort.iter().all(soft) {
-            // The strongest priority in the queue carries the one payload.
-            let message = if cohort.len() == 1 {
-                oldest.message.clone()
-            } else if cohort
-                .iter()
-                .any(|entry| matches!(entry.message, signal_flow::Message::HardAbrupt(_)))
-            {
-                signal_flow::Message::HardAbrupt(signal_flow::Request::Notice(text.clone()))
-            } else {
-                signal_flow::Message::MiddleAbrupt(signal_flow::Request::Notice(text.clone()))
-            };
-            let input = signal_flow::NativeInput {
-                logical_delivery_id: oldest.logical_delivery_id.clone(),
-                sent_by: oldest.sent_by.clone(),
-                message: message.clone(),
-            };
-            let letter = meta_signal_flow::Letter {
-                message_id: oldest.logical_delivery_id.clone(),
-                sender: meta_signal_flow::Sender::Owner,
-                content: meta_signal_flow::Content::NativeInput(input),
-            };
-            let message = match &message {
-                signal_flow::Message::HardAbrupt(_) => {
-                    meta_signal_flow::Message::HardAbrupt(letter)
-                }
-                signal_flow::Message::MiddleAbrupt(_) | signal_flow::Message::Soft(_) => {
-                    meta_signal_flow::Message::MiddleAbrupt(letter)
-                }
-            };
-            let result = self.deliver(meta_signal_flow::DeliveryRequest {
-                delivery_id: attempt.attempt_id.clone(),
-                flow_id: flow_id.clone(),
-                message,
-            });
+            let result = self.deliver_cohort(
+                attempt.attempt_id.clone(),
+                flow_id.clone(),
+                messages.clone(),
+            );
             let proved_absent = matches!(&result,
                 meta_signal_flow::Response::DeliveryRejected(rejected)
                     if matches!(rejected,
@@ -1948,7 +1948,6 @@ impl PerformsWakeAndDrain for RunningNexus {
                 );
             }
         } else if let Err(refusal) = self.hand_over(&flow_id, &text) {
-            // Herdr refused before any of the text reached the pane.
             return if absent(format!("{refusal:?}")) {
                 refused(drained, Failed_Data::HerdrRefused)
             } else {
@@ -2296,7 +2295,10 @@ impl ParksCohort for RunningNexus {
         &self,
         attempt: &QueueDeliveryAttempt,
     ) -> Vec<(Vec<QueueDeliveryAttempt>, String)> {
-        let alone = (vec![attempt.clone()], attempt.prompt_text());
+        let Some(alone_text) = self.typed_attempt_text(attempt) else {
+            return Vec::new();
+        };
+        let alone = (vec![attempt.clone()], alone_text);
         let group = self.typed_group(attempt);
         if group.len() < 2 {
             return vec![alone];
@@ -2308,7 +2310,10 @@ impl ParksCohort for RunningNexus {
                 meta_signal_flow::QueueEvidence::Legacy(_) => None,
             })
             .collect::<Vec<_>>();
-        let text = entries.prompt_text();
+        let Some(messages) = self.typed_queue_cohort(&entries) else {
+            return vec![alone];
+        };
+        let text = messages.datomize(Vec::new()).protosize().compact();
         vec![(group, text), alone]
     }
 }

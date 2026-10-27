@@ -20,7 +20,7 @@ const COUNTER_KEY: &str = "counter";
 const COUNTER_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_counter");
 const CURRENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_current");
 const EVENT_TABLE_NAME: TableName = TableName::new("flow_nexus_logical_delivery_events");
-pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v3";
+pub(super) const CURRENT_SCHEMA: &str = "flow-nexus-logical-delivery-current-v4";
 pub(super) const EVENT_SCHEMA: &str = "flow-nexus-logical-delivery-event-v3";
 const SIMPLIFIED_REPLY_TABLE_NAME: TableName =
     TableName::new("flow_nexus_simplified_reply_bindings");
@@ -70,6 +70,7 @@ impl MemoryDefinition for LogicalDeliveryCounter {
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CurrentLogicalDelivery {
     pub snapshot: DeliverySnapshot,
+    pub sender_option: Option<meta_signal_flow::Sender>,
 }
 impl EngineRecord for CurrentLogicalDelivery {
     fn record_key(&self) -> RecordKey {
@@ -78,10 +79,38 @@ impl EngineRecord for CurrentLogicalDelivery {
 }
 impl MemoryDefinition for CurrentLogicalDelivery {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(3)
+        MemoryVersion::new(4)
     }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(CURRENT_SCHEMA)
+    }
+}
+
+/// The deployed v3 current row, before exact typed sender identity.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CurrentLogicalDeliveryV3 {
+    pub snapshot: DeliverySnapshot,
+}
+impl EngineRecord for CurrentLogicalDeliveryV3 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.snapshot.logical_delivery_id.clone())
+    }
+}
+impl MemoryDefinition for CurrentLogicalDeliveryV3 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(3)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-logical-delivery-current-v3")
+    }
+}
+impl UpgradeFrom<CurrentLogicalDeliveryV3> for CurrentLogicalDelivery {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: CurrentLogicalDeliveryV3) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            snapshot: previous.snapshot,
+            sender_option: None,
+        })
     }
 }
 
@@ -109,6 +138,7 @@ impl UpgradeFrom<CurrentLogicalDeliveryV2> for CurrentLogicalDelivery {
     fn upgrade_from(previous: CurrentLogicalDeliveryV2) -> Decision<Self, Self::Refusal> {
         Decision::Ready(Self {
             snapshot: previous.snapshot.into(),
+            sender_option: None,
         })
     }
 }
@@ -137,6 +167,7 @@ impl UpgradeFrom<CurrentLogicalDeliveryV1> for CurrentLogicalDelivery {
     fn upgrade_from(previous: CurrentLogicalDeliveryV1) -> Decision<Self, Self::Refusal> {
         Decision::Ready(Self {
             snapshot: previous.snapshot.into(),
+            sender_option: None,
         })
     }
 }
@@ -274,7 +305,8 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 CurrentLogicalDelivery::schema_hash(),
             )
             .with_predecessor::<CurrentLogicalDeliveryV1>()
-            .with_predecessor::<CurrentLogicalDeliveryV2>(),
+            .with_predecessor::<CurrentLogicalDeliveryV2>()
+            .with_predecessor::<CurrentLogicalDeliveryV3>(),
             events: TableDescriptor::new(
                 EVENT_TABLE_NAME,
                 FamilyName::new("flow-nexus-logical-delivery-event"),
@@ -297,7 +329,7 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
             counter: engine.register_table(descriptors.counter)?,
             // A v2 family upgrades from v2; one refused at admission is a v1
             // family, which upgrades from v1.
-            current: match engine.upgrade_table::<CurrentLogicalDeliveryV2, CurrentLogicalDelivery>(
+            current: match engine.upgrade_table::<CurrentLogicalDeliveryV3, CurrentLogicalDelivery>(
                 descriptors.current.clone(),
             ) {
                 UpgradeOutcome::Upgraded(receipt) => receipt.table(),
@@ -306,22 +338,39 @@ impl DeclaresLogicalDeliveryTables for LogicalDeliveryTables {
                 UpgradeOutcome::Failed(failure)
                     if failure.phase() == sema_engine::StoragePhase::Admission =>
                 {
-                    match engine.upgrade_table::<CurrentLogicalDeliveryV1, CurrentLogicalDelivery>(
-                        descriptors.current,
+                    match engine.upgrade_table::<CurrentLogicalDeliveryV2, CurrentLogicalDelivery>(
+                        descriptors.current.clone(),
                     ) {
                         UpgradeOutcome::Upgraded(receipt) => receipt.table(),
                         UpgradeOutcome::AlreadyCurrent(table) => table,
                         UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                        UpgradeOutcome::Failed(failure)
+                            if failure.phase() == sema_engine::StoragePhase::Admission =>
+                        {
+                            match engine
+                                .upgrade_table::<CurrentLogicalDeliveryV1, CurrentLogicalDelivery>(
+                                    descriptors.current,
+                                ) {
+                                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                                UpgradeOutcome::AlreadyCurrent(table) => table,
+                                UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+                                UpgradeOutcome::Failed(failure) => {
+                                    return Err(StoreError::LogicalDeliveryUpgrade(format!(
+                                        "current deliveries v1: {failure:?}"
+                                    )));
+                                }
+                            }
+                        }
                         UpgradeOutcome::Failed(failure) => {
                             return Err(StoreError::LogicalDeliveryUpgrade(format!(
-                                "current deliveries: {failure:?}"
+                                "current deliveries v2: {failure:?}"
                             )));
                         }
                     }
                 }
                 UpgradeOutcome::Failed(failure) => {
                     return Err(StoreError::LogicalDeliveryUpgrade(format!(
-                        "current deliveries: {failure:?}"
+                        "current deliveries v3: {failure:?}"
                     )));
                 }
             },
@@ -372,7 +421,7 @@ pub(crate) trait RecordsLogicalDeliveries {
         &self,
         key: &ToolCallKey,
         content_sha256: &str,
-        sender: Address,
+        sender: meta_signal_flow::Sender,
         target: &Target,
         delivery: Delivery,
         message: Message,
@@ -382,6 +431,7 @@ pub(crate) trait RecordsLogicalDeliveries {
         &self,
         address: &Address,
         sent_by: SentBy,
+        sender_option: Option<meta_signal_flow::Sender>,
         delivery: Delivery,
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
@@ -402,6 +452,16 @@ pub(crate) trait RecordsLogicalDeliveries {
         &self,
         id: &LogicalDeliveryId,
     ) -> Result<Option<DeliverySnapshot>, StoreError>;
+    fn logical_delivery_sender(
+        &self,
+        id: &LogicalDeliveryId,
+    ) -> Result<Option<meta_signal_flow::Sender>, StoreError>;
+    #[cfg(test)]
+    fn seed_logical_delivery_sender(
+        &self,
+        id: &LogicalDeliveryId,
+        sender: meta_signal_flow::Sender,
+    ) -> Result<(), StoreError>;
     /// Marks each request of `queue` that waits, Queued or Retryable,
     /// `Retryable(cause)`, so its sender sees why it waits; the queue itself
     /// is untouched. Answers how many changed.
@@ -560,7 +620,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let snapshot = DeliverySnapshot {
             delivery_cursor: cursor,
             logical_delivery_id: id,
-            sent_by: SentBy::Sender(source),
+            sent_by: SentBy::Sender(source.clone()),
             address: destination.clone(),
             delivery_state: DeliveryState::Queued,
         };
@@ -596,6 +656,10 @@ impl RecordsLogicalDeliveries for FlowStore {
                     self.logical_deliveries.current,
                     CurrentLogicalDelivery {
                         snapshot: notice_snapshot.clone(),
+                        sender_option: Some(meta_signal_flow::Sender {
+                            address: source.clone(),
+                            flow_id: flow_id.to_owned(),
+                        }),
                     },
                 )
                 .assert(
@@ -621,6 +685,10 @@ impl RecordsLogicalDeliveries for FlowStore {
                     self.logical_deliveries.current,
                     CurrentLogicalDelivery {
                         snapshot: snapshot.clone(),
+                        sender_option: Some(meta_signal_flow::Sender {
+                            address: source.clone(),
+                            flow_id: flow_id.to_owned(),
+                        }),
                     },
                 )
                 .assert(
@@ -636,7 +704,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         &self,
         key: &ToolCallKey,
         content_sha256: &str,
-        sender: Address,
+        sender: meta_signal_flow::Sender,
         target: &Target,
         delivery: Delivery,
         message: Message,
@@ -687,14 +755,14 @@ impl RecordsLogicalDeliveries for FlowStore {
         let id = format!("logical-delivery-{cursor:020}");
         stored.metaflow.queue.push(QueueEntry {
             logical_delivery_id: id.clone(),
-            sent_by: SentBy::Sender(sender.clone()),
+            sent_by: SentBy::Sender(sender.address.clone()),
             delivery,
             message,
         });
         let snapshot = DeliverySnapshot {
             delivery_cursor: cursor,
             logical_delivery_id: id.clone(),
-            sent_by: SentBy::Sender(sender.clone()),
+            sent_by: SentBy::Sender(sender.address.clone()),
             address: stored.metaflow.address.clone(),
             delivery_state: DeliveryState::Queued,
         };
@@ -704,7 +772,7 @@ impl RecordsLogicalDeliveries for FlowStore {
             delivery_state: DeliveryState::Queued,
         };
         let outcome = ToolSendOutcome::Accepted(Accepted_Data {
-            sender: sender.clone(),
+            sender: sender.address.clone(),
             target: target.clone(),
             send_acceptance: acceptance,
         });
@@ -726,6 +794,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     self.logical_deliveries.current,
                     CurrentLogicalDelivery {
                         snapshot: snapshot.clone(),
+                        sender_option: Some(sender),
                     },
                 )
                 .assert(
@@ -815,6 +884,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                     self.logical_deliveries.current,
                     CurrentLogicalDelivery {
                         snapshot: snapshot.clone(),
+                        sender_option: None,
                     },
                 )
                 .assert(
@@ -832,6 +902,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         &self,
         address: &Address,
         sent_by: SentBy,
+        sender_option: Option<meta_signal_flow::Sender>,
         delivery: Delivery,
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
@@ -898,6 +969,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 self.logical_deliveries.current,
                 CurrentLogicalDelivery {
                     snapshot: snapshot.clone(),
+                    sender_option,
                 },
             )
             .assert(
@@ -1002,6 +1074,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 self.logical_deliveries.current,
                 CurrentLogicalDelivery {
                     snapshot: snapshot.clone(),
+                    sender_option: current.sender_option.clone(),
                 },
             )
             .assert(
@@ -1027,6 +1100,43 @@ impl RecordsLogicalDeliveries for FlowStore {
             [current] => Ok(Some(current.snapshot.clone())),
             _ => Err(StoreError::StateInvariant),
         }
+    }
+    fn logical_delivery_sender(
+        &self,
+        id: &LogicalDeliveryId,
+    ) -> Result<Option<meta_signal_flow::Sender>, StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.current,
+            RecordKey::new(id.clone()),
+        ))?;
+        match rows.records() {
+            [] => Ok(None),
+            [current] => Ok(current.sender_option.clone()),
+            _ => Err(StoreError::StateInvariant),
+        }
+    }
+    #[cfg(test)]
+    fn seed_logical_delivery_sender(
+        &self,
+        id: &LogicalDeliveryId,
+        sender: meta_signal_flow::Sender,
+    ) -> Result<(), StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.current,
+            RecordKey::new(id.clone()),
+        ))?;
+        let [current] = rows.records() else {
+            return Err(StoreError::StateInvariant);
+        };
+        self.engine
+            .commit_atomic(self.engine.begin_atomic_commit().mutate(
+                self.logical_deliveries.current,
+                CurrentLogicalDelivery {
+                    snapshot: current.snapshot.clone(),
+                    sender_option: Some(sender),
+                },
+            ))?;
+        Ok(())
     }
     fn read_logical_delivery_snapshots(
         &self,

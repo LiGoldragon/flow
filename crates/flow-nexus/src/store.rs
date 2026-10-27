@@ -7505,6 +7505,10 @@ pub(crate) trait ReadsFlowMemory {
                     "flow-nexus-logical-delivery-current",
                     <logical_delivery::CurrentLogicalDeliveryV2 as MemoryDefinition>::schema_hash(),
                 ),
+                (
+                    "flow-nexus-logical-delivery-current",
+                    <logical_delivery::CurrentLogicalDeliveryV3 as MemoryDefinition>::schema_hash(),
+                ),
             ],
             "flow_nexus_logical_delivery_events" => &[
                 (
@@ -8539,6 +8543,7 @@ mod tests {
             .accept_logical_delivery(
                 &source,
                 SentBy::Sender(recipient.clone()),
+                None,
                 flow_ethos::Delivery::Wake,
                 Message::Soft(Request::Order("judge this".into())),
                 None,
@@ -8657,6 +8662,7 @@ mod tests {
             .accept_logical_delivery(
                 &second_sender,
                 SentBy::Sender(recipient.clone()),
+                None,
                 flow_ethos::Delivery::Wake,
                 Message::Soft(Request::Question("second judgment".into())),
                 None,
@@ -8753,6 +8759,7 @@ mod tests {
             .accept_logical_delivery(
                 &source,
                 SentBy::Sender(sender.clone()),
+                None,
                 flow_ethos::Delivery::Wake,
                 Message::Soft(Request::Question("review this book source".into())),
                 None,

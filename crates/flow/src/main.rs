@@ -380,7 +380,7 @@ mod tests {
         };
         let Query::Start(request) = client
             .parse_command([
-                "Start.{ request-7 [ spirit-core intent-flow ] [ operation-main-flow compensation-behavior ] Custom.[ 1b8ac0 ] { Field flow Primary } gpt-6-astra medium Some.836818 messaging-build Some.[ SkillTool WorkflowTool ] Default «Carry this bounded launch request.» }".into(),
+                "Start.{ request-7 [ spirit-core intent-flow ] [ operation-main-flow compensation-behavior ] Custom.[ 1b8ac0 ] { Field flow Primary } gpt-6-astra medium Some.836818 messaging-build Some.[ Skill Workflow ] Default «Carry this bounded launch request.» }".into(),
             ]
             .into_iter())
             .expect("typed Start parses")
@@ -394,11 +394,8 @@ mod tests {
             ["operation-main-flow", "compensation-behavior"]
         );
         assert_eq!(
-            request.leave_outs_option,
-            Some(vec![
-                signal_flow::LeaveOut::SkillTool,
-                signal_flow::LeaveOut::WorkflowTool
-            ])
+            request.left_out_option,
+            Some(vec!["Skill".to_owned(), "Workflow".to_owned()])
         );
         assert_eq!(
             request.instruction_prompt,

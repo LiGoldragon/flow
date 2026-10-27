@@ -485,7 +485,7 @@ impl LaunchesDeclared for RunningNexus {
             flow_id_option: predecessor.clone(),
             remembering: launch.remembering,
             herdr_session_name,
-            leave_outs_option: None,
+            left_out_option: None,
             tool_set: declaration.tool_set,
             // The declaration's purpose is composed ahead of the brief.
             instruction_prompt: launch.instruction_prompt.with_purpose(&declaration.purpose),

@@ -924,25 +924,25 @@ impl OpensBoundCodexSession for CodexAdapter {
 
     fn exclusion_config(launch: &ComposedLaunch) -> serde_json::Map<String, serde_json::Value> {
         let mut config = serde_json::Map::new();
-        for leave_out in &launch.leave_outs {
-            let (key, value) = match leave_out {
-                signal_flow::LeaveOut::CodexAgentsMd => {
+        for leave_out in &launch.left_out {
+            let (key, value) = match leave_out.as_str() {
+                "AgentsMd" => {
                     ("project_doc_max_bytes", serde_json::json!(0))
                 }
-                signal_flow::LeaveOut::CodexSkillListing => {
+                "Skills" => {
                     ("skills.include_instructions", serde_json::json!(false))
                 }
-                signal_flow::LeaveOut::CodexCollaborationMode => (
+                "CollaborationMode" => (
                     "include_collaboration_mode_instructions",
                     serde_json::json!(false),
                 ),
-                signal_flow::LeaveOut::CodexEnvironmentContext => {
+                "EnvironmentContext" => {
                     ("include_environment_context", serde_json::json!(false))
                 }
-                signal_flow::LeaveOut::CodexPermissions => {
+                "Permissions" => {
                     ("include_permissions_instructions", serde_json::json!(false))
                 }
-                signal_flow::LeaveOut::CodexDeveloperInstructions => {
+                "DeveloperInstructions" => {
                     // The multi-agent role and mode developer messages
                     // codex 0.161.0-alpha.2 sends a v2 multi-agent model
                     // are its root-agent usage hint and its mode hint; an
@@ -1010,8 +1010,8 @@ impl OpensBoundCodexSession for CodexAdapter {
             )));
         }
         if launch
-            .leave_outs
-            .contains(&signal_flow::LeaveOut::CodexAgentsMd)
+            .left_out
+            .contains(&"AgentsMd".to_owned())
         {
             let sources = response
                 .get("instructionSources")
@@ -2171,7 +2171,7 @@ mod tests {
                 flow_id_option: None,
                 remembering: signal_flow::Remembering::Predecessors(0),
                 herdr_session_name: "session".into(),
-                leave_outs_option: None,
+                left_out_option: None,
                 tool_set: signal_flow::ToolSet::Default,
                 instruction_prompt: "body".into(),
             },
@@ -2192,7 +2192,7 @@ mod tests {
                 launch_request_id: "launch-malformed".into(),
                 prompt_sha256: prompt_sha256.into(),
             },
-            leave_outs: Vec::new(),
+            left_out: Vec::new(),
         };
         let intent = PromptDeliveryIntent {
             launch_request_id: "launch-malformed".into(),
@@ -2205,7 +2205,7 @@ mod tests {
             prompt_sha256_vector: vec![prompt_sha256.into()],
             parts_submitted: 1,
             stops_reported: 0,
-            leave_outs: Vec::new(),
+            left_out: Vec::new(),
             herdr_pane_binding: pane,
             native_transcript_boundary: signal_flow::NativeTranscriptBoundary::Absent(
                 signal_flow::NativeTranscriptAbsence {
@@ -2320,7 +2320,7 @@ mod tests {
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone(),
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap();
         let (_, mut intent) = malformed_bound_launch();
@@ -2484,9 +2484,9 @@ mod tests {
                     launch_profile: fixture_profile(),
                 },
                 vec![
-                    signal_flow::LeaveOut::CodexAgentsMd,
-                    signal_flow::LeaveOut::CodexSkillListing,
-                    signal_flow::LeaveOut::CodexDeveloperInstructions,
+                    "AgentsMd".into(),
+                    "Skills".into(),
+                    "DeveloperInstructions".into(),
                 ],
             )
             .unwrap()
@@ -2859,7 +2859,7 @@ mod tests {
         intent.model_name = launch.launch_profile.model_name.clone();
         intent.effort = launch.launch_profile.effort.clone();
         intent.native_session_id = "thread-lean".into();
-        intent.leave_outs = launch.leave_outs.clone();
+        intent.left_out = launch.left_out.clone();
         intent.parts_submitted = parts_submitted;
         intent
     }

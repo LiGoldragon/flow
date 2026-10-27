@@ -378,32 +378,3 @@ fn a_refused_registration_is_reported_with_its_stage() {
         Some(signal_flow::LaunchStatusOutcome::StartRejected(expected))
     );
 }
-
-/// A Codex Start naming a Claude leave-out is refused at composition, before
-/// Flow reserves its launch or asks Herdr for anything.
-#[test]
-fn a_codex_start_naming_a_claude_leave_out_is_refused_before_reserve_or_open() {
-    use crate::store::ReadsLaunchAttempt;
-    let fixture = NexusFixture::new();
-    fixture.claims_flow_ids();
-    let log = fixture.herdr_logging_every_call();
-    let mut launch = fixture.staged_launch("codex-claude-leave-out", None);
-    launch.profile.leave_outs_option = Some(vec![signal_flow::LeaveOut::ClaudeMd]);
-    assert_eq!(
-        fixture.nexus.dispatch(Query::Start(launch.request())),
-        Response::StartRejected(StartRejection::LeaveOutRefused(
-            signal_flow::LeaveOutRefusal::NotForHarness(signal_flow::LeaveOut::ClaudeMd)
-        ))
-    );
-    assert_eq!(
-        fixture
-            .nexus
-            .store
-            .launch_attempt("codex-claude-leave-out")
-            .expect("attempts read"),
-        None,
-        "no launch was reserved"
-    );
-    assert!(fixture.flow_id_calls().is_empty());
-    assert_eq!(fs::read_to_string(log).unwrap_or_default(), "");
-}

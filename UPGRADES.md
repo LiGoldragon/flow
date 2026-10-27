@@ -1,5 +1,14 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 14 replaces the closed leave-out vocabulary with configured harness
+modules. Each metaflow declaration carries module names; the effective set is
+the harness installation's `LeftOut` union the launch override, or the
+declaration when no override is present. Module tools, flags, environment and
+settings produce the lean launch, while kept module environment is explicitly
+unset. The retired leave-out family is mapped into declarations on the staged
+store generation before its table is removed. Pins signal-flow 38.0.0 and
+meta-signal-flow 48.0.0.
+
 Batch 13 makes every harness installation configured data. The privileged
 contract carries an arbitrary `Harnesses` family and Nexus v3 carries the
 flows root, Flow executables and default Herdr session. A fresh store has no

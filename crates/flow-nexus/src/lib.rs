@@ -268,7 +268,7 @@ impl Dispatches for RunningNexus {
                 }
                 // No write is left half-typed into a pane as it closes.
                 let closed = {
-                    let _lease = self.pane_leases.hold(route);
+                    let _lease = self.pane_leases.hold(&route);
                     self.perform(Operation::Close(node.clone()))
                 };
                 if let Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) = closed {
@@ -361,9 +361,14 @@ impl Dispatches for RunningNexus {
                             meta_signal_flow::ConfigureRejection::ModelServedTwice(model),
                         )
                     }
-                    Err(store::StoreError::LeaveOutNotForHarness) => {
+                    Err(store::StoreError::UnknownHarnessModule(module)) => {
                         meta_signal_flow::Response::ConfigureRejected(
-                            meta_signal_flow::ConfigureRejection::LeaveOutNotForHarness,
+                            meta_signal_flow::ConfigureRejection::UnknownHarnessModule(module),
+                        )
+                    }
+                    Err(store::StoreError::IrremovableHarnessModule(module)) => {
+                        meta_signal_flow::Response::ConfigureRejected(
+                            meta_signal_flow::ConfigureRejection::Irremovable(module),
                         )
                     }
                     Err(store::StoreError::TopicRefused(topic)) => {
@@ -457,7 +462,7 @@ impl Dispatches for RunningNexus {
                     )
                 {
                     let closed = {
-                        let _lease = self.pane_leases.hold(route);
+                        let _lease = self.pane_leases.hold(&route);
                         self.perform(Operation::Close(node.clone()))
                     };
                     if let Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) = closed {
@@ -1658,7 +1663,7 @@ mod tests {
                     recorded: (*model).into(),
                 })
                 .collect(),
-            modules: vec![],
+            modules: crate::store::harness::seeded_modules(kind.clone()),
             left_out: vec![],
             arguments: vec![],
             settings: vec![],
@@ -4451,7 +4456,7 @@ mod tests {
                 flow_id_option: predecessor.map(str::to_owned),
                 remembering: signal_flow::Remembering::Predecessors(0),
                 herdr_session_name: "fixture-session".into(),
-                leave_outs_option: None,
+                left_out_option: None,
                 instruction_prompt: "fixture instruction".into(),
             };
             let composed = self
@@ -4463,7 +4468,7 @@ mod tests {
                         harness_kind: HarnessKind::Codex,
                         launch_profile: profile.clone(),
                     },
-                    Vec::<signal_flow::LeaveOut>::new(),
+                    Vec::<String>::new(),
                 )
                 .expect("launch composes");
             let pane = HerdrPaneBinding {
@@ -4734,7 +4739,7 @@ mod tests {
                     .collect(),
                 parts_submitted: 1,
                 stops_reported: 0,
-                leave_outs: Vec::new(),
+                left_out: Vec::new(),
                 herdr_pane_binding: self.pane.clone(),
                 native_transcript_boundary: NativeTranscriptBoundary::Absent(
                     NativeTranscriptAbsence {
@@ -5597,6 +5602,7 @@ mod tests {
                         continuity: meta_signal_flow::Continuity::OnDemand,
                         purpose: "Publishes the books.".into(),
                         records: vec!["flows/a68420/vision/flow.md".into()],
+                        left_out: vec![],
                         requires: vec![],
                     }])
                 )),

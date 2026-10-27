@@ -124,6 +124,7 @@ pub struct HerdrCli {
     codex_endpoints: CodexEndpoints,
     pub(crate) timings: meta_signal_flow::Timings,
     pub(crate) limits: meta_signal_flow::Limits,
+    pub(crate) harnesses: Vec<meta_signal_flow::Harness>,
     claude_transcript_root: PathBuf,
     /// The Claude daemon's records, read for a daemon-owned session's
     /// readiness.
@@ -204,6 +205,7 @@ impl Default for HerdrCli {
             },
             timings: crate::store::timings_limits::seed_timings().expect("authored timings seed"),
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+            harnesses: Vec::new(),
             claude_transcript_root: PathBuf::new(),
             claude_daemon: crate::claude::ClaudeDaemon::under(Path::new("")),
             harness_hook: std::env::current_exe()
@@ -671,6 +673,7 @@ impl ConfiguresHerdrCli for HerdrCli {
         self.flow_id_executable = PathBuf::from(&nexus.executables.flow_id_claimer);
         self.harness_hook = PathBuf::from(&nexus.executables.hook);
         self.flows_root = PathBuf::from(&nexus.flows_root);
+        self.harnesses = harnesses.to_vec();
         if let Some(claude) = harnesses
             .iter()
             .find(|harness| harness.harness_kind == HarnessKind::Claude)
@@ -753,6 +756,7 @@ impl ConfiguresHerdrCli for HerdrCli {
             },
             timings,
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
+            harnesses: Vec::new(),
             claude_transcript_root: fixture_root.join("claude"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),

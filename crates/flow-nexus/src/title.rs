@@ -98,7 +98,7 @@ mod tests {
             flow_id_option: None,
             remembering: signal_flow::Remembering::Predecessors(0),
             herdr_session_name: "session".into(),
-            leave_outs_option: None,
+            left_out_option: None,
             tool_set: signal_flow::ToolSet::Default,
             instruction_prompt: "work".into(),
         }

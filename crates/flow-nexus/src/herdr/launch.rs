@@ -304,38 +304,17 @@ const CODEX_TERMINAL_TITLE: &str = "tui.terminal_title=[\"thread-title\"]";
 /// 01a146e1-1825-7753-9a4d-2107ac3c0f24 (its first request carried every
 /// one of them), all absent from thread 01a146e4-10dd-7560-a685-30a9896d87f3
 /// opened with the AGENTS.md and skill-listing exclusions.
-const CODEX_LEFT_OUT_OPENINGS: &[(signal_flow::LeaveOut, &str)] = &[
-    (
-        signal_flow::LeaveOut::CodexAgentsMd,
-        "# AGENTS.md instructions for ",
-    ),
-    (
-        signal_flow::LeaveOut::CodexSkillListing,
-        "<skills_instructions>",
-    ),
-    (
-        signal_flow::LeaveOut::CodexPermissions,
-        "<permissions instructions>",
-    ),
-    (
-        signal_flow::LeaveOut::CodexCollaborationMode,
-        "<collaboration_mode>",
-    ),
-    (
-        signal_flow::LeaveOut::CodexEnvironmentContext,
-        "<environment_context>",
-    ),
+const CODEX_LEFT_OUT_OPENINGS: &[(&str, &str)] = &[
+    ("AgentsMd", "# AGENTS.md instructions for "),
+    ("Skills", "<skills_instructions>"),
+    ("Permissions", "<permissions instructions>"),
+    ("CollaborationMode", "<collaboration_mode>"),
+    ("EnvironmentContext", "<environment_context>"),
     // The multi-agent role and mode messages of thread
     // 01a14773-f58c-7ca1-978b-1ac675d19399 (gpt-6-luna), which the
     // developer-instructions leave-out removes through their hints.
-    (
-        signal_flow::LeaveOut::CodexDeveloperInstructions,
-        "<multi_agent_role>",
-    ),
-    (
-        signal_flow::LeaveOut::CodexDeveloperInstructions,
-        "<multi_agent_mode>",
-    ),
+    ("DeveloperInstructions", "<multi_agent_role>"),
+    ("DeveloperInstructions", "<multi_agent_mode>"),
 ];
 
 /// Herdr's socket API, spoken directly: one JSON request line out, one JSON
@@ -456,6 +435,22 @@ pub(crate) trait PreparesClaudePane {
     ) -> Result<(), String>;
 }
 
+impl HerdrCli {
+    fn harness_modules(&self, launch: &ComposedLaunch) -> Vec<meta_signal_flow::HarnessModule> {
+        self.harnesses
+            .iter()
+            .find(|harness| {
+                harness.harness_kind == launch.harness_kind
+                    && harness
+                        .served_models
+                        .iter()
+                        .any(|model| model.model_name == launch.launch_profile.model_name)
+            })
+            .map(|harness| harness.modules.clone())
+            .unwrap_or_default()
+    }
+}
+
 impl PreparesClaudePane for HerdrCli {
     fn claude_flag_settings(&self, lean: &LeanStart) -> String {
         let hook = serde_json::json!([{
@@ -531,7 +526,12 @@ impl PreparesClaudePane for HerdrCli {
                 reserved,
                 &self.ordinary_socket,
                 &self.executable,
-                &launch.lean_start().environment(),
+                &launch
+                    .lean_start(self.harness_modules(launch))
+                    .environment(),
+                &launch
+                    .lean_start(self.harness_modules(launch))
+                    .unset_environment(),
                 &readiness_path,
             ),
         ])?;
@@ -1038,6 +1038,7 @@ pub(crate) trait PreparesClaudeEnvironment {
         socket: &Path,
         herdr: &Path,
         environment: &[String],
+        unset_environment: &[String],
         readiness_socket: &Path,
     ) -> String;
 }
@@ -1049,19 +1050,28 @@ impl PreparesClaudeEnvironment for str {
         socket: &Path,
         herdr: &Path,
         environment: &[String],
+        unset_environment: &[String],
         readiness_socket: &Path,
     ) -> String {
         let marker_suffix = self;
         let flow_id = reserved
             .map(|flow_id| format!(" && export FLOW_ID={flow_id}"))
             .unwrap_or_default();
-        let leave_outs = environment
+        let left_out = environment
             .iter()
             .map(|variable| format!(" && export {}", variable.shell_quoted()))
             .collect::<String>();
+        let unset = HerdrCli::CLAUDE_INHERITED_ENVIRONMENT
+            .iter()
+            .map(|name| (*name).to_owned())
+            .chain(unset_environment.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" ");
         format!(
-            "unset {} && export FLOW_SOCKET={} && export FLOW_HERDR_EXECUTABLE={} && export FLOW_CLAUDE_READY_SOCKET={}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
-            HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
+            "unset {} && export FLOW_SOCKET={} && export FLOW_HERDR_EXECUTABLE={} && export FLOW_CLAUDE_READY_SOCKET={}{flow_id}{left_out} && printf 'FLOW_CLAUDE_ENV_READY_%s\n' {}",
+            unset,
             socket.to_string_lossy().shell_quoted(),
             herdr.to_string_lossy().shell_quoted(),
             readiness_socket.to_string_lossy().shell_quoted(),
@@ -1101,7 +1111,7 @@ pub(crate) trait ChecksComposedLaunch {
     /// The SHA-256 of every part of the first USER message, in order.
     fn part_hashes(&self) -> Vec<String>;
     /// The launch's harness and its effective leave-outs.
-    fn lean_start(&self) -> LeanStart;
+    fn lean_start(&self, modules: Vec<meta_signal_flow::HarnessModule>) -> LeanStart;
     fn binding_matches_launch(&self, pane: &HerdrPaneBinding) -> Result<(), String>;
     fn prompt_intent_matches_launch(&self, intent: &PromptDeliveryIntent) -> Result<(), String>;
 }
@@ -1122,10 +1132,11 @@ impl ChecksComposedLaunch for ComposedLaunch {
         format!("{}-{}", launch.harness_kind.expected_harness(), &hash[..24])
     }
 
-    fn lean_start(&self) -> LeanStart {
+    fn lean_start(&self, modules: Vec<meta_signal_flow::HarnessModule>) -> LeanStart {
         LeanStart {
             harness_kind: self.harness_kind.clone(),
-            leave_outs: self.leave_outs.clone(),
+            harness_module_vector: modules,
+            left_out: self.left_out.clone(),
             tool_set: self.launch_profile.tool_set.clone(),
         }
     }
@@ -1158,7 +1169,7 @@ impl ChecksComposedLaunch for ComposedLaunch {
             || intent.model_name != launch.launch_profile.model_name
             || intent.effort != launch.launch_profile.effort
             || intent.prompt_sha256_vector != launch.part_hashes()
-            || intent.leave_outs != launch.leave_outs
+            || intent.left_out != launch.left_out
             || !usize::try_from(intent.parts_submitted).is_ok_and(|parts| {
                 (intent.prompt_sha256_vector.is_empty() && parts == 0)
                     || (1..=intent.prompt_sha256_vector.len()).contains(&parts)
@@ -1944,7 +1955,8 @@ impl SpawnsNativeHarness for HerdrCli {
         }
         if let Some(title) = &claude_title {
             arguments.push("--settings".into());
-            arguments.push(self.claude_flag_settings(&launch.lean_start()));
+            arguments
+                .push(self.claude_flag_settings(&launch.lean_start(self.harness_modules(launch))));
             // Every Claude Flow is remotely controllable under its title;
             // the title begins with `{`, never `-`, so the optional value
             // binds to the flag.
@@ -1995,7 +2007,7 @@ impl SpawnsNativeHarness for HerdrCli {
             }
         }
         // The launch's leave-outs, as its harness's own switches.
-        arguments.extend(launch.lean_start().arguments());
+        arguments.extend(launch.lean_start(self.harness_modules(launch)).arguments());
         // The subcommand follows every switch: the TUI resumes the thread
         // Flow opened and named, idle until Submit gives it its first turn.
         if let (HarnessKind::Codex, ClaudeSession::Attached(thread)) =
@@ -2810,7 +2822,7 @@ impl AcceptsLaunchRegistration for HerdrCli {
                 1
             },
             stops_reported: 0,
-            leave_outs: launch.leave_outs.clone(),
+            left_out: launch.left_out.clone(),
             native_transcript_boundary,
         })
     }
@@ -2915,7 +2927,8 @@ impl ReadsStartupRecord for StartupReading {
                 // is left out.
                 let lean = LeanStart {
                     harness_kind: intent.harness_kind.clone(),
-                    leave_outs: intent.leave_outs.clone(),
+                    harness_module_vector: self.harness_module_vector.clone(),
+                    left_out: intent.left_out.clone(),
                     tool_set: signal_flow::ToolSet::Default,
                 };
                 let removed = lean.disallowed_tools();
@@ -2992,7 +3005,8 @@ impl ReadsStartupRecord for StartupReading {
                         .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str));
                     for text in texts {
                         if CODEX_LEFT_OUT_OPENINGS.iter().any(|(leave_out, opening)| {
-                            intent.leave_outs.contains(leave_out) && text.starts_with(opening)
+                            intent.left_out.iter().any(|name| name == leave_out)
+                                && text.starts_with(opening)
                         }) {
                             return Err(NativeLaunchFailure::LeaveOutShown);
                         }
@@ -3090,6 +3104,17 @@ impl ObservesNativeTargetReceipt for HerdrCli {
             last_part_answered: false,
             native_turn_option: None,
             part_turn_option: None,
+            harness_module_vector: self
+                .harnesses
+                .iter()
+                .find(|h| {
+                    h.harness_kind == durable_intent.harness_kind
+                        && h.served_models
+                            .iter()
+                            .any(|m| m.model_name == durable_intent.model_name)
+                })
+                .map(|h| h.modules.clone())
+                .unwrap_or_default(),
         };
         let mut observed = None;
         let mut reader = BufReader::new(input);
@@ -3229,7 +3254,7 @@ pub(crate) mod tests {
                 flow_id_option: None,
                 remembering: signal_flow::Remembering::Predecessors(0),
                 herdr_session_name: "flowlaunch42".into(),
-                leave_outs_option: None,
+                left_out_option: None,
                 instruction_prompt: "do the work".into(),
                 tool_set: signal_flow::ToolSet::Default,
             },
@@ -3249,7 +3274,7 @@ pub(crate) mod tests {
                 launch_request_id: "launch-42".into(),
                 prompt_sha256: PROMPT_HASH.into(),
             },
-            leave_outs: Vec::new(),
+            left_out: Vec::new(),
         }
     }
 
@@ -3394,7 +3419,6 @@ printf '%s\n' "$alias"
         }
         .install(&flow_id_script);
         let readiness_runtime = root.path().join("native-transcripts");
-        let adapter = HerdrCli::at(executable, flows);
         let owned_command = root.path().join("owned-command");
         std::thread::spawn(move || {
             for _ in 0..2000 {
@@ -3427,6 +3451,49 @@ printf '%s\n' "$alias"
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         });
+        let mut adapter = HerdrCli::at(executable, flows);
+        let kind = if harness == "codex" {
+            HarnessKind::Codex
+        } else {
+            HarnessKind::Claude
+        };
+        adapter.harnesses = vec![meta_signal_flow::Harness {
+            harness_name: harness.into(),
+            harness_kind: kind.clone(),
+            harness_version: "fixture".into(),
+            executable: format!("/fixture/{harness}"),
+            home: root
+                .path()
+                .join("native-transcripts")
+                .to_string_lossy()
+                .into_owned(),
+            control_socket_path_option: None,
+            served_models: ["model-current", "claude-fable-5-1", "fixture-model"]
+                .into_iter()
+                .map(|model| meta_signal_flow::HarnessModel {
+                    model_name: model.into(),
+                    recorded: model.into(),
+                })
+                .collect(),
+            modules: crate::store::harness::seeded_modules(kind.clone()),
+            left_out: vec![],
+            arguments: vec![],
+            settings: vec![],
+            parameters: vec![],
+            unset: vec![],
+            pane_profile: meta_signal_flow::PaneProfile {
+                command_sigil_vector: vec!["/".into(), "!".into()],
+                interrupt_keys: vec!["esc".into()],
+                submit_keys: vec![],
+                compact_line: "/compact".into(),
+                composer: meta_signal_flow::Composer {
+                    glyph: "❯".into(),
+                    retraction: meta_signal_flow::Retraction::Keys(vec!["ctrl+c".into()]),
+                    composer_lines: 12,
+                    retracted_lines: 32,
+                },
+            },
+        }];
         (root, adapter)
     }
 
@@ -3699,14 +3766,14 @@ printf '%s\n' "$alias"
     }
 
     #[test]
-    fn a_claude_start_carries_its_leave_outs_as_flags_environment_and_settings() {
-        use signal_flow::LeaveOut;
+    fn a_claude_start_carries_its_left_out_as_flags_environment_and_settings() {
         let mut launch = launch(HarnessKind::Claude);
-        launch.leave_outs = vec![
-            LeaveOut::SkillTool,
-            LeaveOut::WorkflowTool,
-            LeaveOut::GitInstructions,
-            LeaveOut::AttributionReminder,
+        launch.left_out = vec![
+            "Skill".to_owned(),
+            "SlashCommands".to_owned(),
+            "Workflow".to_owned(),
+            "GitInstructions".to_owned(),
+            "Attribution".to_owned(),
         ];
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
@@ -3722,7 +3789,7 @@ printf '%s\n' "$alias"
         let calls = fs::read_to_string(root.path().join("calls")).unwrap();
         let start = fs::read_to_string(root.path().join("owned-command")).unwrap();
         assert!(start.contains("'--disable-slash-commands'"));
-        assert!(start.contains("'--disallowedTools' 'Skill,Workflow'"));
+        assert!(start.contains("'--disallowedTools' 'Workflow,Skill'"));
         assert!(start.contains(r#""attribution":{"commit":"","pr":""}"#));
         let prepared = calls
             .lines()
@@ -3734,10 +3801,9 @@ printf '%s\n' "$alias"
 
     #[test]
     fn a_receipt_showing_a_removed_tool_refuses_the_launch() {
-        use signal_flow::LeaveOut;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let mut launch = launch(HarnessKind::Claude);
-        launch.leave_outs = vec![LeaveOut::SkillTool, LeaveOut::WorkflowTool];
+        launch.left_out = vec!["Skill".to_owned(), "Workflow".to_owned()];
         let agent_name = launch.launch_agent_name();
         let (root, adapter) = fixture_herdr(
             "claude",
@@ -3752,7 +3818,7 @@ printf '%s\n' "$alias"
             .join(format!("{native_session}.jsonl"));
         fs::write(&transcript, "{\"type\":\"session_meta\"}\n").unwrap();
         let intent = registered_intent(&adapter, &launch, pane, native_session);
-        assert_eq!(intent.leave_outs, launch.leave_outs);
+        assert_eq!(intent.left_out, launch.left_out);
         let user = serde_json::json!({"type":"user","sessionId":native_session,
             "message":{"role":"user","content":launch.first_prompt_payload.first_prompt_body}});
         let skill_call = serde_json::json!({"type":"assistant","sessionId":native_session,
@@ -3784,6 +3850,7 @@ printf '%s\n' "$alias"
                 None,
                 Path::new("/run/flow.sock"),
                 Path::new("/fixture/herdr"),
+                &[],
                 &[],
                 Path::new("/fixture/ready.sock"),
             ),
@@ -3818,6 +3885,7 @@ printf '%s\n' "$alias"
                     Path::new("/run/flow.sock"),
                     Path::new("/fixture/herdr"),
                     &[],
+                    &[],
                     Path::new("/fixture/ready.sock")
                 ),
             ))
@@ -3844,6 +3912,7 @@ printf '%s\n' "$alias"
                     None,
                     Path::new("/run/user/1001/flow-next/it's a $HOME/flow.sock"),
                     Path::new("/fixture/herdr"),
+                    &[],
                     &[],
                     Path::new("/fixture/ready.sock")
                 ),
@@ -3886,7 +3955,7 @@ printf '%s\n' "$alias"
         assert!(prepared.contains("/fixture/run/flow-next/flow/flow.sock'"));
         assert!(prepared.contains("export FLOW_ID=123456"));
         assert!(prepared.contains("FLOW_CLAUDE_ENV_READY_"));
-        assert!(!prepared.contains("CLAUDE_CODE_ARTIFACT"));
+        assert!(prepared.contains("CLAUDE_CODE_ARTIFACT"));
         let start = fs::read_to_string(root.path().join("owned-command")).unwrap();
         assert!(start.contains(&format!("'--session-id' '{session}'")));
         let flow_id_calls = fs::read_to_string(root.path().join("flow-id-calls")).unwrap();
@@ -4062,7 +4131,7 @@ printf '%s\n' "$alias"
             .find(|line| line.contains("pane wait-output"))
             .unwrap();
         assert!(wait_call.contains("--source recent-unwrapped"));
-        assert!(calls_after_start.contains("unset CLAUDE_CODE_CHILD_SESSION"));
+        assert!(calls_after_start.contains("CLAUDE_CODE_CHILD_SESSION"));
         let create_call = calls_after_start
             .lines()
             .find(|line| line.contains("workspace create"))
@@ -4303,7 +4372,6 @@ printf '%s\n' "$alias"
     /// puts them before the first turn's input.
     #[test]
     fn a_codex_request_carrying_a_left_out_block_is_refused() {
-        use signal_flow::LeaveOut;
         let native_session = "12345678-1234-4abc-8def-123456789abc";
         let agents = serde_json::json!({"type":"response_item","payload":{"type":"message",
             "role":"user","content":[{"type":"input_text",
@@ -4318,18 +4386,10 @@ printf '%s\n' "$alias"
             "role":"developer","content":[{"type":"input_text",
             "text":"<multi_agent_mode>Any earlier instruction enabling proactive"}]}});
         for (block, leave_out, kept) in [
-            (agents, LeaveOut::CodexAgentsMd, LeaveOut::CodexSkillListing),
-            (skills, LeaveOut::CodexSkillListing, LeaveOut::CodexAgentsMd),
-            (
-                role,
-                LeaveOut::CodexDeveloperInstructions,
-                LeaveOut::CodexAgentsMd,
-            ),
-            (
-                mode,
-                LeaveOut::CodexDeveloperInstructions,
-                LeaveOut::CodexAgentsMd,
-            ),
+            (agents, "AgentsMd", "Skills"),
+            (skills, "Skills", "AgentsMd"),
+            (role, "DeveloperInstructions", "AgentsMd"),
+            (mode, "DeveloperInstructions", "AgentsMd"),
         ] {
             let mut launch = launch(HarnessKind::Codex);
             let agent_name = launch.launch_agent_name();
@@ -4349,13 +4409,13 @@ printf '%s\n' "$alias"
             let meta = serde_json::json!({"type":"session_meta","payload":{"id":native_session}});
             fs::write(&transcript, format!("{meta}\n{block}\n{context}\n")).expect("first request");
             // Left in, the block is the launch's own choice.
-            launch.leave_outs = vec![kept];
+            launch.left_out = vec![kept.to_owned()];
             let intent = registered_intent(&adapter, &launch, pane.clone(), native_session);
             assert_eq!(
                 adapter.observe_native_target_receipt(&intent).unwrap(),
                 StartupProgress::Waiting(intent.clone())
             );
-            launch.leave_outs = vec![leave_out.clone()];
+            launch.left_out = vec![(*leave_out).to_owned()];
             let intent = registered_intent(&adapter, &launch, pane, native_session);
             let refusal = adapter.observe_native_target_receipt(&intent).unwrap_err();
             assert_eq!(
@@ -5053,6 +5113,7 @@ printf '%s\n' "$alias"
             last_part_answered: false,
             native_turn_option: None,
             part_turn_option: None,
+            harness_module_vector: Vec::new(),
         };
         let mut received = false;
         for (index, row) in rows.iter().enumerate() {
@@ -5437,7 +5498,7 @@ printf '%s\n' "$alias"
         let mut launch = launch(HarnessKind::Claude);
         launch.launch_profile.address.aspect = Aspect::Psyche;
         launch.launch_profile.model_name = "claude-fable-5-1".into();
-        launch.leave_outs = vec![signal_flow::LeaveOut::SkillTool];
+        launch.left_out = vec!["Skill".to_owned(), "SlashCommands".to_owned()];
         let (root, adapter, session, pane) = reserved_claude(&launch);
         adapter
             .start_native_harness(&launch, &pane, Some("123456"))

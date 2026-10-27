@@ -17,7 +17,7 @@ pub use crate::generated::starter::{
     AssemblesComposedLaunch, CarriesFlowId, ComposesLaunch, ComposesVerifiedContext,
     ContextRequest, FitsOneMessage, HarnessedProfile, JoinsContextAndBrief, LeanStart,
     LeaveOutListing, PartNumbering, Profiled, ProfilesFreshSeat, ReadsVerifiedContext,
-    RendersBrief, RendersLeanStart, ResolvesLeaveOuts, SegmentListing, SplitsStartupMessage,
+    RendersBrief, RendersLeanStart, ResolvesLeftOut, SegmentListing, SplitsStartupMessage,
     SystemPrompted, Textual,
 };
 use datom_codec::Datomizable;
@@ -25,8 +25,7 @@ use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
 use signal_flow::{
     Address, Aspect, ComposedLaunch, CompositionRefusal, ContextRefusal, FirstPromptPayload,
-    HarnessKind, LaunchProfile, Layer, LeaveOut, LeaveOutRefusal, PromptPart, SystemPrompt,
-    TargetReceiptRequest,
+    HarnessKind, LaunchProfile, Layer, PromptPart, QueueEntry, SystemPrompt, TargetReceiptRequest,
 };
 use std::collections::HashSet;
 
@@ -36,8 +35,6 @@ pub enum CompositionError {
     InvalidProfileField(CompositionRefusal),
     #[error("the launch's context was refused: {0:?}")]
     Context(ContextRefusal),
-    #[error("the launch's leave-outs were refused: {0:?}")]
-    LeaveOut(LeaveOutRefusal),
 }
 
 impl From<ContextRefusal> for CompositionError {
@@ -393,25 +390,14 @@ impl RendersBrief for HarnessedProfile {
 
 /// The leave-outs a launch takes: its own, else the default its metaflow
 /// configures, checked against its harness.
-impl ResolvesLeaveOuts for HarnessedProfile {
-    fn effective_leave_outs<N: LeaveOutListing>(
-        &self,
-        input: N,
-    ) -> Result<Vec<LeaveOut>, CompositionError> {
-        let leave_outs = self
+impl ResolvesLeftOut for HarnessedProfile {
+    fn effective_left_out<N: LeaveOutListing>(&self, input: N) -> Vec<String> {
+        let left_out = self
             .launch_profile
-            .leave_outs_option
+            .left_out_option
             .clone()
-            .unwrap_or_else(|| input.leave_outs());
-        let lean = LeanStart {
-            harness_kind: self.harness_kind.clone(),
-            leave_outs: leave_outs.clone(),
-            tool_set: self.launch_profile.tool_set.clone(),
-        };
-        match lean.refusal() {
-            Some(refusal) => Err(CompositionError::LeaveOut(refusal)),
-            None => Ok(leave_outs),
-        }
+            .unwrap_or_else(|| input.left_out());
+        left_out
     }
 }
 
@@ -529,7 +515,7 @@ impl AssemblesComposedLaunch for LaunchComposer {
                     })
                     .collect(),
             },
-            leave_outs: input_4.leave_outs(),
+            left_out: input_4.left_out(),
         }
     }
 }
@@ -549,7 +535,7 @@ impl ComposesLaunch for LaunchComposer {
             launch_profile: input_0.profile(),
             harness_kind: input_0.harness_kind(),
         };
-        let leave_outs = harnessed.effective_leave_outs(input_1)?;
+        let left_out = harnessed.effective_left_out(input_1);
         let verified = self.verified_context(&harnessed)?;
         let brief = harnessed.brief();
         let mut segments = verified.user_segments();
@@ -577,7 +563,7 @@ impl ComposesLaunch for LaunchComposer {
             &system_prompt,
             &body,
             &parts,
-            &leave_outs,
+            &left_out,
         ))
     }
 }
@@ -595,7 +581,7 @@ pub struct FreshSeat {
     pub herdr_session_name: String,
     pub system_modules: Vec<String>,
     pub user_modules: Vec<String>,
-    pub leave_outs_option: Option<Vec<LeaveOut>>,
+    pub left_out_option: Option<Vec<String>>,
     pub tool_set: signal_flow::ToolSet,
     pub prompt: String,
 }
@@ -651,7 +637,7 @@ impl ProfilesFreshSeat for FreshSeat {
             flow_id_option: None,
             remembering: signal_flow::Remembering::Predecessors(1),
             herdr_session_name: self.herdr_session_name.clone(),
-            leave_outs_option: self.leave_outs_option.clone(),
+            left_out_option: self.left_out_option.clone(),
             tool_set: self.tool_set.clone(),
             instruction_prompt: self.prompt.clone(),
         }
@@ -667,7 +653,7 @@ pub(crate) mod tests {
     use crate::context::FixtureComposer;
     use signal_flow::{
         Address, Aspect, CompositionRefusal, ContextRefusal, HarnessKind, LaunchProfile, Layer,
-        LeaveOut, Remembering,
+        Remembering,
     };
 
     /// A launch profile and a composer holding its modules, for tests.
@@ -686,7 +672,7 @@ pub(crate) mod tests {
             flow_id_option: Some("1b8ac0".into()),
             remembering: Remembering::Custom(vec!["836818".into()]),
             herdr_session_name: "messaging-build".into(),
-            leave_outs_option: None,
+            left_out_option: None,
             tool_set: signal_flow::ToolSet::Default,
             instruction_prompt: "Carry the bounded task.".into(),
         }
@@ -735,7 +721,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Claude,
                     launch_profile: fixture_profile(),
                 },
-                Vec::<LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
@@ -753,13 +739,15 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Claude,
                     launch_profile: fixture_profile(),
                 },
-                Vec::<LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap();
-        assert!(!forgetting
-            .first_prompt_payload
-            .first_prompt_body
-            .contains("A crazy idea."));
+        assert!(
+            !forgetting
+                .first_prompt_payload
+                .first_prompt_body
+                .contains("A crazy idea.")
+        );
     }
 
     /// A declaration's purpose goes ahead of the brief; either stands alone
@@ -815,7 +803,7 @@ pub(crate) mod tests {
                     harness_kind: harness.clone(),
                     launch_profile: profile.clone(),
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
@@ -841,7 +829,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile().clone(),
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap();
         let system = &composed.system_prompt.system_prompt_text;
@@ -864,7 +852,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Claude,
                     launch_profile: fixture_profile().clone(),
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap();
         let carried = composed.carrying_flow_id("a1b2c3");
@@ -884,7 +872,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Claude,
                     launch_profile: profile,
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap()
             .carrying_flow_id("a1b2c3");
@@ -905,7 +893,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile().clone(),
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap();
         let body = &composed.first_prompt_payload.first_prompt_body;
@@ -950,21 +938,25 @@ pub(crate) mod tests {
                                 harness_kind,
                                 launch_profile: profile,
                             },
-                            Vec::<signal_flow::LeaveOut>::new(),
+                            Vec::<String>::new(),
                         )
                         .unwrap();
                     let identity = format!(
                         "Metaflow: {{ {aspect_name} coreTopic {layer_name} }}\nModel: gpt-6-astra\nEffort: medium\nFlow ID: pending\nNative binding: pending\n"
                     );
-                    assert!(composed
-                        .system_prompt
-                        .system_prompt_text
-                        .contains(&identity));
+                    assert!(
+                        composed
+                            .system_prompt
+                            .system_prompt_text
+                            .contains(&identity)
+                    );
                     assert!(!composed.system_prompt.system_prompt_text.contains("Role:"));
-                    assert!(!composed
-                        .first_prompt_payload
-                        .first_prompt_body
-                        .contains("Role:"));
+                    assert!(
+                        !composed
+                            .first_prompt_payload
+                            .first_prompt_body
+                            .contains("Role:")
+                    );
                 }
             }
         }
@@ -987,7 +979,7 @@ pub(crate) mod tests {
                         harness_kind: harness.clone(),
                         launch_profile: profile.clone(),
                     },
-                    Vec::<signal_flow::LeaveOut>::new(),
+                    Vec::<String>::new(),
                 )
                 .unwrap();
             let system = &composed.system_prompt.system_prompt_text;
@@ -1001,11 +993,13 @@ pub(crate) mod tests {
                     parts.len()
                 )));
             }
-            assert!(parts
-                .last()
-                .unwrap()
-                .prompt_part_text
-                .ends_with("Carry the bounded task."));
+            assert!(
+                parts
+                    .last()
+                    .unwrap()
+                    .prompt_part_text
+                    .ends_with("Carry the bounded task.")
+            );
             for name in &names {
                 let marker = format!("<!-- module: {name} -->");
                 assert!(
@@ -1038,7 +1032,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone(),
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             ),
             Err(CompositionError::Context(ContextRefusal::ModuleTooLarge))
         );
@@ -1055,7 +1049,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone()
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             ),
             Err(CompositionError::Context(ContextRefusal::ModuleTooLarge))
         );
@@ -1101,7 +1095,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Claude,
                     launch_profile: profile,
                 },
-                Vec::<LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap();
         let system = &composed.system_prompt.system_prompt_text;
@@ -1144,7 +1138,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone(),
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap();
         assert!(composed.system_prompt.system_prompt_text.len() > 140_000);
@@ -1188,7 +1182,7 @@ pub(crate) mod tests {
                         harness_kind: HarnessKind::Codex,
                         launch_profile: profile.clone()
                     },
-                    Vec::<signal_flow::LeaveOut>::new(),
+                    Vec::<String>::new(),
                 ),
                 Err(CompositionError::InvalidProfileField(field))
             );
@@ -1206,7 +1200,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Codex,
                     launch_profile: profile.clone()
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             ),
             Err(CompositionError::Context(ContextRefusal::ComposerRejected))
         );
@@ -1221,7 +1215,7 @@ pub(crate) mod tests {
                     harness_kind: HarnessKind::Codex,
                     launch_profile: fixture_profile(),
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap();
         composed.first_prompt_payload.prompt_part_vector[0]
@@ -1230,11 +1224,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_start_naming_leave_outs_replaces_its_metaflow_default() {
+    fn a_start_naming_left_out_replaces_its_metaflow_default() {
         let composer = fixture_composer();
         let mut profile = fixture_profile();
         let harness = HarnessKind::Claude;
-        let default = vec![LeaveOut::SkillTool, LeaveOut::WorkflowTool];
+        let default = vec!["Skill".to_owned(), "Workflow".to_owned()];
         // None takes the default.
         let composed = composer
             .compose(
@@ -1246,9 +1240,9 @@ pub(crate) mod tests {
                 default.clone(),
             )
             .unwrap();
-        assert_eq!(composed.leave_outs, default);
+        assert_eq!(composed.left_out, default);
         // A Start's own vector replaces it, even an empty one.
-        profile.leave_outs_option = Some(vec![LeaveOut::GitInstructions]);
+        profile.left_out_option = Some(vec!["GitInstructions".to_owned()]);
         let composed = composer
             .compose(
                 crate::composition::HarnessedProfile {
@@ -1259,32 +1253,36 @@ pub(crate) mod tests {
                 default.clone(),
             )
             .unwrap();
-        assert_eq!(composed.leave_outs, [LeaveOut::GitInstructions]);
-        profile.leave_outs_option = Some(Vec::new());
-        assert!(composer
-            .compose(
-                crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
-                    harness_kind: harness.clone(),
-                    launch_profile: profile.clone()
-                },
-                default.clone()
-            )
-            .unwrap()
-            .leave_outs
-            .is_empty());
+        assert_eq!(composed.left_out, ["GitInstructions".to_owned()]);
+        profile.left_out_option = Some(Vec::new());
+        assert!(
+            composer
+                .compose(
+                    crate::composition::HarnessedProfile {
+                        remembered_flows: Vec::new(),
+                        harness_kind: harness.clone(),
+                        launch_profile: profile.clone()
+                    },
+                    default.clone()
+                )
+                .unwrap()
+                .left_out
+                .is_empty()
+        );
         // A Start may leave out ToolSearch while other tools remain.
-        profile.leave_outs_option = Some(vec![LeaveOut::ToolSearch]);
-        assert!(composer
-            .compose(
-                crate::composition::HarnessedProfile {
-                    remembered_flows: Vec::new(),
-                    harness_kind: harness.clone(),
-                    launch_profile: profile.clone()
-                },
-                default
-            )
-            .is_ok());
+        profile.left_out_option = Some(vec!["ToolSearch".to_owned()]);
+        assert!(
+            composer
+                .compose(
+                    crate::composition::HarnessedProfile {
+                        remembered_flows: Vec::new(),
+                        harness_kind: harness.clone(),
+                        launch_profile: profile.clone()
+                    },
+                    default
+                )
+                .is_ok()
+        );
     }
 
     #[test]

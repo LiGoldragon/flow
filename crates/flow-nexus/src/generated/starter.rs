@@ -28,7 +28,7 @@ pub struct FreshContext {
     pub herdr_session_name: signal_flow::HerdrSessionName,
     pub system_modules: signal_flow::SystemModules,
     pub user_modules: signal_flow::UserModules,
-    pub leave_outs_option: std::option::Option<signal_flow::LeaveOuts>,
+    pub left_out_option: std::option::Option<flow_ethos::LeftOut>,
     pub tool_set: signal_flow::ToolSet,
     pub purpose: Purpose,
 }
@@ -141,13 +141,15 @@ pub struct StartupReading {
     pub last_part_answered: LastPartAnswered,
     pub native_turn_option: std::option::Option<NativeTurn>,
     pub part_turn_option: std::option::Option<PartTurn>,
+    pub harness_module_vector: std::vec::Vec<meta_signal_flow::HarnessModule>,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct LeanStart {
     pub harness_kind: signal_flow::HarnessKind,
-    pub leave_outs: signal_flow::LeaveOuts,
+    pub harness_module_vector: std::vec::Vec<meta_signal_flow::HarnessModule>,
+    pub left_out: flow_ethos::LeftOut,
     pub tool_set: signal_flow::ToolSet,
 }
 #[rustfmt::skip]
@@ -162,7 +164,7 @@ pub trait Profiled {
 }
 #[rustfmt::skip]
 pub trait LeaveOutListing {
-    fn leave_outs(&self) -> signal_flow::LeaveOuts;
+    fn left_out(&self) -> flow_ethos::LeftOut;
 }
 #[rustfmt::skip]
 pub trait ContextRequesting {
@@ -293,11 +295,8 @@ pub trait RendersBrief {
     fn brief(&self) -> String;
 }
 #[rustfmt::skip]
-pub trait ResolvesLeaveOuts {
-    fn effective_leave_outs<N: LeaveOutListing>(
-        &self,
-        input: N,
-    ) -> std::result::Result<signal_flow::LeaveOuts, flow_nexus::CompositionError>;
+pub trait ResolvesLeftOut {
+    fn effective_left_out<N: LeaveOutListing>(&self, input: N) -> flow_ethos::LeftOut;
 }
 #[rustfmt::skip]
 pub trait ComposesVerifiedContext {
@@ -378,9 +377,10 @@ pub trait ReadsTypedUserText {
 }
 #[rustfmt::skip]
 pub trait RendersLeanStart {
-    fn refusal(&self) -> std::option::Option<signal_flow::LeaveOutRefusal>;
     fn arguments(&self) -> std::vec::Vec<String>;
     fn environment(&self) -> std::vec::Vec<String>;
+    fn unset_environment(&self) -> std::vec::Vec<String>;
+    fn settings(&self) -> std::vec::Vec<meta_signal_flow::Setting>;
     fn disallowed_tools(&self) -> std::vec::Vec<String>;
     fn attribution_off(&self) -> bool;
     fn skill_listing_off(&self) -> bool;

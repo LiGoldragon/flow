@@ -20,11 +20,13 @@ Library
 [ signal_flow:[ Address HarnessKind Layer LaunchProfile
                  PromptDeliveryIntent NativeTargetReceipt FlowId
                  SessionId Origin SystemModules UserModules
-                 HerdrSessionName LeaveOuts ToolSet
-                 LeaveOutRefusal ComposedLaunch
+                 HerdrSessionName ToolSet
+                 ComposedLaunch
                  ContextRefusal SystemPrompt HerdrPaneBinding
                  PromptDeliveryResult Response Launched
                  NativeLaunchFailure ]
+  meta_signal_flow:[ HarnessModule Setting ]
+  flow_ethos:[ LeftOut ]
   flow_nexus:[ StartupSelection StartupComposition ContextProvenance CurriculumQuery CurriculumOutcome CompositionError VerifiedContext OperationOutcome CallerProcess ]
   serde_json:JsonValue.Value ]
 [ ; The flows a launch remembers, as Flow resolved its Remembering: their
@@ -37,7 +39,7 @@ Library
   HarnessedProfile.{ LaunchProfile HarnessKind RememberedFlows }
   ; What a fresh wake takes from the metaflow's declaration, else its last
   ; launch: the purpose is the declaration's, composed ahead of the brief.
-  FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeaveOuts> ToolSet Purpose.String }
+  FreshContext.{ HerdrSessionName SystemModules UserModules Option<LeftOut> ToolSet Purpose.String }
   ; A Started launch as its outcome row keeps it; the flow's route is read
   ; from the flow's own row when the reply is made.
   LaunchedRecord.{ FlowId SessionId Origin }
@@ -71,15 +73,15 @@ Library
   LastPartAnswered.Boolean
   NativeTurn.String
   PartTurn.String
-  StartupReading.{ SeenParts LastPartAnswered Option<NativeTurn> Option<PartTurn> }
-  ; A harness start and the parts it leaves out.
-  LeanStart.{ HarnessKind LeaveOuts ToolSet } ]
+  StartupReading.{ SeenParts LastPartAnswered Option<NativeTurn> Option<PartTurn> Vector<HarnessModule> }
+  ; A harness start and the configured modules it leaves out.
+  LeanStart.{ HarnessKind Vector<HarnessModule> LeftOut ToolSet } ]
 [ ; The values capabilities read, each through the trait that yields it.
   Textual.[ text.[ String ] ]
   Profiled.[ profile.[ LaunchProfile ]
              harness_kind.[ HarnessKind ]
              remembered_flows.[ RememberedFlows ] ]
-  LeaveOutListing.[ leave_outs.[ LeaveOuts ] ]
+  LeaveOutListing.[ left_out.[ LeftOut ] ]
   ContextRequesting.[ context_request.[ ContextRequest ] ]
   StartupComposing.[ composition.[ StartupComposition ] ]
   CurriculumQuerying.[ query.[ CurriculumQuery ] ]
@@ -111,7 +113,7 @@ Library
                          startup_parts.{ [ SegmentListing Textual ] [ Result<Vector<String> ContextRefusal> ] } ]
   JoinsContextAndBrief.[ joined_with.{ [ Textual ] [ Vector<String> ] } ]
   RendersBrief.[ brief.[ String ] ]
-  ResolvesLeaveOuts.[ effective_leave_outs.{ [ LeaveOutListing ] [ Result<LeaveOuts CompositionError> ] } ]
+  ResolvesLeftOut.[ effective_left_out.{ [ LeaveOutListing ] [ LeftOut ] } ]
   ComposesVerifiedContext.[ verified_context.{ [ Profiled ] [ Result<VerifiedContext CompositionError> ] }
                             launch_system_prompt.{ [ Profiled ReadsVerifiedContext SegmentListing ] [ Result<SystemPrompt CompositionError> ] } ]
   AssemblesComposedLaunch.[ assembled:{ [ Profiled SystemPrompted Textual SegmentListing LeaveOutListing ] [ ComposedLaunch ] } ]
@@ -125,9 +127,10 @@ Library
   ReadsStartupRecord.[ read_record!{ [ JsonRow DeliveryIntended ] [ Result<Option<String> NativeLaunchFailure> ] }
                        read_part!{ [ Textual DeliveryIntended ] [ Result<Integer NativeLaunchFailure> ] } ]
   ReadsTypedUserText.[ claude_typed_text.[ Option<String> ] ]
-  RendersLeanStart.[ refusal.[ Option<LeaveOutRefusal> ]
-                     arguments.[ Vector<String> ]
+  RendersLeanStart.[ arguments.[ Vector<String> ]
                      environment.[ Vector<String> ]
+                     unset_environment.[ Vector<String> ]
+                     settings.[ Vector<Setting> ]
                      disallowed_tools.[ Vector<String> ]
                      attribution_off.[ Boolean ]
                      skill_listing_off.[ Boolean ] ]

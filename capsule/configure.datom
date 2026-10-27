@@ -5,11 +5,32 @@
 ; Codex endpoints name sockets no app-server serves and no models, so no
 ; Codex seat can start; Message names no running executable.
 Configure.Nexus.{ @SOURCE_ROOT@ @SOURCE_ROOT@/flows [ Psyche ] @CAPSULE_RUNTIME@/message.sock @CAPSULE_RUNTIME@/no-message-nexus @CURRICULUM_SOCKET@ 60 { @HERDR@ @FLOW_ID@ @FLOW_HOOK@ } flow-testing }
-Configure.Harnesses.[ { claude Claude fixture @CAPSULE_BIN@/claude @CAPSULE_HOME@/.claude None [ { claude-haiku-5-5 claude-haiku-5-5 } ] [] [] [] [] [] [] { [ / «!» # ] [ esc esc ] [ enter ] /compact { ❯ Keys.[ ctrl+c ] 12 32 } } } ]
+Configure.Harnesses.[ { claude Claude fixture @CAPSULE_BIN@/claude @CAPSULE_HOME@/.claude None [ { claude-haiku-5-5 claude-haiku-5-5 } ]
+  [ { ClaudeAiConnectors Absent [] [ Environment.{ ENABLE_CLAUDEAI_MCP_SERVERS false } ] }
+    { ExplorePlanAgents Absent [] [ Environment.{ CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS 1 } ] }
+    { Workflow Absent [ Workflow ] [ Environment.{ CLAUDE_CODE_DISABLE_WORKFLOWS 1 } ] }
+    { Skill Absent [ Skill ] [] }
+    { SlashCommands Absent [] [ Flag.[ --disable-slash-commands ] ] }
+    { BundledSkills Absent [] [ Environment.{ CLAUDE_CODE_DISABLE_BUNDLED_SKILLS 1 } ] }
+    { ScheduleWakeup Absent [ ScheduleWakeup ] [] }
+    { ReportFindings Absent [ ReportFindings ] [] }
+    { ListAgents Absent [ ListAgents ] [] }
+    { Cron Absent [ CronCreate CronDelete CronList ] [ Environment.{ CLAUDE_CODE_DISABLE_CRON 1 } ] }
+    { DesignSync Absent [ DesignSync ] [] } { Worktree Absent [ EnterWorktree ExitWorktree ] [] }
+    { LSP Absent [ LSP ] [] } { Monitor Absent [ Monitor ] [] }
+    { NotebookEdit Absent [ NotebookEdit ] [] } { PushNotification Absent [ PushNotification ] [] }
+    { RemoteTrigger Absent [ RemoteTrigger ] [] } { SendMessage Absent [ SendMessage ] [] }
+    { TaskStop Absent [ TaskStop ] [] } { WebFetch Absent [ WebFetch ] [] }
+    { WebSearch Absent [ WebSearch ] [] }
+    { ClaudeMd Absent [] [ Environment.{ CLAUDE_CODE_DISABLE_CLAUDE_MDS 1 } ] }
+    { GitInstructions Absent [] [ Environment.{ CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS 1 } ] } ]
+  [] [] [] [] [] { [ / «!» # ] [ esc esc ] [ enter ] /compact { ❯ Keys.[ ctrl+c ] 12 32 } } } ]
 Configure.Models.[ { Primary Psyche claude-haiku-5-5 medium } { Secondary Psyche claude-haiku-5-5 medium } { Tertiary Psyche claude-haiku-5-5 medium } { Quaternary Psyche claude-haiku-5-5 medium } ]
 Configure.Thresholds.[ { claude-haiku-5-5 200000 } ]
-Configure.LeaveOuts.[ { { Psyche test Secondary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } { { Psyche test Tertiary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } { { Psyche test Quaternary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } ]
-Configure.Metaflows.[ { { Psyche test Secondary } [ spirit:core intent:models ] [] Explicit.[] Maintained «» [] [] } { { Psyche test Tertiary } [ spirit:core intent:models ] [] Default OnDemand «» [] [] } { { Psyche test Quaternary } [ spirit:core intent:models ] [] Explicit.[] OnDemand «» [] [] } ]
+Configure.Metaflows.[
+  { { Psyche test Secondary } [ spirit:core intent:models ] [] Explicit.[] Maintained «» [] [ ClaudeAiConnectors ExplorePlanAgents Workflow Skill SlashCommands BundledSkills ScheduleWakeup ReportFindings ListAgents Cron DesignSync Worktree LSP Monitor NotebookEdit PushNotification RemoteTrigger SendMessage TaskStop WebFetch WebSearch ClaudeMd GitInstructions ] [] }
+  { { Psyche test Tertiary } [ spirit:core intent:models ] [] Default OnDemand «» [] [ ClaudeAiConnectors ExplorePlanAgents Workflow Skill SlashCommands BundledSkills ScheduleWakeup ReportFindings ListAgents Cron DesignSync Worktree LSP Monitor NotebookEdit PushNotification RemoteTrigger SendMessage TaskStop WebFetch WebSearch ClaudeMd GitInstructions ] [] }
+  { { Psyche test Quaternary } [ spirit:core intent:models ] [] Explicit.[] OnDemand «» [] [ ClaudeAiConnectors ExplorePlanAgents Workflow Skill SlashCommands BundledSkills ScheduleWakeup ReportFindings ListAgents Cron DesignSync Worktree LSP Monitor NotebookEdit PushNotification RemoteTrigger SendMessage TaskStop WebFetch WebSearch ClaudeMd GitInstructions ] [] } ]
 ; A real Claude TUI does not honor TERM while idle. Exercise the configured
 ; bounded wait and forced compensation without making every lifecycle test
 ; spend the production seed's thirty seconds. Five seconds still witnesses

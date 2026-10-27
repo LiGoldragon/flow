@@ -116,6 +116,7 @@ pub(super) fn maintain(fixture: &NexusFixture, address: Address) {
                 continuity: meta_signal_flow::Continuity::Maintained,
                 purpose: String::new(),
                 records: vec![],
+                left_out: vec![],
                 requires: vec![],
             },
         ]))
@@ -803,7 +804,7 @@ fn last_launch_context() -> WakePlan {
         system_modules: vec!["spirit-core".into(), "intent-flow".into()],
         user_modules: vec!["operation-main-flow".into()],
         tool_set: signal_flow::ToolSet::Default,
-        leave_outs_option: None,
+        left_out_option: None,
         purpose: String::new(),
     })
 }
@@ -841,7 +842,7 @@ fn a_fresh_wake_composes_modules_without_queued_work() {
         herdr_session_name: "fixture-session".into(),
         system_modules: vec!["spirit-core".into(), "intent-flow".into()],
         user_modules: vec!["operation-main-flow".into(), "knowledge-flow".into()],
-        leave_outs_option: None,
+        left_out_option: None,
         prompt: String::new(),
     };
     let profile = seat.fresh_profile();
@@ -857,7 +858,7 @@ fn a_fresh_wake_composes_modules_without_queued_work() {
                 harness_kind: HarnessKind::Claude,
                 launch_profile: profile.clone(),
             },
-            Vec::<signal_flow::LeaveOut>::new(),
+            Vec::<String>::new(),
         )
         .unwrap();
     // The same full module text a Start of these identities carries, with
@@ -1054,7 +1055,7 @@ fn launched_claude_ended_by_with(
         flow_id_option: None,
         remembering: signal_flow::Remembering::Predecessors(0),
         herdr_session_name: "fixture-session".into(),
-        leave_outs_option: None,
+        left_out_option: None,
         instruction_prompt: instruction_prompt.into(),
     };
     // The launch that bound abc123.
@@ -1067,7 +1068,7 @@ fn launched_claude_ended_by_with(
                 harness_kind: HarnessKind::Claude,
                 launch_profile: profile.clone(),
             },
-            Vec::<signal_flow::LeaveOut>::new(),
+            Vec::<String>::new(),
         )
         .expect("composes");
     let session = fixture
@@ -3095,7 +3096,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         flow_id_option: None,
         remembering: signal_flow::Remembering::Predecessors(0),
         herdr_session_name: "fixture-session".into(),
-        leave_outs_option: None,
+        left_out_option: None,
         instruction_prompt: "fixture instruction".into(),
     };
     let composed = fixture
@@ -3107,7 +3108,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
                 harness_kind: HarnessKind::Codex,
                 launch_profile: profile.clone(),
             },
-            Vec::<signal_flow::LeaveOut>::new(),
+            Vec::<String>::new(),
         )
         .unwrap();
     fixture
@@ -3191,7 +3192,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         herdr_session_name: "fixture-session".into(),
         system_modules: profile.system_modules.clone(),
         user_modules: profile.user_modules.clone(),
-        leave_outs_option: None,
+        left_out_option: None,
         tool_set: signal_flow::ToolSet::Default,
         prompt: "A".into(),
     }
@@ -3206,7 +3207,7 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
                 harness_kind: HarnessKind::Codex,
                 launch_profile: fresh,
             },
-            Vec::<signal_flow::LeaveOut>::new(),
+            Vec::<String>::new(),
         )
         .unwrap()
         .first_prompt_payload
@@ -3607,7 +3608,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
             flow_id_option: None,
             remembering: signal_flow::Remembering::Predecessors(0),
             herdr_session_name: "fixture-session".into(),
-            leave_outs_option: None,
+            left_out_option: None,
             instruction_prompt: "Call the send tool once.".into(),
         };
         let settings = crate::store::DefaultConfiguration {
@@ -3661,7 +3662,7 @@ impl SetsUpFirstTurnSend for NexusFixture {
                     harness_kind: HarnessKind::Codex,
                     launch_profile: sender.clone(),
                 },
-                Vec::<signal_flow::LeaveOut>::new(),
+                Vec::<String>::new(),
             )
             .unwrap()
             .first_prompt_payload
@@ -3962,7 +3963,7 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
                 harness_kind: HarnessKind::Codex,
                 launch_profile: setup.sender.clone(),
             },
-            Vec::<signal_flow::LeaveOut>::new(),
+            Vec::<String>::new(),
         )
         .unwrap();
     fixture
@@ -4856,6 +4857,7 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_requirements_first() {
                 continuity: meta_signal_flow::Continuity::OnDemand,
                 purpose: String::new(),
                 records: vec![],
+                left_out: vec![],
                 requires: vec![],
             },
             meta_signal_flow::ConfigureMetaflow {
@@ -4866,6 +4868,7 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_requirements_first() {
                 continuity: meta_signal_flow::Continuity::OnDemand,
                 purpose: String::new(),
                 records: vec![],
+                left_out: vec![],
                 requires: vec![address(Layer::Secondary)],
             },
         ]))

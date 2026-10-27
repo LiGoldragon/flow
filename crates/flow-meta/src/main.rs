@@ -235,39 +235,6 @@ mod tests {
     }
 
     #[test]
-    fn a_family_declaration_is_one_inline_datom_carrying_the_whole_family() {
-        let client = FlowMetaClient {
-            socket: "unused".into(),
-        };
-        let datom = "Configure.LeaveOuts.[ { { Field core Primary } Codex [ CodexAgentsMd CodexSkillListing ] } { { Psyche flow Secondary } Claude [ SkillTool ClaudeMd ] } ]";
-        let query = client
-            .parse_command([datom.to_owned()].into_iter())
-            .expect("LeaveOuts declaration parses");
-        let Query::Configure(ConfigurationChange::LeaveOuts(leave_outs)) = &query else {
-            panic!("a LeaveOuts declaration must stay one Configure query")
-        };
-        assert_eq!(leave_outs.len(), 2);
-        assert_eq!(leave_outs[0].harness_kind, signal_flow::HarnessKind::Codex);
-        assert_eq!(query.datomize(vec![]).protosize().compact(), datom);
-        // An entry that names no harness is not a leave-out default.
-        assert!(client
-            .parse_command(
-                [
-                    "Configure.LeaveOuts.[ { { Psyche flow Secondary } [ SkillTool ClaudeMd ] } ]"
-                        .to_owned()
-                ]
-                .into_iter()
-            )
-            .is_err());
-        // Reconfigure is not a request: Configure.Nexus replaces the Nexus.
-        assert!(
-            client
-                .parse_command(["Reconfigure.{ /home/li/primary }".to_owned()].into_iter())
-                .is_err()
-        );
-    }
-
-    #[test]
     fn refresh_is_not_a_request() {
         // Every wake is fresh, so no request marks one.
         let client = FlowMetaClient {
@@ -373,6 +340,7 @@ mod tests {
                 continuity: meta_signal_flow::Continuity::OnDemand,
                 purpose: format!("Prints page {index}."),
                 records: vec![],
+                left_out: vec![],
                 requires: vec![],
             })
             .collect();
@@ -395,7 +363,6 @@ mod tests {
             harnesses: vec![],
             models: vec![],
             thresholds: vec![],
-            default_leave_outs: vec![],
             send_servers: vec![],
             metaflows: rows.clone(),
             investigation: None,

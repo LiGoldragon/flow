@@ -57,8 +57,8 @@ use std::{
 };
 
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureLeaveOut, ConfigureModel, ConfigureNexus,
-    ConfigureOutcome, ConfigureThreshold,
+    ConfigurationChange, ConfigurationSnapshot, ConfigureModel, ConfigureNexus, ConfigureOutcome,
+    ConfigureThreshold,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -71,11 +71,10 @@ use signal_flow::{
     Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
     FlowLifecycle as SignalFlowLifecycle, FlowNode, HarnessKind, HerdrPaneBinding, HerdrRoute,
     HerdrRouteSelection, LaunchAttempt, LaunchAttemptPhase, LaunchAttemptReservation,
-    LaunchProfile, Launched, Layer, LeaveOut, Lock, Metaflow, NativeLaunchBinding,
-    NativeLaunchIntent, NativeTranscriptBoundary, Origin, Process, PromptDeliveryIntent,
-    PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
-    Remembering, ReplaceRejection, Replaced, Request, Response, RouteReadiness, StartRejection,
-    StopRejection,
+    LaunchProfile, Launched, Layer, Lock, Metaflow, NativeLaunchBinding, NativeLaunchIntent,
+    NativeTranscriptBoundary, Origin, Process, PromptDeliveryIntent, PromptDeliveryResult, Query,
+    RecipientResolutionRejection, RegistrationAcknowledgement, Remembering, ReplaceRejection,
+    Replaced, Request, Response, RouteReadiness, StartRejection, StopRejection,
 };
 
 /// Applies the meta wire's index cursor to an already ordered snapshot.
@@ -92,6 +91,110 @@ pub(crate) fn page_records<T: Clone>(
     let end = start.saturating_add(count).min(records.len());
     let next = (end < records.len()).then(|| i64::try_from(end).unwrap_or(i64::MAX));
     (records[start..end].to_vec(), next)
+}
+
+type LeaveOut = String;
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LeaveOutV37 {
+    ClaudeAiConnectors,
+    ConfiguredMcpServers,
+    AgentTool,
+    ExplorePlanAgents,
+    FileTools,
+    WorkflowTool,
+    ScheduleWakeupTool,
+    ReportFindingsTool,
+    ListAgentsTool,
+    CronTools,
+    WebTools,
+    DeferredTools,
+    SkillTool,
+    BundledSkills,
+    ClaudeMd,
+    GitInstructions,
+    AttributionReminder,
+    UserSettings,
+    ToolSearch,
+    BashTool,
+    CodexSkillListing,
+    CodexAgentsMd,
+    CodexCollaborationMode,
+    CodexEnvironmentContext,
+    CodexPermissions,
+    CodexDeveloperInstructions,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LeaveOutRefusalV37 {
+    Indispensable(LeaveOutV37),
+    NeedsWorkflowLeftOut(LeaveOutV37),
+    NotForHarness(LeaveOutV37),
+}
+
+impl LeaveOutV37 {
+    fn harness(&self) -> HarnessKind {
+        match self {
+            Self::CodexSkillListing
+            | Self::CodexAgentsMd
+            | Self::CodexCollaborationMode
+            | Self::CodexEnvironmentContext
+            | Self::CodexPermissions
+            | Self::CodexDeveloperInstructions => HarnessKind::Codex,
+            _ => HarnessKind::Claude,
+        }
+    }
+
+    fn module_names(&self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeAiConnectors => &["ClaudeAiConnectors"],
+            Self::ConfiguredMcpServers => &["McpServers"],
+            Self::AgentTool => &["Agent"],
+            Self::ExplorePlanAgents => &["ExplorePlanAgents"],
+            Self::FileTools => &["Read", "Edit", "Write"],
+            Self::WorkflowTool => &["Workflow"],
+            Self::ScheduleWakeupTool => &["ScheduleWakeup"],
+            Self::ReportFindingsTool => &["ReportFindings"],
+            Self::ListAgentsTool => &["ListAgents"],
+            Self::CronTools => &["Cron"],
+            Self::WebTools => &["WebFetch", "WebSearch"],
+            Self::DeferredTools => &[
+                "Cron",
+                "DesignSync",
+                "Worktree",
+                "LSP",
+                "Monitor",
+                "NotebookEdit",
+                "PushNotification",
+                "RemoteTrigger",
+                "SendMessage",
+                "TaskStop",
+                "WebFetch",
+                "WebSearch",
+            ],
+            Self::SkillTool => &["Skill", "SlashCommands"],
+            Self::BundledSkills => &["BundledSkills"],
+            Self::ClaudeMd => &["ClaudeMd"],
+            Self::GitInstructions => &["GitInstructions"],
+            Self::AttributionReminder => &["Attribution"],
+            Self::UserSettings => &["UserSettings"],
+            Self::ToolSearch => &["ToolSearch"],
+            Self::BashTool => &["Bash"],
+            Self::CodexSkillListing => &["Skills"],
+            Self::CodexAgentsMd => &["AgentsMd"],
+            Self::CodexCollaborationMode => &["CollaborationMode"],
+            Self::CodexEnvironmentContext => &["EnvironmentContext"],
+            Self::CodexPermissions => &["Permissions"],
+            Self::CodexDeveloperInstructions => &["DeveloperInstructions"],
+        }
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct ConfigureLeaveOutV47 {
+    address: Address,
+    harness_kind: HarnessKind,
+    left_out: Vec<LeaveOutV37>,
 }
 
 const FLOW_TABLE_NAME: TableName = TableName::new("flow_nexus_flows");
@@ -140,6 +243,11 @@ const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
 /// belongs to a model and no flow writes a handover. Each is named with the
 /// family identity it was registered under.
 const RETIRED_TABLES: &[(&str, &str, &str)] = &[
+    (
+        "flow_nexus_meta_leave_out_configuration",
+        "flow-nexus-meta-leave-out-configuration",
+        "flow-nexus-meta-leave-out-configuration-v2",
+    ),
     (
         "flow_nexus_meta_module_configuration",
         "flow-nexus-meta-module-configuration",
@@ -1143,7 +1251,7 @@ impl DescribesInvestigationTable for StoredMetaInvestigationConfiguration {
 /// and that harness.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredMetaLeaveOutConfiguration {
-    leave_out: ConfigureLeaveOut,
+    leave_out: ConfigureLeaveOutV47,
 }
 
 impl EngineRecord for StoredMetaLeaveOutConfiguration {
@@ -1171,7 +1279,7 @@ impl MemoryDefinition for StoredMetaLeaveOutConfiguration {
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LeaveOutDefaultBeforeHarness {
     address: Address,
-    leave_outs: Vec<LeaveOut>,
+    left_out: Vec<LeaveOutV37>,
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -1241,26 +1349,22 @@ impl UpgradeFrom<StoredMetaLeaveOutConfigurationV1> for StoredMetaLeaveOutConfig
     type Refusal = LeaveOutUpgradeRefusal;
 
     fn upgrade_from(previous: StoredMetaLeaveOutConfigurationV1) -> Decision<Self, Self::Refusal> {
-        use crate::lean::BelongsToHarness;
-        let LeaveOutDefaultBeforeHarness {
-            address,
-            leave_outs,
-        } = previous.leave_out;
-        let Some(first) = leave_outs.first() else {
+        let LeaveOutDefaultBeforeHarness { address, left_out } = previous.leave_out;
+        let Some(first) = left_out.first() else {
             return Decision::Refused(LeaveOutUpgradeRefusal::NoHarness);
         };
         let harness_kind = first.harness();
-        if leave_outs
+        if left_out
             .iter()
             .any(|leave_out| leave_out.harness() != harness_kind)
         {
             return Decision::Refused(LeaveOutUpgradeRefusal::MixedHarnesses);
         }
         Decision::Ready(Self {
-            leave_out: ConfigureLeaveOut {
+            leave_out: ConfigureLeaveOutV47 {
                 address,
                 harness_kind,
-                leave_outs,
+                left_out,
             },
         })
     }
@@ -1675,7 +1779,7 @@ struct LaunchProfileV4 {
     effort: String,
     flow_id_option: Option<String>,
     herdr_session_name: String,
-    leave_outs_option: Option<Vec<LeaveOut>>,
+    left_out_option: Option<Vec<LeaveOut>>,
     flow_kind: metaflow_declaration::FlowKindV4,
     tool_set: signal_flow::ToolSet,
     instruction_prompt: String,
@@ -1712,7 +1816,7 @@ impl UpgradeFrom<StoredLaunchAttemptV4> for StoredLaunchAttempt {
                     effort: profile.effort,
                     flow_id_option: profile.flow_id_option,
                     herdr_session_name: profile.herdr_session_name,
-                    leave_outs_option: profile.leave_outs_option,
+                    left_out_option: profile.left_out_option,
                     tool_set: profile.tool_set,
                     instruction_prompt: profile.instruction_prompt,
                 },
@@ -1786,7 +1890,7 @@ struct LaunchProfileV3 {
     flow_id_option: Option<String>,
     remembered_flow_vector: Vec<RememberedFlow>,
     herdr_session_name: String,
-    leave_outs_option: Option<Vec<LeaveOut>>,
+    left_out_option: Option<Vec<LeaveOut>>,
     flow_kind: metaflow_declaration::FlowKindV4,
     tool_set: signal_flow::ToolSet,
     instruction_prompt: String,
@@ -1827,7 +1931,7 @@ impl UpgradeFrom<StoredLaunchAttemptV3> for StoredLaunchAttempt {
                     effort: profile.effort,
                     flow_id_option: profile.flow_id_option,
                     herdr_session_name: profile.herdr_session_name,
-                    leave_outs_option: profile.leave_outs_option,
+                    left_out_option: profile.left_out_option,
                     tool_set: profile.tool_set,
                     instruction_prompt: profile.instruction_prompt,
                 },
@@ -1878,7 +1982,7 @@ struct LaunchProfileV2 {
     flow_id_option: Option<String>,
     remembered_flow_vector: Vec<RememberedFlow>,
     herdr_session_name: String,
-    leave_outs_option: Option<Vec<LeaveOut>>,
+    left_out_option: Option<Vec<LeaveOut>>,
     instruction_prompt: String,
 }
 
@@ -1917,7 +2021,7 @@ impl UpgradeFrom<StoredLaunchAttemptV2> for StoredLaunchAttempt {
                     effort: profile.effort,
                     flow_id_option: profile.flow_id_option,
                     herdr_session_name: profile.herdr_session_name,
-                    leave_outs_option: profile.leave_outs_option,
+                    left_out_option: profile.left_out_option,
                     tool_set: signal_flow::ToolSet::Default,
                     instruction_prompt: profile.instruction_prompt,
                 },
@@ -2046,7 +2150,7 @@ impl From<PromptDeliveryIntentBeforeModules> for PromptDeliveryIntent {
             effort: intent.effort,
             parts_submitted: 1,
             stops_reported: 0,
-            leave_outs: Vec::new(),
+            left_out: Vec::new(),
             herdr_pane_binding: intent.herdr_pane_binding,
             native_transcript_boundary: intent.native_transcript_boundary,
         }
@@ -2145,7 +2249,7 @@ impl UpgradeFrom<StoredLaunchAttemptV1> for StoredLaunchAttempt {
                     effort: profile.effort,
                     flow_id_option: profile.flow_id_option,
                     herdr_session_name: profile.herdr_session_name,
-                    leave_outs_option: Some(Vec::new()),
+                    left_out_option: Some(Vec::new()),
                     tool_set: signal_flow::ToolSet::Default,
                     instruction_prompt: profile.instruction_prompt,
                 },
@@ -2528,6 +2632,7 @@ impl AnswersLaunchOutcome for LaunchOutcome {
             }),
             Self::StartRejected(rejection) => Response::StartRejected(rejection.clone()),
             Self::ReplaceRejected(rejection) => Response::ReplaceRejected(rejection.clone()),
+            Self::Archived(_) => Response::StartRejected(StartRejection::LaunchPersistenceRefused),
         }
     }
 
@@ -2546,6 +2651,9 @@ impl AnswersLaunchOutcome for LaunchOutcome {
             Self::ReplaceRejected(rejection) => {
                 signal_flow::LaunchStatusOutcome::ReplaceRejected(rejection.clone())
             }
+            Self::Archived(_) => signal_flow::LaunchStatusOutcome::StartRejected(
+                StartRejection::LaunchPersistenceRefused,
+            ),
         }
     }
 
@@ -2879,7 +2987,7 @@ enum StartRejectionV34 {
     OriginUnavailable,
     AddressAwake,
     ContextRefused(signal_flow::ContextRefusal),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    LeaveOutRefused(LeaveOutRefusalV37),
     HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
     ModelRefused(signal_flow::ModelRefusal),
     NoSecondary,
@@ -2931,7 +3039,7 @@ impl From<StartRejectionV34> for StartRejection {
             StartRejectionV34::OriginUnavailable => Self::OriginUnavailable,
             StartRejectionV34::AddressAwake => Self::AddressAwake,
             StartRejectionV34::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV34::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+            StartRejectionV34::LeaveOutRefused(_) => Self::LaunchPersistenceRefused,
             StartRejectionV34::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV34::ModelRefused(refusal) => Self::ModelRefused(refusal),
             StartRejectionV34::NoSecondary => {
@@ -3079,7 +3187,7 @@ enum StartRejectionV32 {
     OriginUnavailable,
     AddressAwake,
     ContextRefused(signal_flow::ContextRefusal),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    LeaveOutRefused(LeaveOutRefusalV37),
     HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
     ModelRefused(signal_flow::ModelRefusal),
     NoSecondary,
@@ -3122,7 +3230,7 @@ impl From<StartRejectionV32> for StartRejection {
             StartRejectionV32::OriginUnavailable => Self::OriginUnavailable,
             StartRejectionV32::AddressAwake => Self::AddressAwake,
             StartRejectionV32::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV32::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+            StartRejectionV32::LeaveOutRefused(_) => Self::LaunchPersistenceRefused,
             StartRejectionV32::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV32::ModelRefused(refusal) => Self::ModelRefused(refusal),
             StartRejectionV32::NoSecondary => Self::RequirementUnmet(unrecorded_secondary()),
@@ -3229,7 +3337,7 @@ enum StartRejectionV30 {
     OriginUnavailable,
     AddressAwake,
     ContextRefused(ContextRefusalV30),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    LeaveOutRefused(LeaveOutRefusalV37),
     HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
     ModelRefused(signal_flow::ModelRefusal),
     NoSecondary,
@@ -3275,7 +3383,7 @@ impl From<StartRejectionV30> for StartRejection {
             StartRejectionV30::OriginUnavailable => Self::OriginUnavailable,
             StartRejectionV30::AddressAwake => Self::AddressAwake,
             StartRejectionV30::ContextRefused(refusal) => Self::ContextRefused(refusal.into()),
-            StartRejectionV30::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+            StartRejectionV30::LeaveOutRefused(_) => Self::LaunchPersistenceRefused,
             StartRejectionV30::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV30::ModelRefused(refusal) => Self::ModelRefused(refusal),
             StartRejectionV30::NoSecondary => Self::RequirementUnmet(unrecorded_secondary()),
@@ -3367,7 +3475,7 @@ enum StartRejectionV22 {
     AddressAwake,
     AddressEnded,
     ContextRefused(ContextRefusalV30),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    LeaveOutRefused(LeaveOutRefusalV37),
     HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
     ModelRefused(signal_flow::ModelRefusal),
 }
@@ -3405,7 +3513,7 @@ impl TryFrom<StartRejectionV22> for StartRejectionV30 {
             StartRejectionV22::AddressAwake => Self::AddressAwake,
             StartRejectionV22::AddressEnded => return Err(EndedAddressOutcome),
             StartRejectionV22::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV22::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+            StartRejectionV22::LeaveOutRefused(refusal) => Self::LaunchPersistenceRefused,
             StartRejectionV22::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV22::ModelRefused(refusal) => Self::ModelRefused(refusal),
         })
@@ -3521,7 +3629,7 @@ enum StartRejectionV18 {
     AddressAwake,
     AddressEnded,
     ContextRefused(ContextRefusalV30),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    LeaveOutRefused(LeaveOutRefusalV37),
     HarnessSpawnRefused(signal_flow::HarnessSpawnRefusal),
 }
 
@@ -3557,7 +3665,7 @@ impl From<StartRejectionV18> for StartRejectionV22 {
             StartRejectionV18::AddressAwake => Self::AddressAwake,
             StartRejectionV18::AddressEnded => Self::AddressEnded,
             StartRejectionV18::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV18::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+            StartRejectionV18::LeaveOutRefused(refusal) => Self::LaunchPersistenceRefused,
             StartRejectionV18::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
         }
     }
@@ -3642,7 +3750,7 @@ enum StartRejectionV17 {
     AddressAwake,
     AddressEnded,
     ContextRefused(ContextRefusalV30),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
+    LeaveOutRefused(LeaveOutRefusalV37),
 }
 
 /// A replace rejection as signal-flow 17.0.0 archived it.
@@ -3675,7 +3783,7 @@ impl From<StartRejectionV17> for StartRejectionV18 {
             StartRejectionV17::AddressAwake => Self::AddressAwake,
             StartRejectionV17::AddressEnded => Self::AddressEnded,
             StartRejectionV17::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV17::LeaveOutRefused(refusal) => Self::LeaveOutRefused(refusal),
+            StartRejectionV17::LeaveOutRefused(refusal) => Self::LaunchPersistenceRefused,
         }
     }
 }
@@ -3914,8 +4022,10 @@ pub enum StoreError {
     NotConfigured,
     #[error("a Codex model names both the stable and the next endpoint")]
     ModelServedTwice(String),
-    #[error("a leave-out default names a leave-out of another harness than its own")]
-    LeaveOutNotForHarness,
+    #[error("no configured harness declares module {0}")]
+    UnknownHarnessModule(String),
+    #[error("configured harness module {0} has no removable text, tool or switch")]
+    IrremovableHarnessModule(String),
     #[error("the topic {0} is not an uncapitalized camelCase identifier")]
     TopicRefused(String),
     #[error("a configured native lifecycle timing is outside the supported duration range")]
@@ -4557,7 +4667,6 @@ pub(crate) struct MetaConfigurationTables {
     harnesses: TableReference<harness::StoredHarness>,
     models: TableReference<StoredMetaModelConfiguration>,
     thresholds: TableReference<StoredMetaThresholdConfiguration>,
-    leave_outs: TableReference<StoredMetaLeaveOutConfiguration>,
     pub(crate) send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
     pub(crate) metaflows: TableReference<metaflow_declaration::StoredMetaMetaflowConfiguration>,
     investigation: TableReference<StoredMetaInvestigationConfiguration>,
@@ -4579,8 +4688,6 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             harnesses: engine.register_table(harness::StoredHarness::descriptor())?,
             models: engine.upgraded_models(StoredMetaModelConfiguration::descriptor())?,
             thresholds,
-            leave_outs: engine
-                .upgraded_leave_out_defaults(StoredMetaLeaveOutConfiguration::descriptor())?,
             send_servers: engine.register_table(
                 <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor(),
             )?,
@@ -4720,12 +4827,12 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
         let meta_investigation_descriptor = StoredMetaInvestigationConfiguration::descriptor();
-        let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
         let timings_descriptor = timings_limits::timings_descriptor();
         let limits_descriptor = timings_limits::limits_descriptor();
         if recognized {
+            FlowStore::migrate_retired_leave_outs(path)?;
             FlowStore::drop_retired_tables(path)?;
         }
         // Family identities are part of the open request, so Engine validates
@@ -4741,7 +4848,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_harnesses_descriptor)
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
-                .with_family(&meta_leave_outs_descriptor)
                 .with_family(&meta_send_servers_descriptor)
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&meta_metaflows_descriptor)
@@ -4757,7 +4863,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             harnesses: engine.register_table(meta_harnesses_descriptor)?,
             models: engine.upgraded_models(meta_models_descriptor)?,
             thresholds: engine.upgraded_thresholds(meta_thresholds_descriptor)?,
-            leave_outs: engine.upgraded_leave_out_defaults(meta_leave_outs_descriptor)?,
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
             metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
@@ -5321,7 +5426,6 @@ impl OpensFlowStore for FlowStore {
             <compaction::Compaction as compaction::DescribesCompactionTable>::descriptor();
         let successor_intents_descriptor =
             <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor();
-        let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let timings_descriptor = timings_limits::timings_descriptor();
         let limits_descriptor = timings_limits::limits_descriptor();
         let events_descriptor = <events::FlowEvents as events::DescribesEventTable>::descriptor();
@@ -5362,7 +5466,6 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_nexus_descriptor)
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
-                .with_family(&meta_leave_outs_descriptor)
                 .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
                 .with_family(&meta_investigation_descriptor)
                 .with_family(&timings_descriptor)
@@ -5481,6 +5584,7 @@ impl OpensFlowStore for FlowStore {
 
     fn open_seeded(path: &Path, defaults: &DefaultConfiguration) -> Result<Self, StoreError> {
         if path.exists() {
+            FlowStore::migrate_retired_leave_outs(path)?;
             FlowStore::drop_retired_tables(path)?;
         }
         let mut engine = Engine::open(EngineOpen::new(path, SchemaVersion::new(1)))?;
@@ -5759,7 +5863,7 @@ pub(crate) trait ManagesMetaflowState: Sized {
     ) -> Result<Option<ConfigureThreshold>, StoreError>;
     /// The leave-outs a metaflow's Start on one harness takes when it names
     /// none; empty when none are configured for that harness.
-    fn default_leave_outs(
+    fn default_left_out(
         &self,
         address: &Address,
         harness_kind: &HarnessKind,
@@ -5811,20 +5915,22 @@ impl ManagesMetaflowState for FlowStore {
         }
     }
 
-    fn default_leave_outs(
+    fn default_left_out(
         &self,
         address: &Address,
         harness_kind: &HarnessKind,
     ) -> Result<Vec<LeaveOut>, StoreError> {
-        let rows = self.engine.match_records(QueryPlan::key(
-            self.meta_configuration_tables.leave_outs,
-            RecordKey::new(FlowStore::leave_out_record_key(address, harness_kind)),
-        ))?;
-        match rows.records() {
-            [] => Ok(Vec::new()),
-            [stored] => Ok(stored.leave_out.leave_outs.clone()),
-            _ => Err(StoreError::StateInvariant),
-        }
+        let _ = harness_kind;
+        Ok(self
+            .configuration_snapshot()?
+            .and_then(|snapshot| {
+                snapshot
+                    .metaflows
+                    .into_iter()
+                    .find(|row| &row.address == address)
+                    .map(|row| row.left_out)
+            })
+            .unwrap_or_default())
     }
 
     fn stored_metaflow(&self, address: &Address) -> Result<Option<StoredMetaflow>, StoreError> {
@@ -8759,7 +8865,7 @@ pub(crate) trait ReadsFlowMemory {
     /// Drops each retired table a store holds, its rows and its catalog
     /// registration, in one write before the engine opens the store.
     fn drop_retired_tables(path: &Path) -> Result<(), StoreError> {
-        use redb::ReadableTable as _;
+        use redb::{ReadableDatabase as _, ReadableTable as _};
         let failed = |error: String| StoreError::RetiredTableDrop(error);
         let database = redb::Database::open(path).map_err(|error| failed(error.to_string()))?;
         let write = database
@@ -8792,6 +8898,84 @@ pub(crate) trait ReadsFlowMemory {
             write.commit().map_err(|error| failed(error.to_string()))?;
         } else {
             write.abort().map_err(|error| failed(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Before the legacy leave-out family is retired, carry its behavior
+    /// names into the declaration of the same Address. This runs on the
+    /// staged store generation, so the merge and the later table retirement
+    /// become visible together only when the staged generation activates.
+    fn migrate_retired_leave_outs(path: &Path) -> Result<(), StoreError> {
+        use redb::{ReadableDatabase as _, ReadableTable as _};
+        let database = redb::Database::open(path)
+            .map_err(|error| StoreError::LeaveOutUpgradeFailed(error.to_string()))?;
+        let read = database
+            .begin_read()
+            .map_err(|error| StoreError::LeaveOutUpgradeFailed(error.to_string()))?;
+        let catalog = read
+            .open_table(SEMA_CATALOG_TABLE)
+            .map_err(|error| StoreError::LeaveOutUpgradeFailed(error.to_string()))?;
+        let present = catalog
+            .get(META_LEAVE_OUT_CONFIGURATION_TABLE_NAME.as_str())
+            .map_err(|error| StoreError::LeaveOutUpgradeFailed(error.to_string()))?
+            .is_some();
+        drop(catalog);
+        drop(read);
+        drop(database);
+        if !present {
+            return Ok(());
+        }
+
+        let leave_out_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
+        let metaflow_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
+        let mut engine = Engine::open(
+            EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
+                .with_family(&leave_out_descriptor)
+                .with_family(&metaflow_descriptor),
+        )?;
+        let leave_outs = engine.upgraded_leave_out_defaults(leave_out_descriptor)?;
+        let metaflows = engine.upgraded_metaflow_declarations(metaflow_descriptor)?;
+        let defaults = engine
+            .match_records(QueryPlan::all(leave_outs))?
+            .records()
+            .to_vec();
+        let declarations = engine
+            .match_records(QueryPlan::all(metaflows))?
+            .records()
+            .to_vec();
+        let mut commit = engine.begin_atomic_commit();
+        let mut changed = false;
+        for mut declaration in declarations {
+            let mut declaration_changed = false;
+            for default in defaults
+                .iter()
+                .filter(|default| default.leave_out.address == declaration.metaflow.address)
+            {
+                for name in default
+                    .leave_out
+                    .left_out
+                    .iter()
+                    .flat_map(LeaveOutV37::module_names)
+                {
+                    if !declaration
+                        .metaflow
+                        .left_out
+                        .iter()
+                        .any(|known| known == name)
+                    {
+                        declaration.metaflow.left_out.push((*name).to_owned());
+                        changed = true;
+                        declaration_changed = true;
+                    }
+                }
+            }
+            if declaration_changed {
+                commit = commit.mutate(metaflows, declaration);
+            }
+        }
+        if changed {
+            engine.commit_atomic(commit)?;
         }
         Ok(())
     }
@@ -8994,7 +9178,6 @@ pub(crate) trait ReadsFlowMemory {
         let models_rows = engine.match_records(QueryPlan::all(tables.models))?;
         let harness_rows = engine.match_records(QueryPlan::all(tables.harnesses))?;
         let thresholds_rows = engine.match_records(QueryPlan::all(tables.thresholds))?;
-        let leave_out_rows = engine.match_records(QueryPlan::all(tables.leave_outs))?;
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
@@ -9004,7 +9187,6 @@ pub(crate) trait ReadsFlowMemory {
             || harness_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
-            || leave_out_rows.database_marker() != marker
             || send_server_rows.database_marker() != marker
             || investigation_rows.database_marker() != marker
             || timings_rows.database_marker() != marker
@@ -9047,14 +9229,6 @@ pub(crate) trait ReadsFlowMemory {
             [stored] => Some(stored.investigation.clone()),
             _ => return Err(StoreError::StateInvariant),
         };
-        let mut default_leave_outs = leave_out_rows
-            .records()
-            .iter()
-            .map(|stored| stored.leave_out.clone())
-            .collect::<Vec<_>>();
-        default_leave_outs.sort_by_key(|leave_out| {
-            FlowStore::leave_out_record_key(&leave_out.address, &leave_out.harness_kind)
-        });
         let mut send_servers = send_server_rows
             .records()
             .iter()
@@ -9075,7 +9249,6 @@ pub(crate) trait ReadsFlowMemory {
             harnesses,
             models,
             thresholds,
-            default_leave_outs,
             send_servers,
             investigation,
             metaflows,
@@ -9165,9 +9338,6 @@ pub(crate) trait ReadsFlowMemory {
         // Every Address a declaration names has a camelCase topic, checked
         // before anything is written.
         let addresses: Vec<&Address> = match &change {
-            ConfigurationChange::LeaveOuts(entries) => {
-                entries.iter().map(|entry| &entry.address).collect()
-            }
             ConfigurationChange::Metaflows(entries) => {
                 entries.iter().map(|entry| &entry.address).collect()
             }
@@ -9221,37 +9391,49 @@ pub(crate) trait ReadsFlowMemory {
                     .map(|threshold| StoredMetaThresholdConfiguration { threshold })
                     .collect(),
             ),
-            ConfigurationChange::LeaveOuts(leave_outs) => {
-                use crate::lean::BelongsToHarness;
-                if leave_outs.iter().any(|entry| {
-                    entry
-                        .leave_outs
+            ConfigurationChange::Metaflows(metaflows) => {
+                let configured = engine
+                    .match_records(QueryPlan::all(tables.harnesses))?
+                    .records()
+                    .iter()
+                    .map(|stored| stored.harness.clone())
+                    .collect::<Vec<_>>();
+                for name in metaflows
+                    .iter()
+                    .flat_map(|metaflow| metaflow.left_out.iter())
+                {
+                    let modules = configured
                         .iter()
-                        .any(|leave_out| leave_out.harness() != entry.harness_kind)
-                }) {
-                    return Err(StoreError::LeaveOutNotForHarness);
+                        .flat_map(|harness| harness.modules.iter())
+                        .filter(|module| &module.harness_module_name == name)
+                        .collect::<Vec<_>>();
+                    if modules.is_empty() {
+                        return Err(StoreError::UnknownHarnessModule(name.clone()));
+                    }
+                    if modules.iter().all(|module| {
+                        matches!(
+                            module.module_text,
+                            meta_signal_flow::ModuleText::Retained(_)
+                                | meta_signal_flow::ModuleText::Absent
+                        ) && module.tools.is_empty()
+                            && module.switches.is_empty()
+                    }) {
+                        return Err(StoreError::IrremovableHarnessModule(name.clone()));
+                    }
                 }
                 FlowStore::replace_configuration_family(
                     engine,
-                    tables.leave_outs,
-                    leave_outs
+                    tables.metaflows,
+                    metaflows
                         .into_iter()
-                        .map(|leave_out| StoredMetaLeaveOutConfiguration { leave_out })
+                        .map(
+                            |metaflow| metaflow_declaration::StoredMetaMetaflowConfiguration {
+                                metaflow,
+                            },
+                        )
                         .collect(),
                 )
             }
-            ConfigurationChange::Metaflows(metaflows) => FlowStore::replace_configuration_family(
-                engine,
-                tables.metaflows,
-                metaflows
-                    .into_iter()
-                    .map(
-                        |metaflow| metaflow_declaration::StoredMetaMetaflowConfiguration {
-                            metaflow,
-                        },
-                    )
-                    .collect(),
-            ),
             ConfigurationChange::SendServers(send_servers) => {
                 FlowStore::replace_configuration_family(
                     engine,
@@ -9316,10 +9498,71 @@ impl ReadsFlowMemory for FlowStore {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
+    use super::{LeaveOutV37, ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
     use crate::store::queue_delivery::AccountsQueueDelivery;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
+
+    fn production_leave_out_defaults() -> Vec<(signal_flow::Address, Vec<LeaveOutV37>)> {
+        use signal_flow::{Address, Aspect, Layer};
+        let claude = vec![
+            LeaveOutV37::ClaudeAiConnectors,
+            LeaveOutV37::ExplorePlanAgents,
+            LeaveOutV37::WorkflowTool,
+            LeaveOutV37::SkillTool,
+            LeaveOutV37::BundledSkills,
+            LeaveOutV37::ScheduleWakeupTool,
+            LeaveOutV37::ReportFindingsTool,
+            LeaveOutV37::ListAgentsTool,
+            LeaveOutV37::CronTools,
+            LeaveOutV37::DeferredTools,
+            LeaveOutV37::ClaudeMd,
+            LeaveOutV37::GitInstructions,
+        ];
+        let codex = vec![
+            LeaveOutV37::CodexAgentsMd,
+            LeaveOutV37::CodexSkillListing,
+            LeaveOutV37::CodexCollaborationMode,
+            LeaveOutV37::CodexEnvironmentContext,
+            LeaveOutV37::CodexPermissions,
+            LeaveOutV37::CodexDeveloperInstructions,
+        ];
+        [
+            (Aspect::Field, "illustrator", Layer::Tertiary, &claude),
+            (Aspect::Field, "core", Layer::Primary, &codex),
+            (Aspect::Field, "publisher", Layer::Quaternary, &claude),
+            (Aspect::Mind, "prototyping", Layer::Primary, &codex),
+            (Aspect::Mind, "prototyping", Layer::Secondary, &codex),
+            (Aspect::Mind, "core", Layer::Primary, &codex),
+            (Aspect::Mind, "core", Layer::Secondary, &codex),
+            (Aspect::Psyche, "communication", Layer::Primary, &claude),
+            (Aspect::Psyche, "communication", Layer::Secondary, &claude),
+            (Aspect::Psyche, "core", Layer::Primary, &claude),
+            (Aspect::Psyche, "core", Layer::Secondary, &claude),
+            (Aspect::Psyche, "core", Layer::Tertiary, &claude),
+            (Aspect::Psyche, "flow", Layer::Primary, &claude),
+            (Aspect::Psyche, "flow", Layer::Secondary, &claude),
+            (Aspect::Psyche, "ethos", Layer::Primary, &claude),
+            (Aspect::Psyche, "ethos", Layer::Secondary, &claude),
+            (Aspect::Psyche, "nexus", Layer::Secondary, &claude),
+            (Aspect::Psyche, "spirit", Layer::Primary, &claude),
+            (Aspect::Psyche, "spirit", Layer::Secondary, &claude),
+            (Aspect::Psyche, "chronos", Layer::Primary, &claude),
+            (Aspect::Psyche, "chronos", Layer::Secondary, &claude),
+        ]
+        .into_iter()
+        .map(|(aspect, topic, layer, values)| {
+            (
+                Address {
+                    aspect,
+                    topic: topic.into(),
+                    layer,
+                },
+                values.clone(),
+            )
+        })
+        .collect()
+    }
 
     #[test]
     fn immediately_previous_catalog_upgrades_and_reopens_with_records() {
@@ -10155,10 +10398,7 @@ mod tests {
         /// Replaces the store's leave-out family with its v1 shape, holding
         /// each default given under its Address alone, as 0.35.0 to 0.35.11
         /// kept it.
-        fn seed_v1_leave_outs(
-            &self,
-            defaults: &[(signal_flow::Address, Vec<signal_flow::LeaveOut>)],
-        ) {
+        fn seed_v1_left_out(&self, defaults: &[(signal_flow::Address, Vec<LeaveOutV37>)]) {
             let database = redb::Database::open(self.path()).expect("store opens directly");
             let write = database.begin_write().expect("catalog transaction starts");
             {
@@ -10186,14 +10426,14 @@ mod tests {
                     SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
                 ))
                 .expect("v1 leave-out family registers");
-            for (address, leave_outs) in defaults {
+            for (address, left_out) in defaults {
                 engine
                     .assert(Assertion::new(
                         table,
                         super::StoredMetaLeaveOutConfigurationV1 {
                             leave_out: super::LeaveOutDefaultBeforeHarness {
                                 address: address.clone(),
-                                leave_outs: leave_outs.clone(),
+                                left_out: left_out.clone(),
                             },
                         },
                     ))
@@ -10317,7 +10557,7 @@ mod tests {
                 flow_id_option: None,
                 remembering: signal_flow::Remembering::Predecessors(0),
                 herdr_session_name: "fixture-session".into(),
-                leave_outs_option: None,
+                left_out_option: None,
                 instruction_prompt: "fixture instruction".into(),
                 tool_set: signal_flow::ToolSet::Default,
             }
@@ -10343,7 +10583,7 @@ mod tests {
                     launch_request_id: launch_request_id.into(),
                     prompt_sha256: prompt_sha256.into(),
                 },
-                leave_outs: Vec::new(),
+                left_out: Vec::new(),
             }
         }
 
@@ -10494,7 +10734,7 @@ mod tests {
             ],
             parts_submitted: 1,
             stops_reported: 0,
-            leave_outs: Vec::new(),
+            left_out: Vec::new(),
             herdr_pane_binding: pane,
             native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
                 native_session_id: "different-session".into(),
@@ -10681,7 +10921,7 @@ mod tests {
             prompt_sha256_vector: vec!["a".repeat(64), "b".repeat(64)],
             parts_submitted: 1,
             stops_reported: 2,
-            leave_outs: Vec::new(),
+            left_out: Vec::new(),
             herdr_pane_binding: pane,
             native_transcript_boundary: NativeTranscriptBoundary::Absent(NativeTranscriptAbsence {
                 native_session_id: "parts-session".into(),
@@ -11134,7 +11374,14 @@ mod tests {
         {
             let mut engine = Engine::open(EngineOpen::new(&path, SchemaVersion::new(2)))
                 .expect("store opens under the engine");
-            for (table, family, schema) in super::RETIRED_TABLES {
+            for (table, family, schema) in
+                super::RETIRED_TABLES
+                    .iter()
+                    .copied()
+                    .filter(|(table, _, _)| {
+                        *table != super::META_LEAVE_OUT_CONFIGURATION_TABLE_NAME.as_str()
+                    })
+            {
                 let retired = engine
                     .register_table(TableDescriptor::<RetiredRow>::new(
                         TableName::new(table),
@@ -11172,26 +11419,38 @@ mod tests {
             (registered, stored)
         };
         let (registered, stored) = tables();
-        for (table, _, _) in super::RETIRED_TABLES {
+        for (table, _, _) in super::RETIRED_TABLES
+            .iter()
+            .copied()
+            .filter(|(table, _, _)| {
+                *table != super::META_LEAVE_OUT_CONFIGURATION_TABLE_NAME.as_str()
+            })
+        {
             assert!(
-                registered.iter().any(|name| name == *table),
+                registered.iter().any(|name| name.as_str() == table),
                 "{table} seeded"
             );
             assert!(
-                stored.iter().any(|name| name == *table),
+                stored.iter().any(|name| name.as_str() == table),
                 "{table} rows seeded"
             );
         }
 
         drop(FlowStore::open_configured(&path).expect("the older store opens"));
         let (registered, stored) = tables();
-        for (table, _, _) in super::RETIRED_TABLES {
+        for (table, _, _) in super::RETIRED_TABLES
+            .iter()
+            .copied()
+            .filter(|(table, _, _)| {
+                *table != super::META_LEAVE_OUT_CONFIGURATION_TABLE_NAME.as_str()
+            })
+        {
             assert!(
-                !registered.iter().any(|name| name == *table),
+                !registered.iter().any(|name| name.as_str() == table),
                 "{table} unregistered"
             );
             assert!(
-                !stored.iter().any(|name| name == *table),
+                !stored.iter().any(|name| name.as_str() == table),
                 "{table} rows dropped"
             );
         }
@@ -11988,14 +12247,6 @@ mod tests {
                         .len(),
                 ),
                 read(
-                    "flow_nexus_meta_leave_out_configuration",
-                    engine
-                        .match_records(QueryPlan::all(meta.leave_outs))
-                        .expect("meta leave-out configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
                     "flow_nexus_flow_events",
                     engine
                         .match_records(QueryPlan::all(self.event_tables.events))
@@ -12206,7 +12457,7 @@ mod tests {
             prompt_sha256_vector: vec!["ab".repeat(32)],
             parts_submitted: 1,
             stops_reported: 0,
-            leave_outs: Vec::new(),
+            left_out: Vec::new(),
             herdr_pane_binding: pane.clone(),
             native_transcript_boundary: signal_flow::NativeTranscriptBoundary::Absent(
                 signal_flow::NativeTranscriptAbsence {
@@ -12233,7 +12484,7 @@ mod tests {
                 flow_id_option: Some("predecessor-34".into()),
                 remembering: signal_flow::Remembering::Custom(vec!["e51411".into()]),
                 herdr_session_name: "messaging-build".into(),
-                leave_outs_option: Some(Vec::new()),
+                left_out_option: Some(Vec::new()),
                 tool_set: signal_flow::ToolSet::Default,
                 instruction_prompt: "0.34 instruction".into(),
             },
@@ -13511,126 +13762,6 @@ mod tests {
     /// open as the current outcomes, and the store then keeps a refused
     /// harness start with its cause and its opened thread.
     #[test]
-    fn v3_launch_outcomes_upgrade_to_the_refused_spawn_shape() {
-        let fixture = StoreFixture::new();
-        let started = LaunchedRecord {
-            flow_id: "started-flow".into(),
-            session_id: "started-session".into(),
-            origin: Origin::Unbound,
-        };
-        let rows = [
-            StoredLaunchOutcomeV3 {
-                launch_request_id: "v3-started".into(),
-                launch_outcome: LaunchOutcomeV3::Started(started.clone()),
-            },
-            StoredLaunchOutcomeV3 {
-                launch_request_id: "v3-leave-out".into(),
-                launch_outcome: LaunchOutcomeV3::StartRejected(StartRejectionV17::LeaveOutRefused(
-                    signal_flow::LeaveOutRefusal::NotForHarness(
-                        signal_flow::LeaveOut::CodexPermissions,
-                    ),
-                )),
-            },
-            StoredLaunchOutcomeV3 {
-                launch_request_id: "v3-native".into(),
-                launch_outcome: LaunchOutcomeV3::StartRejected(
-                    StartRejectionV17::NativeLaunchRefused,
-                ),
-            },
-            StoredLaunchOutcomeV3 {
-                launch_request_id: "v3-replace".into(),
-                launch_outcome: LaunchOutcomeV3::ReplaceRejected(
-                    ReplaceRejectionV17::LaunchRefused(StartRejectionV17::ContextRefused(
-                        ContextRefusalV30::SystemTooLarge,
-                    )),
-                ),
-            },
-        ];
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("outcome store opens");
-            let outcomes = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_launch_outcomes"),
-                    FamilyName::new("flow-nexus-launch-outcome"),
-                    SchemaHash::for_label("flow-nexus-launch-outcome-v3"),
-                ))
-                .expect("v3 outcome family registers");
-            for row in rows {
-                engine
-                    .assert(Assertion::new(outcomes, row))
-                    .expect("v3 outcome persists");
-            }
-        }
-        let expected = [
-            ("v3-started", LaunchOutcome::Started(started)),
-            (
-                "v3-leave-out",
-                LaunchOutcome::StartRejected(StartRejection::LeaveOutRefused(
-                    signal_flow::LeaveOutRefusal::NotForHarness(
-                        signal_flow::LeaveOut::CodexPermissions,
-                    ),
-                )),
-            ),
-            (
-                "v3-native",
-                LaunchOutcome::StartRejected(StartRejection::NativeLaunchRefused(
-                    signal_flow::NativeLaunchRefusal {
-                        native_launch_stage: signal_flow::NativeLaunchStage::Unclassified,
-                        native_launch_failure: signal_flow::NativeLaunchFailure::Unclassified,
-                    },
-                )),
-            ),
-            (
-                "v3-replace",
-                LaunchOutcome::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::ContextRefused(signal_flow::ContextRefusal::SystemTooLarge),
-                )),
-            ),
-        ];
-        let store = fixture.store();
-        for (request, outcome) in &expected {
-            assert_eq!(
-                store
-                    .launch_outcome(request)
-                    .expect("upgraded outcome reads"),
-                Some(outcome.clone()),
-                "the v3 outcome for {request} survives the family upgrade"
-            );
-        }
-        let refused = LaunchOutcome::StartRejected(StartRejection::HarnessSpawnRefused(
-            signal_flow::HarnessSpawnRefusal {
-                spawn_refusal_cause: signal_flow::SpawnRefusalCause::Herdr(
-                    signal_flow::HerdrRefusal {
-                        herdr_error_code_option: Some("invalid_agent_argument".into()),
-                        herdr_error_message:
-                            "agent arguments cannot be encoded safely for the target shell".into(),
-                    },
-                ),
-                opened_thread_option: Some(signal_flow::OpenedThread {
-                    native_session_id: "01a14773-f58c-7ca1-978b-1ac675d19399".into(),
-                    first_turn: signal_flow::FirstTurn::Answered,
-                    thread_archive: signal_flow::ThreadArchive::Archived,
-                }),
-            },
-        ));
-        store
-            .record_launch_outcome("v4-refused", refused.clone())
-            .expect("a refused spawn outcome persists");
-        drop(store);
-        let reopened = fixture.store();
-        for (request, outcome) in expected.iter().chain([("v4-refused", refused)].iter()) {
-            assert_eq!(
-                reopened
-                    .launch_outcome(request)
-                    .expect("outcome reads after reopening"),
-                Some(outcome.clone()),
-                "the outcome for {request} reads unchanged after reopening"
-            );
-        }
-    }
-
-    #[test]
     fn v2_launch_outcomes_upgrade_to_their_derived_origin() {
         let fixture = StoreFixture::new();
         let clue = OriginClueBeforeOrigin {
@@ -14011,262 +14142,6 @@ mod tests {
     /// The leave-out defaults the production store held at 0.35.11, each
     /// under its Address alone: every Claude metaflow's twelve, every Codex
     /// metaflow's six.
-    fn production_leave_out_defaults() -> Vec<(signal_flow::Address, Vec<signal_flow::LeaveOut>)> {
-        use signal_flow::{Address, Layer, LeaveOut};
-        let claude = vec![
-            LeaveOut::ClaudeAiConnectors,
-            LeaveOut::ExplorePlanAgents,
-            LeaveOut::WorkflowTool,
-            LeaveOut::SkillTool,
-            LeaveOut::BundledSkills,
-            LeaveOut::ScheduleWakeupTool,
-            LeaveOut::ReportFindingsTool,
-            LeaveOut::ListAgentsTool,
-            LeaveOut::CronTools,
-            LeaveOut::DeferredTools,
-            LeaveOut::ClaudeMd,
-            LeaveOut::GitInstructions,
-        ];
-        let codex = vec![
-            LeaveOut::CodexAgentsMd,
-            LeaveOut::CodexSkillListing,
-            LeaveOut::CodexCollaborationMode,
-            LeaveOut::CodexEnvironmentContext,
-            LeaveOut::CodexPermissions,
-            LeaveOut::CodexDeveloperInstructions,
-        ];
-        [
-            (Aspect::Field, "illustrator", Layer::Tertiary, &claude),
-            (Aspect::Field, "core", Layer::Primary, &codex),
-            (Aspect::Field, "publisher", Layer::Quaternary, &claude),
-            (Aspect::Mind, "prototyping", Layer::Primary, &codex),
-            (Aspect::Mind, "prototyping", Layer::Secondary, &codex),
-            (Aspect::Mind, "core", Layer::Primary, &codex),
-            (Aspect::Mind, "core", Layer::Secondary, &codex),
-            (Aspect::Psyche, "communication", Layer::Primary, &claude),
-            (Aspect::Psyche, "communication", Layer::Secondary, &claude),
-            (Aspect::Psyche, "core", Layer::Primary, &claude),
-            (Aspect::Psyche, "core", Layer::Secondary, &claude),
-            (Aspect::Psyche, "core", Layer::Tertiary, &claude),
-            (Aspect::Psyche, "flow", Layer::Primary, &claude),
-            (Aspect::Psyche, "flow", Layer::Secondary, &claude),
-            (Aspect::Psyche, "ethos", Layer::Primary, &claude),
-            (Aspect::Psyche, "ethos", Layer::Secondary, &claude),
-            (Aspect::Psyche, "nexus", Layer::Secondary, &claude),
-            (Aspect::Psyche, "spirit", Layer::Primary, &claude),
-            (Aspect::Psyche, "spirit", Layer::Secondary, &claude),
-            (Aspect::Psyche, "chronos", Layer::Primary, &claude),
-            (Aspect::Psyche, "chronos", Layer::Secondary, &claude),
-        ]
-        .into_iter()
-        .map(|(aspect, topic, layer, leave_outs)| {
-            (
-                Address {
-                    aspect,
-                    topic: topic.into(),
-                    layer,
-                },
-                leave_outs.clone(),
-            )
-        })
-        .collect()
-    }
-
-    /// A store before 0.35.19 keeps each metaflow's default leave-outs under
-    /// its Address alone. Opening carries every one of them whole under the
-    /// harness its leave-outs belong to, keyed by its Address and that
-    /// harness; the other harness of that Address has none, and a second
-    /// open changes nothing.
-    #[test]
-    fn production_leave_out_defaults_upgrade_each_under_its_harness() {
-        use super::ManagesMetaflowState;
-        use crate::lean::BelongsToHarness;
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        let defaults = production_leave_out_defaults();
-        fixture.seed_v1_leave_outs(&defaults);
-        let expected = defaults
-            .iter()
-            .map(
-                |(address, leave_outs)| meta_signal_flow::ConfigureLeaveOut {
-                    address: address.clone(),
-                    harness_kind: leave_outs[0].harness(),
-                    leave_outs: leave_outs.clone(),
-                },
-            )
-            .collect::<Vec<_>>();
-        assert_eq!(
-            expected
-                .iter()
-                .filter(|entry| entry.harness_kind == HarnessKind::Codex)
-                .count(),
-            5
-        );
-        for reopening in 0..2 {
-            let store = fixture.configured_store();
-            let snapshot = store
-                .configuration_snapshot()
-                .expect("snapshot reads")
-                .expect("store configured");
-            assert_eq!(snapshot.default_leave_outs.len(), defaults.len());
-            for entry in &expected {
-                assert!(
-                    snapshot.default_leave_outs.contains(entry),
-                    "{entry:?} is carried (open {reopening})"
-                );
-                assert_eq!(
-                    store
-                        .default_leave_outs(&entry.address, &entry.harness_kind)
-                        .expect("default reads"),
-                    entry.leave_outs
-                );
-                let other = match entry.harness_kind {
-                    HarnessKind::Claude => HarnessKind::Codex,
-                    HarnessKind::Codex => HarnessKind::Claude,
-                };
-                assert!(
-                    store
-                        .default_leave_outs(&entry.address, &other)
-                        .expect("default reads")
-                        .is_empty()
-                );
-            }
-        }
-        // The configuration-only open reads the same family.
-        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
-        let mut carried = configuration
-            .configuration_snapshot()
-            .expect("snapshot reads")
-            .expect("store configured")
-            .default_leave_outs;
-        let mut expected = expected;
-        let order = |entry: &meta_signal_flow::ConfigureLeaveOut| {
-            format!("{:?}", (&entry.address, &entry.harness_kind))
-        };
-        carried.sort_by_key(order);
-        expected.sort_by_key(order);
-        assert_eq!(carried, expected);
-    }
-
-    /// The configuration-only open, which the deployment runs before the
-    /// Nexus, carries a v1 family the same way.
-    #[test]
-    fn the_configuration_only_open_upgrades_v1_leave_out_defaults() {
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        let defaults = production_leave_out_defaults();
-        fixture.seed_v1_leave_outs(&defaults);
-        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
-        let carried = configuration
-            .configuration_snapshot()
-            .expect("snapshot reads")
-            .expect("store configured")
-            .default_leave_outs;
-        assert_eq!(carried.len(), defaults.len());
-        for (address, leave_outs) in &defaults {
-            assert!(
-                carried
-                    .iter()
-                    .any(|entry| entry.address == *address && entry.leave_outs == *leave_outs)
-            );
-        }
-        drop(configuration);
-        use super::ManagesMetaflowState;
-        let store = fixture.configured_store();
-        let (address, leave_outs) = &defaults[1];
-        assert_eq!(
-            store
-                .default_leave_outs(address, &HarnessKind::Codex)
-                .expect("default reads"),
-            *leave_outs
-        );
-    }
-
-    /// A 0.35.11 store whose v1 default has leave-outs of both harnesses,
-    /// or none, has no one harness to carry it under: each open refuses,
-    /// naming that entry, and the store stays the 0.35.11 store it was, byte
-    /// for byte — the models upgraded before the leave-outs are not kept
-    /// either.
-    #[test]
-    fn a_v1_leave_out_default_mixing_harnesses_refuses_the_upgrade_by_its_entry() {
-        use signal_flow::{Address, Layer, LeaveOut};
-        for (leave_outs, reason) in [
-            (
-                vec![LeaveOut::ClaudeMd, LeaveOut::CodexAgentsMd],
-                super::LeaveOutUpgradeRefusal::MixedHarnesses,
-            ),
-            (Vec::new(), super::LeaveOutUpgradeRefusal::NoHarness),
-        ] {
-            let fixture = StoreFixture::new();
-            fixture.configured();
-            drop(fixture.configured_store());
-            let mixed = Address {
-                aspect: Aspect::Psyche,
-                topic: "flow".into(),
-                layer: Layer::Secondary,
-            };
-            let mut defaults = production_leave_out_defaults();
-            defaults.retain(|(address, _)| *address != mixed);
-            defaults.push((mixed.clone(), leave_outs));
-            fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &production_models());
-            fixture.seed_v1_leave_outs(&defaults);
-            fixture.seed_v1_events(&[("a1a1a1", Vec::new())]);
-            fixture.as_0_35_11();
-            let bytes = std::fs::read(fixture.path()).expect("0.35.11 store reads");
-            let rows = fixture.path().rows_by_table();
-            let refusal = |error: super::StoreError| match error {
-                super::StoreError::LeaveOutUpgrade { entry, reason } => (entry, reason),
-                other => panic!("not a leave-out refusal: {other}"),
-            };
-            let expected = (FlowStore::address_record_key(&mixed), reason);
-            for configuration_only in [false, true] {
-                let refused = if configuration_only {
-                    ConfigurationOnlyStore::open(&fixture.path()).map(drop)
-                } else {
-                    FlowStore::open_configured(&fixture.path()).map(drop)
-                };
-                match refused {
-                    Ok(()) => {
-                        panic!("the open must refuse (configuration only: {configuration_only})")
-                    }
-                    Err(error) => assert_eq!(refusal(error), expected),
-                }
-                assert!(
-                    std::fs::read(fixture.path()).expect("store reads") == bytes,
-                    "the store is the 0.35.11 store it was (configuration only: {configuration_only})"
-                );
-                assert_eq!(fixture.path().rows_by_table(), rows);
-                assert_eq!(fixture.staged_copies(), Vec::<String>::new());
-            }
-            // Nothing was carried: the v1 rows still read as v1.
-            let mut engine = Engine::open(EngineOpen::new(
-                fixture.path(),
-                SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
-            ))
-            .expect("store still opens as before");
-            let table = engine
-                .register_table(
-                    TableDescriptor::<super::StoredMetaLeaveOutConfigurationV1>::new(
-                        TableName::new("flow_nexus_meta_leave_out_configuration"),
-                        FamilyName::new("flow-nexus-meta-leave-out-configuration"),
-                        SchemaHash::for_label("flow-nexus-meta-leave-out-configuration-v1"),
-                    ),
-                )
-                .expect("v1 family stands");
-            assert_eq!(
-                engine
-                    .match_records(QueryPlan::all(table))
-                    .expect("v1 rows read")
-                    .records()
-                    .len(),
-                defaults.len()
-            );
-        }
-    }
-
-    /// A crash between two family upgrades of one open leaves the store
-    /// the 0.35.11 store it was; the next open upgrades it whole and clears
-    /// the copy the crash left.
     #[test]
     fn a_crash_between_family_upgrades_leaves_the_0_35_11_store() {
         use super::staged_upgrade::{InterruptsStagedUpgrade, StagedUpgrade, StagesUpgrade};
@@ -14276,7 +14151,7 @@ mod tests {
         drop(fixture.configured_store());
         let models = production_models();
         fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &models);
-        fixture.seed_v1_leave_outs(&production_leave_out_defaults());
+        fixture.seed_v1_left_out(&production_leave_out_defaults());
         fixture.seed_v1_events(&[("a1a1a1", Vec::new())]);
         fixture.as_0_35_11();
         let bytes = std::fs::read(fixture.path()).expect("0.35.11 store reads");
@@ -14313,6 +14188,197 @@ mod tests {
         );
         drop(store);
         assert_eq!(fixture.staged_copies(), Vec::<String>::new());
+    }
+
+    /// The retired LeaveOut row and the declaration are one logical change:
+    /// its mapped module names join the declaration on the staged copy, the
+    /// old table disappears at activation, and reopening repeats nothing.
+    #[test]
+    fn retired_leave_outs_become_declaration_modules_once() {
+        use super::metaflow_declaration::{
+            DescribesMetaflowDeclarationTable, UpgradesMetaflowDeclarations,
+        };
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        let address = signal_flow::Address {
+            aspect: Aspect::Psyche,
+            topic: "flow".into(),
+            layer: Layer::Secondary,
+        };
+        {
+            let descriptor = <super::metaflow_declaration::StoredMetaMetaflowConfiguration as DescribesMetaflowDeclarationTable>::descriptor();
+            let mut engine = Engine::open(
+                EngineOpen::new(
+                    fixture.path(),
+                    SchemaVersion::new(super::FLOW_SCHEMA_VERSION),
+                )
+                .with_family(&descriptor),
+            )
+            .expect("current declaration store opens");
+            let table = engine
+                .upgraded_metaflow_declarations(descriptor)
+                .expect("declaration family is current");
+            engine
+                .assert(Assertion::new(
+                    table,
+                    super::metaflow_declaration::StoredMetaMetaflowConfiguration {
+                        metaflow: meta_signal_flow::ConfigureMetaflow {
+                            address: address.clone(),
+                            system_modules: vec!["spirit-core".into()],
+                            user_modules: vec![],
+                            tool_set: signal_flow::ToolSet::Default,
+                            continuity: meta_signal_flow::Continuity::OnDemand,
+                            purpose: String::new(),
+                            records: vec![],
+                            left_out: vec!["AlreadyNamed".into()],
+                            requires: vec![],
+                        },
+                    },
+                ))
+                .expect("current declaration persists");
+        }
+        fixture.seed_v1_left_out(&[(
+            address.clone(),
+            vec![LeaveOutV37::FileTools, LeaveOutV37::SkillTool],
+        )]);
+
+        let read = || {
+            let store = fixture.configured_store();
+            let snapshot = store
+                .configuration_snapshot()
+                .expect("snapshot reads")
+                .expect("configuration exists");
+            let row = snapshot
+                .metaflows
+                .into_iter()
+                .find(|row| row.address == address)
+                .expect("declaration remains");
+            drop(store);
+            row.left_out
+        };
+        assert_eq!(
+            read(),
+            vec![
+                "AlreadyNamed",
+                "Read",
+                "Edit",
+                "Write",
+                "Skill",
+                "SlashCommands"
+            ]
+        );
+        assert_eq!(
+            read(),
+            vec![
+                "AlreadyNamed",
+                "Read",
+                "Edit",
+                "Write",
+                "Skill",
+                "SlashCommands"
+            ],
+            "reopening is idempotent"
+        );
+        use redb::{ReadableDatabase as _, TableHandle as _};
+        let database = redb::ReadOnlyDatabase::open(fixture.path()).expect("store reads");
+        assert!(
+            database
+                .begin_read()
+                .expect("read starts")
+                .list_tables()
+                .expect("tables list")
+                .all(
+                    |table| table.name() != super::META_LEAVE_OUT_CONFIGURATION_TABLE_NAME.as_str()
+                ),
+            "the retired LeaveOut table is gone"
+        );
+    }
+
+    /// A declaration may omit only behavior that a configured harness
+    /// actually exposes and that Flow can remove by text, tool, or switch.
+    #[test]
+    fn metaflow_left_out_names_are_known_and_removable() {
+        let fixture = StoreFixture::new();
+        fixture.configured();
+        let config = ConfigurationOnlyStore::open(&fixture.path()).expect("configuration opens");
+        let module =
+            |name: &str, text: meta_signal_flow::ModuleText| meta_signal_flow::HarnessModule {
+                harness_module_name: name.into(),
+                module_text: text,
+                tools: vec![],
+                switches: vec![],
+            };
+        config
+            .configure_change(meta_signal_flow::ConfigurationChange::Harnesses(vec![
+                meta_signal_flow::Harness {
+                    harness_name: "claude".into(),
+                    harness_kind: HarnessKind::Claude,
+                    harness_version: "fixture".into(),
+                    executable: "/fixture/claude".into(),
+                    home: "/fixture/home".into(),
+                    control_socket_path_option: None,
+                    served_models: vec![],
+                    modules: vec![
+                        module(
+                            "Injected",
+                            meta_signal_flow::ModuleText::Injected("text".into()),
+                        ),
+                        module(
+                            "Fixed",
+                            meta_signal_flow::ModuleText::Retained("text".into()),
+                        ),
+                    ],
+                    left_out: vec![],
+                    arguments: vec![],
+                    settings: vec![],
+                    parameters: vec![],
+                    unset: vec![],
+                    pane_profile: meta_signal_flow::PaneProfile {
+                        command_sigil_vector: vec![],
+                        interrupt_keys: vec![],
+                        submit_keys: vec![],
+                        compact_line: "/compact".into(),
+                        composer: meta_signal_flow::Composer {
+                            glyph: "❯".into(),
+                            retraction: meta_signal_flow::Retraction::Keys(vec![]),
+                            composer_lines: 1,
+                            retracted_lines: 1,
+                        },
+                    },
+                },
+            ]))
+            .expect("harness commits");
+        let declaration = |name: &str| meta_signal_flow::ConfigureMetaflow {
+            address: Address {
+                aspect: Aspect::Psyche,
+                topic: "flow".into(),
+                layer: Layer::Secondary,
+            },
+            system_modules: vec![],
+            user_modules: vec![],
+            tool_set: signal_flow::ToolSet::Default,
+            continuity: meta_signal_flow::Continuity::OnDemand,
+            purpose: String::new(),
+            records: vec![],
+            left_out: vec![name.into()],
+            requires: vec![],
+        };
+        assert!(matches!(
+            config.configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![declaration("Unknown")])),
+            Err(super::StoreError::UnknownHarnessModule(name)) if name == "Unknown"
+        ));
+        assert!(matches!(
+            config.configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![declaration("Fixed")])),
+            Err(super::StoreError::IrremovableHarnessModule(name)) if name == "Fixed"
+        ));
+        assert_eq!(
+            config
+                .configure_change(meta_signal_flow::ConfigurationChange::Metaflows(vec![
+                    declaration("Injected")
+                ]))
+                .expect("removable module commits"),
+            meta_signal_flow::ConfigureOutcome::Replaced
+        );
     }
 
     /// A crash-left copy goes at the next open, one that upgrades nothing
@@ -14361,200 +14427,6 @@ mod tests {
         drop(staged);
         assert_eq!(fixture.staged_copies(), Vec::<String>::new());
     }
-
-    /// A 0.35.11 store holds the model, leave-out and events families at
-    /// v1. One open carries all three, models first, then leave-outs, then
-    /// events; a second open carries nothing again.
-    #[test]
-    fn a_0_35_11_store_upgrades_models_leave_outs_and_events_in_one_open() {
-        use super::ManagesMetaflowState;
-        use super::NamesConfiguredModel;
-        use super::events::{EventBeforeIdentity, RecordsHarnessEvents};
-        use crate::lean::BelongsToHarness;
-        use signal_flow::{Address, Event, NativeStop};
-        let fixture = StoreFixture::new();
-        fixture.configured();
-        drop(fixture.configured_store());
-        let models = production_models();
-        let defaults = production_leave_out_defaults();
-        let events = vec![(
-            "a1a1a1",
-            vec![
-                EventBeforeIdentity::Started,
-                EventBeforeIdentity::ToolUsed("Bash".into()),
-                EventBeforeIdentity::Stopped,
-            ],
-        )];
-        fixture.seed_v1_models(super::FLOW_SCHEMA_VERSION, &models);
-        fixture.seed_v1_leave_outs(&defaults);
-        fixture.seed_v1_events(&events);
-        fixture.as_0_35_11();
-        let mut before = fixture.path().rows_by_table();
-        for added in StoreFixture::ADDED_IN_0_35_19 {
-            assert_eq!(before.insert((*added).to_owned(), 0), None);
-        }
-        for reopening in 0..2 {
-            let store = fixture.configured_store();
-            for (layer, native) in &models {
-                let address = Address {
-                    aspect: Aspect::Psyche,
-                    topic: "flow".into(),
-                    layer: layer.clone(),
-                };
-                assert_eq!(
-                    store.configured_model(&address).expect("model reads"),
-                    Some((*native).to_owned()),
-                    "{layer:?} (open {reopening})"
-                );
-            }
-            for (address, leave_outs) in &defaults {
-                assert_eq!(
-                    store
-                        .default_leave_outs(address, &leave_outs[0].harness())
-                        .expect("default reads"),
-                    *leave_outs,
-                    "{address:?} (open {reopening})"
-                );
-            }
-            assert_eq!(
-                store.events("a1a1a1").expect("events read"),
-                Some(vec![
-                    Event::Started(None),
-                    Event::ToolUsed("Bash".into()),
-                    Event::Stopped(NativeStop {
-                        native_session_id_option: None,
-                        transcript_path_option: None,
-                        last_assistant_message_option: None,
-                    }),
-                ]),
-                "open {reopening}"
-            );
-            drop(store);
-            assert_eq!(fixture.path().rows_by_table(), before, "open {reopening}");
-            assert_eq!(fixture.staged_copies(), Vec::<String>::new());
-        }
-        let configuration = ConfigurationOnlyStore::open(&fixture.path()).expect("opens");
-        let snapshot = configuration
-            .configuration_snapshot()
-            .expect("snapshot reads")
-            .expect("store configured");
-        assert_eq!(snapshot.models.len(), models.len());
-        assert_eq!(snapshot.default_leave_outs.len(), defaults.len());
-    }
-
-    /// The store the deployment holds, copied: one open by this Flow carries
-    /// every family it keeps at an older version, every table keeps its rows
-    /// and every added table is empty, every row reads in its current shape,
-    /// and a second open changes nothing. The store is no fixture this
-    /// repository holds, so the test runs only when asked for by name with
-    /// `--ignored` and the variable set.
-    #[test]
-    #[ignore = "needs FLOW_0_35_11_STORE naming a copy of a store Flow 0.35.11 wrote"]
-    fn the_deployed_0_35_11_store_opens_and_every_family_upgrades_in_one_open() {
-        use super::events::RecordsHarnessEvents;
-        use super::{ManagesMetaflowState, ReadsFlowRows};
-        let source = std::env::var_os("FLOW_0_35_11_STORE")
-            .map(std::path::PathBuf::from)
-            .expect("FLOW_0_35_11_STORE names the 0.35.11 store to copy");
-        for configuration_first in [false, true] {
-            let directory = tempfile::tempdir().expect("copy directory");
-            let path = directory.path().join("flow.sema");
-            std::fs::copy(&source, &path).expect("0.35.11 store copied");
-            let mut permissions = std::fs::metadata(&path)
-                .expect("copy metadata")
-                .permissions();
-            #[allow(clippy::permissions_set_readonly_false)]
-            permissions.set_readonly(false);
-            std::fs::set_permissions(&path, permissions).expect("copy writable");
-            // A copy of a store its Nexus holds open reads as one left
-            // uncleanly; redb repairs it on its first writable open, as the
-            // Nexus's own open would, before anything is counted.
-            drop(redb::Database::open(&path).expect("the copy opens and repairs"));
-            let before = path.rows_by_table();
-            eprintln!("configuration-only open first: {configuration_first}");
-            eprintln!("rows before: {before:?}");
-            if configuration_first {
-                let configuration =
-                    ConfigurationOnlyStore::open(&path).expect("the configuration-only open");
-                let snapshot = configuration
-                    .configuration_snapshot()
-                    .expect("snapshot reads")
-                    .expect("store configured");
-                eprintln!(
-                    "models after the configuration-only open: {:?}",
-                    snapshot.models
-                );
-            }
-            let store = FlowStore::open_configured(&path).expect("the 0.35.11 store opens");
-            let set_aside = store
-                .opening_settlements
-                .iter()
-                .filter(|settlement| {
-                    !matches!(settlement, super::LaunchAttemptSettlement::Unsettled { .. })
-                })
-                .count() as u64;
-            eprintln!("launch-attempt rows set aside: {set_aside}");
-            let snapshot = store
-                .configuration_snapshot()
-                .expect("snapshot reads")
-                .expect("store configured");
-            eprintln!("models: {:?}", snapshot.models);
-            eprintln!("leave-out defaults: {}", snapshot.default_leave_outs.len());
-            for entry in &snapshot.default_leave_outs {
-                eprintln!(
-                    "  {:?} {:?} {}",
-                    entry.address,
-                    entry.harness_kind,
-                    entry.leave_outs.len()
-                );
-            }
-            assert!(
-                snapshot
-                    .models
-                    .iter()
-                    .all(|model| model.aspect == Aspect::Psyche),
-                "every carried model is a Psyche model"
-            );
-            assert!(snapshot.send_servers.is_empty());
-            let flows = store.flow_nodes().expect("flow nodes read");
-            let mut stops = 0usize;
-            for flow in &flows {
-                if let Some(events) = store.events(&flow.flow_id).expect("events read") {
-                    stops += events
-                        .iter()
-                        .filter(|event| matches!(event, signal_flow::Event::Stopped(_)))
-                        .count();
-                }
-            }
-            eprintln!("flows: {}, their Stops read: {stops}", flows.len());
-            assert_eq!(
-                store.list_metaflows().expect("metaflows list").len() as u64,
-                before["flow_nexus_metaflows"]
-            );
-            assert!(store.ambiguous_launch_attempts().is_ok());
-            drop(store);
-            let after = path.rows_by_table();
-            eprintln!("rows after: {after:?}");
-            for (table, rows) in &before {
-                let expected = match table.as_str() {
-                    "flow_nexus_launch_attempts" => rows - set_aside,
-                    "flow_nexus_quarantined_launch_attempts" => rows + set_aside,
-                    _ => *rows,
-                };
-                assert_eq!(after.get(table), Some(&expected), "rows of {table}");
-            }
-            for (table, rows) in &after {
-                if !before.contains_key(table) {
-                    eprintln!("added {table}");
-                    assert_eq!(*rows, 0, "{table} is added empty");
-                }
-            }
-            let reopened = FlowStore::open_configured(&path).expect("the upgraded store reopens");
-            assert_eq!(reopened.opening_settlements, Vec::new());
-            drop(reopened);
-            assert_eq!(path.rows_by_table(), after);
-        }
-    }
 }
 
 /// A v3 launch attempt row, written in its old shape, reads as v4 with its
@@ -14588,7 +14460,7 @@ mod v3_attempts {
                     flow_id_option: None,
                     remembered_flow_vector: remembered,
                     herdr_session_name: "default".into(),
-                    leave_outs_option: None,
+                    left_out_option: None,
                     flow_kind: super::metaflow_declaration::FlowKindV4::Regular,
                     tool_set: signal_flow::ToolSet::Default,
                     instruction_prompt: "Carry on.".into(),

@@ -141,7 +141,6 @@ pub enum Failed_Data {
     NothingQueued,
     AddressAwake,
     ContextRefused(signal_flow::ContextRefusal),
-    LeaveOutRefused(signal_flow::LeaveOutRefusal),
     SpawnRefused(signal_flow::HarnessSpawnRefusal),
     LaunchRefused(signal_flow::NativeLaunchRefusal),
 }

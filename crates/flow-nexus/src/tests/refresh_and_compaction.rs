@@ -118,6 +118,7 @@ pub(super) fn declare_seat(
             continuity,
             purpose: String::new(),
             records: vec![],
+                left_out: vec![],
             requires: vec![],
         }]))
         .expect("metaflow declared");

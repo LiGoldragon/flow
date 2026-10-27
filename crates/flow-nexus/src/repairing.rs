@@ -6,9 +6,9 @@
 
 use crate::RunningNexus;
 use crate::herdr::{PaneRoute, ReadsHerdrPanes};
-use crate::store::ReadsFlowRows;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
+use crate::store::{ReadsFlowRows, RebindsNativeSession};
 use meta_signal_flow::{
     InspectRejected_Data, Rebind_Data, RebindRejected_Data, Rebinding, Response, StoreRefusal,
     Withdraw_Data,
@@ -80,6 +80,42 @@ impl RepairsFromMeta for RunningNexus {
                 self.store.rebind_route(&flow_id, route).map(Ok)
             }
             Rebinding::Flow(flow_id) => self.store.rebind_current_flow(&address, &flow_id),
+            Rebinding::Native(native_session_id) => {
+                let flow_id = match self.store.current_flow(&address) {
+                    Ok(Ok(flow_id)) => flow_id,
+                    Ok(Err(rejection)) => return Response::RebindRejected(rejection),
+                    Err(error) => return Self::store_refused(error),
+                };
+                let node = match self.store.flow_node(&flow_id) {
+                    Ok(Some(node)) => node,
+                    _ => return Response::RebindRejected(RebindRejected_Data::FlowUnknown),
+                };
+                self.store
+                    .rebind_native_session(&flow_id, &node.session_id, &native_session_id)
+                    .map(|changed| {
+                        if changed {
+                            Ok(())
+                        } else {
+                            Err(RebindRejected_Data::FlowNotLive)
+                        }
+                    })
+            }
+            Rebinding::Session(herdr_session_name) => {
+                let flow_id = match self.store.current_flow(&address) {
+                    Ok(Ok(flow_id)) => flow_id,
+                    Ok(Err(rejection)) => return Response::RebindRejected(rejection),
+                    Err(error) => return Self::store_refused(error),
+                };
+                let node = match self.store.flow_node(&flow_id) {
+                    Ok(Some(node)) => node,
+                    _ => return Response::RebindRejected(RebindRejected_Data::FlowUnknown),
+                };
+                let HerdrRouteSelection::Available(mut route) = node.herdr_route_selection else {
+                    return Response::RebindRejected(RebindRejected_Data::PaneAbsent);
+                };
+                route.herdr_session_name = herdr_session_name;
+                self.store.rebind_route(&flow_id, route).map(Ok)
+            }
         };
         match rebound {
             Ok(Ok(())) => {

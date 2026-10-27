@@ -5,6 +5,11 @@ on their `flow-0.40` branches, and Curriculum 91acf29 on its `flow-0.40`
 branch, whose schema it carries. Every ordinary and meta peer repins, and
 Curriculum serves that schema.
 
+- Store-only recovery repins meta-signal-flow 42 and adds owner repairs for
+  queued work, metaflow state, launch settlement, successors, lifecycle,
+  in-memory holds, context, quarantine, and extended rebind. These operations
+  mutate Flow memory without acting on a harness.
+
 - An abrupt request may use `Delivery.Queue`; it enters the recipient's
   durable queue and answers `SendAccepted` instead of
   `Failed.QueueNotPermitted`. Pins signal-flow 34.0.0. Send outcomes,

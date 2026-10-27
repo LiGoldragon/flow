@@ -38,6 +38,74 @@ impl StoredHarness {
     }
 }
 
+/// The behavior units known for each adapter before the versioned stock
+/// prompt text is installed. Batch 16 fills the text; the switches and tools
+/// are already the complete removable behavior of the legacy leave-outs.
+pub(crate) fn seeded_modules(kind: flow_ethos::HarnessKind) -> Vec<meta_signal_flow::HarnessModule> {
+    use meta_signal_flow::{Assignment, HarnessModule, ModuleText, Setting, Switch};
+    let module = |name: &str, tools: &[&str], switches: Vec<Switch>| HarnessModule {
+        harness_module_name: name.into(),
+        module_text: ModuleText::Absent,
+        tools: tools.iter().map(|tool| (*tool).into()).collect(),
+        switches,
+    };
+    let environment = |name: &str, value: &str| Switch::Environment(Assignment {
+        environment_name: name.into(), environment_value: value.into(),
+    });
+    let setting = |name: &str, value: &str| Switch::Setting(Setting {
+        setting_key: name.into(), setting_value: value.into(),
+    });
+    match kind {
+        flow_ethos::HarnessKind::Codex => vec![
+            module("Skills", &[], vec![setting("skills.include_instructions", "false")]),
+            module("AgentsMd", &[], vec![setting("project_doc_max_bytes", "0")]),
+            module("CollaborationMode", &[], vec![setting("include_collaboration_mode_instructions", "false")]),
+            module("EnvironmentContext", &[], vec![setting("include_environment_context", "false")]),
+            module("Permissions", &[], vec![setting("include_permissions_instructions", "false")]),
+            module("DeveloperInstructions", &[], vec![
+                setting("developer_instructions", "\"\""),
+                setting("features.multi_agent_v2.root_agent_usage_hint_text", "\"\""),
+                setting("features.multi_agent_v2.multi_agent_mode_hint_text", "\"\""),
+            ]),
+        ],
+        flow_ethos::HarnessKind::Claude => vec![
+            module("ClaudeAiConnectors", &[], vec![environment("ENABLE_CLAUDEAI_MCP_SERVERS", "false")]),
+            module("McpServers", &[], vec![Switch::Flag(vec!["--strict-mcp-config".into()])]),
+            module("Agent", &["Agent"], vec![]),
+            module("ExplorePlanAgents", &[], vec![environment("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS", "1")]),
+            module("Read", &["Read"], vec![]),
+            module("Edit", &["Edit"], vec![]),
+            module("Write", &["Write"], vec![]),
+            module("Workflow", &["Workflow"], vec![environment("CLAUDE_CODE_DISABLE_WORKFLOWS", "1")]),
+            module("ScheduleWakeup", &["ScheduleWakeup"], vec![]),
+            module("ReportFindings", &["ReportFindings"], vec![]),
+            module("ListAgents", &["ListAgents"], vec![]),
+            module("Cron", &["CronCreate", "CronDelete", "CronList"], vec![environment("CLAUDE_CODE_DISABLE_CRON", "1")]),
+            module("WebFetch", &["WebFetch"], vec![]),
+            module("WebSearch", &["WebSearch"], vec![]),
+            module("DesignSync", &["DesignSync"], vec![]),
+            module("Worktree", &["EnterWorktree", "ExitWorktree"], vec![]),
+            module("LSP", &["LSP"], vec![]),
+            module("Monitor", &["Monitor"], vec![]),
+            module("NotebookEdit", &["NotebookEdit"], vec![]),
+            module("PushNotification", &["PushNotification"], vec![]),
+            module("RemoteTrigger", &["RemoteTrigger"], vec![]),
+            module("SendMessage", &["SendMessage"], vec![]),
+            module("TaskStop", &["TaskStop"], vec![]),
+            module("Skill", &["Skill"], vec![]),
+            module("SlashCommands", &[], vec![Switch::Flag(vec!["--disable-slash-commands".into()])]),
+            module("BundledSkills", &[], vec![environment("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "1")]),
+            module("ClaudeMd", &[], vec![environment("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")]),
+            module("GitInstructions", &[], vec![environment("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS", "1")]),
+            module("Attribution", &[], vec![setting("attribution", "{\"commit\":\"\",\"pr\":\"\"}")]),
+            module("UserSettings", &[], vec![Switch::Flag(vec!["--setting-sources".into(), "project".into()])]),
+            module("ToolSearch", &["ToolSearch"], vec![]),
+            module("Bash", &["Bash"], vec![]),
+            module("Artifact", &["Artifact", "ArtifactComments", "ArtifactData"], vec![environment("CLAUDE_CODE_ARTIFACT", "0")]),
+        ],
+    }
+}
+
 /// Builds the three harness installation rows carried by the v2 Nexus
 /// declaration. This is the cross-family part of the v2-to-v3 upgrade: the
 /// Nexus row loses endpoints and pane profiles only after their values have
@@ -133,7 +201,7 @@ pub(super) fn from_legacy_nexus(
             home: endpoint.home.clone(),
             control_socket_path_option: Some(endpoint.control_socket_path.clone()),
             served_models: served(&endpoint.model_name_vector),
-            modules: vec![],
+            modules: seeded_modules(HarnessKind::Codex),
             left_out: vec![],
             arguments: codex_arguments.clone(),
             settings: vec![Setting {
@@ -189,7 +257,7 @@ pub(super) fn from_legacy_nexus(
             home: claude_home,
             control_socket_path_option: None,
             served_models: served(&claude_models),
-            modules: vec![],
+            modules: seeded_modules(HarnessKind::Claude),
             left_out: vec![],
             arguments: vec![
                 Piece::Text("--settings".into()),

@@ -460,9 +460,6 @@ impl AnswersWakeRefusal for WakeRefusal {
                 signal_flow::StartRejection::ContextRefused(refusal) => {
                     Failed_Data::ContextRefused(refusal.clone())
                 }
-                signal_flow::StartRejection::LeaveOutRefused(refusal) => {
-                    Failed_Data::LeaveOutRefused(refusal.clone())
-                }
                 signal_flow::StartRejection::HarnessSpawnRefused(refusal) => {
                     Failed_Data::SpawnRefused(refusal.clone())
                 }
@@ -880,9 +877,9 @@ impl CorrelatesNativeEvents for RunningNexus {
             .iter()
             .rev()
             .find_map(|event| match event {
-                Event::Stopped(stop) => self.correlated_stop(flow_id, stop).then_some(true),
+                Event::Stopped(stop) => self.correlated_stop(flow_id, &stop).then_some(true),
                 Event::PromptSubmitted(prompt) => {
-                    self.correlated_prompt(flow_id, prompt).then_some(false)
+                    self.correlated_prompt(flow_id, &prompt).then_some(false)
                 }
                 Event::Started(_) | Event::ToolUsed(_) | Event::Ended(_) | Event::Cleared(_) => {
                     None
@@ -1316,7 +1313,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 tool_set: declared.tool_set.clone(),
                 system_modules: declared.system_modules,
                 user_modules: declared.user_modules,
-                leave_outs_option: None,
+                left_out_option: None,
                 purpose: declared.purpose,
             }),
             (_, Some(profile)) => WakePlan::Fresh(FreshContext {
@@ -1324,7 +1321,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 tool_set: profile.tool_set.clone(),
                 system_modules: profile.system_modules,
                 user_modules: profile.user_modules,
-                leave_outs_option: profile.leave_outs_option,
+                left_out_option: profile.left_out_option,
                 purpose: String::new(),
             }),
             (_, None) => WakePlan::Unplaceable,
@@ -2087,7 +2084,7 @@ impl WakesInParts for RunningNexus {
             herdr_session_name: fresh.herdr_session_name,
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,
-            leave_outs_option: fresh.leave_outs_option,
+            left_out_option: fresh.left_out_option,
             tool_set: fresh.tool_set,
             prompt: text.with_purpose(&fresh.purpose),
         };
@@ -2269,7 +2266,7 @@ impl WakesInParts for RunningNexus {
             herdr_session_name: fresh.herdr_session_name,
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,
-            leave_outs_option: fresh.leave_outs_option,
+            left_out_option: fresh.left_out_option,
             tool_set: fresh.tool_set,
             prompt: "".with_purpose(&fresh.purpose),
         };

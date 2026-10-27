@@ -15,7 +15,7 @@ use crate::generated::starter::{
     SegmentListing, StartupComposing, StartupProgress, SystemPrompted, Textual,
 };
 use signal_flow::{
-    HarnessKind, HerdrPaneBinding, LaunchProfile, LeaveOut, PromptDeliveryIntent, SystemPrompt,
+    HarnessKind, HerdrPaneBinding, LaunchProfile, PromptDeliveryIntent, SystemPrompt,
 };
 
 impl Textual for str {
@@ -64,21 +64,21 @@ impl<T: Profiled + ?Sized> Profiled for &T {
     }
 }
 
-impl LeaveOutListing for [LeaveOut] {
-    fn leave_outs(&self) -> Vec<LeaveOut> {
+impl LeaveOutListing for [String] {
+    fn left_out(&self) -> Vec<String> {
         self.to_vec()
     }
 }
 
-impl LeaveOutListing for Vec<LeaveOut> {
-    fn leave_outs(&self) -> Vec<LeaveOut> {
+impl LeaveOutListing for Vec<String> {
+    fn left_out(&self) -> Vec<String> {
         self.clone()
     }
 }
 
 impl<T: LeaveOutListing + ?Sized> LeaveOutListing for &T {
-    fn leave_outs(&self) -> Vec<LeaveOut> {
-        (**self).leave_outs()
+    fn left_out(&self) -> Vec<String> {
+        (**self).left_out()
     }
 }
 

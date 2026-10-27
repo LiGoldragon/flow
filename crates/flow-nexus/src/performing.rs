@@ -218,7 +218,7 @@ impl Performs for RunningNexus {
         match operation {
             // A model that is not exact on its harness is never launched: its
             // receipt could not match the model the transcript records.
-            Operation::Compose(profile) => {
+            Operation::Compose(mut profile) => {
                 // Harness installations are a configured family. Read the
                 // committed snapshot for this composition rather than the
                 // adapters the long-running process opened with: Configure
@@ -240,10 +240,30 @@ impl Performs for RunningNexus {
                 // for the harness it starts on, and none when that harness
                 // has no default.
                 let harness_kind = codex_endpoints.harness_for(&profile.model_name);
-                let default = self
+                let declaration_left_out = self
                     .store
-                    .default_leave_outs(&profile.address, &harness_kind)
+                    .default_left_out(&profile.address, &harness_kind)
                     .unwrap_or_default();
+                let chosen_left_out = profile
+                    .left_out_option
+                    .take()
+                    .unwrap_or(declaration_left_out);
+                let mut default = codex_endpoints
+                    .harnesses
+                    .iter()
+                    .find(|harness| {
+                        harness.harness_kind == harness_kind
+                            && harness.served_models.iter().any(|served| {
+                                served.model_name == profile.model_name
+                            })
+                    })
+                    .map(|harness| harness.left_out.clone())
+                    .unwrap_or_default();
+                for module in chosen_left_out {
+                    if !default.contains(&module) {
+                        default.push(module);
+                    }
+                }
                 let request = profile.launch_request_id.clone();
                 // The launch's Remembering, resolved to the flows whose raw
                 // records the composer reads into its first message.
@@ -263,10 +283,6 @@ impl Performs for RunningNexus {
                     default,
                 ) {
                     Ok(launch) => Outcome::Composed(launch),
-                    Err(CompositionError::LeaveOut(refusal)) => {
-                        eprintln!("flow-nexus: launch {request} leave-outs refused: {refusal:?}");
-                        Outcome::Failed(Failed_Data::LeaveOutRefused(refusal))
-                    }
                     Err(CompositionError::Context(refusal)) => {
                         eprintln!("flow-nexus: launch {request} context refused: {refusal:?}");
                         Outcome::Failed(Failed_Data::ContextRefused(refusal))

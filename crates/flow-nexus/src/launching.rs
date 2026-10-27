@@ -81,9 +81,6 @@ impl InterpretsLaunchObservations for RunningNexus {
             Outcome::Failed(Failed_Data::ContextRefused(refusal)) => {
                 Response::StartRejected(StartRejection::ContextRefused(refusal))
             }
-            Outcome::Failed(Failed_Data::LeaveOutRefused(refusal)) => {
-                Response::StartRejected(StartRejection::LeaveOutRefused(refusal))
-            }
             Outcome::Failed(Failed_Data::CompositionRefused(refusal)) => {
                 Response::StartRejected(StartRejection::CompositionRefused(refusal))
             }
@@ -957,7 +954,7 @@ impl AbandonsRefusedLaunch for RunningNexus {
             match self.herdr.pane_ownership(&node) {
                 PaneOwnership::Absent => {}
                 PaneOwnership::Owned | PaneOwnership::Bare => {
-                    let _lease = self.pane_leases.hold(route);
+                    let _lease = self.pane_leases.hold(&route);
                     if self.perform(Operation::Close(node.clone())) != Outcome::Closed {
                         eprintln!(
                             "flow-nexus: refused launch {launch_request_id} left flow {} Pending: its pane was not closed",

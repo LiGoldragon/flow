@@ -359,6 +359,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         continuity: meta_signal_flow::Continuity::OnDemand,
         purpose: String::new(),
         records: vec![],
+                left_out: vec![],
         requires: vec![],
     };
     fixture

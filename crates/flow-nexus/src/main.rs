@@ -264,9 +264,6 @@ trait RunsConfigurationStartup {
                 Err(StoreError::ModelServedTwice(model)) => {
                     MetaResponse::ConfigureRejected(ConfigureRejection::ModelServedTwice(model))
                 }
-                Err(StoreError::LeaveOutNotForHarness) => {
-                    MetaResponse::ConfigureRejected(ConfigureRejection::LeaveOutNotForHarness)
-                }
                 Err(StoreError::TopicRefused(topic)) => {
                     MetaResponse::ConfigureRejected(ConfigureRejection::TopicRefused(topic))
                 }

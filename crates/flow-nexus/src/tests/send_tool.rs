@@ -994,7 +994,7 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: profile,
             },
-            vec![signal_flow::LeaveOut::CodexAgentsMd],
+            vec!["AgentsMd".to_owned()],
         )
         .expect("launch composes");
     let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, layer Secondary, kind Order and body witness-order. Then reply with the exact text the tool returned.";
@@ -1134,7 +1134,7 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: profile.clone(),
             },
-            vec![signal_flow::LeaveOut::CodexAgentsMd],
+            vec!["AgentsMd".to_owned()],
         )
         .expect("launch composes");
     let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, layer Secondary, kind Order and body first-turn-witness. Then reply with the exact text the tool returned, and end your turn.";
@@ -1278,7 +1278,7 @@ fn witness_interrupted_launch_first_half_exits_with_its_call_pending() {
                 harness_kind: signal_flow::HarnessKind::Codex,
                 launch_profile: profile.clone(),
             },
-            vec![signal_flow::LeaveOut::CodexAgentsMd],
+            vec!["AgentsMd".to_owned()],
         )
         .expect("launch composes");
     let instruction = "Call the send tool exactly once with target aspect Mind, topic flow, layer Secondary, kind Order and body interrupted-witness. Then reply with the exact text the tool returned, and end your turn.";

@@ -141,6 +141,7 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV4> for StoredMetaMetaflowConfig
                 continuity: previous.continuity,
                 purpose: previous.purpose,
                 records: previous.records,
+                left_out: vec![],
                 requires: Vec::new(),
             },
         })
@@ -195,6 +196,7 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV3> for StoredMetaMetaflowConfig
                 tool_set: previous.tool_set,
                 purpose: previous.purpose,
                 records: previous.records,
+                left_out: vec![],
                 requires: Vec::new(),
             },
         })
@@ -246,6 +248,7 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV2> for StoredMetaMetaflowConfig
                 tool_set: previous.tool_set,
                 purpose: String::new(),
                 records: Vec::new(),
+                left_out: vec![],
                 requires: Vec::new(),
             },
         })
@@ -295,6 +298,7 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV1> for StoredMetaMetaflowConfig
                 tool_set: signal_flow::ToolSet::Default,
                 purpose: String::new(),
                 records: Vec::new(),
+                left_out: vec![],
                 requires: Vec::new(),
             },
         })

@@ -7,6 +7,7 @@ pub enum LaunchOutcome {
     Replaced(flow_nexus::ReplacedRecord),
     StartRejected(signal_flow::StartRejection),
     ReplaceRejected(signal_flow::ReplaceRejection),
+    Archived(String),
 }
 #[rustfmt::skip]
 pub type Predecessor = String;

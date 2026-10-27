@@ -118,6 +118,7 @@ fn declare_secondary(fixture: &NexusFixture, continuity: meta_signal_flow::Conti
                 continuity,
                 purpose: String::new(),
                 records: vec![],
+                left_out: vec![],
                 requires: vec![],
             },
         ]))

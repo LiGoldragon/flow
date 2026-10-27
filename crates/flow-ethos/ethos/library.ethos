@@ -75,6 +75,8 @@ Library
   StableCodex.CodexEndpoint
   NextCodex.CodexEndpoint
   HarnessKind.[ Codex Claude ]
+  HarnessModuleName.String
+  LeftOut.Vector<HarnessModuleName>
   KeyName.String
   CommandSigil.String
   InterruptKeys.Vector<KeyName>

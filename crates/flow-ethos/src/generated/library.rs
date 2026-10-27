@@ -233,6 +233,10 @@ pub enum HarnessKind {
     Claude,
 }
 #[rustfmt::skip]
+pub type HarnessModuleName = String;
+#[rustfmt::skip]
+pub type LeftOut = std::vec::Vec<HarnessModuleName>;
+#[rustfmt::skip]
 pub type KeyName = String;
 #[rustfmt::skip]
 pub type CommandSigil = String;

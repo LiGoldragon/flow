@@ -2369,4 +2369,4 @@ later change and is not part of this release.
 
 # Batch 11: reports by session and notifications
 
-The ordinary signal contract is signal-flow 36.0.0. A harness report identifies either a Flow or a native session; the Nexus resolves session reporters against the adopted seats it holds. Claude's Notification hook records `Notified` events. The flow-events family upgrades from v4 to v5 without changing any archived event.
+The ordinary signal contract is signal-flow 37.0.0 and the privileged contract is meta-signal-flow 51.0.0. A harness report identifies either a Flow or a native session; the Nexus resolves session reporters against the adopted seats it holds. Claude's Notification hook records `Notified` events. The flow-events family upgrades from v4 to v5 without changing any archived event.

@@ -430,7 +430,8 @@ impl HandlesSendCall for RunningNexus {
                 return Self::refused(SendRefusal::Store);
             };
             let message = arguments.message();
-            if let Some(signal_flow::Refusal::Oversized(size)) = message.oversized_refusal(&sender)
+            if let Some(signal_flow::Refusal::Oversized(size)) =
+                message.oversized_refusal(&sender, self.limits.send_body as usize)
             {
                 return refused_kept(SendRefusal::Oversized(size), content_sha256);
             }
@@ -460,8 +461,6 @@ impl HandlesSendCall for RunningNexus {
 /// How long a responder waits before it reconnects: from the first wait,
 /// doubling after each connection that fails, to the longest.
 pub(crate) trait PacesReconnection {
-    const FIRST_WAIT: Duration = Duration::from_secs(1);
-    const LONGEST_WAIT: Duration = Duration::from_secs(60);
     /// Waits `wait` unless told to stop first; true when told to stop.
     fn stopped_within(inbox: &mpsc::Receiver<ResponderSignal>, wait: Duration) -> bool {
         let deadline = Instant::now() + wait;
@@ -515,7 +514,9 @@ impl RespondsToSendCalls for RunningNexus {
         inbox: mpsc::Receiver<ResponderSignal>,
     ) {
         let mut generation = 0;
-        let mut wait = Self::FIRST_WAIT;
+        let first_wait = Duration::from_millis(self.timings.send_tool_first_wait as u64);
+        let longest_wait = Duration::from_millis(self.timings.send_tool_longest_wait as u64);
+        let mut wait = first_wait;
         loop {
             generation += 1;
             match adapter.subscribe_thread(thread, generation, &signals, &inbox) {
@@ -525,11 +526,11 @@ impl RespondsToSendCalls for RunningNexus {
                     if Self::stopped_within(&inbox, wait) {
                         return;
                     }
-                    wait = (wait * 2).min(Self::LONGEST_WAIT);
+                    wait = (wait * 2).min(longest_wait);
                     continue;
                 }
                 Ok(mut subscription) => {
-                    wait = Self::FIRST_WAIT;
+                    wait = first_wait;
                     let early = std::mem::take(&mut subscription.early);
                     let mut open = early.into_iter().all(|request| {
                         self.answer_request(&mut subscription, request)
@@ -638,7 +639,6 @@ pub struct LaunchCalls {
 pub(crate) trait ServesLaunchCalls {
     /// How long one read of the launch's connection waits before the launch
     /// looks again whether the work it waits on has ended.
-    const SERVING_SLICE: Duration = Duration::from_millis(50);
     /// Keeps the connection that opened the launch's thread as its
     /// responder.
     fn hold_launch_responder(&self, responder: LaunchResponder);
@@ -693,7 +693,8 @@ impl ServesLaunchCalls for RunningNexus {
                 }
             }
             while open && !running.is_finished() {
-                let deadline = Instant::now() + Self::SERVING_SLICE;
+                let deadline = Instant::now()
+                    + Duration::from_millis(self.timings.send_tool_serving_slice as u64);
                 match responder
                     .subscription
                     .next_event(&responder.inbox, Some(deadline))
@@ -792,7 +793,8 @@ impl ServesLaunchCalls for RunningNexus {
         for request in std::mem::take(&mut responder.subscription.early) {
             let _ = self.answer_launch_call(&mut responder, request);
         }
-        let deadline = Instant::now() + Self::SERVING_SLICE;
+        let deadline =
+            Instant::now() + Duration::from_millis(self.timings.send_tool_serving_slice as u64);
         while let Ok(ProxyEvent::Reply(Ok(message))) = responder
             .subscription
             .next_event(&responder.inbox, Some(deadline))
@@ -835,7 +837,6 @@ pub struct InterruptedCalls {
 /// record; any other call is refused.
 pub(crate) trait RefusesInterruptedCalls {
     /// How long the resumed connection is read for replayed calls.
-    const REPLAY_WINDOW: Duration = Duration::from_secs(2);
     /// Answers every call the app-server replays on `thread` within the
     /// window: from its record when one holds the same call, else refused
     /// (`ThreadUnowned`; `KeyReused` when its key's record holds another
@@ -881,7 +882,8 @@ impl RefusesInterruptedCalls for RunningNexus {
         let mut open = early
             .into_iter()
             .all(|request| answer(&mut subscription, request));
-        let deadline = Instant::now() + Self::REPLAY_WINDOW;
+        let deadline =
+            Instant::now() + Duration::from_millis(self.timings.send_tool_replay_window as u64);
         while open {
             match subscription.next_event(&inbox, Some(deadline)) {
                 Ok(ProxyEvent::Reply(Ok(message))) => open = answer(&mut subscription, message),

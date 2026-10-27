@@ -26,7 +26,9 @@ use tungstenite::{
     protocol::{Role, WebSocket, WebSocketConfig},
 };
 
+#[cfg(test)]
 const MAX_HEADER_BYTES: usize = 16 * 1024;
+#[cfg(test)]
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -37,6 +39,7 @@ pub struct CodexAdapter {
     pub timeout: Duration,
     /// Exact cwd whose native Codex skill catalog is valid for this launch.
     pub workspace_root: PathBuf,
+    pub limits: meta_signal_flow::Limits,
 }
 
 #[derive(Clone)]
@@ -54,10 +57,10 @@ pub struct CodexEndpoints {
     pub next: CodexEndpoint,
     pub timeout: Duration,
     pub workspace_root: PathBuf,
+    pub limits: meta_signal_flow::Limits,
 }
 
 pub trait SelectsCodexEndpoint {
-    const APP_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
     /// Models selected by both endpoints select neither.
     fn overlapping_models(&self) -> BTreeSet<String>;
     fn endpoint_for(&self, model: &str) -> Result<&CodexEndpoint, CodexAdapterUnavailable>;
@@ -93,6 +96,7 @@ impl SelectsCodexEndpoint for CodexEndpoints {
             model: model.to_owned(),
             timeout: self.timeout,
             workspace_root: self.workspace_root.clone(),
+            limits: self.limits.clone(),
         })
     }
 }
@@ -149,8 +153,9 @@ impl From<&RuntimeConfiguration> for CodexEndpoints {
         Self {
             stable: CodexEndpoint::from(&configuration.stable_codex),
             next: CodexEndpoint::from(&configuration.next_codex),
-            timeout: Self::APP_SERVER_TIMEOUT,
+            timeout: Duration::ZERO,
             workspace_root: PathBuf::from(&configuration.source_root),
+            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
         }
     }
 }
@@ -254,11 +259,6 @@ pub enum CodexTurnHistory {
 /// Reads a thread's turns from its app-server, for the anchor a queued
 /// turn is prepared with and for its reconciliation.
 pub trait ReadsCodexTurnHistory {
-    /// How many turns one `thread/turns/list` page asks for.
-    const HISTORY_PAGE: u64 = 16;
-    /// How many pages a reconciliation reads before it calls the anchor
-    /// missing.
-    const HISTORY_PAGES: u64 = 16;
     /// The thread's newest turn, None when it has none.
     fn newest_turn(&self, thread_id: &str) -> Result<Option<String>, CodexAdapterUnavailable>;
     /// What the thread's history after `anchor` shows of `text`.
@@ -496,10 +496,13 @@ impl SpawnsCodexProxy for CodexAdapter {
             return Err(CodexAdapterUnavailable::Proxy(error.to_string()));
         }
         let reader_input = Arc::clone(&input);
+        let max_header_bytes = self.limits.app_server_header as usize;
+        let max_message_bytes = self.limits.app_server_message as usize;
         thread::spawn(move || {
             let mut output = BufReader::new(output);
             let outcome = ProxySessionReader {
                 output: &mut output,
+                max_header_bytes,
             }
             .read_upgrade(&accept);
             if let Err(error) = outcome {
@@ -510,8 +513,8 @@ impl SpawnsCodexProxy for CodexAdapter {
                 return;
             }
             let mut config = WebSocketConfig::default();
-            config.max_message_size = Some(MAX_MESSAGE_BYTES);
-            config.max_frame_size = Some(MAX_MESSAGE_BYTES);
+            config.max_message_size = Some(max_message_bytes);
+            config.max_frame_size = Some(max_message_bytes);
             let mut socket = WebSocket::from_raw_socket(
                 ProxyWebSocketIo {
                     reader: output,
@@ -591,6 +594,7 @@ impl OpensCodexProxy for CodexAdapter {
 
 struct ProxySessionReader<'a, R: BufRead> {
     output: &'a mut R,
+    max_header_bytes: usize,
 }
 
 trait ReadsCodexProxy {
@@ -610,7 +614,7 @@ impl<R: BufRead> ReadsCodexProxy for ProxySessionReader<'_, R> {
                 return Err(CodexAdapterUnavailable::Closed);
             }
             header.extend_from_slice(&line);
-            if header.len() > MAX_HEADER_BYTES {
+            if header.len() > self.max_header_bytes {
                 return Err(CodexAdapterUnavailable::Upgrade(
                     "response headers exceed limit".into(),
                 ));
@@ -1325,10 +1329,10 @@ impl ReadsCodexTurnHistory for CodexAdapter {
             let mut anchor_seen = anchor.is_none();
             let mut read_turns = 0_u64;
             let mut cursor: Option<String> = None;
-            'pages: for page in 0..Self::HISTORY_PAGES {
+            'pages: for page in 0..self.limits.history_pages as u64 {
                 let mut params = serde_json::json!({
                     "threadId": thread_id,
-                    "limit": Self::HISTORY_PAGE,
+                    "limit": self.limits.history_page,
                     "sortDirection": "desc",
                     "itemsView": "full"
                 });
@@ -2025,6 +2029,7 @@ mod tests {
             model: "gpt-5.6".into(),
             timeout: Duration::from_millis(100),
             workspace_root: std::env::current_dir().unwrap(),
+            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
         }
     }
 
@@ -2061,6 +2066,7 @@ mod tests {
             },
             timeout: Duration::from_secs(10),
             workspace_root: PathBuf::from("/home/test/primary"),
+            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
         }
     }
 

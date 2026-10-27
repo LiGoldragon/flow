@@ -242,10 +242,12 @@ trait RunsConfigurationStartup {
         if stopping.load(Ordering::SeqCst) {
             return Err("stopped by signal before any configuration arrived".into());
         }
-        peer.set_read_timeout(Some(Duration::from_secs(5)))
-            .and_then(|_| peer.set_write_timeout(Some(Duration::from_secs(5))))
+        let (timings, limits) = store.runtime_bounds().map_err(|error| error.to_string())?;
+        let socket_timeout = Duration::from_millis(timings.socket_timeout as u64);
+        peer.set_read_timeout(Some(socket_timeout))
+            .and_then(|_| peer.set_write_timeout(Some(socket_timeout)))
             .map_err(|error| error.to_string())?;
-        let query = peer.read_meta_query()?;
+        let query = peer.read_meta_query_with_limit(limits.frame as usize)?;
         if let Some(refusal) = ConfigurationStartup::peer_is_authorized_for_configuration(
             peer.peer_process(),
             message_nexus_binary,

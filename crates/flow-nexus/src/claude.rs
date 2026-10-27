@@ -382,17 +382,14 @@ impl LocatesClaudeTranscript for Path {
 /// reports `Stopped`; nothing watches the file.
 pub trait MeasuresClaudeContext {
     /// In a transcript: the tokens of the context its last turn carried.
-    fn context_tokens(&self) -> Option<i64>;
+    fn context_tokens(&self, tail_bytes: u64) -> Option<i64>;
 }
 
-/// How much of a transcript's end is read first for its last usage entry.
-const CONTEXT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
-
 impl MeasuresClaudeContext for Path {
-    fn context_tokens(&self) -> Option<i64> {
+    fn context_tokens(&self, tail_bytes: u64) -> Option<i64> {
         let mut file = fs::File::open(self).ok()?;
         let length = file.metadata().ok()?.len();
-        let start = length.saturating_sub(CONTEXT_TAIL_BYTES);
+        let start = length.saturating_sub(tail_bytes);
         let mut tail = Vec::new();
         file.seek(SeekFrom::Start(start)).ok()?;
         file.read_to_end(&mut tail).ok()?;
@@ -766,10 +763,13 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(transcript.context_tokens(), Some(2 + 150_385 + 575));
+        assert_eq!(
+            transcript.context_tokens(4 * 1024 * 1024),
+            Some(2 + 150_385 + 575)
+        );
         let empty = directory.path().join("empty.jsonl");
         fs::write(&empty, "{\"type\":\"user\"}\n").unwrap();
-        assert_eq!(empty.context_tokens(), None);
+        assert_eq!(empty.context_tokens(4 * 1024 * 1024), None);
     }
 }
 

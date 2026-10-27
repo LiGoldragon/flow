@@ -406,6 +406,20 @@ fn each_family_is_its_last_declaration() {
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
     assert_eq!(snapshot(&nexus).send_servers, send_servers);
+    let mut timings = snapshot(&nexus).timings;
+    timings.send_wait += 1;
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::Timings(timings.clone())),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(snapshot(&nexus).timings, timings);
+    let mut limits = snapshot(&nexus).limits;
+    limits.send_body += 1;
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::Limits(limits.clone())),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    assert_eq!(snapshot(&nexus).limits, limits);
     // The effective snapshot equals the last declaration of every family,
     // across a restart.
     drop(nexus);
@@ -420,6 +434,8 @@ fn each_family_is_its_last_declaration() {
             send_servers,
             metaflows: Vec::new(),
             investigation: None,
+            timings,
+            limits,
         }
     );
     // An empty declaration empties the family.

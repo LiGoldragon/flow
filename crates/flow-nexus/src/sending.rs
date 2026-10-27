@@ -48,7 +48,7 @@ use signal_flow::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Flow's maximum UTF-8 byte length for one rendered native Send prompt.
+#[cfg(test)]
 pub const MAX_SEND_PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// Measures a Request as it would appear in the recipient's native prompt.
@@ -71,25 +71,25 @@ impl MeasuresSendPayload for Message {
 
 /// Refuses a Send whose complete native prompt rendering exceeds Flow's budget.
 pub trait AdmitsSendPayload {
-    fn oversized_refusal(&self, sender: &Address) -> Option<Refusal>;
+    fn oversized_refusal(&self, sender: &Address, maximum_bytes: usize) -> Option<Refusal>;
 }
 
 impl AdmitsSendPayload for Request {
-    fn oversized_refusal(&self, sender: &Address) -> Option<Refusal> {
+    fn oversized_refusal(&self, sender: &Address, maximum_bytes: usize) -> Option<Refusal> {
         let actual_bytes = self.native_prompt_bytes(sender);
-        (actual_bytes > MAX_SEND_PAYLOAD_BYTES).then_some(Refusal::Oversized(SendPayloadSize {
+        (actual_bytes > maximum_bytes).then_some(Refusal::Oversized(SendPayloadSize {
             actual_bytes: i64::try_from(actual_bytes).unwrap_or(i64::MAX),
-            maximum_bytes: MAX_SEND_PAYLOAD_BYTES as i64,
+            maximum_bytes: maximum_bytes as i64,
         }))
     }
 }
 
 impl AdmitsSendPayload for Message {
-    fn oversized_refusal(&self, sender: &Address) -> Option<Refusal> {
+    fn oversized_refusal(&self, sender: &Address, maximum_bytes: usize) -> Option<Refusal> {
         let actual_bytes = self.native_prompt_bytes(sender);
-        (actual_bytes > MAX_SEND_PAYLOAD_BYTES).then_some(Refusal::Oversized(SendPayloadSize {
+        (actual_bytes > maximum_bytes).then_some(Refusal::Oversized(SendPayloadSize {
             actual_bytes: i64::try_from(actual_bytes).unwrap_or(i64::MAX),
-            maximum_bytes: MAX_SEND_PAYLOAD_BYTES as i64,
+            maximum_bytes: maximum_bytes as i64,
         }))
     }
 }
@@ -885,7 +885,7 @@ impl CompletesDirectSends for RunningNexus {
         };
         // This budget bounds waiting, not evidence. Expiry is uncertainty,
         // never proof of absence and never permission for a new attempt.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_millis(self.timings.send_wait as u64);
         let changes = self.store.launch_changes.clone();
         loop {
             let seen = changes.current();

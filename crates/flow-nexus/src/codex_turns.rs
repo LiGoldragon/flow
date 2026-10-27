@@ -68,9 +68,6 @@ pub enum ThreadStatus {
     Unavailable,
 }
 
-/// How many completed turns of a thread are kept to recognise a repeat.
-const REMEMBERED_TURNS: usize = 64;
-
 #[derive(Debug, Clone)]
 struct ThreadState {
     turn: ThreadTurn,
@@ -87,9 +84,29 @@ impl Default for ThreadState {
 }
 
 /// Every Codex thread's turn, keyed by thread id.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CodexTurns {
     threads: Mutex<HashMap<String, ThreadState>>,
+    remembered_turns: usize,
+}
+
+impl Default for CodexTurns {
+    fn default() -> Self {
+        Self::with_remembered_turns(
+            crate::store::timings_limits::seed_limits()
+                .expect("authored limits seed")
+                .remembered_turns as usize,
+        )
+    }
+}
+
+impl CodexTurns {
+    pub(crate) fn with_remembered_turns(remembered_turns: usize) -> Self {
+        Self {
+            threads: Mutex::new(HashMap::new()),
+            remembered_turns,
+        }
+    }
 }
 
 pub trait ReadsTurnEvent {
@@ -170,7 +187,7 @@ impl TracksCodexTurns for CodexTurns {
                     return false;
                 }
                 state.completed.push_back(turn.clone());
-                if state.completed.len() > REMEMBERED_TURNS {
+                if state.completed.len() > self.remembered_turns {
                     state.completed.pop_front();
                 }
                 match &state.turn {

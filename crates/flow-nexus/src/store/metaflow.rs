@@ -271,7 +271,15 @@ impl MutatesMetaflows for FlowStore {
                 request.lock.address,
             ))));
         };
-        if let Some(refusal) = request.message.oversized_refusal(&request.lock.sender) {
+        let maximum_bytes = self
+            .configuration_snapshot()?
+            .ok_or(StoreError::NotConfigured)?
+            .limits
+            .send_body as usize;
+        if let Some(refusal) = request
+            .message
+            .oversized_refusal(&request.lock.sender, maximum_bytes)
+        {
             let released = self.release_metaflow_lock(request.lock.clone(), now)?;
             if released != Response::Released {
                 return Ok(released);

@@ -121,6 +121,8 @@ pub struct HerdrCli {
     flow_id_executable: PathBuf,
     flows_root: PathBuf,
     codex_endpoints: CodexEndpoints,
+    pub(crate) timings: meta_signal_flow::Timings,
+    pub(crate) limits: meta_signal_flow::Limits,
     claude_transcript_root: PathBuf,
     /// The Claude daemon's records, read for a daemon-owned session's
     /// readiness.
@@ -183,9 +185,16 @@ impl Default for HerdrCli {
                         "gpt-6-luna".into(),
                     ]),
                 },
-                timeout: std::time::Duration::from_secs(10),
+                timeout: std::time::Duration::from_millis(
+                    crate::store::timings_limits::seed_timings()
+                        .expect("authored timings seed")
+                        .app_server_timeout as u64,
+                ),
                 workspace_root: workspace_root.clone(),
+                limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
             },
+            timings: crate::store::timings_limits::seed_timings().expect("authored timings seed"),
+            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
             claude_transcript_root: claude_home.join("projects"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&claude_home),
             harness_hook: std::env::current_exe()
@@ -264,19 +273,6 @@ trait ReadsPromptReply {
     /// lifecycle change within five seconds of an accepted prompt to a
     /// non-working agent, else `agent_prompt_stalled`; any observed state
     /// then matches.
-    const OBSERVATION: [&'static str; 11] = [
-        "--wait",
-        "--until",
-        "working",
-        "--until",
-        "idle",
-        "--until",
-        "done",
-        "--until",
-        "blocked",
-        "--timeout",
-        "10000",
-    ];
     /// Herdr 0.8.2 error codes answered before any input is sent to the
     /// pane (`handle_agent_prompt` and the pre-prompt `agent get`). Every
     /// other failure may follow typed input and is Uncertain.
@@ -335,6 +331,11 @@ pub trait ConfiguresHerdrCli {
     fn with_ordinary_socket(self, ordinary_socket: &std::path::Path) -> Self;
     /// Re-roots the flows directory on the configured source root.
     fn with_source_root(self, source_root: &std::path::Path) -> Self;
+    fn with_runtime_settings(
+        self,
+        timings: meta_signal_flow::Timings,
+        limits: meta_signal_flow::Limits,
+    ) -> Self;
     #[cfg(test)]
     fn at(executable: PathBuf, flows_root: PathBuf) -> Self;
 }
@@ -355,12 +356,26 @@ impl ConfiguresHerdrCli for HerdrCli {
         self
     }
 
+    fn with_runtime_settings(
+        mut self,
+        timings: meta_signal_flow::Timings,
+        limits: meta_signal_flow::Limits,
+    ) -> Self {
+        self.timings = timings;
+        self.limits = limits;
+        self
+    }
+
     #[cfg(test)]
     fn at(executable: PathBuf, flows_root: PathBuf) -> Self {
         let fixture_root = flows_root
             .parent()
             .expect("fixture flows root has a parent")
             .join("native-transcripts");
+        let mut timings =
+            crate::store::timings_limits::seed_timings().expect("authored timings seed");
+        timings.launch_rest_wait = 1000;
+        timings.title_readback_interval = 1;
         Self {
             executable,
             flow_id_executable: fixture_root.join("flow-id"),
@@ -385,7 +400,10 @@ impl ConfiguresHerdrCli for HerdrCli {
                     .parent()
                     .expect("fixture flows root has a parent")
                     .to_path_buf(),
+                limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
             },
+            timings,
+            limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),
             claude_transcript_root: fixture_root.join("claude"),
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),

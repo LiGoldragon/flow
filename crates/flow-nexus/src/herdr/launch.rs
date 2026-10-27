@@ -10,7 +10,6 @@
 use super::{DecodesFlowClaim, FlowClaim, HerdrCli, claude_paste};
 use crate::codex::NamesBoundCodexThread;
 use crate::codex::SelectsCodexEndpoint;
-use crate::composition::HERDR_REQUEST_LINE_LIMIT;
 pub use crate::generated::starter::StartupProgress;
 use crate::generated::starter::{
     DeliveryIntended, JsonRow, LeanStart, PaneBound, PromptsThroughHerdrSocket, ReadsStartupRecord,
@@ -344,8 +343,6 @@ const CODEX_LEFT_OUT_OPENINGS: &[(signal_flow::LeaveOut, &str)] = &[
 /// session. Herdr 0.8.2 reads a request line up to 1 MiB.
 /// Herdr's `agent.prompt` for the pane's agent types the text, then Enter;
 /// its reply is the JSON value Herdr answered with a result.
-const PROMPT_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
-
 impl PromptsThroughHerdrSocket for HerdrCli {
     fn herdr_session_socket<N: Textual>(&self, input: N) -> Result<String, String> {
         use crate::caller::KnowsHerdrServers;
@@ -373,15 +370,21 @@ impl PromptsThroughHerdrSocket for HerdrCli {
         let mut line = serde_json::to_string(&request)
             .map_err(|error| format!("Herdr prompt request not encoded: {error}"))?;
         line.push('\n');
-        if line.len() > HERDR_REQUEST_LINE_LIMIT {
+        if line.len() > self.limits.herdr_line as usize {
             return Err("Herdr prompt request exceeds its line limit".into());
         }
         let socket = self.herdr_session_socket(&pane.herdr_session_name)?;
         let mut stream = UnixStream::connect(&socket)
             .map_err(|error| format!("Herdr socket unreachable: {error}"))?;
         stream
-            .set_read_timeout(Some(PROMPT_REPLY_TIMEOUT))
-            .and_then(|_| stream.set_write_timeout(Some(PROMPT_REPLY_TIMEOUT)))
+            .set_read_timeout(Some(Duration::from_millis(
+                self.timings.prompt_reply_timeout as u64,
+            )))
+            .and_then(|_| {
+                stream.set_write_timeout(Some(Duration::from_millis(
+                    self.timings.prompt_reply_timeout as u64,
+                )))
+            })
             .map_err(|error| error.to_string())?;
         stream
             .write_all(line.as_bytes())
@@ -524,9 +527,9 @@ impl PreparesClaudePane for HerdrCli {
             "--source".into(),
             "recent-unwrapped".into(),
             "--lines".into(),
-            "50".into(),
+            self.limits.output_lines.to_string(),
             "--timeout".into(),
-            "5000".into(),
+            self.timings.environment_ready_timeout.to_string(),
         ])?;
         let observed_pane = response
             .pointer("/result/pane_id")
@@ -1415,13 +1418,10 @@ impl ReadsTranscriptRow for serde_json::Value {
 }
 
 pub(crate) trait TitlesClaudeSession {
-    const TITLE_READBACK_ATTEMPTS: usize = 40;
+    fn title_readback_attempts(&self) -> usize;
+    fn title_readback_interval(&self) -> Duration;
     /// The source under which Flow reports a pane's displayed agent to Herdr.
     const DISPLAY_SOURCE: &'static str = "flow";
-    #[cfg(not(test))]
-    const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(250);
-    #[cfg(test)]
-    const TITLE_READBACK_INTERVAL: Duration = Duration::from_millis(1);
     /// Every title the native Claude transcript records for its session, in
     /// the order written; empty while no transcript or no title record
     /// exists.
@@ -1465,6 +1465,13 @@ pub(crate) trait TitlesClaudeSession {
 }
 
 impl TitlesClaudeSession for HerdrCli {
+    fn title_readback_attempts(&self) -> usize {
+        self.limits.title_readbacks as usize
+    }
+
+    fn title_readback_interval(&self) -> Duration {
+        Duration::from_millis(self.timings.title_readback_interval as u64)
+    }
     fn claude_transcript_titles(
         &self,
         pane: &HerdrPaneBinding,
@@ -1503,7 +1510,7 @@ impl TitlesClaudeSession for HerdrCli {
         self.await_pane_rest(pane)
             .map_err(|_| TitleRefusal::NotReady)?;
         let mut last = TitleRefusal::NotReady;
-        for _ in 0..Self::TITLE_READBACK_ATTEMPTS {
+        for _ in 0..self.title_readback_attempts() {
             match self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)
             {
                 Ok(agent)
@@ -1520,7 +1527,7 @@ impl TitlesClaudeSession for HerdrCli {
                 }
                 Err(refusal) => return Err(refusal.into()),
             }
-            std::thread::sleep(Self::TITLE_READBACK_INTERVAL);
+            std::thread::sleep(self.title_readback_interval());
         }
         Err(last)
     }
@@ -1532,7 +1539,7 @@ impl TitlesClaudeSession for HerdrCli {
     ) -> Result<(), TitleRefusal> {
         let pane = &binding.herdr_pane_binding;
         self.await_claude_title_readiness(binding)?;
-        for _ in 0..Self::TITLE_READBACK_ATTEMPTS {
+        for _ in 0..self.title_readback_attempts() {
             let agent =
                 self.verify_native_target(pane, &binding.native_session_id, &HarnessKind::Claude)?;
             let terminal = agent
@@ -1547,7 +1554,7 @@ impl TitlesClaudeSession for HerdrCli {
             if terminal == Some(title.as_str()) && record_agrees {
                 return Ok(());
             }
-            std::thread::sleep(Self::TITLE_READBACK_INTERVAL);
+            std::thread::sleep(self.title_readback_interval());
         }
         Err(TitleRefusal::ReadbackDiffers)
     }
@@ -1824,7 +1831,7 @@ impl SpawnsNativeHarness for HerdrCli {
             "--pane".into(),
             pane.herdr_pane_id.clone(),
             "--timeout".into(),
-            "30000".into(),
+            self.timings.agent_start_timeout.to_string(),
         ];
         // The program Herdr types first: Herdr's own name for the kind, or
         // the configured Codex client.
@@ -2130,11 +2137,6 @@ impl ReadsHerdrRefusal for signal_flow::HerdrRefusal {
 /// the title, each wait here, bounded, and a timeout is a typed not-ready
 /// refusal.
 pub(crate) trait WaitsForPaneRest {
-    /// How long Herdr's `agent wait` may take before a bind or a first prompt.
-    #[cfg(not(test))]
-    const REST_WAIT_MILLISECONDS: &'static str = "30000";
-    #[cfg(test)]
-    const REST_WAIT_MILLISECONDS: &'static str = "1000";
     /// The refusal text a bind or a prompt that never found the pane at rest
     /// carries; the failure classifier reads it as not-ready.
     const NOT_READY: &'static str = "Herdr agent did not come to rest: not ready";
@@ -2154,7 +2156,7 @@ impl WaitsForPaneRest for HerdrCli {
             "--until".into(),
             "done".into(),
             "--timeout".into(),
-            Self::REST_WAIT_MILLISECONDS.into(),
+            self.timings.launch_rest_wait.to_string(),
         ])
         .map_err(|_| Self::NOT_READY.to_owned())
     }

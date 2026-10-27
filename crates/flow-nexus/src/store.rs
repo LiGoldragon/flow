@@ -28,6 +28,7 @@ pub(crate) mod send_v33;
 pub(crate) mod sent;
 mod staged_upgrade;
 pub(crate) mod successor;
+pub(crate) mod timings_limits;
 use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
@@ -44,6 +45,7 @@ use queue_delivery::{AccountsQueueDelivery, QueueDeliveryPhase};
 use queue_delivery::{DeclaresQueueDeliveryTables, QueueDeliveryTables};
 use send_outcome::{DeclaresSendOutcomeTables, SendOutcomeTables};
 use staged_upgrade::{StagedUpgrade, StagesUpgrade, UpgradeScope};
+use timings_limits::RegistersTimingAndLimitTables;
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
@@ -206,6 +208,8 @@ const ADDED_LATER_TABLES: &[&str] = &[
     "flow_nexus_queue_delivery_requests",
     "flow_nexus_queue_delivery_attempts",
     "flow_nexus_meta_metaflow_configuration",
+    "flow_nexus_meta_timings_configuration",
+    "flow_nexus_meta_limits_configuration",
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_compactions",
@@ -225,6 +229,8 @@ const CONFIGURATION_ONLY_ADDED_TABLES: &[&str] = &[
     "flow_nexus_meta_model_threshold_configuration",
     "flow_nexus_meta_investigation_configuration",
     "flow_nexus_meta_metaflow_configuration",
+    "flow_nexus_meta_timings_configuration",
+    "flow_nexus_meta_limits_configuration",
 ];
 // These are this Flow source's authored Memory version candidates. They are
 // separate from the generic Sema layout version: the registered state-family
@@ -3250,6 +3256,8 @@ impl AnnouncesLaunchChanges for LaunchChanges {
 pub enum StoreError {
     #[error("sema-engine operation failed: {0}")]
     Engine(#[from] sema_engine::Error),
+    #[error("configuration seed is invalid: {0}")]
+    ConfigurationSeed(String),
     #[error("launch outcome family upgrade failed: {0}")]
     LaunchOutcomeUpgrade(String),
     #[error("flow family upgrade failed: {0}")]
@@ -3807,6 +3815,8 @@ pub(crate) struct MetaConfigurationTables {
     pub(crate) send_servers: TableReference<send_server::StoredMetaSendServerConfiguration>,
     pub(crate) metaflows: TableReference<metaflow_declaration::StoredMetaMetaflowConfiguration>,
     investigation: TableReference<StoredMetaInvestigationConfiguration>,
+    timings: TableReference<timings_limits::StoredTimings>,
+    limits: TableReference<timings_limits::StoredLimits>,
 }
 
 trait RegistersMetaConfigurationTables: Sized {
@@ -3827,6 +3837,8 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             )?,
             investigation: engine
                 .register_table(StoredMetaInvestigationConfiguration::descriptor())?,
+            timings: engine.register_timings()?,
+            limits: engine.register_limits()?,
             metaflows: engine.upgraded_metaflow_declarations(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
             )?,
@@ -3902,6 +3914,9 @@ pub trait ConfiguresOnlyStore: Sized {
     /// The open itself, on the store at `path` and in its place.
     fn open_in_place(path: &Path) -> Result<Self, StoreError>;
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
+    fn runtime_bounds(
+        &self,
+    ) -> Result<(meta_signal_flow::Timings, meta_signal_flow::Limits), StoreError>;
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
     fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError>;
@@ -3952,6 +3967,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
         let meta_send_servers_descriptor = <send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor();
         let meta_metaflows_descriptor = <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor();
+        let timings_descriptor = timings_limits::timings_descriptor();
+        let limits_descriptor = timings_limits::limits_descriptor();
         if recognized {
             FlowStore::drop_retired_tables(path)?;
         }
@@ -3970,7 +3987,9 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
                 .with_family(&meta_leave_outs_descriptor)
                 .with_family(&meta_send_servers_descriptor)
                 .with_family(&meta_investigation_descriptor)
-                .with_family(&meta_metaflows_descriptor),
+                .with_family(&meta_metaflows_descriptor)
+                .with_family(&timings_descriptor)
+                .with_family(&limits_descriptor),
         )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
@@ -3984,6 +4003,8 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
             metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
+            timings: engine.register_timings()?,
+            limits: engine.register_limits()?,
         };
         if !recognized {
             engine.assert(Assertion::new(
@@ -4004,6 +4025,21 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
 
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError> {
         FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
+    }
+
+    fn runtime_bounds(
+        &self,
+    ) -> Result<(meta_signal_flow::Timings, meta_signal_flow::Limits), StoreError> {
+        let timings = self
+            .engine
+            .match_records(QueryPlan::all(self.meta_configuration_tables.timings))?;
+        let limits = self
+            .engine
+            .match_records(QueryPlan::all(self.meta_configuration_tables.limits))?;
+        match (timings.records(), limits.records()) {
+            ([timings], [limits]) => Ok((timings.timings.clone(), limits.limits.clone())),
+            _ => Err(StoreError::StateInvariant),
+        }
     }
 
     fn configure_change(
@@ -4496,6 +4532,8 @@ impl OpensFlowStore for FlowStore {
         let successor_intents_descriptor =
             <successor::SuccessorIntent as successor::DescribesSuccessorIntentTable>::descriptor();
         let meta_leave_outs_descriptor = StoredMetaLeaveOutConfiguration::descriptor();
+        let timings_descriptor = timings_limits::timings_descriptor();
+        let limits_descriptor = timings_limits::limits_descriptor();
         let events_descriptor = <events::FlowEvents as events::DescribesEventTable>::descriptor();
         let context_sizes_descriptor =
             <context::FlowContextSize as context::DescribesContextSizeTable>::descriptor();
@@ -4536,6 +4574,8 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&meta_leave_outs_descriptor)
                 .with_family(&<send_server::StoredMetaSendServerConfiguration as send_server::DescribesSendServerTable>::descriptor())
                 .with_family(&meta_investigation_descriptor)
+                .with_family(&timings_descriptor)
+                .with_family(&limits_descriptor)
                 .with_family(&compactions_descriptor)
                 .with_family(&successor_intents_descriptor)
                 .with_family(&<metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor())
@@ -7500,6 +7540,18 @@ pub(crate) trait ReadsFlowMemory {
                 metaflow_declaration::META_METAFLOW_CONFIGURATION_FAMILY,
                 metaflow_declaration::META_METAFLOW_CONFIGURATION_SCHEMA,
             ),
+            "flow_nexus_meta_timings_configuration" => {
+                return Some((
+                    "flow-nexus-meta-timings-configuration",
+                    timings_limits::StoredTimings::schema_hash(),
+                ));
+            }
+            "flow_nexus_meta_limits_configuration" => {
+                return Some((
+                    "flow-nexus-meta-limits-configuration",
+                    timings_limits::StoredLimits::schema_hash(),
+                ));
+            }
             "flow_nexus_flow_events" => (events::FLOW_EVENT_FAMILY, events::FLOW_EVENT_SCHEMA),
             "flow_nexus_flow_context_sizes" => (
                 context::FLOW_CONTEXT_SIZE_FAMILY,
@@ -8004,18 +8056,30 @@ pub(crate) trait ReadsFlowMemory {
         let send_server_rows = engine.match_records(QueryPlan::all(tables.send_servers))?;
         let investigation_rows = engine.match_records(QueryPlan::all(tables.investigation))?;
         let metaflow_rows = engine.match_records(QueryPlan::all(tables.metaflows))?;
+        let timings_rows = engine.match_records(QueryPlan::all(tables.timings))?;
+        let limits_rows = engine.match_records(QueryPlan::all(tables.limits))?;
         if models_rows.database_marker() != marker
             || metaflow_rows.database_marker() != marker
             || thresholds_rows.database_marker() != marker
             || leave_out_rows.database_marker() != marker
             || send_server_rows.database_marker() != marker
             || investigation_rows.database_marker() != marker
+            || timings_rows.database_marker() != marker
+            || limits_rows.database_marker() != marker
             || engine.current_database_marker()? != marker
         {
             return Err(StoreError::ConfigurationReadViewChanged);
         }
         let Some(nexus) = nexus else {
             return Ok(None);
+        };
+        let timings = match timings_rows.records() {
+            [stored] if stored.record_key() == RecordKey::new("timings") => stored.timings.clone(),
+            _ => return Err(StoreError::StateInvariant),
+        };
+        let limits = match limits_rows.records() {
+            [stored] if stored.record_key() == RecordKey::new("limits") => stored.limits.clone(),
+            _ => return Err(StoreError::StateInvariant),
         };
         let mut models = models_rows
             .records()
@@ -8065,6 +8129,8 @@ pub(crate) trait ReadsFlowMemory {
             send_servers,
             investigation,
             metaflows,
+            timings,
+            limits,
         }))
     }
 
@@ -8248,6 +8314,16 @@ pub(crate) trait ReadsFlowMemory {
                     vec![StoredMetaInvestigationConfiguration { investigation }],
                 )
             }
+            ConfigurationChange::Timings(timings) => FlowStore::replace_configuration_family(
+                engine,
+                tables.timings,
+                vec![timings_limits::StoredTimings { timings }],
+            ),
+            ConfigurationChange::Limits(limits) => FlowStore::replace_configuration_family(
+                engine,
+                tables.limits,
+                vec![timings_limits::StoredLimits { limits }],
+            ),
         }
     }
 

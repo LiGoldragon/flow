@@ -1,5 +1,12 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 9 makes every operational timing and size/count limit in the overnight
+audit configured data. Fresh stores seed the `Timings` and `Limits` singleton
+families from committed Datom files; existing stores gain those families with
+the same seed values on open. `Configure.Timings` and `Configure.Limits` replace
+their complete singleton values, and the effective configuration snapshot
+carries both. The privileged wire advances to meta-signal-flow 44.0.0.
+
 Batch 6 makes launch dependencies declaration data. `ConfigureMetaflow`
 appends `Requires`; archived declarations upgrade with none. Before a new
 launch, Flow starts every required Address not Awake and rejects with

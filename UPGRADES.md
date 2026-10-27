@@ -26,7 +26,6 @@ Curriculum serves that schema.
   settle an `Uncertain` pane delivery as `Presented` or `NotPresented`, with
   their reason, through `ResolveDelivery`. Delivery Memory upgrades v1 to
   v2; all three earlier grades retain their exact meanings.
->>>>>>> 787b498 (Add paged meta reads and delivery resolution)
 - Refresh threshold configuration names `RefreshTokens`; the threshold family advances
   from v1 to v2 preserving the numeric value. A successor's `Refresh` cause is unit.
 - Store-only recovery repins meta-signal-flow 42 and adds owner repairs for

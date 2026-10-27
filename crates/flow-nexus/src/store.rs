@@ -319,9 +319,8 @@ impl SeedsConfiguration for DefaultConfiguration {
         }
     }
 
-    /// Psyche seats deploy and manage flows, so they alone among flows
-    /// reach the meta socket by default. No Message Nexus executable is
-    /// admitted by path until one is configured.
+    /// Every aspect reaches the meta socket by default. No Message Nexus
+    /// executable is admitted by path until one is configured.
     fn delivery_configuration(&self) -> DeliveryConfiguration {
         use delivery::DefaultsHarnessProfile;
         DeliveryConfiguration {

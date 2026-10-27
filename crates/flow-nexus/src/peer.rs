@@ -61,14 +61,10 @@ impl AdmitsMetaPeer for RunningNexus {
                 snapshot.nexus.message_nexus_binary,
                 snapshot.nexus.meta_aspects,
             ),
-            Ok(None) => (
-                String::new(),
-                vec![
-                    signal_flow::Aspect::Psyche,
-                    signal_flow::Aspect::Mind,
-                    signal_flow::Aspect::Field,
-                ],
-            ),
+            Ok(None) => match self.store.delivery_configuration() {
+                Ok(legacy) => (legacy.message_nexus_path, legacy.meta_aspects),
+                Err(_) => return Some(MetaRefusal::PeerUnknown),
+            },
             Err(_) => return Some(MetaRefusal::PeerUnknown),
         };
         if !message_binary.is_empty() && peer.executable() == fs::canonicalize(&message_binary).ok()

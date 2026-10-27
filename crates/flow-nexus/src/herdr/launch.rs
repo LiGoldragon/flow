@@ -71,6 +71,85 @@ enum ClaudeSession {
     Attached(String),
 }
 
+/// The values a configured harness argument template may insert for one
+/// launch. `None` means an optional value is absent; an empty vector is a
+/// present list with no arguments.
+struct HarnessArgumentValues {
+    title: Option<String>,
+    module_switches: Vec<String>,
+    denied_tools: Option<String>,
+    allowed_tools: Option<String>,
+    session_id: Option<String>,
+    prompt_file: Option<String>,
+    settings_text: Option<String>,
+    launch_model: String,
+    launch_effort: String,
+    remote_socket: Option<String>,
+    thread_id: Option<String>,
+}
+
+impl HarnessArgumentValues {
+    fn at(&self, slot: &meta_signal_flow::Slot) -> Result<Option<Vec<String>>, String> {
+        use meta_signal_flow::Slot;
+        let one = |value: &Option<String>| value.clone().map(|value| vec![value]);
+        Ok(match slot {
+            Slot::Title => one(&self.title),
+            Slot::ModuleSwitches => Some(self.module_switches.clone()),
+            Slot::DeniedTools => one(&self.denied_tools),
+            Slot::AllowedTools => one(&self.allowed_tools),
+            Slot::SessionId => one(&self.session_id),
+            Slot::PromptFile => one(&self.prompt_file),
+            Slot::SettingsText => one(&self.settings_text),
+            Slot::LaunchModel => Some(vec![self.launch_model.clone()]),
+            Slot::LaunchEffort => Some(vec![self.launch_effort.clone()]),
+            Slot::RemoteSocket => one(&self.remote_socket),
+            Slot::ThreadId => one(&self.thread_id),
+            _ => return Err(format!("slot {slot:?} is not a harness argument value")),
+        })
+    }
+}
+
+/// Renders the configured argument sequence without interpreting literal
+/// text. A direct Slot and a Joined slot are required; Flagged is omitted
+/// together with its flag when its value is absent.
+fn render_harness_arguments(
+    template: &[meta_signal_flow::Piece],
+    values: &HarnessArgumentValues,
+) -> Result<Vec<String>, String> {
+    use meta_signal_flow::Piece;
+    let mut arguments = Vec::new();
+    for piece in template {
+        match piece {
+            Piece::Text(text) => arguments.push(text.clone()),
+            Piece::Slot(slot) => arguments.extend(
+                values
+                    .at(slot)?
+                    .ok_or_else(|| format!("required harness argument slot {slot:?} is absent"))?,
+            ),
+            Piece::Flagged(flagged) => {
+                if let Some(value) = values.at(&flagged.slot)? {
+                    arguments.push(flagged.string.clone());
+                    arguments.extend(value);
+                }
+            }
+            Piece::Joined(joined) => {
+                let value = values
+                    .at(&joined.slot)?
+                    .ok_or_else(|| format!("required joined slot {:?} is absent", joined.slot))?;
+                let [value] = value.as_slice() else {
+                    return Err(format!(
+                        "joined harness argument slot {:?} has {} values",
+                        joined.slot,
+                        value.len()
+                    ));
+                };
+                arguments.push(format!("{}{}", joined.string, value));
+            }
+        }
+    }
+    Ok(arguments)
+}
+
 /// The one Herdr `agent start` every launch runs.
 trait SpawnsNativeHarness {
     fn spawn_native_harness(
@@ -293,11 +372,6 @@ pub trait ObservesNativeTargetReceipt {
     ) -> Result<StartupProgress, TranscriptRefusal>;
 }
 
-/// The Codex TUI's terminal title items: the thread title alone. The items
-/// codex-tui 0.161.0-alpha.2 accepts in `[tui].terminal_title` include
-/// `project-name`, `current-dir`, `run-state` and `thread-title`.
-const CODEX_TERMINAL_TITLE: &str = "tui.terminal_title=[\"thread-title\"]";
-
 /// How each Codex block a launch may leave out opens when Codex puts it in a
 /// request: the openings of the developer and user context messages in the
 /// rollout codex-tui 0.161.0-alpha.2 wrote for thread
@@ -420,13 +494,6 @@ pub(crate) trait PreparesClaudePane {
     /// A launch that leaves out the attribution reminder sets the
     /// attribution lines empty here.
     fn claude_flag_settings(&self, lean: &LeanStart) -> String;
-    const CLAUDE_REMOTE_CONTROL_FLAG: &'static str = "--remote-control";
-    /// Claude Code 2.1.294's session name: "Set a display name for this
-    /// session (shown in the prompt box, /resume picker, and terminal
-    /// title)". A headless probe with `--disable-slash-commands` recorded it
-    /// as the same `custom-title` and `agent-name` transcript records
-    /// `/rename` writes.
-    const CLAUDE_NAME_FLAG: &'static str = "--name";
     fn prepare_claude_pane_environment(
         &self,
         launch: &ComposedLaunch,
@@ -1949,73 +2016,85 @@ impl SpawnsNativeHarness for HerdrCli {
         };
         arguments.push("--".into());
         let typed_from = arguments.len();
-        if let Some(endpoint) = codex_endpoint {
-            arguments.push("--remote".into());
-            arguments.push(format!("unix://{}", endpoint.socket));
-        }
-        if let Some(title) = &claude_title {
-            arguments.push("--settings".into());
-            arguments
-                .push(self.claude_flag_settings(&launch.lean_start(self.harness_modules(launch))));
-            // Every Claude Flow is remotely controllable under its title;
-            // the title begins with `{`, never `-`, so the optional value
-            // binds to the flag.
-            arguments.push(Self::CLAUDE_REMOTE_CONTROL_FLAG.into());
-            arguments.push(title.as_str().into());
-            // The session is named at launch with the same title: the name
-            // Claude records in its transcript and shows in the prompt box,
-            // the resume picker and the terminal title. `/rename` is a
-            // slash command, which a launch leaving out the Skill tool
-            // (`--disable-slash-commands`) cannot run.
-            arguments.push(Self::CLAUDE_NAME_FLAG.into());
-            arguments.push(title.as_str().into());
-            // The composed system prompt is read from the in-memory file
-            // this Nexus holds open until the session has bound; it never
-            // travels in the typed command and never touches a disk.
-            arguments.push("--system-prompt-file".into());
-            arguments.push(self.hold_system_prompt(launch)?);
-            match &session {
-                ClaudeSession::Unchosen | ClaudeSession::Attached(_) => {}
-                ClaudeSession::Chosen(session) => {
-                    arguments.push("--session-id".into());
-                    arguments.push(session.clone());
-                }
-            }
-        }
-        arguments.push("--model".into());
-        arguments.push(launch.launch_profile.model_name.clone());
-        match launch.harness_kind {
-            HarnessKind::Claude => {
-                arguments.push("--effort".into());
-                arguments.push(launch.launch_profile.effort.clone());
-            }
-            // The thread already holds the composed system prompt as its
-            // base instructions, given at thread/start and given again after
-            // the TUI attaches; the TUI is not given it.
-            HarnessKind::Codex => {
-                arguments.push("-c".into());
-                arguments.push(format!(
-                    "model_reasoning_effort={}",
-                    launch.launch_profile.effort
+        let configured_harness = {
+            let mut matches = self.codex_endpoints.harnesses.iter().filter(|configured| {
+                configured.harness_kind == launch.harness_kind
+                    && configured
+                        .served_models
+                        .iter()
+                        .any(|served| served.model_name == launch.launch_profile.model_name)
+            });
+            let configured = matches.next().ok_or_else(|| {
+                SpawnFailure::Unattempted(
+                    "no configured harness serves the launch model exactly".into(),
+                )
+            })?;
+            if matches.next().is_some() {
+                return Err(SpawnFailure::Unattempted(
+                    "more than one configured harness serves the launch model".into(),
                 ));
-                // The terminal title is the thread title alone, which Title
-                // sets to the seat's struct: codex-tui 0.161.0-alpha.2 names
-                // its items in `[tui].terminal_title`, and without this list
-                // appends the project name (" | primary").
-                arguments.push("-c".into());
-                arguments.push(CODEX_TERMINAL_TITLE.into());
+            }
+            configured.clone()
+        };
+
+        let lean = launch.lean_start(self.harness_modules(launch));
+        let mut module_switches = Vec::new();
+        let mut legacy = lean.arguments().into_iter();
+        while let Some(argument) = legacy.next() {
+            if argument == "--disallowedTools" || argument == "--tools" {
+                // These two values have their own typed template slots.
+                let _ = legacy.next();
+            } else {
+                module_switches.push(argument);
             }
         }
-        // The launch's leave-outs, as its harness's own switches.
-        arguments.extend(launch.lean_start(self.harness_modules(launch)).arguments());
-        // The subcommand follows every switch: the TUI resumes the thread
-        // Flow opened and named, idle until Submit gives it its first turn.
-        if let (HarnessKind::Codex, ClaudeSession::Attached(thread)) =
-            (&launch.harness_kind, &session)
-        {
-            arguments.push("resume".into());
-            arguments.push(thread.clone());
-        }
+        let denied_tools = lean
+            .disallowed_tools()
+            .into_iter()
+            .reduce(|mut joined, tool| {
+                joined.push(',');
+                joined.push_str(&tool);
+                joined
+            });
+        let allowed_tools = match &launch.launch_profile.tool_set {
+            signal_flow::ToolSet::Default => None,
+            signal_flow::ToolSet::Explicit(tools) => Some(tools.join(",")),
+        };
+        let prompt_file = if launch.harness_kind == HarnessKind::Claude {
+            // The composed system prompt is read from the in-memory file
+            // this Nexus holds open until its session has bound.
+            Some(self.hold_system_prompt(launch)?)
+        } else {
+            None
+        };
+        let (session_id, thread_id) = match &session {
+            ClaudeSession::Unchosen => (None, None),
+            ClaudeSession::Chosen(session) => (Some(session.clone()), None),
+            ClaudeSession::Attached(thread) => (None, Some(thread.clone())),
+        };
+        let values = HarnessArgumentValues {
+            title: claude_title.as_ref().map(|title| title.as_str().to_owned()),
+            module_switches,
+            denied_tools,
+            allowed_tools,
+            session_id,
+            prompt_file: prompt_file.clone(),
+            settings_text: (launch.harness_kind == HarnessKind::Claude)
+                .then(|| self.claude_flag_settings(&lean)),
+            launch_model: launch.launch_profile.model_name.clone(),
+            launch_effort: launch.launch_profile.effort.clone(),
+            remote_socket: codex_endpoint.map(|endpoint| endpoint.socket.clone()),
+            thread_id,
+        };
+        let rendered = render_harness_arguments(&configured_harness.arguments, &values).map_err(
+            |problem| {
+                if prompt_file.is_some() {
+                    self.release_system_prompt(&launch.launch_profile.launch_request_id);
+                }
+                SpawnFailure::Unattempted(problem)
+            },
+        )?;
+        arguments.extend(rendered);
         let typed = std::iter::once(program)
             .chain(arguments[typed_from..].iter().cloned())
             .collect::<Vec<_>>();
@@ -3197,9 +3276,9 @@ impl ObservesNativeTargetReceipt for HerdrCli {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        AcceptsLaunchRegistration, CreatesHerdrLaunchPane, ObservesNativeLaunchBinding,
-        ObservesNativeTargetReceipt, StartsNativeHerdrHarness, StartupProgress, SubmitsStartupPart,
-        TitlesNativeFlow,
+        AcceptsLaunchRegistration, CreatesHerdrLaunchPane, HarnessArgumentValues,
+        ObservesNativeLaunchBinding, ObservesNativeTargetReceipt, StartsNativeHerdrHarness,
+        StartupProgress, SubmitsStartupPart, TitlesNativeFlow, render_harness_arguments,
     };
     use crate::composition::{FitsOneMessage, SplitsStartupMessage};
     use crate::fixture_executable::{FixtureExecutable, InstallsScript};
@@ -3236,6 +3315,69 @@ pub(crate) mod tests {
     }
 
     const PROMPT_HASH: &str = "0cb26cfe0a554e4780aa5af20cafbe3ae3259f823438576026a4ffff58371a67";
+
+    #[test]
+    fn a_configured_argument_template_preserves_the_seed_order_exactly() {
+        use meta_signal_flow::{Flagged_Data, Joined_Data, Piece, Slot};
+        let template = vec![
+            Piece::Text("--remote".into()),
+            Piece::Joined(Joined_Data {
+                string: "unix://".into(),
+                slot: Slot::RemoteSocket,
+            }),
+            Piece::Text("--model".into()),
+            Piece::Slot(Slot::LaunchModel),
+            Piece::Text("-c".into()),
+            Piece::Joined(Joined_Data {
+                string: "model_reasoning_effort=".into(),
+                slot: Slot::LaunchEffort,
+            }),
+            Piece::Text("-c".into()),
+            Piece::Text("tui.terminal_title=[\"thread-title\"]".into()),
+            Piece::Slot(Slot::ModuleSwitches),
+            Piece::Flagged(Flagged_Data {
+                string: "resume".into(),
+                slot: Slot::ThreadId,
+            }),
+        ];
+        let values = HarnessArgumentValues {
+            title: None,
+            module_switches: vec!["-c".into(), "skills.include_instructions=false".into()],
+            denied_tools: None,
+            allowed_tools: None,
+            session_id: None,
+            prompt_file: None,
+            settings_text: None,
+            launch_model: "gpt-6-sol".into(),
+            launch_effort: "medium".into(),
+            remote_socket: Some("/run/codex.sock".into()),
+            thread_id: Some("thread-42".into()),
+        };
+        assert_eq!(
+            render_harness_arguments(&template, &values).unwrap(),
+            [
+                "--remote",
+                "unix:///run/codex.sock",
+                "--model",
+                "gpt-6-sol",
+                "-c",
+                "model_reasoning_effort=medium",
+                "-c",
+                "tui.terminal_title=[\"thread-title\"]",
+                "-c",
+                "skills.include_instructions=false",
+                "resume",
+                "thread-42",
+            ]
+        );
+
+        let unresolved = [Piece::Slot(Slot::PromptFile)];
+        assert!(
+            render_harness_arguments(&unresolved, &values)
+                .unwrap_err()
+                .contains("required harness argument slot PromptFile is absent")
+        );
+    }
 
     pub(crate) fn launch(harness_kind: HarnessKind) -> ComposedLaunch {
         ComposedLaunch {
@@ -4098,7 +4240,7 @@ printf '%s\n' "$alias"
             "UserPromptSubmit",
         ] {
             assert!(start_call.contains(event), "missing {event}: {start_call}");
-        }        // The flag settings name the launch's own mode, which suppresses the
+        } // The flag settings name the launch's own mode, which suppresses the
         // auto-mode default offer, and carry the harness hook on SessionStart,
         // every PostToolUse, UserPromptSubmit, Notification, Stop and SessionEnd; no
         // settings file is written.

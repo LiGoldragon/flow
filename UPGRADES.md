@@ -1,5 +1,12 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 15 renders each native harness command from its configured
+`Harness.Arguments` template. Literal arguments, joined values, optional
+flagged values and ordered multi-value module switches retain the configured
+order; a required or unsupported slot refuses before Herdr starts the agent.
+Existing Harness v1 rows already carry the templates installed by Batch 13,
+so their storage shape does not change.
+
 Batch 14 replaces the closed leave-out vocabulary with configured harness
 modules. Each metaflow declaration carries module names; the effective set is
 the harness installation's `LeftOut` union the launch override, or the

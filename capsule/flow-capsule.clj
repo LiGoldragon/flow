@@ -673,7 +673,8 @@
             :when (and (not (str/blank? line)) (not (str/starts-with? line ";")))]
       (let [datom (-> line (str/replace "@SOURCE_ROOT@" source-root) (str/replace "@CAPSULE_RUNTIME@" capsule-runtime)
                       (str/replace "@CURRICULUM_SOCKET@" curriculum-socket)
-                      (str/replace "@CAPSULE_HOME@" capsule-home))
+                      (str/replace "@CAPSULE_HOME@" capsule-home)
+                      (str/replace "@CAPSULE_BIN@" capsule-bin))
             [reply exit] (configure-one! datom log)
             family (second (re-find #"^Configure\.([A-Za-z]+)" datom))
             ok (str/starts-with? reply "Configured.")]

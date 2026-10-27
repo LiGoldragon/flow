@@ -263,7 +263,7 @@ fn a_letter_herdr_calls_prompted_but_the_composer_still_holds_is_not_presented()
         fixture.deliver_soft("stuck-1", "when you rest"),
         delivered("stuck-1", DeliveryGrade::Uncertain)
     );
-    assert!(fixture.key_presses().is_empty());
+    assert_eq!(fixture.key_presses(), ["ctrl+u backspace"]);
     assert!(fixture.composer_holds().is_some());
 }
 
@@ -277,10 +277,7 @@ fn a_letter_that_will_not_submit_is_taken_back_and_parked() {
     );
     // No submit key is configured; the configured line-by-line retraction
     // takes the stuck two-line letter back out.
-    assert_eq!(
-        fixture.key_presses(),
-        ["ctrl+u backspace ctrl+u backspace"]
-    );
+    assert_eq!(fixture.key_presses(), ["ctrl+u backspace ctrl+u backspace"]);
     assert_eq!(fixture.composer_holds(), None, "the pane is free again");
     // Nothing of a taken-back letter is kept: Message may deliver it again
     // under the same DeliveryId, and this time it submits.
@@ -341,7 +338,7 @@ fn a_stalled_prompt_left_in_the_composer_is_submitted() {
         fixture.deliver_soft("stalled-1", "when you rest"),
         delivered("stalled-1", DeliveryGrade::Uncertain)
     );
-    assert!(fixture.key_presses().is_empty());
+    assert_eq!(fixture.key_presses(), ["ctrl+u backspace"]);
     assert!(fixture.composer_holds().is_some());
 }
 

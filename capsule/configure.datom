@@ -5,7 +5,7 @@
 ; Codex endpoints name sockets no app-server serves and no models, so no
 ; Codex seat can start; Message names no running executable.
 Configure.Nexus.{ @SOURCE_ROOT@ @SOURCE_ROOT@/flows [ Psyche ] @CAPSULE_RUNTIME@/message.sock @CAPSULE_RUNTIME@/no-message-nexus @CURRICULUM_SOCKET@ 60 { herdr flow-id flow-hook } flow-testing }
-Configure.Harnesses.[ { claude Claude fixture claude @CAPSULE_HOME@ None [ { claude-haiku-5-5 claude-haiku-5-5 } ] [] [] [] [] [] [] { [ / «!» # ] [ esc esc ] [ enter ] /compact { ❯ Keys.[ ctrl+c ] 12 32 } } } ]
+Configure.Harnesses.[ { claude Claude fixture @CAPSULE_BIN@/claude @CAPSULE_HOME@/.claude None [ { claude-haiku-5-5 claude-haiku-5-5 } ] [] [] [] [] [] [] { [ / «!» # ] [ esc esc ] [ enter ] /compact { ❯ Keys.[ ctrl+c ] 12 32 } } } ]
 Configure.Models.[ { Primary Psyche claude-haiku-5-5 } { Secondary Psyche claude-haiku-5-5 } { Tertiary Psyche claude-haiku-5-5 } { Quaternary Psyche claude-haiku-5-5 } ]
 Configure.Thresholds.[ { claude-haiku-5-5 200000 } ]
 Configure.LeaveOuts.[ { { Psyche test Secondary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } { { Psyche test Tertiary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } { { Psyche test Quaternary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } ]

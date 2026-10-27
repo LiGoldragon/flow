@@ -194,19 +194,21 @@ impl NamesCurriculumSocket for ConfigureNexusV1 {
     }
 }
 
-
 /// Reads the v1/v2 Nexus row before Engine upgrades its table, so the fields
 /// that move to the Harness family can be written there without loss.
 pub(super) fn legacy_nexus(path: &std::path::Path) -> Result<Option<ConfigureNexusV2>, StoreError> {
     use redb::{ReadableDatabase as _, ReadableTable as _};
-    if !path.exists() { return Ok(None); }
+    if !path.exists() {
+        return Ok(None);
+    }
     // This runs only inside the mutating open (on its staged copy when an
     // upgrade is needed). A recovery-required redb must be opened writable
     // so redb can repair it before we read the legacy row; recognition itself
     // remains read-only and never calls this function.
-    let database = redb::Database::open(path)
-        .map_err(|error| StoreError::NexusUpgrade(error.to_string()))?;
-    let read = database.begin_read()
+    let database =
+        redb::Database::open(path).map_err(|error| StoreError::NexusUpgrade(error.to_string()))?;
+    let read = database
+        .begin_read()
         .map_err(|error| StoreError::NexusUpgrade(error.to_string()))?;
     let table = match read.open_table(redb::TableDefinition::<String, &[u8]>::new(
         super::META_NEXUS_CONFIGURATION_TABLE_NAME.as_str(),
@@ -215,12 +217,20 @@ pub(super) fn legacy_nexus(path: &std::path::Path) -> Result<Option<ConfigureNex
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
         Err(error) => return Err(StoreError::NexusUpgrade(error.to_string())),
     };
-    let Some(bytes) = table.get("nexus".to_owned())
-        .map_err(|error| StoreError::NexusUpgrade(error.to_string()))? else { return Ok(None); };
-    if let Ok(row) = rkyv::from_bytes::<StoredMetaNexusConfigurationV2, rkyv::rancor::Error>(bytes.value()) {
+    let Some(bytes) = table
+        .get("nexus".to_owned())
+        .map_err(|error| StoreError::NexusUpgrade(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    if let Ok(row) =
+        rkyv::from_bytes::<StoredMetaNexusConfigurationV2, rkyv::rancor::Error>(bytes.value())
+    {
         return Ok(Some(row.nexus));
     }
-    if let Ok(row) = rkyv::from_bytes::<StoredMetaNexusConfigurationV1, rkyv::rancor::Error>(bytes.value()) {
+    if let Ok(row) =
+        rkyv::from_bytes::<StoredMetaNexusConfigurationV1, rkyv::rancor::Error>(bytes.value())
+    {
         return Ok(Some(row.nexus.with_curriculum(
             DefaultConfiguration::from_environment().curriculum_socket(),
         )));
@@ -261,12 +271,20 @@ impl UpgradesNexusConfiguration for Engine {
             super::META_NEXUS_CONFIGURATION_TABLE_NAME,
             FamilyName::new(META_NEXUS_CONFIGURATION_FAMILY),
             StoredMetaNexusConfigurationV1::schema_hash(),
-        ).family_identity();
-        let family = self.catalog().family_identity(&super::META_NEXUS_CONFIGURATION_TABLE_NAME).cloned();
+        )
+        .family_identity();
+        let family = self
+            .catalog()
+            .family_identity(&super::META_NEXUS_CONFIGURATION_TABLE_NAME)
+            .cloned();
         let outcome = if family.as_ref() == Some(&v1) {
-            self.upgrade_table::<StoredMetaNexusConfigurationV1, StoredMetaNexusConfiguration>(descriptor)
+            self.upgrade_table::<StoredMetaNexusConfigurationV1, StoredMetaNexusConfiguration>(
+                descriptor,
+            )
         } else {
-            self.upgrade_table::<StoredMetaNexusConfigurationV2, StoredMetaNexusConfiguration>(descriptor)
+            self.upgrade_table::<StoredMetaNexusConfigurationV2, StoredMetaNexusConfiguration>(
+                descriptor,
+            )
         };
         match outcome {
             UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),

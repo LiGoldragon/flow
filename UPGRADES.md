@@ -11,7 +11,18 @@ their exact Layer; PowerLevel and binding role claims are gone. Role and flow
 families advance one version, upgrading High, Medium, Low and UltraLow to
 Primary, Secondary, Tertiary and Quaternary. Fresh meta aspects are Psyche,
 Mind and Field, and an unbound pane is admitted by process. Pins signal-flow
-36.0.0 and meta-signal-flow 50.0.0.
+36.0.0 and meta-signal-flow 50.0.0.Batch 13 makes every harness installation configured data. The privileged
+contract carries an arbitrary `Harnesses` family and Nexus v3 carries the
+flows root, Flow executables and default Herdr session. A fresh store has no
+harness; configured model service, executable/home/socket, pane profile and
+composer data are read from the committed harness snapshot. The Nexus family
+upgrades v2 to v3 and the new harness family is v1. Default Codex endpoints
+leave Flow. Pins signal-flow 37.0.0 and meta-signal-flow 47.0.0.
+The store migration reads frozen v8 launch outcomes with the corresponding
+launch attempts in one typed context snapshot. A unique attempt supplies the
+Address for `RequirementUnmet`; a missing or conflicting attempt moves the
+exact old outcome archive into the durable quarantined-outcome family with a
+typed reason. The staged store is activated only after every family opens.
 
 Batch 9 makes every operational timing and size/count limit in the overnight
 audit configured data. Fresh stores seed the `Timings` and `Limits` singleton
@@ -24,8 +35,9 @@ Batch 6 makes launch dependencies declaration data. `ConfigureMetaflow`
 appends `Requires`; archived declarations upgrade with none. Before a new
 launch, Flow starts every required Address not Awake and rejects with
 `RequirementUnmet.Address` when one cannot start. The launch-outcome family
-advances to v9; an archived `NoSecondary` is retained as an unrecorded
-Secondary requirement.
+advances to v9; an archived `NoSecondary` becomes `RequirementUnmet` only
+when its historical attempt uniquely supplies the Address;
+otherwise it is kept whole in the durable quarantined-outcome family.
 
 Batch 4 adds typed Line, Keys and Clear owner commands and ReadPane. Keys
 carry the exact Herdr keys; they are admitted in a Blocked pane. Line and

@@ -48,8 +48,8 @@ pub(super) fn from_legacy_nexus(
 ) -> Vec<StoredHarness> {
     use flow_ethos::HarnessKind;
     use meta_signal_flow::{
-        Composer, Flagged_Data, Harness, HarnessModel, Joined_Data, PaneProfile, Piece,
-        Retraction, Setting, Slot,
+        Composer, Flagged_Data, Harness, HarnessModel, Joined_Data, PaneProfile, Piece, Retraction,
+        Setting, Slot,
     };
 
     let profile = |kind: HarnessKind| {
@@ -71,11 +71,7 @@ pub(super) fn from_legacy_nexus(
                     vec!["esc".into(), "esc".into()],
                     vec!["enter".into()],
                 ),
-                HarnessKind::Codex => (
-                    vec!["/".into(), "!".into()],
-                    vec!["esc".into()],
-                    vec![],
-                ),
+                HarnessKind::Codex => (vec!["/".into(), "!".into()], vec!["esc".into()], vec![]),
             });
         PaneProfile {
             command_sigil_vector: sigils,
@@ -91,10 +87,7 @@ pub(super) fn from_legacy_nexus(
                 },
                 HarnessKind::Codex => Composer {
                     glyph: "›".into(),
-                    retraction: Retraction::LineByLine(vec![
-                        "ctrl+u".into(),
-                        "backspace".into(),
-                    ]),
+                    retraction: Retraction::LineByLine(vec!["ctrl+u".into(), "backspace".into()]),
                     composer_lines: 12,
                     retracted_lines: 32,
                 },
@@ -112,15 +105,24 @@ pub(super) fn from_legacy_nexus(
     };
     let codex_arguments = vec![
         Piece::Text("--remote".into()),
-        Piece::Joined(Joined_Data { string: "unix://".into(), slot: Slot::RemoteSocket }),
+        Piece::Joined(Joined_Data {
+            string: "unix://".into(),
+            slot: Slot::RemoteSocket,
+        }),
         Piece::Text("--model".into()),
         Piece::Slot(Slot::LaunchModel),
         Piece::Text("-c".into()),
-        Piece::Joined(Joined_Data { string: "model_reasoning_effort=".into(), slot: Slot::LaunchEffort }),
+        Piece::Joined(Joined_Data {
+            string: "model_reasoning_effort=".into(),
+            slot: Slot::LaunchEffort,
+        }),
         Piece::Text("-c".into()),
         Piece::Text("tui.terminal_title=[\"thread-title\"]".into()),
         Piece::Slot(Slot::ModuleSwitches),
-        Piece::Flagged(Flagged_Data { string: "resume".into(), slot: Slot::ThreadId }),
+        Piece::Flagged(Flagged_Data {
+            string: "resume".into(),
+            slot: Slot::ThreadId,
+        }),
     ];
     let codex = |name: &str, endpoint: &flow_ethos::CodexEndpoint| StoredHarness {
         harness: Harness {
@@ -134,11 +136,23 @@ pub(super) fn from_legacy_nexus(
             modules: vec![],
             left_out: vec![],
             arguments: codex_arguments.clone(),
-            settings: vec![Setting { setting_key: "shell_environment_policy.inherit".into(), setting_value: "\"core\"".into() }],
+            settings: vec![Setting {
+                setting_key: "shell_environment_policy.inherit".into(),
+                setting_value: "\"core\"".into(),
+            }],
             parameters: vec![
-                Setting { setting_key: "approvalPolicy".into(), setting_value: "\"never\"".into() },
-                Setting { setting_key: "sandbox".into(), setting_value: "\"danger-full-access\"".into() },
-                Setting { setting_key: "ephemeral".into(), setting_value: "false".into() },
+                Setting {
+                    setting_key: "approvalPolicy".into(),
+                    setting_value: "\"never\"".into(),
+                },
+                Setting {
+                    setting_key: "sandbox".into(),
+                    setting_value: "\"danger-full-access\"".into(),
+                },
+                Setting {
+                    setting_key: "ephemeral".into(),
+                    setting_value: "false".into(),
+                },
             ],
             unset: vec![],
             pane_profile: profile(HarnessKind::Codex),
@@ -158,7 +172,12 @@ pub(super) fn from_legacy_nexus(
         .collect::<Vec<_>>();
     let claude_home = std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_else(|_| {
         std::env::var("HOME")
-            .map(|home| std::path::Path::new(&home).join(".claude").to_string_lossy().into_owned())
+            .map(|home| {
+                std::path::Path::new(&home)
+                    .join(".claude")
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .unwrap_or_else(|_| ".claude".into())
     });
     let claude = StoredHarness {
@@ -181,14 +200,23 @@ pub(super) fn from_legacy_nexus(
                 Piece::Slot(Slot::Title),
                 Piece::Text("--system-prompt-file".into()),
                 Piece::Slot(Slot::PromptFile),
-                Piece::Flagged(Flagged_Data { string: "--session-id".into(), slot: Slot::SessionId }),
+                Piece::Flagged(Flagged_Data {
+                    string: "--session-id".into(),
+                    slot: Slot::SessionId,
+                }),
                 Piece::Text("--model".into()),
                 Piece::Slot(Slot::LaunchModel),
                 Piece::Text("--effort".into()),
                 Piece::Slot(Slot::LaunchEffort),
                 Piece::Slot(Slot::ModuleSwitches),
-                Piece::Flagged(Flagged_Data { string: "--disallowedTools".into(), slot: Slot::DeniedTools }),
-                Piece::Flagged(Flagged_Data { string: "--tools".into(), slot: Slot::AllowedTools }),
+                Piece::Flagged(Flagged_Data {
+                    string: "--disallowedTools".into(),
+                    slot: Slot::DeniedTools,
+                }),
+                Piece::Flagged(Flagged_Data {
+                    string: "--tools".into(),
+                    slot: Slot::AllowedTools,
+                }),
             ],
             settings: vec![],
             parameters: vec![],

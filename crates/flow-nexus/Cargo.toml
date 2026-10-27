@@ -26,7 +26,7 @@ rustix = { version = "1", features = ["fs", "net", "time"] }
 rkyv.workspace = true
 redb = "4"
 sema = { git = "https://github.com/LiGoldragon/sema", rev = "51d7927c872f0df12791bad8d39a4db6433b01a1" }
-sema-engine = { git = "https://github.com/LiGoldragon/sema-engine", rev = "9884905ff9c660ad97a35c524e42532d5c7bac90" }
+sema-engine = { git = "https://github.com/LiGoldragon/sema-engine", rev = "32e79b069486018f240b303f012e6a499bbcbcbf" }
 serde_json.workspace = true
 sha1 = "0.10"
 sha2 = "0.10"

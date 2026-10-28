@@ -161,10 +161,6 @@ pub struct HerdrCli {
     /// matching text.
     pub(crate) flow_owned_claude_processes:
         std::sync::Mutex<std::collections::HashMap<String, OwnedClaudeProcess>>,
-    /// Legacy fixture rows model a rested Claude pane without a real
-    /// process. They exercise store transitions, not process authority.
-    #[cfg(test)]
-    fixture_unretained_claude: bool,
 }
 
 #[derive(Debug)]
@@ -224,8 +220,6 @@ impl Default for HerdrCli {
                 .to_path_buf(),
             flow_owned_claude_programs: Default::default(),
             flow_owned_claude_processes: Default::default(),
-            #[cfg(test)]
-            fixture_unretained_claude: false,
         }
     }
 }
@@ -311,10 +305,7 @@ impl OperatesHerdrPane for HerdrCli {
         // A Flow-launched Claude without its retained kernel identity is a
         // Nexus-restart uncertainty. Current argv or Herdr ownership never
         // recreates authority to stop it.
-        if node.harness_kind == HarnessKind::Claude
-            && matches!(node.origin, Origin::Flow(_))
-            && !self.fixture_accepts_unretained_claude()
-        {
+        if node.harness_kind == HarnessKind::Claude && matches!(node.origin, Origin::Flow(_)) {
             return PaneCloseOutcome::Refused(PaneCloseFailure::IdentityUnavailable);
         }
         // A pane is closed when Herdr shows it running the Flow's own native
@@ -334,17 +325,6 @@ impl OperatesHerdrPane for HerdrCli {
 }
 
 impl HerdrCli {
-    fn fixture_accepts_unretained_claude(&self) -> bool {
-        #[cfg(test)]
-        {
-            self.fixture_unretained_claude
-        }
-        #[cfg(not(test))]
-        {
-            false
-        }
-    }
-
     fn close_pane(&self, route: &HerdrRoute) -> bool {
         Command::new(&self.executable)
             .args([
@@ -750,7 +730,6 @@ impl ConfiguresHerdrCli for HerdrCli {
             flow_owned_claude_readiness_root: fixture_root.to_path_buf(),
             flow_owned_claude_programs: Default::default(),
             flow_owned_claude_processes: Default::default(),
-            fixture_unretained_claude: true,
         }
     }
 }
@@ -1861,21 +1840,17 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&herdr, permissions).unwrap();
         let adapter = HerdrCli::at(herdr, root.path().join("flows"));
-        adapter
-            .flow_owned_claude_processes
-            .lock()
-            .unwrap()
-            .insert(
-                route().herdr_pane_id.clone(),
-                super::OwnedClaudeProcess {
-                    process_id: process.id(),
-                    process_start: actual_start + 1,
-                    process_executable: process_executable.clone(),
-                    configured_executable: process_executable,
-                    session_id: "native-session".into(),
-                    pidfd,
-                },
-            );
+        adapter.flow_owned_claude_processes.lock().unwrap().insert(
+            route().herdr_pane_id.clone(),
+            super::OwnedClaudeProcess {
+                process_id: process.id(),
+                process_start: actual_start + 1,
+                process_executable: process_executable.clone(),
+                configured_executable: process_executable,
+                session_id: "native-session".into(),
+                pidfd,
+            },
+        );
         let node = FlowNode {
             flow_id: "owner".into(),
             session_id: "native-session".into(),
@@ -1891,9 +1866,7 @@ mod tests {
 
         assert_eq!(
             adapter.close(&node),
-            signal_flow::PaneCloseOutcome::Refused(
-                signal_flow::PaneCloseFailure::IdentityMismatch
-            )
+            signal_flow::PaneCloseOutcome::Refused(signal_flow::PaneCloseFailure::IdentityMismatch)
         );
         assert!(process.try_wait().unwrap().is_none());
         assert!(!closed.exists());
@@ -1919,8 +1892,7 @@ mod tests {
         let mut permissions = std::fs::metadata(&herdr).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&herdr, permissions).unwrap();
-        let mut adapter = HerdrCli::at(herdr, root.path().join("flows"));
-        adapter.fixture_unretained_claude = false;
+        let adapter = HerdrCli::at(herdr, root.path().join("flows"));
         let node = FlowNode {
             flow_id: "owner".into(),
             session_id: "native-session".into(),

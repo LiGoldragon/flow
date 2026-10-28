@@ -15,8 +15,8 @@ use redb::{ReadableDatabase as _, ReadableTable as _, TableHandle as _};
 use sema_engine::TableRegistration;
 
 use super::{
-    FlowStore, ReadsFlowMemory, StoreError, ADDED_LATER_TABLES, CONFIGURATION_ONLY_ADDED_TABLES,
-    CONFIGURATION_ONLY_TABLES, RETIRED_TABLES, RUNNING_TABLES, SEMA_CATALOG_TABLE,
+    ADDED_LATER_TABLES, CONFIGURATION_ONLY_ADDED_TABLES, CONFIGURATION_ONLY_TABLES, FlowStore,
+    RETIRED_TABLES, RUNNING_TABLES, ReadsFlowMemory, SEMA_CATALOG_TABLE, StoreError,
 };
 
 /// The tables one entry point registers, and so may add or upgrade.

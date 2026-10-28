@@ -3812,6 +3812,8 @@ pub enum StoreError {
     LeaveOutNotForHarness,
     #[error("the topic {0} is not an uncapitalized camelCase identifier")]
     TopicRefused(String),
+    #[error("a configured native lifecycle timing is outside the supported duration range")]
+    TimingOutOfRange,
     #[error("the leave-out default of {entry} cannot be carried under one harness: {reason:?}")]
     LeaveOutUpgrade {
         entry: String,
@@ -4468,7 +4470,7 @@ impl RegistersMetaConfigurationTables for MetaConfigurationTables {
             )?,
             investigation: engine
                 .register_table(StoredMetaInvestigationConfiguration::descriptor())?,
-            timings: engine.register_timings()?,
+            timings: engine.upgraded_timings(timings_limits::timings_descriptor())?,
             limits: engine.register_limits()?,
             metaflows: engine.upgraded_metaflow_declarations(
                 <metaflow_declaration::StoredMetaMetaflowConfiguration as metaflow_declaration::DescribesMetaflowDeclarationTable>::descriptor(),
@@ -4550,7 +4552,7 @@ pub trait ConfiguresOnlyStore: Sized {
         &self,
     ) -> Result<(meta_signal_flow::Timings, meta_signal_flow::Limits), StoreError>;
     fn configure_change(&self, change: ConfigurationChange)
-        -> Result<ConfigureOutcome, StoreError>;
+    -> Result<ConfigureOutcome, StoreError>;
     fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError>;
     fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError>;
 }
@@ -4643,7 +4645,7 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             send_servers: engine.register_table(meta_send_servers_descriptor)?,
             investigation: engine.register_table(meta_investigation_descriptor)?,
             metaflows: engine.upgraded_metaflow_declarations(meta_metaflows_descriptor)?,
-            timings: engine.register_timings()?,
+            timings: engine.upgraded_timings(timings_descriptor)?,
             limits: engine.register_limits()?,
         };
         if let Some(legacy) = legacy_nexus {
@@ -5042,9 +5044,9 @@ trait ReadsFlowStore {
 
 trait WritesFlowStore {
     fn reserve_start(&self, flow_type: String, origin: Origin)
-        -> Result<PendingLaunch, StoreError>;
+    -> Result<PendingLaunch, StoreError>;
     fn record_thread(&self, pending: &PendingLaunch, thread_id: String)
-        -> Result<bool, StoreError>;
+    -> Result<bool, StoreError>;
     fn confirm_start(&self, flow_id: &str) -> Result<Response, StoreError>;
     /// Writes the attempt's next state, keeping what its row knows of the
     /// context its seat started with.
@@ -5631,7 +5633,7 @@ pub(crate) trait ManagesMetaflowState: Sized {
     fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
     /// Replace one configuration family whole with its declaration.
     fn configure_change(&self, change: ConfigurationChange)
-        -> Result<ConfigureOutcome, StoreError>;
+    -> Result<ConfigureOutcome, StoreError>;
     /// The refresh threshold configured for one model, if any.
     fn configured_threshold(
         &self,
@@ -9153,11 +9155,16 @@ pub(crate) trait ReadsFlowMemory {
                     vec![StoredMetaInvestigationConfiguration { investigation }],
                 )
             }
-            ConfigurationChange::Timings(timings) => FlowStore::replace_configuration_family(
-                engine,
-                tables.timings,
-                vec![timings_limits::StoredTimings { timings }],
-            ),
+            ConfigurationChange::Timings(timings) => {
+                if !timings_limits::SupportedNativeTimings::supported(&timings) {
+                    return Err(StoreError::TimingOutOfRange);
+                }
+                FlowStore::replace_configuration_family(
+                    engine,
+                    tables.timings,
+                    vec![timings_limits::StoredTimings { timings }],
+                )
+            }
             ConfigurationChange::Limits(limits) => FlowStore::replace_configuration_family(
                 engine,
                 tables.limits,
@@ -9309,6 +9316,7 @@ mod tests {
     /// successors, deliveries and send calls as they were kept.
     #[test]
     fn a_store_before_continuity_and_withdrawal_upgrades_and_reopens() {
+        use super::MemoryDefinition;
         use super::events::{EventV3, FlowEventsV3};
         use super::logical_delivery::{CurrentLogicalDeliveryV1, LogicalDeliveryEventV1};
         use super::metaflow_declaration::{
@@ -9322,7 +9330,6 @@ mod tests {
         use super::successor::{
             OwesSuccessors, SuccessionCause, SuccessionCauseV1, SuccessorIntent, SuccessorIntentV1,
         };
-        use super::MemoryDefinition;
         use crate::store::logical_delivery::RecordsLogicalDeliveries;
         let fixture = StoreFixture::new();
         fixture.configured();
@@ -9585,29 +9592,35 @@ mod tests {
         store
             .reserve_launch_attempt(&launch, fixture.origin())
             .expect("launch reservation");
-        assert!(store
-            .record_native_launch_intent(NativeLaunchIntent {
-                launch_request_id: "created-pane".into(),
-                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                harness_kind: HarnessKind::Codex,
-                model_name: launch.launch_profile.model_name.clone(),
-                effort: launch.launch_profile.effort.clone(),
-                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                prompt_sha256_vector: launch
-                    .first_prompt_payload
-                    .prompt_part_vector
-                    .iter()
-                    .map(|part| part.prompt_sha256.clone())
-                    .collect(),
-            })
-            .expect("intent persists"));
+        assert!(
+            store
+                .record_native_launch_intent(NativeLaunchIntent {
+                    launch_request_id: "created-pane".into(),
+                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                    harness_kind: HarnessKind::Codex,
+                    model_name: launch.launch_profile.model_name.clone(),
+                    effort: launch.launch_profile.effort.clone(),
+                    system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                    prompt_sha256_vector: launch
+                        .first_prompt_payload
+                        .prompt_part_vector
+                        .iter()
+                        .map(|part| part.prompt_sha256.clone())
+                        .collect(),
+                })
+                .expect("intent persists")
+        );
         let pane = fixture.pane("created-pane");
-        assert!(store
-            .record_created_launch_pane(pane.clone())
-            .expect("pane persists"));
-        assert!(!store
-            .record_created_launch_pane(pane.clone())
-            .expect("pane cannot be replaced"));
+        assert!(
+            store
+                .record_created_launch_pane(pane.clone())
+                .expect("pane persists")
+        );
+        assert!(
+            !store
+                .record_created_launch_pane(pane.clone())
+                .expect("pane cannot be replaced")
+        );
         assert_eq!(
             store
                 .request_harness_start("created-pane")
@@ -9628,9 +9641,11 @@ mod tests {
                 .expect("recoverable pane"),
             Some(pane)
         );
-        assert!(reopened
-            .orphan_launch_pane("created-pane")
-            .expect("orphan persists"));
+        assert!(
+            reopened
+                .orphan_launch_pane("created-pane")
+                .expect("orphan persists")
+        );
         assert_eq!(
             reopened
                 .recoverable_launch_pane("created-pane")
@@ -9865,9 +9880,9 @@ mod tests {
     use super::{LaunchOutcomeV7, ReplaceRejectionV32, StartRejectionV32, StoredLaunchOutcomeV7};
     use super::{LaunchedRecord, ReplacedRecord};
     use super::{LaysOutDefaults, SeedsConfiguration};
+    use crate::store::RegistersBindings;
     use crate::store::delivery::RecordsDeliveries;
     use crate::store::delivery::{LeaseStep, PaneLease};
-    use crate::store::RegistersBindings;
     use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
     use sema_engine::{
         Assertion, Engine, EngineOpen, EngineRecord, FamilyName, MemoryDefinition, QueryPlan,
@@ -10261,12 +10276,16 @@ mod tests {
                 .map(|part| part.prompt_sha256.clone())
                 .collect(),
         };
-        assert!(store
-            .record_native_launch_intent(intent.clone())
-            .expect("first external intent persists"));
-        assert!(!store
-            .record_native_launch_intent(intent)
-            .expect("a repeated external intent is refused"));
+        assert!(
+            store
+                .record_native_launch_intent(intent.clone())
+                .expect("first external intent persists")
+        );
+        assert!(
+            !store
+                .record_native_launch_intent(intent)
+                .expect("a repeated external intent is refused")
+        );
         assert!(matches!(
             store
                 .reserve_launch_attempt(&launch, origin.clone())
@@ -10306,22 +10325,24 @@ mod tests {
         store
             .reserve_launch_attempt(&launch, fixture.origin())
             .expect("reservation persists");
-        assert!(store
-            .record_native_launch_intent(NativeLaunchIntent {
-                launch_request_id: "request-boundary".into(),
-                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                harness_kind: HarnessKind::Claude,
-                model_name: launch.launch_profile.model_name.clone(),
-                effort: launch.launch_profile.effort.clone(),
-                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                prompt_sha256_vector: launch
-                    .first_prompt_payload
-                    .prompt_part_vector
-                    .iter()
-                    .map(|part| part.prompt_sha256.clone())
-                    .collect(),
-            })
-            .unwrap());
+        assert!(
+            store
+                .record_native_launch_intent(NativeLaunchIntent {
+                    launch_request_id: "request-boundary".into(),
+                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                    harness_kind: HarnessKind::Claude,
+                    model_name: launch.launch_profile.model_name.clone(),
+                    effort: launch.launch_profile.effort.clone(),
+                    system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                    prompt_sha256_vector: launch
+                        .first_prompt_payload
+                        .prompt_part_vector
+                        .iter()
+                        .map(|part| part.prompt_sha256.clone())
+                        .collect(),
+                })
+                .unwrap()
+        );
         let pane = fixture.pane("request-boundary");
         let binding = NativeLaunchBinding {
             launch_request_id: "request-boundary".into(),
@@ -10331,14 +10352,16 @@ mod tests {
             herdr_pane_binding: pane.clone(),
         };
         assert!(store.record_native_launch_binding(binding).unwrap());
-        assert!(store
-            .record_registration_acknowledgement(RegistrationAcknowledgement {
-                launch_request_id: "request-boundary".into(),
-                flow_id: "native-flow".into(),
-                native_session_id: "native-session".into(),
-                herdr_pane_binding: pane.clone(),
-            })
-            .unwrap());
+        assert!(
+            store
+                .record_registration_acknowledgement(RegistrationAcknowledgement {
+                    launch_request_id: "request-boundary".into(),
+                    flow_id: "native-flow".into(),
+                    native_session_id: "native-session".into(),
+                    herdr_pane_binding: pane.clone(),
+                })
+                .unwrap()
+        );
         let intent = PromptDeliveryIntent {
             launch_request_id: "request-boundary".into(),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
@@ -10361,25 +10384,33 @@ mod tests {
                 transcript_root_inode: "99143".into(),
             }),
         };
-        assert!(!store
-            .record_prompt_delivery_intent(intent.clone())
-            .expect("part hashes other than the native intent's are refused"));
+        assert!(
+            !store
+                .record_prompt_delivery_intent(intent.clone())
+                .expect("part hashes other than the native intent's are refused")
+        );
         let mut exact = intent;
         exact.prompt_sha256_vector = vec![launch.first_prompt_payload.prompt_sha256.clone()];
-        assert!(!store
-            .record_prompt_delivery_intent(exact.clone())
-            .expect("mismatching boundary is refused"));
+        assert!(
+            !store
+                .record_prompt_delivery_intent(exact.clone())
+                .expect("mismatching boundary is refused")
+        );
         let NativeTranscriptBoundary::Absent(absence) = &mut exact.native_transcript_boundary
         else {
             panic!("absence fixture")
         };
         absence.native_session_id = "native-session".into();
-        assert!(store
-            .record_prompt_delivery_intent(exact.clone())
-            .expect("exact pre-send evidence persists"));
-        assert!(!store
-            .record_prompt_delivery_intent(exact.clone())
-            .expect("one-shot prompt intent cannot be replayed"));
+        assert!(
+            store
+                .record_prompt_delivery_intent(exact.clone())
+                .expect("exact pre-send evidence persists")
+        );
+        assert!(
+            !store
+                .record_prompt_delivery_intent(exact.clone())
+                .expect("one-shot prompt intent cannot be replayed")
+        );
         drop(store);
         let reopened = fixture.store();
         assert_eq!(
@@ -10390,9 +10421,11 @@ mod tests {
                 .prompt_delivery_intent_option,
             Some(exact.clone())
         );
-        assert!(reopened
-            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(exact.clone()))
-            .unwrap());
+        assert!(
+            reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(exact.clone()))
+                .unwrap()
+        );
         let mut cursor_intent = exact.clone();
         cursor_intent.native_transcript_boundary =
             NativeTranscriptBoundary::Existing(NativeTranscriptCursor {
@@ -10404,9 +10437,13 @@ mod tests {
                 transcript_prefix_sha256:
                     "5555555555555555555555555555555555555555555555555555555555555555".into(),
             });
-        assert!(reopened
-            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(cursor_intent.clone(),))
-            .expect("fresh transcript advances the durable boundary"));
+        assert!(
+            reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(
+                    cursor_intent.clone(),
+                ))
+                .expect("fresh transcript advances the durable boundary")
+        );
         assert_eq!(
             reopened
                 .launch_attempt("request-boundary")
@@ -10415,34 +10452,44 @@ mod tests {
                 .prompt_delivery_intent_option,
             Some(cursor_intent.clone())
         );
-        assert!(!reopened
-            .record_prompt_delivery_result(PromptDeliveryResult::Observed(NativeTargetReceipt {
-                launch_request_id: cursor_intent.launch_request_id.clone(),
-                prompt_sha256: cursor_intent.prompt_sha256.clone(),
-                flow_id: cursor_intent.flow_id.clone(),
-                native_session_id: cursor_intent.native_session_id.clone(),
-                native_turn_id: "native-turn".into(),
-                receipt_sha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-                    .into(),
-                model_name: cursor_intent.model_name.clone(),
-                effort: cursor_intent.effort.clone(),
-                prompt_sha256_vector: cursor_intent.prompt_sha256_vector.clone(),
-            }))
-            .expect("caller-shaped receipt is validated before promotion"));
-        assert!(reopened
-            .record_prompt_delivery_result(PromptDeliveryResult::Observed(NativeTargetReceipt {
-                launch_request_id: cursor_intent.launch_request_id,
-                prompt_sha256: cursor_intent.prompt_sha256,
-                flow_id: cursor_intent.flow_id,
-                native_session_id: cursor_intent.native_session_id,
-                native_turn_id: "native-turn".into(),
-                receipt_sha256: "4444444444444444444444444444444444444444444444444444444444444444"
-                    .into(),
-                model_name: cursor_intent.model_name,
-                effort: cursor_intent.effort,
-                prompt_sha256_vector: cursor_intent.prompt_sha256_vector,
-            }))
-            .expect("authentic receipt promotes ambiguity"));
+        assert!(
+            !reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Observed(
+                    NativeTargetReceipt {
+                        launch_request_id: cursor_intent.launch_request_id.clone(),
+                        prompt_sha256: cursor_intent.prompt_sha256.clone(),
+                        flow_id: cursor_intent.flow_id.clone(),
+                        native_session_id: cursor_intent.native_session_id.clone(),
+                        native_turn_id: "native-turn".into(),
+                        receipt_sha256:
+                            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                                .into(),
+                        model_name: cursor_intent.model_name.clone(),
+                        effort: cursor_intent.effort.clone(),
+                        prompt_sha256_vector: cursor_intent.prompt_sha256_vector.clone(),
+                    }
+                ))
+                .expect("caller-shaped receipt is validated before promotion")
+        );
+        assert!(
+            reopened
+                .record_prompt_delivery_result(PromptDeliveryResult::Observed(
+                    NativeTargetReceipt {
+                        launch_request_id: cursor_intent.launch_request_id,
+                        prompt_sha256: cursor_intent.prompt_sha256,
+                        flow_id: cursor_intent.flow_id,
+                        native_session_id: cursor_intent.native_session_id,
+                        native_turn_id: "native-turn".into(),
+                        receipt_sha256:
+                            "4444444444444444444444444444444444444444444444444444444444444444"
+                                .into(),
+                        model_name: cursor_intent.model_name,
+                        effort: cursor_intent.effort,
+                        prompt_sha256_vector: cursor_intent.prompt_sha256_vector,
+                    }
+                ))
+                .expect("authentic receipt promotes ambiguity")
+        );
     }
 
     /// A first message sent in parts: each next part is recorded submitted
@@ -10469,35 +10516,41 @@ mod tests {
         store
             .reserve_launch_attempt(&launch, fixture.origin())
             .expect("reservation persists");
-        assert!(store
-            .record_native_launch_intent(NativeLaunchIntent {
-                launch_request_id: "request-parts".into(),
-                prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
-                system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
-                harness_kind: HarnessKind::Codex,
-                model_name: launch.launch_profile.model_name.clone(),
-                effort: launch.launch_profile.effort.clone(),
-                prompt_sha256_vector: vec!["a".repeat(64), "b".repeat(64)],
-            })
-            .unwrap());
+        assert!(
+            store
+                .record_native_launch_intent(NativeLaunchIntent {
+                    launch_request_id: "request-parts".into(),
+                    prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
+                    system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
+                    harness_kind: HarnessKind::Codex,
+                    model_name: launch.launch_profile.model_name.clone(),
+                    effort: launch.launch_profile.effort.clone(),
+                    prompt_sha256_vector: vec!["a".repeat(64), "b".repeat(64)],
+                })
+                .unwrap()
+        );
         let pane = fixture.pane("request-parts");
-        assert!(store
-            .record_native_launch_binding(NativeLaunchBinding {
-                launch_request_id: "request-parts".into(),
-                flow_id: "parts-flow".into(),
-                native_session_id: "parts-session".into(),
-                harness_kind: HarnessKind::Codex,
-                herdr_pane_binding: pane.clone(),
-            })
-            .unwrap());
-        assert!(store
-            .record_registration_acknowledgement(RegistrationAcknowledgement {
-                launch_request_id: "request-parts".into(),
-                flow_id: "parts-flow".into(),
-                native_session_id: "parts-session".into(),
-                herdr_pane_binding: pane.clone(),
-            })
-            .unwrap());
+        assert!(
+            store
+                .record_native_launch_binding(NativeLaunchBinding {
+                    launch_request_id: "request-parts".into(),
+                    flow_id: "parts-flow".into(),
+                    native_session_id: "parts-session".into(),
+                    harness_kind: HarnessKind::Codex,
+                    herdr_pane_binding: pane.clone(),
+                })
+                .unwrap()
+        );
+        assert!(
+            store
+                .record_registration_acknowledgement(RegistrationAcknowledgement {
+                    launch_request_id: "request-parts".into(),
+                    flow_id: "parts-flow".into(),
+                    native_session_id: "parts-session".into(),
+                    herdr_pane_binding: pane.clone(),
+                })
+                .unwrap()
+        );
         let first = PromptDeliveryIntent {
             launch_request_id: "request-parts".into(),
             prompt_sha256: launch.first_prompt_payload.prompt_sha256.clone(),
@@ -10519,9 +10572,11 @@ mod tests {
             }),
         };
         assert!(store.record_prompt_delivery_intent(first.clone()).unwrap());
-        assert!(store
-            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(first.clone()))
-            .unwrap());
+        assert!(
+            store
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(first.clone()))
+                .unwrap()
+        );
         let receipt = |intent: &PromptDeliveryIntent| NativeTargetReceipt {
             launch_request_id: intent.launch_request_id.clone(),
             prompt_sha256: intent.prompt_sha256.clone(),
@@ -10559,9 +10614,11 @@ mod tests {
         let mut second = first.clone();
         second.parts_submitted = 2;
         second.stops_reported = 3;
-        assert!(store
-            .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(second.clone()))
-            .unwrap());
+        assert!(
+            store
+                .record_prompt_delivery_result(PromptDeliveryResult::Ambiguous(second.clone()))
+                .unwrap()
+        );
         assert_eq!(
             store
                 .launch_attempt("request-parts")
@@ -10570,9 +10627,11 @@ mod tests {
                 .prompt_delivery_intent_option,
             Some(second.clone())
         );
-        assert!(store
-            .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt(&second)))
-            .unwrap());
+        assert!(
+            store
+                .record_prompt_delivery_result(PromptDeliveryResult::Observed(receipt(&second)))
+                .unwrap()
+        );
     }
 
     impl OpensFixtureStore for StoreFixture {
@@ -10598,9 +10657,11 @@ mod tests {
                 .reserve_pending_start(Query::Start(self.launch_profile("legacy-start-1")))
                 .expect("start reserves")
                 .expect("flow type is accepted");
-            assert!(store
-                .record_pending_thread(&pending, "thread-1".into())
-                .expect("thread persists"));
+            assert!(
+                store
+                    .record_pending_thread(&pending, "thread-1".into())
+                    .expect("thread persists")
+            );
             let response = store
                 .confirm_started(&pending.flow_id)
                 .expect("start confirms");
@@ -10819,10 +10880,12 @@ mod tests {
 
         let config = ConfigurationOnlyStore::open(&path)
             .expect("configuration-only listener reopens recognized Memory");
-        assert!(config
-            .configuration_snapshot()
-            .expect("snapshot reads")
-            .is_some());
+        assert!(
+            config
+                .configuration_snapshot()
+                .expect("snapshot reads")
+                .is_some()
+        );
         drop(config);
 
         let reopened = FlowStore::open_configured(&path).expect("configured Memory resumes");
@@ -10878,10 +10941,12 @@ mod tests {
             let mut catalog = write
                 .open_table(super::SEMA_CATALOG_TABLE)
                 .expect("catalog opens");
-            assert!(catalog
-                .remove("flow_nexus_flow_context_sizes")
-                .expect("catalog entry removes")
-                .is_some());
+            assert!(
+                catalog
+                    .remove("flow_nexus_flow_context_sizes")
+                    .expect("catalog entry removes")
+                    .is_some()
+            );
         }
         write.commit().expect("catalog commits");
         drop(database);
@@ -11056,10 +11121,12 @@ mod tests {
             let mut catalog = write
                 .open_table(super::SEMA_CATALOG_TABLE)
                 .expect("catalog opens");
-            assert!(catalog
-                .remove("flow_nexus_address_holds")
-                .expect("catalog entry removes")
-                .is_some());
+            assert!(
+                catalog
+                    .remove("flow_nexus_address_holds")
+                    .expect("catalog entry removes")
+                    .is_some()
+            );
         }
         write.commit().expect("catalog commits");
         drop(database);
@@ -11482,16 +11549,20 @@ mod tests {
 
         let store = fixture.store();
         let quarantined = match store.opening_settlements.as_slice() {
-            [LaunchAttemptSettlement::SetAside {
-                launch_request_id: earlier,
-                from: ArchivedLaunchAttemptShape::BeforeSystemPromptBundle,
-            }, LaunchAttemptSettlement::SetAside {
-                launch_request_id: before_address,
-                from: ArchivedLaunchAttemptShape::BeforeAddress,
-            }, LaunchAttemptSettlement::Quarantined {
-                launch_request_id: unreadable,
-                decode_error,
-            }] => {
+            [
+                LaunchAttemptSettlement::SetAside {
+                    launch_request_id: earlier,
+                    from: ArchivedLaunchAttemptShape::BeforeSystemPromptBundle,
+                },
+                LaunchAttemptSettlement::SetAside {
+                    launch_request_id: before_address,
+                    from: ArchivedLaunchAttemptShape::BeforeAddress,
+                },
+                LaunchAttemptSettlement::Quarantined {
+                    launch_request_id: unreadable,
+                    decode_error,
+                },
+            ] => {
                 assert_eq!(earlier, EarlierLaunchAttemptRows::EARLIER_REQUEST);
                 assert_eq!(
                     before_address,
@@ -11524,10 +11595,12 @@ mod tests {
             assert_eq!(store.launch_attempt(request).unwrap(), None);
         }
         // The 0.34 row is carried, not set aside.
-        assert!(store
-            .launch_attempt(EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST)
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .launch_attempt(EarlierLaunchAttemptRows::ZERO_THIRTY_FOUR_REQUEST)
+                .unwrap()
+                .is_some()
+        );
         // Every whole-table read answers again.
         assert!(store.ambiguous_launch_attempts().is_ok());
         assert_eq!(store.flow_nodes().unwrap().len(), 1);
@@ -11947,10 +12020,12 @@ mod tests {
             store.list_metaflows().expect("metaflows list").len() as u64,
             after["flow_nexus_metaflows"]
         );
-        assert!(store
-            .configuration_snapshot()
-            .expect("snapshot reads")
-            .is_some());
+        assert!(
+            store
+                .configuration_snapshot()
+                .expect("snapshot reads")
+                .is_some()
+        );
         let attempts = store
             .engine
             .match_records(QueryPlan::all(store.launch_attempts))
@@ -11959,10 +12034,12 @@ mod tests {
             .to_vec();
         for stored in &attempts {
             let request = &stored.attempt.launch_request_id;
-            assert!(store
-                .launch_attempt(request)
-                .expect("attempt reads")
-                .is_some());
+            assert!(
+                store
+                    .launch_attempt(request)
+                    .expect("attempt reads")
+                    .is_some()
+            );
             store.launch_outcome(request).expect("outcome reads");
         }
         drop(store);
@@ -12926,12 +13003,14 @@ mod tests {
                 StartRejection::RequirementUnmet(launch.launch_profile.address.clone())
             ))
         );
-        assert!(store
-            .engine
-            .match_records(QueryPlan::all(store.quarantined_launch_outcomes))
-            .expect("archive reads")
-            .records()
-            .is_empty());
+        assert!(
+            store
+                .engine
+                .match_records(QueryPlan::all(store.quarantined_launch_outcomes))
+                .expect("archive reads")
+                .records()
+                .is_empty()
+        );
         drop(store);
 
         let reopened = fixture.store();
@@ -13882,10 +13961,12 @@ mod tests {
                     HarnessKind::Claude => HarnessKind::Codex,
                     HarnessKind::Codex => HarnessKind::Claude,
                 };
-                assert!(store
-                    .default_leave_outs(&entry.address, &other)
-                    .expect("default reads")
-                    .is_empty());
+                assert!(
+                    store
+                        .default_leave_outs(&entry.address, &other)
+                        .expect("default reads")
+                        .is_empty()
+                );
             }
         }
         // The configuration-only open reads the same family.
@@ -13920,9 +14001,11 @@ mod tests {
             .default_leave_outs;
         assert_eq!(carried.len(), defaults.len());
         for (address, leave_outs) in &defaults {
-            assert!(carried
-                .iter()
-                .any(|entry| entry.address == *address && entry.leave_outs == *leave_outs));
+            assert!(
+                carried
+                    .iter()
+                    .any(|entry| entry.address == *address && entry.leave_outs == *leave_outs)
+            );
         }
         drop(configuration);
         use super::ManagesMetaflowState;
@@ -14121,9 +14204,9 @@ mod tests {
     /// events; a second open carries nothing again.
     #[test]
     fn a_0_35_11_store_upgrades_models_leave_outs_and_events_in_one_open() {
-        use super::events::{EventBeforeIdentity, RecordsHarnessEvents};
         use super::ManagesMetaflowState;
         use super::NamesConfiguredModel;
+        use super::events::{EventBeforeIdentity, RecordsHarnessEvents};
         use crate::lean::BelongsToHarness;
         use signal_flow::{Address, Event, NativeStop};
         let fixture = StoreFixture::new();

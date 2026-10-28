@@ -14,4 +14,4 @@ Configure.Metaflows.[ { { Psyche test Secondary } [ spirit:core intent:models ] 
 ; bounded wait and forced compensation without making every lifecycle test
 ; spend the production seed's thirty seconds. Five seconds still witnesses
 ; the actual configured wrapper's SessionStart readiness on this boundary.
-Configure.Timings.{ 5000 30000 10000 10000 30000 5000 15000 30000 5000 10000 3000 350 250 500 1000 60000 50 2000 600000 }
+Configure.Timings.{ 5000 30000 10000 10000 30000 5000 5000 15000 30000 5000 10000 3000 350 250 500 1000 60000 50 2000 600000 }

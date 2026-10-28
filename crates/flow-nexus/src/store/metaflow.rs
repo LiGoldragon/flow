@@ -880,13 +880,15 @@ mod tests {
                 .unwrap(),
             Response::Refused(Refusal::Unknown(_))
         ));
-        assert!(fixture
-            .store
-            .metaflow(&target)
-            .unwrap()
-            .unwrap()
-            .queue
-            .is_empty());
+        assert!(
+            fixture
+                .store
+                .metaflow(&target)
+                .unwrap()
+                .unwrap()
+                .queue
+                .is_empty()
+        );
         assert!(matches!(
             fixture
                 .store
@@ -910,11 +912,13 @@ mod tests {
             fixture.store.metaflow(&target).unwrap().unwrap().queue[0].message,
             flow_ethos::Message::Soft(body)
         );
-        assert!(fixture
-            .store
-            .stored_metaflow_lock(&lock.address)
-            .unwrap()
-            .is_none());
+        assert!(
+            fixture
+                .store
+                .stored_metaflow_lock(&lock.address)
+                .unwrap()
+                .is_none()
+        );
         assert!(matches!(
             fixture
                 .store

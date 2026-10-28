@@ -1933,8 +1933,9 @@ fn a_codex_turn_absent_from_an_idle_thread_remains_uncertain() {
 }
 
 /// History that cannot decide keeps the request Uncertain, names why, and
-/// starts no turn: a thread still active, a history without the anchor,
-/// and an app-server that cannot be read.
+/// starts no turn: a thread still active keeps it outstanding until the
+/// next drain; a history without the anchor parks it, so it no longer
+/// holds the queue.
 #[test]
 fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     use crate::generated::operation::{Operation, Outcome};
@@ -1943,7 +1944,7 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     use meta_signal_flow::{QueueDeliveryStanding, Undecided};
     let mut fixture = NexusFixture::new();
     let first = from_core(Request::Order("First.".into()));
-    fixture.awake_codex_seat(vec![first.clone()]);
+    fixture.awake_codex_seat(vec![first]);
     let fake = FakeAppServer::install(vec![]);
     fixture.adapter("gpt-sol", &fake);
     crashed_before_receipt(&fixture);
@@ -1968,9 +1969,11 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
         true,
         vec![history_turn("turn-unrelated", "completed", None)],
     );
+    // The undecidable attempt is parked: it names why, is never resent,
+    // and no longer holds the queue.
     assert_eq!(
         fixture.nexus.perform(Operation::Drain(seat_at())),
-        Outcome::Failed(crate::generated::operation::Failed_Data::HerdrRefused)
+        Outcome::Drained(vec![])
     );
     assert_eq!(
         codex_standings(&fixture),
@@ -1978,20 +1981,8 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
             Undecided::HistoryReplaced
         ))]
     );
-
-    // Run 3 has no answer: the app-server is unreadable.
-    assert!(!matches!(
-        fixture.nexus.perform(Operation::Drain(seat_at())),
-        Outcome::Drained(_)
-    ));
-    assert_eq!(
-        codex_standings(&fixture),
-        vec![QueueDeliveryStanding::Uncertain(Some(
-            Undecided::HistoryUnreadable
-        ))]
-    );
     assert!(fake.queued_turn_texts().is_empty(), "never resent");
-    assert_eq!(fixture.seat_queue(), vec![first]);
+    assert_eq!(fixture.seat_queue(), vec![]);
 }
 
 /// A turn completion on another thread is not the seat's: nothing drains.

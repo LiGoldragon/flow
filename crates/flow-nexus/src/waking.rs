@@ -1683,9 +1683,14 @@ impl PerformsWakeAndDrain for RunningNexus {
                     drained.push(queued);
                 }
                 Reconciled::Absent => {}
-                Reconciled::Undecided(Undecided::AbsenceUnprovable) => {
+                // An attempt native history cannot decide (absence
+                // unprovable, a Codex seat not resting, a history replaced or
+                // unreadable) is parked: it stays Uncertain, is never typed
+                // again, and settles on a later receipt, while the queue
+                // behind it moves on.
+                Reconciled::Undecided(undecided) => {
                     eprintln!(
-                        "flow-nexus: queued delivery {} remains uncertain (AbsenceUnprovable); parking it without retry",
+                        "flow-nexus: queued delivery {} remains uncertain ({undecided:?}); parking it without retry",
                         attempt.attempt_id
                     );
                     if !self
@@ -1712,13 +1717,6 @@ impl PerformsWakeAndDrain for RunningNexus {
                         Outcome::Failed(_) => Outcome::Drained(drained),
                         other => other,
                     };
-                }
-                Reconciled::Undecided(undecided) => {
-                    eprintln!(
-                        "flow-nexus: queued delivery {} stays uncertain ({undecided:?}); it is never handed over again",
-                        attempt.attempt_id
-                    );
-                    return Outcome::Failed(Failed_Data::HerdrRefused);
                 }
                 Reconciled::Refused => return Outcome::Failed(Failed_Data::StoreRefused),
             },

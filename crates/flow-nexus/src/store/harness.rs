@@ -126,7 +126,7 @@ fn upgrade_piece(piece: PieceV1) -> meta_signal_flow::Piece {
 }
 
 #[cfg(test)]
-mod tests {
+mod upgrade_tests {
     use super::{FlaggedV1, PieceV1, upgrade_piece};
     use meta_signal_flow::{Flagged_Data, Piece, Slot};
 

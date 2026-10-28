@@ -11,10 +11,11 @@ use crate::store::{
     ConfigurationOnlyStore, ConfiguresOnlyStore, DefaultConfiguration, FlowStore,
     ManagesMetaflowState, OpensFlowStore, ReadsFlowRows, RegistersFlowIdentity, SeedsConfiguration,
 };
-use crate::{Dispatches, OpensRunningNexus, RunningNexus};
+use crate::{Dispatches, OpensRunningNexus, ReadsCompleteConfiguration, RunningNexus};
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureModel, ConfigureNexus, ConfigureOutcome,
-    ConfigureRejection, ConfigureThreshold, Response as MetaResponse,
+    ConfigurationChange, ConfigurationEntry, ConfigurationSnapshot, ConfigureMetaflow,
+    ConfigureModel, ConfigureNexus, ConfigureOutcome, ConfigureRejection, ConfigureSendServer,
+    ConfigureThreshold, EntryKey, ModelKey_Data, Response as MetaResponse,
 };
 use signal_flow::{
     Address, Aspect, Bind_Data, EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin,
@@ -259,7 +260,9 @@ struct OtherRows {
 
 fn other_rows(nexus: &RunningNexus) -> OtherRows {
     let ConfigurationSnapshot {
-        models, thresholds, ..
+        configured_models: models,
+        configured_thresholds: thresholds,
+        ..
     } = snapshot(nexus);
     let peer = this_process();
     OtherRows {
@@ -278,15 +281,13 @@ fn other_rows(nexus: &RunningNexus) -> OtherRows {
 
 fn snapshot(nexus: &RunningNexus) -> ConfigurationSnapshot {
     nexus
-        .store
-        .configuration_snapshot()
+        .complete_configuration_snapshot()
         .expect("snapshot reads")
-        .expect("store configured")
 }
 
 fn stable_models(nexus: &RunningNexus) -> BTreeSet<String> {
     snapshot(nexus)
-        .harnesses
+        .configured_harnesses
         .into_iter()
         .find(|harness| harness.harness_name == "codex")
         .expect("configured Codex harness")
@@ -323,7 +324,7 @@ fn configure_nexus_replaces_only_the_nexus_value_and_keeps_every_other_row() {
         configure(&nexus, ConfigurationChange::Nexus(replaced.clone())),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
-    assert_eq!(snapshot(&nexus).nexus, replaced, "the whole value replaced");
+    assert_eq!(snapshot(&nexus).configured_nexus, replaced, "the whole value replaced");
     assert_eq!(other_rows(&nexus), before, "no other row changed");
     // The same declaration again writes nothing.
     assert_eq!(
@@ -338,7 +339,7 @@ fn configure_nexus_replaces_only_the_nexus_value_and_keeps_every_other_row() {
     // The next open serves the replaced value and still holds every row.
     let reopened = fixture.open();
     assert!(stable_models(&reopened).contains(TERRA));
-    assert_eq!(snapshot(&reopened).nexus, replaced);
+    assert_eq!(snapshot(&reopened).configured_nexus, replaced);
     assert_eq!(other_rows(&reopened), before);
 }
 
@@ -387,7 +388,16 @@ fn a_fresh_store_takes_its_first_nexus_declaration() {
     };
     let path = directory.path().join("flow.sema");
     let store = ConfigurationOnlyStore::open(&path).expect("fresh store");
-    assert_eq!(store.configuration_snapshot().expect("reads"), None);
+    let seeded = store
+        .configuration_snapshot()
+        .expect("reads")
+        .expect("a fresh store commits its first complete configuration");
+    assert!(seeded.configured_harnesses.is_empty());
+    assert!(seeded.configured_models.is_empty());
+    assert!(seeded.configured_thresholds.is_empty());
+    assert!(seeded.configured_send_servers.is_empty());
+    assert!(seeded.configured_metaflows.is_empty());
+    assert_eq!(seeded.configured_investigation, None);
     let declared = ConfiguredStore::nexus(&defaults, &[SOL, LUNA], 45);
     assert_eq!(
         store
@@ -399,9 +409,123 @@ fn a_fresh_store_takes_its_first_nexus_declaration() {
         store
             .configuration_snapshot()
             .expect("reads")
-            .map(|snapshot| snapshot.nexus),
+            .map(|snapshot| snapshot.configured_nexus),
         Some(declared)
     );
+}
+
+#[test]
+fn each_keyed_family_changes_one_entry_and_removes_that_entry() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let before_refusal = snapshot(&nexus);
+    assert_eq!(
+        nexus.dispatch_meta(meta_signal_flow::Query::ConfigureEntry(
+            ConfigurationEntry::HarnessEntry(ConfiguredStore::harness(
+                "overlapping",
+                HarnessKind::Claude,
+                &[TERRA],
+            )),
+        )),
+        MetaResponse::ConfigureRejected(ConfigureRejection::ModelServedTwice(TERRA.into()))
+    );
+    assert_eq!(snapshot(&nexus), before_refusal, "a refused key writes nothing");
+    let model = ConfigureModel {
+        layer: Layer::Quaternary,
+        aspect: Aspect::Field,
+        model_name: "claude-extra".into(),
+        effort: "low".into(),
+    };
+    let threshold = ConfigureThreshold {
+        model_name: "claude-extra".into(),
+        refresh_tokens: 91_000,
+    };
+    let harness = ConfiguredStore::harness("fixture-extra", HarnessKind::Claude, &["claude-extra"]);
+    let send_server = ConfigureSendServer {
+        codex_app_server_binary: "/opt/codex-app-server-extra".into(),
+        mcp_send_server_binary: "/opt/mcp-send-server-extra".into(),
+    };
+    let metaflow = ConfigureMetaflow {
+        address: quaternary_field(),
+        system_modules: vec!["spirit-core".into()],
+        user_modules: vec![],
+        tool_set: signal_flow::ToolSet::Default,
+        continuity: meta_signal_flow::Continuity::OnDemand,
+        purpose: "Exercises one configured entry.".into(),
+        records: vec![],
+        left_out: vec![],
+        requires: vec![],
+    };
+    let entries = [
+        ConfigurationEntry::ModelEntry(model.clone()),
+        ConfigurationEntry::ThresholdEntry(threshold.clone()),
+        ConfigurationEntry::HarnessEntry(harness.clone()),
+        ConfigurationEntry::SendServerEntry(send_server.clone()),
+        ConfigurationEntry::MetaflowEntry(metaflow.clone()),
+    ];
+    for entry in entries {
+        assert_eq!(
+            nexus.dispatch_meta(meta_signal_flow::Query::ConfigureEntry(entry.clone())),
+            MetaResponse::Configured(ConfigureOutcome::Replaced)
+        );
+        assert_eq!(
+            nexus.dispatch_meta(meta_signal_flow::Query::ConfigureEntry(entry)),
+            MetaResponse::Configured(ConfigureOutcome::Unchanged)
+        );
+    }
+    let configured = snapshot(&nexus);
+    assert!(configured.configured_models.contains(&model));
+    assert!(configured.configured_thresholds.contains(&threshold));
+    assert!(configured.configured_harnesses.contains(&harness));
+    assert!(configured.configured_send_servers.contains(&send_server));
+    assert!(configured.configured_metaflows.contains(&metaflow));
+
+    let keys = [
+        EntryKey::ModelKey(ModelKey_Data {
+            layer: model.layer.clone(),
+            aspect: model.aspect.clone(),
+        }),
+        EntryKey::ThresholdKey(threshold.model_name.clone()),
+        EntryKey::HarnessKey(harness.harness_name.clone()),
+        EntryKey::SendServerKey(send_server.codex_app_server_binary.clone()),
+        EntryKey::MetaflowKey(metaflow.address.clone()),
+    ];
+    for key in keys {
+        assert_eq!(
+            nexus.dispatch_meta(meta_signal_flow::Query::RemoveEntry(key.clone())),
+            MetaResponse::Configured(ConfigureOutcome::Removed)
+        );
+        assert_eq!(
+            nexus.dispatch_meta(meta_signal_flow::Query::RemoveEntry(key)),
+            MetaResponse::ConfigureRejected(ConfigureRejection::UnknownEntry)
+        );
+    }
+    drop(nexus);
+    let reopened = fixture.open();
+    let configured = snapshot(&reopened);
+    assert!(!configured.configured_models.contains(&model));
+    assert!(!configured.configured_thresholds.contains(&threshold));
+    assert!(!configured.configured_harnesses.contains(&harness));
+    assert!(!configured.configured_send_servers.contains(&send_server));
+    assert!(!configured.configured_metaflows.contains(&metaflow));
+}
+
+#[test]
+fn configuration_reads_the_exact_runtime_and_every_committed_family() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let configured = snapshot(&nexus);
+    assert_eq!(configured.runtime, fixture.start);
+    assert_eq!(configured.configured_nexus.lease, 30);
+    assert_eq!(configured.configured_harnesses.len(), 2);
+    assert_eq!(configured.configured_models.len(), 1);
+    assert_eq!(configured.configured_thresholds.len(), 1);
+    assert!(configured.configured_send_servers.is_empty());
+    assert!(configured.configured_metaflows.is_empty());
+    assert_eq!(configured.configured_investigation, None);
+    assert!(configured.timings.socket_timeout > 0);
+    assert!(configured.limits.frame > 0);
+    assert!(!configured.texts.launch_section.pending_launch.is_empty());
 }
 
 #[test]
@@ -419,7 +543,7 @@ fn a_store_configured_while_stopped_opens_with_the_replaced_value() {
     );
     drop(configuration);
     let nexus = fixture.open();
-    assert_eq!(snapshot(&nexus).nexus, replaced);
+    assert_eq!(snapshot(&nexus).configured_nexus, replaced);
     assert_eq!(other_rows(&nexus), rows);
     assert!(
         stable_models(&nexus).contains(TERRA),

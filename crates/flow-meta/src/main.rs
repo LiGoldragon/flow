@@ -344,8 +344,19 @@ mod tests {
                 requires: vec![],
             })
             .collect();
+        let texts = FlowMetaClient::parse_datom::<meta_signal_flow::Texts>(
+            include_str!("../../flow-nexus/seed/texts.datom").to_owned(),
+            "authored texts seed",
+        )
+        .expect("texts seed parses");
         let snapshot = ConfigurationSnapshot {
-            nexus: ConfigureNexus {
+            runtime: meta_signal_flow::Runtime {
+                ordinary_socket_path: "/run/flow.sock".into(),
+                meta_socket_path: "/run/flow-meta.sock".into(),
+                store_path: "/state/flow.sema".into(),
+                landing_watch_option: None,
+            },
+            configured_nexus: ConfigureNexus {
                 source_root: "/source".into(),
                 flows_root: "/source/flows".into(),
                 meta_aspects: vec![Aspect::Psyche],
@@ -360,12 +371,12 @@ mod tests {
                 },
                 default_herdr_session: "default".into(),
             },
-            harnesses: vec![],
-            models: vec![],
-            thresholds: vec![],
-            send_servers: vec![],
-            metaflows: rows.clone(),
-            investigation: None,
+            configured_harnesses: vec![],
+            configured_models: vec![],
+            configured_thresholds: vec![],
+            configured_send_servers: vec![],
+            configured_metaflows: rows.clone(),
+            configured_investigation: None,
             timings: meta_signal_flow::Timings {
                 socket_timeout: 5000,
                 curriculum_timeout: 30000,
@@ -406,6 +417,7 @@ mod tests {
                 title_readbacks: 40,
                 output_lines: 50,
             },
+            texts,
         };
         let printed = Response::Configuration(snapshot)
             .datomize(vec![])
@@ -417,7 +429,7 @@ mod tests {
         else {
             panic!("wrong response")
         };
-        let query = Query::Configure(ConfigurationChange::Metaflows(parsed.metaflows));
+        let query = Query::Configure(ConfigurationChange::Metaflows(parsed.configured_metaflows));
         let text = query.datomize(vec![]).protosize().compact();
         let client = FlowMetaClient {
             socket: "unused".into(),

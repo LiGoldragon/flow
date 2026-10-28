@@ -739,8 +739,9 @@ pub(crate) fn fixture_harnesses(root: &Path) -> Vec<meta_signal_flow::Harness> {
                 Piece::Text("--system-prompt-file".into()),
                 Piece::Slot(Slot::PromptFile),
                 Piece::Flagged(Flagged_Data {
-                    string: "--session-id".into(),
+                    first_string: "--session-id".into(),
                     slot: Slot::SessionId,
+                    second_string: String::new(),
                 }),
                 Piece::Text("--model".into()),
                 Piece::Slot(Slot::LaunchModel),
@@ -748,12 +749,14 @@ pub(crate) fn fixture_harnesses(root: &Path) -> Vec<meta_signal_flow::Harness> {
                 Piece::Slot(Slot::LaunchEffort),
                 Piece::Slot(Slot::ModuleSwitches),
                 Piece::Flagged(Flagged_Data {
-                    string: "--disallowedTools".into(),
+                    first_string: "--disallowedTools".into(),
                     slot: Slot::DeniedTools,
+                    second_string: String::new(),
                 }),
                 Piece::Flagged(Flagged_Data {
-                    string: "--tools".into(),
+                    first_string: "--tools".into(),
                     slot: Slot::AllowedTools,
+                    second_string: String::new(),
                 }),
             ],
             settings: vec![],
@@ -800,8 +803,9 @@ pub(crate) fn fixture_harnesses(root: &Path) -> Vec<meta_signal_flow::Harness> {
                 Piece::Text("tui.terminal_title=[\"thread-title\"]".into()),
                 Piece::Slot(Slot::ModuleSwitches),
                 Piece::Flagged(Flagged_Data {
-                    string: "resume".into(),
+                    first_string: "resume".into(),
                     slot: Slot::ThreadId,
+                    second_string: String::new(),
                 }),
             ],
             settings: vec![],

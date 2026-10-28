@@ -20,8 +20,8 @@ use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::pane::{Interruption, PaneAgent, Placement, Submission, WritesPane};
 use crate::performing::Performs;
 use crate::store::context::{JudgesCompaction, JudgesThreshold};
-use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
-use crate::store::{ReadsFlowRows, RecordsReplacement};
+use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
+use crate::store::{ManagesMetaflowState, ReadsFlowRows, RecordsReplacement};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
@@ -109,9 +109,21 @@ impl FindsDeliveryTarget for RunningNexus {
         }
         let profile = self
             .store
-            .delivery_configuration()
+            .configuration_snapshot()
             .map_err(|_| TargetRefusal::PersistenceRefused)?
-            .profile(&node.harness_kind);
+            .and_then(|snapshot| {
+                snapshot
+                    .configured_harnesses
+                    .into_iter()
+                    .find(|harness| harness.harness_kind == node.harness_kind)
+            })
+            .map(|harness| HarnessProfile {
+                harness_kind: harness.harness_kind,
+                command_sigil_vector: harness.pane_profile.command_sigil_vector,
+                interrupt_keys: harness.pane_profile.interrupt_keys,
+                submit_keys: harness.pane_profile.submit_keys,
+            })
+            .ok_or(TargetRefusal::PersistenceRefused)?;
         let HerdrRouteSelection::Available(route) = node.herdr_route_selection.clone() else {
             return Err(TargetRefusal::RouteUnavailable);
         };

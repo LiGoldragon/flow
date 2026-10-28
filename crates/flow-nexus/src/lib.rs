@@ -103,6 +103,8 @@ use waking::SettlesStopsAtConfirmation;
 use waking::SleepsAndWakesSeats;
 
 pub struct RunningNexus {
+    /// The exact typed runtime value that opened this Nexus.
+    pub runtime: flow_ethos::Start,
     pub store: FlowStore,
     pub codex_endpoints: CodexEndpoints,
     pub herdr: herdr::HerdrCli,
@@ -340,54 +342,36 @@ impl Dispatches for RunningNexus {
         query: meta_signal_flow::Query,
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Response {
+        let configured_response = |result: Result<meta_signal_flow::ConfigureOutcome, store::StoreError>| {
+            match result {
+                Ok(outcome) => meta_signal_flow::Response::Configured(outcome),
+                Err(store::StoreError::DuplicateConfigurationEntry) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::DuplicateEntry),
+                Err(store::StoreError::ModelServedTwice(model)) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::ModelServedTwice(model)),
+                Err(store::StoreError::UnknownHarnessModule(module)) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::UnknownHarnessModule(module)),
+                Err(store::StoreError::IrremovableHarnessModule(module)) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::Irremovable(module)),
+                Err(store::StoreError::UnknownConfigurationEntry) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::UnknownEntry),
+                Err(store::StoreError::TopicRefused(topic)) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::TopicRefused(topic)),
+                Err(store::StoreError::TimingOutOfRange) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::TimingOutOfRange),
+                Err(error) => meta_signal_flow::Response::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string())),
+            }
+        };
         match query {
-            meta_signal_flow::Query::Configuration => match self.store.configuration_snapshot() {
-                Ok(Some(snapshot)) => meta_signal_flow::Response::Configuration(snapshot),
-                Ok(None) => meta_signal_flow::Response::Unconfigured,
+            meta_signal_flow::Query::Configuration => match self.complete_configuration_snapshot() {
+                Ok(snapshot) => meta_signal_flow::Response::Configuration(snapshot),
                 Err(error) => meta_signal_flow::Response::Refused(
                     meta_signal_flow::StoreRefusal::Store(error.to_string()),
                 ),
             },
-            // A declared family replaces the committed family whole; this
-            // Nexus keeps the Codex endpoints it opened with until its next
-            // start.
+            // A declared family replaces the committed family whole; keyed
+            // operations change one row under the same validation.
             meta_signal_flow::Query::Configure(change) => {
-                match self.store.configure_change(change) {
-                    Ok(outcome) => meta_signal_flow::Response::Configured(outcome),
-                    Err(store::StoreError::DuplicateConfigurationEntry) => {
-                        meta_signal_flow::Response::ConfigureRejected(
-                            meta_signal_flow::ConfigureRejection::DuplicateEntry,
-                        )
-                    }
-                    Err(store::StoreError::ModelServedTwice(model)) => {
-                        meta_signal_flow::Response::ConfigureRejected(
-                            meta_signal_flow::ConfigureRejection::ModelServedTwice(model),
-                        )
-                    }
-                    Err(store::StoreError::UnknownHarnessModule(module)) => {
-                        meta_signal_flow::Response::ConfigureRejected(
-                            meta_signal_flow::ConfigureRejection::UnknownHarnessModule(module),
-                        )
-                    }
-                    Err(store::StoreError::IrremovableHarnessModule(module)) => {
-                        meta_signal_flow::Response::ConfigureRejected(
-                            meta_signal_flow::ConfigureRejection::Irremovable(module),
-                        )
-                    }
-                    Err(store::StoreError::TopicRefused(topic)) => {
-                        meta_signal_flow::Response::ConfigureRejected(
-                            meta_signal_flow::ConfigureRejection::TopicRefused(topic),
-                        )
-                    }
-                    Err(store::StoreError::TimingOutOfRange) => {
-                        meta_signal_flow::Response::ConfigureRejected(
-                            meta_signal_flow::ConfigureRejection::TimingOutOfRange,
-                        )
-                    }
-                    Err(error) => meta_signal_flow::Response::Refused(
-                        meta_signal_flow::StoreRefusal::Store(error.to_string()),
-                    ),
-                }
+                configured_response(self.store.configure_change(change))
+            }
+            meta_signal_flow::Query::ConfigureEntry(entry) => {
+                configured_response(self.store.configure_entry(entry))
+            }
+            meta_signal_flow::Query::RemoveEntry(key) => {
+                configured_response(self.store.remove_entry(key))
             }
             meta_signal_flow::Query::ConsumeReset(request) => self
                 .codex_endpoints
@@ -804,6 +788,36 @@ impl Dispatches for RunningNexus {
     }
 }
 
+pub trait ReadsCompleteConfiguration {
+    fn complete_configuration_snapshot(
+        &self,
+    ) -> Result<meta_signal_flow::ConfigurationSnapshot, store::StoreError>;
+}
+
+impl ReadsCompleteConfiguration for RunningNexus {
+    fn complete_configuration_snapshot(
+        &self,
+    ) -> Result<meta_signal_flow::ConfigurationSnapshot, store::StoreError> {
+        let stored = self
+            .store
+            .configuration_snapshot()?
+            .ok_or(store::StoreError::NotConfigured)?;
+        Ok(meta_signal_flow::ConfigurationSnapshot {
+            runtime: self.runtime.clone(),
+            configured_nexus: stored.configured_nexus,
+            configured_harnesses: stored.configured_harnesses,
+            configured_models: stored.configured_models,
+            configured_thresholds: stored.configured_thresholds,
+            configured_send_servers: stored.configured_send_servers,
+            configured_metaflows: stored.configured_metaflows,
+            configured_investigation: stored.configured_investigation,
+            timings: stored.timings,
+            limits: stored.limits,
+            texts: stored.texts,
+        })
+    }
+}
+
 pub trait OpensRunningNexus {
     /// Opens the configured Nexus from one typed Start payload. Durable
     /// runner values come from the committed Meta configuration snapshot;
@@ -838,15 +852,16 @@ impl OpensRunningNexus for RunningNexus {
                 "flow-nexus: models selected by both Codex endpoints are unavailable: {overlap:?}"
             );
         }
-        let source_root = PathBuf::from(&snapshot.nexus.source_root);
+        let source_root = PathBuf::from(&snapshot.configured_nexus.source_root);
         // The socket this Nexus serves: a changed one takes effect only on
         // restart, so the store's value at open is the one being served.
         let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
         Ok(Self {
+            runtime: start.clone(),
             store,
             codex_endpoints: codex_endpoints.clone(),
             herdr: herdr::HerdrCli::default()
-                .with_installations(&snapshot.nexus, &snapshot.harnesses)
+                .with_installations(&snapshot.configured_nexus, &snapshot.configured_harnesses)
                 .with_codex_endpoints(codex_endpoints)
                 .with_runtime_settings(snapshot.timings.clone(), snapshot.limits.clone())
                 .with_ordinary_socket(&ordinary_socket),
@@ -854,7 +869,7 @@ impl OpensRunningNexus for RunningNexus {
             // socket the configuration names, read as the Nexus opens.
             composer: LaunchComposer::with_context_limits_and_texts(
                 context::ContextComposer::Curriculum(CurriculumComposer::configured(
-                    &snapshot.nexus.curriculum_nexus_path,
+                    &snapshot.configured_nexus.curriculum_nexus_path,
                     &snapshot.timings,
                     &snapshot.limits,
                 )),
@@ -1659,8 +1674,9 @@ mod tests {
                 Piece::Text("--system-prompt-file".into()),
                 Piece::Slot(Slot::PromptFile),
                 Piece::Flagged(Flagged_Data {
-                    string: "--session-id".into(),
+                    first_string: "--session-id".into(),
                     slot: Slot::SessionId,
+                    second_string: String::new(),
                 }),
                 Piece::Text("--model".into()),
                 Piece::Slot(Slot::LaunchModel),
@@ -1668,12 +1684,14 @@ mod tests {
                 Piece::Slot(Slot::LaunchEffort),
                 Piece::Slot(Slot::ModuleSwitches),
                 Piece::Flagged(Flagged_Data {
-                    string: "--disallowedTools".into(),
+                    first_string: "--disallowedTools".into(),
                     slot: Slot::DeniedTools,
+                    second_string: String::new(),
                 }),
                 Piece::Flagged(Flagged_Data {
-                    string: "--tools".into(),
+                    first_string: "--tools".into(),
                     slot: Slot::AllowedTools,
+                    second_string: String::new(),
                 }),
             ],
             HarnessKind::Codex => vec![
@@ -1693,8 +1711,9 @@ mod tests {
                 Piece::Text("tui.terminal_title=[\"thread-title\"]".into()),
                 Piece::Slot(Slot::ModuleSwitches),
                 Piece::Flagged(Flagged_Data {
-                    string: "resume".into(),
+                    first_string: "resume".into(),
                     slot: Slot::ThreadId,
+                    second_string: String::new(),
                 }),
             ],
         };
@@ -2501,10 +2520,28 @@ mod tests {
                 .expect("fixture snapshot")
                 .expect("fixture configured");
             let nexus = RunningNexus {
+                runtime: flow_ethos::Start {
+                    ordinary_socket_path: directory
+                        .path()
+                        .join("flow.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                    meta_socket_path: directory
+                        .path()
+                        .join("flow-meta.sock")
+                        .to_string_lossy()
+                        .into_owned(),
+                    store_path: directory
+                        .path()
+                        .join("flow.sema")
+                        .to_string_lossy()
+                        .into_owned(),
+                    landing_watch_option: None,
+                },
                 store,
                 codex_endpoints: codex_endpoints.clone(),
                 herdr: HerdrCli::at(snapshot_program.clone(), flows_root)
-                    .with_installations(&installation.nexus, &harnesses)
+                    .with_installations(&installation.configured_nexus, &harnesses)
                     .with_codex_endpoints(codex_endpoints),
                 composer: LaunchComposer::with_context(crate::context::ContextComposer::Fixture(
                     FixtureComposer::from(

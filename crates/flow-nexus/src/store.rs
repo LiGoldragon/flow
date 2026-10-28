@@ -60,8 +60,8 @@ use std::{
 };
 
 use meta_signal_flow::{
-    ConfigurationChange, ConfigurationSnapshot, ConfigureModel, ConfigureNexus, ConfigureOutcome,
-    ConfigureThreshold,
+    ConfigurationChange, ConfigurationEntry, ConfigureModel, ConfigureNexus, ConfigureOutcome,
+    ConfigureThreshold, EntryKey,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
@@ -247,6 +247,16 @@ const META_LEAVE_OUT_CONFIGURATION_TABLE_NAME: TableName =
 /// family identity it was registered under.
 const RETIRED_TABLES: &[(&str, &str, &str)] = &[
     (
+        "flow_nexus_runtime_configuration",
+        "flow-nexus-runtime-configuration",
+        "flow-nexus-runtime-configuration-v1",
+    ),
+    (
+        "flow_nexus_delivery_configuration",
+        "flow-nexus-delivery-configuration",
+        "flow-nexus-delivery-configuration-v1",
+    ),
+    (
         "flow_nexus_meta_leave_out_configuration",
         "flow-nexus-meta-leave-out-configuration",
         "flow-nexus-meta-leave-out-configuration-v2",
@@ -286,8 +296,6 @@ const RETIRED_TABLES: &[(&str, &str, &str)] = &[
 const CONFIGURATION_ONLY_TABLES: &[&str] = &[
     "flow_nexus_state",
     "flow_nexus_configuration",
-    "flow_nexus_runtime_configuration",
-    "flow_nexus_delivery_configuration",
     "flow_nexus_meta_nexus_configuration",
     "flow_nexus_meta_model_configuration",
 ];
@@ -299,7 +307,6 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_metaflow_processes",
     "flow_nexus_metaflow_locks",
     "flow_nexus_configuration",
-    "flow_nexus_runtime_configuration",
     "flow_nexus_herdr_routes",
     "flow_nexus_launch_attempts",
     "flow_nexus_launch_panes",
@@ -310,7 +317,6 @@ const RUNNING_TABLES: &[&str] = &[
     "flow_nexus_quarantined_launch_outcomes",
     "flow_nexus_deliveries",
     "flow_nexus_pane_leases",
-    "flow_nexus_delivery_configuration",
     "flow_nexus_meta_nexus_configuration",
     "flow_nexus_meta_model_configuration",
     "flow_nexus_flow_events",
@@ -402,6 +408,22 @@ pub struct Configuration {
     pub harness_profile_vector: Vec<meta_signal_flow::HarnessProfile>,
     pub meta_aspects: Vec<Aspect>,
     pub message_nexus_path: String,
+}
+
+/// The store-owned configuration families. The runtime `Start` belongs to the
+/// running Nexus and is composed into the public snapshot at dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredConfigurationSnapshot {
+    pub configured_nexus: meta_signal_flow::ConfigureNexus,
+    pub configured_harnesses: Vec<meta_signal_flow::Harness>,
+    pub configured_models: Vec<meta_signal_flow::ConfigureModel>,
+    pub configured_thresholds: Vec<meta_signal_flow::ConfigureThreshold>,
+    pub configured_send_servers: Vec<meta_signal_flow::ConfigureSendServer>,
+    pub configured_metaflows: Vec<meta_signal_flow::ConfigureMetaflow>,
+    pub configured_investigation: Option<flow_ethos::Address>,
+    pub timings: meta_signal_flow::Timings,
+    pub limits: meta_signal_flow::Limits,
+    pub texts: meta_signal_flow::Texts,
 }
 
 pub use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
@@ -4283,6 +4305,8 @@ pub enum StoreError {
     ConfigurationReadViewChanged,
     #[error("a configuration declaration names one key twice")]
     DuplicateConfigurationEntry,
+    #[error("the configured entry does not exist")]
+    UnknownConfigurationEntry,
     #[error("store path must be an absolute file path")]
     InvalidStorePath,
     #[error("meta configuration is not configured")]
@@ -5012,7 +5036,6 @@ pub struct FlowStore {
     metaflow_processes: TableReference<StoredMetaflowProcess>,
     metaflow_locks: TableReference<StoredMetaflowLock>,
     configuration: TableReference<FlowStoreConfiguration>,
-    runtime_configuration: TableReference<RuntimeConfiguration>,
     herdr_routes: TableReference<FlowHerdrRouteRecord>,
     launch_attempts: TableReference<StoredLaunchAttempt>,
     launch_panes: TableReference<StoredLaunchPane>,
@@ -5061,8 +5084,6 @@ impl SetsNativeOwnerEnvironmentForTests for FlowStore {
 pub struct ConfigurationOnlyStore {
     engine: Engine,
     configuration: TableReference<FlowStoreConfiguration>,
-    runtime_configuration: TableReference<RuntimeConfiguration>,
-    delivery_configuration: TableReference<DeliveryConfiguration>,
     meta_configuration_tables: MetaConfigurationTables,
 }
 
@@ -5070,15 +5091,15 @@ pub trait ConfiguresOnlyStore: Sized {
     fn open(path: &Path) -> Result<Self, StoreError>;
     /// The open itself, on the store at `path` and in its place.
     fn open_in_place(path: &Path) -> Result<Self, StoreError>;
-    fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
+    fn configuration_snapshot(&self) -> Result<Option<StoredConfigurationSnapshot>, StoreError>;
     fn configured_texts(&self) -> Result<meta_signal_flow::Texts, StoreError>;
     fn runtime_bounds(
         &self,
     ) -> Result<(meta_signal_flow::Timings, meta_signal_flow::Limits), StoreError>;
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
-    fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError>;
-    fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError>;
+    fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError>;
+    fn remove_entry(&self, key: EntryKey) -> Result<ConfigureOutcome, StoreError>;
 }
 
 impl ConfiguresOnlyStore for ConfigurationOnlyStore {
@@ -5113,16 +5134,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             FamilyName::new("flow-nexus-configuration"),
             SchemaHash::for_label("flow-nexus-configuration-v1"),
         );
-        let runtime_configuration_descriptor = TableDescriptor::new(
-            FLOW_RUNTIME_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-runtime-configuration"),
-            SchemaHash::for_label("flow-nexus-runtime-configuration-v1"),
-        );
-        let delivery_configuration_descriptor = TableDescriptor::new(
-            delivery::DELIVERY_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-delivery-configuration"),
-            SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
-        );
         let meta_nexus_descriptor = StoredMetaNexusConfiguration::descriptor();
         let meta_harnesses_descriptor = harness::StoredHarness::descriptor();
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
@@ -5144,8 +5155,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             EngineOpen::new(path, SchemaVersion::new(FLOW_SCHEMA_VERSION))
                 .with_family(&state_descriptor)
                 .with_family(&configuration_descriptor)
-                .with_family(&runtime_configuration_descriptor)
-                .with_family(&delivery_configuration_descriptor)
                 .with_family(&meta_nexus_descriptor)
                 .with_family(&meta_harnesses_descriptor)
                 .with_family(&meta_models_descriptor)
@@ -5159,8 +5168,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         )?;
         let state = engine.register_table(state_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
-        let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
-        let delivery_configuration = engine.register_table(delivery_configuration_descriptor)?;
         let meta_configuration_tables = MetaConfigurationTables {
             nexus: engine.upgraded_nexus_configuration(meta_nexus_descriptor)?,
             harnesses: engine.upgraded_harnesses(meta_harnesses_descriptor)?,
@@ -5173,6 +5180,33 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
             limits: engine.register_limits()?,
             texts: engine.register_texts()?,
         };
+        if !recognized {
+            let defaults = DefaultConfiguration::from_environment();
+            let source_root = defaults.source_root();
+            engine.assert(Assertion::new(
+                meta_configuration_tables.nexus,
+                StoredMetaNexusConfiguration {
+                    nexus: meta_signal_flow::ConfigureNexus {
+                        source_root: source_root.to_string_lossy().into_owned(),
+                        flows_root: source_root.join("flows").to_string_lossy().into_owned(),
+                        meta_aspects: vec![Aspect::Psyche, Aspect::Mind, Aspect::Field],
+                        message_nexus_path: String::new(),
+                        message_nexus_binary: String::new(),
+                        curriculum_nexus_path: defaults
+                            .curriculum_socket_path()
+                            .to_string_lossy()
+                            .into_owned(),
+                        lease: 60,
+                        executables: meta_signal_flow::Executables {
+                            herdr: String::new(),
+                            flow_id_claimer: String::new(),
+                            hook: String::new(),
+                        },
+                        default_herdr_session: "default".into(),
+                    },
+                },
+            ))?;
+        }
         if let Some(legacy) = legacy_nexus {
             let harnesses_empty = engine
                 .match_records(QueryPlan::all(meta_configuration_tables.harnesses))?
@@ -5204,13 +5238,11 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         Ok(Self {
             engine,
             configuration,
-            runtime_configuration,
-            delivery_configuration,
             meta_configuration_tables,
         })
     }
 
-    fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError> {
+    fn configuration_snapshot(&self) -> Result<Option<StoredConfigurationSnapshot>, StoreError> {
         FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
     }
 
@@ -5240,85 +5272,15 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
     }
 
-    /// Reads either a wholly unconfigured store (using its declared defaults
-    /// without writing them) or all three committed configuration records.
-    /// A partial or duplicated configuration refuses service.
-    fn configuration(&self, defaults: &DefaultConfiguration) -> Result<Configuration, StoreError> {
-        let socket = self
-            .engine
-            .match_records(QueryPlan::all(self.configuration))?
-            .records()
-            .to_vec();
-        let runtime = self
-            .engine
-            .match_records(QueryPlan::all(self.runtime_configuration))?
-            .records()
-            .to_vec();
-        let delivery = self
-            .engine
-            .match_records(QueryPlan::all(self.delivery_configuration))?
-            .records()
-            .to_vec();
-        match (socket.as_slice(), runtime.as_slice(), delivery.as_slice()) {
-            ([], [], []) => Ok(defaults.configuration()),
-            ([socket], [runtime], [delivery])
-                if socket.record_key() == defaults.socket_configuration().record_key()
-                    && runtime.record_key() == defaults.runtime_configuration().record_key()
-                    && delivery.record_key() == defaults.delivery_configuration().record_key() =>
-            {
-                Ok(socket.clone().with_runtime(runtime, delivery))
-            }
-            _ => Err(StoreError::StateInvariant),
-        }
+    fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError> {
+        FlowStore::configure_meta_entry(&self.engine, &self.meta_configuration_tables, entry)
     }
 
-    /// Commits socket, runtime, and delivery configuration together. Fresh
-    /// stores assert the three records; configured stores replace them. A
-    /// partial/duplicated prior state is refused before any write.
-    fn configure(&self, configuration: Configuration) -> Result<Configuration, StoreError> {
-        let socket_rows = self
-            .engine
-            .match_records(QueryPlan::all(self.configuration))?
-            .records()
-            .to_vec();
-        let runtime_rows = self
-            .engine
-            .match_records(QueryPlan::all(self.runtime_configuration))?
-            .records()
-            .to_vec();
-        let delivery_rows = self
-            .engine
-            .match_records(QueryPlan::all(self.delivery_configuration))?
-            .records()
-            .to_vec();
-        let socket = FlowStoreConfiguration::from(&configuration);
-        let runtime = RuntimeConfiguration::from(&configuration);
-        let delivery = DeliveryConfiguration::from(&configuration);
-        let commit =
-            if socket_rows.is_empty() && runtime_rows.is_empty() && delivery_rows.is_empty() {
-                self.engine
-                    .begin_atomic_commit()
-                    .assert(self.configuration, socket)
-                    .assert(self.runtime_configuration, runtime)
-                    .assert(self.delivery_configuration, delivery)
-            } else if socket_rows.len() == 1
-                && runtime_rows.len() == 1
-                && delivery_rows.len() == 1
-                && socket_rows[0].record_key() == socket.record_key()
-                && runtime_rows[0].record_key() == runtime.record_key()
-                && delivery_rows[0].record_key() == delivery.record_key()
-            {
-                self.engine
-                    .begin_atomic_commit()
-                    .mutate(self.configuration, socket)
-                    .mutate(self.runtime_configuration, runtime)
-                    .mutate(self.delivery_configuration, delivery)
-            } else {
-                return Err(StoreError::StateInvariant);
-            };
-        self.engine.commit_atomic(commit)?;
-        Ok(configuration)
+    fn remove_entry(&self, key: EntryKey) -> Result<ConfigureOutcome, StoreError> {
+        FlowStore::remove_meta_entry(&self.engine, &self.meta_configuration_tables, key)
     }
+
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5394,13 +5356,6 @@ pub trait ConfirmsStartedFlow {
     fn confirm_started(&self, flow_id: &str) -> Result<Response, StoreError>;
 }
 
-/// Configuration is durable policy and shares the Nexus's sole `.sema` store.
-pub trait ConfiguresFlowStore {
-    fn configuration(&self) -> Result<Configuration, StoreError>;
-    fn configure(&self, configuration: Configuration) -> Result<(), StoreError>;
-    fn runtime_configuration(&self) -> Result<RuntimeConfiguration, StoreError>;
-    fn configure_runtime(&self, configuration: RuntimeConfiguration) -> Result<(), StoreError>;
-}
 
 pub trait RegistersFlowIdentity {
     /// Registers a flow whose role is not known (the meta RegisterFlow).
@@ -5649,11 +5604,6 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-configuration"),
             SchemaHash::for_label("flow-nexus-configuration-v1"),
         );
-        let runtime_configuration_descriptor = TableDescriptor::<RuntimeConfiguration>::new(
-            FLOW_RUNTIME_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-runtime-configuration"),
-            SchemaHash::for_label("flow-nexus-runtime-configuration-v1"),
-        );
         let herdr_routes_descriptor = TableDescriptor::<FlowHerdrRouteRecord>::new(
             FLOW_HERDR_ROUTE_TABLE_NAME,
             FamilyName::new("flow-nexus-herdr-route"),
@@ -5723,11 +5673,6 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-pane-lease"),
             SchemaHash::for_label("flow-nexus-pane-lease-v1"),
         );
-        let delivery_configuration_descriptor = TableDescriptor::<DeliveryConfiguration>::new(
-            delivery::DELIVERY_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-delivery-configuration"),
-            SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
-        );
         let meta_nexus_descriptor = StoredMetaNexusConfiguration::descriptor();
         let meta_models_descriptor = StoredMetaModelConfiguration::descriptor();
         let meta_thresholds_descriptor = StoredMetaThresholdConfiguration::descriptor();
@@ -5762,7 +5707,6 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&metaflow_processes_descriptor)
                 .with_family(&metaflow_locks_descriptor)
                 .with_family(&configuration_descriptor)
-                .with_family(&runtime_configuration_descriptor)
                 .with_family(&herdr_routes_descriptor)
                 .with_family(&launch_attempts_descriptor)
                 .with_family(&launch_panes_descriptor)
@@ -5773,7 +5717,6 @@ impl OpensFlowStore for FlowStore {
                 .with_family(&quarantined_launch_outcomes_descriptor)
                 .with_family(&delivery_descriptor)
                 .with_family(&pane_lease_descriptor)
-                .with_family(&delivery_configuration_descriptor)
                 .with_family(&meta_nexus_descriptor)
                 .with_family(&meta_models_descriptor)
                 .with_family(&meta_thresholds_descriptor)
@@ -5807,7 +5750,6 @@ impl OpensFlowStore for FlowStore {
         let metaflow_processes = engine.register_table(metaflow_processes_descriptor)?;
         let metaflow_locks = engine.register_table(metaflow_locks_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
-        let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
         let herdr_routes = engine.register_table(herdr_routes_descriptor)?;
         let quarantined_launch_attempts =
             engine.register_table(quarantined_launch_attempts_descriptor)?;
@@ -5852,7 +5794,6 @@ impl OpensFlowStore for FlowStore {
             metaflow_processes,
             metaflow_locks,
             configuration,
-            runtime_configuration,
             herdr_routes,
             launch_attempts,
             launch_panes,
@@ -5941,11 +5882,6 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-configuration"),
             SchemaHash::for_label("flow-nexus-configuration-v1"),
         ))?;
-        let runtime_configuration = engine.register_table(TableDescriptor::new(
-            FLOW_RUNTIME_CONFIGURATION_TABLE_NAME,
-            FamilyName::new("flow-nexus-runtime-configuration"),
-            SchemaHash::for_label("flow-nexus-runtime-configuration-v1"),
-        ))?;
         let herdr_routes = engine.register_table(TableDescriptor::new(
             FLOW_HERDR_ROUTE_TABLE_NAME,
             FamilyName::new("flow-nexus-herdr-route"),
@@ -6016,6 +5952,36 @@ impl OpensFlowStore for FlowStore {
         )?;
         let delivery_tables = DeliveryTables::register(&mut engine)?;
         let meta_configuration_tables = MetaConfigurationTables::register(&mut engine)?;
+        if engine
+            .match_records(QueryPlan::all(meta_configuration_tables.nexus))?
+            .records()
+            .is_empty()
+        {
+            let source_root = defaults.source_root();
+            engine.assert(Assertion::new(
+                meta_configuration_tables.nexus,
+                StoredMetaNexusConfiguration {
+                    nexus: meta_signal_flow::ConfigureNexus {
+                        source_root: source_root.to_string_lossy().into_owned(),
+                        flows_root: source_root.join("flows").to_string_lossy().into_owned(),
+                        meta_aspects: vec![Aspect::Psyche, Aspect::Mind, Aspect::Field],
+                        message_nexus_path: String::new(),
+                        message_nexus_binary: String::new(),
+                        curriculum_nexus_path: defaults
+                            .curriculum_socket_path()
+                            .to_string_lossy()
+                            .into_owned(),
+                        lease: 60,
+                        executables: meta_signal_flow::Executables {
+                            herdr: String::new(),
+                            flow_id_claimer: String::new(),
+                            hook: String::new(),
+                        },
+                        default_herdr_session: "default".into(),
+                    },
+                },
+            ))?;
+        }
         let event_tables =
             <events::EventTables as events::RegistersEventTables>::register(&mut engine)?;
         let context_sizes = engine.register_table(
@@ -6057,7 +6023,6 @@ impl OpensFlowStore for FlowStore {
             metaflow_processes,
             metaflow_locks,
             configuration,
-            runtime_configuration,
             herdr_routes,
             launch_attempts,
             launch_panes,
@@ -6112,25 +6077,10 @@ impl OpensFlowStore for FlowStore {
                 defaults.socket_configuration(),
             ))?;
         }
-        if store
-            .engine
-            .match_records(QueryPlan::key(
-                store.runtime_configuration,
-                RecordKey::new(RUNTIME_CONFIGURATION_KEY),
-            ))?
-            .records()
-            .is_empty()
-        {
-            store.engine.assert(Assertion::new(
-                store.runtime_configuration,
-                defaults.runtime_configuration(),
-            ))?;
-        }
         for settlement in &store.opening_settlements {
             eprintln!("flow-nexus: {settlement}");
         }
         store.adopt_legacy_roles()?;
-        store.seed_delivery_configuration(defaults)?;
         // A delivery a crash left under the lease is settled Uncertain here
         // and never retried: what reached its pane is not known.
         for delivery in store.settle_interrupted_deliveries()? {
@@ -6168,11 +6118,13 @@ impl OpensFlowStore for FlowStore {
 }
 
 pub(crate) trait ManagesMetaflowState: Sized {
-    fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError>;
+    fn configuration_snapshot(&self) -> Result<Option<StoredConfigurationSnapshot>, StoreError>;
     fn configured_texts(&self) -> Result<meta_signal_flow::Texts, StoreError>;
     /// Replace one configuration family whole with its declaration.
     fn configure_change(&self, change: ConfigurationChange)
     -> Result<ConfigureOutcome, StoreError>;
+    fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError>;
+    fn remove_entry(&self, key: EntryKey) -> Result<ConfigureOutcome, StoreError>;
     /// The refresh threshold configured for one model, if any.
     fn configured_threshold(
         &self,
@@ -6206,7 +6158,7 @@ pub(crate) trait ManagesMetaflowState: Sized {
 }
 
 impl ManagesMetaflowState for FlowStore {
-    fn configuration_snapshot(&self) -> Result<Option<ConfigurationSnapshot>, StoreError> {
+    fn configuration_snapshot(&self) -> Result<Option<StoredConfigurationSnapshot>, StoreError> {
         FlowStore::meta_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
     }
 
@@ -6219,6 +6171,14 @@ impl ManagesMetaflowState for FlowStore {
         change: ConfigurationChange,
     ) -> Result<ConfigureOutcome, StoreError> {
         FlowStore::configure_meta_change(&self.engine, &self.meta_configuration_tables, change)
+    }
+
+    fn configure_entry(&self, entry: ConfigurationEntry) -> Result<ConfigureOutcome, StoreError> {
+        FlowStore::configure_meta_entry(&self.engine, &self.meta_configuration_tables, entry)
+    }
+
+    fn remove_entry(&self, key: EntryKey) -> Result<ConfigureOutcome, StoreError> {
+        FlowStore::remove_meta_entry(&self.engine, &self.meta_configuration_tables, key)
     }
 
     fn configured_threshold(
@@ -6246,7 +6206,7 @@ impl ManagesMetaflowState for FlowStore {
             .configuration_snapshot()?
             .and_then(|snapshot| {
                 snapshot
-                    .metaflows
+                    .configured_metaflows
                     .into_iter()
                     .find(|row| &row.address == address)
                     .map(|row| row.left_out)
@@ -6519,58 +6479,6 @@ impl ConfirmsStartedFlow for FlowStore {
     }
 }
 
-impl ConfiguresFlowStore for FlowStore {
-    fn configuration(&self) -> Result<Configuration, StoreError> {
-        Ok(self.stored_configuration()?.with_runtime(
-            &self.runtime_configuration()?,
-            &self.delivery_configuration()?,
-        ))
-    }
-
-    fn configure(&self, configuration: Configuration) -> Result<(), StoreError> {
-        self.engine.commit_atomic(
-            self.engine
-                .begin_atomic_commit()
-                .mutate(
-                    self.configuration,
-                    FlowStoreConfiguration::from(&configuration),
-                )
-                .mutate(
-                    self.runtime_configuration,
-                    RuntimeConfiguration::from(&configuration),
-                )
-                .mutate(
-                    self.delivery_tables.configuration,
-                    DeliveryConfiguration::from(&configuration),
-                ),
-        )?;
-        Ok(())
-    }
-
-    fn runtime_configuration(&self) -> Result<RuntimeConfiguration, StoreError> {
-        let records = self
-            .engine
-            .match_records(QueryPlan::key(
-                self.runtime_configuration,
-                RecordKey::new(RUNTIME_CONFIGURATION_KEY),
-            ))?
-            .records()
-            .to_vec();
-        match records.as_slice() {
-            [configuration] => Ok(configuration.clone()),
-            _ => Err(StoreError::StateInvariant),
-        }
-    }
-
-    fn configure_runtime(&self, configuration: RuntimeConfiguration) -> Result<(), StoreError> {
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.runtime_configuration,
-            RecordKey::new(RUNTIME_CONFIGURATION_KEY),
-            configuration,
-        ))?;
-        Ok(())
-    }
-}
 
 trait RegistersBindings {
     fn register_flow_as(
@@ -8252,7 +8160,21 @@ impl WritesFlowStore for FlowStore {
         origin: Origin,
     ) -> Result<PendingLaunch, StoreError> {
         let state = self.state()?;
-        let stable_socket = self.runtime_configuration()?.stable_codex.socket;
+        let snapshot = self
+            .configuration_snapshot()?
+            .ok_or(StoreError::NotConfigured)?;
+        let endpoint_selection = snapshot
+            .configured_harnesses
+            .into_iter()
+            .find(|harness| harness.harness_kind == HarnessKind::Codex)
+            .and_then(|harness| harness.control_socket_path_option)
+            .map(|endpoint_path| {
+                EndpointSelection::Available(signal_flow::Available_Data {
+                    endpoint_path,
+                    route_readiness: RouteReadiness::Parked,
+                })
+            })
+            .unwrap_or(EndpointSelection::Unavailable);
         let flow_id = format!("flow-{:016x}", state.next_flow_number);
         self.engine.commit_atomic(
             self.engine
@@ -8265,12 +8187,7 @@ impl WritesFlowStore for FlowStore {
                         origin: origin.clone(),
                         thread_id: None,
                         harness_kind: signal_flow::HarnessKind::Codex,
-                        endpoint_selection: EndpointSelection::Available(
-                            signal_flow::Available_Data {
-                                endpoint_path: stable_socket,
-                                route_readiness: RouteReadiness::Parked,
-                            },
-                        ),
+                        endpoint_selection,
                         lifecycle: FlowLifecycle::Pending,
                         generation: 0,
                     },
@@ -9582,7 +9499,7 @@ pub(crate) trait ReadsFlowMemory {
     fn meta_configuration_snapshot(
         engine: &Engine,
         tables: &MetaConfigurationTables,
-    ) -> Result<Option<ConfigurationSnapshot>, StoreError> {
+    ) -> Result<Option<StoredConfigurationSnapshot>, StoreError> {
         let nexus_rows = engine.match_records(QueryPlan::all(tables.nexus))?;
         let marker = nexus_rows.database_marker();
         let nexus = match nexus_rows.records() {
@@ -9663,17 +9580,119 @@ pub(crate) trait ReadsFlowMemory {
             .map(|stored| stored.metaflow.clone())
             .collect::<Vec<_>>();
         metaflows.sort_by_key(|metaflow| FlowStore::address_record_key(&metaflow.address));
-        Ok(Some(ConfigurationSnapshot {
-            nexus,
-            harnesses,
-            models,
-            thresholds,
-            send_servers,
-            investigation,
-            metaflows,
+        let texts = match texts_rows.records() {
+            [stored] if stored.record_key() == RecordKey::new("texts") => stored.texts.clone(),
+            _ => return Err(StoreError::StateInvariant),
+        };
+        Ok(Some(StoredConfigurationSnapshot {
+            configured_nexus: nexus,
+            configured_harnesses: harnesses,
+            configured_models: models,
+            configured_thresholds: thresholds,
+            configured_send_servers: send_servers,
+            configured_metaflows: metaflows,
+            configured_investigation: investigation,
             timings,
             limits,
+            texts,
         }))
+    }
+
+    fn configure_meta_entry(
+        engine: &Engine,
+        tables: &MetaConfigurationTables,
+        entry: ConfigurationEntry,
+    ) -> Result<ConfigureOutcome, StoreError> {
+        let snapshot = FlowStore::meta_configuration_snapshot(engine, tables)?
+            .ok_or(StoreError::NotConfigured)?;
+        match entry {
+            ConfigurationEntry::ModelEntry(entry) => {
+                let mut rows = snapshot.configured_models;
+                match rows.iter().position(|row| row.layer == entry.layer && row.aspect == entry.aspect) {
+                    Some(index) => rows[index] = entry,
+                    None => rows.push(entry),
+                }
+                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Models(rows))
+            }
+            ConfigurationEntry::ThresholdEntry(entry) => {
+                let mut rows = snapshot.configured_thresholds;
+                match rows.iter().position(|row| row.model_name == entry.model_name) {
+                    Some(index) => rows[index] = entry,
+                    None => rows.push(entry),
+                }
+                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Thresholds(rows))
+            }
+            ConfigurationEntry::HarnessEntry(entry) => {
+                let mut rows = snapshot.configured_harnesses;
+                match rows.iter().position(|row| row.harness_name == entry.harness_name) {
+                    Some(index) => rows[index] = entry,
+                    None => rows.push(entry),
+                }
+                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Harnesses(rows))
+            }
+            ConfigurationEntry::SendServerEntry(entry) => {
+                let mut rows = snapshot.configured_send_servers;
+                match rows.iter().position(|row| row.codex_app_server_binary == entry.codex_app_server_binary) {
+                    Some(index) => rows[index] = entry,
+                    None => rows.push(entry),
+                }
+                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::SendServers(rows))
+            }
+            ConfigurationEntry::MetaflowEntry(entry) => {
+                let mut rows = snapshot.configured_metaflows;
+                match rows.iter().position(|row| row.address == entry.address) {
+                    Some(index) => rows[index] = entry,
+                    None => rows.push(entry),
+                }
+                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Metaflows(rows))
+            }
+        }
+    }
+
+    fn remove_meta_entry(
+        engine: &Engine,
+        tables: &MetaConfigurationTables,
+        key: EntryKey,
+    ) -> Result<ConfigureOutcome, StoreError> {
+        let snapshot = FlowStore::meta_configuration_snapshot(engine, tables)?
+            .ok_or(StoreError::NotConfigured)?;
+        let outcome = match key {
+            EntryKey::ModelKey(key) => {
+                let mut rows = snapshot.configured_models;
+                let before = rows.len();
+                rows.retain(|row| row.layer != key.layer || row.aspect != key.aspect);
+                if rows.len() == before { return Err(StoreError::UnknownConfigurationEntry); }
+                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Models(rows))?
+            }
+            EntryKey::ThresholdKey(key) => {
+                let mut rows = snapshot.configured_thresholds;
+                let before = rows.len(); rows.retain(|row| row.model_name != key);
+                if rows.len() == before { return Err(StoreError::UnknownConfigurationEntry); }
+                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Thresholds(rows))?
+            }
+            EntryKey::HarnessKey(key) => {
+                let mut rows = snapshot.configured_harnesses;
+                let before = rows.len(); rows.retain(|row| row.harness_name != key);
+                if rows.len() == before { return Err(StoreError::UnknownConfigurationEntry); }
+                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Harnesses(rows))?
+            }
+            EntryKey::SendServerKey(key) => {
+                let mut rows = snapshot.configured_send_servers;
+                let before = rows.len(); rows.retain(|row| row.codex_app_server_binary != key);
+                if rows.len() == before { return Err(StoreError::UnknownConfigurationEntry); }
+                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::SendServers(rows))?
+            }
+            EntryKey::MetaflowKey(key) => {
+                let mut rows = snapshot.configured_metaflows;
+                let before = rows.len(); rows.retain(|row| row.address != key);
+                if rows.len() == before { return Err(StoreError::UnknownConfigurationEntry); }
+                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Metaflows(rows))?
+            }
+        };
+        match outcome {
+            ConfigureOutcome::Replaced | ConfigureOutcome::Removed => Ok(ConfigureOutcome::Removed),
+            ConfigureOutcome::Unchanged => Err(StoreError::StateInvariant),
+        }
     }
 
     fn meta_texts(
@@ -9771,7 +9790,7 @@ pub(crate) trait ReadsFlowMemory {
             ConfigurationChange::Metaflows(entries) => {
                 entries.iter().map(|entry| &entry.address).collect()
             }
-            ConfigurationChange::Investigation(address) => vec![address],
+            ConfigurationChange::Investigation(address) => address.iter().collect(),
             _ => Vec::new(),
         };
         if let Some(refused) = addresses
@@ -9882,7 +9901,10 @@ pub(crate) trait ReadsFlowMemory {
                 FlowStore::replace_configuration_family(
                     engine,
                     tables.investigation,
-                    vec![StoredMetaInvestigationConfiguration { investigation }],
+                    investigation
+                        .into_iter()
+                        .map(|investigation| StoredMetaInvestigationConfiguration { investigation })
+                        .collect(),
                 )
             }
             ConfigurationChange::Timings(timings) => {
@@ -10451,7 +10473,7 @@ mod tests {
     }
 
     use super::{
-        AppliesFlowQuery, ConfigurationOnlyStore, ConfiguresFlowStore, ConfirmsStartedFlow,
+        AppliesFlowQuery, ConfigurationOnlyStore, ConfirmsStartedFlow,
         DerivesNativeOwnerProof, FlowStore, LaunchOutcome, LaunchOutcomeV2, ManagesMetaflowState,
         NativeOwnerEnvironment, NativeOwnerProof, NativeOwnerState, OpensFlowStore, ReadsFlowRoles,
         ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
@@ -11471,169 +11493,6 @@ mod tests {
     }
 
     #[test]
-    fn new_store_seeds_defaults_from_home_and_runtime_directory() {
-        let fixture = StoreFixture::new();
-        let defaults = super::DefaultConfiguration {
-            home: std::path::PathBuf::from("/home/someone"),
-            runtime_directory: std::path::PathBuf::from("/run/user/4242"),
-        };
-        let path = fixture.directory.path().join("seeded.sema");
-        let store = FlowStore::open_seeded(&path, &defaults).expect("store opens");
-        let configuration = store.configuration().expect("configuration");
-        assert_eq!(configuration, defaults.configuration());
-        assert_eq!(
-            configuration.ordinary_socket_path,
-            "/run/user/4242/flow/flow.sock"
-        );
-        assert_eq!(
-            configuration.meta_socket_path,
-            "/run/user/4242/flow/flow-meta.sock"
-        );
-        assert_eq!(configuration.source_root, "/home/someone/primary");
-        assert!(configuration.stable_codex.control_socket_path.is_empty());
-        let runtime = store
-            .runtime_configuration()
-            .expect("runtime configuration");
-        assert_eq!(runtime.source_root, "/home/someone/primary");
-        assert!(runtime.stable_codex.socket.is_empty());
-        assert!(runtime.next_codex.home.is_empty());
-        assert_eq!(
-            defaults.store_path(),
-            std::path::Path::new("/home/someone/.local/state/flow/flow.sema")
-        );
-        drop(store);
-
-        let other = super::DefaultConfiguration {
-            home: std::path::PathBuf::from("/elsewhere"),
-            runtime_directory: std::path::PathBuf::from("/run/elsewhere"),
-        };
-        let resumed = FlowStore::open_seeded(&path, &other).expect("store reopens");
-        assert_eq!(
-            resumed
-                .runtime_configuration()
-                .expect("resumed")
-                .source_root,
-            "/home/someone/primary",
-            "a populated store resumes what it holds"
-        );
-    }
-
-    #[test]
-    fn configuration_only_store_defaults_without_seeding_then_commits_all_configuration() {
-        let fixture = StoreFixture::new();
-        let defaults = super::DefaultConfiguration {
-            home: std::path::PathBuf::from("/home/configuration-only"),
-            runtime_directory: std::path::PathBuf::from("/run/user/4243"),
-        };
-        let path = fixture.directory.path().join("configuration-only.sema");
-        let store = ConfigurationOnlyStore::open(&path).expect("configuration store opens");
-        assert_eq!(
-            store
-                .engine
-                .match_records(QueryPlan::all(store.configuration))
-                .expect("socket records read")
-                .records()
-                .len(),
-            0,
-            "reading fresh defaults writes no socket configuration"
-        );
-        assert_eq!(
-            store.configuration(&defaults).expect("fresh defaults"),
-            defaults.configuration()
-        );
-        assert_eq!(
-            store
-                .engine
-                .match_records(QueryPlan::all(store.runtime_configuration))
-                .expect("runtime records read")
-                .records()
-                .len(),
-            0,
-            "reading fresh defaults writes no runtime configuration"
-        );
-        assert_eq!(
-            store
-                .engine
-                .match_records(QueryPlan::all(store.delivery_configuration))
-                .expect("delivery records read")
-                .records()
-                .len(),
-            0,
-            "reading fresh defaults writes no delivery configuration"
-        );
-
-        let mut configured = defaults.configuration();
-        configured.meta_socket_path = "/run/user/4243/flow/custom-meta.sock".into();
-        let persisted = store
-            .configure(configured.clone())
-            .expect("all configuration commits");
-        assert_eq!(persisted, configured);
-        drop(store);
-        assert!(FlowStore::recognize_flow_memory(&path).expect("new Memory recognizes"));
-
-        let reopened = ConfigurationOnlyStore::open(&path).expect("configured store reopens");
-        assert_eq!(
-            reopened
-                .configuration(&defaults)
-                .expect("persisted configuration"),
-            configured,
-            "the next listener reads the committed endpoint instead of defaults"
-        );
-    }
-
-    #[test]
-    fn configuration_only_store_refuses_partial_state_without_filling_it() {
-        let fixture = StoreFixture::new();
-        let defaults = super::DefaultConfiguration {
-            home: std::path::PathBuf::from("/home/configuration-only"),
-            runtime_directory: std::path::PathBuf::from("/run/user/4244"),
-        };
-        let path = fixture.directory.path().join("partial-configuration.sema");
-        let store = ConfigurationOnlyStore::open(&path).expect("configuration store opens");
-        let initial = defaults.configuration();
-        store
-            .engine
-            .assert(Assertion::new(
-                store.configuration,
-                super::FlowStoreConfiguration::from(&initial),
-            ))
-            .expect("one partial row is present");
-
-        assert!(matches!(
-            store.configure(defaults.configuration()),
-            Err(super::StoreError::StateInvariant)
-        ));
-        assert_eq!(
-            store
-                .engine
-                .match_records(QueryPlan::all(store.configuration))
-                .expect("socket records read")
-                .records()
-                .len(),
-            1
-        );
-        assert_eq!(
-            store
-                .engine
-                .match_records(QueryPlan::all(store.runtime_configuration))
-                .expect("runtime records read")
-                .records()
-                .len(),
-            0,
-            "a failed configuration does not partially seed the missing rows"
-        );
-        assert_eq!(
-            store
-                .engine
-                .match_records(QueryPlan::all(store.delivery_configuration))
-                .expect("delivery records read")
-                .records()
-                .len(),
-            0
-        );
-    }
-
-    #[test]
     fn configured_opener_and_configuration_listener_leave_a_delivery_lease_untouched() {
         let fixture = StoreFixture::new();
         let path = fixture.path();
@@ -12170,46 +12029,6 @@ mod tests {
     }
 
     #[test]
-    fn configured_policy_is_recovered_from_the_same_store() {
-        let fixture = StoreFixture::new();
-        let store = fixture.store();
-        let endpoint = |name: &str| meta_signal_flow::CodexEndpoint {
-            client_path: format!("/opt/{name}-client"),
-            home: format!("/srv/{name}"),
-            control_socket_path: format!("/srv/{name}/control.sock"),
-            model_name_vector: vec![format!("{name}-model")],
-        };
-        let configuration = Configuration {
-            ordinary_socket_path: "/tmp/ordinary-test.sock".into(),
-            meta_socket_path: "/tmp/meta-test.sock".into(),
-            source_root: "/srv/source".into(),
-            stable_codex: endpoint("stable"),
-            next_codex: endpoint("next"),
-            harness_profile_vector: vec![meta_signal_flow::HarnessProfile {
-                harness_kind: signal_flow::HarnessKind::Codex,
-                command_sigil_vector: vec!["/".into()],
-                interrupt_keys: vec!["esc".into()],
-                submit_keys: Vec::new(),
-            }],
-            meta_aspects: vec![signal_flow::Aspect::Psyche, signal_flow::Aspect::Mind],
-            message_nexus_path: "/opt/message-nexus".into(),
-        };
-        store
-            .configure(configuration.clone())
-            .expect("policy persists");
-        drop(store);
-        let store = fixture.store();
-        assert_eq!(
-            store.configuration().expect("policy recovers"),
-            configuration
-        );
-        let runtime = store.runtime_configuration().expect("runtime recovers");
-        assert_eq!(runtime.source_root, "/srv/source");
-        assert_eq!(runtime.next_codex.socket, "/srv/next/control.sock");
-        assert_eq!(runtime.stable_codex.model_names, vec!["stable-model"]);
-    }
-
-    #[test]
     fn socket_record_keeps_the_archive_of_the_former_two_field_configuration() {
         #[derive(rkyv::Archive, rkyv::Serialize)]
         struct FormerConfiguration {
@@ -12249,13 +12068,11 @@ mod tests {
         assert_eq!(node.flow_id, flow_id);
         assert_eq!(node.session_id, "thread-1");
         assert_eq!(node.harness_kind, signal_flow::HarnessKind::Codex);
-        assert!(matches!(
+        assert_eq!(
             node.endpoint_selection,
-            signal_flow::EndpointSelection::Available(signal_flow::Available_Data {
-                route_readiness: signal_flow::RouteReadiness::Parked,
-                ..
-            })
-        ));
+            signal_flow::EndpointSelection::Unavailable,
+            "a fresh store fabricates no Codex endpoint before a harness is configured"
+        );
         assert_eq!(
             node.herdr_route_selection,
             signal_flow::HerdrRouteSelection::Unavailable
@@ -12566,14 +12383,6 @@ mod tests {
                         .len(),
                 ),
                 read(
-                    "flow_nexus_runtime_configuration",
-                    engine
-                        .match_records(QueryPlan::all(self.runtime_configuration))
-                        .expect("runtime configuration reads")
-                        .records()
-                        .len(),
-                ),
-                read(
                     "flow_nexus_herdr_routes",
                     engine
                         .match_records(QueryPlan::all(self.herdr_routes))
@@ -12642,14 +12451,6 @@ mod tests {
                     engine
                         .match_records(QueryPlan::all(delivery.pane_leases))
                         .expect("pane leases read")
-                        .records()
-                        .len(),
-                ),
-                read(
-                    "flow_nexus_delivery_configuration",
-                    engine
-                        .match_records(QueryPlan::all(delivery.configuration))
-                        .expect("delivery configuration reads")
                         .records()
                         .len(),
                 ),
@@ -14734,7 +14535,7 @@ mod tests {
             .configuration_snapshot()
             .expect("snapshot reads")
             .expect("store configured")
-            .nexus;
+            .configured_nexus;
         drop(configuration);
         assert_eq!(nexus.source_root, "/fixture/source");
         assert_eq!(nexus.message_nexus_path, "/fixture/message.sock");
@@ -14754,7 +14555,7 @@ mod tests {
                 .configuration_snapshot()
                 .expect("snapshot reads")
                 .expect("store configured")
-                .nexus,
+                .configured_nexus,
             nexus
         );
     }
@@ -14797,7 +14598,7 @@ mod tests {
             .configuration_snapshot()
             .expect("snapshot reads")
             .expect("store configured")
-            .models;
+            .configured_models;
         assert_eq!(
             carried,
             models
@@ -14928,7 +14729,7 @@ mod tests {
                 .expect("snapshot reads")
                 .expect("configuration exists");
             let row = snapshot
-                .metaflows
+                .configured_metaflows
                 .into_iter()
                 .find(|row| row.address == address)
                 .expect("declaration remains");

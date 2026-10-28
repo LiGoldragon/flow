@@ -171,9 +171,9 @@ impl From<&CodexEndpointConfiguration> for CodexEndpoint {
 }
 
 impl CodexEndpoints {
-    pub fn configured(snapshot: &meta_signal_flow::ConfigurationSnapshot) -> Self {
+    pub fn configured(snapshot: &crate::store::StoredConfigurationSnapshot) -> Self {
         let endpoints = snapshot
-            .harnesses
+            .configured_harnesses
             .iter()
             .filter(|harness| harness.harness_kind == HarnessKind::Codex)
             .filter_map(|harness| {
@@ -195,9 +195,9 @@ impl CodexEndpoints {
             .collect();
         Self {
             endpoints,
-            harnesses: snapshot.harnesses.clone(),
+            harnesses: snapshot.configured_harnesses.clone(),
             timeout: Duration::from_millis(snapshot.timings.app_server_timeout as u64),
-            workspace_root: PathBuf::from(&snapshot.nexus.source_root),
+            workspace_root: PathBuf::from(&snapshot.configured_nexus.source_root),
             limits: snapshot.limits.clone(),
             texts: crate::store::texts::seed_texts().expect("authored texts seed"),
         }

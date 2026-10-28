@@ -207,7 +207,7 @@ fn environment_overrides_do_not_replace_the_explicit_configuration() {
         .configuration_snapshot()
         .expect("configuration reads")
         .expect("whole configuration was committed")
-        .nexus;
+        .configured_nexus;
     assert_eq!(stored, desired);
     assert_eq!(
         stored.source_root,

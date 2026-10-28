@@ -8,8 +8,7 @@
 //! opens is a delivery a crash interrupted: it settles `Uncertain` then and
 //! there and is never retried, since what reached the pane is not known.
 
-use super::{DefaultConfiguration, FlowStore, SeedsConfiguration, StoreError};
-use crate::store::ManagesMetaflowState;
+use super::{FlowStore, StoreError};
 use meta_signal_flow::{
     Delivery, DeliveryGrade, DeliveryId, DeliveryOutcome, DeliveryResolution, HarnessProfile,
     InterruptWitness, MessageNexusPath, MetaAspects, ResolveDeliveryRejected_Data,
@@ -223,7 +222,6 @@ impl DefaultsHarnessProfile for HarnessKind {
 pub struct DeliveryTables {
     pub deliveries: TableReference<StoredDelivery>,
     pub pane_leases: TableReference<PaneLease>,
-    pub configuration: TableReference<DeliveryConfiguration>,
 }
 
 pub trait RegistersDeliveryTables: Sized {
@@ -255,11 +253,6 @@ impl RegistersDeliveryTables for DeliveryTables {
                 PANE_LEASE_TABLE_NAME,
                 FamilyName::new("flow-nexus-pane-lease"),
                 SchemaHash::for_label("flow-nexus-pane-lease-v1"),
-            ))?,
-            configuration: engine.register_table(TableDescriptor::new(
-                DELIVERY_CONFIGURATION_TABLE_NAME,
-                FamilyName::new("flow-nexus-delivery-configuration"),
-                SchemaHash::for_label("flow-nexus-delivery-configuration-v1"),
             ))?,
         })
     }
@@ -313,13 +306,6 @@ pub trait RecordsDeliveries {
     fn release_lease(&self, delivery_id: &str) -> Result<(), StoreError>;
     /// Settles every lease row a crash left behind as Uncertain.
     fn settle_interrupted_deliveries(&self) -> Result<Vec<Delivery>, StoreError>;
-    fn delivery_configuration(&self) -> Result<DeliveryConfiguration, StoreError>;
-    fn configure_delivery(&self, configuration: DeliveryConfiguration) -> Result<(), StoreError>;
-    /// Seeds the delivery configuration on a store that has none.
-    fn seed_delivery_configuration(
-        &self,
-        defaults: &DefaultConfiguration,
-    ) -> Result<(), StoreError>;
 }
 
 impl RecordsDeliveries for FlowStore {
@@ -414,66 +400,7 @@ impl RecordsDeliveries for FlowStore {
         Ok(settled)
     }
 
-    fn delivery_configuration(&self) -> Result<DeliveryConfiguration, StoreError> {
-        if let Some(snapshot) = self.configuration_snapshot()? {
-            return Ok(DeliveryConfiguration {
-                harness_profile_vector: snapshot
-                    .harnesses
-                    .into_iter()
-                    .map(|harness| HarnessProfile {
-                        harness_kind: harness.harness_kind,
-                        command_sigil_vector: harness.pane_profile.command_sigil_vector,
-                        interrupt_keys: harness.pane_profile.interrupt_keys,
-                        submit_keys: harness.pane_profile.submit_keys,
-                    })
-                    .collect(),
-                meta_aspects: snapshot.nexus.meta_aspects,
-                message_nexus_path: snapshot.nexus.message_nexus_path,
-            });
-        }
-        let records = self
-            .engine
-            .match_records(QueryPlan::key(
-                self.delivery_tables.configuration,
-                RecordKey::new(DELIVERY_CONFIGURATION_KEY),
-            ))?
-            .records()
-            .to_vec();
-        match records.as_slice() {
-            [configuration] => Ok(configuration.clone()),
-            _ => Err(StoreError::StateInvariant),
-        }
-    }
 
-    fn configure_delivery(&self, configuration: DeliveryConfiguration) -> Result<(), StoreError> {
-        self.engine.mutate_keyed(KeyedMutation::new(
-            self.delivery_tables.configuration,
-            RecordKey::new(DELIVERY_CONFIGURATION_KEY),
-            configuration,
-        ))?;
-        Ok(())
-    }
-
-    fn seed_delivery_configuration(
-        &self,
-        defaults: &DefaultConfiguration,
-    ) -> Result<(), StoreError> {
-        if self
-            .engine
-            .match_records(QueryPlan::key(
-                self.delivery_tables.configuration,
-                RecordKey::new(DELIVERY_CONFIGURATION_KEY),
-            ))?
-            .records()
-            .is_empty()
-        {
-            self.engine.assert(Assertion::new(
-                self.delivery_tables.configuration,
-                defaults.delivery_configuration(),
-            ))?;
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]

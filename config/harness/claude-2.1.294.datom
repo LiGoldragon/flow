@@ -71,7 +71,7 @@ When the conversation grows long, some or all of the current context is summariz
     { Artifact Absent [ Artifact ArtifactComments ArtifactData ] [ Environment.{ CLAUDE_CODE_ARTIFACT 0 } ] }
   ]
   [ AgentRole SecurityPolicy Harness OutputRendering Permissions SystemTurns PastedContent ToolSelection CodeReferences DynamicBoundary CodeStyle Pronouns Confirmation SessionSpecificGuidance UserShellCommands CodeReviewUltra Environment ModelIdentifiers Surfaces FastMode ContextManagement Decisiveness ReasoningEffort TurnEnding Clarification EditReversibility PartialCompletion TokenBudget ]
-  [ Text.--settings Slot.SettingsText Text.--remote-control Slot.Title Text.--name Slot.Title Text.--system-prompt-file Slot.PromptFile Flagged.{ --session-id SessionId } Text.--model Slot.LaunchModel Text.--effort Slot.LaunchEffort Slot.ModuleSwitches Flagged.{ --disallowedTools DeniedTools } Flagged.{ --tools AllowedTools } ]
+  [ Text.--settings Slot.SettingsText Text.--remote-control Slot.Title Text.--name Slot.Title Text.--system-prompt-file Slot.PromptFile Flagged.{ --session-id SessionId «» } Text.--model Slot.LaunchModel Text.--effort Slot.LaunchEffort Slot.ModuleSwitches Flagged.{ --disallowedTools DeniedTools «» } Flagged.{ --tools AllowedTools «» } ]
   []
   []
   [ CLAUDE_CODE_CHILD_SESSION CLAUDE_JOB_DIR CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SESSION_KIND ]

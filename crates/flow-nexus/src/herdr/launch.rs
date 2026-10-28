@@ -128,8 +128,11 @@ fn render_harness_arguments(
             ),
             Piece::Flagged(flagged) => {
                 if let Some(value) = values.at(&flagged.slot)? {
-                    arguments.push(flagged.string.clone());
+                    arguments.push(flagged.first_string.clone());
                     arguments.extend(value);
+                    if !flagged.second_string.is_empty() {
+                        arguments.push(flagged.second_string.clone());
+                    }
                 }
             }
             Piece::Joined(joined) => {
@@ -3336,8 +3339,9 @@ pub(crate) mod tests {
             Piece::Text("tui.terminal_title=[\"thread-title\"]".into()),
             Piece::Slot(Slot::ModuleSwitches),
             Piece::Flagged(Flagged_Data {
-                string: "resume".into(),
+                first_string: "resume".into(),
                 slot: Slot::ThreadId,
+                second_string: String::new(),
             }),
         ];
         let values = HarnessArgumentValues {

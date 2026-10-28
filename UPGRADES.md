@@ -1,5 +1,15 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 18 adds per-key privileged configuration for Models, Thresholds,
+Harnesses, SendServers and Metaflows, with typed removal and unknown-key
+refusal. `Configuration` now returns the exact typed `Start` that opened the
+running Nexus and every committed family, including Texts. A fresh store
+commits its initial Nexus and empty keyed families, so the response has no
+unconfigured shape. The runtime-configuration and delivery-configuration
+tables are retired after their facts have moved through the Nexus and Harness
+family upgrades; delivery and peer behavior read only the committed families.
+Pins meta-signal-flow 57.0.0.
+
 Batch 16 adds Claude Code 2.1.294's captured stock prompt as one configured
 Harness datom. Each exact section is a module in prompt order; Flow injects
 the text of kept `Injected` modules ahead of the composed system context,

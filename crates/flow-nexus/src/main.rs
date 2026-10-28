@@ -292,7 +292,7 @@ trait RunsConfigurationStartup {
         let message_nexus_binary = store
             .configuration_snapshot()
             .map_err(ConfigureOnlyError::Store)?
-            .map(|snapshot| snapshot.nexus.message_nexus_binary)
+            .map(|snapshot| snapshot.configured_nexus.message_nexus_binary)
             .unwrap_or_default();
         // Configure cannot retarget the socket while this one-request process is
         // serving. The store's same-file writer is held before stale-socket
@@ -652,7 +652,7 @@ mod tests {
                 .configuration_snapshot()
                 .expect("snapshot reads")
                 .expect("configuration is present")
-                .nexus,
+                .configured_nexus,
             expected_nexus
         );
         assert!(
@@ -697,7 +697,7 @@ mod tests {
                 .configuration_snapshot()
                 .expect("snapshot rereads")
                 .expect("configuration remains present")
-                .nexus,
+                .configured_nexus,
             changed_nexus,
             "a declared Nexus replaces the committed Nexus whole"
         );

@@ -87,24 +87,12 @@ impl Default for ThreadState {
 #[derive(Debug)]
 pub struct CodexTurns {
     threads: Mutex<HashMap<String, ThreadState>>,
-    remembered_turns: usize,
 }
 
 impl Default for CodexTurns {
     fn default() -> Self {
-        Self::with_remembered_turns(
-            crate::store::timings_limits::seed_limits()
-                .expect("authored limits seed")
-                .remembered_turns as usize,
-        )
-    }
-}
-
-impl CodexTurns {
-    pub(crate) fn with_remembered_turns(remembered_turns: usize) -> Self {
         Self {
             threads: Mutex::new(HashMap::new()),
-            remembered_turns,
         }
     }
 }
@@ -161,14 +149,14 @@ impl ReadsThreadStatus for serde_json::Value {
 
 pub trait TracksCodexTurns {
     /// Applies one event; true when it brought the thread to rest.
-    fn observe(&self, thread: &str, event: TurnEvent) -> bool;
+    fn observe(&self, thread: &str, event: TurnEvent, remembered_turns: usize) -> bool;
     /// Flow typed work into the seat on `thread`.
     fn delivered(&self, thread: &str);
     fn turn(&self, thread: &str) -> ThreadTurn;
 }
 
 impl TracksCodexTurns for CodexTurns {
-    fn observe(&self, thread: &str, event: TurnEvent) -> bool {
+    fn observe(&self, thread: &str, event: TurnEvent, remembered_turns: usize) -> bool {
         let mut threads = self
             .threads
             .lock()
@@ -187,7 +175,7 @@ impl TracksCodexTurns for CodexTurns {
                     return false;
                 }
                 state.completed.push_back(turn.clone());
-                if state.completed.len() > self.remembered_turns {
+                while state.completed.len() > remembered_turns {
                     state.completed.pop_front();
                 }
                 match &state.turn {
@@ -244,6 +232,30 @@ impl TracksCodexTurns for CodexTurns {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{CodexTurns, TracksCodexTurns, TurnEvent};
+
+    #[test]
+    fn the_next_event_uses_the_current_remembered_turn_limit() {
+        let turns = CodexTurns::default();
+        assert!(turns.observe("thread", TurnEvent::Completed("one".into()), 8));
+        assert!(!turns.observe("thread", TurnEvent::Completed("two".into()), 8));
+        assert!(!turns.observe("thread", TurnEvent::Completed("three".into()), 1));
+        let threads = turns.threads.lock().expect("turn state");
+        assert_eq!(
+            threads
+                .get("thread")
+                .expect("thread")
+                .completed
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["three".to_owned()]
+        );
+    }
+}
+
 /// The settlement a Codex thread's rest allows.
 pub trait SettlesRestingCodexSeats {
     /// Off the dispatch gate, from a responder: applies the events under
@@ -273,13 +285,17 @@ impl SettlesRestingCodexSeats for RunningNexus {
         if events.is_empty() {
             return;
         }
+        let remembered_turns = match self.store.committed_configuration_snapshot() {
+            Ok(Some(committed)) => committed.snapshot.limits.remembered_turns as usize,
+            _ => return,
+        };
         let seat = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             for event in events {
-                self.codex_turns.observe(thread, event);
+                self.codex_turns.observe(thread, event, remembered_turns);
             }
             self.codex_flow_on(thread).and_then(|node| {
                 let metaflow = self.store.metaflow_awake_as(&node.flow_id).ok()??;
@@ -294,8 +310,12 @@ impl SettlesRestingCodexSeats for RunningNexus {
     }
 
     fn observe_codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
+        let remembered_turns = match self.store.committed_configuration_snapshot() {
+            Ok(Some(committed)) => committed.snapshot.limits.remembered_turns as usize,
+            _ => return,
+        };
         for event in events {
-            self.codex_turns.observe(thread, event);
+            self.codex_turns.observe(thread, event, remembered_turns);
         }
         if self.codex_turns.turn(thread) == ThreadTurn::Resting
             && let Some(node) = self.codex_flow_on(thread)

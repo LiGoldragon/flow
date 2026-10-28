@@ -154,9 +154,17 @@ impl ObservesAgent for RunningNexus {
             .ok_or("Herdr session socket not found")?;
         let mut events = HerdrEvents::subscribe(&socket, &route.herdr_pane_id)?;
         loop {
+            let poll_milliseconds = self
+                .store
+                .committed_configuration_snapshot()
+                .map_err(|error| error.to_string())?
+                .ok_or("Flow configuration is absent")?
+                .snapshot
+                .timings
+                .agent_observe_poll;
             let Some(event) = events.next_event(
                 &|| self.stopping.requested(),
-                std::time::Duration::from_millis(self.timings.agent_observe_poll as u64),
+                std::time::Duration::from_millis(poll_milliseconds as u64),
             )?
             else {
                 // Herdr closed the subscription: the session is gone. The

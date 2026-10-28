@@ -12,9 +12,9 @@
 //! Flow learns of a Claude compaction from the flow's own hook: every
 //! Report it sends (`SessionStart` follows a compaction at once) has the
 //! flow's transcript read from where the last reading stopped. A transcript
-//! first read in this Nexus's run is read whole, and only compactions from
-//! [`WATCH_MARGIN_SECONDS`] before the Nexus started on are raised, so a
-//! deploy raises none of the compactions made before it. A Codex compaction
+//! first read in this Nexus's run is read whole, and only compactions within
+//! the committed watch margin at that reading are raised, so a deploy raises
+//! none of the compactions made before it. A Codex compaction
 //! arrives as its app-server's `item/completed`. Each compaction is
 //! recorded once ([`crate::store::compaction`]), so a compaction read twice
 //! warns once.
@@ -48,45 +48,23 @@ pub struct CompactionWatch {
     /// The Codex flows a Compact was typed into: the next compaction of
     /// each is the one asked for.
     requested: Mutex<HashSet<String>>,
-    /// The earliest compaction time raised on a first reading, as a
-    /// transcript writes it (`2026-10-19T23:59:01.123Z`).
-    floor: String,
 }
 
 impl Default for CompactionWatch {
     fn default() -> Self {
-        Self::with_margin_milliseconds(
-            crate::store::timings_limits::seed_timings()
-                .expect("authored timings seed")
-                .compaction_watch_margin as u64,
-        )
-    }
-}
-
-impl CompactionWatch {
-    pub(crate) fn with_margin_milliseconds(milliseconds: u64) -> Self {
-        let started = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or_default();
-        Self::from_floor(started.saturating_sub(milliseconds / 1000))
-    }
-}
-
-pub trait OpensCompactionWatch {
-    /// A watch whose first readings raise compactions from `floor`, in
-    /// Unix seconds, on.
-    fn from_floor(floor: u64) -> Self;
-}
-
-impl OpensCompactionWatch for CompactionWatch {
-    fn from_floor(floor: u64) -> Self {
         Self {
             read_to: Mutex::default(),
             requested: Mutex::default(),
-            floor: floor.transcript_time(),
         }
     }
+}
+
+fn compaction_floor(milliseconds: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    now.saturating_sub(milliseconds / 1000).transcript_time()
 }
 
 /// A Unix time written as a transcript writes its timestamps.
@@ -339,11 +317,22 @@ pub trait WatchesCompactions {
     /// one asked for.
     fn compaction_requested(&self, flow_id: &str);
     /// Raises a compaction made during continuous work once as a warning.
-    fn raise_compaction(&self, node: &FlowNode, boundary: &str, pre_tokens: Option<i64>);
+    fn raise_compaction(
+        &self,
+        node: &FlowNode,
+        boundary: &str,
+        pre_tokens: Option<i64>,
+        texts: &meta_signal_flow::Texts,
+    );
 }
 
 impl WatchesCompactions for RunningNexus {
     fn watch_claude_compactions(&self, flow_id: &str) {
+        let configuration = match self.store.committed_configuration_snapshot() {
+            Ok(Some(committed)) => committed.snapshot,
+            _ => return,
+        };
+        let floor = compaction_floor(configuration.timings.compaction_watch_margin as u64);
         let Ok(Some(node)) = self.store.flow_node(flow_id) else {
             return;
         };
@@ -373,11 +362,16 @@ impl WatchesCompactions for RunningNexus {
             found
                 .into_iter()
                 .filter(|compaction| compaction.trigger == "auto")
-                .filter(|compaction| !first || compaction.timestamp >= self.compactions.floor)
+                .filter(|compaction| !first || compaction.timestamp >= floor)
                 .collect::<Vec<_>>()
         };
         for compaction in raised {
-            self.raise_compaction(&node, &compaction.uuid, compaction.pre_tokens);
+            self.raise_compaction(
+                &node,
+                &compaction.uuid,
+                compaction.pre_tokens,
+                &configuration.texts,
+            );
         }
     }
 
@@ -416,8 +410,12 @@ impl WatchesCompactions for RunningNexus {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&node.flow_id);
                 if !asked {
+                    let texts = match self.store.committed_configuration_snapshot() {
+                        Ok(Some(committed)) => committed.snapshot.texts,
+                        _ => return,
+                    };
                     let pre_tokens = self.store.context_size(&node.flow_id).ok().flatten();
-                    self.raise_compaction(&node, &item, pre_tokens);
+                    self.raise_compaction(&node, &item, pre_tokens, &texts);
                 }
             }
         }
@@ -431,7 +429,13 @@ impl WatchesCompactions for RunningNexus {
             .insert(flow_id.to_owned());
     }
 
-    fn raise_compaction(&self, node: &FlowNode, boundary: &str, pre_tokens: Option<i64>) {
+    fn raise_compaction(
+        &self,
+        node: &FlowNode,
+        boundary: &str,
+        pre_tokens: Option<i64>,
+        texts: &meta_signal_flow::Texts,
+    ) {
         let flow_id = node.flow_id.as_str();
         match self.store.compaction_recorded(flow_id, boundary) {
             Ok(false) => {}
@@ -460,7 +464,7 @@ impl WatchesCompactions for RunningNexus {
             session: &node.session_id,
             transcript: transcript.as_deref(),
             pre_tokens,
-            texts: &self.texts,
+            texts,
         }
         .text();
         let compaction = Compaction {
@@ -500,6 +504,7 @@ mod tests {
     use super::{
         ClaudeCompaction, CodexContextSignal, CompactionWarning, ReadsClaudeCompactions,
         ReadsCodexContextSignal, RendersCompactionWarning, WritesTranscriptTime,
+        compaction_floor,
     };
     use signal_flow::{Address, Aspect, HarnessKind, Layer};
     use std::io::Write;
@@ -508,6 +513,11 @@ mod tests {
         format!(
             "{{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"uuid\":\"{uuid}\",\"timestamp\":\"{timestamp}\",\"isSidechain\":false,\"compactMetadata\":{{\"trigger\":\"{trigger}\",\"preTokens\":219141}}}}\n"
         )
+    }
+
+    #[test]
+    fn each_first_read_can_use_the_current_watch_margin() {
+        assert!(compaction_floor(0) > compaction_floor(60_000));
     }
 
     #[test]

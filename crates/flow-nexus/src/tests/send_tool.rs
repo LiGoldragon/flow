@@ -2069,7 +2069,10 @@ fn codex_resolved_absent(
         }
         other => panic!("not read: {other:?}"),
     };
-    fixture.nexus.codex_turns.observe(SEAT_THREAD, first_event);
+    fixture
+        .nexus
+        .codex_turns
+        .observe(SEAT_THREAD, first_event, 64);
     fake.accept_queued_turns(SEAT_THREAD, 1..=2);
     let response = fixture.nexus.dispatch_meta_serially(
         meta_signal_flow::Query::ResolveQueueDelivery(QueueDeliveryResolution {
@@ -2116,7 +2119,7 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     fixture
         .nexus
         .codex_turns
-        .observe(SEAT_THREAD, TurnEvent::Status(ThreadStatus::Idle));
+        .observe(SEAT_THREAD, TurnEvent::Status(ThreadStatus::Idle), 64);
     fixture.nexus.wake_due(seat_at());
     assert!(
         fake.queued_turn_texts().is_empty(),

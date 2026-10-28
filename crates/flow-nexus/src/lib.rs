@@ -885,12 +885,8 @@ impl OpensRunningNexus for RunningNexus {
             stopped_at_confirmation: waking::StoppedAtConfirmation::default(),
             stopping: Stopping::default(),
             launch_calls: send_tool::LaunchCalls::default(),
-            codex_turns: codex_turns::CodexTurns::with_remembered_turns(
-                snapshot.limits.remembered_turns as usize,
-            ),
-            compactions: compacting::CompactionWatch::with_margin_milliseconds(
-                snapshot.timings.compaction_watch_margin as u64,
-            ),
+            codex_turns: codex_turns::CodexTurns::default(),
+            compactions: compacting::CompactionWatch::default(),
         })
     }
 }

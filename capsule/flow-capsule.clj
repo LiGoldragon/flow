@@ -255,6 +255,28 @@
   (let [node (first (heads-named "Some" (second (items (body (read-datom inspected))))))]
     (some-> node body items second str)))
 
+(declare transcript-user-turns)
+
+(defn wake-boundary
+  "The exact durable and native boundary reached by a wake whose prompt is
+  not yet visible.  This is captured before teardown removes the owned pane
+  and transcript, so a failed capsule locates the refusal without turning a
+  later retry into its evidence."
+  [addr]
+  (let [inspection (inspect addr)
+        pane (bound-pane inspection)
+        native (native-session inspection)
+        process (when pane (str/trim (:out (herdr "pane" "process-info" "--pane" pane))))
+        agent (when pane (str/trim (:out (herdr "agent" "get" pane))))]
+    {:inspection inspection
+     :queue (flow-meta (str "ReadQueueDeliveries." addr))
+     :pane pane
+     :process-info process
+     :agent agent
+     :pane-text (when pane (pane-text pane))
+     :native-session native
+     :user-turns (vec (or (transcript-user-turns native) []))}))
+
 (defn transcript-user-turns
   "The user turns of a Claude transcript, as text, in order."
   [native]
@@ -393,11 +415,13 @@
             native (native-session (inspect quaternary))
             delivered (watch 60 #(some (fn [turn] (when (str/includes? turn "Tag s3") turn))
                                         (transcript-user-turns native)))
-            m (current quaternary)]
+            m (current quaternary)
+            passed (and (str/starts-with? reply "SendAccepted.") woke (not= (str woke) old)
+                        delivered (some #{old} (map str (:past m))))]
         {:reply reply
-         :pass (boolean (and (str/starts-with? reply "SendAccepted.") woke (not= (str woke) old)
-                             delivered (some #{old} (map str (:past m)))))
-         :watched (str "Metaflows Quaternary Awake as " woke ", Past " (:past m))}))]
+         :pass (boolean passed)
+         :watched (str "Metaflows Quaternary Awake as " woke ", Past " (:past m)
+                       (when-not passed (str "; boundary " (pr-str (wake-boundary quaternary)))))}))]
 
    ["4 Refresh.Address"
     (fn []

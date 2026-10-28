@@ -254,7 +254,7 @@ impl RunningNexus {
         origin: signal_flow::Origin,
     ) -> signal_flow::Response {
         let launch_request_id = profile.launch_request_id.clone();
-        if let Some(settled) = self.settled(&profile, &origin) {
+        if let Some(settled) = self.settled_configured(configured, &profile, &origin) {
             return settled;
         }
         match self.admission_refusal(&profile) {
@@ -3243,8 +3243,10 @@ mod tests {
             None
         );
         assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
+        let configured = fixture.nexus.configured_use().expect("configured fixture");
         assert_eq!(
-            fixture.nexus.settle(
+            fixture.nexus.settle_configured(
+                &configured,
                 "refused-title-request",
                 Response::StartRejected(title_not_ready())
             ),

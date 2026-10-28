@@ -360,8 +360,10 @@ fn a_refused_registration_is_reported_with_its_stage() {
             signal_flow::NativeTargetRefusal::IdentityInexact
         ))
     );
+    let configured = fixture.nexus.configured_use().expect("configured fixture");
     assert_eq!(
-        fixture.nexus.settle(
+        fixture.nexus.settle_configured(
+            &configured,
             "registration-request",
             Response::StartRejected(expected.clone())
         ),

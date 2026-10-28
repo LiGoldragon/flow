@@ -2406,10 +2406,13 @@ fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
     queued.queue.push(Request::Notice("B".into()).unsent());
     fixture.nexus.store.seed_metaflow(queued);
 
+    let configured = fixture.nexus.configured_use().expect("configured fixture");
     assert_eq!(
-        fixture
-            .nexus
-            .settle("asleep-request", Response::StartRejected(naming_refused())),
+        fixture.nexus.settle_configured(
+            &configured,
+            "asleep-request",
+            Response::StartRejected(naming_refused())
+        ),
         Response::StartRejected(naming_refused())
     );
     assert_eq!(

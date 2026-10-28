@@ -531,10 +531,7 @@ pub trait PerformsWakeAndDrain {
 /// not start and confirm, rejects the requested Start naming that Address.
 pub(crate) trait StartsRequirementsFirst {
     /// Runs off the dispatch gate, taking it per requirement as a wake does.
-    fn requirements_first(
-        &self,
-        profile: &LaunchProfile,
-    ) -> Result<(), signal_flow::StartRejection>;
+
     fn requirements_first_configured(
         &self,
         configured: &crate::ConfiguredUse,
@@ -543,16 +540,6 @@ pub(crate) trait StartsRequirementsFirst {
 }
 
 impl StartsRequirementsFirst for RunningNexus {
-    fn requirements_first(
-        &self,
-        profile: &LaunchProfile,
-    ) -> Result<(), signal_flow::StartRejection> {
-        let configured = self
-            .configured_use()
-            .map_err(|_| signal_flow::StartRejection::LaunchPersistenceRefused)?;
-        self.requirements_first_configured(&configured, profile)
-    }
-
     fn requirements_first_configured(
         &self,
         configured: &crate::ConfiguredUse,
@@ -716,7 +703,7 @@ impl StartsUnbound for RunningNexus {
             // The Nexus starts this flow itself: no calling flow is its
             // origin.
             let response = self.start_configured(configured, profile, Origin::Unbound);
-            self.settle(&launch_request_id, response)
+            self.settle_configured(configured, &launch_request_id, response)
         };
         // A send tool call made by the flow's first turn cannot wake its
         // target while this launch holds the dispatch gate. The gate is
@@ -787,8 +774,10 @@ trait WakesInParts {
     /// or drain runs meanwhile: the successor is started and confirmed
     /// through Replace before the predecessor is stopped and closed. The
     /// successor is owed for `cause` until it is confirmed.
-    fn refresh_successor_first(
+
+    fn refresh_successor_first_configured(
         &self,
+        configured: &crate::ConfiguredUse,
         flow_id: &str,
         metaflow: &Metaflow,
         cause: SuccessionCause,
@@ -1452,7 +1441,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             }
             let known_resting = match node.harness_kind {
                 HarnessKind::Codex => self.codex_resting(&flow_id),
-                HarnessKind::Claude => self.claude_main_turn_ended(&node),
+                HarnessKind::Claude => self.claude_main_turn_ended_configured(&configured, &node),
             };
             known_resting.then_some(flow_id)
         };
@@ -1672,6 +1661,10 @@ impl RefreshesMetaflows for RunningNexus {
     fn refresh(&self, address: &Address) -> Response {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         use signal_flow::{RefreshRejection, Refreshed, Refusal, Unknown_Data};
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Response::RefreshRejected(RefreshRejection::PersistenceRefused),
+        };
         let turn = self
             .dispatch_gate
             .lock()
@@ -1764,8 +1757,12 @@ impl RefreshesMetaflows for RunningNexus {
             // Replace takes the gate for its own steps; the lock keeps any
             // wake, drain or delivery of the metaflow out meanwhile.
             drop(turn);
-            let replaced =
-                self.refresh_successor_first(&flow_id, &metaflow, SuccessionCause::Ordered);
+            let replaced = self.refresh_successor_first_configured(
+                &configured,
+                &flow_id,
+                &metaflow,
+                SuccessionCause::Ordered,
+            );
             drop(lock);
             self.wake_deferred();
             return match replaced {
@@ -1824,6 +1821,14 @@ impl RefreshesMetaflows for RunningNexus {
 
     fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response {
         use signal_flow::{ReplaceRejection, StartRejection};
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => {
+                return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::LaunchPersistenceRefused,
+                ));
+            }
+        };
         let address = profile.address.clone();
         let response = {
             let _turn = self
@@ -1850,7 +1855,7 @@ impl RefreshesMetaflows for RunningNexus {
                     StartRejection::LaunchPersistenceRefused,
                 ));
             }
-            let response = self.replace(profile, origin);
+            let response = self.replace_configured(&configured, profile, origin);
             self.settle_owed(&address, &response);
             drop(lock);
             response
@@ -2345,9 +2350,9 @@ impl WakesInParts for RunningNexus {
             ),
         };
         let profile = seat.fresh_profile();
-        self.requirements_first(&profile)
+        self.requirements_first_configured(configured, &profile)
             .map_err(FreshRefusal::Rejected)?;
-        self.start_unbound_configured(&configured, profile)
+        self.start_unbound_configured(configured, profile)
     }
 
     fn hand_over(
@@ -2489,8 +2494,9 @@ impl WakesInParts for RunningNexus {
         Ok(())
     }
 
-    fn refresh_successor_first(
+    fn refresh_successor_first_configured(
         &self,
+        configured: &crate::ConfiguredUse,
         flow_id: &str,
         metaflow: &Metaflow,
         cause: SuccessionCause,
@@ -2503,10 +2509,6 @@ impl WakesInParts for RunningNexus {
         lineage.past.push(flow_id.to_owned());
         let WakePlan::Fresh(fresh) = self.wake_plan(&lineage) else {
             return AtStop::Kept(KeptAtStop::RefreshUnplaceable);
-        };
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => return AtStop::Kept(KeptAtStop::RefreshUnplaceable),
         };
         let model = match configured
             .snapshot
@@ -2581,7 +2583,7 @@ impl WakesInParts for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.replace(profile, Origin::Unbound)
+            self.replace_configured(configured, profile, Origin::Unbound)
         };
         self.settle_owed(&address, &response);
         match response {
@@ -2612,6 +2614,10 @@ impl WakesInParts for RunningNexus {
     }
 
     fn take_up_owed(&self, intent: SuccessorIntent) -> AtStop {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
         let address = intent.address.clone();
         let Some(lock) = self.waking.hold(&address) else {
             return AtStop::Kept(KeptAtStop::Waking);
@@ -2658,7 +2664,7 @@ impl WakesInParts for RunningNexus {
                         .dispatch_gate
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    self.replace(profile, attempt.origin)
+                    self.replace_configured(&configured, profile, attempt.origin)
                 };
                 self.settle_owed(&address, &response);
                 match response {
@@ -2666,7 +2672,12 @@ impl WakesInParts for RunningNexus {
                     response => AtStop::Kept(KeptAtStop::RefreshLaunchRefused(Box::new(response))),
                 }
             }
-            cause => self.refresh_successor_first(&intent.predecessor, &metaflow, cause),
+            cause => self.refresh_successor_first_configured(
+                &configured,
+                &intent.predecessor,
+                &metaflow,
+                cause,
+            ),
         };
         drop(lock);
         self.wake_deferred();
@@ -2812,8 +2823,12 @@ impl WakesInParts for RunningNexus {
                 // Replace takes the gate for its own steps; the waking lease
                 // keeps any wake or drain of the metaflow out meanwhile.
                 drop(turn);
-                let refreshed =
-                    self.refresh_successor_first(flow_id, &metaflow, SuccessionCause::Refresh);
+                let refreshed = self.refresh_successor_first_configured(
+                    &configured,
+                    flow_id,
+                    &metaflow,
+                    SuccessionCause::Refresh,
+                );
                 drop(refreshing);
                 self.wake_deferred();
                 return refreshed;

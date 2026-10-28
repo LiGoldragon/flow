@@ -146,7 +146,6 @@ impl AdmitsLaunch for RunningNexus {
 /// reaps the predecessor before the successor becomes routable.
 pub trait LaunchesFlows {
     /// Runs or resumes the launch a profile names, for its origin.
-    fn start(&self, profile: LaunchProfile, origin: Origin) -> Response;
     /// Runs Start using the one configuration generation selected at the
     /// external operation boundary.
     fn start_configured(
@@ -156,9 +155,13 @@ pub trait LaunchesFlows {
         origin: Origin,
     ) -> Response;
     /// The recorded outcome of a request already settled, or None.
-    fn settled(&self, profile: &LaunchProfile, origin: &Origin) -> Option<Response>;
+    fn settled_configured(
+        &self,
+        configured: &ConfiguredUse,
+        profile: &LaunchProfile,
+        origin: &Origin,
+    ) -> Option<Response>;
     /// Records what a Start-path response settles, completing a replacement.
-    fn settle(&self, launch_request_id: &str, response: Response) -> Response;
     fn settle_configured(
         &self,
         configured: &ConfiguredUse,
@@ -166,10 +169,14 @@ pub trait LaunchesFlows {
         response: Response,
     ) -> Response;
     /// Starts the successor through the Start path, then replaces.
-    fn replace(&self, profile: LaunchProfile, origin: Origin) -> Response;
+    fn replace_configured(
+        &self,
+        configured: &ConfiguredUse,
+        profile: LaunchProfile,
+        origin: Origin,
+    ) -> Response;
     /// Stops the predecessor, then closes its pane; only then is the
     /// successor routable.
-    fn reap(&self, replacement: Replacement, launched: Launched) -> Response;
     fn reap_configured(
         &self,
         configured: &ConfiguredUse,
@@ -190,16 +197,6 @@ pub trait LaunchesFlows {
 }
 
 impl LaunchesFlows for RunningNexus {
-    fn start(&self, profile: LaunchProfile, origin: Origin) -> Response {
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => {
-                return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
-            }
-        };
-        self.start_configured(&configured, profile, origin)
-    }
-
     fn start_configured(
         &self,
         configured: &ConfiguredUse,
@@ -229,7 +226,7 @@ impl LaunchesFlows for RunningNexus {
                 let Some(binding) = attempt.native_launch_binding_option else {
                     return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
                 };
-                return self.confirmed(&binding.flow_id);
+                return self.confirmed_configured(configured, &binding.flow_id);
             }
             if attempt.launch_attempt_phase == LaunchAttemptPhase::NativeLaunchIntentRecorded
                 && attempt
@@ -319,7 +316,7 @@ impl LaunchesFlows for RunningNexus {
                                 StartRejection::LaunchPersistenceRefused,
                             );
                         }
-                        self.confirmed(&binding.flow_id)
+                        self.confirmed_configured(configured, &binding.flow_id)
                     }
                     _ => Response::LaunchPending(attempt),
                 };
@@ -591,12 +588,17 @@ impl LaunchesFlows for RunningNexus {
                 prompt_delivery_intent: delivery_intent.clone(),
             }),
         ) {
-            Outcome::Submitted(_) => self.confirmed(&binding.flow_id),
+            Outcome::Submitted(_) => self.confirmed_configured(configured, &binding.flow_id),
             outcome => Self::native_refused(NativeLaunchStage::Confirm, outcome),
         }
     }
 
-    fn settled(&self, profile: &LaunchProfile, origin: &Origin) -> Option<Response> {
+    fn settled_configured(
+        &self,
+        configured: &ConfiguredUse,
+        profile: &LaunchProfile,
+        origin: &Origin,
+    ) -> Option<Response> {
         let launch_request_id = &profile.launch_request_id;
         let outcome = match self.store.launch_outcome(launch_request_id) {
             Ok(outcome) => outcome?,
@@ -615,7 +617,11 @@ impl LaunchesFlows for RunningNexus {
                 ));
             }
             Ok(Some(attempt)) if outcome.awaits_reaping() => {
-                return Some(self.resume_reaping(launch_request_id, attempt));
+                return Some(self.resume_reaping_configured(
+                    configured,
+                    launch_request_id,
+                    attempt,
+                ));
             }
             Ok(_) => {}
             Err(_) => {
@@ -625,14 +631,6 @@ impl LaunchesFlows for RunningNexus {
             }
         }
         Some(outcome.response(&self.store))
-    }
-
-    fn settle(&self, launch_request_id: &str, response: Response) -> Response {
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => return response,
-        };
-        self.settle_configured(&configured, launch_request_id, response)
     }
 
     fn settle_configured(
@@ -690,15 +688,12 @@ impl LaunchesFlows for RunningNexus {
         }
     }
 
-    fn replace(&self, mut profile: LaunchProfile, origin: Origin) -> Response {
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => {
-                return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::LaunchPersistenceRefused,
-                ));
-            }
-        };
+    fn replace_configured(
+        &self,
+        configured: &ConfiguredUse,
+        mut profile: LaunchProfile,
+        origin: Origin,
+    ) -> Response {
         profile.model_name = match configured.snapshot.configured_models.iter().find(|model| {
             model.layer == profile.address.layer && model.aspect == profile.address.aspect
         }) {
@@ -722,11 +717,15 @@ impl LaunchesFlows for RunningNexus {
         match self.store.replacement(&launch_request_id) {
             Ok(Some(_)) => {
                 // A replacement already under way or settled: resume it.
-                if let Some(settled) = self.settled(&profile, &origin) {
+                if let Some(settled) = self.settled_configured(&configured, &profile, &origin) {
                     return Self::as_replacement(settled);
                 }
                 let response = self.start_configured(&configured, profile, origin);
-                return Self::as_replacement(self.settle(&launch_request_id, response));
+                return Self::as_replacement(self.settle_configured(
+                    &configured,
+                    &launch_request_id,
+                    response,
+                ));
             }
             Ok(None) => {}
             Err(_) => return persistence(),
@@ -768,19 +767,7 @@ impl LaunchesFlows for RunningNexus {
             return persistence();
         }
         let response = self.start_configured(&configured, profile, origin);
-        Self::as_replacement(self.settle(&launch_request_id, response))
-    }
-
-    fn reap(&self, replacement: Replacement, launched: Launched) -> Response {
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => {
-                return Response::ReplaceRejected(ReplaceRejection::ReapRefused(
-                    StopRejection::PersistenceRefused,
-                ));
-            }
-        };
-        self.reap_configured(&configured, replacement, launched)
+        Self::as_replacement(self.settle_configured(&configured, &launch_request_id, response))
     }
 
     fn reap_configured(
@@ -852,10 +839,13 @@ impl LaunchesFlows for RunningNexus {
             launched,
         };
         // The Replaced outcome is what releases the successor to routing.
-        if self.perform(Self::settled_as(
-            &replacement.launch_request_id,
-            LaunchOutcome::Replaced(ReplacedRecord::from(&replaced)),
-        )) != Outcome::Recorded
+        if self.perform_configured(
+            configured,
+            Self::settled_as(
+                &replacement.launch_request_id,
+                LaunchOutcome::Replaced(ReplacedRecord::from(&replaced)),
+            ),
+        ) != Outcome::Recorded
         {
             return Response::ReplaceRejected(ReplaceRejection::ReapRefused(
                 StopRejection::PersistenceRefused,
@@ -962,8 +952,9 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
                     _ => continue,
                 }
             };
-            if unsettled {
-                self.settle(
+            if unsettled && let Ok(configured) = self.configured_use() {
+                self.settle_configured(
+                    &configured,
                     &launch_request_id,
                     Response::StartRejected(StartRejection::NativeLaunchRefused(
                         NativeLaunchRefusal {
@@ -1212,12 +1203,17 @@ impl DescribesLaunchInspection for LaunchInspectionRecords {
 
 /// Helpers of the launch verbs that are not themselves wire operations.
 trait ResumesReplacement {
-    fn resume_reaping(&self, launch_request_id: &str, attempt: LaunchAttempt) -> Response;
+    fn resume_reaping_configured(
+        &self,
+        configured: &ConfiguredUse,
+        launch_request_id: &str,
+        attempt: LaunchAttempt,
+    ) -> Response;
     fn as_replacement(response: Response) -> Response;
     /// The Record operation that stores what a launch request came to.
     fn settled_as(launch_request_id: &str, launch_outcome: LaunchOutcome) -> Operation;
     /// Confirms a launch whose receipt was observed: it is Started.
-    fn confirmed(&self, flow_id: &str) -> Response;
+    fn confirmed_configured(&self, configured: &ConfiguredUse, flow_id: &str) -> Response;
     /// The answer to a native launch step that did not succeed: the stage
     /// and category its operation failed with, else the step's stage with
     /// the catch-all category.
@@ -1235,7 +1231,12 @@ impl ResumesReplacement for RunningNexus {
         }))
     }
 
-    fn resume_reaping(&self, launch_request_id: &str, attempt: LaunchAttempt) -> Response {
+    fn resume_reaping_configured(
+        &self,
+        configured: &ConfiguredUse,
+        launch_request_id: &str,
+        attempt: LaunchAttempt,
+    ) -> Response {
         let replacement = match self.store.replacement(launch_request_id) {
             Ok(Some(replacement)) => replacement,
             _ => {
@@ -1249,8 +1250,8 @@ impl ResumesReplacement for RunningNexus {
                 StartRejection::LaunchPersistenceRefused,
             ));
         };
-        match self.perform(Operation::Confirm(binding.flow_id)) {
-            Outcome::Started(started) => self.reap(replacement, started),
+        match self.perform_configured(configured, Operation::Confirm(binding.flow_id)) {
+            Outcome::Started(started) => self.reap_configured(configured, replacement, started),
             _ => Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
                 StartRejection::LaunchPersistenceRefused,
             )),
@@ -1264,8 +1265,8 @@ impl ResumesReplacement for RunningNexus {
         }))
     }
 
-    fn confirmed(&self, flow_id: &str) -> Response {
-        match self.perform(Operation::Confirm(flow_id.into())) {
+    fn confirmed_configured(&self, configured: &ConfiguredUse, flow_id: &str) -> Response {
+        match self.perform_configured(configured, Operation::Confirm(flow_id.into())) {
             Outcome::Started(started) => {
                 // A Stop that landed before this commit found the seat
                 // unconfirmed and left it; it is settled once the gate is

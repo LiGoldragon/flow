@@ -89,7 +89,6 @@ use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, Read
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
-use crate::sending::MAX_SEND_PAYLOAD_BYTES;
 use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
@@ -1885,12 +1884,6 @@ impl PerformsWakeAndDrain for RunningNexus {
             return refused(drained, Failed_Data::StoreRefused);
         };
         let text = messages.datomize(Vec::new()).protosize().compact();
-        // The native budget applies to what the pane actually receives. A
-        // cohort is indivisible, so an oversized cohort stays entirely in
-        // the durable queue and no native attempt is created.
-        if text.len() > MAX_SEND_PAYLOAD_BYTES {
-            return refused(drained, Failed_Data::StoreRefused);
-        }
         let attempt = match self.store.prepare_oldest_delivery(
             &address,
             &flow_id,

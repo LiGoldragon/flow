@@ -1589,6 +1589,22 @@ fn canonical_test_payload(requests: &[TestRequest]) -> String {
         .compact()
 }
 
+fn parse_typed_payload(text: &str) -> Vec<meta_signal_flow::Message> {
+    use datom_codec::{Actualizing, Budget, Potential};
+    use protos::ReaderBudget;
+    let mut budget = Budget {
+        remaining: 1_000_000,
+        reader: ReaderBudget {
+            remaining: 1_000_000,
+        },
+        depth: 0,
+        maximum_depth: 1024,
+    };
+    Potential::<Vec<meta_signal_flow::Message>>::from(text)
+        .actualize(&mut budget)
+        .expect("the complete Codex turn input is one typed message vector")
+}
+
 /// The app-server's notification of a turn of `thread` starting or
 /// completing.
 fn turn_notice(method: &str, thread: &str, turn: &str) -> serde_json::Value {
@@ -1733,11 +1749,15 @@ fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
     let texts = fake.queued_turn_texts();
     assert_eq!(texts.len(), 1, "one payload: {texts:?}");
     let typed = &texts[0];
-    assert!(
-        typed.find("Make it so.") < typed.find("Your brief."),
-        "both, in order: {typed}"
+    let expected_text = canonical_test_payload(&[psyche.clone(), brief.clone()]);
+    assert_eq!(typed, &expected_text);
+    let expected = parse_typed_payload(&expected_text);
+    assert_eq!(parse_typed_payload(typed), expected);
+    assert_eq!(
+        expected.datomize(Vec::new()).protosize().compact(),
+        *typed,
+        "the captured Codex input is the canonical complete vector"
     );
-    assert!(typed.contains("Psyche core Secondary"));
     assert_eq!(fixture.seat_queue(), vec![]);
 }
 

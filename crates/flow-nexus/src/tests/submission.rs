@@ -389,7 +389,7 @@ fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
     assert_eq!(presses.len(), 2);
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop }")
+        Some("[ HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop } ]")
     );
 }
 
@@ -434,7 +434,7 @@ fn a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c() {
     assert_eq!(fixture.composer_holds(), None, "the pane is free again");
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop }")
+        Some("[ HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop } ]")
     );
 }
 
@@ -482,7 +482,7 @@ fn a_prompt_claudes_interrupt_put_back_is_submitted_again_and_the_hard_abrupt_fo
     assert_eq!(fixture.composer_holds(), None, "the pane is free again");
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop }")
+        Some("[ HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop } ]")
     );
 }
 
@@ -609,6 +609,6 @@ fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
     );
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop }")
+        Some("[ HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop } ]")
     );
 }

@@ -6,6 +6,10 @@ branch, whose schema it carries. Every ordinary and meta peer repins, and
 Curriculum serves that schema.
 
 - Every pane delivery is the complete typed message datom. A queued cohort is one canonical vector of those messages, preserving each member's kind, authenticated sender and priority in queue order. Pins meta-signal-flow 41.0.0 (`17e7b7`). Logical delivery current rows upgrade from v3 to v4 with their resolved typed sender; historical rows without authentic sender or priority are durably quarantined outside the runnable queue and are never rendered through an unsigned fallback. Payload budgets and native receipt digests cover the whole canonical datom or vector.
+  Metaflow delivery locks upgrade from v1 to v2: a new lock retains the
+  exact flow identity authenticated when it was issued, while a historical
+  lock without that identity cannot deliver and is released without
+  inventing the current successor as its sender.
 - A Send is never refused for the seat's state or its route. A Wake Send to
   a seat with a queue, an outstanding delivery, a hold or a passed context
   threshold is queued and answers `SendAccepted.{ ... Queued }`; the route

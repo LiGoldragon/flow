@@ -154,7 +154,7 @@ fn soft_waits_for_a_resting_recipient_and_types_nothing_to_a_working_one() {
     );
     assert_eq!(
         fixture.typed().as_deref(),
-        Some("Soft.{ Notice { { Psyche core Secondary } e167d8 } Words.«when you rest» }")
+        Some("[ Soft.{ Notice { { Psyche core Secondary } e167d8 } Words.«when you rest» } ]")
     );
 }
 
@@ -249,7 +249,7 @@ fn hard_abrupt_interrupts_a_working_recipient_before_typing() {
         vec![
             "--session messaging-build pane send-keys w1:p3 esc".to_owned(),
             "--session messaging-build agent wait w1:p3 --until idle --until done --until blocked --timeout 3000".to_owned(),
-            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«stop the build» }".to_owned(),
+            "--session messaging-build agent prompt w1:p3 [ HardAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«stop the build» } ]".to_owned(),
         ]
     );
 }
@@ -281,7 +281,7 @@ fn hard_abrupt_presses_the_interrupt_again_while_the_recipient_still_works() {
             wait,
             press,
             wait,
-            "--session messaging-build agent prompt w1:p3 HardAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«stop now» }",
+            "--session messaging-build agent prompt w1:p3 [ HardAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«stop now» } ]",
         ]
     );
 }
@@ -331,14 +331,14 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
         (
             "end \u{1b}[201~ of paste",
             BodyRefusal::ControlCharacter(
-                "MiddleAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«end ".len()
+                "[ MiddleAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«end ".len()
                     as i64,
             ),
         ),
         (
             "one\rtwo",
             BodyRefusal::ControlCharacter(
-                "MiddleAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«one".len()
+                "[ MiddleAbrupt.{ Notice { { Psyche core Secondary } e167d8 } Words.«one".len()
                     as i64,
             ),
         ),

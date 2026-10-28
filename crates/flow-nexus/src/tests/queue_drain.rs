@@ -122,6 +122,22 @@ fn queue_payload(requests: &[TestRequest]) -> String {
         .compact()
 }
 
+fn parse_queue_payload(text: &str) -> Vec<meta_signal_flow::Message> {
+    use datom_codec::{Actualizing, Budget, Potential};
+    use protos::ReaderBudget;
+    let mut budget = Budget {
+        remaining: 1_000_000,
+        reader: ReaderBudget {
+            remaining: 1_000_000,
+        },
+        depth: 0,
+        maximum_depth: 1024,
+    };
+    Potential::<Vec<meta_signal_flow::Message>>::from(text)
+        .actualize(&mut budget)
+        .expect("the complete native prompt is one typed message vector")
+}
+
 fn queue_entry(request: &TestRequest) -> QueueEntry {
     QueueEntry {
         logical_delivery_id: request.logical_delivery_id.clone(),
@@ -378,7 +394,13 @@ fn two_queued_claude_requests_go_in_one_payload_and_settle_on_its_receipt() {
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     assert_eq!(queue(&fixture), vec![], "both typed, out of the queue");
     let typed = fixture.typed().unwrap_or_default();
-    assert!(typed.find("first-request-body") < typed.find("second-request-body"));
+    let expected = vec![expected_message(&first), expected_message(&second)];
+    assert_eq!(parse_queue_payload(&typed), expected);
+    assert_eq!(
+        expected.datomize(Vec::new()).protosize().compact(),
+        typed,
+        "the captured native prompt is the canonical complete vector"
+    );
     assert!(matches!(
         standings(&fixture).as_slice(),
         [
@@ -438,30 +460,36 @@ fn two_queued_claude_requests_go_in_one_payload_and_settle_on_its_receipt() {
     assert_eq!(typed_count(&fixture, "second-request-body"), 1, "no replay");
 }
 
-/// The byte budget applies to the exact vector typed into the pane. Two
-/// individually admissible messages whose one cohort is too large remain
-/// together in the durable queue; no partial vector or native attempt is
-/// created.
+/// Admission measures each complete typed message. Once accepted, the
+/// indivisible cohort is rendered whole; Flow neither splits it nor leaves
+/// it permanently queued merely because the vector is larger than one
+/// member's admission ceiling.
 #[test]
-fn an_oversized_typed_cohort_is_neither_split_nor_submitted() {
+fn a_large_accepted_cohort_reaches_the_native_boundary_as_one_vector() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![working_claude_agent(&fixture)],
-        PromptFixture::Prompted("w1:p3"),
+        PromptFixture::PromptedUnrecorded("w1:p3"),
     );
     let first = from_core(&"a".repeat(33_000));
     let second = from_core(&"b".repeat(33_000));
     assert!(queue_payload(std::slice::from_ref(&first)).len() < 64 * 1024);
     assert!(queue_payload(std::slice::from_ref(&second)).len() < 64 * 1024);
-    assert!(queue_payload(&[first.clone(), second.clone()]).len() > 64 * 1024);
+    let expected_text = queue_payload(&[first.clone(), second.clone()]);
+    assert!(expected_text.len() > 64 * 1024);
     seat(&fixture, vec![first.clone(), second.clone()]);
     append_main_rows(&fixture, &[end_turn("before")]);
 
     report(&fixture, claude_stop(&fixture));
 
-    assert_eq!(queue(&fixture), vec![first, second]);
-    assert!(standings(&fixture).is_empty(), "no native attempt was made");
-    assert!(fixture.typed().is_none(), "nothing reached the pane");
+    let captured = fixture.typed().expect("the full cohort reached Herdr");
+    assert_eq!(captured, expected_text);
+    assert_eq!(
+        parse_queue_payload(&captured),
+        vec![expected_message(&first), expected_message(&second)]
+    );
+    assert_eq!(queue(&fixture), vec![]);
+    assert_eq!(standings(&fixture).len(), 2, "one cohort attempt");
 }
 
 /// A background task's notification takes the main turn before the typed

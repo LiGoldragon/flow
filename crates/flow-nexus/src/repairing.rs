@@ -4,11 +4,11 @@
 //! `Withdraw` takes one queued request out of its queue and closes the
 //! attempt that holds it back.
 
-use crate::RunningNexus;
 use crate::herdr::{PaneRoute, ReadsHerdrPanes};
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::repair::RepairsMetaflows;
 use crate::store::{ReadsFlowRows, RebindsNativeSession};
+use crate::{ConfiguredUse, RunningNexus};
 use meta_signal_flow::{
     InspectRejected_Data, Rebind_Data, RebindRejected_Data, Rebinding, Response, StoreRefusal,
     Withdraw_Data,
@@ -20,7 +20,7 @@ pub trait RepairsFromMeta {
     fn inspect(&self, address: Address) -> Response;
     /// Rebound once the new pane or flow is recorded; RebindRejected
     /// changes nothing.
-    fn rebind(&self, rebind: Rebind_Data) -> Response;
+    fn rebind(&self, configured: &ConfiguredUse, rebind: Rebind_Data) -> Response;
     /// Withdrawn once the request has left the queue; WithdrawRejected
     /// changes nothing.
     fn withdraw(&self, withdraw: Withdraw_Data) -> Response;
@@ -45,16 +45,11 @@ impl RepairsFromMeta for RunningNexus {
         }
     }
 
-    fn rebind(&self, rebind: Rebind_Data) -> Response {
+    fn rebind(&self, configured: &ConfiguredUse, rebind: Rebind_Data) -> Response {
         let Rebind_Data { address, rebinding } = rebind;
         let rebound = match rebinding {
             Rebinding::Pane(herdr_pane_id) => {
-                let view = match self.herdr_operation_view() {
-                    Ok(view) => view,
-                    Err(_) => {
-                        return Response::RebindRejected(RebindRejected_Data::HerdrUnavailable);
-                    }
-                };
+                let view = configured.herdr_operation_view();
                 let flow_id = match self.store.current_flow(&address) {
                     Ok(Ok(flow_id)) => flow_id,
                     Ok(Err(rejection)) => return Response::RebindRejected(rejection),

@@ -22,11 +22,11 @@
 //! ResolvePeer (meta) answers the same question for a process named by
 //! Message, which reads its own peer from the kernel.
 
-use crate::RunningNexus;
-use crate::generated::starter::{CallerProcessing, DerivesOrigin};
+use crate::generated::starter::CallerProcessing;
 use crate::herdr::PanePresence;
 use crate::herdr::ReadsHerdrPanes;
 use crate::store::{ReadsFlowRoles, ReadsFlowRows, StoreError};
+use crate::{ConfiguredUse, RunningNexus};
 use signal_flow::{Caller, CallerResolutionRejection, FlowId, FlowNode, Response};
 use std::collections::BTreeSet;
 use std::{fs, os::unix::net::UnixStream, path::PathBuf};
@@ -374,15 +374,22 @@ impl NamesRootThread for crate::codex::CodexEndpoints {
 
 /// Answers ResolveCaller for the pane a connection's peer runs in.
 pub trait ResolvesCaller {
-    fn resolve_caller(&self, pane: Option<CallerPane>, claim: Option<FlowId>) -> Response;
+    fn resolve_caller(
+        &self,
+        configured: &ConfiguredUse,
+        pane: Option<CallerPane>,
+        claim: Option<FlowId>,
+    ) -> Response;
 }
 
 impl ResolvesCaller for RunningNexus {
-    fn resolve_caller(&self, pane: Option<CallerPane>, claim: Option<FlowId>) -> Response {
-        let Ok(view) = self.herdr_operation_view() else {
-            return Response::CallerResolutionRejected(CallerResolutionRejection::CallerUnknown);
-        };
-        self.resolve_caller_with(&view.herdr, pane, claim)
+    fn resolve_caller(
+        &self,
+        configured: &ConfiguredUse,
+        pane: Option<CallerPane>,
+        claim: Option<FlowId>,
+    ) -> Response {
+        self.resolve_caller_with(&configured.herdr, pane, claim)
     }
 }
 
@@ -411,15 +418,16 @@ impl RunningNexus {
 /// The origin of what a calling process asks: its pane's one bound flow
 /// with that flow's native session, as Identify resolves a caller, or
 /// Unbound when it is no bound flow (a deploy script, a shell).
-impl DerivesOrigin for RunningNexus {
-    fn origin_of<N: CallerProcessing>(&self, input: N) -> signal_flow::Origin {
-        let Ok(view) = self.herdr_operation_view() else {
-            return signal_flow::Origin::Unbound;
-        };
+impl RunningNexus {
+    pub(crate) fn origin_of_configured<N: CallerProcessing>(
+        &self,
+        configured: &ConfiguredUse,
+        input: N,
+    ) -> signal_flow::Origin {
         input
             .caller_process()
-            .and_then(|process| process.caller_pane(&view.herdr))
-            .and_then(|pane| self.bound_caller_with(&view.herdr, &pane).ok())
+            .and_then(|process| process.caller_pane(&configured.herdr))
+            .and_then(|pane| self.bound_caller_with(&configured.herdr, &pane).ok())
             .and_then(|caller| self.store.flow_node(&caller.flow_id).ok().flatten())
             .map(|node| {
                 signal_flow::Origin::Flow(signal_flow::FlowOrigin {
@@ -433,15 +441,20 @@ impl DerivesOrigin for RunningNexus {
 
 /// The one flow a pane holds, with its role.
 pub(crate) trait BindsCallerPane {
-    fn bound_caller(&self, pane: &CallerPane) -> Result<Caller, CallerResolutionRejection>;
+    fn bound_caller(
+        &self,
+        configured: &ConfiguredUse,
+        pane: &CallerPane,
+    ) -> Result<Caller, CallerResolutionRejection>;
 }
 
 impl BindsCallerPane for RunningNexus {
-    fn bound_caller(&self, pane: &CallerPane) -> Result<Caller, CallerResolutionRejection> {
-        let view = self
-            .herdr_operation_view()
-            .map_err(|_| CallerResolutionRejection::CallerUnknown)?;
-        self.bound_caller_with(&view.herdr, pane)
+    fn bound_caller(
+        &self,
+        configured: &ConfiguredUse,
+        pane: &CallerPane,
+    ) -> Result<Caller, CallerResolutionRejection> {
+        self.bound_caller_with(&configured.herdr, pane)
     }
 }
 
@@ -466,5 +479,15 @@ impl RunningNexus {
             .role(&node.flow_id)
             .map_err(unknown)?
             .ok_or(CallerResolutionRejection::CallerUnknown)
+    }
+}
+
+#[cfg(test)]
+impl crate::generated::starter::DerivesOrigin for RunningNexus {
+    fn origin_of<N: CallerProcessing>(&self, input: N) -> signal_flow::Origin {
+        self.configured_use()
+            .map_or(signal_flow::Origin::Unbound, |configured| {
+                self.origin_of_configured(&configured, input)
+            })
     }
 }

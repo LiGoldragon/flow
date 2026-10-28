@@ -14,7 +14,6 @@ use crate::delivery::body::ShowsPaneText;
 pub mod body;
 pub mod lease;
 
-use crate::RunningNexus;
 use crate::compacting::WatchesCompactions;
 use crate::generated::operation::{Operation, Record_Data};
 use crate::herdr::HerdrCli;
@@ -23,6 +22,7 @@ use crate::performing::Performs;
 use crate::store::context::{JudgesCompaction, JudgesThreshold};
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
 use crate::store::{ReadsFlowRows, RecordsReplacement};
+use crate::{ConfiguredUse, RunningNexus};
 use body::{RecognizesLetter, RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
@@ -85,15 +85,20 @@ struct DeliveryReadiness {
 
 /// Finds the live, routable flow a write is for.
 pub trait FindsDeliveryTarget {
-    fn delivery_target(&self, flow_id: &str) -> Result<DeliveryTarget, TargetRefusal>;
+    fn delivery_target(
+        &self,
+        configured: &ConfiguredUse,
+        flow_id: &str,
+    ) -> Result<DeliveryTarget, TargetRefusal>;
 }
 
 impl FindsDeliveryTarget for RunningNexus {
-    fn delivery_target(&self, flow_id: &str) -> Result<DeliveryTarget, TargetRefusal> {
-        let view = self
-            .herdr_operation_view()
-            .map_err(|_| TargetRefusal::PersistenceRefused)?;
-        self.delivery_target_with(flow_id, &view.configuration.snapshot)
+    fn delivery_target(
+        &self,
+        configured: &ConfiguredUse,
+        flow_id: &str,
+    ) -> Result<DeliveryTarget, TargetRefusal> {
+        self.delivery_target_with(flow_id, &configured.snapshot)
     }
 }
 
@@ -179,26 +184,36 @@ pub trait ReadsLeasedPane {
     /// The agent's state when the pane may be written: bound, ready, not
     /// Blocked, and its composer blank. A pane Herdr shows gone records the
     /// flow Exited, where that observation is made.
-    fn writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal>;
+    fn writable_state(
+        &self,
+        configured: &ConfiguredUse,
+        target: &DeliveryTarget,
+    ) -> Result<AgentState, PaneRefusal>;
     /// The same read for an owner-forced write. A blocked state is then
     /// writable, while route, readiness and a person's composer remain
     /// protected exactly as for a kept write.
-    fn forced_writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal>;
+    fn forced_writable_state(
+        &self,
+        configured: &ConfiguredUse,
+        target: &DeliveryTarget,
+    ) -> Result<AgentState, PaneRefusal>;
 }
 
 impl ReadsLeasedPane for RunningNexus {
-    fn writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
-        let view = self
-            .herdr_operation_view()
-            .map_err(|_| PaneRefusal::RouteUnavailable)?;
-        self.writable_state_with(&view.herdr, target, false, true)
+    fn writable_state(
+        &self,
+        configured: &ConfiguredUse,
+        target: &DeliveryTarget,
+    ) -> Result<AgentState, PaneRefusal> {
+        self.writable_state_with(&configured.herdr, target, false, true)
     }
 
-    fn forced_writable_state(&self, target: &DeliveryTarget) -> Result<AgentState, PaneRefusal> {
-        let view = self
-            .herdr_operation_view()
-            .map_err(|_| PaneRefusal::RouteUnavailable)?;
-        self.writable_state_with(&view.herdr, target, true, true)
+    fn forced_writable_state(
+        &self,
+        configured: &ConfiguredUse,
+        target: &DeliveryTarget,
+    ) -> Result<AgentState, PaneRefusal> {
+        self.writable_state_with(&configured.herdr, target, true, true)
     }
 }
 
@@ -316,10 +331,10 @@ impl RunningNexus {
 
 /// The privileged pane writes.
 pub trait DeliversMessages {
-    fn deliver(&self, request: DeliveryRequest) -> Response;
-    fn vet(&self, request: &DeliveryRequest) -> Response;
-    fn command(&self, request: CommandRequest) -> Response;
-    fn read_pane(&self, flow_id: &str) -> Response;
+    fn deliver(&self, configured: &ConfiguredUse, request: DeliveryRequest) -> Response;
+    fn vet(&self, configured: &ConfiguredUse, request: &DeliveryRequest) -> Response;
+    fn command(&self, configured: &ConfiguredUse, request: CommandRequest) -> Response;
+    fn read_pane(&self, configured: &ConfiguredUse, flow_id: &str) -> Response;
 }
 
 impl RunningNexus {
@@ -343,7 +358,7 @@ impl RunningNexus {
 }
 
 impl DeliversMessages for RunningNexus {
-    fn deliver(&self, request: DeliveryRequest) -> Response {
+    fn deliver(&self, configured: &ConfiguredUse, request: DeliveryRequest) -> Response {
         match self.store.delivery(&request.delivery_id) {
             Ok(Some(delivery)) => return Response::Delivered(delivery),
             Ok(None) => {}
@@ -351,22 +366,12 @@ impl DeliversMessages for RunningNexus {
                 return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
             }
         }
-        let view = match self.herdr_operation_view() {
-            Ok(view) => view,
-            Err(_) => {
-                return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
-            }
-        };
+        let view = configured.herdr_operation_view();
         self.deliver_with_view(&view, request)
     }
 
-    fn vet(&self, request: &DeliveryRequest) -> Response {
-        let view = match self.herdr_operation_view() {
-            Ok(view) => view,
-            Err(_) => {
-                return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
-            }
-        };
+    fn vet(&self, configured: &ConfiguredUse, request: &DeliveryRequest) -> Response {
+        let view = configured.herdr_operation_view();
         let target = match self.checked_delivery_target(&view.configuration.snapshot, request) {
             Ok(target) => target,
             Err(refusal) => return Response::DeliveryRejected(refusal),
@@ -377,11 +382,8 @@ impl DeliversMessages for RunningNexus {
         }
     }
 
-    fn command(&self, request: CommandRequest) -> Response {
-        let view = match self.herdr_operation_view() {
-            Ok(view) => view,
-            Err(_) => return Response::CommandRejected(CommandRejection::NotDelivered),
-        };
+    fn command(&self, configured: &ConfiguredUse, request: CommandRequest) -> Response {
+        let view = configured.herdr_operation_view();
         let herdr = &view.herdr;
         let target = match self.delivery_target_with(&request.flow_id, &view.configuration.snapshot)
         {
@@ -471,13 +473,8 @@ impl DeliversMessages for RunningNexus {
         })
     }
 
-    fn read_pane(&self, flow_id: &str) -> Response {
-        let view = match self.herdr_operation_view() {
-            Ok(view) => view,
-            Err(_) => {
-                return Response::ReadPaneRejected(ReadPaneRejected_Data::HerdrUnavailable);
-            }
-        };
+    fn read_pane(&self, configured: &ConfiguredUse, flow_id: &str) -> Response {
+        let view = configured.herdr_operation_view();
         let herdr = &view.herdr;
         let node = match self.store.flow_node(flow_id) {
             Ok(Some(node)) => node,

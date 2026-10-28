@@ -325,6 +325,42 @@ impl OperatesHerdrPane for HerdrCli {
 }
 
 impl HerdrCli {
+    #[cfg(test)]
+    pub(crate) fn retain_exited_fixture_claude(
+        &self,
+        pane_id: &str,
+        session_id: &str,
+    ) {
+        let mut process = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("fixture Claude process starts");
+        let process_id = process.id();
+        let process_start = process_start(process_id).expect("fixture Claude start identity");
+        let process_executable = fs::canonicalize(format!("/proc/{process_id}/exe"))
+            .expect("fixture Claude executable identity");
+        // SAFETY: pidfd_open has no pointer arguments. The inserted owned
+        // process closes this descriptor when the fixture adapter drops.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, 0) as i32 };
+        assert!(pidfd >= 0, "fixture Claude pidfd opens");
+        process.kill().expect("fixture Claude exits");
+        process.wait().expect("fixture Claude is reaped");
+        self.flow_owned_claude_processes
+            .lock()
+            .expect("fixture Claude process ownership")
+            .insert(
+                pane_id.to_owned(),
+                OwnedClaudeProcess {
+                    process_id,
+                    process_start,
+                    process_executable: process_executable.clone(),
+                    configured_executable: process_executable,
+                    session_id: session_id.to_owned(),
+                    pidfd,
+                },
+            );
+    }
+
     fn close_pane(&self, route: &HerdrRoute) -> bool {
         Command::new(&self.executable)
             .args([

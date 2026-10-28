@@ -171,6 +171,10 @@ pub(super) fn claude_seat(fixture: &NexusFixture, tokens: i64) {
         .store
         .register_flow(node)
         .expect("Claude seat registered");
+    fixture
+        .nexus
+        .herdr
+        .retain_exited_fixture_claude("w1:p3", CLAUDE_SESSION);
     fs::write(
         fixture
             .directory
@@ -1138,6 +1142,10 @@ fn launched_claude_ended_by_with(
             flow_lifecycle: FlowLifecycle::Active,
         })
         .expect("registered");
+    fixture
+        .nexus
+        .herdr
+        .retain_exited_fixture_claude("w1:p3", &session);
     assert!(end(&fixture.nexus.store));
     fs::write(
         fixture.directory.path().join("flows/.abc123.flow-id"),
@@ -1152,7 +1160,7 @@ fn launched_claude_ended_by_with(
         path: fixture.snapshot_program.clone(),
     }
     .install(&format!(
-        "#!/bin/sh\n{sessions}\nprintf '%s\\n' \"$*\" >> '{calls}'\ncase \"$*\" in\n  *\"api snapshot\"*) printf '%s\\n' '{{\"id\":\"cli:api:snapshot\",\"result\":{{\"snapshot\":{{\"agents\":[],\"protocol\":20,\"version\":\"0.8.2\"}},\"type\":\"session_snapshot\"}}}}' ;;\n  *\"pane close\"*) printf '%s\\n' '{{\"result\":{{}}}}' ;;\n  *) exit 64 ;;\nesac\n",
+        "#!/bin/sh\n{sessions}\nprintf '%s\\n' \"$*\" >> '{calls}'\ncase \"$*\" in\n  *\"api snapshot\"*) printf '%s\\n' '{{\"id\":\"cli:api:snapshot\",\"result\":{{\"snapshot\":{{\"agents\":[],\"protocol\":20,\"version\":\"0.8.2\"}},\"type\":\"session_snapshot\"}}}}' ;;\n  *\"pane process-info\"*) printf '%s\\n' '{{\"result\":{{\"process_info\":{{\"pane_id\":\"w1:p3\",\"foreground_processes\":[]}}}}}}' ;;\n  *\"pane close\"*) printf '%s\\n' '{{\"result\":{{}}}}' ;;\n  *) exit 64 ;;\nesac\n",
         sessions = fixture.session_listing(),
         calls = calls.display(),
     ));

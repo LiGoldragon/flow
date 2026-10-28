@@ -1085,7 +1085,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
     }
 
     fn recover_deliveries(&self) {
-        let seats = {
+        let (addresses, outstanding) = {
             let _turn = self
                 .dispatch_gate
                 .lock()
@@ -1094,17 +1094,54 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 eprintln!("flow-nexus: metaflows unreadable; no queued delivery reconciled");
                 return;
             };
-            for metaflow in &metaflows {
-                if let Ok(Some(attempt)) = self.store.outstanding_delivery(&metaflow.address) {
-                    let reconciled = self.reconcile_delivery(&attempt);
-                    eprintln!(
-                        "flow-nexus: queued delivery {} reconciled at start: {reconciled:?}",
-                        attempt.attempt_id
-                    );
+            let outstanding = metaflows
+                .iter()
+                .filter_map(|metaflow| {
+                    self.store
+                        .outstanding_delivery(&metaflow.address)
+                        .ok()
+                        .flatten()
+                })
+                .collect::<Vec<_>>();
+            let addresses = metaflows
+                .into_iter()
+                .map(|metaflow| metaflow.address)
+                .collect::<Vec<_>>();
+            (addresses, outstanding)
+        };
+        // Native history is read off the gate, so a read that waits on its
+        // harness holds no other request; each answer is settled under it.
+        for attempt in outstanding {
+            let found = matches!(
+                attempt.phase,
+                QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
+            )
+            .then(|| self.find_receipt(&attempt));
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let reconciled = match found {
+                Some(Ok((run, turn_id, native_receipt, seat_after))) => {
+                    self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after)
                 }
-                self.reconcile_typed(&metaflow.address);
-            }
-            metaflows
+                Some(Err(undecided)) => self.undecided(&attempt, undecided),
+                None => self.reconcile_delivery(&attempt),
+            };
+            eprintln!(
+                "flow-nexus: queued delivery {} reconciled at start: {reconciled:?}",
+                attempt.attempt_id
+            );
+        }
+        self.recover_typed(&addresses);
+        let seats = {
+            let _turn = self
+                .dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.store
+                .list_metaflows()
+                .unwrap_or_default()
                 .into_iter()
                 .filter(|metaflow| !metaflow.queue.is_empty())
                 .filter_map(|metaflow| match metaflow.state {
@@ -1977,10 +2014,22 @@ pub(crate) trait ParksCohort {
         &self,
         attempt: &QueueDeliveryAttempt,
     ) -> Vec<(Vec<QueueDeliveryAttempt>, String)>;
-    /// Reconciles every typed attempt of the flow `address` is Awake as
-    /// that has not settled, so the receipts native history now shows
-    /// settle what earlier payloads carried.
+    /// The attempts one payload carried with `attempt`: the unsettled
+    /// typed attempts at its native anchor whose attempt numbers run
+    /// consecutively through its own, oldest first.
+    fn typed_group(&self, attempt: &QueueDeliveryAttempt) -> Vec<QueueDeliveryAttempt>;
+    /// Under the gate the caller holds: settles the latest payload typed
+    /// into the seat `address` is Awake as, when native history shows its
+    /// receipt. One payload, so one or two native reads.
     fn reconcile_typed(&self, address: &Address);
+    /// At start, with no gate held: reads native history for every
+    /// payload still to settle, then takes the gate only to settle each
+    /// one whose receipt it found. A read that cannot decide, or that
+    /// waits on its harness, holds no other request.
+    fn recover_typed(&self, addresses: &[Address]);
+    /// The typed attempts of `flow_id` at `address` still to settle, past
+    /// the one still holding the queue's head, by attempt number.
+    fn typed(&self, address: &Address, flow_id: &str) -> Vec<QueueDeliveryAttempt>;
     /// The run of typed attempts native history shows one exact receipt
     /// for, with that receipt; else why it cannot be decided.
     fn find_receipt(&self, attempt: &QueueDeliveryAttempt) -> Result<Receipted, Undecided>;
@@ -2125,52 +2174,11 @@ impl ParksCohort for RunningNexus {
         Err(found)
     }
 
-    fn reconcile_typed(&self, address: &Address) {
-        let Ok(Some(Metaflow {
-            state: flow_ethos::State::Awake(flow_id),
-            ..
-        })) = self.store.metaflow(address)
-        else {
-            return;
-        };
-        let Ok(unsettled) = self.store.unsettled_deliveries(address) else {
-            return;
-        };
-        // The attempt still holding the queue's head is reconciled as the
-        // outstanding one; only those parked once typed are read here.
-        let outstanding = self
-            .store
-            .outstanding_delivery(address)
-            .ok()
-            .flatten()
-            .map(|attempt| attempt.attempt_id);
-        for attempt in unsettled {
-            let typed = attempt.flow_id == flow_id
-                && Some(&attempt.attempt_id) != outstanding.as_ref()
-                && matches!(
-                    self.store.queue_delivery_attempt(&attempt.attempt_id),
-                    Ok(Some(current)) if matches!(
-                        current.phase,
-                        QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
-                    )
-                );
-            if typed
-                && let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt)
-            {
-                let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
-            }
-        }
-    }
-
-    fn cohort_runs(
-        &self,
-        attempt: &QueueDeliveryAttempt,
-    ) -> Vec<(Vec<QueueDeliveryAttempt>, String)> {
-        let alone = vec![(vec![attempt.clone()], attempt.prompt_text())];
+    fn typed_group(&self, attempt: &QueueDeliveryAttempt) -> Vec<QueueDeliveryAttempt> {
         let Ok(unsettled) = self.store.unsettled_deliveries(&attempt.address) else {
-            return alone;
+            return vec![attempt.clone()];
         };
-        let siblings = unsettled
+        let mut siblings = unsettled
             .into_iter()
             .filter(|other| {
                 other.flow_id == attempt.flow_id
@@ -2188,29 +2196,120 @@ impl ParksCohort for RunningNexus {
                     )
             })
             .collect::<Vec<_>>();
+        siblings.sort_by_key(|other| other.native_request_id);
         let Some(at) = siblings
             .iter()
             .position(|other| other.attempt_id == attempt.attempt_id)
         else {
-            return alone;
+            return vec![attempt.clone()];
         };
-        let mut runs = Vec::new();
-        for length in (1..=siblings.len()).rev() {
-            for start in at.saturating_sub(length - 1)..=at {
-                let Some(run) = siblings.get(start..start + length) else {
+        let mut start = at;
+        while start > 0
+            && siblings[start - 1].native_request_id + 1 == siblings[start].native_request_id
+        {
+            start -= 1;
+        }
+        let mut end = at + 1;
+        while end < siblings.len()
+            && siblings[end - 1].native_request_id + 1 == siblings[end].native_request_id
+        {
+            end += 1;
+        }
+        siblings[start..end].to_vec()
+    }
+
+    fn typed(&self, address: &Address, flow_id: &str) -> Vec<QueueDeliveryAttempt> {
+        let Ok(unsettled) = self.store.unsettled_deliveries(address) else {
+            return Vec::new();
+        };
+        let outstanding = self
+            .store
+            .outstanding_delivery(address)
+            .ok()
+            .flatten()
+            .map(|attempt| attempt.attempt_id);
+        let mut typed = unsettled
+            .into_iter()
+            .filter(|attempt| {
+                attempt.flow_id == flow_id
+                    && Some(&attempt.attempt_id) != outstanding.as_ref()
+                    && matches!(
+                        attempt.phase,
+                        QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
+                    )
+            })
+            .collect::<Vec<_>>();
+        typed.sort_by_key(|attempt| attempt.native_request_id);
+        typed
+    }
+
+    fn reconcile_typed(&self, address: &Address) {
+        let Ok(Some(Metaflow {
+            state: flow_ethos::State::Awake(flow_id),
+            ..
+        })) = self.store.metaflow(address)
+        else {
+            return;
+        };
+        let latest = self.typed(address, &flow_id).into_iter().last();
+        if let Some(attempt) = latest
+            && let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt)
+        {
+            let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
+        }
+    }
+
+    fn recover_typed(&self, addresses: &[Address]) {
+        for address in addresses {
+            let flow_id = match self.store.metaflow(address) {
+                Ok(Some(Metaflow {
+                    state: flow_ethos::State::Awake(flow_id),
+                    ..
+                })) => flow_id,
+                _ => continue,
+            };
+            let mut covered = HashSet::new();
+            for attempt in self.typed(address, &flow_id) {
+                if !covered.insert(attempt.native_request_id) {
+                    continue;
+                }
+                covered.extend(
+                    self.typed_group(&attempt)
+                        .iter()
+                        .map(|member| member.native_request_id),
+                );
+                // Read off the gate; settle under it.
+                let Ok((run, turn_id, native_receipt, seat_after)) = self.find_receipt(&attempt)
+                else {
                     continue;
                 };
-                let entries = run
-                    .iter()
-                    .filter_map(|member| match &member.queue_evidence {
-                        meta_signal_flow::QueueEvidence::Logical(entry) => Some(entry.clone()),
-                        meta_signal_flow::QueueEvidence::Legacy(_) => None,
-                    })
-                    .collect::<Vec<_>>();
-                runs.push((run.to_vec(), entries.prompt_text()));
+                let _turn = self
+                    .dispatch_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let _ = self.settle_received(&attempt, &run, turn_id, native_receipt, seat_after);
             }
         }
-        runs
+    }
+
+    fn cohort_runs(
+        &self,
+        attempt: &QueueDeliveryAttempt,
+    ) -> Vec<(Vec<QueueDeliveryAttempt>, String)> {
+        let alone = (vec![attempt.clone()], attempt.prompt_text());
+        let group = self.typed_group(attempt);
+        if group.len() < 2 {
+            return vec![alone];
+        }
+        let entries = group
+            .iter()
+            .filter_map(|member| match &member.queue_evidence {
+                meta_signal_flow::QueueEvidence::Logical(entry) => Some(entry.clone()),
+                meta_signal_flow::QueueEvidence::Legacy(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let text = entries.prompt_text();
+        vec![(group, text), alone]
     }
 }
 

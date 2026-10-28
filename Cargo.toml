@@ -3,7 +3,7 @@ members = ["crates/flow-defaults", "crates/flow-native", "crates/flow-ethos", "c
 resolver = "3"
 
 [workspace.package]
-version = "0.40.3"
+version = "0.40.4"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"

@@ -1985,6 +1985,54 @@ fn an_undecidable_codex_turn_stays_uncertain_and_is_never_resent() {
     assert_eq!(fixture.seat_queue(), vec![]);
 }
 
+/// A Nexus start whose reconciliation reads the history of a Codex seat
+/// whose app-server takes the connection and never answers still serves
+/// Metaflows meanwhile: native history is read off the dispatch gate.
+#[test]
+fn a_start_reading_an_unanswering_codex_history_still_serves_metaflows() {
+    use crate::DispatchesSerially;
+    use crate::store::queue_delivery::AccountsQueueDelivery;
+    use crate::waking::ReconcilesQueueDelivery;
+    let mut fixture = NexusFixture::new();
+    fixture.awake_codex_seat(vec![from_core(Request::Order("First.".into()))]);
+    let fake = FakeAppServer::install(vec![]);
+    // Run 1 takes the connection and never answers it.
+    std::fs::write(fake.directory.path().join("frames-1"), "").unwrap();
+    fixture.adapter("gpt-sol", &fake);
+    crashed_before_receipt(&fixture);
+    // The typed payload is parked, as a drain leaves it once typed.
+    let attempt = fixture
+        .nexus
+        .store
+        .unsettled_deliveries(&seat_at())
+        .unwrap()
+        .remove(0);
+    assert!(
+        fixture
+            .nexus
+            .store
+            .park_uncertain_delivery(&attempt.attempt_id)
+            .unwrap()
+    );
+    std::thread::scope(|scope| {
+        let recovery = scope.spawn(|| fixture.nexus.recover_deliveries());
+        while fake.runs() == 0 {
+            std::thread::yield_now();
+        }
+        let listed = fixture
+            .nexus
+            .dispatch_serially(signal_flow::Query::Metaflows, signal_flow::Origin::Unbound);
+        assert!(
+            matches!(listed, signal_flow::Response::Listed(_)),
+            "{listed:?}"
+        );
+        assert!(
+            !recovery.is_finished(),
+            "Metaflows answered while the native read still waits"
+        );
+    });
+}
+
 /// A turn completion on another thread is not the seat's: nothing drains.
 #[test]
 fn a_completion_on_another_thread_drains_nothing() {

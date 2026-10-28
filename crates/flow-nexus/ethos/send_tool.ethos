@@ -30,7 +30,7 @@
 ; a turn on a thread through the app-server socket.
 
 Library
-[ signal_flow:[ Address Delivery Message Sender SendAcceptance SendPayloadSize Topic ]
+[ signal_flow:[ Address Delivery Message Sender SendAcceptance SendPayloadSize Topic PrimaryRouteRefused ]
   serde_json:JsonValue.Value ]
 [ SendKind.[ Order Question Result Notice ]
   Target.Address
@@ -70,7 +70,8 @@ Library
                 Held
                 Oversized.SendPayloadSize
                 Store
-                TopicRefused.Topic ]
+                TopicRefused.Topic
+                PrimaryRequiresOwnSecondary.PrimaryRouteRefused ]
   ; Accepted is a durable logical delivery, never a claim of delivery.
   ; LegacyUnknown preserves historical calls which predate logical IDs.
   SendOutcome.[ Accepted.{ Sender Target SendAcceptance }

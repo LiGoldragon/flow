@@ -16,7 +16,8 @@
 use crate::RunningNexus;
 use crate::binding::{ReadsProcessIdentity, VerifiesAdoptedSeat};
 use crate::caller::{
-    CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread, NamesRootThread,
+    BindsCallerPane, CallerProcess, KnowsHerdrServers, LocatesCallerPane, LocatesCodexThread,
+    NamesRootThread,
 };
 use crate::composition::JoinsPurpose;
 use crate::delivery::body::TypesPaneMessage;
@@ -33,8 +34,8 @@ use crate::store::send_call::KeepsSendCalls;
 use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::sent::NamesCodexAppServers;
 use crate::store::{
-    ExistingSeatAdoption, FlowStore, ManagesMetaflowState, NamesConfiguredModel, ReadsFlowMemory,
-    RegistersExistingFlow,
+    ExistingSeatAdoption, FlowStore, ManagesMetaflowState, NamesConfiguredModel, NamesLiveFlow,
+    ReadsFlowMemory, ReadsFlowRows, RegistersExistingFlow,
 };
 use crate::waking::{
     HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
@@ -100,15 +101,16 @@ impl AdmitsSendPayload for Message {
 
 /// Names the metaflow the calling process runs in.
 pub trait IdentifiesSender {
+    fn sending_sender(&self, peer: &Process) -> Result<meta_signal_flow::Sender, Box<Response>>;
     fn sending_address(&self, peer: &Process) -> Result<Address, Box<Response>>;
 }
 
 impl IdentifiesSender for RunningNexus {
-    fn sending_address(&self, peer: &Process) -> Result<Address, Box<Response>> {
+    fn sending_sender(&self, peer: &Process) -> Result<meta_signal_flow::Sender, Box<Response>> {
         let unidentified = || Box::new(Response::Refused(Refusal::Unidentified(peer.clone())));
-        match self.identify_peer_process(peer.clone()) {
-            Ok(Response::Identified(address)) => return Ok(address),
-            Ok(_) => {}
+        match self.store.identify_process_sender(peer.clone()) {
+            Ok(Some(sender)) => return Ok(sender),
+            Ok(None) => {}
             Err(error) => {
                 return Err(Box::new(Response::Refused(Refusal::Store(
                     error.to_string(),
@@ -118,6 +120,33 @@ impl IdentifiesSender for RunningNexus {
         let Ok(process_id) = u32::try_from(peer.pid) else {
             return Err(unidentified());
         };
+        if let Some(pane) = (CallerProcess { process_id }).caller_pane(&self.herdr)
+            && let Ok(caller) = self.bound_caller(&pane)
+        {
+            let address = match self.identify_peer_process(peer.clone()) {
+                Ok(Response::Identified(address)) => address,
+                Ok(_) => return Err(unidentified()),
+                Err(error) => {
+                    return Err(Box::new(Response::Refused(Refusal::Store(
+                        error.to_string(),
+                    ))));
+                }
+            };
+            match self.store.metaflow_awake_as(&caller.flow_id) {
+                Ok(Some(metaflow)) if metaflow.address == address => {
+                    return Ok(meta_signal_flow::Sender {
+                        address,
+                        flow_id: caller.flow_id,
+                    });
+                }
+                Ok(_) => return Err(unidentified()),
+                Err(error) => {
+                    return Err(Box::new(Response::Refused(Refusal::Store(
+                        error.to_string(),
+                    ))));
+                }
+            }
+        }
         let app_servers = self
             .store
             .codex_app_servers()
@@ -126,13 +155,38 @@ impl IdentifiesSender for RunningNexus {
             return Err(unidentified());
         };
         let root_thread = self.codex_endpoints.root_thread(&thread);
-        match self.store.thread_sender(&root_thread) {
-            Ok(Ok(address)) => Ok(address),
-            Ok(Err(_)) => Err(unidentified()),
-            Err(error) => Err(Box::new(Response::Refused(Refusal::Store(
-                error.to_string(),
+        let address = match self.store.thread_sender(&root_thread) {
+            Ok(Ok(address)) => address,
+            Ok(Err(_)) => return Err(unidentified()),
+            Err(error) => {
+                return Err(Box::new(Response::Refused(Refusal::Store(
+                    error.to_string(),
+                ))));
+            }
+        };
+        let nodes = self
+            .store
+            .flow_nodes()
+            .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?;
+        let mut owners = nodes.into_iter().filter(|node| {
+            node.harness_kind == signal_flow::HarnessKind::Codex
+                && node.session_id == root_thread
+                && node.flow_lifecycle.is_live()
+        });
+        match (owners.next(), owners.next()) {
+            (Some(owner), None) => Ok(meta_signal_flow::Sender {
+                address,
+                flow_id: owner.flow_id,
+            }),
+            (None, None) => Err(unidentified()),
+            _ => Err(Box::new(Response::Refused(Refusal::Store(
+                "multiple live flows own the authenticated Codex thread".into(),
             )))),
         }
+    }
+
+    fn sending_address(&self, peer: &Process) -> Result<Address, Box<Response>> {
+        self.sending_sender(peer).map(|sender| sender.address)
     }
 }
 
@@ -250,17 +304,17 @@ impl SendsRequests for RunningNexus {
                 ))
                 .into();
             };
-            let sender = match self.sending_address(peer) {
+            let sender = match self.sending_sender(peer) {
                 Ok(sender) => sender,
                 Err(refusal) => return (*refusal).into(),
             };
             let delivery = send.delivery.clone();
             let recipient = match send.recipient {
                 Recipient::Address(address) => address,
-                Recipient::Up => match sender.layer.above() {
+                Recipient::Up => match sender.address.layer.above() {
                     Some(layer) => Address {
-                        aspect: sender.aspect.clone(),
-                        topic: sender.topic.clone(),
+                        aspect: sender.address.aspect.clone(),
+                        topic: sender.address.topic.clone(),
                         layer,
                     },
                     None => return Response::Refused(Refusal::NoneAbove).into(),
@@ -287,22 +341,10 @@ impl SendsRequests for RunningNexus {
                 None
             };
             let direct = direct_lease.is_some();
-            let sender_flow_id = match self.store.list_metaflows() {
-                Ok(metaflows) => metaflows
-                    .into_iter()
-                    .find_map(|metaflow| (metaflow.address == sender).then_some(metaflow.state)),
-                Err(error) => return Response::Refused(Refusal::Store(error.to_string())).into(),
-            };
-            let Some(flow_ethos::State::Awake(sender_flow_id)) = sender_flow_id else {
-                return Response::Refused(Refusal::Unidentified(peer.clone())).into();
-            };
             let admitted = self.store.accept_logical_delivery(
                 &recipient,
-                SentBy::Sender(sender.clone()),
-                Some(meta_signal_flow::Sender {
-                    address: sender,
-                    flow_id: sender_flow_id,
-                }),
+                SentBy::Sender(sender.address.clone()),
+                Some(sender),
                 delivery.clone(),
                 send.message,
                 None,

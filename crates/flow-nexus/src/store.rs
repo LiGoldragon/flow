@@ -915,11 +915,58 @@ impl UpgradeFrom<StoredMetaflowV2> for StoredMetaflow {
 pub(crate) struct StoredMetaflowProcess {
     process: Process,
     address: Address,
+    /// The exact flow authenticated when this process was bound. Historical
+    /// bindings have no authentic flow identity and cannot send.
+    flow_id_option: Option<FlowId>,
 }
 
 impl EngineRecord for StoredMetaflowProcess {
     fn record_key(&self) -> RecordKey {
         RecordKey::new(FlowStore::address_record_key(&self.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaflowProcess {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(2)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-process-v2")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredMetaflowProcessV1 {
+    process: Process,
+    address: Address,
+}
+
+impl EngineRecord for StoredMetaflowProcessV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaflowProcessV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-metaflow-process-v1")
+    }
+}
+
+impl UpgradeFrom<StoredMetaflowProcessV1> for StoredMetaflowProcess {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: StoredMetaflowProcessV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            process: previous.process,
+            address: previous.address,
+            flow_id_option: None,
+        })
     }
 }
 
@@ -3246,6 +3293,10 @@ pub enum StoreError {
 /// launch attempt names its context by module identity, or keeps what a
 /// 0.34 launch named instead.
 trait UpgradesFlowFamilies {
+    fn upgraded_metaflow_processes(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaflowProcess>,
+    ) -> Result<TableReference<StoredMetaflowProcess>, StoreError>;
     fn upgraded_metaflow_locks(
         &mut self,
         descriptor: TableDescriptor<StoredMetaflowLock>,
@@ -3308,6 +3359,20 @@ trait UpgradesFlowFamilies {
 }
 
 impl UpgradesFlowFamilies for Engine {
+    fn upgraded_metaflow_processes(
+        &mut self,
+        descriptor: TableDescriptor<StoredMetaflowProcess>,
+    ) -> Result<TableReference<StoredMetaflowProcess>, StoreError> {
+        match self.upgrade_table::<StoredMetaflowProcessV1, StoredMetaflowProcess>(descriptor) {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => {
+                Err(StoreError::MetaflowUpgrade(format!("{failure:?}")))
+            }
+        }
+    }
+
     fn upgraded_metaflow_locks(
         &mut self,
         descriptor: TableDescriptor<StoredMetaflowLock>,
@@ -4336,8 +4401,9 @@ impl OpensFlowStore for FlowStore {
         let metaflow_processes_descriptor = TableDescriptor::<StoredMetaflowProcess>::new(
             METAFLOW_PROCESS_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-process"),
-            SchemaHash::for_label("flow-nexus-metaflow-process-v1"),
-        );
+            SchemaHash::for_label("flow-nexus-metaflow-process-v2"),
+        )
+        .with_predecessor::<StoredMetaflowProcessV1>();
         let metaflow_locks_descriptor = TableDescriptor::<StoredMetaflowLock>::new(
             METAFLOW_LOCK_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-lock"),
@@ -4486,7 +4552,8 @@ impl OpensFlowStore for FlowStore {
         let native_owner_proofs = engine.register_table(native_owner_proofs_descriptor)?;
         let state = engine.register_table(state_descriptor)?;
         let metaflows = engine.upgraded_metaflows(metaflows_descriptor)?;
-        let metaflow_processes = engine.register_table(metaflow_processes_descriptor)?;
+        let metaflow_processes =
+            engine.upgraded_metaflow_processes(metaflow_processes_descriptor)?;
         let metaflow_locks = engine.upgraded_metaflow_locks(metaflow_locks_descriptor)?;
         let configuration = engine.register_table(configuration_descriptor)?;
         let runtime_configuration = engine.register_table(runtime_configuration_descriptor)?;
@@ -4598,11 +4665,14 @@ impl OpensFlowStore for FlowStore {
             .with_predecessor::<StoredMetaflowV3>()
             .with_predecessor::<StoredMetaflowV4>(),
         )?;
-        let metaflow_processes = engine.register_table(TableDescriptor::new(
-            METAFLOW_PROCESS_TABLE_NAME,
-            FamilyName::new("flow-nexus-metaflow-process"),
-            SchemaHash::for_label("flow-nexus-metaflow-process-v1"),
-        ))?;
+        let metaflow_processes = engine.upgraded_metaflow_processes(
+            TableDescriptor::new(
+                METAFLOW_PROCESS_TABLE_NAME,
+                FamilyName::new("flow-nexus-metaflow-process"),
+                SchemaHash::for_label("flow-nexus-metaflow-process-v2"),
+            )
+            .with_predecessor::<StoredMetaflowProcessV1>(),
+        )?;
         let metaflow_locks = engine.register_table(TableDescriptor::new(
             METAFLOW_LOCK_TABLE_NAME,
             FamilyName::new("flow-nexus-metaflow-lock"),
@@ -4848,6 +4918,10 @@ pub(crate) trait ManagesMetaflowState: Sized {
     fn current_metaflow(&self, address: &Address) -> Result<Response, StoreError>;
     fn list_metaflows(&self) -> Result<Vec<Metaflow>, StoreError>;
     fn identify_process(&self, process: Process) -> Result<Response, StoreError>;
+    fn identify_process_sender(
+        &self,
+        process: Process,
+    ) -> Result<Option<meta_signal_flow::Sender>, StoreError>;
     fn release_metaflow_lock(
         &self,
         lock: Lock,
@@ -5005,6 +5079,40 @@ impl ManagesMetaflowState for FlowStore {
         Ok(Response::Refused(signal_flow::Refusal::Unidentified(
             process,
         )))
+    }
+
+    fn identify_process_sender(
+        &self,
+        process: Process,
+    ) -> Result<Option<meta_signal_flow::Sender>, StoreError> {
+        let lineage = FlowStore::process_lineage(&process);
+        if lineage.is_empty() {
+            return Ok(None);
+        }
+        for ancestor in lineage {
+            let rows = self
+                .engine
+                .match_records(QueryPlan::all(self.metaflow_processes))?;
+            let Some(binding) = rows.records().iter().find(|binding| {
+                binding.process == ancestor && FlowStore::process_is_live(&binding.process)
+            }) else {
+                continue;
+            };
+            let Some(flow_id) = binding.flow_id_option.clone() else {
+                return Ok(None);
+            };
+            let Some(stored) = self.stored_metaflow(&binding.address)? else {
+                return Ok(None);
+            };
+            if stored.metaflow.state != MetaflowState::Awake(flow_id.clone()) {
+                return Ok(None);
+            }
+            return Ok(Some(meta_signal_flow::Sender {
+                address: binding.address.clone(),
+                flow_id,
+            }));
+        }
+        Ok(None)
     }
 
     fn release_metaflow_lock(
@@ -7353,7 +7461,7 @@ pub(crate) trait ReadsFlowMemory {
             "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v5"),
             "flow_nexus_metaflow_processes" => (
                 "flow-nexus-metaflow-process",
-                "flow-nexus-metaflow-process-v1",
+                "flow-nexus-metaflow-process-v2",
             ),
             "flow_nexus_metaflow_locks" => {
                 ("flow-nexus-metaflow-lock", "flow-nexus-metaflow-lock-v2")
@@ -11772,6 +11880,65 @@ mod tests {
             assert!(archive.iter().any(|record| record.address == address
                 && record.queue_evidence
                     == meta_signal_flow::QueueEvidence::Logical(entry.clone())));
+        }
+    }
+
+    #[test]
+    fn a_v1_process_binding_reopens_without_inventing_a_sender_flow() {
+        use sema_engine::{MemoryDefinition, MemoryUpgrades, UpgradeOutcome};
+        let fixture = StoreFixture::new();
+        drop(fixture.store());
+        let table_name = TableName::new("fixture_metaflow_processes");
+        let address = Address {
+            aspect: Aspect::Psyche,
+            topic: "core".into(),
+            layer: Layer::Secondary,
+        };
+        let old = super::StoredMetaflowProcessV1 {
+            process: signal_flow::Process {
+                pid: 7,
+                started: 11,
+            },
+            address,
+        };
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("v1 store opens");
+            let table = engine
+                .register_table(TableDescriptor::new(
+                    table_name,
+                    FamilyName::new("fixture-metaflow-process"),
+                    super::StoredMetaflowProcessV1::schema_hash(),
+                ))
+                .expect("v1 process family registers");
+            engine
+                .assert(Assertion::new(table, old))
+                .expect("v1 process persists");
+        }
+        for _ in 0..2 {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("store reopens");
+            let descriptor = TableDescriptor::<super::StoredMetaflowProcess>::new(
+                table_name,
+                FamilyName::new("fixture-metaflow-process"),
+                super::StoredMetaflowProcess::schema_hash(),
+            )
+            .with_predecessor::<super::StoredMetaflowProcessV1>();
+            let table = match engine
+                .upgrade_table::<super::StoredMetaflowProcessV1, super::StoredMetaflowProcess>(
+                    descriptor,
+                ) {
+                UpgradeOutcome::Upgraded(receipt) => receipt.table(),
+                UpgradeOutcome::AlreadyCurrent(table) => table,
+                other => panic!("process upgrade failed: {other:?}"),
+            };
+            let rows = engine
+                .match_records(QueryPlan::all(table))
+                .expect("upgraded rows read");
+            let [carried] = rows.records() else {
+                panic!("one process binding is carried")
+            };
+            assert_eq!(carried.flow_id_option, None);
         }
     }
 

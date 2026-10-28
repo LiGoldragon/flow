@@ -234,6 +234,28 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
             Response::Refused(Refusal::Unidentified(_))
         ));
     }
+    let bound_peer = FlowStore::process_identity_for_pid(root.0.id()).unwrap();
+    assert_eq!(
+        fixture.nexus.sending_sender(&bound_peer).unwrap(),
+        meta_signal_flow::Sender {
+            address: address.clone(),
+            flow_id: CLAUDE_SEAT.into(),
+        }
+    );
+    // A successor at the same Address never lends its identity to the old
+    // bound process. The old process is refused rather than signed as the
+    // successor or admitted under its ended identity.
+    fixture.nexus.store.seed_metaflow(metaflow(
+        Layer::Secondary,
+        flow_ethos::State::Awake("successor".into()),
+        vec![],
+        vec![],
+    ));
+    assert!(matches!(
+        fixture.nexus.sending_sender(&bound_peer),
+        Err(response)
+            if *response == Response::Refused(Refusal::Unidentified(bound_peer.clone()))
+    ));
     let stranger = MarkedProcess::spawn("sleep", &["30"], "unknown-pane");
     let unknown = FlowStore::process_identity_for_pid(stranger.0.id()).unwrap();
     assert!(matches!(

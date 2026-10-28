@@ -112,26 +112,6 @@ impl RendersPaneText for Message {
     }
 }
 
-/// Recognises a typed letter envelope in composer text.
-pub trait RecognizesLetter {
-    fn opens_a_letter(&self) -> bool;
-}
-
-impl RecognizesLetter for str {
-    fn opens_a_letter(&self) -> bool {
-        [
-            "HardAbrupt.{ ",
-            "MiddleAbrupt.{ ",
-            "Soft.{ ",
-            "[ HardAbrupt.{ ",
-            "[ MiddleAbrupt.{ ",
-            "[ Soft.{ ",
-        ]
-        .iter()
-        .any(|head| self.starts_with(head))
-    }
-}
-
 /// Answers what the writer would refuse of a Message for one harness.
 pub trait VetsBody {
     fn refusal(&self, profile: &HarnessProfile) -> Option<BodyRefusal>;
@@ -247,7 +227,7 @@ impl ReadsCommandLine for HarnessProfile {
 
 #[cfg(test)]
 mod tests {
-    use super::{RecognizesLetter, RendersPaneText, VetsBody};
+    use super::{RendersPaneText, VetsBody};
     use crate::delivery::body::ShowsPaneText;
     use crate::store::delivery::DefaultsHarnessProfile;
     use meta_signal_flow::{Body, BodyRefusal, Kind, Letter, Message, PsycheWords, Sender};
@@ -293,28 +273,6 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_flow_minted_abrupt_send_letters() {
-        for prefix in ["HardAbrupt", "MiddleAbrupt"] {
-            let text =
-                format!("{prefix}.{{ Order {{ {{ Psyche core Secondary }} e167d8 }} Words.work }}");
-            assert!(text.as_str().opens_a_letter(), "{text}");
-        }
-    }
-
-    #[test]
-    fn recognizes_the_actual_durable_logical_identity_shape() {
-        assert!(
-            !"{ logical-delivery-00000000000000000001 Owner Soft.Order.work }".opens_a_letter()
-        );
-        assert!(
-            !"{ logical-delivery-0000000000000000000x Owner Soft.Order.work }".opens_a_letter()
-        );
-        assert!(
-            !"{ logical-delivery-000000000000000000010 Owner Soft.Order.work }".opens_a_letter()
-        );
-    }
-
-    #[test]
     fn complete_message_renders_kind_sender_and_body() {
         let text = "keep «quotes» and { braces }\nand preserve the second line";
         let message = Message::HardAbrupt(Letter {
@@ -330,7 +288,6 @@ mod tests {
         );
         assert!(message.pane_text().as_str().contains("Words.«keep"));
         assert_eq!(refusal(&message, HarnessKind::Codex), None);
-        assert!(!text.opens_a_letter());
     }
 
     #[test]

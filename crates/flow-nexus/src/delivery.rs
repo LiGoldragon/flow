@@ -24,7 +24,7 @@ use crate::performing::Performs;
 use crate::store::context::{JudgesCompaction, JudgesThreshold};
 use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries, SelectsHarnessProfile};
 use crate::store::{ReadsFlowRows, RecordsReplacement};
-use body::{RecognizesLetter, RendersPaneText, VetsBody};
+use body::{RendersPaneText, VetsBody};
 use lease::LeasesPanes;
 use meta_signal_flow::{
     CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Delivery, DeliveryGrade,
@@ -401,9 +401,6 @@ trait RunsLeasedDelivery<'run> {
     /// key is pressed once; when it stays after that too, the text is taken
     /// back, so the pane is never left holding a letter.
     fn submitted(&self, lines: usize) -> Submitted;
-    /// Empties the composer of a letter an interrupt put back into it; a
-    /// text that is not a letter is a person's and is never touched.
-    fn retracted_restored_letter(&self) -> bool;
     /// Submits again the prompt an interrupt put back into a composer that
     /// was blank when the interrupt was pressed: the prompt of the turn the
     /// interrupt cancelled, which its writer had already submitted. It is
@@ -511,17 +508,6 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         Submitted::Stuck
     }
 
-    fn retracted_restored_letter(&self) -> bool {
-        let herdr = &self.nexus.herdr;
-        let route = &self.target.route;
-        let harness_kind = &self.target.node.harness_kind;
-        herdr
-            .composer_text(route, harness_kind)
-            .is_some_and(|text| text.opens_a_letter())
-            && herdr.retract(route, harness_kind)
-            && herdr.submission(route, harness_kind) == Submission::Seen
-    }
-
     fn resubmitted_cancelled_prompt(&self) -> bool {
         let herdr = &self.nexus.herdr;
         let route = &self.target.route;
@@ -556,7 +542,6 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
                 .composer_text(&self.target.route, &self.target.node.harness_kind)
             {
                 Some(text) if text.is_empty() => composer_was_blank = true,
-                Some(text) if text.opens_a_letter() => {}
                 Some(_) => return Err(DeliveryRejection::ComposerOccupied),
                 None => return Err(DeliveryRejection::NotDelivered),
             }
@@ -596,8 +581,7 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             agent_state = match self.nexus.writable_state(self.target) {
                 Ok(agent_state) => agent_state,
                 Err(PaneRefusal::ComposerOccupied)
-                    if self.retracted_restored_letter()
-                        || (composer_was_blank && self.resubmitted_cancelled_prompt()) =>
+                    if composer_was_blank && self.resubmitted_cancelled_prompt() =>
                 {
                     match self.nexus.writable_state(self.target) {
                         Ok(agent_state) => agent_state,

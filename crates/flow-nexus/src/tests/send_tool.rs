@@ -1659,8 +1659,8 @@ fn seat_responding(
     fake
 }
 
-/// The seat's first turn completion offers the first request to native
-/// history. Until that history receipts it, both requests remain queued.
+/// The seat's first turn completion offers both queued requests to its
+/// thread as one payload, in order; both leave the queue, typed once.
 #[test]
 fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
     let mut fixture = NexusFixture::new();
@@ -1682,16 +1682,17 @@ fn a_codex_first_turn_completion_keeps_requests_until_native_receipts() {
         40,
     );
 
-    assert_eq!(fixture.typed_count(&psyche), 0, "not yet history-received");
-    assert_eq!(fixture.typed_count(&brief), 0, "the second remains queued");
-    let typed = fake.queued_turn_texts().join("\n");
-    assert!(typed.contains("Make it so."), "oldest offered: {typed}");
+    assert_eq!(fixture.typed_count(&psyche), 1);
+    assert_eq!(fixture.typed_count(&brief), 1);
+    let texts = fake.queued_turn_texts();
+    assert_eq!(texts.len(), 1, "one payload: {texts:?}");
+    let typed = &texts[0];
     assert!(
-        !typed.contains("Your brief."),
-        "second not offered before receipt: {typed}"
+        typed.find("Make it so.") < typed.find("Your brief."),
+        "both, in order: {typed}"
     );
     assert!(!typed.contains("Psyche core Secondary"));
-    assert_eq!(fixture.seat_queue(), vec![psyche, brief]);
+    assert_eq!(fixture.seat_queue(), vec![]);
 }
 
 /// A completion read twice cannot settle a request without native history.
@@ -1715,15 +1716,15 @@ fn a_duplicated_turn_completed_delivers_nothing_twice() {
         41,
     );
 
-    assert_eq!(fixture.typed_count(&first), 0);
-    assert_eq!(fixture.typed_count(&second), 0, "the second waits");
-    assert_eq!(fixture.seat_queue(), vec![first, second]);
+    assert_eq!(fixture.typed_count(&first), 1);
+    assert_eq!(fixture.typed_count(&second), 1, "in the same payload");
+    assert_eq!(fixture.seat_queue(), vec![]);
     assert_eq!(fake.queued_turn_texts().len(), 1, "no duplicate handover");
 }
 
 /// Work queued while the seat is in a turn (here by a send call its own
 /// thread makes to it) is held, not typed mid-turn; its turn completion
-/// leaves it queued until native history receipts it.
+/// hands it over once.
 #[test]
 fn work_queued_while_a_codex_turn_runs_is_held_until_its_completion() {
     let mut fixture = NexusFixture::new();
@@ -1750,8 +1751,8 @@ fn work_queued_while_a_codex_turn_runs_is_held_until_its_completion() {
         vec![turn_notice("turn/completed", SEAT_THREAD, "turn-running")],
         44,
     );
-    assert_eq!(fixture.typed_count(&queued), 0, "awaiting native receipt");
-    assert_eq!(fixture.seat_queue(), vec![queued]);
+    assert_eq!(fixture.typed_count(&queued), 1, "handed over at completion");
+    assert_eq!(fixture.seat_queue(), vec![]);
     let texts = second.queued_turn_texts();
     assert_eq!(texts.len(), 1, "completion offers the request once");
     assert!(texts[0].contains("later"), "{texts:?}");
@@ -2058,7 +2059,7 @@ fn codex_resolved_absent(
 }
 
 /// A resting Codex seat may retry an owner-resolved-absent request once,
-/// but it remains queued until native thread history receipts it.
+/// and never twice.
 #[test]
 fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_once() {
     use crate::codex_turns::{ThreadStatus, TurnEvent};
@@ -2067,14 +2068,11 @@ fn a_resting_codex_seat_resolved_absent_is_handed_the_request_at_once_exactly_on
     assert_eq!(fake.queued_turn_texts().len(), 1, "handed over at once");
     fixture.nexus.drain_awake(&seat_at());
     assert_eq!(fake.queued_turn_texts().len(), 1, "never twice");
-    assert_eq!(
-        fixture.seat_queue(),
-        vec![from_core(Request::Order("First.".into()))]
-    );
+    assert_eq!(fixture.seat_queue(), vec![]);
 }
 
 /// An idle Awake Codex seat keeps its pane: an Order is handed to its live
-/// thread once but remains queued until native thread history receipts it.
+/// thread once.
 #[test]
 fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     use crate::codex_turns::{ThreadStatus, TracksCodexTurns, TurnEvent};
@@ -2112,10 +2110,7 @@ fn a_request_to_an_idle_awake_codex_flow_is_delivered_into_its_pane() {
     let texts = fake.queued_turn_texts();
     assert_eq!(texts.len(), 1, "handed over once: {texts:?}");
     assert!(texts[0].contains("Read the new ruling."), "{texts:?}");
-    assert_eq!(
-        fixture.seat_queue(),
-        vec![from_core(Request::Order("Read the new ruling.".into()))]
-    );
+    assert_eq!(fixture.seat_queue(), vec![]);
     let seat = fixture.nexus.store.metaflow(&seat_at()).unwrap().unwrap();
     assert_eq!(seat.state, State::Awake("908786".into()));
 }

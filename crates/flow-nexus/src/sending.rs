@@ -783,6 +783,13 @@ pub(crate) trait CompletesDirectSends {
         address: &Address,
     ) -> Result<Option<crate::waking::WakingLease<'_>>, Box<Response>>;
     fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer;
+    /// The attempt still to settle that carried `logical_id`: the one
+    /// outstanding, else the latest parked once its payload was typed.
+    fn carrying_attempt(
+        &self,
+        address: &Address,
+        logical_id: &str,
+    ) -> Option<crate::store::queue_delivery::QueueDeliveryAttempt>;
 }
 
 impl CompletesDirectSends for RunningNexus {
@@ -873,6 +880,21 @@ impl CompletesDirectSends for RunningNexus {
         }
         Ok(Some(lease))
     }
+    fn carrying_attempt(
+        &self,
+        address: &Address,
+        logical_id: &str,
+    ) -> Option<crate::store::queue_delivery::QueueDeliveryAttempt> {
+        if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
+            return Some(attempt);
+        }
+        self.store
+            .unsettled_deliveries(address)
+            .ok()?
+            .into_iter()
+            .rev()
+            .find(|attempt| attempt.request_id == logical_id)
+    }
     fn complete_direct_send(&self, address: &Address, logical_id: String) -> SendAnswer {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
@@ -898,7 +920,7 @@ impl CompletesDirectSends for RunningNexus {
             let seen = changes.current();
             let state = {
                 let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-                if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
+                if let Some(attempt) = self.carrying_attempt(address, &logical_id) {
                     let _ = self.reconcile_delivery(&attempt);
                 }
                 self.store.logical_delivery_snapshot(&logical_id)
@@ -928,7 +950,7 @@ impl CompletesDirectSends for RunningNexus {
             // A native transcript can land without a harness hook. One
             // final correlated reconciliation follows the bounded event
             // wait; timeout alone is never evidence of absence.
-            if let Ok(Some(attempt)) = self.store.outstanding_delivery(address) {
+            if let Some(attempt) = self.carrying_attempt(address, &logical_id) {
                 let _ = self.reconcile_delivery(&attempt);
             }
             self.store

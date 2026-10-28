@@ -180,6 +180,7 @@ impl MutatesMetaflows for FlowStore {
         let binding = StoredMetaflowProcess {
             process: peer.clone(),
             address,
+            flow_id_option: Some(flow_id.clone()),
         };
         let commit = if new_binding {
             commit.assert(self.metaflow_processes, binding)

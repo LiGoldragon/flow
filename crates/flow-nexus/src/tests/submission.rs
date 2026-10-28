@@ -356,7 +356,7 @@ fn hard_abrupt(text: &str) -> Message {
 /// ComposerOccupied, Message parked it, and the restored letter held the
 /// pane against every later letter.
 #[test]
-fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
+fn an_interrupt_restored_prompt_is_resubmitted_without_claiming_its_syntax() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.current_agent()],
@@ -385,12 +385,8 @@ fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
     );
     let presses = fixture.key_presses();
     assert_eq!(presses[0], "esc", "Codex's interrupt");
-    assert!(presses[1].starts_with("ctrl+u backspace"), "{presses:?}");
-    assert_eq!(presses.len(), 2);
-    assert_eq!(
-        fixture.typed().as_deref(),
-        Some("[ HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop } ]")
-    );
+    assert_eq!(presses, ["esc", "enter"]);
+    assert!(presses.iter().all(|key| !key.contains("backspace")));
 }
 
 /// The same path under Claude Code, which is where it was witnessed and
@@ -400,7 +396,7 @@ fn a_letter_an_interrupt_put_back_is_taken_out_and_the_hard_abrupt_lands() {
 /// Claude's vim NORMAL mode, which the second `esc` leaves it in, is what
 /// makes the line-by-line take-back unfit here.
 #[test]
-fn a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c() {
+fn claudes_interrupt_restored_prompt_is_resubmitted_not_retracted() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.working_agent(FixtureComposer::Claude)],
@@ -429,13 +425,8 @@ fn a_letter_claudes_interrupt_put_back_is_taken_out_by_one_ctrl_c() {
     );
     assert_eq!(
         fixture.key_presses(),
-        ["esc esc", "ctrl+c", "enter"],
-        "Claude's interrupt, one retract press and no more, then its submit"
-    );
-    assert_eq!(fixture.composer_holds(), None, "the pane is free again");
-    assert_eq!(
-        fixture.typed().as_deref(),
-        Some("[ HardAbrupt.{ Order { { Psyche core Secondary } e167d8 } Words.stop } ]")
+        ["esc esc", "enter", "enter"],
+        "the cancelled prompt is resubmitted, then the new delivery lands"
     );
 }
 

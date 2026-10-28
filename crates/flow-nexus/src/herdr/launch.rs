@@ -568,7 +568,8 @@ impl PreparesClaudePane for HerdrCli {
             std::os::unix::net::UnixDatagram::bind(&readiness_path).map_err(|error| {
                 format!("Flow-owned Claude readiness endpoint could not open: {error}")
             })?;
-        self.flow_owned_claude_readiness
+        self.owned
+            .flow_owned_claude_readiness
             .lock()
             .map_err(|_| "Flow-owned Claude readiness ownership is unavailable".to_owned())?
             .insert(
@@ -1881,14 +1882,16 @@ impl CreatesHerdrLaunchPane for HerdrCli {
             .pointer("/result/root_pane/terminal_id")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "Herdr workspace create returned no terminal id".to_owned())?;
-        Ok(HerdrPaneBinding {
+        let binding = HerdrPaneBinding {
             launch_request_id: launch.launch_profile.launch_request_id.clone(),
             herdr_session_name: launch.launch_profile.herdr_session_name.clone(),
             herdr_agent_name: agent_name,
             herdr_workspace_id: workspace.into(),
             herdr_pane_id: pane.into(),
             herdr_terminal_id: terminal.into(),
-        })
+        };
+        self.retain_pane_binding(&binding)?;
+        Ok(binding)
     }
 }
 
@@ -2135,6 +2138,7 @@ impl RunsFlowOwnedClaude for HerdrCli {
         command: &[String],
     ) -> Result<(), SpawnFailure> {
         let readiness_path = self
+            .owned
             .flow_owned_claude_readiness
             .lock()
             .map_err(|_| {
@@ -2165,7 +2169,7 @@ impl RunsFlowOwnedClaude for HerdrCli {
             .output()
             .map_err(|error| format!("Herdr command could not start: {error}"))?;
         if !output.status.success() {
-            if let Ok(mut readiness) = self.flow_owned_claude_readiness.lock() {
+            if let Ok(mut readiness) = self.owned.flow_owned_claude_readiness.lock() {
                 readiness.remove(&pane.herdr_pane_id);
             }
             let _ = fs::remove_file(readiness_path);
@@ -2179,7 +2183,8 @@ impl RunsFlowOwnedClaude for HerdrCli {
         let configured_program = command.first().ok_or_else(|| {
             SpawnFailure::Unattempted("configured Claude command is empty".into())
         })?;
-        self.flow_owned_claude_programs
+        self.owned
+            .flow_owned_claude_programs
             .lock()
             .map_err(|_| {
                 SpawnFailure::Unattempted(
@@ -2307,7 +2312,8 @@ impl HoldsSystemPrompt for HerdrCli {
         file.write_all(launch.system_prompt.system_prompt_text.as_bytes())
             .map_err(|error| format!("cannot write the in-memory system prompt: {error}"))?;
         let path = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd());
-        self.held_system_prompts
+        self.owned
+            .held_system_prompts
             .lock()
             .map_err(|_| "the held system prompts are unreadable".to_owned())?
             .insert(launch.launch_profile.launch_request_id.clone(), file);
@@ -2315,7 +2321,7 @@ impl HoldsSystemPrompt for HerdrCli {
     }
 
     fn release_system_prompt(&self, launch_request_id: &str) {
-        if let Ok(mut held) = self.held_system_prompts.lock() {
+        if let Ok(mut held) = self.owned.held_system_prompts.lock() {
             held.remove(launch_request_id);
         }
     }
@@ -2323,7 +2329,8 @@ impl HoldsSystemPrompt for HerdrCli {
     #[cfg(test)]
     fn held_system_prompt_path(&self, launch_request_id: &str) -> Option<String> {
         use std::os::fd::AsRawFd;
-        self.held_system_prompts
+        self.owned
+            .held_system_prompts
             .lock()
             .ok()?
             .get(launch_request_id)
@@ -2540,6 +2547,7 @@ impl ObservesBoundPane for HerdrCli {
                     "the Flow-owned Claude process has no selected session".to_owned()
                 })?;
             let (readiness, readiness_path) = self
+                .owned
                 .flow_owned_claude_readiness
                 .lock()
                 .map_err(|_| "Flow-owned Claude readiness ownership is unavailable".to_owned())?
@@ -2559,6 +2567,7 @@ impl ObservesBoundPane for HerdrCli {
                 .map_err(|error| format!("Flow-owned Claude readiness was not reported: {error}"));
             let _ = fs::remove_file(readiness_path);
             let configured_executable = self
+                .owned
                 .flow_owned_claude_programs
                 .lock()
                 .map_err(|_| "Flow-owned Claude installation ownership is unavailable".to_owned())?
@@ -2573,7 +2582,8 @@ impl ObservesBoundPane for HerdrCli {
                     .ok_or_else(|| "configured Claude installation is not textual".to_owned())?,
             )?;
             if let Some(process) = process {
-                self.flow_owned_claude_processes
+                self.owned
+                    .flow_owned_claude_processes
                     .lock()
                     .map_err(|_| "Flow-owned Claude process ownership is unavailable".to_owned())?
                     .insert(pane.herdr_pane_id.clone(), process);
@@ -3654,6 +3664,7 @@ printf '%s\n' "$alias"
 
     fn report_fixture_readiness(adapter: &HerdrCli, pane: &HerdrPaneBinding) {
         let path = adapter
+            .owned
             .flow_owned_claude_readiness
             .lock()
             .unwrap()

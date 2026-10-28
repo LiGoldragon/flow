@@ -221,14 +221,11 @@ impl Performs for RunningNexus {
             // A model that is not exact on its harness is never launched: its
             // receipt could not match the model the transcript records.
             Operation::Compose(mut profile) => {
-                // Harness installations are a configured family. Read the
-                // committed snapshot for this composition rather than the
-                // adapters the long-running process opened with: Configure
-                // takes effect on the next use of the family.
-                let codex_endpoints = match self.store.configuration_snapshot() {
-                    Ok(Some(snapshot)) => crate::codex::CodexEndpoints::configured(&snapshot),
-                    _ => return Outcome::Failed(Failed_Data::StoreRefused),
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
                 };
+                let codex_endpoints = &configured.codex_endpoints;
                 if !codex_endpoints.launches_exactly(&profile.model_name) {
                     eprintln!(
                         "flow-nexus: launch {} not composed: model {} is not an exact native model",
@@ -250,15 +247,13 @@ impl Performs for RunningNexus {
                     .left_out_option
                     .take()
                     .unwrap_or(declaration_left_out);
-                let harness = codex_endpoints
-                    .harnesses
-                    .iter()
-                    .find(|harness| {
-                        harness.harness_kind == harness_kind
-                            && harness.served_models.iter().any(|served| {
-                                served.model_name == profile.model_name
-                            })
-                    });
+                let harness = codex_endpoints.harnesses.iter().find(|harness| {
+                    harness.harness_kind == harness_kind
+                        && harness
+                            .served_models
+                            .iter()
+                            .any(|served| served.model_name == profile.model_name)
+                });
                 let mut default = harness
                     .map(|harness| harness.left_out.clone())
                     .unwrap_or_default();
@@ -280,14 +275,17 @@ impl Performs for RunningNexus {
                         Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
                     }
                 };
-                match self.composer.with_harness_modules(harness_modules).compose(
-                    HarnessedProfile {
-                        remembered_flows,
-                        harness_kind,
-                        launch_profile: profile,
-                    },
-                    default,
-                ) {
+                match configured
+                    .composer
+                    .with_harness_modules(harness_modules)
+                    .compose(
+                        HarnessedProfile {
+                            remembered_flows,
+                            harness_kind,
+                            launch_profile: profile,
+                        },
+                        default,
+                    ) {
                     Ok(launch) => Outcome::Composed(launch),
                     Err(CompositionError::Context(refusal)) => {
                         eprintln!("flow-nexus: launch {request} context refused: {refusal:?}");
@@ -318,22 +316,32 @@ impl Performs for RunningNexus {
                 Ok(_) => Outcome::Failed(Failed_Data::Unstarted),
                 Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
             },
-            Operation::Open(launch) => match self.herdr.create_launch_pane(&launch) {
-                Ok(pane) => Outcome::Opened(pane),
-                Err(error) => NativeLaunchRefusal::refused(NativeLaunchStage::Open, error),
-            },
+            Operation::Open(launch) => {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+                };
+                match configured.herdr.create_launch_pane(&launch) {
+                    Ok(pane) => Outcome::Opened(pane),
+                    Err(error) => NativeLaunchRefusal::refused(NativeLaunchStage::Open, error),
+                }
+            }
             Operation::Spawn(PaneLaunch {
                 composed_launch,
                 herdr_pane_binding,
                 flow_id_option,
                 ..
             }) => {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+                };
                 // Codex: the thread is opened lean through the app-server
                 // and named with its title, then the TUI attaches to it while
                 // it is idle; its first turn is started at Submit, once the
                 // pane is bound.
                 let opened = match composed_launch.harness_kind {
-                    HarnessKind::Codex => match self
+                    HarnessKind::Codex => match configured
                         .codex_endpoints
                         .adapter_for(&composed_launch.launch_profile.model_name)
                         .and_then(|adapter| {
@@ -363,7 +371,7 @@ impl Performs for RunningNexus {
                                         "opened thread {thread} not recorded as the launch's"
                                     )));
                                 }
-                                let flow_id = self
+                                let flow_id = configured
                                     .herdr
                                     .claim_flow_identity(&HarnessKind::Codex, thread)
                                     .map_err(refused)?;
@@ -402,12 +410,12 @@ impl Performs for RunningNexus {
                 // Herdr's start returns once the TUI is at rest; the thread
                 // it attaches to has no turn yet.
                 let started = match &opened {
-                    Some(thread) => self.herdr.attach_codex_harness(
+                    Some(thread) => configured.herdr.attach_codex_harness(
                         &composed_launch,
                         &herdr_pane_binding,
                         thread,
                     ),
-                    None => self.herdr.start_native_harness(
+                    None => configured.herdr.start_native_harness(
                         &composed_launch,
                         &herdr_pane_binding,
                         flow_id_option.as_deref(),
@@ -427,7 +435,7 @@ impl Performs for RunningNexus {
                             .log_line()
                         );
                         let opened_thread_option = opened.map(|thread| {
-                            match self
+                            match configured
                                 .codex_endpoints
                                 .adapter_for(&composed_launch.launch_profile.model_name)
                             {
@@ -457,13 +465,17 @@ impl Performs for RunningNexus {
                 flow_id_option,
                 native_session_id_option,
             }) => {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+                };
                 let observed = match native_session_id_option {
-                    Some(thread) => self.herdr.observe_attached_codex_binding(
+                    Some(thread) => configured.herdr.observe_attached_codex_binding(
                         &composed_launch,
                         &herdr_pane_binding,
                         &thread,
                     ),
-                    None => self.herdr.observe_native_binding(
+                    None => configured.herdr.observe_native_binding(
                         &composed_launch,
                         &herdr_pane_binding,
                         flow_id_option.as_deref(),
@@ -477,22 +489,33 @@ impl Performs for RunningNexus {
             Operation::Title(Title_Data {
                 composed_launch,
                 native_launch_binding,
-            }) => match self
-                .herdr
-                .title_native_flow(&composed_launch, &native_launch_binding)
-            {
-                Ok(_) => Outcome::Titled,
-                Err(refusal) => NativeLaunchRefusal::refused_title(&refusal),
-            },
+            }) => {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+                };
+                match configured
+                    .herdr
+                    .title_native_flow(&composed_launch, &native_launch_binding)
+                {
+                    Ok(_) => Outcome::Titled,
+                    Err(refusal) => NativeLaunchRefusal::refused_title(&refusal),
+                }
+            }
             Operation::Submit(Submit_Data {
                 composed_launch,
                 prompt_delivery_intent,
             }) => {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+                };
                 let submission = match composed_launch.harness_kind {
                     // The part's turn may call the send tool at once: the
                     // launch, holding the gate, answers it meanwhile.
                     HarnessKind::Codex => self.serving_launch_calls(|| {
-                        self.codex_endpoints
+                        configured
+                            .codex_endpoints
                             .adapter_for(&composed_launch.launch_profile.model_name)
                             .map_err(|_| Failed_Data::CodexRefused)
                             .and_then(|adapter| {
@@ -504,7 +527,7 @@ impl Performs for RunningNexus {
                                     .map_err(|_| Failed_Data::CodexRefused)
                             })
                     }),
-                    HarnessKind::Claude => self
+                    HarnessKind::Claude => configured
                         .herdr
                         .submit_startup_part(&composed_launch, &prompt_delivery_intent)
                         .map_err(|_| Failed_Data::HerdrRefused),
@@ -515,12 +538,18 @@ impl Performs for RunningNexus {
                 }
             }
             Operation::Release(flow_id) => self.release(&flow_id),
-            Operation::Close(node) => match self.herdr.close(&node) {
-                signal_flow::PaneCloseOutcome::Closed => Outcome::Closed,
-                signal_flow::PaneCloseOutcome::Refused(failure) => {
-                    Outcome::Failed(Failed_Data::PaneCloseRefused(failure))
+            Operation::Close(node) => {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+                };
+                match configured.herdr.close(&node) {
+                    signal_flow::PaneCloseOutcome::Closed => Outcome::Closed,
+                    signal_flow::PaneCloseOutcome::Refused(failure) => {
+                        Outcome::Failed(Failed_Data::PaneCloseRefused(failure))
+                    }
                 }
-            },
+            }
             Operation::Wake(address) => self.wake(address),
             Operation::Drain(address) => self.drain(address),
         }
@@ -553,9 +582,13 @@ impl PerformsInParts for RunningNexus {
             Ok(reservation) => reservation,
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
         };
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+        };
         let flow_id_option = match &reservation {
             LaunchAttemptReservation::Reserved(_) => {
-                match self.herdr.reserve_flow_identity(&composed_launch) {
+                match configured.herdr.reserve_flow_identity(&composed_launch) {
                     Ok(flow_id_option) => flow_id_option,
                     Err(error) => {
                         eprintln!(
@@ -584,11 +617,15 @@ impl PerformsInParts for RunningNexus {
     fn release(&self, flow_id: &str) -> Outcome {
         use crate::herdr::reservation::ReleasesFlowIdentity;
         use crate::store::events::RecordsHarnessEvents;
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+        };
         if let Err(error) = self.store.release_reserved_flow(flow_id) {
             eprintln!("flow-nexus: reserved flow {flow_id} not released: {error:?}");
             return Outcome::Failed(Failed_Data::StoreRefused);
         }
-        match self.herdr.release_flow_identity(flow_id) {
+        match configured.herdr.release_flow_identity(flow_id) {
             Ok(()) => Outcome::Released,
             Err(error) => {
                 eprintln!("flow-nexus: FlowId {flow_id} claim not released: {error}");
@@ -625,15 +662,18 @@ impl PerformsInParts for RunningNexus {
             // no pane lease: an exit is recorded where a write may already
             // hold it, and nothing more is typed into an exited flow.
             Record_Data::Exited(flow_id) => {
+                let configured = self.configured_use().ok();
                 let node = self.store.flow_node(&flow_id).ok().flatten();
                 let recorded = self.store.record_exited(&flow_id).recorded();
                 if recorded == Outcome::Recorded
+                    && let Some(configured) = configured
                     && let Some(node) = node
                     && matches!(
-                        self.herdr.pane_presence(&node),
+                        configured.herdr.pane_presence(&node),
                         crate::herdr::PanePresence::Present | crate::herdr::PanePresence::Bare
                     )
-                    && let signal_flow::PaneCloseOutcome::Refused(failure) = self.herdr.close(&node)
+                    && let signal_flow::PaneCloseOutcome::Refused(failure) =
+                        configured.herdr.close(&node)
                 {
                     eprintln!(
                         "flow-nexus: flow {flow_id} exited; its pane was not closed: {failure:?}"

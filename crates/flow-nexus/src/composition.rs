@@ -154,6 +154,32 @@ impl OpensLaunchComposer for LaunchComposer {
 }
 
 impl LaunchComposer {
+    /// Makes the composer for one committed configuration generation. The
+    /// production provider follows that generation's Curriculum endpoint;
+    /// a test fixture keeps its explicit in-memory provider while receiving
+    /// the generation's limits and text.
+    pub(crate) fn configured_view(
+        &self,
+        snapshot: &crate::store::StoredConfigurationSnapshot,
+    ) -> Self {
+        let context = match &self.context {
+            ContextComposer::Curriculum(_) => {
+                ContextComposer::Curriculum(crate::context::CurriculumComposer::configured(
+                    &snapshot.configured_nexus.curriculum_nexus_path,
+                    &snapshot.timings,
+                    &snapshot.limits,
+                ))
+            }
+            #[cfg(test)]
+            ContextComposer::Fixture(fixture) => ContextComposer::Fixture(fixture.clone()),
+        };
+        Self::with_context_limits_and_texts(
+            context,
+            snapshot.limits.clone(),
+            snapshot.texts.clone(),
+        )
+    }
+
     pub(crate) fn with_context_and_limits(
         context: ContextComposer,
         limits: meta_signal_flow::Limits,
@@ -694,12 +720,8 @@ impl ComposesLaunch for LaunchComposer {
         // context and the brief are the first message, split into as many
         // prompts as it takes when it does not fit one, sent one right after
         // another, so the start is one model call.
-        let system_prompt = self.launch_system_prompt(
-            &harnessed,
-            &verified,
-            Vec::<String>::new(),
-            &left_out,
-        )?;
+        let system_prompt =
+            self.launch_system_prompt(&harnessed, &verified, Vec::<String>::new(), &left_out)?;
         let body = segments.joined_with(&brief).concat();
         let parts = MessageBoundary {
             harness: &harnessed.harness_kind,
@@ -1016,9 +1038,7 @@ pub(crate) mod tests {
         let modules = vec![
             meta_signal_flow::HarnessModule {
                 harness_module_name: "CodeStyle".into(),
-                module_text: meta_signal_flow::ModuleText::Injected(
-                    "Write clear code.".into(),
-                ),
+                module_text: meta_signal_flow::ModuleText::Injected("Write clear code.".into()),
                 tools: vec![],
                 switches: vec![],
             },
@@ -1045,10 +1065,12 @@ pub(crate) mod tests {
         assert!(kept.system_prompt.system_prompt_text.starts_with(
             "Write clear code.\n\nThese are your skills, given here; do not reload them."
         ));
-        assert!(!kept
-            .system_prompt
-            .system_prompt_text
-            .contains("The harness retains this."));
+        assert!(
+            !kept
+                .system_prompt
+                .system_prompt_text
+                .contains("The harness retains this.")
+        );
 
         let omitted = composer
             .compose(
@@ -1060,10 +1082,12 @@ pub(crate) mod tests {
                 vec!["CodeStyle".into()],
             )
             .expect("left-out text composes");
-        assert!(!omitted
-            .system_prompt
-            .system_prompt_text
-            .contains("Write clear code."));
+        assert!(
+            !omitted
+                .system_prompt
+                .system_prompt_text
+                .contains("Write clear code.")
+        );
     }
 
     #[test]

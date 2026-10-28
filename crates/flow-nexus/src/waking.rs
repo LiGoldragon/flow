@@ -1027,6 +1027,10 @@ impl RendersAttemptInput for QueueDeliveryAttempt {
 
 impl ReconcilesQueueDelivery for RunningNexus {
     fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Reconciled::Refused,
+        };
         match &attempt.phase {
             QueueDeliveryPhase::ReceiptRecorded(_) => {
                 return if self
@@ -1081,7 +1085,12 @@ impl ReconcilesQueueDelivery for RunningNexus {
                     .role(&attempt.flow_id)
                     .ok()
                     .flatten()
-                    .and_then(|role| self.codex_endpoints.adapter_for(&role.model_name).ok())
+                    .and_then(|role| {
+                        configured
+                            .codex_endpoints
+                            .adapter_for(&role.model_name)
+                            .ok()
+                    })
                     .and_then(|adapter| {
                         adapter
                             .queued_turn_after(&attempt.thread_id, anchor.as_deref(), &text)
@@ -1723,6 +1732,12 @@ impl PerformsWakeAndDrain for RunningNexus {
     }
 
     fn drain(&self, address: Address) -> Outcome {
+        // One queued item is one effect. `drain_all` calls this again for the
+        // next item, so a later committed generation takes effect there.
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+        };
         let flow_id = match self.store.metaflow(&address) {
             Ok(Some(Metaflow {
                 state: flow_ethos::State::Awake(flow_id),
@@ -1840,7 +1855,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                     Ok(Some(role)) => role.model_name,
                     _ => return refused(drained, Failed_Data::StoreRefused),
                 };
-                let adapter = match self.codex_endpoints.adapter_for(&model) {
+                let adapter = match configured.codex_endpoints.adapter_for(&model) {
                     Ok(adapter) => adapter,
                     Err(_) => return refused(drained, Failed_Data::CodexRefused),
                 };
@@ -2110,21 +2125,24 @@ impl WakesInParts for RunningNexus {
         text: &str,
     ) -> Result<FlowId, FreshRefusal> {
         let address = &metaflow.address;
-        // The seat's model is the one configured for its layer and aspect.
-        let model = match self.store.configured_model(address) {
-            Ok(Some(model)) => model,
-            Ok(None) => {
+        let configured = self
+            .configured_use()
+            .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?;
+        // Model, effort and wording are one committed generation.
+        let model = match configured
+            .snapshot
+            .configured_models
+            .iter()
+            .find(|model| model.layer == address.layer && model.aspect == address.aspect)
+        {
+            Some(model) => model,
+            None => {
                 return Err(FreshRefusal::Rejected(
                     signal_flow::StartRejection::CompositionRefused(
                         signal_flow::CompositionRefusal::Unconfigured,
                     ),
                 ));
             }
-            Err(_) => return Err(FreshRefusal::Failed(Failed_Data::StoreRefused)),
-        };
-        let effort = match self.store.configured_effort(address) {
-            Ok(Some(effort)) => effort,
-            Ok(None) | Err(_) => return Err(FreshRefusal::Failed(Failed_Data::StoreRefused)),
         };
         let launch_request_id = format!(
             "wake-{}-{}",
@@ -2137,14 +2155,18 @@ impl WakesInParts for RunningNexus {
         let seat = FreshSeat {
             address: address.clone(),
             launch_request_id: launch_request_id.clone(),
-            model_name: model,
-            effort,
+            model_name: model.model_name.clone(),
+            effort: model.effort.clone(),
             herdr_session_name: fresh.herdr_session_name,
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,
             left_out_option: fresh.left_out_option,
             tool_set: fresh.tool_set,
-            prompt: crate::composition::with_purpose_configured(&text, &fresh.purpose, &self.texts),
+            prompt: crate::composition::with_purpose_configured(
+                &text,
+                &fresh.purpose,
+                &configured.snapshot.texts,
+            ),
         };
         let profile = seat.fresh_profile();
         self.requirements_first(&profile)
@@ -2153,6 +2175,9 @@ impl WakesInParts for RunningNexus {
     }
 
     fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), HandOverRefusal> {
+        let configured = self
+            .configured_use()
+            .map_err(|_| HandOverRefusal::Refused)?;
         let handed = (|| {
             let target = self
                 .delivery_target(flow_id)
@@ -2162,9 +2187,9 @@ impl WakesInParts for RunningNexus {
                 .writable_state(&target)
                 .map_err(HandOverRefusal::Pane)?;
             let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
-            match self.herdr.place(&target.route, text, observe) {
+            match configured.herdr.place(&target.route, text, observe) {
                 Placement::Placed { observed: true }
-                    if self.herdr.route_is_available(&target.node) =>
+                    if configured.herdr.route_is_available(&target.node) =>
                 {
                     let _ = self.store.record_active(flow_id);
                     Ok(())
@@ -2193,16 +2218,19 @@ impl WakesInParts for RunningNexus {
     }
 
     fn record_context_at_stop(&self, flow_id: &str) {
+        let Ok(configured) = self.configured_use() else {
+            eprintln!("flow-nexus: flow {flow_id} stopped with configuration unreadable");
+            return;
+        };
         let Ok(Some(node)) = self.store.flow_node(flow_id) else {
             return;
         };
         if node.harness_kind != HarnessKind::Claude {
             return;
         }
-        let Some(tokens) = self
-            .claude_transcript(&node)
-            .and_then(|transcript| transcript.context_tokens(self.limits.context_tail as u64))
-        else {
+        let Some(tokens) = self.claude_transcript(&node).and_then(|transcript| {
+            transcript.context_tokens(configured.snapshot.limits.context_tail as u64)
+        }) else {
             eprintln!("flow-nexus: flow {flow_id} stopped with no context size readable");
             return;
         };
@@ -2218,12 +2246,18 @@ impl WakesInParts for RunningNexus {
     }
 
     fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal> {
+        let configured = self
+            .configured_use()
+            .map_err(|_| WakeRefusal::HerdrUnreadable)?;
         let mut checked = HashSet::new();
         for herdr_session_name in sessions {
             if !checked.insert(herdr_session_name) {
                 continue;
             }
-            match self.herdr.holds_native_session(herdr_session_name, node) {
+            match configured
+                .herdr
+                .holds_native_session(herdr_session_name, node)
+            {
                 Some(false) => {}
                 Some(true) => {
                     eprintln!(

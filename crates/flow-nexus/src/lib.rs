@@ -134,6 +134,75 @@ pub struct RunningNexus {
     pub codex_turns: codex_turns::CodexTurns,
     /// How far each flow's compactions have been read; see `compacting`.
     pub compactions: compacting::CompactionWatch,
+    /// Tests may supply explicit in-memory/executable I/O providers while
+    /// configuration still owns every value the provider consumes.
+    #[cfg(test)]
+    pub fixture_configuration_io: bool,
+}
+
+/// One external operation's immutable complete configuration generation and
+/// the clients derived from it. Nested helpers receive this value instead of
+/// rereading families independently.
+pub(crate) struct ConfiguredUse {
+    pub(crate) generation: sema_engine::DatabaseMarker,
+    pub(crate) snapshot: store::StoredConfigurationSnapshot,
+    pub(crate) codex_endpoints: CodexEndpoints,
+    pub(crate) herdr: herdr::HerdrCli,
+    pub(crate) composer: LaunchComposer,
+}
+
+impl RunningNexus {
+    pub(crate) fn configured_use(&self) -> Result<ConfiguredUse, store::StoreError> {
+        let committed = self
+            .store
+            .committed_configuration_snapshot()?
+            .ok_or(store::StoreError::NotConfigured)?;
+        #[cfg(not(test))]
+        let codex_endpoints = CodexEndpoints::configured(&committed.snapshot)
+            .with_texts(committed.snapshot.texts.clone());
+        #[cfg(test)]
+        let codex_endpoints = if self.fixture_configuration_io {
+            let mut endpoints = self.codex_endpoints.clone();
+            endpoints.limits = committed.snapshot.limits.clone();
+            endpoints.texts = committed.snapshot.texts.clone();
+            endpoints
+        } else {
+            CodexEndpoints::configured(&committed.snapshot)
+                .with_texts(committed.snapshot.texts.clone())
+        };
+        #[cfg(not(test))]
+        let herdr = herdr::HerdrCli::configured_view(
+            &committed.snapshot,
+            codex_endpoints.clone(),
+            Path::new(&self.runtime.ordinary_socket_path),
+            self.herdr.owned_resources(),
+        );
+        #[cfg(test)]
+        let herdr = if self.fixture_configuration_io {
+            self.herdr
+                .clone()
+                .with_codex_endpoints(codex_endpoints.clone())
+                .with_runtime_settings(
+                    committed.snapshot.timings.clone(),
+                    committed.snapshot.limits.clone(),
+                )
+        } else {
+            herdr::HerdrCli::configured_view(
+                &committed.snapshot,
+                codex_endpoints.clone(),
+                Path::new(&self.runtime.ordinary_socket_path),
+                self.herdr.owned_resources(),
+            )
+        };
+        let composer = self.composer.configured_view(&committed.snapshot);
+        Ok(ConfiguredUse {
+            generation: committed.generation,
+            snapshot: committed.snapshot,
+            codex_endpoints,
+            herdr,
+            composer,
+        })
+    }
 }
 
 pub trait Dispatches {
@@ -923,6 +992,8 @@ impl OpensRunningNexus for RunningNexus {
             launch_calls: send_tool::LaunchCalls::default(),
             codex_turns: codex_turns::CodexTurns::default(),
             compactions: compacting::CompactionWatch::default(),
+            #[cfg(test)]
+            fixture_configuration_io: false,
         })
     }
 }
@@ -2596,6 +2667,7 @@ mod tests {
                 launch_calls: crate::send_tool::LaunchCalls::default(),
                 codex_turns: crate::codex_turns::CodexTurns::default(),
                 compactions: crate::compacting::CompactionWatch::default(),
+                fixture_configuration_io: true,
             };
             let herdr_config = directory.path().join("herdr-config");
             let session_socket = herdr_config.join("sessions/messaging-build/herdr.sock");

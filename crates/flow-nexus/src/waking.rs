@@ -1053,6 +1053,25 @@ impl ReconcilesQueueDelivery for RunningNexus {
         native_receipt: String,
         seat_after: SeatAfter,
     ) -> Reconciled {
+        if run.len() == 1 && attempt.cohort.len() > 1 {
+            return if self
+                .store
+                .settle_received_cohort(
+                    &attempt.attempt_id,
+                    NativeDeliveryReceipt {
+                        native_request_id: attempt.native_request_id,
+                        thread_id: attempt.thread_id.clone(),
+                        turn_id,
+                        native_receipt,
+                    },
+                )
+                .is_ok()
+            {
+                attempt.as_settled(seat_after)
+            } else {
+                Reconciled::Refused
+            };
+        }
         for member in run {
             let receipt = NativeDeliveryReceipt {
                 native_request_id: member.native_request_id,
@@ -1958,29 +1977,32 @@ impl PerformsWakeAndDrain for RunningNexus {
                     oldest.logical_delivery_id, attempt.attempt_id
                 );
             }
-            // Park first so every member of the one native vector has its
-            // own durable attempt. A successful turn/start response is then
-            // the exact native receipt for that whole run; it need not be
-            // rediscovered by matching text in paged history.
-            let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
-            let typed = self.park_cohort(&attempt, &cohort);
             if let Ok(receipt) = submitted {
-                let run = self.typed_group(&attempt);
-                if matches!(
-                    self.settle_received(
-                        &attempt,
-                        &run,
-                        receipt.turn_id,
-                        receipt.native_receipt,
-                        SeatAfter::InItsTurn,
-                    ),
-                    Reconciled::Settled(..)
+                match self.store.settle_received_cohort(
+                    &attempt.attempt_id,
+                    NativeDeliveryReceipt {
+                        native_request_id: receipt.native_request_id,
+                        thread_id: receipt.thread_id,
+                        turn_id: receipt.turn_id,
+                        native_receipt: receipt.native_receipt,
+                    },
                 ) {
-                    self.codex_turns.delivered(&node.session_id);
+                    Ok(settled) => {
+                        self.codex_turns.delivered(&node.session_id);
+                        drained.extend(settled);
+                        return Outcome::Drained(drained);
+                    }
+                    Err(error) => eprintln!(
+                        "flow-nexus: exact Codex receipt for {} could not settle atomically: {error:?}",
+                        attempt.attempt_id
+                    ),
                 }
             }
-            drained.extend(typed);
-            return Outcome::Drained(drained);
+            // The prepared attempt retains the complete frozen cohort.  A
+            // failed or ambiguous local transition is never submitted a
+            // second time; native history reconciles that exact vector.
+            let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
+            return Outcome::AwaitingReceipt(oldest.logical_delivery_id);
         } else if let Err(refusal) = self.hand_over(&flow_id, &text) {
             return if absent(format!("{refusal:?}")) {
                 refused(drained, Failed_Data::HerdrRefused)
@@ -2335,6 +2357,12 @@ impl ParksCohort for RunningNexus {
         let alone = (vec![attempt.clone()], alone_text);
         let group = self.typed_group(attempt);
         if group.len() < 2 {
+            if attempt.cohort.len() > 1
+                && let Some(messages) = self.typed_queue_cohort(&attempt.cohort)
+            {
+                let text = messages.datomize(Vec::new()).protosize().compact();
+                return vec![(vec![attempt.clone()], text), alone];
+            }
             return vec![alone];
         }
         let entries = group

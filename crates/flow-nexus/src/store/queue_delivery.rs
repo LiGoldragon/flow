@@ -735,6 +735,15 @@ pub trait AccountsQueueDelivery {
     /// settled attempt, so a duplicate completion is idempotent.
     fn settle_recorded_delivery(&self, attempt_id: &str) -> Result<bool, StoreError>;
 
+    /// An exact native response for the one vector carried by `attempt_id`
+    /// settles that vector in one store transaction.  No member can leave
+    /// the group before every member holds the same native turn receipt.
+    fn settle_received_cohort(
+        &self,
+        attempt_id: &str,
+        receipt: NativeDeliveryReceipt,
+    ) -> Result<Vec<flow_ethos::QueueEntry>, StoreError>;
+
     /// Ends an accepted cohort that cannot fit the native transport.  The
     /// whole cohort leaves the runnable queue in one commit while its exact
     /// messages and terminal lifecycle remain durable for inspection and an
@@ -1244,6 +1253,139 @@ impl AccountsQueueDelivery for FlowStore {
             commit,
         )?;
         Ok(true)
+    }
+
+    fn settle_received_cohort(
+        &self,
+        attempt_id: &str,
+        receipt: NativeDeliveryReceipt,
+    ) -> Result<Vec<flow_ethos::QueueEntry>, StoreError> {
+        let Some(mut head) = self.queue_delivery_attempt(attempt_id)? else {
+            return Err(StoreError::StateInvariant);
+        };
+        let cohort = head.cohort.clone();
+        if cohort.is_empty() {
+            return Err(StoreError::StateInvariant);
+        }
+        if receipt.native_request_id != head.native_request_id
+            || receipt.thread_id != head.thread_id
+            || receipt.turn_id.is_empty()
+            || receipt.native_receipt.is_empty()
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        if let QueueDeliveryPhase::Settled(recorded) = &head.phase {
+            return if recorded == &receipt {
+                Ok(cohort)
+            } else {
+                Err(StoreError::StateInvariant)
+            };
+        }
+        if !matches!(
+            head.phase,
+            QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_)
+        ) {
+            return Err(StoreError::StateInvariant);
+        }
+        let Some(mut metaflow) = self.stored_metaflow(&head.address)? else {
+            return Err(StoreError::StateInvariant);
+        };
+        if metaflow.metaflow.state != flow_ethos::State::Awake(head.flow_id.clone())
+            || !metaflow.metaflow.queue.starts_with(&cohort)
+        {
+            return Err(StoreError::StateInvariant);
+        }
+        let counters = self
+            .engine
+            .match_records(QueryPlan::key(
+                self.queue_delivery.counter,
+                RecordKey::new(COUNTER_KEY),
+            ))?
+            .records()
+            .to_vec();
+        let [counter] = counters.as_slice() else {
+            return Err(StoreError::StateInvariant);
+        };
+        let rest_len = u64::try_from(cohort.len().saturating_sub(1))
+            .map_err(|_| StoreError::StateInvariant)?;
+        let next_counter = DeliveryCounter {
+            next_request: counter
+                .next_request
+                .checked_add(rest_len)
+                .ok_or(StoreError::StateInvariant)?,
+            next_attempt: counter
+                .next_attempt
+                .checked_add(rest_len)
+                .ok_or(StoreError::StateInvariant)?,
+        };
+        let mut commit = self.engine.begin_atomic_commit();
+        head.phase = QueueDeliveryPhase::Settled(receipt.clone());
+        commit = commit.mutate(self.queue_delivery.attempts, head.clone());
+        for (index, entry) in cohort.iter().enumerate() {
+            let request = StoredDeliveryRequest {
+                request_id: entry.logical_delivery_id.clone(),
+                address: head.address.clone(),
+                queue_evidence: QueueEvidence::Logical(entry.clone()),
+                state: RequestState::Settled,
+            };
+            let existing = self.engine.match_records(QueryPlan::key(
+                self.queue_delivery.requests,
+                RecordKey::new(entry.logical_delivery_id.clone()),
+            ))?;
+            commit = match existing.records() {
+                [] => commit.assert(self.queue_delivery.requests, request),
+                [stored]
+                    if stored.address == head.address
+                        && stored.queue_evidence == request.queue_evidence
+                        && stored.state == RequestState::Queued =>
+                {
+                    commit.mutate(self.queue_delivery.requests, request)
+                }
+                _ => return Err(StoreError::StateInvariant),
+            };
+            if index > 0 {
+                let offset = u64::try_from(index - 1).map_err(|_| StoreError::StateInvariant)?;
+                let attempt_number = counter
+                    .next_attempt
+                    .checked_add(offset)
+                    .ok_or(StoreError::StateInvariant)?;
+                commit = commit.assert(
+                    self.queue_delivery.attempts,
+                    QueueDeliveryAttempt {
+                        request_id: entry.logical_delivery_id.clone(),
+                        attempt_id: format!("queue-attempt-{attempt_number:016x}"),
+                        native_request_id: attempt_number,
+                        flow_id: head.flow_id.clone(),
+                        thread_id: head.thread_id.clone(),
+                        harness_kind: head.harness_kind.clone(),
+                        history_anchor: head.history_anchor.clone(),
+                        address: head.address.clone(),
+                        queue_evidence: QueueEvidence::Logical(entry.clone()),
+                        cohort: cohort[index..].to_vec(),
+                        phase: QueueDeliveryPhase::Settled(NativeDeliveryReceipt {
+                            native_request_id: attempt_number,
+                            thread_id: head.thread_id.clone(),
+                            turn_id: receipt.turn_id.clone(),
+                            native_receipt: receipt.native_receipt.clone(),
+                        }),
+                    },
+                );
+            }
+        }
+        metaflow.metaflow.queue.drain(..cohort.len());
+        let native = NativeReceipt {
+            harness_kind: head.harness_kind,
+            native_session_id: head.thread_id,
+            native_prompt_id: receipt.turn_id,
+        };
+        commit = commit
+            .mutate(self.metaflows, metaflow)
+            .mutate(self.queue_delivery.counter, next_counter);
+        commit =
+            self.stage_logical_transitions(&cohort, DeliveryState::Delivered(native), commit)?;
+        self.engine.commit_atomic(commit)?;
+        self.launch_changes.announce();
+        Ok(cohort)
     }
 
     fn fail_transport_overlimit(
@@ -2142,6 +2284,110 @@ mod tests {
         assert_eq!(resolved.attempt_id, attempt.attempt_id);
         assert_eq!(cohort, initial);
         assert!(!cohort.contains(&later));
+    }
+
+    #[test]
+    fn one_exact_codex_receipt_settles_the_whole_frozen_cohort_atomically() {
+        let (fixture, store) = Fixture::new();
+        let original = store.metaflow(&address()).unwrap().unwrap().queue;
+        let PrepareQueueDelivery::Prepared(attempt) = store
+            .prepare_oldest_delivery(
+                &address(),
+                "flow-delivery",
+                "codex-thread",
+                HarnessKind::Codex,
+                NativeHistoryAnchor::CodexTurns(Some("before".into())),
+            )
+            .unwrap()
+        else {
+            panic!("the cohort is prepared")
+        };
+        assert_eq!(attempt.cohort, original);
+        assert_eq!(
+            store
+                .settle_received_cohort(
+                    &attempt.attempt_id,
+                    NativeDeliveryReceipt {
+                        native_request_id: attempt.native_request_id,
+                        thread_id: "codex-thread".into(),
+                        turn_id: "turn-exact".into(),
+                        native_receipt: r#"{"id":7,"result":{"turn":{"id":"turn-exact"}}}"#.into(),
+                    },
+                )
+                .unwrap(),
+            original
+        );
+        assert!(
+            store
+                .metaflow(&address())
+                .unwrap()
+                .unwrap()
+                .queue
+                .is_empty()
+        );
+        for entry in &original {
+            assert_eq!(
+                store.request_state(&entry.logical_delivery_id).unwrap(),
+                Some(RequestState::Settled)
+            );
+            assert_eq!(
+                store
+                    .logical_delivery_snapshot(&entry.logical_delivery_id)
+                    .unwrap()
+                    .unwrap()
+                    .delivery_state,
+                DeliveryState::Delivered(NativeReceipt {
+                    harness_kind: HarnessKind::Codex,
+                    native_session_id: "codex-thread".into(),
+                    native_prompt_id: "turn-exact".into(),
+                })
+            );
+        }
+        // The same exact response is idempotent; a contradictory response
+        // cannot rewrite the already durable native identity.
+        assert_eq!(
+            store
+                .settle_received_cohort(
+                    &attempt.attempt_id,
+                    NativeDeliveryReceipt {
+                        native_request_id: attempt.native_request_id,
+                        thread_id: "codex-thread".into(),
+                        turn_id: "turn-exact".into(),
+                        native_receipt: r#"{"id":7,"result":{"turn":{"id":"turn-exact"}}}"#.into(),
+                    },
+                )
+                .unwrap(),
+            original
+        );
+        assert!(
+            store
+                .settle_received_cohort(
+                    &attempt.attempt_id,
+                    NativeDeliveryReceipt {
+                        native_request_id: attempt.native_request_id,
+                        thread_id: "codex-thread".into(),
+                        turn_id: "different-turn".into(),
+                        native_receipt: "different-receipt".into(),
+                    },
+                )
+                .is_err()
+        );
+        drop(store);
+        let reopened = fixture.reopen();
+        assert!(
+            reopened
+                .metaflow(&address())
+                .unwrap()
+                .unwrap()
+                .queue
+                .is_empty()
+        );
+        for entry in original {
+            assert_eq!(
+                reopened.request_state(&entry.logical_delivery_id).unwrap(),
+                Some(RequestState::Settled)
+            );
+        }
     }
 
     #[test]

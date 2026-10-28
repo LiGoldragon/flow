@@ -117,6 +117,43 @@ impl LocatesNativeTranscripts for HerdrCli {
 }
 
 /// The production Herdr roster reader.
+#[derive(Default)]
+pub(crate) struct HerdrOwnedResources {
+    /// Composed system prompts retained until their native sessions bind.
+    pub(crate) held_system_prompts:
+        std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
+    /// One launch-owned readiness endpoint per Flow-owned Claude pane.
+    pub(crate) flow_owned_claude_readiness: std::sync::Mutex<
+        std::collections::HashMap<String, (std::os::unix::net::UnixDatagram, std::path::PathBuf)>,
+    >,
+    /// The exact configured Claude program selected at launch.
+    pub(crate) flow_owned_claude_programs:
+        std::sync::Mutex<std::collections::HashMap<String, PathBuf>>,
+    /// Stable kernel identities selected when Flow-owned Claude sessions bind.
+    pub(crate) flow_owned_claude_processes:
+        std::sync::Mutex<std::collections::HashMap<String, OwnedClaudeProcess>>,
+    /// The original backend binding of every pane Flow created. Configuration
+    /// views share this registry and never transfer a pane to a newer backend.
+    pane_backends: std::sync::Mutex<std::collections::HashMap<String, OwnedPaneBinding>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OwnedPaneBinding {
+    executable: PathBuf,
+    herdr_session_name: String,
+    herdr_pane_id: String,
+    herdr_terminal_id: String,
+}
+
+impl OwnedPaneBinding {
+    fn matches(&self, route: &HerdrRoute) -> bool {
+        self.herdr_session_name == route.herdr_session_name
+            && self.herdr_pane_id == route.herdr_pane_id
+            && self.herdr_terminal_id == route.herdr_terminal_id
+    }
+}
+
+#[derive(Clone)]
 pub struct HerdrCli {
     pub(crate) executable: PathBuf,
     flow_id_executable: PathBuf,
@@ -139,29 +176,12 @@ pub struct HerdrCli {
     /// whatever Nexus the default path under the pane's runtime directory
     /// names.
     pub(crate) ordinary_socket: PathBuf,
-    /// The in-memory file of each Claude start's composed system prompt,
-    /// by launch request, held from the start until its session has bound.
-    pub(crate) held_system_prompts:
-        std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
-    /// One blocking, launch-owned readiness endpoint per Flow-owned Claude
-    /// pane. SessionStart sends one typed unit readiness signal to it;
-    /// process and session identity are verified separately. Binding consumes
-    /// the endpoint once and removes it.
-    pub(crate) flow_owned_claude_readiness: std::sync::Mutex<
-        std::collections::HashMap<String, (std::os::unix::net::UnixDatagram, std::path::PathBuf)>,
-    >,
     pub(crate) flow_owned_claude_readiness_root: PathBuf,
-    /// The exact configured installation typed into each reserved pane,
-    /// retained across spawn and bind so binding does not select
-    /// configuration a second time.
-    pub(crate) flow_owned_claude_programs:
-        std::sync::Mutex<std::collections::HashMap<String, PathBuf>>,
-    /// The stable kernel identity selected when a Flow-owned Claude binds,
-    /// keyed by Herdr's pane. A Nexus restart deliberately loses this
-    /// authority: a later Stop refuses rather than selecting a fresh PID by
-    /// matching text.
-    pub(crate) flow_owned_claude_processes:
-        std::sync::Mutex<std::collections::HashMap<String, OwnedClaudeProcess>>,
+    /// Resource authority shared by every immutable configuration view.
+    owned: std::sync::Arc<HerdrOwnedResources>,
+    /// True for operation views made by the running Nexus. Such a view may
+    /// never substitute its current backend for missing resource authority.
+    requires_owned_pane_binding: bool,
 }
 
 #[derive(Debug)]
@@ -214,15 +234,13 @@ impl Default for HerdrCli {
                 .and_then(|path| path.parent().map(|directory| directory.join("flow-hook")))
                 .unwrap_or_else(|| PathBuf::from("flow-hook")),
             ordinary_socket: defaults.ordinary_socket_path(),
-            held_system_prompts: Default::default(),
-            flow_owned_claude_readiness: Default::default(),
             flow_owned_claude_readiness_root: defaults
                 .ordinary_socket_path()
                 .parent()
                 .unwrap_or_else(|| Path::new("/"))
                 .to_path_buf(),
-            flow_owned_claude_programs: Default::default(),
-            flow_owned_claude_processes: Default::default(),
+            owned: Default::default(),
+            requires_owned_pane_binding: false,
         }
     }
 }
@@ -257,24 +275,29 @@ impl OperatesHerdrPane for HerdrCli {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return PaneCloseOutcome::Refused(PaneCloseFailure::IdentityUnavailable);
         };
+        let lifecycle = match self.lifecycle_view(route) {
+            Ok(view) => view,
+            Err(failure) => return PaneCloseOutcome::Refused(failure),
+        };
         // A reserved Claude is Flow-owned rather than a Herdr-managed
         // agent.  Stop the exact native session Flow selected, wait for the
         // kernel to reap that process identity, and only then ask Herdr to
         // close the pane it owns.  Closing the pane is not used as a proxy
         // for stopping the native process.
-        let ownership = self.pane_ownership(node);
+        let ownership = lifecycle.pane_ownership(node);
         let retained_flow_owned_claude = node.harness_kind == HarnessKind::Claude
-            && self
+            && lifecycle
+                .owned
                 .flow_owned_claude_processes
                 .lock()
                 .is_ok_and(|processes| processes.contains_key(&route.herdr_pane_id));
         if retained_flow_owned_claude {
-            match self.stop_flow_owned_claude(route, &node.session_id) {
+            match lifecycle.stop_flow_owned_claude(route, &node.session_id) {
                 Ok(OwnedProcessDisposition::Stopped) => {
-                    return self.close_flow_owned_claude_pane(route);
+                    return lifecycle.close_flow_owned_claude_pane(route);
                 }
                 Ok(OwnedProcessDisposition::AlreadyExited) => {
-                    let foreground = match self.foreground_processes(route) {
+                    let foreground = match lifecycle.foreground_processes(route) {
                         Some(foreground) => foreground,
                         None => {
                             return PaneCloseOutcome::Refused(
@@ -287,7 +310,7 @@ impl OperatesHerdrPane for HerdrCli {
                     }
                     return match ownership {
                         PaneOwnership::Owned | PaneOwnership::Bare => {
-                            self.close_flow_owned_claude_pane(route)
+                            lifecycle.close_flow_owned_claude_pane(route)
                         }
                         PaneOwnership::Absent => {
                             PaneCloseOutcome::Refused(PaneCloseFailure::IdentityUnavailable)
@@ -317,7 +340,7 @@ impl OperatesHerdrPane for HerdrCli {
         // prompt could take. A pane now running another session is never
         // closed, and a Flow with no recorded session closes nothing.
         match ownership {
-            PaneOwnership::Owned | PaneOwnership::Bare => self.close_owned_pane(route),
+            PaneOwnership::Owned | PaneOwnership::Bare => lifecycle.close_owned_pane(route),
             PaneOwnership::Absent => PaneCloseOutcome::Closed,
             PaneOwnership::Foreign => PaneCloseOutcome::Refused(PaneCloseFailure::IdentityMismatch),
             PaneOwnership::Unproven | PaneOwnership::Unidentified | PaneOwnership::Unknown => {
@@ -328,6 +351,93 @@ impl OperatesHerdrPane for HerdrCli {
 }
 
 impl HerdrCli {
+    /// Builds one immutable Herdr view from one committed configuration
+    /// snapshot. Every effect receives its own view while all views retain
+    /// the running Nexus's one resource authority registry.
+    pub(crate) fn configured_view(
+        snapshot: &crate::store::StoredConfigurationSnapshot,
+        codex_endpoints: CodexEndpoints,
+        ordinary_socket: &Path,
+        owned: std::sync::Arc<HerdrOwnedResources>,
+    ) -> Self {
+        Self::default()
+            .with_installations(&snapshot.configured_nexus, &snapshot.configured_harnesses)
+            .with_codex_endpoints(codex_endpoints)
+            .with_runtime_settings(snapshot.timings.clone(), snapshot.limits.clone())
+            .with_ordinary_socket(ordinary_socket)
+            .with_owned_resources(owned)
+    }
+
+    /// The single authority registry shared by all immutable configuration
+    /// views made for this running Nexus.
+    pub(crate) fn owned_resources(&self) -> std::sync::Arc<HerdrOwnedResources> {
+        std::sync::Arc::clone(&self.owned)
+    }
+
+    /// Makes this configuration view use the running Nexus's one authority
+    /// registry. Configuration replacement changes the view, never ownership.
+    pub(crate) fn with_owned_resources(
+        mut self,
+        owned: std::sync::Arc<HerdrOwnedResources>,
+    ) -> Self {
+        self.owned = owned;
+        self.requires_owned_pane_binding = true;
+        self
+    }
+
+    fn retain_pane_binding(&self, pane: &signal_flow::HerdrPaneBinding) -> Result<(), String> {
+        let binding = OwnedPaneBinding {
+            executable: self.executable.clone(),
+            herdr_session_name: pane.herdr_session_name.clone(),
+            herdr_pane_id: pane.herdr_pane_id.clone(),
+            herdr_terminal_id: pane.herdr_terminal_id.clone(),
+        };
+        let mut bindings = self
+            .owned
+            .pane_backends
+            .lock()
+            .map_err(|_| "owned pane registry is unavailable".to_owned())?;
+        if let Some(existing) = bindings.get(&pane.herdr_pane_id) {
+            if existing != &binding {
+                return Err("pane already has a different owned backend binding".to_owned());
+            }
+            return Ok(());
+        }
+        bindings.insert(pane.herdr_pane_id.clone(), binding);
+        Ok(())
+    }
+
+    fn owned_pane_executable(&self, route: &HerdrRoute) -> Result<PathBuf, PaneCloseFailure> {
+        let bindings = self
+            .owned
+            .pane_backends
+            .lock()
+            .map_err(|_| PaneCloseFailure::IdentityUnavailable)?;
+        let Some(binding) = bindings.get(&route.herdr_pane_id) else {
+            return if self.requires_owned_pane_binding {
+                Err(PaneCloseFailure::IdentityUnavailable)
+            } else {
+                Ok(self.executable.clone())
+            };
+        };
+        if !binding.matches(route) {
+            return Err(PaneCloseFailure::IdentityMismatch);
+        }
+        Ok(binding.executable.clone())
+    }
+
+    fn lifecycle_view(&self, route: &HerdrRoute) -> Result<Self, PaneCloseFailure> {
+        let mut view = self.clone();
+        view.executable = self.owned_pane_executable(route)?;
+        Ok(view)
+    }
+
+    fn release_pane_binding(&self, pane_id: &str) {
+        if let Ok(mut bindings) = self.owned.pane_backends.lock() {
+            bindings.remove(pane_id);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn retain_exited_fixture_claude(&self, pane_id: &str, session_id: &str) {
         let mut process = Command::new("sleep")
@@ -344,7 +454,8 @@ impl HerdrCli {
         assert!(pidfd >= 0, "fixture Claude pidfd opens");
         process.kill().expect("fixture Claude exits");
         process.wait().expect("fixture Claude is reaped");
-        self.flow_owned_claude_processes
+        self.owned
+            .flow_owned_claude_processes
             .lock()
             .expect("fixture Claude process ownership")
             .insert(
@@ -360,8 +471,12 @@ impl HerdrCli {
             );
     }
 
-    fn close_pane(&self, route: &HerdrRoute) -> bool {
-        Command::new(&self.executable)
+    fn close_owned_pane(&self, route: &HerdrRoute) -> PaneCloseOutcome {
+        let executable = match self.owned_pane_executable(route) {
+            Ok(executable) => executable,
+            Err(failure) => return PaneCloseOutcome::Refused(failure),
+        };
+        let closed = Command::new(executable)
             .args([
                 "--session",
                 route.herdr_session_name.as_str(),
@@ -370,11 +485,9 @@ impl HerdrCli {
                 route.herdr_pane_id.as_str(),
             ])
             .output()
-            .is_ok_and(|output| output.status.success())
-    }
-
-    fn close_owned_pane(&self, route: &HerdrRoute) -> PaneCloseOutcome {
-        if self.close_pane(route) {
+            .is_ok_and(|output| output.status.success());
+        if closed {
+            self.release_pane_binding(&route.herdr_pane_id);
             PaneCloseOutcome::Closed
         } else {
             PaneCloseOutcome::Refused(PaneCloseFailure::HerdrCloseFailed)
@@ -384,7 +497,7 @@ impl HerdrCli {
     fn close_flow_owned_claude_pane(&self, route: &HerdrRoute) -> PaneCloseOutcome {
         let outcome = self.close_owned_pane(route);
         if outcome == PaneCloseOutcome::Closed
-            && let Ok(mut processes) = self.flow_owned_claude_processes.lock()
+            && let Ok(mut processes) = self.owned.flow_owned_claude_processes.lock()
         {
             processes.remove(&route.herdr_pane_id);
         }
@@ -403,6 +516,7 @@ impl HerdrCli {
             return Err(PaneCloseFailure::IdentityUnavailable);
         }
         let owned = self
+            .owned
             .flow_owned_claude_processes
             .lock()
             .map_err(|_| PaneCloseFailure::IdentityUnavailable)?;
@@ -778,12 +892,12 @@ pub(crate) fn fixture_harnesses(root: &Path) -> Vec<meta_signal_flow::Harness> {
                 "gpt-6-sol",
                 "gpt-6-luna",
             ]
-                .into_iter()
-                .map(|model| HarnessModel {
-                    model_name: model.into(),
-                    recorded: model.into(),
-                })
-                .collect(),
+            .into_iter()
+            .map(|model| HarnessModel {
+                model_name: model.into(),
+                recorded: model.into(),
+            })
+            .collect(),
             modules: vec![],
             left_out: vec![],
             arguments: vec![
@@ -915,11 +1029,9 @@ impl ConfiguresHerdrCli for HerdrCli {
             claude_daemon: crate::claude::ClaudeDaemon::under(&fixture_root.join("claude-home")),
             harness_hook: PathBuf::from("/fixture/bin/flow-hook"),
             ordinary_socket: PathBuf::from("/fixture/run/flow-next/flow/flow.sock"),
-            held_system_prompts: Default::default(),
-            flow_owned_claude_readiness: Default::default(),
             flow_owned_claude_readiness_root: fixture_root.to_path_buf(),
-            flow_owned_claude_programs: Default::default(),
-            flow_owned_claude_processes: Default::default(),
+            owned: Default::default(),
+            requires_owned_pane_binding: false,
         }
     }
 }
@@ -1503,7 +1615,9 @@ mod tests {
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
     use crate::herdr::ReadsHerdrSnapshot;
+    use crate::herdr::launch::CreatesHerdrLaunchPane;
     use crate::herdr::pane::ReadsAgentStatus;
+    use crate::herdr::pane::WritesPane;
     use signal_flow::{
         EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
         HerdrRouteSelection, Origin,
@@ -1795,17 +1909,22 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&herdr, permissions).unwrap();
         let adapter = HerdrCli::at(herdr, root.path().join("flows"));
-        adapter.flow_owned_claude_processes.lock().unwrap().insert(
-            route().herdr_pane_id.clone(),
-            super::OwnedClaudeProcess {
-                process_id: original.id(),
-                process_start: original_start,
-                process_executable: original_executable.clone(),
-                configured_executable: original_executable,
-                session_id: "native-session".into(),
-                pidfd,
-            },
-        );
+        adapter
+            .owned
+            .flow_owned_claude_processes
+            .lock()
+            .unwrap()
+            .insert(
+                route().herdr_pane_id.clone(),
+                super::OwnedClaudeProcess {
+                    process_id: original.id(),
+                    process_start: original_start,
+                    process_executable: original_executable.clone(),
+                    configured_executable: original_executable,
+                    session_id: "native-session".into(),
+                    pidfd,
+                },
+            );
 
         let node = FlowNode {
             flow_id: "owner".into(),
@@ -1878,17 +1997,22 @@ mod tests {
             permissions.set_mode(0o755);
             std::fs::set_permissions(&herdr, permissions).unwrap();
             let adapter = HerdrCli::at(herdr, root.path().join("flows"));
-            adapter.flow_owned_claude_processes.lock().unwrap().insert(
-                route().herdr_pane_id.clone(),
-                super::OwnedClaudeProcess {
-                    process_id: original.id(),
-                    process_start: original_start,
-                    process_executable: original_executable.clone(),
-                    configured_executable: original_executable,
-                    session_id: "native-session".into(),
-                    pidfd,
-                },
-            );
+            adapter
+                .owned
+                .flow_owned_claude_processes
+                .lock()
+                .unwrap()
+                .insert(
+                    route().herdr_pane_id.clone(),
+                    super::OwnedClaudeProcess {
+                        process_id: original.id(),
+                        process_start: original_start,
+                        process_executable: original_executable.clone(),
+                        configured_executable: original_executable,
+                        session_id: "native-session".into(),
+                        pidfd,
+                    },
+                );
             let node = FlowNode {
                 flow_id: "owner".into(),
                 session_id: "native-session".into(),
@@ -1944,17 +2068,22 @@ mod tests {
         std::fs::set_permissions(&herdr, permissions).unwrap();
         let mut adapter = HerdrCli::at(herdr, root.path().join("flows"));
         adapter.timings.stop_wait = -1;
-        adapter.flow_owned_claude_processes.lock().unwrap().insert(
-            route().herdr_pane_id.clone(),
-            super::OwnedClaudeProcess {
-                process_id: process.id(),
-                process_start,
-                process_executable,
-                configured_executable,
-                session_id: "native-session".into(),
-                pidfd,
-            },
-        );
+        adapter
+            .owned
+            .flow_owned_claude_processes
+            .lock()
+            .unwrap()
+            .insert(
+                route().herdr_pane_id.clone(),
+                super::OwnedClaudeProcess {
+                    process_id: process.id(),
+                    process_start,
+                    process_executable,
+                    configured_executable,
+                    session_id: "native-session".into(),
+                    pidfd,
+                },
+            );
         let node = FlowNode {
             flow_id: "owner".into(),
             session_id: "native-session".into(),
@@ -2031,17 +2160,22 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&herdr, permissions).unwrap();
         let adapter = HerdrCli::at(herdr, root.path().join("flows"));
-        adapter.flow_owned_claude_processes.lock().unwrap().insert(
-            route().herdr_pane_id.clone(),
-            super::OwnedClaudeProcess {
-                process_id: process.id(),
-                process_start: actual_start + 1,
-                process_executable: process_executable.clone(),
-                configured_executable: process_executable,
-                session_id: "native-session".into(),
-                pidfd,
-            },
-        );
+        adapter
+            .owned
+            .flow_owned_claude_processes
+            .lock()
+            .unwrap()
+            .insert(
+                route().herdr_pane_id.clone(),
+                super::OwnedClaudeProcess {
+                    process_id: process.id(),
+                    process_start: actual_start + 1,
+                    process_executable: process_executable.clone(),
+                    configured_executable: process_executable,
+                    session_id: "native-session".into(),
+                    pidfd,
+                },
+            );
         let node = FlowNode {
             flow_id: "owner".into(),
             session_id: "native-session".into(),
@@ -2116,5 +2250,135 @@ mod tests {
         assert!(process.try_wait().unwrap().is_none());
         process.kill().unwrap();
         process.wait().unwrap();
+    }
+
+    #[test]
+    fn configuration_views_keep_original_pane_authority_and_use_current_backend_for_new_effects() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let a_log = root.path().join("a.log");
+        let b_log = root.path().join("b.log");
+        let a_closed = root.path().join("a.closed");
+        let b_closed = root.path().join("b.closed");
+        let backend_a = root.path().join("herdr-a");
+        let backend_b = root.path().join("herdr-b");
+        std::fs::write(
+            &backend_a,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$3 $4\" in\n  \"workspace create\") printf '%s\\n' '{{\"result\":{{\"workspace\":{{\"workspace_id\":\"wa\"}},\"root_pane\":{{\"pane_id\":\"wa:p1\",\"terminal_id\":\"term-a\"}}}}}}' ;;\n  \"api snapshot\") printf '%s\\n' '{{\"result\":{{\"snapshot\":{{\"agents\":[],\"panes\":[{{\"pane_id\":\"wa:p1\",\"terminal_id\":\"term-a\"}}]}}}}}}' ;;\n  \"pane close\") touch '{}' ;;\nesac\n",
+                a_log.display(),
+                a_closed.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &backend_b,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$3 $4\" in\n  \"workspace create\") printf '%s\\n' '{{\"result\":{{\"workspace\":{{\"workspace_id\":\"wb\"}},\"root_pane\":{{\"pane_id\":\"wb:p1\",\"terminal_id\":\"term-b\"}}}}}}' ;;\n  \"agent read\") printf 'B-SCREEN\\n' ;;\n  \"pane close\") touch '{}' ;;\nesac\n",
+                b_log.display(),
+                b_closed.display()
+            ),
+        )
+        .unwrap();
+        for executable in [&backend_a, &backend_b] {
+            let mut permissions = std::fs::metadata(executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(executable, permissions).unwrap();
+        }
+
+        let flows = root.path().join("flows");
+        let view_a = HerdrCli::at(backend_a, flows.clone());
+        let launch_a = crate::herdr::launch::tests::launch(HarnessKind::Codex);
+        let pane_a = view_a.create_launch_pane(&launch_a).unwrap();
+        let owned = view_a.owned_resources();
+        let unavailable_view = HerdrCli::at(root.path().join("missing-herdr-b"), flows.clone())
+            .with_owned_resources(std::sync::Arc::clone(&owned));
+        let view_b = HerdrCli::at(backend_b, flows).with_owned_resources(owned);
+        let route_a = HerdrRoute {
+            herdr_session_name: pane_a.herdr_session_name.clone(),
+            herdr_agent_name: pane_a.herdr_agent_name.clone(),
+            herdr_pane_id: pane_a.herdr_pane_id.clone(),
+            herdr_terminal_id: pane_a.herdr_terminal_id.clone(),
+        };
+
+        assert_eq!(
+            unavailable_view.screen(&route_a, &HarnessKind::Codex),
+            None,
+            "an unavailable current backend never falls back to A"
+        );
+        assert_eq!(
+            view_b.screen(&route_a, &HarnessKind::Codex).as_deref(),
+            Some("B-SCREEN\n")
+        );
+        assert!(view_b.press(&route_a, &["ctrl+u".into()]));
+        let _ = view_b.place(&route_a, "current-view-line", false);
+        let current_calls = std::fs::read_to_string(&b_log).unwrap();
+        assert!(current_calls.contains("agent read"));
+        assert!(current_calls.contains("pane send-keys"));
+        assert!(current_calls.contains("agent prompt"));
+        let node_a = FlowNode {
+            flow_id: "a1".into(),
+            session_id: "thread-a".into(),
+            harness_kind: HarnessKind::Codex,
+            endpoint_selection: EndpointSelection::Unavailable,
+            herdr_route_selection: HerdrRouteSelection::Available(route_a),
+            origin: Origin::Flow(FlowOrigin {
+                flow_id: "a1".into(),
+                session_id: "thread-a".into(),
+            }),
+            flow_lifecycle: FlowLifecycle::Active,
+        };
+        assert_eq!(view_b.close(&node_a), signal_flow::PaneCloseOutcome::Closed);
+        assert!(a_closed.exists(), "old pane closes through backend A");
+        assert!(!b_closed.exists(), "backend B never closes A's pane");
+
+        let launch_b = crate::herdr::launch::tests::launch(HarnessKind::Codex);
+        let pane_b = view_b.create_launch_pane(&launch_b).unwrap();
+        assert_eq!(pane_b.herdr_pane_id, "wb:p1");
+        assert!(
+            std::fs::read_to_string(b_log)
+                .unwrap()
+                .contains("workspace create")
+        );
+    }
+
+    #[test]
+    fn a_configuration_view_refuses_lost_or_mixed_pane_authority() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let closed = root.path().join("closed");
+        let backend = root.path().join("herdr");
+        std::fs::write(
+            &backend,
+            format!("#!/bin/sh\ntouch '{}'\n", closed.display()),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&backend).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&backend, permissions).unwrap();
+        let initial = HerdrCli::at(backend.clone(), root.path().join("flows"));
+        let view = HerdrCli::at(backend, root.path().join("flows-next"))
+            .with_owned_resources(initial.owned_resources());
+        let node = FlowNode {
+            flow_id: "a1".into(),
+            session_id: "thread-a".into(),
+            harness_kind: HarnessKind::Codex,
+            endpoint_selection: EndpointSelection::Unavailable,
+            herdr_route_selection: HerdrRouteSelection::Available(route()),
+            origin: Origin::Flow(FlowOrigin {
+                flow_id: "a1".into(),
+                session_id: "thread-a".into(),
+            }),
+            flow_lifecycle: FlowLifecycle::Active,
+        };
+        assert_eq!(
+            view.close(&node),
+            signal_flow::PaneCloseOutcome::Refused(
+                signal_flow::PaneCloseFailure::IdentityUnavailable
+            )
+        );
+        assert!(!closed.exists());
     }
 }

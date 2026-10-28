@@ -37,20 +37,6 @@ impl CorePresentationRoute for Address {
     }
 }
 
-pub(crate) fn primary_route_refusal(
-    sender: &meta_signal_flow::Sender,
-    target: &Address,
-) -> Option<signal_flow::PrimaryRouteRefused> {
-    (target.layer == signal_flow::Layer::Primary
-        && !(sender.address.layer == signal_flow::Layer::Secondary
-            && sender.address.aspect == target.aspect
-            && sender.address.topic == target.topic))
-        .then(|| signal_flow::PrimaryRouteRefused {
-            sender_address: sender.address.clone(),
-            target_address: target.clone(),
-        })
-}
-
 /// A lock that the caller has authenticated and checked for expiry while
 /// holding the serial dispatch gate. The store consumes it with admission.
 pub(crate) struct VerifiedDeliveryLock {
@@ -755,13 +741,6 @@ impl RecordsLogicalDeliveries for FlowStore {
                 .assert(Assertion::new(self.send_calls, record(outcome.clone())))?;
             return Ok(outcome);
         };
-        if let Some(refusal) = primary_route_refusal(&sender, target) {
-            let outcome =
-                ToolSendOutcome::Refused(ToolSendRefusal::PrimaryRequiresOwnSecondary(refusal));
-            self.engine
-                .assert(Assertion::new(self.send_calls, record(outcome.clone())))?;
-            return Ok(outcome);
-        }
         if self
             .stored_metaflow_lock(target)?
             .is_some_and(|held| held.lock.until > now)
@@ -933,11 +912,6 @@ impl RecordsLogicalDeliveries for FlowStore {
             .write_gate
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(refusal) = primary_route_refusal(&sender, address) {
-            return Ok(Response::Refused(Refusal::PrimaryRequiresOwnSecondary(
-                refusal,
-            )));
-        }
         let Some(mut stored) = self.stored_metaflow(address)? else {
             return Ok(Response::Refused(Refusal::Unknown(Unknown_Data::Address(
                 address.clone(),

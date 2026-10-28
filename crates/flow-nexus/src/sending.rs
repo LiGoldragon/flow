@@ -112,7 +112,10 @@ impl IdentifiesSender for RunningNexus {
         let unidentified = || Box::new(Response::Refused(Refusal::Unidentified(peer.clone())));
         match self.store.identify_process_sender(peer.clone()) {
             Ok(ProcessSenderResolution::Sender(sender)) => return Ok(sender),
-            Ok(ProcessSenderResolution::UnauthenticatedBinding) => return Err(unidentified()),
+            Ok(
+                ProcessSenderResolution::MissingFlowIdentity
+                | ProcessSenderResolution::StaleFlowIdentity,
+            ) => return Err(unidentified()),
             Ok(ProcessSenderResolution::NoBinding) => {}
             Err(error) => {
                 return Err(Box::new(Response::Refused(Refusal::Store(
@@ -706,6 +709,7 @@ impl BindsSeats for RunningNexus {
         if !FlowStore::process_is_live(peer) {
             return unidentified();
         }
+        let mut missing_flow_identity = false;
         // A seat Flow already knows binds idempotently through the same
         // kernel-authenticated resolver as Send. Claude children do not
         // carry a Codex thread or resume command.
@@ -715,26 +719,19 @@ impl BindsSeats for RunningNexus {
                     Ok(ProcessSenderResolution::Sender(sender)) => {
                         return Response::Bound(sender.flow_id);
                     }
-                    Ok(ProcessSenderResolution::UnauthenticatedBinding) => {
-                        return self
-                            .store
-                            .bind_metaflow(
-                                Bind_Data {
-                                    process: peer.clone(),
-                                    address,
-                                },
-                                peer,
-                                None,
-                            )
-                            .unwrap_or_else(|error| {
-                                Response::Refused(Refusal::Store(error.to_string()))
-                            });
+                    // A migrated binding without a FlowId is not proof of
+                    // current ownership. Continue through the full native
+                    // session, foreground-process and identity-claim checks
+                    // below; binding writes the proved FlowId.
+                    Ok(ProcessSenderResolution::MissingFlowIdentity) => {
+                        missing_flow_identity = true;
                     }
                     Ok(ProcessSenderResolution::NoBinding) => {
                         if let Some(flow_id) = self.live_awake_flow(&address) {
                             return Response::Bound(flow_id);
                         }
                     }
+                    Ok(ProcessSenderResolution::StaleFlowIdentity) => return unidentified(),
                     Err(error) => {
                         return Response::Refused(Refusal::Store(error.to_string()));
                     }
@@ -843,14 +840,33 @@ impl BindsSeats for RunningNexus {
         };
         match self.verified_seat_node(&seat.herdr_session_name, &address, &binding) {
             Err(_) => unidentified(),
-            Ok(node) => match self
-                .store
-                .adopt_existing_flow(node, role, address.clone(), &binding)
-            {
-                Ok(ExistingSeatAdoption::Bound(_)) => Response::Bound(flow_id),
-                Ok(ExistingSeatAdoption::Refused(_)) => Response::Refused(Refusal::Taken(address)),
-                Err(error) => Response::Refused(Refusal::Store(error.to_string())),
-            },
+            Ok(node) => {
+                if missing_flow_identity {
+                    return self
+                        .store
+                        .bind_metaflow(
+                            Bind_Data {
+                                process: peer.clone(),
+                                address,
+                            },
+                            peer,
+                            Some(flow_id),
+                        )
+                        .unwrap_or_else(|error| {
+                            Response::Refused(Refusal::Store(error.to_string()))
+                        });
+                }
+                match self
+                    .store
+                    .adopt_existing_flow(node, role, address.clone(), &binding)
+                {
+                    Ok(ExistingSeatAdoption::Bound(_)) => Response::Bound(flow_id),
+                    Ok(ExistingSeatAdoption::Refused(_)) => {
+                        Response::Refused(Refusal::Taken(address))
+                    }
+                    Err(error) => Response::Refused(Refusal::Store(error.to_string())),
+                }
+            }
         }
     }
 }

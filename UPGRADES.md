@@ -12,9 +12,7 @@ Curriculum serves that schema.
   inventing the current successor as its sender.
   Metaflow process bindings likewise advance from v1 to v2 and retain the
   exact FlowId authenticated at bind time; historical bindings upgrade
-  without one and cannot send until rebound. A Primary accepts messages
-  only from its own Secondary at the same aspect and topic, otherwise the
-  typed `PrimaryRequiresOwnSecondary` refusal leaves its queue unchanged.
+  without one and cannot send until rebound.
 - A Send is never refused for the seat's state or its route. A Wake Send to
   a seat with a queue, an outstanding delivery, a hold or a passed context
   threshold is queued and answers `SendAccepted.{ ... Queued }`; the route

@@ -5111,20 +5111,15 @@ mod tests {
             send(Recipient::Up, Request::Result("done".into()), &peer),
             Response::SendAccepted(_)
         ));
-        assert_eq!(
+        assert!(matches!(
             send(
                 Recipient::Address(sibling_primary.clone()),
                 Request::Question("cross-topic Primary".into()),
                 &peer,
             ),
-            Response::Refused(Refusal::PrimaryRequiresOwnSecondary(
-                signal_flow::PrimaryRouteRefused {
-                    sender_address: sender.clone(),
-                    target_address: sibling_primary.clone(),
-                }
-            ))
-        );
-        assert!(
+            Response::SendAccepted(_)
+        ));
+        assert_eq!(
             fixture
                 .nexus
                 .store
@@ -5132,7 +5127,8 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .queue
-                .is_empty()
+                .len(),
+            1
         );
         assert_eq!(
             fixture

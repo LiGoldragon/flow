@@ -276,6 +276,11 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
         Err(response)
             if *response == Response::Refused(Refusal::Unidentified(bound_peer.clone()))
     ));
+    assert_eq!(
+        fixture.nexus.bind_seat(address.clone(), Some(&bound_peer)),
+        Response::Refused(Refusal::Unidentified(bound_peer.clone())),
+        "a predecessor's explicit binding cannot acquire its successor's identity"
+    );
     let stranger = MarkedProcess::spawn("sleep", &["30"], "unknown-pane");
     let unknown = FlowStore::process_identity_for_pid(stranger.0.id()).unwrap();
     assert!(matches!(

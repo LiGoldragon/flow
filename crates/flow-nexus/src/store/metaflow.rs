@@ -3,6 +3,8 @@
 use super::logical_delivery::{RecordsLogicalDeliveries, VerifiedDeliveryLock};
 use super::*;
 use crate::sending::AdmitsSendPayload;
+#[cfg(test)]
+use flow_ethos::SentBy;
 use signal_flow::{
     Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Recipient, Refusal, StartRejection,
     Unknown_Data,
@@ -141,7 +143,17 @@ impl MutatesMetaflows for FlowStore {
             if previous.process == *peer
                 && let MetaflowState::Awake(id) = &stored.metaflow.state
             {
-                if previous.flow_id_option.as_ref() != Some(id) {
+                if previous
+                    .flow_id_option
+                    .as_ref()
+                    .is_some_and(|previous| previous != id)
+                {
+                    return Ok(Response::Refused(Refusal::Taken(address)));
+                }
+                if previous.flow_id_option.is_none() {
+                    if launched.as_ref() != Some(id) {
+                        return Ok(Response::Refused(Refusal::Unidentified(peer.clone())));
+                    }
                     self.engine.mutate(sema_engine::Mutation::new(
                         self.metaflow_processes,
                         StoredMetaflowProcess {

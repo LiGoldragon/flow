@@ -944,7 +944,8 @@ pub(crate) struct StoredMetaflowProcessV1 {
 
 pub(crate) enum ProcessSenderResolution {
     NoBinding,
-    UnauthenticatedBinding,
+    MissingFlowIdentity,
+    StaleFlowIdentity,
     Sender(meta_signal_flow::Sender),
 }
 
@@ -5111,13 +5112,13 @@ impl ManagesMetaflowState for FlowStore {
                 continue;
             };
             let Some(flow_id) = binding.flow_id_option.clone() else {
-                return Ok(ProcessSenderResolution::UnauthenticatedBinding);
+                return Ok(ProcessSenderResolution::MissingFlowIdentity);
             };
             let Some(stored) = self.stored_metaflow(&binding.address)? else {
-                return Ok(ProcessSenderResolution::UnauthenticatedBinding);
+                return Ok(ProcessSenderResolution::StaleFlowIdentity);
             };
             if stored.metaflow.state != MetaflowState::Awake(flow_id.clone()) {
-                return Ok(ProcessSenderResolution::UnauthenticatedBinding);
+                return Ok(ProcessSenderResolution::StaleFlowIdentity);
             }
             return Ok(ProcessSenderResolution::Sender(meta_signal_flow::Sender {
                 address: binding.address.clone(),

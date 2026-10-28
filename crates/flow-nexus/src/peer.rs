@@ -11,23 +11,21 @@
 //! ancestry and reads as the owner: this gate stops accidents and model
 //! mistakes, not an adversary (F4).
 
-use crate::RunningNexus;
 use crate::binding::{ChecksProcessIdentity, ReadsProcessIdentity};
 use crate::caller::{CallerProcess, LocatesCallerPane, ReadsProcess};
+use crate::{ConfiguredUse, RunningNexus};
 use meta_signal_flow::{MetaRefusal, ProcessIdentity, ResolverIdentity, Response};
 use signal_flow::CallerResolutionRejection;
 use std::fs;
 
 /// Names the flow a process runs in.
 pub trait ResolvesPeer {
-    fn resolve_peer(&self, identity: &ProcessIdentity) -> Response;
+    fn resolve_peer(&self, configured: &ConfiguredUse, identity: &ProcessIdentity) -> Response;
 }
 
 impl ResolvesPeer for RunningNexus {
-    fn resolve_peer(&self, identity: &ProcessIdentity) -> Response {
-        let Ok(view) = self.herdr_operation_view() else {
-            return Response::PeerResolutionRejected(CallerResolutionRejection::CallerUnknown);
-        };
+    fn resolve_peer(&self, configured: &ConfiguredUse, identity: &ProcessIdentity) -> Response {
+        let view = configured.herdr_operation_view();
         // The identity must still name the same live process (user and start
         // time), so a reused process ID names no one.
         if !identity.is_live_process() {
@@ -50,17 +48,23 @@ impl ResolvesPeer for RunningNexus {
 /// Decides whether a meta peer may be answered.
 pub trait AdmitsMetaPeer {
     /// None when admitted; the refusal otherwise.
-    fn meta_refusal(&self, peer: Option<CallerProcess>) -> Option<MetaRefusal>;
+    fn meta_refusal(
+        &self,
+        configured: &ConfiguredUse,
+        peer: Option<CallerProcess>,
+    ) -> Option<MetaRefusal>;
 }
 
 impl AdmitsMetaPeer for RunningNexus {
-    fn meta_refusal(&self, peer: Option<CallerProcess>) -> Option<MetaRefusal> {
+    fn meta_refusal(
+        &self,
+        configured: &ConfiguredUse,
+        peer: Option<CallerProcess>,
+    ) -> Option<MetaRefusal> {
         let Some(peer) = peer else {
             return Some(MetaRefusal::PeerUnknown);
         };
-        let Ok(view) = self.herdr_operation_view() else {
-            return Some(MetaRefusal::PeerUnknown);
-        };
+        let view = configured.herdr_operation_view();
         let message_binary = &view
             .configuration
             .snapshot
@@ -89,12 +93,20 @@ impl AdmitsMetaPeer for RunningNexus {
 pub trait NamesMetaPeer {
     /// The peer's process, and the flow it runs in when it runs in one; None
     /// when the process cannot be read.
-    fn meta_resolver(&self, peer: Option<CallerProcess>) -> Option<ResolverIdentity>;
+    fn meta_resolver(
+        &self,
+        configured: &ConfiguredUse,
+        peer: Option<CallerProcess>,
+    ) -> Option<ResolverIdentity>;
 }
 
 impl NamesMetaPeer for RunningNexus {
-    fn meta_resolver(&self, peer: Option<CallerProcess>) -> Option<ResolverIdentity> {
-        let view = self.herdr_operation_view().ok()?;
+    fn meta_resolver(
+        &self,
+        configured: &ConfiguredUse,
+        peer: Option<CallerProcess>,
+    ) -> Option<ResolverIdentity> {
+        let view = configured.herdr_operation_view();
         let peer = peer?;
         let process_identity = ProcessIdentity::of(peer.process_id)?;
         let flow_id_option =

@@ -143,6 +143,7 @@ pub(crate) struct ConfiguredUse {
     pub(crate) codex_endpoints: CodexEndpoints,
     pub(crate) herdr: herdr::HerdrCli,
     pub(crate) composer: LaunchComposer,
+    ordinary_socket_path: PathBuf,
 }
 
 impl RunningNexus {
@@ -195,34 +196,30 @@ impl RunningNexus {
             codex_endpoints,
             herdr,
             composer,
+            ordinary_socket_path: PathBuf::from(&self.runtime.ordinary_socket_path),
         })
     }
 }
 
-impl RunningNexus {
-    /// Reads one complete committed configuration generation and constructs
-    /// the strict Herdr transport view used for the whole external effect.
-    /// Existing-resource lifecycle authority remains in `self.herdr`'s one
-    /// shared registry; only configuration is rebuilt here.
-    pub(crate) fn herdr_operation_view(
-        &self,
-    ) -> Result<herdr::HerdrOperationView, store::StoreError> {
-        let configuration = self
-            .store
-            .committed_configuration_snapshot()?
-            .ok_or(store::StoreError::NotConfigured)?;
-        let codex_endpoints = CodexEndpoints::configured(&configuration.snapshot)
-            .with_texts(configuration.snapshot.texts.clone());
+impl ConfiguredUse {
+    /// The strict Herdr view for this already-selected operation generation.
+    /// Effect code cannot reacquire configuration through this value.
+    pub(crate) fn herdr_operation_view(&self) -> herdr::HerdrOperationView {
+        let codex_endpoints =
+            CodexEndpoints::configured(&self.snapshot).with_texts(self.snapshot.texts.clone());
         let herdr = herdr::HerdrCli::configured_view(
-            &configuration.snapshot,
+            &self.snapshot,
             codex_endpoints,
-            Path::new(&self.runtime.ordinary_socket_path),
+            &self.ordinary_socket_path,
             self.herdr.owned_resources(),
         );
-        Ok(herdr::HerdrOperationView {
-            configuration,
+        herdr::HerdrOperationView {
+            configuration: store::CommittedConfigurationSnapshot {
+                generation: self.generation,
+                snapshot: self.snapshot.clone(),
+            },
             herdr,
-        })
+        }
     }
 }
 
@@ -421,7 +418,12 @@ impl Dispatches for RunningNexus {
                 Response::Stopped(flow_id)
             }
             // A dispatch without a connection has no peer to read.
-            Query::ResolveCaller(claim) => self.resolve_caller(None, claim),
+            Query::ResolveCaller(claim) => match self.configured_use() {
+                Ok(configured) => self.resolve_caller(&configured, None, claim),
+                Err(_) => Response::CallerResolutionRejected(
+                    signal_flow::CallerResolutionRejection::CallerUnknown,
+                ),
+            },
             Query::Report(report) => self.report(report),
             Query::Current(address) => {
                 use crate::waking::RestsEndedAwake;
@@ -733,11 +735,36 @@ impl Dispatches for RunningNexus {
                     flow_binding_result: result,
                 })
             }
-            meta_signal_flow::Query::Deliver(request) => self.deliver(request),
-            meta_signal_flow::Query::Vet(request) => self.vet(&request),
-            meta_signal_flow::Query::Command(request) => self.command(request),
-            meta_signal_flow::Query::ReadPane(flow_id) => self.read_pane(&flow_id),
-            meta_signal_flow::Query::ResolvePeer(identity) => self.resolve_peer(&identity),
+            meta_signal_flow::Query::Deliver(request) => match self.configured_use() {
+                Ok(configured) => self.deliver(&configured, request),
+                Err(_) => meta_signal_flow::Response::DeliveryRejected(
+                    meta_signal_flow::DeliveryRejection::PersistenceRefused,
+                ),
+            },
+            meta_signal_flow::Query::Vet(request) => match self.configured_use() {
+                Ok(configured) => self.vet(&configured, &request),
+                Err(_) => meta_signal_flow::Response::DeliveryRejected(
+                    meta_signal_flow::DeliveryRejection::PersistenceRefused,
+                ),
+            },
+            meta_signal_flow::Query::Command(request) => match self.configured_use() {
+                Ok(configured) => self.command(&configured, request),
+                Err(_) => meta_signal_flow::Response::CommandRejected(
+                    meta_signal_flow::CommandRejection::NotDelivered,
+                ),
+            },
+            meta_signal_flow::Query::ReadPane(flow_id) => match self.configured_use() {
+                Ok(configured) => self.read_pane(&configured, &flow_id),
+                Err(_) => meta_signal_flow::Response::ReadPaneRejected(
+                    meta_signal_flow::ReadPaneRejected_Data::HerdrUnavailable,
+                ),
+            },
+            meta_signal_flow::Query::ResolvePeer(identity) => match self.configured_use() {
+                Ok(configured) => self.resolve_peer(&configured, &identity),
+                Err(_) => meta_signal_flow::Response::PeerResolutionRejected(
+                    signal_flow::CallerResolutionRejection::CallerUnknown,
+                ),
+            },
             meta_signal_flow::Query::ReadEvents(flow_id) => self.read_events(flow_id),
             meta_signal_flow::Query::ReadQueueDeliveries(address) => {
                 self.read_queue_deliveries(address)
@@ -804,7 +831,12 @@ impl Dispatches for RunningNexus {
             }
             meta_signal_flow::Query::Rebind(rebind) => {
                 use crate::repairing::RepairsFromMeta;
-                self.rebind(rebind)
+                match self.configured_use() {
+                    Ok(configured) => self.rebind(&configured, rebind),
+                    Err(_) => meta_signal_flow::Response::RebindRejected(
+                        meta_signal_flow::RebindRejected_Data::HerdrUnavailable,
+                    ),
+                }
             }
             meta_signal_flow::Query::Enqueue(request) => {
                 use crate::store::repair::RepairsStoredState;
@@ -1159,12 +1191,8 @@ impl ServesConnection for Connection {
     }
 
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
-        let frame_limit = nexus
-            .configured_use()
-            .map_err(|error| error.to_string())?
-            .snapshot
-            .limits
-            .frame;
+        let configured = nexus.configured_use().map_err(|error| error.to_string())?;
+        let frame_limit = configured.snapshot.limits.frame;
         let query = self.peer.read_query_with_limit(frame_limit as usize)?;
         let response = match query {
             // Reads of launch state never wait behind a running launch.
@@ -1223,12 +1251,18 @@ impl ServesConnection for Connection {
                 return Ok(());
             }
             // The caller is the peer of this connection, read from the kernel.
-            Query::ResolveCaller(claim) => nexus.resolve_caller(
-                self.peer
-                    .peer_process()
-                    .and_then(|process| process.caller_pane(&nexus.herdr)),
-                claim,
-            ),
+            Query::ResolveCaller(claim) => match nexus.configured_use() {
+                Ok(configured) => nexus.resolve_caller(
+                    &configured,
+                    self.peer
+                        .peer_process()
+                        .and_then(|process| process.caller_pane(&configured.herdr)),
+                    claim,
+                ),
+                Err(_) => Response::CallerResolutionRejected(
+                    signal_flow::CallerResolutionRejection::CallerUnknown,
+                ),
+            },
             query @ (Query::Bind(_)
             | Query::Identify(_)
             | Query::IdentifyThread(_)
@@ -1284,7 +1318,10 @@ impl ServesConnection for Connection {
             // process, or, for a metaflow Awake as a live flow, the Replace
             // of that flow under the metaflow's lock.
             Query::Launch(launch) => {
-                let origin = nexus.origin_of(self.peer.peer_process());
+                let configured = nexus.configured_use().ok();
+                let origin = configured.as_ref().map_or(Origin::Unbound, |configured| {
+                    nexus.origin_of_configured(configured, self.peer.peer_process())
+                });
                 let declared = {
                     let _turn = nexus
                         .dispatch_gate
@@ -1316,7 +1353,10 @@ impl ServesConnection for Connection {
             // it: its pane's bound flow and that flow's native session.
             // A new Primary's Secondary starts first, off the gate.
             Query::Start(profile) => {
-                let origin = nexus.origin_of(self.peer.peer_process());
+                let configured = nexus.configured_use().ok();
+                let origin = configured.as_ref().map_or(Origin::Unbound, |configured| {
+                    nexus.origin_of_configured(configured, self.peer.peer_process())
+                });
                 match nexus.configured_use() {
                     Ok(configured) => {
                         match nexus.requirements_first_configured(&configured, &profile) {
@@ -1334,7 +1374,10 @@ impl ServesConnection for Connection {
                 }
             }
             query @ Query::Replace(_) => {
-                let origin = nexus.origin_of(self.peer.peer_process());
+                let configured = nexus.configured_use().ok();
+                let origin = configured.as_ref().map_or(Origin::Unbound, |configured| {
+                    nexus.origin_of_configured(configured, self.peer.peer_process())
+                });
                 nexus.dispatch_serially(query, origin)
             }
             query => nexus.dispatch_serially(query, Origin::Unbound),
@@ -1346,19 +1389,15 @@ impl ServesConnection for Connection {
     }
 
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
-        let frame_limit = nexus
-            .configured_use()
-            .map_err(|error| error.to_string())?
-            .snapshot
-            .limits
-            .frame;
+        let configured = nexus.configured_use().map_err(|error| error.to_string())?;
+        let frame_limit = configured.snapshot.limits.frame;
         let query = self.peer.read_meta_query_with_limit(frame_limit as usize)?;
         // The peer is read from the kernel; nothing in the query names it.
         let peer = self.peer.peer_process();
-        let response = match nexus.meta_refusal(peer) {
+        let response = match nexus.meta_refusal(&configured, peer) {
             Some(refusal) => meta_signal_flow::Response::MetaRefused(refusal),
             None => {
-                let resolver = nexus.meta_resolver(peer);
+                let resolver = nexus.meta_resolver(&configured, peer);
                 nexus.dispatch_meta_serially(query, resolver)
             }
         };
@@ -5733,13 +5772,19 @@ mod tests {
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
 
         assert_eq!(
-            fixture.nexus.resolve_caller(pane("pane-1"), None),
+            fixture.nexus.resolve_caller(
+                &fixture.nexus.configured_use().unwrap(),
+                pane("pane-1"),
+                None
+            ),
             Response::CallerResolved(mind_live())
         );
         assert_eq!(
-            fixture
-                .nexus
-                .resolve_caller(pane("pane-1"), Some("a001".into())),
+            fixture.nexus.resolve_caller(
+                &fixture.nexus.configured_use().unwrap(),
+                pane("pane-1"),
+                Some("a001".into())
+            ),
             Response::CallerResolved(mind_live())
         );
     }
@@ -5790,9 +5835,11 @@ mod tests {
         assert_eq!(sleeper.caller_pane(&fixture.nexus.herdr), pane("pane-2"));
 
         assert_eq!(
-            fixture
-                .nexus
-                .resolve_caller(marked_process.caller_pane(&fixture.nexus.herdr), None),
+            fixture.nexus.resolve_caller(
+                &fixture.nexus.configured_use().unwrap(),
+                marked_process.caller_pane(&fixture.nexus.herdr),
+                None
+            ),
             Response::CallerResolved(mind_live())
         );
     }
@@ -6053,9 +6100,11 @@ mod tests {
         ]);
         assert_eq!(marked_process.caller_pane(&fixture.nexus.herdr), None);
         assert_eq!(
-            fixture
-                .nexus
-                .resolve_caller(marked_process.caller_pane(&fixture.nexus.herdr), None),
+            fixture.nexus.resolve_caller(
+                &fixture.nexus.configured_use().unwrap(),
+                marked_process.caller_pane(&fixture.nexus.herdr),
+                None
+            ),
             Response::CallerResolutionRejected(
                 signal_flow::CallerResolutionRejection::CallerUnknown
             )
@@ -6095,9 +6144,11 @@ mod tests {
         };
         assert_eq!(peer.caller_pane(&fixture.nexus.herdr), pane("pane-1"));
         assert_eq!(
-            fixture
-                .nexus
-                .resolve_caller(peer.caller_pane(&fixture.nexus.herdr), None),
+            fixture.nexus.resolve_caller(
+                &fixture.nexus.configured_use().unwrap(),
+                peer.caller_pane(&fixture.nexus.herdr),
+                None
+            ),
             Response::CallerResolved(mind_live())
         );
     }
@@ -6115,14 +6166,33 @@ mod tests {
         );
 
         // A pane the registry binds no flow to.
-        assert_eq!(fixture.nexus.resolve_caller(pane("pane-9"), None), unknown);
+        assert_eq!(
+            fixture.nexus.resolve_caller(
+                &fixture.nexus.configured_use().unwrap(),
+                pane("pane-9"),
+                None
+            ),
+            unknown
+        );
         // A peer outside any Herdr pane.
-        assert_eq!(fixture.nexus.resolve_caller(None, None), unknown);
+        assert_eq!(
+            fixture
+                .nexus
+                .resolve_caller(&fixture.nexus.configured_use().unwrap(), None, None),
+            unknown
+        );
         // A dispatch has no connection, so no peer.
         assert_eq!(fixture.nexus.dispatch(Query::ResolveCaller(None)), unknown);
         // Herdr reused the pane ID for a new terminal: the binding is gone.
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-new")]);
-        assert_eq!(fixture.nexus.resolve_caller(pane("pane-1"), None), unknown);
+        assert_eq!(
+            fixture.nexus.resolve_caller(
+                &fixture.nexus.configured_use().unwrap(),
+                pane("pane-1"),
+                None
+            ),
+            unknown
+        );
     }
 
     #[test]
@@ -6131,9 +6201,11 @@ mod tests {
         bind_existing_caller(&fixture, "a001", "pane-1");
         fixture.set_agents(vec![codex_agent_in("pane-1", "terminal-pane-1")]);
         assert_eq!(
-            fixture
-                .nexus
-                .resolve_caller(pane("pane-1"), Some("field-other".into())),
+            fixture.nexus.resolve_caller(
+                &fixture.nexus.configured_use().unwrap(),
+                pane("pane-1"),
+                Some("field-other".into())
+            ),
             Response::CallerResolutionRejected(
                 signal_flow::CallerResolutionRejection::CallerMismatch(mind_live())
             )

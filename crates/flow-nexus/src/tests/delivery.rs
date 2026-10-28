@@ -993,14 +993,21 @@ fn the_meta_socket_admits_the_owner_and_refuses_an_unreadable_peer() {
     let fixture = NexusFixture::new();
     fixture.set_agents(vec![]);
     assert_eq!(
-        fixture.nexus.meta_refusal(None),
+        fixture
+            .nexus
+            .meta_refusal(&fixture.nexus.configured_use().unwrap(), None),
         Some(meta_signal_flow::MetaRefusal::PeerUnknown)
     );
     // This test process runs in no flow's pane: it is the owner.
     let own = crate::caller::CallerProcess {
         process_id: std::process::id(),
     };
-    assert_eq!(fixture.nexus.meta_refusal(Some(own)), None);
+    assert_eq!(
+        fixture
+            .nexus
+            .meta_refusal(&fixture.nexus.configured_use().unwrap(), Some(own)),
+        None
+    );
 }
 
 #[test]
@@ -1009,11 +1016,12 @@ fn a_flow_in_the_configured_meta_aspects_is_admitted_to_the_meta_socket() {
     super::bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![super::codex_agent_in("pane-1", "terminal-pane-1")]);
     let peer = PanePeer::spawn("pane-1");
-    let refusal = fixture
-        .nexus
-        .meta_refusal(Some(crate::caller::CallerProcess {
+    let refusal = fixture.nexus.meta_refusal(
+        &fixture.nexus.configured_use().unwrap(),
+        Some(crate::caller::CallerProcess {
             process_id: peer.0.id(),
-        }));
+        }),
+    );
     assert_eq!(refusal, None);
 }
 
@@ -1028,11 +1036,12 @@ fn a_flow_whose_role_flow_does_not_know_is_admitted_by_process() {
     fixture.register_with(FlowLifecycle::Active);
     let peer = PanePeer::spawn("w1:p3");
     assert_eq!(
-        fixture
-            .nexus
-            .meta_refusal(Some(crate::caller::CallerProcess {
+        fixture.nexus.meta_refusal(
+            &fixture.nexus.configured_use().unwrap(),
+            Some(crate::caller::CallerProcess {
                 process_id: peer.0.id(),
-            })),
+            })
+        ),
         None
     );
 }

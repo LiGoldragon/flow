@@ -65,7 +65,7 @@ impl IdentifiesPeerProcess for RunningNexus {
             return unidentified();
         };
         match self.store.metaflow_awake_as(&caller.flow_id)? {
-            Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
+            Some(metaflow) if !self.rest_ended_awake(&configured, &metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))
             }
             _ => unidentified(),
@@ -105,7 +105,7 @@ impl IdentifiesThread for RunningNexus {
         };
         let root_thread = configured.codex_endpoints.root_thread(&native_session_id);
         match self.store.thread_metaflow(&root_thread)? {
-            Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
+            Some(metaflow) if !self.rest_ended_awake(&configured, &metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))
             }
             _ => Ok(Response::Refused(Refusal::Unidentified(process))),
@@ -173,7 +173,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     let digest = format!("{:x}", Sha256::digest(digest_text.as_bytes()));
                     let sender = request.lock.sender.clone();
                     let recipient = request.lock.address.clone();
-                    self.rest_ended_awake(&request.lock.address);
+                    self.rest_ended_awake(&configured, &request.lock.address);
                     let abrupt = !matches!(&request.message, signal_flow::Message::Soft(_));
                     let direct = abrupt && request.delivery == signal_flow::Delivery::Wake;
                     // A metaflow another holds takes the request into its

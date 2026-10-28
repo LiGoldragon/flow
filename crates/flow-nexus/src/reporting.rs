@@ -20,13 +20,13 @@ use crate::generated::operation::{
     Failed_Data, Operation, Outcome, Record_Data, Record_Data_Harness_Data,
 };
 use crate::performing::Performs;
+use crate::store::AnnouncesLaunchChanges;
 use crate::store::events::RecordsHarnessEvents;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::queue_delivery::{AccountsQueueDelivery, ShowsQueueDelivery};
-use crate::store::AnnouncesLaunchChanges;
 use crate::store::{ReadsFlowRows, RebindsNativeSession};
 use crate::waking::{CorrelatesNativeEvents, ReconcilesQueueDelivery, SleepsAndWakesSeats};
-use crate::RunningNexus;
+use crate::{ConfiguredUse, RunningNexus};
 use meta_signal_flow::{
     EventsRead_Data, QueueDeliveriesRead_Data, QueueDeliveryResolution, QueueDeliveryResolved_Data,
     QueueResolutionRecord, ReadEventsRejected_Data, ReadQueueDeliveriesRejected_Data,
@@ -36,7 +36,7 @@ use signal_flow::{Address, Event, FlowId, Report_Data, Reporter, Response};
 
 pub trait RecordsReports {
     fn resolve_reporter(&self, reporter: &Reporter) -> Option<FlowId>;
-    fn report(&self, report: Report_Data) -> Response;
+    fn report(&self, configured: &ConfiguredUse, report: Report_Data) -> Response;
     /// What a recorded report sets going once it is answered: a `Stopped`
     /// flow's context size is written, and its resting seat is handed its
     /// oldest queued request or sleeps when nothing waits for it (see
@@ -72,7 +72,7 @@ impl RecordsReports for RunningNexus {
         }
     }
 
-    fn report(&self, report: Report_Data) -> Response {
+    fn report(&self, configured: &ConfiguredUse, report: Report_Data) -> Response {
         let Report_Data { reporter, event } = report;
         let unresolved = match &reporter {
             Reporter::Flow(flow_id) => flow_id.clone(),
@@ -84,12 +84,13 @@ impl RecordsReports for RunningNexus {
                 signal_flow::Unknown_Data::FlowId(unresolved),
             ));
         };
-        match self.perform_ingress(Operation::Record(Record_Data::Harness(
-            Record_Data_Harness_Data {
+        match self.perform_configured(
+            configured,
+            Operation::Record(Record_Data::Harness(Record_Data_Harness_Data {
                 flow_id: flow_id.clone(),
                 event,
-            },
-        ))) {
+            })),
+        ) {
             Outcome::Recorded => Response::Reported,
             Outcome::Failed(Failed_Data::UnknownFlow) => Response::Refused(
                 signal_flow::Refusal::Unknown(signal_flow::Unknown_Data::FlowId(flow_id)),
@@ -107,6 +108,9 @@ impl RecordsReports for RunningNexus {
     }
 
     fn after_report(&self, flow_id: &FlowId, event: &Event) {
+        let Ok(configured) = self.configured_use() else {
+            return;
+        };
         if let Event::Started(Some(session)) = event {
             self.follow_cleared_session(flow_id, session);
         }
@@ -131,7 +135,11 @@ impl RecordsReports for RunningNexus {
                             && session.as_deref() == Some(node.session_id.as_str())
                     });
                 if own {
-                    crate::observe_agent::RecordsWitnessedExit::exited_as_witnessed(self, flow_id);
+                    crate::observe_agent::RecordsWitnessedExit::exited_as_witnessed(
+                        self,
+                        &configured,
+                        flow_id,
+                    );
                 } else {
                     eprintln!(
                         "flow-nexus: flow {flow_id} reported a session end not its own: {session:?}"

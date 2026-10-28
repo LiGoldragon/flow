@@ -119,10 +119,13 @@ fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
 /// A report as the hook sends it: recorded, answered, then acted on.
 fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
-        fixture.nexus.report(Report_Data {
-            reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
-            event: event.clone(),
-        }),
+        fixture.nexus.report(
+            &fixture.nexus.configured_use().expect("configured fixture"),
+            Report_Data {
+                reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
+                event: event.clone(),
+            }
+        ),
         Response::Reported
     );
     fixture.nexus.after_report(&CLAUDE_SEAT.to_owned(), &event);
@@ -729,10 +732,13 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
         ],
     );
     assert_eq!(
-        fixture.nexus.report(Report_Data {
-            reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
-            event: foreign_stop(),
-        }),
+        fixture.nexus.report(
+            &fixture.nexus.configured_use().expect("configured fixture"),
+            Report_Data {
+                reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
+                event: foreign_stop(),
+            }
+        ),
         Response::Reported
     );
     {

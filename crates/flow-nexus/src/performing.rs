@@ -539,8 +539,8 @@ impl RunningNexus {
         self.configured_effects(configured).perform(operation)
     }
 
-    /// Root ingress for effects whose callback has not yet been given its
-    /// configured capability. Effect code must instead retain ConfiguredEffects.
+    /// Test-only convenience: production ingress always carries ConfiguredEffects.
+    #[cfg(test)]
     pub(crate) fn perform_ingress(&self, operation: Operation) -> Outcome {
         match self.configured_use() {
             Ok(configured) => self.configured_effects(&configured).perform(operation),

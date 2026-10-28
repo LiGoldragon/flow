@@ -15,7 +15,7 @@ use crate::herdr::HerdrCli;
 use crate::herdr::pane::ReadsAgentStatus;
 use crate::herdr::pane::{PaneAgent, WritesPane};
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
-use crate::{HoldsStopRequest, RunningNexus};
+use crate::{ConfiguredUse, HoldsStopRequest, RunningNexus};
 use signal_flow::{
     AgentObservation, AgentState, FlowNode, HerdrRoute, HerdrRouteSelection, Response,
 };
@@ -42,11 +42,11 @@ pub trait ObservesAgent {
 pub(crate) trait RecordsWitnessedExit {
     /// Records the flow Exited, under the dispatch gate, when it is still
     /// live; then wakes its metaflow when Flow's records show it due.
-    fn exited_as_witnessed(&self, flow_id: &str);
+    fn exited_as_witnessed(&self, configured: &ConfiguredUse, flow_id: &str);
 }
 
 impl RecordsWitnessedExit for RunningNexus {
-    fn exited_as_witnessed(&self, flow_id: &str) {
+    fn exited_as_witnessed(&self, configured: &ConfiguredUse, flow_id: &str) {
         use crate::generated::operation::{Operation, Outcome, Record_Data};
         use crate::performing::Performs;
         use crate::store::metaflow::SleepsMetaflows;
@@ -66,8 +66,10 @@ impl RecordsWitnessedExit for RunningNexus {
                 .ok()
                 .flatten()
                 .map(|metaflow| metaflow.address);
-            if self.perform_ingress(Operation::Record(Record_Data::Exited(flow_id.to_owned())))
-                != Outcome::Recorded
+            if self.perform_configured(
+                configured,
+                Operation::Record(Record_Data::Exited(flow_id.to_owned())),
+            ) != Outcome::Recorded
             {
                 eprintln!("flow-nexus: flow {flow_id} seen gone but not recorded Exited");
                 return;
@@ -124,7 +126,7 @@ impl ObservesAgent for RunningNexus {
         let agent_state = match configured.herdr.pane_agent(&node) {
             PaneAgent::Present { agent_state, .. } => agent_state,
             PaneAgent::Absent => {
-                self.exited_as_witnessed(flow_id);
+                self.exited_as_witnessed(&configured, flow_id);
                 AgentState::Gone
             }
             PaneAgent::Unreadable => AgentState::Unknown,
@@ -176,7 +178,7 @@ impl ObservesAgent for RunningNexus {
                 if let Some((node, _)) = self.observable(flow_id)
                     && matches!(configured.herdr.pane_agent(&node), PaneAgent::Absent)
                 {
-                    self.exited_as_witnessed(flow_id);
+                    self.exited_as_witnessed(&configured, flow_id);
                 }
                 return send(&AgentState::Gone.observed_of(flow_id));
             };
@@ -189,7 +191,7 @@ impl ObservesAgent for RunningNexus {
             }
             send(&agent_state.clone().observed_of(flow_id))?;
             if agent_state == AgentState::Gone {
-                self.exited_as_witnessed(flow_id);
+                self.exited_as_witnessed(&configured, flow_id);
                 return Ok(());
             }
             last = agent_state;

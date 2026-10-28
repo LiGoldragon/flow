@@ -294,7 +294,7 @@ impl RunningNexus {
             }),
             wake_due: Box::new(move |address| self.wake_due(address)),
             rest_ended_awake: Box::new(move |address| {
-                self.rest_ended_awake(address);
+                self.rest_ended_awake(configured, address);
             }),
             wake: Box::new(move |address| self.wake_configured(configured, address)),
             drain: Box::new(move |address| self.drain_configured(configured, address)),
@@ -542,10 +542,17 @@ impl Dispatches for RunningNexus {
                     signal_flow::CallerResolutionRejection::CallerUnknown,
                 ),
             },
-            Query::Report(report) => self.report(report),
+            Query::Report(report) => match self.configured_use() {
+                Ok(configured) => self.report(&configured, report),
+                Err(_) => Response::Refused(signal_flow::Refusal::NotConfigured),
+            },
             Query::Current(address) => {
                 use crate::waking::RestsEndedAwake;
-                self.rest_ended_awake(&address);
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => return Response::Refused(signal_flow::Refusal::NotConfigured),
+                };
+                self.rest_ended_awake(&configured, &address);
                 self.store
                     .current_metaflow(&address)
                     .unwrap_or_else(|error| {
@@ -1358,9 +1365,17 @@ impl ServesConnection for Connection {
             // and the connection is closed: the harness waits on its hook,
             // and the settling waits on the harness.
             Query::Report(report) => {
+                let configured = match nexus.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => {
+                        return self.peer.write_response(&Response::Refused(
+                            signal_flow::Refusal::NotConfigured,
+                        ));
+                    }
+                };
                 let flow_id = nexus.resolve_reporter(&report.reporter);
                 let event = report.event.clone();
-                let response = nexus.report(report);
+                let response = nexus.report(&configured, report);
                 self.peer.write_response(&response)?;
                 drop(self);
                 if response == Response::Reported

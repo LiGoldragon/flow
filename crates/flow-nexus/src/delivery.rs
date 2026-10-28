@@ -205,7 +205,7 @@ impl ReadsLeasedPane for RunningNexus {
         configured: &ConfiguredUse,
         target: &DeliveryTarget,
     ) -> Result<AgentState, PaneRefusal> {
-        self.writable_state_with(&configured.herdr, target, false, true)
+        self.writable_state_with(configured, &configured.herdr, target, false, true)
     }
 
     fn forced_writable_state(
@@ -213,21 +213,23 @@ impl ReadsLeasedPane for RunningNexus {
         configured: &ConfiguredUse,
         target: &DeliveryTarget,
     ) -> Result<AgentState, PaneRefusal> {
-        self.writable_state_with(&configured.herdr, target, true, true)
+        self.writable_state_with(configured, &configured.herdr, target, true, true)
     }
 }
 
 impl RunningNexus {
     fn pane_state(
         &self,
+        configured: &ConfiguredUse,
         herdr: &HerdrCli,
         target: &DeliveryTarget,
     ) -> Result<AgentState, PaneRefusal> {
-        self.pane_state_with(herdr, target, true)
+        self.pane_state_with(configured, herdr, target, true)
     }
 
     fn pane_state_with(
         &self,
+        configured: &ConfiguredUse,
         herdr: &HerdrCli,
         target: &DeliveryTarget,
         record_exit: bool,
@@ -242,9 +244,10 @@ impl RunningNexus {
             }
             PaneAgent::Absent => {
                 if record_exit {
-                    let _ = self.perform_ingress(Operation::Record(Record_Data::Exited(
-                        target.node.flow_id.clone(),
-                    )));
+                    let _ = self.perform_configured(
+                        configured,
+                        Operation::Record(Record_Data::Exited(target.node.flow_id.clone())),
+                    );
                 }
                 Err(PaneRefusal::RouteUnavailable)
             }
@@ -253,12 +256,13 @@ impl RunningNexus {
 
     pub(crate) fn writable_state_with(
         &self,
+        configured: &ConfiguredUse,
         herdr: &HerdrCli,
         target: &DeliveryTarget,
         permit_blocked: bool,
         record_exit: bool,
     ) -> Result<AgentState, PaneRefusal> {
-        let agent_state = self.pane_state_with(herdr, target, record_exit)?;
+        let agent_state = self.pane_state_with(configured, herdr, target, record_exit)?;
         if agent_state == AgentState::Blocked {
             return if permit_blocked {
                 Ok(agent_state)
@@ -293,6 +297,7 @@ impl RunningNexus {
 
     fn delivery_readiness(
         &self,
+        configured: &ConfiguredUse,
         herdr: &HerdrCli,
         request: &DeliveryRequest,
         target: &DeliveryTarget,
@@ -302,7 +307,7 @@ impl RunningNexus {
         let permit_blocked = matches!(request.gate, meta_signal_flow::Gate::Forced);
         let mut composer_was_blank = false;
         let agent_state = if hard {
-            let agent_state = self.pane_state_with(herdr, target, record_exit)?;
+            let agent_state = self.pane_state_with(configured, herdr, target, record_exit)?;
             if agent_state == AgentState::Blocked && !permit_blocked {
                 return Err(DeliveryRejection::RecipientBlocked);
             }
@@ -314,7 +319,7 @@ impl RunningNexus {
             }
             agent_state
         } else {
-            self.writable_state_with(herdr, target, permit_blocked, record_exit)?
+            self.writable_state_with(configured, herdr, target, permit_blocked, record_exit)?
         };
         if matches!(request.message, Message::Soft(_))
             && !matches!(agent_state, AgentState::Idle | AgentState::Done)
@@ -342,6 +347,7 @@ impl RunningNexus {
     /// by that item's drain boundary.
     pub(crate) fn deliver_with_view(
         &self,
+        configured: &ConfiguredUse,
         view: &crate::herdr::HerdrOperationView,
         request: DeliveryRequest,
     ) -> Response {
@@ -350,7 +356,7 @@ impl RunningNexus {
             Err(refusal) => return Response::DeliveryRejected(refusal),
         };
         let _lease = self.pane_leases.hold(&target.route);
-        match LeasedDelivery::new(self, &view.herdr, &request, &target).run() {
+        match LeasedDelivery::new(self, configured, &view.herdr, &request, &target).run() {
             Ok(delivery) => Response::Delivered(delivery),
             Err(rejection) => Response::DeliveryRejected(rejection),
         }
@@ -367,7 +373,7 @@ impl DeliversMessages for RunningNexus {
             }
         }
         let view = configured.herdr_operation_view();
-        self.deliver_with_view(&view, request)
+        self.deliver_with_view(configured, &view, request)
     }
 
     fn vet(&self, configured: &ConfiguredUse, request: &DeliveryRequest) -> Response {
@@ -376,7 +382,7 @@ impl DeliversMessages for RunningNexus {
             Ok(target) => target,
             Err(refusal) => return Response::DeliveryRejected(refusal),
         };
-        match self.delivery_readiness(&view.herdr, request, &target, false) {
+        match self.delivery_readiness(configured, &view.herdr, request, &target, false) {
             Ok(_) => Response::Vetted(target.node.flow_id),
             Err(refusal) => Response::DeliveryRejected(refusal),
         }
@@ -405,13 +411,13 @@ impl DeliversMessages for RunningNexus {
         }
         let _lease = self.pane_leases.hold(&target.route);
         let state = match &request.harness_command {
-            HarnessCommand::Keys(_) => self.pane_state(herdr, &target),
+            HarnessCommand::Keys(_) => self.pane_state(configured, herdr, &target),
             HarnessCommand::Line(_) | HarnessCommand::Clear
                 if matches!(request.gate, meta_signal_flow::Gate::Forced) =>
             {
-                self.writable_state_with(herdr, &target, true, true)
+                self.writable_state_with(configured, herdr, &target, true, true)
             }
-            _ => self.writable_state_with(herdr, &target, false, true),
+            _ => self.writable_state_with(configured, herdr, &target, false, true),
         };
         let agent_state = match state {
             Ok(agent_state) => agent_state,
@@ -522,6 +528,7 @@ enum Submitted {
 /// One delivery's key sequence, run while its pane lease is held.
 struct LeasedDelivery<'run> {
     nexus: &'run RunningNexus,
+    configured: &'run ConfiguredUse,
     herdr: &'run HerdrCli,
     request: &'run DeliveryRequest,
     target: &'run DeliveryTarget,
@@ -530,6 +537,7 @@ struct LeasedDelivery<'run> {
 trait RunsLeasedDelivery<'run> {
     fn new(
         nexus: &'run RunningNexus,
+        configured: &'run ConfiguredUse,
         herdr: &'run HerdrCli,
         request: &'run DeliveryRequest,
         target: &'run DeliveryTarget,
@@ -561,12 +569,14 @@ trait RunsLeasedDelivery<'run> {
 impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
     fn new(
         nexus: &'run RunningNexus,
+        configured: &'run ConfiguredUse,
         herdr: &'run HerdrCli,
         request: &'run DeliveryRequest,
         target: &'run DeliveryTarget,
     ) -> Self {
         Self {
             nexus,
+            configured,
             herdr,
             request,
             target,
@@ -665,9 +675,13 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         // letter nowhere to go, so every later hard letter would cancel the
         // next turn too. A blank composer, or one holding Flow's letter, is
         // interrupted; what the interrupt puts back is settled below.
-        let readiness =
-            self.nexus
-                .delivery_readiness(self.herdr, self.request, self.target, true)?;
+        let readiness = self.nexus.delivery_readiness(
+            self.configured,
+            self.herdr,
+            self.request,
+            self.target,
+            true,
+        )?;
         let composer_was_blank = readiness.composer_was_blank;
         let mut agent_state = readiness.agent_state;
         self.step(LeaseStep::Acquired)?;
@@ -696,11 +710,21 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             // left behind to hold the pane and never deleted.
             let read_after_interrupt = || {
                 if matches!(self.request.gate, meta_signal_flow::Gate::Forced) {
-                    self.nexus
-                        .writable_state_with(self.herdr, self.target, true, true)
+                    self.nexus.writable_state_with(
+                        self.configured,
+                        self.herdr,
+                        self.target,
+                        true,
+                        true,
+                    )
                 } else {
-                    self.nexus
-                        .writable_state_with(self.herdr, self.target, false, true)
+                    self.nexus.writable_state_with(
+                        self.configured,
+                        self.herdr,
+                        self.target,
+                        false,
+                        true,
+                    )
                 }
             };
             agent_state = match read_after_interrupt() {
@@ -718,11 +742,21 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
             };
         } else if hard {
             agent_state = if matches!(self.request.gate, meta_signal_flow::Gate::Forced) {
-                self.nexus
-                    .writable_state_with(self.herdr, self.target, true, true)?
+                self.nexus.writable_state_with(
+                    self.configured,
+                    self.herdr,
+                    self.target,
+                    true,
+                    true,
+                )?
             } else {
-                self.nexus
-                    .writable_state_with(self.herdr, self.target, false, true)?
+                self.nexus.writable_state_with(
+                    self.configured,
+                    self.herdr,
+                    self.target,
+                    false,
+                    true,
+                )?
             };
         }
         let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
@@ -770,9 +804,10 @@ impl<'run> RunsLeasedDelivery<'run> for LeasedDelivery<'run> {
         //
         // A Pending flow seen reacting to a real Deliver is witnessed live.
         if self.target.node.flow_lifecycle == FlowLifecycle::Pending {
-            let _ = self.nexus.perform_ingress(Operation::Record(Record_Data::Active(
-                self.target.node.flow_id.clone(),
-            )));
+            let _ = self.nexus.perform_configured(
+                self.configured,
+                Operation::Record(Record_Data::Active(self.target.node.flow_id.clone())),
+            );
         }
         self.settle(interrupt_witness, DeliveryGrade::Presented)
     }

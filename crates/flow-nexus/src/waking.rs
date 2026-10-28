@@ -193,13 +193,13 @@ pub trait RestsEndedAwake {
     /// runs, and that holds no Address hold. An Address held only through
     /// ended bindings, with nothing queued, is forgotten instead. True when
     /// either was done.
-    fn rest_ended_awake(&self, address: &Address) -> bool;
+    fn rest_ended_awake(&self, configured: &ConfiguredUse, address: &Address) -> bool;
     /// The same for every metaflow, at the Nexus's start.
     fn rest_every_ended_awake(&self);
 }
 
 impl RestsEndedAwake for RunningNexus {
-    fn rest_ended_awake(&self, address: &Address) -> bool {
+    fn rest_ended_awake(&self, configured: &ConfiguredUse, address: &Address) -> bool {
         let Ok(Some(metaflow)) = self.store.metaflow(address) else {
             return false;
         };
@@ -231,12 +231,13 @@ impl RestsEndedAwake for RunningNexus {
         if !ended || !matches!(self.store.address_hold(&flow_id), Ok(None)) {
             return false;
         }
-        match self.perform_ingress(Operation::Record(Record_Data::Asleep(
-            Record_Data_Asleep_Data {
+        match self.perform_configured(
+            configured,
+            Operation::Record(Record_Data::Asleep(Record_Data_Asleep_Data {
                 address: address.clone(),
                 flow_id: flow_id.clone(),
-            },
-        ))) {
+            })),
+        ) {
             Outcome::Recorded => {
                 eprintln!("flow-nexus: metaflow Awake as ended flow {flow_id} was recorded Asleep");
                 true
@@ -246,11 +247,14 @@ impl RestsEndedAwake for RunningNexus {
     }
 
     fn rest_every_ended_awake(&self) {
+        let Ok(configured) = self.configured_use() else {
+            return;
+        };
         let Ok(metaflows) = self.store.list_metaflows() else {
             return;
         };
         for metaflow in metaflows {
-            self.rest_ended_awake(&metaflow.address);
+            self.rest_ended_awake(&configured, &metaflow.address);
         }
     }
 }
@@ -620,7 +624,7 @@ impl StartsRequirementsFirst for RunningNexus {
                 if !matches!(self.store.metaflow_declaration(&required), Ok(Some(_))) {
                     return Err(signal_flow::StartRejection::RequirementUnmet(required));
                 }
-                self.rest_ended_awake(&required);
+                self.rest_ended_awake(configured, &required);
                 match self.store.metaflow(&required) {
                     Ok(Some(metaflow)) => match &metaflow.state {
                         flow_ethos::State::Awake(flow_id)
@@ -1495,7 +1499,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.rest_ended_awake(&address);
+            self.rest_ended_awake(&configured, &address);
             matches!(
                 self.store.metaflow(&address),
                 Ok(Some(metaflow)) if self.wake_is_due(&metaflow)
@@ -1710,7 +1714,7 @@ impl RefreshesMetaflows for RunningNexus {
         let Some(lock) = self.waking.hold(address) else {
             return Response::RefreshRejected(RefreshRejection::Locked);
         };
-        self.rest_ended_awake(address);
+        self.rest_ended_awake(&configured, address);
         let metaflow = match self.store.metaflow(address) {
             Ok(Some(
                 metaflow @ Metaflow {
@@ -2101,6 +2105,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                 herdr: configured.herdr.clone(),
             };
             let result = self.deliver_with_view(
+                configured,
                 &view,
                 meta_signal_flow::DeliveryRequest {
                     gate: meta_signal_flow::Gate::Kept,
@@ -2253,7 +2258,7 @@ impl WakesInParts for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.rest_ended_awake(address);
+            self.rest_ended_awake(&configured, address);
             match self.store.metaflow(address) {
                 Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => metaflow,
                 Ok(_) => return Err(WakeRefusal::NotAsleep),
@@ -2405,7 +2410,7 @@ impl WakesInParts for RunningNexus {
                 .map_err(HandOverRefusal::Target)?;
             let _lease = self.pane_leases.hold(&target.route);
             let agent_state = self
-                .writable_state_with(&configured.herdr, &target, false, true)
+                .writable_state_with(configured, &configured.herdr, &target, false, true)
                 .map_err(HandOverRefusal::Pane)?;
             let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
             match configured.herdr.place(&target.route, text, observe) {
@@ -2837,7 +2842,13 @@ impl WakesInParts for RunningNexus {
                             self.delivery_target_with(flow_id, &configured.snapshot)
                                 .ok()
                                 .and_then(|target| self
-                                    .writable_state_with(&configured.herdr, &target, false, true)
+                                    .writable_state_with(
+                                        &configured,
+                                        &configured.herdr,
+                                        &target,
+                                        false,
+                                        true
+                                    )
                                     .ok()),
                             Some(AgentState::Working | AgentState::Idle | AgentState::Done)
                         ));

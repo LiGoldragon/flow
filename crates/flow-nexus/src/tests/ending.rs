@@ -21,10 +21,13 @@ const CLEARED_SUCCESSOR_SESSION: &str = "c1a0de00-0000-4000-8000-000000000002";
 /// A report as the hook sends it: recorded, answered, then acted on.
 fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
-        fixture.nexus.report(Report_Data {
-            reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
-            event: event.clone(),
-        }),
+        fixture.nexus.report(
+            &fixture.nexus.configured_use().expect("configured fixture"),
+            Report_Data {
+                reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
+                event: event.clone(),
+            }
+        ),
         Response::Reported
     );
     fixture.nexus.after_report(&CLAUDE_SEAT.to_owned(), &event);

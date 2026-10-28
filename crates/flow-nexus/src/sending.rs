@@ -286,7 +286,7 @@ impl SendsRequests for RunningNexus {
                     None => return Response::Refused(Refusal::NoneAbove).into(),
                 },
             };
-            self.rest_ended_awake(&recipient);
+            self.rest_ended_awake(&configured, &recipient);
             // Own the address until the direct call has a receipt or a
             // durable non-retryable failure. Background drain/wake may not
             // submit this same request independently. A metaflow another
@@ -391,7 +391,7 @@ impl SendsRequests for RunningNexus {
         if let Err(refusal) = self.sending_address(configured, peer) {
             return *refusal;
         }
-        self.rest_ended_awake(&address);
+        self.rest_ended_awake(&configured, &address);
         let asleep = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => {
                 if metaflow.queue.is_empty() {

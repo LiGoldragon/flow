@@ -337,7 +337,7 @@ impl LaunchesFlows for RunningNexus {
             Err(_) => return persistence(),
         }
         // A metaflow an older Nexus left Awake as an ended flow is Asleep.
-        self.rest_ended_awake(&profile.address);
+        self.rest_ended_awake(&configured, &profile.address);
         // A seat whose Address it could not take is never launched.
         match self.store.launch_address_refusal(&profile) {
             Ok(None) => {}

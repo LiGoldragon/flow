@@ -2302,29 +2302,33 @@ impl PerformsWakeAndDrain for RunningNexus {
                     oldest.logical_delivery_id, attempt.attempt_id
                 );
             }
+
+            // Park first so every member of the one native vector has its
+            // own durable attempt. A successful turn/start response is then
+            // the exact native receipt for that whole run; it need not be
+            // rediscovered by matching text in paged history.
             let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
-            return match self.reconcile_delivery_configured(configured, &attempt) {
-                Reconciled::Settled(entry, _) => {
+            let typed = self.park_cohort(&attempt, &cohort);
+            if let Ok(receipt) = submitted {
+                let run = self.typed_group(&attempt);
+                if matches!(
+                    self.settle_received(
+                        &attempt,
+                        &run,
+                        receipt.turn_id,
+                        receipt.native_receipt,
+                        SeatAfter::InItsTurn,
+                    ),
+                    Reconciled::Settled(..)
+                ) {
                     self.codex_turns.delivered(&node.session_id);
-                    drained.push(entry);
-                    Outcome::Drained(drained)
                 }
-                _ => Outcome::AwaitingReceipt(oldest.logical_delivery_id),
-            };
-        }
-        if let Err(refusal) = self.hand_over(&configured, &flow_id, &text) {
-            // Herdr refused before any of the text reached the pane.
-            return if self
-                .store
-                .mark_delivery_absent(
-                    &attempt.attempt_id,
-                    AbsenceRecord {
-                        proof: AbsenceProof::HandOverRefused,
-                        observation: format!("{refusal:?}"),
-                    },
-                )
-                .unwrap_or(false)
-            {
+            }
+            drained.extend(typed);
+            return Outcome::Drained(drained);
+        } else if let Err(refusal) = self.hand_over(configured, &flow_id, &text) {
+            return if absent(format!("{refusal:?}")) {
+
                 refused(drained, Failed_Data::HerdrRefused)
             } else {
                 refused(drained, Failed_Data::StoreRefused)

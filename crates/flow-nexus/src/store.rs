@@ -2440,7 +2440,7 @@ impl AnswersLaunchOutcome for LaunchOutcome {
             }),
             Self::StartRejected(rejection) => Response::StartRejected(rejection.clone()),
             Self::ReplaceRejected(rejection) => Response::ReplaceRejected(rejection.clone()),
-            Self::Archived(_) => Response::StartRejected(StartRejection::LaunchPersistenceRefused),
+            Self::Archived(reference) => Response::LaunchArchived(reference.clone()),
         }
     }
 
@@ -2459,9 +2459,9 @@ impl AnswersLaunchOutcome for LaunchOutcome {
             Self::ReplaceRejected(rejection) => {
                 signal_flow::LaunchStatusOutcome::ReplaceRejected(rejection.clone())
             }
-            Self::Archived(_) => signal_flow::LaunchStatusOutcome::StartRejected(
-                StartRejection::LaunchPersistenceRefused,
-            ),
+            Self::Archived(reference) => {
+                signal_flow::LaunchStatusOutcome::Archived(reference.clone())
+            }
         }
     }
 
@@ -2552,7 +2552,9 @@ impl From<StartRejectionV39> for StartRejection {
             StartRejectionV39::OriginUnavailable => Self::OriginUnavailable,
             StartRejectionV39::AddressAwake => Self::AddressAwake,
             StartRejectionV39::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV39::LeaveOutRefused(_) => Self::LaunchPersistenceRefused,
+            StartRejectionV39::LeaveOutRefused(_) => {
+                unreachable!("legacy leave-out refusals are archived before conversion")
+            }
             StartRejectionV39::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV39::ModelRefused(refusal) => Self::ModelRefused(refusal),
             StartRejectionV39::RequirementUnmet(address) => Self::RequirementUnmet(address),
@@ -2828,7 +2830,9 @@ impl From<StartRejectionV34> for StartRejection {
             StartRejectionV34::OriginUnavailable => Self::OriginUnavailable,
             StartRejectionV34::AddressAwake => Self::AddressAwake,
             StartRejectionV34::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV34::LeaveOutRefused(_) => Self::LaunchPersistenceRefused,
+            StartRejectionV34::LeaveOutRefused(_) => {
+                unreachable!("legacy leave-out refusals are archived before conversion")
+            }
             StartRejectionV34::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV34::ModelRefused(refusal) => Self::ModelRefused(refusal),
             StartRejectionV34::NoSecondary => {
@@ -2890,6 +2894,77 @@ impl LaunchOutcomeV8 {
     }
 }
 
+trait HasLegacyLeaveOutRefusal {
+    fn has_legacy_leave_out_refusal(&self) -> bool;
+}
+
+macro_rules! legacy_leave_out_refusal {
+    ($start:ty, $replace:ty, $outcome:ty) => {
+        impl HasLegacyLeaveOutRefusal for $start {
+            fn has_legacy_leave_out_refusal(&self) -> bool {
+                matches!(self, Self::LeaveOutRefused(_))
+            }
+        }
+        impl HasLegacyLeaveOutRefusal for $replace {
+            fn has_legacy_leave_out_refusal(&self) -> bool {
+                match self {
+                    Self::LaunchRefused(rejection) => rejection.has_legacy_leave_out_refusal(),
+                    _ => false,
+                }
+            }
+        }
+        impl HasLegacyLeaveOutRefusal for $outcome {
+            fn has_legacy_leave_out_refusal(&self) -> bool {
+                match self {
+                    Self::StartRejected(rejection) => rejection.has_legacy_leave_out_refusal(),
+                    Self::ReplaceRejected(rejection) => rejection.has_legacy_leave_out_refusal(),
+                    _ => false,
+                }
+            }
+        }
+    };
+}
+
+macro_rules! legacy_leave_out_outcome {
+    ($replace:ty, $outcome:ty) => {
+        impl HasLegacyLeaveOutRefusal for $replace {
+            fn has_legacy_leave_out_refusal(&self) -> bool {
+                match self {
+                    Self::LaunchRefused(rejection) => rejection.has_legacy_leave_out_refusal(),
+                    _ => false,
+                }
+            }
+        }
+        impl HasLegacyLeaveOutRefusal for $outcome {
+            fn has_legacy_leave_out_refusal(&self) -> bool {
+                match self {
+                    Self::StartRejected(rejection) => rejection.has_legacy_leave_out_refusal(),
+                    Self::ReplaceRejected(rejection) => rejection.has_legacy_leave_out_refusal(),
+                    _ => false,
+                }
+            }
+        }
+    };
+}
+
+legacy_leave_out_refusal!(StartRejectionV39, ReplaceRejectionV39, LaunchOutcomeV10);
+legacy_leave_out_outcome!(ReplaceRejectionV38, LaunchOutcomeV9);
+legacy_leave_out_refusal!(StartRejectionV34, ReplaceRejectionV34, LaunchOutcomeV8);
+legacy_leave_out_refusal!(StartRejectionV32, ReplaceRejectionV32, LaunchOutcomeV7);
+legacy_leave_out_refusal!(StartRejectionV30, ReplaceRejectionV30, LaunchOutcomeV6);
+legacy_leave_out_refusal!(StartRejectionV22, ReplaceRejectionV22, LaunchOutcomeV5);
+legacy_leave_out_refusal!(StartRejectionV18, ReplaceRejectionV18, LaunchOutcomeV4);
+legacy_leave_out_refusal!(StartRejectionV17, ReplaceRejectionV17, LaunchOutcomeV3);
+impl HasLegacyLeaveOutRefusal for LaunchOutcomeV2 {
+    fn has_legacy_leave_out_refusal(&self) -> bool {
+        match self {
+            Self::StartRejected(rejection) => rejection.has_legacy_leave_out_refusal(),
+            Self::ReplaceRejected(rejection) => rejection.has_legacy_leave_out_refusal(),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 enum HistoricalAttemptReason {
     Missing,
@@ -2897,10 +2972,36 @@ enum HistoricalAttemptReason {
 }
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
-struct QuarantinedLaunchOutcome {
+struct QuarantinedLaunchOutcomeV1 {
     launch_request_id: String,
     archive: Vec<u8>,
     reason: HistoricalAttemptReason,
+}
+
+impl EngineRecord for QuarantinedLaunchOutcomeV1 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+
+impl MemoryDefinition for QuarantinedLaunchOutcomeV1 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(1)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-quarantined-launch-outcome-v1")
+    }
+}
+
+/// One historical launch outcome kept byte-for-byte when its meaning cannot
+/// be projected into the live launch vocabulary.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct QuarantinedLaunchOutcome {
+    launch_request_id: String,
+    origin_family: String,
+    origin_version: i64,
+    archive: Vec<u8>,
+    reason: signal_flow::LaunchArchiveReason,
 }
 
 impl EngineRecord for QuarantinedLaunchOutcome {
@@ -2911,10 +3012,42 @@ impl EngineRecord for QuarantinedLaunchOutcome {
 
 impl MemoryDefinition for QuarantinedLaunchOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(1)
+        MemoryVersion::new(2)
     }
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-quarantined-launch-outcome-v1")
+        SchemaHash::for_label("flow-nexus-quarantined-launch-outcome-v2")
+    }
+}
+
+impl QuarantinedLaunchOutcome {
+    fn reference(&self) -> signal_flow::LaunchOutcomeArchive {
+        signal_flow::LaunchOutcomeArchive {
+            launch_request_id: self.launch_request_id.clone(),
+            launch_outcome_family: self.origin_family.clone(),
+            launch_outcome_version: self.origin_version,
+            launch_archive_reason: self.reason.clone(),
+        }
+    }
+}
+
+impl UpgradeFrom<QuarantinedLaunchOutcomeV1> for QuarantinedLaunchOutcome {
+    type Refusal = std::convert::Infallible;
+
+    fn upgrade_from(previous: QuarantinedLaunchOutcomeV1) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            launch_request_id: previous.launch_request_id,
+            origin_family: "flow-nexus-launch-outcome".into(),
+            origin_version: 8,
+            archive: previous.archive,
+            reason: match previous.reason {
+                HistoricalAttemptReason::Missing => {
+                    signal_flow::LaunchArchiveReason::HistoricalAttemptMissing
+                }
+                HistoricalAttemptReason::Ambiguous => {
+                    signal_flow::LaunchArchiveReason::HistoricalAttemptAmbiguous
+                }
+            },
+        })
     }
 }
 
@@ -3011,7 +3144,9 @@ impl From<StartRejectionV32> for StartRejection {
             StartRejectionV32::OriginUnavailable => Self::OriginUnavailable,
             StartRejectionV32::AddressAwake => Self::AddressAwake,
             StartRejectionV32::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV32::LeaveOutRefused(_) => Self::LaunchPersistenceRefused,
+            StartRejectionV32::LeaveOutRefused(_) => {
+                unreachable!("legacy leave-out refusals are archived before conversion")
+            }
             StartRejectionV32::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV32::ModelRefused(refusal) => Self::ModelRefused(refusal),
             StartRejectionV32::NoSecondary => Self::Undeclared,
@@ -3164,7 +3299,9 @@ impl From<StartRejectionV30> for StartRejection {
             StartRejectionV30::OriginUnavailable => Self::OriginUnavailable,
             StartRejectionV30::AddressAwake => Self::AddressAwake,
             StartRejectionV30::ContextRefused(refusal) => Self::ContextRefused(refusal.into()),
-            StartRejectionV30::LeaveOutRefused(_) => Self::LaunchPersistenceRefused,
+            StartRejectionV30::LeaveOutRefused(_) => {
+                unreachable!("legacy leave-out refusals are archived before conversion")
+            }
             StartRejectionV30::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV30::ModelRefused(refusal) => Self::ModelRefused(refusal),
             StartRejectionV30::NoSecondary => Self::Undeclared,
@@ -3294,7 +3431,9 @@ impl TryFrom<StartRejectionV22> for StartRejectionV30 {
             StartRejectionV22::AddressAwake => Self::AddressAwake,
             StartRejectionV22::AddressEnded => return Err(EndedAddressOutcome),
             StartRejectionV22::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV22::LeaveOutRefused(refusal) => Self::LaunchPersistenceRefused,
+            StartRejectionV22::LeaveOutRefused(_) => {
+                unreachable!("legacy leave-out refusals are archived before conversion")
+            }
             StartRejectionV22::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
             StartRejectionV22::ModelRefused(refusal) => Self::ModelRefused(refusal),
         })
@@ -3446,7 +3585,9 @@ impl From<StartRejectionV18> for StartRejectionV22 {
             StartRejectionV18::AddressAwake => Self::AddressAwake,
             StartRejectionV18::AddressEnded => Self::AddressEnded,
             StartRejectionV18::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV18::LeaveOutRefused(refusal) => Self::LaunchPersistenceRefused,
+            StartRejectionV18::LeaveOutRefused(_) => {
+                unreachable!("legacy leave-out refusals are archived before conversion")
+            }
             StartRejectionV18::HarnessSpawnRefused(refusal) => Self::HarnessSpawnRefused(refusal),
         }
     }
@@ -3564,7 +3705,9 @@ impl From<StartRejectionV17> for StartRejectionV18 {
             StartRejectionV17::AddressAwake => Self::AddressAwake,
             StartRejectionV17::AddressEnded => Self::AddressEnded,
             StartRejectionV17::ContextRefused(refusal) => Self::ContextRefused(refusal),
-            StartRejectionV17::LeaveOutRefused(refusal) => Self::LaunchPersistenceRefused,
+            StartRejectionV17::LeaveOutRefused(_) => {
+                unreachable!("legacy leave-out refusals are archived before conversion")
+            }
         }
     }
 }
@@ -3839,6 +3982,10 @@ trait UpgradesFlowFamilies {
         &mut self,
         descriptor: TableDescriptor<StoredMetaflow>,
     ) -> Result<TableReference<StoredMetaflow>, StoreError>;
+    fn upgraded_quarantined_launch_outcomes(
+        &mut self,
+        descriptor: TableDescriptor<QuarantinedLaunchOutcome>,
+    ) -> Result<TableReference<QuarantinedLaunchOutcome>, StoreError>;
     /// A store before 0.35.19 keeps one model per Layer; each is carried as
     /// that layer's Psyche model and re-keyed by its Layer and Aspect.
     fn upgraded_models(
@@ -3929,6 +4076,21 @@ impl UpgradesFlowFamilies for Engine {
             self.commit_atomic(commit)?;
         }
         Ok(table)
+    }
+
+    fn upgraded_quarantined_launch_outcomes(
+        &mut self,
+        descriptor: TableDescriptor<QuarantinedLaunchOutcome>,
+    ) -> Result<TableReference<QuarantinedLaunchOutcome>, StoreError> {
+        match self.upgrade_table::<QuarantinedLaunchOutcomeV1, QuarantinedLaunchOutcome>(descriptor)
+        {
+            UpgradeOutcome::Upgraded(receipt) => Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure) => {
+                Err(StoreError::LaunchOutcomeUpgrade(format!("{failure:?}")))
+            }
+        }
     }
 
     fn upgraded_leave_out_defaults(
@@ -4203,6 +4365,7 @@ impl UpgradesFlowFamilies for Engine {
         let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
+        self.archive_legacy_leave_outs(quarantine)?;
         match self.upgrade_table::<StoredLaunchOutcomeV10, StoredLaunchOutcome>(descriptor) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
@@ -5129,7 +5292,8 @@ impl OpensFlowStore for FlowStore {
                 FLOW_QUARANTINED_LAUNCH_OUTCOME_TABLE_NAME,
                 FamilyName::new("flow-nexus-quarantined-launch-outcome"),
                 QuarantinedLaunchOutcome::schema_hash(),
-            );
+            )
+            .with_predecessor::<QuarantinedLaunchOutcomeV1>();
         let delivery_descriptor = TableDescriptor::<delivery::StoredDelivery>::new(
             delivery::DELIVERY_TABLE_NAME,
             FamilyName::new("flow-nexus-delivery"),
@@ -5227,7 +5391,7 @@ impl OpensFlowStore for FlowStore {
         let quarantined_launch_attempts =
             engine.register_table(quarantined_launch_attempts_descriptor)?;
         let quarantined_launch_outcomes =
-            engine.register_table(quarantined_launch_outcomes_descriptor)?;
+            engine.upgraded_quarantined_launch_outcomes(quarantined_launch_outcomes_descriptor)?;
         let (launch_attempts, opening_settlements) = engine
             .upgraded_launch_attempts(launch_attempts_descriptor, quarantined_launch_attempts)?;
         let launch_panes = engine.register_table(launch_panes_descriptor)?;
@@ -5398,11 +5562,14 @@ impl OpensFlowStore for FlowStore {
             FamilyName::new("flow-nexus-quarantined-launch-attempt"),
             SchemaHash::for_label("flow-nexus-quarantined-launch-attempt-v1"),
         ))?;
-        let quarantined_launch_outcomes = engine.register_table(TableDescriptor::new(
-            FLOW_QUARANTINED_LAUNCH_OUTCOME_TABLE_NAME,
-            FamilyName::new("flow-nexus-quarantined-launch-outcome"),
-            QuarantinedLaunchOutcome::schema_hash(),
-        ))?;
+        let quarantined_launch_outcomes = engine.upgraded_quarantined_launch_outcomes(
+            TableDescriptor::new(
+                FLOW_QUARANTINED_LAUNCH_OUTCOME_TABLE_NAME,
+                FamilyName::new("flow-nexus-quarantined-launch-outcome"),
+                QuarantinedLaunchOutcome::schema_hash(),
+            )
+            .with_predecessor::<QuarantinedLaunchOutcomeV1>(),
+        )?;
         let (launch_attempts, opening_settlements) = engine.upgraded_launch_attempts(
             TableDescriptor::new(
                 FLOW_LAUNCH_ATTEMPT_TABLE_NAME,
@@ -6183,6 +6350,12 @@ impl SettlesLaunchAttempts for Engine {
 }
 
 trait SettlesLaunchOutcomes {
+    /// Archives every legacy leave-out refusal before any predecessor
+    /// conversion can erase its historical meaning.
+    fn archive_legacy_leave_outs(
+        &mut self,
+        quarantine: TableReference<QuarantinedLaunchOutcome>,
+    ) -> Result<(), StoreError>;
     /// Moves a v8 NoSecondary outcome whose historical attempt cannot name
     /// exactly one Address into a durable archive before the remaining v8
     /// family is upgraded. The surrounding staged store open activates the
@@ -6196,6 +6369,62 @@ trait SettlesLaunchOutcomes {
 }
 
 impl SettlesLaunchOutcomes for Engine {
+    fn archive_legacy_leave_outs(
+        &mut self,
+        quarantine: TableReference<QuarantinedLaunchOutcome>,
+    ) -> Result<(), StoreError> {
+        macro_rules! archive_version {
+            ($stored:ty, $version:literal) => {{
+                let descriptor = TableDescriptor::<$stored>::new(
+                    FLOW_LAUNCH_OUTCOME_TABLE_NAME,
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    <$stored>::schema_hash(),
+                );
+                if self.catalog().family_identity(&FLOW_LAUNCH_OUTCOME_TABLE_NAME)
+                    == Some(&descriptor.family_identity())
+                {
+                    let predecessor = self.register_table(descriptor)?;
+                    for (stored_key, archive) in self.launch_outcome_archives()? {
+                        let previous = rkyv::from_bytes::<$stored, rkyv::rancor::Error>(&archive)
+                            .map_err(|error| {
+                                StoreError::LaunchOutcomeUpgrade(format!(
+                                    "v{} launch outcome {stored_key} could not be read before archival: {error:?}",
+                                    $version
+                                ))
+                            })?;
+                        if previous.launch_outcome.has_legacy_leave_out_refusal() {
+                            self.commit_atomic(
+                                self.begin_atomic_commit()
+                                    .retract(predecessor, RecordKey::new(stored_key.clone()))
+                                    .assert(
+                                        quarantine,
+                                        QuarantinedLaunchOutcome {
+                                            launch_request_id: stored_key,
+                                            origin_family: "flow-nexus-launch-outcome".into(),
+                                            origin_version: $version,
+                                            archive,
+                                            reason: signal_flow::LaunchArchiveReason::LegacyLeaveOutRefusal,
+                                        },
+                                    ),
+                            )?;
+                        }
+                    }
+                    return Ok(());
+                }
+            }};
+        }
+        archive_version!(StoredLaunchOutcomeV10, 10);
+        archive_version!(StoredLaunchOutcomeV9, 9);
+        archive_version!(StoredLaunchOutcomeV8, 8);
+        archive_version!(StoredLaunchOutcomeV7, 7);
+        archive_version!(StoredLaunchOutcomeV6, 6);
+        archive_version!(StoredLaunchOutcomeV5, 5);
+        archive_version!(StoredLaunchOutcomeV4, 4);
+        archive_version!(StoredLaunchOutcomeV3, 3);
+        archive_version!(StoredLaunchOutcomeV2, 2);
+        Ok(())
+    }
+
     fn settle_launch_outcomes(
         &mut self,
         _attempts: TableReference<StoredLaunchAttempt>,
@@ -6259,8 +6488,17 @@ impl SettlesLaunchOutcomes for Engine {
                         quarantine,
                         QuarantinedLaunchOutcome {
                             launch_request_id: stored_key,
+                            origin_family: "flow-nexus-launch-outcome".into(),
+                            origin_version: 8,
                             archive,
-                            reason,
+                            reason: match reason {
+                                HistoricalAttemptReason::Missing => {
+                                    signal_flow::LaunchArchiveReason::HistoricalAttemptMissing
+                                }
+                                HistoricalAttemptReason::Ambiguous => {
+                                    signal_flow::LaunchArchiveReason::HistoricalAttemptAmbiguous
+                                }
+                            },
                         },
                     ),
             )?;
@@ -7040,7 +7278,21 @@ impl RecordsLaunchOutcome for FlowStore {
             .records()
             .to_vec();
         match records.as_slice() {
-            [] => Ok(None),
+            [] => {
+                let archived = self
+                    .engine
+                    .match_records(QueryPlan::key(
+                        self.quarantined_launch_outcomes,
+                        RecordKey::new(launch_request_id),
+                    ))?
+                    .records()
+                    .to_vec();
+                match archived.as_slice() {
+                    [] => Ok(None),
+                    [archived] => Ok(Some(LaunchOutcome::Archived(archived.reference()))),
+                    _ => Err(StoreError::StateInvariant),
+                }
+            }
             [stored] => Ok(Some(stored.launch_outcome.clone())),
             _ => Err(StoreError::StateInvariant),
         }
@@ -8198,7 +8450,7 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_quarantined_launch_outcomes" => (
                 "flow-nexus-quarantined-launch-outcome",
-                "flow-nexus-quarantined-launch-outcome-v1",
+                "flow-nexus-quarantined-launch-outcome-v2",
             ),
             "flow_nexus_metaflows" => ("flow-nexus-metaflow", "flow-nexus-metaflow-v5"),
             "flow_nexus_metaflow_processes" => (
@@ -12925,72 +13177,223 @@ mod tests {
     }
 
     #[test]
-    fn v10_leave_out_refusals_upgrade_once_to_launch_persistence_refused() {
-        let fixture = StoreFixture::new();
-        {
-            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
-                .expect("outcome store opens");
-            let outcomes = engine
-                .register_table(TableDescriptor::new(
-                    TableName::new("flow_nexus_launch_outcomes"),
-                    FamilyName::new("flow-nexus-launch-outcome"),
-                    StoredLaunchOutcomeV10::schema_hash(),
-                ))
-                .expect("v10 outcome family registers");
-            for (key, launch_outcome) in [
-                (
-                    "v10-start-leave-out",
-                    LaunchOutcomeV10::StartRejected(StartRejectionV39::LeaveOutRefused(
+    fn every_legacy_leave_out_refusal_is_archived_losslessly() {
+        macro_rules! assert_version {
+            ($stored:ident, $outcome:ident, $start:ident, $replace:ident, $version:literal) => {{
+                let fixture = StoreFixture::new();
+                let rows = [
+                    (
+                        "start-indispensable",
+                        super::LeaveOutRefusalV37::Indispensable(super::LeaveOutV37::UserSettings),
+                        false,
+                    ),
+                    (
+                        "start-needs-workflow",
+                        super::LeaveOutRefusalV37::NeedsWorkflowLeftOut(
+                            super::LeaveOutV37::SkillTool,
+                        ),
+                        false,
+                    ),
+                    (
+                        "start-not-for-harness",
                         super::LeaveOutRefusalV37::NotForHarness(
                             super::LeaveOutV37::CodexSkillListing,
                         ),
-                    )),
-                ),
-                (
-                    "v10-replace-leave-out",
-                    LaunchOutcomeV10::ReplaceRejected(ReplaceRejectionV39::LaunchRefused(
-                        StartRejectionV39::LeaveOutRefused(
-                            super::LeaveOutRefusalV37::Indispensable(
-                                super::LeaveOutV37::WorkflowTool,
-                            ),
+                        false,
+                    ),
+                    (
+                        "replace-indispensable",
+                        super::LeaveOutRefusalV37::Indispensable(super::LeaveOutV37::UserSettings),
+                        true,
+                    ),
+                    (
+                        "replace-needs-workflow",
+                        super::LeaveOutRefusalV37::NeedsWorkflowLeftOut(
+                            super::LeaveOutV37::BundledSkills,
                         ),
-                    )),
-                ),
-            ] {
-                engine
-                    .assert(Assertion::new(
-                        outcomes,
-                        StoredLaunchOutcomeV10 {
-                            launch_request_id: key.into(),
-                            launch_outcome,
-                        },
-                    ))
-                    .expect("v10 outcome persists");
-            }
+                        true,
+                    ),
+                    (
+                        "replace-not-for-harness",
+                        super::LeaveOutRefusalV37::NotForHarness(super::LeaveOutV37::CodexAgentsMd),
+                        true,
+                    ),
+                ];
+                let mut archives = Vec::new();
+                {
+                    let mut engine =
+                        Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                            .expect("outcome store opens");
+                    let outcomes = engine
+                        .register_table(TableDescriptor::new(
+                            TableName::new("flow_nexus_launch_outcomes"),
+                            FamilyName::new("flow-nexus-launch-outcome"),
+                            $stored::schema_hash(),
+                        ))
+                        .expect("legacy outcome family registers");
+                    for (suffix, refusal, replacement) in rows {
+                        let key = format!("v{}-{suffix}", $version);
+                        let rejection = $start::LeaveOutRefused(refusal);
+                        let previous = $stored {
+                            launch_request_id: key.clone(),
+                            launch_outcome: if replacement {
+                                $outcome::ReplaceRejected($replace::LaunchRefused(rejection))
+                            } else {
+                                $outcome::StartRejected(rejection)
+                            },
+                        };
+                        let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&previous)
+                            .expect("legacy outcome archives")
+                            .to_vec();
+                        archives.push((key, archive.clone()));
+                        engine
+                            .assert(Assertion::new(outcomes, previous))
+                            .expect("legacy outcome persists");
+                    }
+                }
+                let store = fixture.store();
+                for (key, archive) in &archives {
+                    assert_eq!(
+                        store.launch_outcome(key).expect("archived outcome reads"),
+                        Some(LaunchOutcome::Archived(signal_flow::LaunchOutcomeArchive {
+                            launch_request_id: key.clone(),
+                            launch_outcome_family: "flow-nexus-launch-outcome".into(),
+                            launch_outcome_version: $version,
+                            launch_archive_reason:
+                                signal_flow::LaunchArchiveReason::LegacyLeaveOutRefusal,
+                        }))
+                    );
+                    let record = store
+                        .engine
+                        .match_records(QueryPlan::key(
+                            store.quarantined_launch_outcomes,
+                            RecordKey::new(key),
+                        ))
+                        .expect("archive record reads");
+                    assert_eq!(record.records().len(), 1);
+                    assert_eq!(record.records()[0].archive, *archive);
+                }
+                drop(store);
+                let reopened = fixture.store();
+                assert_eq!(
+                    reopened
+                        .engine
+                        .match_records(QueryPlan::all(reopened.quarantined_launch_outcomes))
+                        .expect("reopened archives read")
+                        .records()
+                        .len(),
+                    archives.len()
+                );
+            }};
+        }
+        assert_version!(
+            StoredLaunchOutcomeV10,
+            LaunchOutcomeV10,
+            StartRejectionV39,
+            ReplaceRejectionV39,
+            10
+        );
+        assert_version!(
+            StoredLaunchOutcomeV9,
+            LaunchOutcomeV9,
+            StartRejectionV39,
+            ReplaceRejectionV38,
+            9
+        );
+        assert_version!(
+            StoredLaunchOutcomeV8,
+            LaunchOutcomeV8,
+            StartRejectionV34,
+            ReplaceRejectionV34,
+            8
+        );
+        assert_version!(
+            StoredLaunchOutcomeV7,
+            LaunchOutcomeV7,
+            StartRejectionV32,
+            ReplaceRejectionV32,
+            7
+        );
+        assert_version!(
+            StoredLaunchOutcomeV6,
+            LaunchOutcomeV6,
+            StartRejectionV30,
+            ReplaceRejectionV30,
+            6
+        );
+        assert_version!(
+            StoredLaunchOutcomeV5,
+            LaunchOutcomeV5,
+            StartRejectionV22,
+            ReplaceRejectionV22,
+            5
+        );
+        assert_version!(
+            StoredLaunchOutcomeV4,
+            LaunchOutcomeV4,
+            StartRejectionV18,
+            ReplaceRejectionV18,
+            4
+        );
+        assert_version!(
+            StoredLaunchOutcomeV3,
+            LaunchOutcomeV3,
+            StartRejectionV17,
+            ReplaceRejectionV17,
+            3
+        );
+        assert_version!(
+            StoredLaunchOutcomeV2,
+            LaunchOutcomeV2,
+            StartRejectionV17,
+            ReplaceRejectionV17,
+            2
+        );
+    }
+
+    #[test]
+    fn quarantined_outcome_v1_gains_provenance_once() {
+        let fixture = StoreFixture::new();
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("store opens");
+            let quarantine = engine
+                .register_table(TableDescriptor::new(
+                    super::FLOW_QUARANTINED_LAUNCH_OUTCOME_TABLE_NAME,
+                    FamilyName::new("flow-nexus-quarantined-launch-outcome"),
+                    super::QuarantinedLaunchOutcomeV1::schema_hash(),
+                ))
+                .expect("v1 archive family registers");
+            engine
+                .assert(Assertion::new(
+                    quarantine,
+                    super::QuarantinedLaunchOutcomeV1 {
+                        launch_request_id: "old-archive".into(),
+                        archive: vec![1, 2, 3],
+                        reason: super::HistoricalAttemptReason::Missing,
+                    },
+                ))
+                .expect("v1 archive persists");
         }
         let store = fixture.store();
         assert_eq!(
             store
-                .launch_outcome("v10-start-leave-out")
-                .expect("upgraded start refusal reads"),
-            Some(LaunchOutcome::StartRejected(
-                StartRejection::LaunchPersistenceRefused
-            ))
-        );
-        assert_eq!(
-            store
-                .launch_outcome("v10-replace-leave-out")
-                .expect("upgraded replace refusal reads"),
-            Some(LaunchOutcome::ReplaceRejected(
-                ReplaceRejection::LaunchRefused(StartRejection::LaunchPersistenceRefused)
-            ))
+                .launch_outcome("old-archive")
+                .expect("upgraded archive reads"),
+            Some(LaunchOutcome::Archived(signal_flow::LaunchOutcomeArchive {
+                launch_request_id: "old-archive".into(),
+                launch_outcome_family: "flow-nexus-launch-outcome".into(),
+                launch_outcome_version: 8,
+                launch_archive_reason: signal_flow::LaunchArchiveReason::HistoricalAttemptMissing,
+            }))
         );
         drop(store);
         assert!(
             fixture
                 .store()
-                .launch_outcome("v10-start-leave-out")
-                .is_ok()
+                .launch_outcome("old-archive")
+                .expect("reopened archive reads")
+                .is_some()
         );
     }
 
@@ -13181,7 +13584,12 @@ mod tests {
             store
                 .launch_outcome("v8-missing-attempt")
                 .expect("active outcomes read"),
-            None
+            Some(LaunchOutcome::Archived(signal_flow::LaunchOutcomeArchive {
+                launch_request_id: "v8-missing-attempt".into(),
+                launch_outcome_family: "flow-nexus-launch-outcome".into(),
+                launch_outcome_version: 8,
+                launch_archive_reason: signal_flow::LaunchArchiveReason::HistoricalAttemptMissing,
+            }))
         );
         assert_eq!(
             store
@@ -13191,8 +13599,10 @@ mod tests {
                 .records(),
             &[super::QuarantinedLaunchOutcome {
                 launch_request_id: "v8-missing-attempt".into(),
+                origin_family: "flow-nexus-launch-outcome".into(),
+                origin_version: 8,
                 archive,
-                reason: super::HistoricalAttemptReason::Missing,
+                reason: signal_flow::LaunchArchiveReason::HistoricalAttemptMissing,
             }]
         );
         drop(store);
@@ -13256,13 +13666,18 @@ mod tests {
         assert_eq!(archived.records().len(), 1);
         assert_eq!(
             archived.records()[0].reason,
-            super::HistoricalAttemptReason::Ambiguous
+            signal_flow::LaunchArchiveReason::HistoricalAttemptAmbiguous
         );
         assert_eq!(
             store
                 .launch_outcome("v8-conflicting-attempt")
                 .expect("active outcomes read"),
-            None
+            Some(LaunchOutcome::Archived(signal_flow::LaunchOutcomeArchive {
+                launch_request_id: "v8-conflicting-attempt".into(),
+                launch_outcome_family: "flow-nexus-launch-outcome".into(),
+                launch_outcome_version: 8,
+                launch_archive_reason: signal_flow::LaunchArchiveReason::HistoricalAttemptAmbiguous,
+            }))
         );
     }
 

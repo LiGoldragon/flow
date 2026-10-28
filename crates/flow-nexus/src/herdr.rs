@@ -221,17 +221,38 @@ impl OperatesHerdrPane for HerdrCli {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return false;
         };
+        // A reserved Claude is Flow-owned rather than a Herdr-managed
+        // agent.  Stop the exact native session Flow selected, wait for the
+        // kernel to reap that process identity, and only then ask Herdr to
+        // close the pane it owns.  Closing the pane is not used as a proxy
+        // for stopping the native process.
+        let ownership = self.pane_ownership(node);
+        if node.harness_kind == HarnessKind::Claude
+            && !matches!(ownership, PaneOwnership::Owned | PaneOwnership::Bare)
+        {
+            match self.stop_flow_owned_claude(route, &node.session_id) {
+                Some(true) => return self.close_pane(route),
+                Some(false) => return false,
+                // An imported Herdr-managed Claude, or a Flow-owned Claude
+                // that has already exited, continues through the ownership
+                // proof below. It is never signalled by guesswork.
+                None => {}
+            }
+        }
         // A pane is closed when Herdr shows it running the Flow's own native
         // session, or running none, whatever its readiness and whether its
         // FlowId claim was given back: closing needs the pane, not a route a
         // prompt could take. A pane now running another session is never
         // closed, and a Flow with no recorded session closes nothing.
-        if !matches!(
-            self.pane_ownership(node),
-            PaneOwnership::Owned | PaneOwnership::Bare
-        ) {
+        if !matches!(ownership, PaneOwnership::Owned | PaneOwnership::Bare) {
             return false;
         }
+        self.close_pane(route)
+    }
+}
+
+impl HerdrCli {
+    fn close_pane(&self, route: &HerdrRoute) -> bool {
         Command::new(&self.executable)
             .args([
                 "--session",
@@ -243,6 +264,90 @@ impl OperatesHerdrPane for HerdrCli {
             .output()
             .is_ok_and(|output| output.status.success())
     }
+
+    /// Stops the one actual foreground process carrying Flow's selected
+    /// Claude session. A pidfd keeps the selected kernel process identity
+    /// stable across signalling and provides an event-driven exit witness.
+    fn stop_flow_owned_claude(&self, route: &HerdrRoute, session: &str) -> Option<bool> {
+        if session.is_empty() {
+            return Some(false);
+        }
+        let Some(processes) = self.foreground_processes(route) else {
+            return Some(false);
+        };
+        let mut selected = processes.into_iter().filter(|process| {
+            process
+                .arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--session-id" && pair[1] == session)
+        });
+        let Some(process) = selected.next() else {
+            return None;
+        };
+        if selected.next().is_some() {
+            return Some(false);
+        }
+        let Ok(timeout) = u64::try_from(self.timings.launch_rest_wait) else {
+            return Some(false);
+        };
+        Some(stop_process(process.process_id, timeout).is_some())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessStop {
+    Graceful,
+    Forced,
+}
+
+/// Signals one stable Linux process identity and blocks on its kernel exit
+/// event. A native process that does not honor SIGTERM is compensated with
+/// SIGKILL; a timeout never becomes a successful stop.
+fn stop_process(process_id: u32, timeout_milliseconds: u64) -> Option<ProcessStop> {
+    let process_id = i32::try_from(process_id).ok()?;
+    // SAFETY: pidfd_open has no pointer arguments. The returned owned
+    // descriptor is closed on every path below.
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, 0) as i32 };
+    if pidfd < 0 {
+        return None;
+    }
+    let signal = |signal: i32| {
+        // SAFETY: pidfd_send_signal is called with the live pidfd above,
+        // a signal number, and no siginfo payload or flags.
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                pidfd,
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            ) == 0
+        }
+    };
+    let exited = |timeout: i32| {
+        let mut event = libc::pollfd {
+            fd: pidfd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: event points to one initialized pollfd for the length
+        // of the blocking call.
+        (unsafe { libc::poll(&mut event, 1, timeout) == 1 })
+            && event.revents & (libc::POLLIN | libc::POLLHUP) != 0
+    };
+    let timeout = i32::try_from(timeout_milliseconds).ok()?;
+    let stopped = if !signal(libc::SIGTERM) {
+        None
+    } else if exited(timeout) {
+        Some(ProcessStop::Graceful)
+    } else if signal(libc::SIGKILL) && exited(timeout) {
+        Some(ProcessStop::Forced)
+    } else {
+        None
+    };
+    // SAFETY: pidfd is an owned descriptor returned by pidfd_open.
+    unsafe { libc::close(pidfd) };
+    stopped
 }
 
 /// Herdr's answer to one `agent prompt`, read for what it proves about the
@@ -455,6 +560,13 @@ pub trait ReadsHerdrPanes {
         let _ = route;
         None
     }
+    /// Whether the exact pane currently has one actual foreground process
+    /// carrying Flow's selected Claude session. Ambiguity and unreadable
+    /// process state are false.
+    fn flow_owned_claude_session_is_running(&self, node: &FlowNode) -> bool {
+        let _ = node;
+        false
+    }
     fn refresh_route(&self, node: FlowNode) -> FlowNode;
     fn snapshot(&self, route: &HerdrRoute) -> Option<serde_json::Value>;
     /// The snapshot of one Herdr session.
@@ -495,6 +607,28 @@ pub struct ForegroundProcess {
 }
 
 impl ReadsHerdrPanes for HerdrCli {
+    fn flow_owned_claude_session_is_running(&self, node: &FlowNode) -> bool {
+        let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
+            return false;
+        };
+        if node.harness_kind != HarnessKind::Claude || node.session_id.is_empty() {
+            return false;
+        }
+        let Some(processes) = self.foreground_processes(route) else {
+            return false;
+        };
+        processes
+            .iter()
+            .filter(|process| {
+                process
+                    .arguments
+                    .windows(2)
+                    .any(|pair| pair[0] == "--session-id" && pair[1] == node.session_id)
+            })
+            .count()
+            == 1
+    }
+
     fn validate_registration(&self, node: &FlowNode) -> bool {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return false;
@@ -567,12 +701,24 @@ impl ReadsHerdrPanes for HerdrCli {
             .iter()
             .find(|agent| agent.matches_binding(route, &node.harness_kind))
         {
+            let session_source = agent
+                .pointer("/agent_session/source")
+                .and_then(serde_json::Value::as_str);
             return match (
                 agent
                     .pointer("/agent_session/value")
                     .and_then(serde_json::Value::as_str),
                 &node.harness_kind,
             ) {
+                // A Flow lifecycle report names the selected Claude session
+                // but does not make Herdr its process owner. Its actual argv
+                // remains the ownership proof and Flow remains responsible
+                // for stopping it.
+                (Some(session), HarnessKind::Claude)
+                    if session == node.session_id && session_source == Some("flow") =>
+                {
+                    PaneOwnership::Unproven
+                }
                 (Some(session), _) if session == node.session_id => PaneOwnership::Owned,
                 (Some(_), _) => PaneOwnership::Foreign,
                 (None, HarnessKind::Codex) => {
@@ -963,7 +1109,7 @@ impl DecodesFlowClaim for FlowClaim {
 
 #[cfg(test)]
 mod tests {
-    use super::{HerdrCli, VerifiesFlowClaim};
+    use super::{HerdrCli, ProcessStop, VerifiesFlowClaim, stop_process};
     use crate::herdr::ConfiguresHerdrCli;
     use crate::herdr::ReadsHerdrPanes;
     use crate::herdr::ReadsHerdrSnapshot;
@@ -972,7 +1118,7 @@ mod tests {
         EndpointSelection, FlowLifecycle, FlowNode, FlowOrigin, HarnessKind, HerdrRoute,
         HerdrRouteSelection, Origin,
     };
-    use std::path::PathBuf;
+    use std::{os::unix::process::CommandExt, path::PathBuf, process::Command};
 
     /// Whether the snapshot's one agent is at rest, as the writer reads it.
     fn idle(snapshot: &serde_json::Value) -> bool {
@@ -1169,5 +1315,35 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn flow_owned_process_stop_waits_for_the_exact_kernel_exit() {
+        let mut process = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("sleep starts");
+        assert_eq!(
+            stop_process(process.id(), 1000),
+            Some(ProcessStop::Graceful)
+        );
+        assert!(process.wait().expect("sleep reaped").code().is_none());
+    }
+
+    #[test]
+    fn flow_owned_process_stop_forces_a_term_refusing_process_without_orphaning_it() {
+        let mut command = Command::new("sleep");
+        command.arg("60");
+        // SAFETY: this runs after fork in the child and changes only the
+        // child's SIGTERM disposition before exec.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let mut process = command.spawn().expect("term-refusing sleep starts");
+        assert_eq!(stop_process(process.id(), 10), Some(ProcessStop::Forced));
+        assert!(process.wait().expect("sleep reaped").code().is_none());
     }
 }

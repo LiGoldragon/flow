@@ -10,3 +10,8 @@ Configure.Models.[ { Primary Psyche claude-haiku-5-5 } { Secondary Psyche claude
 Configure.Thresholds.[ { claude-haiku-5-5 200000 } ]
 Configure.LeaveOuts.[ { { Psyche test Secondary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } { { Psyche test Tertiary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } { { Psyche test Quaternary } Claude [ ClaudeAiConnectors ExplorePlanAgents WorkflowTool SkillTool BundledSkills ScheduleWakeupTool ReportFindingsTool ListAgentsTool CronTools DeferredTools ClaudeMd GitInstructions ] } ]
 Configure.Metaflows.[ { { Psyche test Secondary } [ spirit:core intent:models ] [] Explicit.[] Maintained «» [] [] } { { Psyche test Tertiary } [ spirit:core intent:models ] [] Default OnDemand «» [] [] } { { Psyche test Quaternary } [ spirit:core intent:models ] [] Explicit.[] OnDemand «» [] [] } ]
+; A real Claude TUI does not honor TERM while idle. Exercise the configured
+; bounded wait and forced compensation without making every lifecycle test
+; spend the production seed's thirty seconds. Five seconds still witnesses
+; the actual configured wrapper's SessionStart readiness on this boundary.
+Configure.Timings.{ 5000 30000 10000 10000 30000 5000 15000 30000 5000 10000 3000 350 250 500 1000 60000 50 2000 600000 }

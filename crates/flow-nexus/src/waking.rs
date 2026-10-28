@@ -65,6 +65,7 @@
 //! [`WakingMetaflows`], so a second request starts no second wake and a
 //! turn end does not drain the waking seat.
 
+use crate::RunningNexus;
 use crate::claude::{
     ClaudeQueuedHistory, ClaudeTranscriptCursor, LocatesClaudeTranscript, MeasuresClaudeContext,
     ReadsClaudeTurns,
@@ -89,6 +90,7 @@ use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, Read
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::send_tool::ServesLaunchCalls;
+use crate::store::NamesConfiguredModel;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::events::RecordsHarnessEvents;
@@ -98,12 +100,10 @@ use crate::store::queue_delivery::{
     NativeTranscriptCursor, PrepareQueueDelivery, QueueDeliveryAttempt, QueueDeliveryPhase,
 };
 use crate::store::successor::{OwesSuccessors, ReadsContinuity, SuccessionCause, SuccessorIntent};
-use crate::store::NamesConfiguredModel;
 use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
-use crate::RunningNexus;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
@@ -545,9 +545,9 @@ impl StartsRequirementsFirst for RunningNexus {
         profile: &LaunchProfile,
     ) -> Result<(), signal_flow::StartRejection> {
         use crate::launching::NamesTopic;
+        use crate::store::ReadsLaunchAttempt;
         use crate::store::metaflow::TakesLaunchAddress;
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
-        use crate::store::ReadsLaunchAttempt;
 
         if profile.flow_id_option.is_some() || !profile.address.topic.as_str().is_camel_case_topic()
         {
@@ -1750,7 +1750,9 @@ impl PerformsWakeAndDrain for RunningNexus {
         if matches!(oldest.message, signal_flow::Message::Soft(_)) {
             let resting = match node.harness_kind {
                 HarnessKind::Codex => self.codex_resting(&flow_id),
-                HarnessKind::Claude => self.claude_main_turn_ended(&node),
+                HarnessKind::Claude => {
+                    self.turn_end_recorded(&flow_id) || self.claude_main_turn_ended(&node)
+                }
             };
             if !resting {
                 return Outcome::WaitingForTurn(oldest.logical_delivery_id);
@@ -2409,7 +2411,21 @@ impl WakesInParts for RunningNexus {
             return AtStop::Kept(KeptAtStop::Waking);
         }
         let node = match self.store.flow_node(flow_id) {
-            Ok(Some(node)) => self.herdr.refresh_route(node),
+            Ok(Some(node)) => {
+                // A Flow-owned Claude's Stop lifecycle report may remove
+                // Herdr's auto-detected agent before this synchronous hook
+                // returns. Keep the persisted, launch-owned pane when its
+                // exact selected process is still there; refreshing that
+                // route through the managed-agent roster would erase the
+                // only pane Flow is responsible for stopping.
+                if node.harness_kind == HarnessKind::Claude
+                    && self.herdr.flow_owned_claude_session_is_running(&node)
+                {
+                    node
+                } else {
+                    self.herdr.refresh_route(node)
+                }
+            }
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
@@ -2442,23 +2458,33 @@ impl WakesInParts for RunningNexus {
                     &pane_agent,
                     PaneAgent::Present { agent_state, .. } if Self::rests_at(agent_state)
                 );
+                // A Flow-owned Claude is intentionally outside Herdr's
+                // managed-agent lifecycle. Its synchronous Stop hook is the
+                // native turn-end event which reaches this path; the exact
+                // selected session in the pane's actual foreground is the
+                // process Flow owns and can now stop. Claude may flush the
+                // final transcript row only after the hook returns, so that
+                // file cannot be the hook's own readiness prerequisite.
+                let flow_owned_resting = self.herdr.flow_owned_claude_session_is_running(&node);
                 // Closing a seat ends whatever runs in it: one whose main
                 // turn ended while its background agents run shows Working,
-                // and is refreshed only once Herdr shows it resting.
-                if refresh_due && !native_resting {
+                // and is refreshed only once Herdr shows it resting. The
+                // Flow-owned Stop boundary above is the equivalent proof.
+                if refresh_due && !native_resting && !flow_owned_resting {
                     return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
                 }
                 let claude_main_ready = self.claude_main_turn_ended(&node)
-                    && matches!(
-                        self.delivery_target(flow_id)
-                            .ok()
-                            .and_then(|target| self.writable_state(&target).ok()),
-                        Some(AgentState::Working | AgentState::Idle | AgentState::Done)
-                    );
+                    && (flow_owned_resting
+                        || matches!(
+                            self.delivery_target(flow_id)
+                                .ok()
+                                .and_then(|target| self.writable_state(&target).ok()),
+                            Some(AgentState::Working | AgentState::Idle | AgentState::Done)
+                        ));
                 if !native_resting && !claude_main_ready {
                     return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
                 }
-                native_resting
+                native_resting || flow_owned_resting
             }
         };
         if refresh_due {

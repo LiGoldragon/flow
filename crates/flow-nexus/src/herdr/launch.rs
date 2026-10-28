@@ -530,7 +530,6 @@ impl PreparesClaudePane for HerdrCli {
                 reserved,
                 &self.ordinary_socket,
                 &self.executable,
-                &pane.herdr_session_name,
                 &launch.lean_start().environment(),
                 &readiness_path,
             ),
@@ -1037,7 +1036,6 @@ pub(crate) trait PreparesClaudeEnvironment {
         reserved: Option<&str>,
         socket: &Path,
         herdr: &Path,
-        herdr_session: &str,
         environment: &[String],
         readiness_socket: &Path,
     ) -> String;
@@ -1049,7 +1047,6 @@ impl PreparesClaudeEnvironment for str {
         reserved: Option<&str>,
         socket: &Path,
         herdr: &Path,
-        herdr_session: &str,
         environment: &[String],
         readiness_socket: &Path,
     ) -> String {
@@ -1062,11 +1059,10 @@ impl PreparesClaudeEnvironment for str {
             .map(|variable| format!(" && export {}", variable.shell_quoted()))
             .collect::<String>();
         format!(
-            "unset {} && export FLOW_SOCKET={} && export FLOW_HERDR_EXECUTABLE={} && export FLOW_HERDR_SESSION={} && export FLOW_CLAUDE_READY_SOCKET={}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
+            "unset {} && export FLOW_SOCKET={} && export FLOW_HERDR_EXECUTABLE={} && export FLOW_CLAUDE_READY_SOCKET={}{flow_id}{leave_outs} && printf 'FLOW_CLAUDE_ENV_READY_%s\\n' {}",
             HerdrCli::CLAUDE_INHERITED_ENVIRONMENT.join(" "),
             socket.to_string_lossy().shell_quoted(),
             herdr.to_string_lossy().shell_quoted(),
-            herdr_session.shell_quoted(),
             readiness_socket.to_string_lossy().shell_quoted(),
             marker_suffix
         )
@@ -2408,7 +2404,7 @@ impl ObservesBoundPane for HerdrCli {
                     pane.herdr_session_name.clone(),
                     "agent".into(),
                     "get".into(),
-                    pane.herdr_agent_name.clone(),
+                    pane.herdr_pane_id.clone(),
                 ])
                 .ok()
                 .and_then(|response| response.pointer("/result/agent/agent_session").cloned())
@@ -2430,10 +2426,10 @@ impl ObservesBoundPane for HerdrCli {
             let report = if already_reported {
                 Ok(0)
             } else {
+                let timeout = u64::try_from(self.timings.launch_rest_wait)
+                    .map_err(|_| "Flow-owned Claude readiness timeout is invalid".to_owned())?;
                 readiness
-                    .set_read_timeout(Some(Duration::from_millis(
-                        self.timings.launch_rest_wait as u64,
-                    )))
+                    .set_read_timeout(Some(Duration::from_millis(timeout)))
                     .map_err(|error| {
                         format!("Flow-owned Claude readiness timeout failed: {error}")
                     })?;
@@ -2452,12 +2448,17 @@ impl ObservesBoundPane for HerdrCli {
                 &launch.launch_profile.model_name,
             )?;
         }
+        let observed_agent = if flow_owned_claude {
+            &pane.herdr_pane_id
+        } else {
+            &pane.herdr_agent_name
+        };
         let response = self.run_json(&[
             "--session".into(),
             pane.herdr_session_name.clone(),
             "agent".into(),
             "get".into(),
-            pane.herdr_agent_name.clone(),
+            observed_agent.clone(),
         ])?;
         let agent = response
             .pointer("/result/agent")
@@ -3677,7 +3678,6 @@ printf '%s\n' "$alias"
                 None,
                 Path::new("/run/flow.sock"),
                 Path::new("/fixture/herdr"),
-                "fixture-session",
                 &[],
                 Path::new("/fixture/ready.sock"),
             ),
@@ -3711,7 +3711,6 @@ printf '%s\n' "$alias"
                     Some("5a4d0b"),
                     Path::new("/run/flow.sock"),
                     Path::new("/fixture/herdr"),
-                    "fixture-session",
                     &[],
                     Path::new("/fixture/ready.sock")
                 ),
@@ -3739,7 +3738,6 @@ printf '%s\n' "$alias"
                     None,
                     Path::new("/run/user/1001/flow-next/it's a $HOME/flow.sock"),
                     Path::new("/fixture/herdr"),
-                    "fixture-session",
                     &[],
                     Path::new("/fixture/ready.sock")
                 ),

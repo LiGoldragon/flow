@@ -158,7 +158,11 @@ fn main() -> ExitCode {
     std::thread::scope(|scope| {
         // One connection per live Codex thread answers its send-tool calls.
         let send_tool_nexus = &nexus;
-        scope.spawn(move || send_tool_nexus.serve_send_tool(scope));
+        scope.spawn(move || {
+            if let Ok(configured) = send_tool_nexus.configured_use() {
+                send_tool_nexus.serve_send_tool(&configured, scope)
+            }
+        });
         // Work the last Nexus owed is taken up while the sockets serve:
         // queued deliveries are reconciled, every successor owed is started
         // or resumed, and every metaflow due a wake is woken.

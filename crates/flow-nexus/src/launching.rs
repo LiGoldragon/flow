@@ -390,7 +390,7 @@ impl LaunchesFlows for RunningNexus {
         let harness_kind = launch.harness_kind.clone();
         let response = self.launch_reserved(configured, launch, origin, reserved.clone());
         // The launch's own responder ends with it, whatever it came to.
-        self.close_launch_responder();
+        self.configured_effects(configured).close_launch_responder();
         // A launch refused after its pane exists leaves nothing running: its
         // pane is closed and the flow it registered recorded Stopped. Then
         // it gives back the flow it held and the FlowId it claimed; the
@@ -898,6 +898,9 @@ pub trait ReconcilesInterruptedLaunches {
 
 impl ReconcilesInterruptedLaunches for RunningNexus {
     fn reconcile_interrupted_launches(&self) {
+        let Ok(configured) = self.configured_use() else {
+            return;
+        };
         use crate::codex::{AccountsOpenedThread, SelectsCodexEndpoint};
         use crate::send_tool::RefusesInterruptedCalls;
         use crate::store::launch_cleanup::{
@@ -970,7 +973,9 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
                     .adapter_for(&attempt.launch_profile.model_name)
                 {
                     Ok(adapter) => {
-                        let answered = self.refuse_interrupted_calls(&thread, &adapter);
+                        let answered = self
+                            .configured_effects(&configured)
+                            .refuse_interrupted_calls(&thread, &adapter);
                         let account = adapter.account_opened_thread(&thread);
                         eprintln!(
                             "flow-nexus: launch {launch_request_id} interrupted after opening thread {thread}: {answered:?}, {account:?}"

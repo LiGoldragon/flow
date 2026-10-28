@@ -64,6 +64,8 @@ pub mod waking;
 use binding::{ChecksFlowContainer, ChecksProcessIdentity, VerifiesAdoptedSeat};
 use caller::{IdentifiesPeer, LocatesCallerPane, ResolvesCaller};
 use codex::{CodexEndpoints, ConsumesResetCredit};
+use codex_turns::SettlesRestingCodexSeats;
+use compacting::WatchesCompactions;
 use composition::{LaunchComposer, OpensLaunchComposer};
 use context::{CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
@@ -75,7 +77,7 @@ use observe_sends::ObservesLogicalSends;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
-use send_tool::ServesLaunchCalls;
+use send_tool::{ServesLaunchCalls, WakesDeferred};
 use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRouteSelection, ObserveSelection, Origin,
@@ -100,8 +102,8 @@ use store::{
     AppliesFlowQuery, FlowStore, NamesLiveFlow, OpensFlowStore, ReadsFlowRows,
     RegistersExistingFlow, RegistersFlowIdentity,
 };
-use waking::SettlesStopsAtConfirmation;
 use waking::SleepsAndWakesSeats;
+use waking::{RestsEndedAwake, SettlesStopsAtConfirmation};
 
 pub struct RunningNexus {
     /// The exact typed runtime value that opened this Nexus.
@@ -230,8 +232,13 @@ pub(crate) struct ConfiguredEffects<'a> {
     pub(crate) configured: &'a ConfiguredUse,
     pub(crate) operational: operational::OperationalStore<'a>,
     pub(crate) dispatch_gate: &'a Mutex<()>,
-    wake_due: Box<dyn Fn(signal_flow::Address) + 'a>,
-    rest_ended_awake: Box<dyn Fn(&signal_flow::Address) + 'a>,
+    pub(crate) launch_calls: &'a send_tool::LaunchCalls,
+    pub(crate) stopping: &'a Stopping,
+    codex_events: Box<dyn Fn(&str, Vec<codex_turns::TurnEvent>) + Send + Sync + 'a>,
+    observe_codex_events: Box<dyn Fn(&str, Vec<codex_turns::TurnEvent>) + Send + Sync + 'a>,
+    codex_context_signal: Box<dyn Fn(&str, compacting::CodexContextSignal) + Send + Sync + 'a>,
+    wake_due: Box<dyn Fn(signal_flow::Address) + Send + Sync + 'a>,
+    rest_ended_awake: Box<dyn Fn(&signal_flow::Address) + Send + Sync + 'a>,
 }
 
 impl RunningNexus {
@@ -243,13 +250,37 @@ impl RunningNexus {
             configured,
             operational: operational::OperationalStore::new(&self.store),
             dispatch_gate: &self.dispatch_gate,
+            launch_calls: &self.launch_calls,
+            stopping: &self.stopping,
+            codex_events: Box::new(move |thread, events| self.codex_events(thread, events)),
+            observe_codex_events: Box::new(move |thread, events| {
+                self.observe_codex_events(thread, events)
+            }),
+            codex_context_signal: Box::new(move |thread, signal| {
+                self.codex_context_signal(thread, signal)
+            }),
             wake_due: Box::new(move |address| self.wake_due(address)),
-            rest_ended_awake: Box::new(move |address| self.rest_ended_awake(address)),
+            rest_ended_awake: Box::new(move |address| {
+                self.rest_ended_awake(address);
+            }),
         }
     }
 }
 
 impl ConfiguredEffects<'_> {
+    pub(crate) fn codex_events(&self, thread: &str, events: Vec<codex_turns::TurnEvent>) {
+        (self.codex_events)(thread, events)
+    }
+    pub(crate) fn observe_codex_events(&self, thread: &str, events: Vec<codex_turns::TurnEvent>) {
+        (self.observe_codex_events)(thread, events)
+    }
+    pub(crate) fn codex_context_signal(
+        &self,
+        thread: &str,
+        signal: compacting::CodexContextSignal,
+    ) {
+        (self.codex_context_signal)(thread, signal)
+    }
     pub(crate) fn wake_due(&self, address: signal_flow::Address) {
         (self.wake_due)(address)
     }

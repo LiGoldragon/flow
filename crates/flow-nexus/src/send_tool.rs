@@ -408,7 +408,7 @@ impl HandlesSendCall for ConfiguredEffects<'_> {
                 },
             };
             let sender_flow_id = sender_flow_id.or_else(|| {
-                configured
+                self.configured
                     .herdr
                     .claim_flow_identity(&HarnessKind::Codex, &root_thread)
                     .ok()
@@ -524,7 +524,6 @@ pub(crate) trait RespondsToSendCalls {
     /// reconnecting whenever it closes.
     fn respond_for(
         &self,
-        configured: &crate::ConfiguredUse,
         thread: &str,
         adapter: &CodexAdapter,
         signals: mpsc::Sender<ResponderSignal>,
@@ -536,18 +535,16 @@ pub(crate) trait RespondsToSendCalls {
     /// Wake. Err when the answer could not be written.
     fn answer_request(
         &self,
-        configured: &crate::ConfiguredUse,
         subscription: &mut ThreadSubscription,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable>;
 }
 
-impl PacesReconnection for RunningNexus {}
+impl PacesReconnection for ConfiguredEffects<'_> {}
 
-impl RespondsToSendCalls for RunningNexus {
+impl RespondsToSendCalls for ConfiguredEffects<'_> {
     fn respond_for(
         &self,
-        configured: &crate::ConfiguredUse,
         thread: &str,
         adapter: &CodexAdapter,
         signals: mpsc::Sender<ResponderSignal>,
@@ -560,9 +557,10 @@ impl RespondsToSendCalls for RunningNexus {
             // complete committed generation; an already-open subscription
             // keeps the generation with which this iteration began.
             let first_wait =
-                Duration::from_millis(configured.snapshot.timings.send_tool_first_wait as u64);
-            let longest_wait =
-                Duration::from_millis(configured.snapshot.timings.send_tool_longest_wait as u64);
+                Duration::from_millis(self.configured.snapshot.timings.send_tool_first_wait as u64);
+            let longest_wait = Duration::from_millis(
+                self.configured.snapshot.timings.send_tool_longest_wait as u64,
+            );
             if wait.is_zero() {
                 wait = first_wait;
             } else {
@@ -583,7 +581,7 @@ impl RespondsToSendCalls for RunningNexus {
                     wait = first_wait;
                     let early = std::mem::take(&mut subscription.early);
                     let mut open = early.into_iter().all(|request| {
-                        self.answer_request(configured, &mut subscription, request)
+                        self.answer_request(&mut subscription, request)
                             .inspect_err(|error| {
                                 eprintln!("flow-nexus: send tool for thread {thread}: {error}")
                             })
@@ -605,8 +603,7 @@ impl RespondsToSendCalls for RunningNexus {
                                 return;
                             }
                             Ok(ProxyEvent::Reply(Ok(message))) => {
-                                if let Err(error) =
-                                    self.answer_request(configured, &mut subscription, message)
+                                if let Err(error) = self.answer_request(&mut subscription, message)
                                 {
                                     eprintln!("flow-nexus: send tool for thread {thread}: {error}");
                                     open = false;
@@ -633,7 +630,6 @@ impl RespondsToSendCalls for RunningNexus {
 
     fn answer_request(
         &self,
-        configured: &crate::ConfiguredUse,
         subscription: &mut ThreadSubscription,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable> {
@@ -660,7 +656,7 @@ impl RespondsToSendCalls for RunningNexus {
             .cloned()
             .and_then(ToolCall::read_tool_call::<serde_json::Value>)
         {
-            Some(call) => self.configured_effects(configured).handle_send_call(call),
+            Some(call) => self.handle_send_call(call),
             None => Self::refused(SendRefusal::Malformed),
         };
         let answered = subscription.answer(id, outcome.tool_response());
@@ -693,35 +689,28 @@ pub(crate) trait ServesLaunchCalls {
     /// looks again whether the work it waits on has ended.
     /// Keeps the connection that opened the launch's thread as its
     /// responder.
-    fn hold_launch_responder(&self, configured: &crate::ConfiguredUse, responder: LaunchResponder);
+    fn hold_launch_responder(&self, responder: LaunchResponder);
     /// Runs `work`, an outside wait that writes nothing to the store, while
     /// the caller, holding the dispatch gate, answers the calls the
     /// launch's connection brings. Without a launch responder, `work` runs
     /// alone.
-    fn serving_launch_calls<T: Send>(
-        &self,
-        configured: &crate::ConfiguredUse,
-        work: impl FnOnce() -> T + Send,
-    ) -> T;
+    fn serving_launch_calls<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T;
     /// Handles one server request of the launch's connection as the gate's
     /// holder and answers it.
     fn answer_launch_call(
         &self,
-        configured: &crate::ConfiguredUse,
         responder: &mut LaunchResponder,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable>;
     /// At the launch's end, whatever it came to: answers the calls already
     /// read, then closes the connection. A later call is the Nexus's
     /// responders' (`ServesSendTool`).
-    fn close_launch_responder(&self, configured: &crate::ConfiguredUse);
-    /// Off the dispatch gate, considers every target admitted during launch.
-    fn wake_deferred(&self);
+    fn close_launch_responder(&self);
 }
 
-impl ServesLaunchCalls for RunningNexus {
-    fn hold_launch_responder(&self, configured: &crate::ConfiguredUse, responder: LaunchResponder) {
-        self.close_launch_responder(configured);
+impl ServesLaunchCalls for ConfiguredEffects<'_> {
+    fn hold_launch_responder(&self, responder: LaunchResponder) {
+        self.close_launch_responder();
         *self
             .launch_calls
             .responder
@@ -729,11 +718,7 @@ impl ServesLaunchCalls for RunningNexus {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(responder);
     }
 
-    fn serving_launch_calls<T: Send>(
-        &self,
-        configured: &crate::ConfiguredUse,
-        work: impl FnOnce() -> T + Send,
-    ) -> T {
+    fn serving_launch_calls<T: Send>(&self, work: impl FnOnce() -> T + Send) -> T {
         let taken = self
             .launch_calls
             .responder
@@ -744,13 +729,13 @@ impl ServesLaunchCalls for RunningNexus {
             return work();
         };
         let serving_slice =
-            Duration::from_millis(configured.snapshot.timings.send_tool_serving_slice as u64);
+            Duration::from_millis(self.configured.snapshot.timings.send_tool_serving_slice as u64);
         let mut open = true;
         let outcome = std::thread::scope(|scope| {
             let running = scope.spawn(work);
             // The calls that arrived before the subscription was answered.
             for request in std::mem::take(&mut responder.subscription.early) {
-                if let Err(error) = self.answer_launch_call(configured, &mut responder, request) {
+                if let Err(error) = self.answer_launch_call(&mut responder, request) {
                     eprintln!("flow-nexus: launch send tool: {error}");
                     open = false;
                 }
@@ -762,9 +747,7 @@ impl ServesLaunchCalls for RunningNexus {
                     .next_event(&responder.inbox, Some(deadline))
                 {
                     Ok(ProxyEvent::Reply(Ok(message))) => {
-                        if let Err(error) =
-                            self.answer_launch_call(configured, &mut responder, message)
-                        {
+                        if let Err(error) = self.answer_launch_call(&mut responder, message) {
                             eprintln!("flow-nexus: launch send tool: {error}");
                             open = false;
                         }
@@ -798,7 +781,6 @@ impl ServesLaunchCalls for RunningNexus {
 
     fn answer_launch_call(
         &self,
-        configured: &crate::ConfiguredUse,
         responder: &mut LaunchResponder,
         request: serde_json::Value,
     ) -> Result<(), crate::codex::CodexAdapterUnavailable> {
@@ -831,9 +813,7 @@ impl ServesLaunchCalls for RunningNexus {
             .cloned()
             .and_then(ToolCall::read_tool_call::<serde_json::Value>)
         {
-            Some(call) => self
-                .configured_effects(configured)
-                .handle_held_send_call(call),
+            Some(call) => self.handle_held_send_call(call),
             None => Self::refused(SendRefusal::Malformed),
         };
         let answered = responder.subscription.answer(id, outcome.tool_response());
@@ -847,7 +827,7 @@ impl ServesLaunchCalls for RunningNexus {
         answered
     }
 
-    fn close_launch_responder(&self, configured: &crate::ConfiguredUse) {
+    fn close_launch_responder(&self) {
         let taken = self
             .launch_calls
             .responder
@@ -858,24 +838,28 @@ impl ServesLaunchCalls for RunningNexus {
             return;
         };
         for request in std::mem::take(&mut responder.subscription.early) {
-            let _ = self.answer_launch_call(configured, &mut responder, request);
+            let _ = self.answer_launch_call(&mut responder, request);
         }
         let deadline = Instant::now()
-            + Duration::from_millis(configured.snapshot.timings.send_tool_serving_slice as u64);
+            + Duration::from_millis(
+                self.configured.snapshot.timings.send_tool_serving_slice as u64,
+            );
         while let Ok(ProxyEvent::Reply(Ok(message))) = responder
             .subscription
             .next_event(&responder.inbox, Some(deadline))
         {
-            if self
-                .answer_launch_call(configured, &mut responder, message)
-                .is_err()
-            {
+            if self.answer_launch_call(&mut responder, message).is_err() {
                 break;
             }
         }
         responder.subscription.close();
     }
+}
 
+pub(crate) trait WakesDeferred {
+    fn wake_deferred(&self);
+}
+impl WakesDeferred for RunningNexus {
     fn wake_deferred(&self) {
         let wakes = std::mem::take(
             &mut *self
@@ -911,24 +895,14 @@ pub(crate) trait RefusesInterruptedCalls {
     /// window: from its record when one holds the same call, else refused
     /// (`ThreadUnowned`; `KeyReused` when its key's record holds another
     /// call).
-    fn refuse_interrupted_calls(
-        &self,
-        configured: &crate::ConfiguredUse,
-        thread: &str,
-        adapter: &CodexAdapter,
-    ) -> InterruptedCalls;
+    fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls;
     /// The answer to one replayed call; true when it came from its record.
     fn interrupted_call_outcome(&self, thread: &str, call: Option<ToolCall>)
     -> (SendOutcome, bool);
 }
 
-impl RefusesInterruptedCalls for RunningNexus {
-    fn refuse_interrupted_calls(
-        &self,
-        configured: &crate::ConfiguredUse,
-        thread: &str,
-        adapter: &CodexAdapter,
-    ) -> InterruptedCalls {
+impl RefusesInterruptedCalls for ConfiguredEffects<'_> {
+    fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls {
         let mut tally = InterruptedCalls::default();
         let (signals, inbox) = mpsc::channel();
         let mut subscription = match adapter.subscribe_thread(thread, 1, &signals, &inbox) {
@@ -963,7 +937,9 @@ impl RefusesInterruptedCalls for RunningNexus {
             .into_iter()
             .all(|request| answer(&mut subscription, request));
         let deadline = Instant::now()
-            + Duration::from_millis(configured.snapshot.timings.send_tool_replay_window as u64);
+            + Duration::from_millis(
+                self.configured.snapshot.timings.send_tool_replay_window as u64,
+            );
         while open {
             match subscription.next_event(&inbox, Some(deadline)) {
                 Ok(ProxyEvent::Reply(Ok(message))) => open = answer(&mut subscription, message),
@@ -988,7 +964,7 @@ impl RefusesInterruptedCalls for RunningNexus {
         {
             (Self::refused(SendRefusal::ThreadUnowned), false)
         } else {
-            match self.store.send_call(&call.tool_call_key) {
+            match self.operational.send_call(&call.tool_call_key) {
                 Ok(Some(recorded)) if recorded.content_sha256 == call.content_sha256() => {
                     (recorded.send_outcome, true)
                 }
@@ -1003,7 +979,17 @@ impl RefusesInterruptedCalls for RunningNexus {
                 }
             }
         };
-        (self.journal_send_invocation(&call, outcome), recorded)
+        (
+            {
+                let invocation = call.send_invocation(outcome.clone());
+                eprintln!(
+                    "flow-nexus: {}",
+                    invocation.datomize(Vec::new()).protosize().compact()
+                );
+                outcome
+            },
+            recorded,
+        )
     }
 }
 
@@ -1109,7 +1095,8 @@ impl KeepsSendToolResponders for SendToolResponders {
                 thread.clone(),
                 (configured.generation.clone(), signals.clone()),
             );
-            scope.spawn(move || nexus.respond_for(configured, &thread, &adapter, signals, inbox));
+            let effects = nexus.configured_effects(configured);
+            scope.spawn(move || effects.respond_for(&thread, &adapter, signals, inbox));
         }
     }
 

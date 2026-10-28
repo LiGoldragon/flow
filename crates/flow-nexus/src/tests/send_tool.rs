@@ -493,8 +493,13 @@ fn responding<T>(
     std::thread::scope(|scope| {
         let (signals, inbox) = mpsc::channel();
         let stop = signals.clone();
-        let responder =
-            scope.spawn(move || fixture.nexus.respond_for(thread, adapter, signals, inbox));
+        let responder = scope.spawn(move || {
+            let configured = fixture.nexus.configured_use().unwrap();
+            fixture
+                .nexus
+                .configured_effects(&configured)
+                .respond_for(thread, adapter, signals, inbox)
+        });
         let result = done();
         stop.send(ResponderSignal::Stop).unwrap();
         responder.join().expect("responder ends when told to stop");
@@ -813,9 +818,11 @@ fn a_pending_call_is_answered_after_start_and_reconnect() {
         },
     ]);
     fixture.adapter("gpt-sol", &fake);
+    let configured = fixture.nexus.configured_use().unwrap();
     let answer = std::thread::scope(|scope| {
         let nexus = &fixture.nexus;
-        let server = scope.spawn(move || nexus.serve_send_tool(scope));
+        let configured = &configured;
+        let server = scope.spawn(move || nexus.serve_send_tool(configured, scope));
         let answer = answer_to(&fake.written_on(4, |m| m["id"] == 14), 14);
         nexus.stopping.request();
         nexus.store.launch_changes.announce();
@@ -1126,7 +1133,12 @@ fn witness_a_real_call_is_queued_once_across_a_forced_reconnect() {
         let nexus = &fixture.nexus;
         let thread = thread.as_str();
         let adapter = &adapter;
-        let responder = scope.spawn(move || nexus.respond_for(thread, adapter, signals, inbox));
+        let responder = scope.spawn(move || {
+            let configured = nexus.configured_use().unwrap();
+            nexus
+                .configured_effects(&configured)
+                .respond_for(thread, adapter, signals, inbox)
+        });
         // The answer reaches the app-server; the model's turn then ends.
         // The record and the queue are what Flow witnesses here; the
         // rollout shows the tool's output.
@@ -1259,7 +1271,9 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
         })
         .expect("the thread opens and is named");
     start_first_turn(&mut connection, &launch, &thread);
-    nexus.hold_launch_responder(connection);
+    nexus
+        .configured_effects(&nexus.configured_use().unwrap())
+        .hold_launch_responder(connection);
     let rollout_shows_turn_complete = || {
         let deadline = Instant::now() + Duration::from_secs(180);
         while Instant::now() < deadline {
@@ -1275,8 +1289,12 @@ fn witness_a_first_turn_call_is_served_while_the_launch_holds_the_gate() {
         }
         None
     };
-    let rollout = nexus.serving_launch_calls(rollout_shows_turn_complete);
-    nexus.close_launch_responder();
+    let rollout = nexus
+        .configured_effects(&nexus.configured_use().unwrap())
+        .serving_launch_calls(rollout_shows_turn_complete);
+    nexus
+        .configured_effects(&nexus.configured_use().unwrap())
+        .close_launch_responder();
     drop(gate);
     let rollout = rollout.expect("the first turn completes while the gate is held");
     let outputs = rollout

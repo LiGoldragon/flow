@@ -390,7 +390,8 @@ impl RunningNexus {
                         // That connection answers the thread's calls while
                         // the launch holds the gate.
                         Ok((thread, connection)) => {
-                            self.hold_launch_responder(connection);
+                            self.configured_effects(configured)
+                                .hold_launch_responder(connection);
                             Some(thread)
                         }
                         Err(error) => {
@@ -506,20 +507,23 @@ impl RunningNexus {
                 let submission = match composed_launch.harness_kind {
                     // The part's turn may call the send tool at once: the
                     // launch, holding the gate, answers it meanwhile.
-                    HarnessKind::Codex => self.serving_launch_calls(|| {
-                        configured
-                            .codex_endpoints
-                            .adapter_for(&composed_launch.launch_profile.model_name)
-                            .map_err(|_| Failed_Data::CodexRefused)
-                            .and_then(|adapter| {
-                                adapter
-                                    .submit_bound_codex_part(
-                                        &composed_launch,
-                                        &prompt_delivery_intent,
-                                    )
+                    HarnessKind::Codex => {
+                        self.configured_effects(configured)
+                            .serving_launch_calls(|| {
+                                configured
+                                    .codex_endpoints
+                                    .adapter_for(&composed_launch.launch_profile.model_name)
                                     .map_err(|_| Failed_Data::CodexRefused)
+                                    .and_then(|adapter| {
+                                        adapter
+                                            .submit_bound_codex_part(
+                                                &composed_launch,
+                                                &prompt_delivery_intent,
+                                            )
+                                            .map_err(|_| Failed_Data::CodexRefused)
+                                    })
                             })
-                    }),
+                    }
                     HarnessKind::Claude => configured
                         .herdr
                         .submit_startup_part(&composed_launch, &prompt_delivery_intent)

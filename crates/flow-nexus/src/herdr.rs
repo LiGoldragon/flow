@@ -328,11 +328,7 @@ impl OperatesHerdrPane for HerdrCli {
 
 impl HerdrCli {
     #[cfg(test)]
-    pub(crate) fn retain_exited_fixture_claude(
-        &self,
-        pane_id: &str,
-        session_id: &str,
-    ) {
+    pub(crate) fn retain_exited_fixture_claude(&self, pane_id: &str, session_id: &str) {
         let mut process = Command::new("sleep")
             .arg("60")
             .spawn()
@@ -1708,6 +1704,7 @@ mod tests {
             let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, original.id(), 0) as i32 };
             assert!(pidfd >= 0);
             original.wait().unwrap();
+            assert!(super::pidfd_exited(pidfd, 1000));
 
             let closed = root.path().join(format!("closed-{name}"));
             let herdr = root.path().join("herdr");

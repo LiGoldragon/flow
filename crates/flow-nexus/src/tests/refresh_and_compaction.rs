@@ -3,8 +3,8 @@
 //! harness made while it kept working raises a warning.
 
 use super::waking::{
-    append_main_rows, claude_agent, claude_seat, claude_stop, claude_transcript, end_turn,
-    CLAUDE_SEAT,
+    CLAUDE_SEAT, append_main_rows, claude_agent, claude_seat, claude_stop, claude_transcript,
+    end_turn,
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture, StagedLaunch};
 use crate::compacting::{CodexContextSignal, WatchesCompactions, WritesTranscriptTime};
@@ -118,7 +118,7 @@ pub(super) fn declare_seat(
             continuity,
             purpose: String::new(),
             records: vec![],
-                left_out: vec![],
+            left_out: vec![],
             requires: vec![],
         }]))
         .expect("metaflow declared");
@@ -558,12 +558,14 @@ fn a_codex_compaction_is_raised_unless_a_compact_asked_for_it() {
     fixture
         .nexus
         .codex_context_signal(&thread, CodexContextSignal::Compacted("item-asked".into()));
-    assert!(fixture
-        .nexus
-        .store
-        .compactions_of("908786")
-        .unwrap()
-        .is_empty());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .compactions_of("908786")
+            .unwrap()
+            .is_empty()
+    );
     fixture
         .nexus
         .codex_context_signal(&thread, CodexContextSignal::Compacted("item-own".into()));

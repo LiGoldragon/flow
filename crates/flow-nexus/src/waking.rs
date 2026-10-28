@@ -89,7 +89,7 @@ use crate::herdr::pane::{PaneAgent, Placement, WritesPane};
 use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, ReadsHerdrRoster};
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
-use crate::send_tool::ServesLaunchCalls;
+use crate::send_tool::{ServesLaunchCalls, WakesDeferred};
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::events::RecordsHarnessEvents;

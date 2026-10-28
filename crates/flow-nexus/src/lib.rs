@@ -77,7 +77,7 @@ use observe_sends::ObservesLogicalSends;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
 use performing::Performs;
 use reporting::RecordsReports;
-use send_tool::{ServesLaunchCalls, WakesDeferred};
+use send_tool::{ServesLaunchCalls, ServesSendTool, WakesDeferred};
 use sending::{BindsSeats, LaunchesDeclared, SendsRequests};
 use signal_flow::{
     EndpointSelection, FlowLifecycle, FlowNode, HerdrRouteSelection, ObserveSelection, Origin,
@@ -149,7 +149,31 @@ pub(crate) struct ConfiguredUse {
     ordinary_socket_path: PathBuf,
 }
 
+/// The root-selected immutable capability for the send-tool service.
+pub struct SendToolIngress(ConfiguredUse);
+
+impl SendToolIngress {
+    pub fn serve<'scope, 'env>(
+        &'env self,
+        nexus: &'env RunningNexus,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+    ) {
+        nexus.serve_send_tool(&self.0, scope);
+    }
+}
+
 impl RunningNexus {
+    /// Selects the configuration generation for the send-tool service at
+    /// root ingress and returns only the capability that can serve it.
+    pub fn send_tool_ingress(&self) -> Option<SendToolIngress> {
+        self.configured_use().ok().map(SendToolIngress)
+    }
+
+    /// Exposes only the stop signal required by the process signal watcher.
+    pub fn stop_requested(&self) -> bool {
+        self.stopping.requested()
+    }
+
     pub(crate) fn configured_use(&self) -> Result<ConfiguredUse, store::StoreError> {
         let committed = self
             .store
@@ -351,9 +375,12 @@ impl Dispatches for RunningNexus {
                     Err(rejection) => Response::StartRejected(rejection),
                 }
             }
-            Query::Launch(launch) => match self.declared_launch(launch, None) {
-                Ok(query) => self.dispatch(query),
-                Err(refusal) => *refusal,
+            Query::Launch(launch) => match self.configured_use() {
+                Ok(configured) => match self.declared_launch(&configured, launch, None) {
+                    Ok(query) => self.dispatch(query),
+                    Err(refusal) => *refusal,
+                },
+                Err(_) => Response::Refused(signal_flow::Refusal::NotConfigured),
             },
             query => self.dispatch_from(query, Origin::Unbound),
         }
@@ -395,10 +422,16 @@ impl Dispatches for RunningNexus {
                     started: 0,
                 }))
             }
-            Query::Send(send) => self.send_request(send, None).response,
-            Query::Launch(launch) => match self.declared_launch(launch, None) {
-                Ok(query) => self.dispatch_from(query, origin),
-                Err(refusal) => *refusal,
+            Query::Send(send) => match self.configured_use() {
+                Ok(configured) => self.send_request(&configured, send, None).response,
+                Err(_) => Response::Refused(signal_flow::Refusal::NotConfigured),
+            },
+            Query::Launch(launch) => match self.configured_use() {
+                Ok(configured) => match self.declared_launch(&configured, launch, None) {
+                    Ok(query) => self.dispatch_from(query, origin),
+                    Err(refusal) => *refusal,
+                },
+                Err(_) => Response::Refused(signal_flow::Refusal::NotConfigured),
             },
             Query::LaunchStatus(launch_request_id) => self.launch_status(&launch_request_id),
             // Over a connection Observe streams; a direct dispatch answers the
@@ -1360,7 +1393,15 @@ impl ServesConnection for Connection {
             // A flow's own Send: its sender is the calling process. A queued
             // request's wake is read after the answer, off the gate.
             Query::Send(send) => {
-                let answer = nexus.send_request(send, self.process.as_ref());
+                let configured = match nexus.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => {
+                        return self.peer.write_response(&Response::Refused(
+                            signal_flow::Refusal::NotConfigured,
+                        ));
+                    }
+                };
+                let answer = nexus.send_request(&configured, send, self.process.as_ref());
                 let written = self.peer.write_response(&answer.response);
                 drop(self);
                 if let Some(pending) = answer.pending {
@@ -1373,27 +1414,48 @@ impl ServesConnection for Connection {
                 return written;
             }
             Query::DeliverAll(address) => {
-                let response = nexus.deliver_all(address, self.process.as_ref());
+                let configured = match nexus.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => {
+                        return self.peer.write_response(&Response::Refused(
+                            signal_flow::Refusal::NotConfigured,
+                        ));
+                    }
+                };
+                let response = nexus.deliver_all(&configured, address, self.process.as_ref());
                 return self.peer.write_response(&response);
             }
             Query::BindSeat(address) => {
-                let response = nexus.bind_seat(address.clone(), self.process.as_ref());
+                let configured = match nexus.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => {
+                        return self.peer.write_response(&Response::Refused(
+                            signal_flow::Refusal::NotConfigured,
+                        ));
+                    }
+                };
+                let response = nexus.bind_seat(&configured, address.clone(), self.process.as_ref());
                 return self.peer.write_response(&response);
             }
             // A Launch is the Start its declaration names, from the calling
             // process, or, for a metaflow Awake as a live flow, the Replace
             // of that flow under the metaflow's lock.
             Query::Launch(launch) => {
-                let configured = nexus.configured_use().ok();
-                let origin = configured.as_ref().map_or(Origin::Unbound, |configured| {
-                    nexus.origin_of_configured(configured, self.peer.peer_process())
-                });
+                let configured = match nexus.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => {
+                        return self.peer.write_response(&Response::Refused(
+                            signal_flow::Refusal::NotConfigured,
+                        ));
+                    }
+                };
+                let origin = nexus.origin_of_configured(&configured, self.peer.peer_process());
                 let declared = {
                     let _turn = nexus
                         .dispatch_gate
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    nexus.declared_launch(launch, self.process.as_ref())
+                    nexus.declared_launch(&configured, launch, self.process.as_ref())
                 };
                 match declared {
                     Ok(Query::Start(profile)) => match nexus.configured_use() {
@@ -5956,9 +6018,11 @@ mod tests {
         let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
         let peer = FlowStore::process_identity_for_pid(caller.0.id()).expect("caller identity");
         let send = |recipient: Recipient, request: Request, peer: &signal_flow::Process| {
+            let configured = fixture.nexus.configured_use().expect("configured fixture");
             fixture
                 .nexus
                 .send_request(
+                    &configured,
                     SendRequest {
                         recipient,
                         delivery: Delivery::Queue,
@@ -6063,10 +6127,11 @@ mod tests {
             remembering: signal_flow::Remembering::Predecessors(1),
             instruction_prompt: "Publish the newest edition.".into(),
         };
-        let Ok(Query::Start(profile)) = fixture
-            .nexus
-            .declared_launch(launch(declared.clone()), None)
-        else {
+        let Ok(Query::Start(profile)) = fixture.nexus.declared_launch(
+            &fixture.nexus.configured_use().expect("configured fixture"),
+            launch(declared.clone()),
+            None,
+        ) else {
             panic!("a declared Address launches as a Start");
         };
         assert_eq!(profile.address, declared);

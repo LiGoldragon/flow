@@ -53,7 +53,7 @@ fn declare(fixture: &NexusFixture, at: Address) {
             continuity: Continuity::OnDemand,
             purpose: String::new(),
             records: vec![],
-                left_out: vec![],
+            left_out: vec![],
             requires: vec![],
         }]))
         .expect("metaflow declared");
@@ -324,6 +324,7 @@ fn a_send_during_a_refresh_queues_for_the_successor_and_never_reaches_the_ending
         let (nexus, peer, request) = (&fixture.nexus, &peer, &request);
         let sending = scope.spawn(move || {
             let answer = nexus.send_request(
+                &nexus.configured_use().unwrap(),
                 SendRequest {
                     recipient: Recipient::Address(seat_address()),
                     delivery: Delivery::Wake,
@@ -631,6 +632,7 @@ fn an_abrupt_send_to_a_held_metaflow_is_queued_never_refused_busy() {
         .hold(&seat_address())
         .expect("the holder takes the metaflow");
     let sent = fixture.nexus.send_request(
+        &fixture.nexus.configured_use().unwrap(),
         SendRequest {
             recipient: Recipient::Address(seat_address()),
             delivery: Delivery::Wake,
@@ -739,6 +741,7 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
             let caller = MarkedProcess::spawn("sleep", &["30"], "pane-1");
             let peer = FlowStore::process_identity_for_pid(caller.0.id()).unwrap();
             let sent = fixture.nexus.send_request(
+                &fixture.nexus.configured_use().unwrap(),
                 SendRequest {
                     recipient: Recipient::Address(seat_address()),
                     delivery: Delivery::Wake,
@@ -812,6 +815,7 @@ fn a_launch_to_an_awake_metaflow_names_the_replace_of_its_flow() {
     );
     awake_seat(&fixture, vec![]);
     let Ok(Query::Replace(profile)) = fixture.nexus.declared_launch(
+        &fixture.nexus.configured_use().unwrap(),
         signal_flow::Launch_Data {
             address: seat_address(),
             remembering: signal_flow::Remembering::Predecessors(1),

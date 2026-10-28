@@ -162,7 +162,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                 Err(error) => return Response::Refused(Refusal::Store(error.to_string())).into(),
             }
             match query {
-                Query::Identify(process) => Ok(match self.sending_address(&process) {
+                Query::Identify(process) => Ok(match self.sending_address(&configured, &process) {
                     Ok(address) => Response::Identified(address),
                     Err(response) => *response,
                 }),
@@ -179,7 +179,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     // A metaflow another holds takes the request into its
                     // queue instead.
                     let direct_lease = if direct {
-                        match self.direct_send_lease(&recipient) {
+                        match self.direct_send_lease(&configured, &recipient) {
                             Ok(lease) => lease,
                             Err(refusal) => return (*refusal).into(),
                         }
@@ -196,8 +196,12 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     if direct {
                         response.response = match response.response {
                             Response::SendAccepted(accepted) => {
-                                self.complete_direct_send(&recipient, accepted.logical_delivery_id)
-                                    .response
+                                self.complete_direct_send(
+                                    &configured,
+                                    &recipient,
+                                    accepted.logical_delivery_id,
+                                )
+                                .response
                             }
                             Response::Refused(refusal) => {
                                 Response::Failed(signal_flow::SendFailure {

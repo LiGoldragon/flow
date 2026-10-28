@@ -1,6 +1,6 @@
-use crate::sending::{AdmitsSendPayload, MeasuresSendPayload, MAX_SEND_PAYLOAD_BYTES};
-use crate::store::metaflow::SleepsMetaflows;
+use crate::sending::{AdmitsSendPayload, MAX_SEND_PAYLOAD_BYTES, MeasuresSendPayload};
 use crate::store::ReadsFlowMemory;
+use crate::store::metaflow::SleepsMetaflows;
 use flow_ethos::{Address, Aspect, Layer, Request};
 
 fn sender() -> Address {
@@ -57,19 +57,20 @@ fn rendered_native_prompt_budget_counts_multibyte_utf8_bytes() {
         over.native_prompt_bytes(&sender),
         MAX_SEND_PAYLOAD_BYTES + 1
     );
-    assert!(over
-        .oversized_refusal(&sender, MAX_SEND_PAYLOAD_BYTES)
-        .is_some());
+    assert!(
+        over.oversized_refusal(&sender, MAX_SEND_PAYLOAD_BYTES)
+            .is_some()
+    );
 }
 
 #[test]
 fn wake_to_sleeping_or_unknown_fails_but_abrupt_queue_is_admitted() {
     use super::{
-        bind_existing_caller, codex_agent_in, ControlsHerdrSnapshot, MarkedProcess, NexusFixture,
+        ControlsHerdrSnapshot, MarkedProcess, NexusFixture, bind_existing_caller, codex_agent_in,
     };
     use crate::sending::SendsRequests;
-    use crate::store::metaflow::SeedsMetaflow;
     use crate::store::FlowStore;
+    use crate::store::metaflow::SeedsMetaflow;
     use signal_flow::{
         Delivery, Message, Metaflow, Recipient, Response, SendFailureReason, SendRequest,
     };
@@ -94,6 +95,7 @@ fn wake_to_sleeping_or_unknown_fails_but_abrupt_queue_is_admitted() {
         Message::MiddleAbrupt(Request::Order("direct middle".into())),
     ] {
         let answer = fixture.nexus.send_request(
+            &fixture.nexus.configured_use().unwrap(),
             SendRequest {
                 recipient: Recipient::Address(target.clone()),
                 delivery: Delivery::Wake,
@@ -113,20 +115,23 @@ fn wake_to_sleeping_or_unknown_fails_but_abrupt_queue_is_admitted() {
             answer.response
         );
         assert!(answer.pending.is_none());
-        assert!(fixture
-            .nexus
-            .store
-            .metaflow(&target)
-            .unwrap()
-            .unwrap()
-            .queue
-            .is_empty());
+        assert!(
+            fixture
+                .nexus
+                .store
+                .metaflow(&target)
+                .unwrap()
+                .unwrap()
+                .queue
+                .is_empty()
+        );
     }
     let unknown = Address {
         topic: "unknown-direct-target".into(),
         ..target.clone()
     };
     let answer = fixture.nexus.send_request(
+        &fixture.nexus.configured_use().unwrap(),
         SendRequest {
             recipient: Recipient::Address(unknown.clone()),
             delivery: Delivery::Wake,
@@ -141,6 +146,7 @@ fn wake_to_sleeping_or_unknown_fails_but_abrupt_queue_is_admitted() {
         Message::MiddleAbrupt(Request::Notice("middle queued".into())),
     ] {
         let answer = fixture.nexus.send_request(
+            &fixture.nexus.configured_use().unwrap(),
             SendRequest {
                 recipient: Recipient::Address(target.clone()),
                 delivery: Delivery::Queue,
@@ -151,6 +157,7 @@ fn wake_to_sleeping_or_unknown_fails_but_abrupt_queue_is_admitted() {
         assert!(matches!(answer.response, Response::SendAccepted(_)));
     }
     let queued = fixture.nexus.send_request(
+        &fixture.nexus.configured_use().unwrap(),
         SendRequest {
             recipient: Recipient::Address(target.clone()),
             delivery: Delivery::Queue,
@@ -175,16 +182,16 @@ fn wake_to_sleeping_or_unknown_fails_but_abrupt_queue_is_admitted() {
 #[test]
 fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
     use super::waking::{
-        append_main_rows, claude_agent, claude_seat, claude_transcript, end_turn, CLAUDE_SEAT,
-        CLAUDE_SESSION,
+        CLAUDE_SEAT, CLAUDE_SESSION, append_main_rows, claude_agent, claude_seat,
+        claude_transcript, end_turn,
     };
     use super::{
-        bind_existing_caller, codex_agent_in, ControlsHerdrSnapshot, MarkedProcess, NexusFixture,
-        PromptFixture,
+        ControlsHerdrSnapshot, MarkedProcess, NexusFixture, PromptFixture, bind_existing_caller,
+        codex_agent_in,
     };
     use crate::sending::SendsRequests;
-    use crate::store::metaflow::SeedsMetaflow;
     use crate::store::FlowStore;
+    use crate::store::metaflow::SeedsMetaflow;
     use signal_flow::{Delivery, Message, Metaflow, Recipient, Response, SendRequest};
     use std::io::Write;
     use std::time::{Duration, Instant};
@@ -289,6 +296,7 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
                 .response
         } else {
             let answer = fixture.nexus.send_request(
+                &fixture.nexus.configured_use().unwrap(),
                 SendRequest {
                     recipient: Recipient::Address(target.clone()),
                     delivery: Delivery::Wake,
@@ -325,14 +333,16 @@ fn an_active_abrupt_send_returns_sent_only_after_exact_native_receipt() {
             }
         );
         assert!(!receipt.logical_delivery_id.is_empty());
-        assert!(fixture
-            .nexus
-            .store
-            .metaflow(&target)
-            .unwrap()
-            .unwrap()
-            .queue
-            .is_empty());
+        assert!(
+            fixture
+                .nexus
+                .store
+                .metaflow(&target)
+                .unwrap()
+                .unwrap()
+                .queue
+                .is_empty()
+        );
     }
 }
 
@@ -347,7 +357,12 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         topic: "newConfiguredDirect".into(),
         layer: Layer::Secondary,
     };
-    assert!(fixture.nexus.direct_send_lease(&target).is_err());
+    assert!(
+        fixture
+            .nexus
+            .direct_send_lease(&fixture.nexus.configured_use().unwrap(), &target)
+            .is_err()
+    );
     assert!(fixture.nexus.store.metaflow(&target).unwrap().is_none());
     let declaration = meta_signal_flow::ConfigureMetaflow {
         address: target.clone(),
@@ -357,7 +372,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         continuity: meta_signal_flow::Continuity::OnDemand,
         purpose: String::new(),
         records: vec![],
-                left_out: vec![],
+        left_out: vec![],
         requires: vec![],
     };
     fixture
@@ -381,7 +396,7 @@ fn direct_start_preflight_materializes_only_configured_working_state() {
         .unwrap();
     let lease = fixture
         .nexus
-        .direct_send_lease(&target)
+        .direct_send_lease(&fixture.nexus.configured_use().unwrap(), &target)
         .expect("configured address can start");
     let working = fixture.nexus.store.metaflow(&target).unwrap().unwrap();
     assert_eq!(working.state, flow_ethos::State::Asleep);

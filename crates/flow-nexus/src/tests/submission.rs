@@ -7,8 +7,8 @@
 //! occupied and was parked for good.
 
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
-use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::Dispatches;
+use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use meta_signal_flow::{
     Body, Delivery, DeliveryGrade, DeliveryRejection, DeliveryRequest, InterruptWitness, Letter,
     Message, Query as MetaQuery, Response as MetaResponse,

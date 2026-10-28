@@ -155,12 +155,14 @@ fn main() -> ExitCode {
     nexus.reconcile_interrupted_launches();
     // Every thread borrows the Nexus inside this scope, so when a stop has
     // ended them all the Nexus drops here and its store closes cleanly.
+    let send_tool_ingress = nexus.send_tool_ingress();
     std::thread::scope(|scope| {
         // One connection per live Codex thread answers its send-tool calls.
         let send_tool_nexus = &nexus;
+        let send_tool_ingress = &send_tool_ingress;
         scope.spawn(move || {
-            if let Ok(configured) = send_tool_nexus.configured_use() {
-                send_tool_nexus.serve_send_tool(&configured, scope)
+            if let Some(ingress) = send_tool_ingress {
+                ingress.serve(send_tool_nexus, scope);
             }
         });
         // Work the last Nexus owed is taken up while the sockets serve:
@@ -168,7 +170,7 @@ fn main() -> ExitCode {
         // or resumed, and every metaflow due a wake is woken.
         scope.spawn(|| nexus.recover_wakes());
         scope.spawn(|| {
-            if signals.watch(&|| nexus.stopping.requested()) {
+            if signals.watch(&|| nexus.stop_requested()) {
                 nexus.stop(&sockets);
             }
         });

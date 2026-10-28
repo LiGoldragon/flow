@@ -175,22 +175,40 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
         tui.0.id(),
     );
     assert_eq!(
-        fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
+        fixture.nexus.bind_seat(
+            &fixture.nexus.configured_use().unwrap(),
+            address.clone(),
+            Some(&subagent)
+        ),
         Response::Refused(Refusal::Unidentified(subagent.clone()))
     );
 
     super::herdr_world(&fixture, vec![unreported_codex("w12:p1")], tui.0.id());
     // A thread whose session no pane runs names no seat.
     assert_eq!(
-        fixture.nexus.bind_seat(address.clone(), Some(&orphan)),
+        fixture.nexus.bind_seat(
+            &fixture.nexus.configured_use().unwrap(),
+            address.clone(),
+            Some(&orphan)
+        ),
         Response::Refused(Refusal::Unidentified(orphan.clone()))
     );
     // The subagent's command binds its flow's seat, under the root's claim.
     assert_eq!(
-        fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
+        fixture.nexus.bind_seat(
+            &fixture.nexus.configured_use().unwrap(),
+            address.clone(),
+            Some(&subagent)
+        ),
         Response::Bound("877549".into())
     );
-    assert_eq!(fixture.nexus.sending_address(&subagent).unwrap(), address);
+    assert_eq!(
+        fixture
+            .nexus
+            .sending_address(&fixture.nexus.configured_use().unwrap(), &subagent)
+            .unwrap(),
+        address
+    );
     // Message's authenticated Identify bridge uses the same root-aware
     // kernel caller resolution as direct Flow Send, never a claimed seat.
     use crate::metaflow::DispatchesMetaflowPeer;
@@ -260,20 +278,32 @@ fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
     for pid in [root.0.id(), child_pid] {
         let peer = FlowStore::process_identity_for_pid(pid).unwrap();
         assert_eq!(
-            fixture.nexus.bind_seat(address.clone(), Some(&peer)),
+            fixture.nexus.bind_seat(
+                &fixture.nexus.configured_use().unwrap(),
+                address.clone(),
+                Some(&peer)
+            ),
             Response::Bound(CLAUDE_SEAT.into())
         );
         let mut forged = peer;
         forged.started += 1;
         assert!(matches!(
-            fixture.nexus.bind_seat(address.clone(), Some(&forged)),
+            fixture.nexus.bind_seat(
+                &fixture.nexus.configured_use().unwrap(),
+                address.clone(),
+                Some(&forged)
+            ),
             Response::Refused(Refusal::Unidentified(_))
         ));
     }
     let stranger = MarkedProcess::spawn("sleep", &["30"], "unknown-pane");
     let unknown = FlowStore::process_identity_for_pid(stranger.0.id()).unwrap();
     assert!(matches!(
-        fixture.nexus.bind_seat(address, Some(&unknown)),
+        fixture.nexus.bind_seat(
+            &fixture.nexus.configured_use().unwrap(),
+            address,
+            Some(&unknown)
+        ),
         Response::Refused(Refusal::Unidentified(_))
     ));
     let _ = std::process::Command::new("kill")

@@ -5,9 +5,9 @@
 //! is not.
 
 use super::model::{configure, seat};
-use super::{pane_unopened, NexusFixture};
-use crate::store::ManagesMetaflowState;
+use super::{NexusFixture, pane_unopened};
 use crate::Dispatches;
+use crate::store::ManagesMetaflowState;
 use signal_flow::{Aspect, Layer, Query, Response, StartRejection};
 use std::fs;
 
@@ -61,12 +61,14 @@ fn a_launch_with_no_requirements_needs_no_other_seat() {
         fixture.nexus.dispatch(Query::Start(primary)),
         Response::StartRejected(pane_unopened())
     );
-    assert!(fixture
-        .nexus
-        .store
-        .launch_attempt("primary-request")
-        .unwrap()
-        .is_some());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .launch_attempt("primary-request")
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// A declaration's missing required metaflow is named before the requested
@@ -117,9 +119,9 @@ fn an_unstartable_requirement_is_named() {
 /// anything is written; one that is, capitals within, is kept as written.
 #[test]
 fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
+    use crate::Dispatches;
     use crate::store::ManagesMetaflowState;
     use crate::store::ReadsLaunchAttempt;
-    use crate::Dispatches;
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();
     let _ = fs::remove_file(&fixture.snapshot_program);
@@ -154,7 +156,7 @@ fn a_topic_that_is_not_camel_case_is_refused_at_start_and_configure() {
             continuity: meta_signal_flow::Continuity::OnDemand,
             purpose: String::new(),
             records: vec![],
-                left_out: vec![],
+            left_out: vec![],
             requires: vec![],
         };
         assert_eq!(
@@ -200,6 +202,7 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
             layer: Layer::Secondary,
         };
         let sent = fixture.nexus.send_request(
+            &fixture.nexus.configured_use().unwrap(),
             SendRequest {
                 recipient: Recipient::Address(recipient.clone()),
                 delivery: Delivery::Queue,
@@ -215,6 +218,7 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
         assert!(sent.pending.is_none());
         assert_eq!(fixture.nexus.store.metaflow(&recipient).unwrap(), None);
         let abrupt = fixture.nexus.send_request(
+            &fixture.nexus.configured_use().unwrap(),
             SendRequest {
                 recipient: Recipient::Address(recipient),
                 delivery: Delivery::Wake,
@@ -239,8 +243,8 @@ fn a_send_to_a_bad_topic_is_topic_refused() {
 /// as Start and Configure refuse it.
 #[test]
 fn launch_with_a_bad_topic_is_topic_refused() {
-    use crate::store::ManagesMetaflowState;
     use crate::Dispatches;
+    use crate::store::ManagesMetaflowState;
     use signal_flow::{Address, Launch_Data, Remembering};
     let fixture = NexusFixture::new();
     fixture.claims_flow_ids();

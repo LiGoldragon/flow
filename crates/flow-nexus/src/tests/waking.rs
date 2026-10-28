@@ -2016,9 +2016,11 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
         .store
         .seed_metaflow(metaflow(Layer::Secondary, State::Asleep, vec![], vec![]));
     assert_eq!(
-        fixture
-            .nexus
-            .deliver_all(empty.clone(), Some(&sender_process)),
+        fixture.nexus.deliver_all(
+            &fixture.nexus.configured_use().unwrap(),
+            empty.clone(),
+            Some(&sender_process)
+        ),
         Response::Drained(signal_flow::DrainOutcome {
             address: empty.clone(),
             drain_state: signal_flow::DrainState::Delivered,
@@ -2036,9 +2038,11 @@ fn deliver_all_reports_empty_and_retained_queue_truthfully() {
         vec![request.clone()],
     ));
     assert_eq!(
-        fixture
-            .nexus
-            .deliver_all(queued.clone(), Some(&sender_process)),
+        fixture.nexus.deliver_all(
+            &fixture.nexus.configured_use().unwrap(),
+            queued.clone(),
+            Some(&sender_process)
+        ),
         Response::Drained(signal_flow::DrainOutcome {
             address: queued.clone(),
             drain_state: signal_flow::DrainState::Held(vec![

@@ -15,10 +15,10 @@ use crate::herdr::pane::PaneAgent;
 use crate::herdr::reservation::ChoosesNativeSession;
 use crate::performing::Performs;
 use crate::reporting::RecordsReports;
+use crate::store::ManagesMetaflowState;
 use crate::store::context::RecordsContextSize;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::{SeedsMetaflow, SleepsMetaflows};
-use crate::store::ManagesMetaflowState;
 use crate::store::{
     ReadsFlowRows, RecordsFlowLifecycle, RecordsNativeLaunchBinding, RecordsNativeLaunchIntent,
     RegistersFlowIdentity, ReservesLaunchAttempt,
@@ -776,9 +776,11 @@ fn the_store_sleeps_and_awakens_without_consuming_address_pending_work() {
         "only the oldest, as typed, is removed"
     );
     for body in ["A", "B", "C"] {
-        assert!(store
-            .remove_oldest_queued(&at, &Request::Order(body.into()).unsent())
-            .unwrap());
+        assert!(
+            store
+                .remove_oldest_queued(&at, &Request::Order(body.into()).unsent())
+                .unwrap()
+        );
     }
     assert!(store.metaflow(&at).unwrap().unwrap().queue.is_empty());
     assert_eq!(
@@ -858,10 +860,12 @@ fn a_fresh_wake_composes_modules_without_queued_work() {
     let body = composed.first_prompt_payload.first_prompt_body;
     assert!(body.starts_with("These are your skills, given here; do not reload them."));
     assert!(body.contains("Main flow body.") && body.contains("Knowledge body."));
-    assert!(composed
-        .system_prompt
-        .system_prompt_text
-        .contains("Spirit body."));
+    assert!(
+        composed
+            .system_prompt
+            .system_prompt_text
+            .contains("Spirit body.")
+    );
     assert!(!body.contains(&text));
     assert!(!body.contains("Order.first"));
     assert!(!body.contains("Question.second"));
@@ -1075,24 +1079,26 @@ fn launched_claude_ended_by_with(
         .store
         .reserve_launch_attempt(&composed, origin.clone())
         .expect("reserved");
-    assert!(fixture
-        .nexus
-        .store
-        .record_native_launch_intent(NativeLaunchIntent {
-            launch_request_id: profile.launch_request_id.clone(),
-            prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
-            harness_kind: HarnessKind::Claude,
-            model_name: profile.model_name.clone(),
-            effort: profile.effort.clone(),
-            system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
-            prompt_sha256_vector: composed
-                .first_prompt_payload
-                .prompt_part_vector
-                .iter()
-                .map(|part| part.prompt_sha256.clone())
-                .collect(),
-        })
-        .unwrap());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_intent(NativeLaunchIntent {
+                launch_request_id: profile.launch_request_id.clone(),
+                prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: HarnessKind::Claude,
+                model_name: profile.model_name.clone(),
+                effort: profile.effort.clone(),
+                system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: composed
+                    .first_prompt_payload
+                    .prompt_part_vector
+                    .iter()
+                    .map(|part| part.prompt_sha256.clone())
+                    .collect(),
+            })
+            .unwrap()
+    );
     let old_pane = signal_flow::HerdrPaneBinding {
         launch_request_id: profile.launch_request_id.clone(),
         herdr_session_name: "fixture-session".into(),
@@ -1101,17 +1107,19 @@ fn launched_claude_ended_by_with(
         herdr_pane_id: "w1:p3".into(),
         herdr_terminal_id: "term-old".into(),
     };
-    assert!(fixture
-        .nexus
-        .store
-        .record_native_launch_binding(NativeLaunchBinding {
-            launch_request_id: profile.launch_request_id.clone(),
-            flow_id: "abc123".into(),
-            native_session_id: session.clone(),
-            harness_kind: HarnessKind::Claude,
-            herdr_pane_binding: old_pane,
-        })
-        .unwrap());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_binding(NativeLaunchBinding {
+                launch_request_id: profile.launch_request_id.clone(),
+                flow_id: "abc123".into(),
+                native_session_id: session.clone(),
+                harness_kind: HarnessKind::Claude,
+                herdr_pane_binding: old_pane,
+            })
+            .unwrap()
+    );
     fixture
         .nexus
         .store
@@ -1207,7 +1215,11 @@ impl ReadsFreshWorld for FreshWorld {
     fn claude_starts(&self) -> usize {
         self.calls()
             .lines()
-            .filter(|line| line.contains("pane run") && line.contains("'/fixture/claude'") && line.contains("'--session-id'"))
+            .filter(|line| {
+                line.contains("pane run")
+                    && line.contains("'/fixture/claude'")
+                    && line.contains("'--session-id'")
+            })
             .count()
     }
 
@@ -1749,11 +1761,13 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .unwrap(),
         crate::store::metaflow::AddressTaking::Takes(_)
     ));
-    assert!(fixture
-        .nexus
-        .store
-        .awaken_metaflow(&sender_address, "5e4de7", 0)
-        .unwrap());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .awaken_metaflow(&sender_address, "5e4de7", 0)
+            .unwrap()
+    );
     // Herdr shows the sender's pane.
     let script = fs::read_to_string(&fixture.snapshot_program).unwrap();
     let sender_agent = r#"{"agent":"claude","agent_status":"working","name":"sender-agent","pane_id":"w5:p1","terminal_id":"term-sender","workspace_id":"w5"}"#;
@@ -1836,20 +1850,24 @@ fn identifies_and_wakes_by_an_order(recipient: State) {
             .response,
         refusal
     );
-    assert!(fixture
-        .nexus
-        .store
-        .metaflow(&at)
-        .unwrap()
-        .unwrap()
-        .queue
-        .is_empty());
-    assert!(fixture
-        .nexus
-        .store
-        .stored_metaflow_lock(&at)
-        .unwrap()
-        .is_none());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&at)
+            .unwrap()
+            .unwrap()
+            .queue
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .stored_metaflow_lock(&at)
+            .unwrap()
+            .is_none()
+    );
     let send_outcomes = fixture.nexus.store.read_send_outcomes().unwrap();
     assert!(matches!(
         send_outcomes.last().map(|record| &record.ordinary_send_outcome),
@@ -2190,11 +2208,13 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
             .unwrap(),
         crate::store::metaflow::AddressTaking::Takes(_)
     ));
-    assert!(fixture
-        .nexus
-        .store
-        .awaken_metaflow(&sender_address, "41fa34", 0)
-        .unwrap());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .awaken_metaflow(&sender_address, "41fa34", 0)
+            .unwrap()
+    );
 
     // The trusted send server names the flow of its thread.
     assert_eq!(
@@ -2250,11 +2270,13 @@ fn a_trusted_send_server_identifies_the_awake_flow_of_its_codex_thread() {
     );
 
     // Once its metaflow sleeps, the thread names no one.
-    assert!(fixture
-        .nexus
-        .store
-        .sleep_metaflow(&sender_address, "41fa34")
-        .unwrap());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .sleep_metaflow(&sender_address, "41fa34")
+            .unwrap()
+    );
     assert_eq!(
         identify(&send_server_process, thread, &message),
         Response::Refused(Refusal::Unidentified(send_server_process.clone()))
@@ -2412,12 +2434,14 @@ fn an_unconfirmed_launch_that_fails_or_ends_leaves_no_awake_registration() {
     let mut absent = fixture.staged_launch("absent-request", None);
     let at = absent.profile.address.clone();
     absent.stage_to_ambiguity(&fixture.nexus);
-    assert!(fixture
-        .nexus
-        .store
-        .metaflow_awake_as("908786")
-        .unwrap()
-        .is_some());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .metaflow_awake_as("908786")
+            .unwrap()
+            .is_some()
+    );
     assert!(fixture.nexus.store.record_exited("908786").unwrap());
     assert_eq!(fixture.nexus.store.metaflow(&at).unwrap(), None);
     assert_eq!(fixture.nexus.store.address_hold("908786").unwrap(), None);
@@ -2723,6 +2747,37 @@ impl BuildsFreshWorld for NexusFixture {
         let root = self.directory.path().to_path_buf();
         let state = root.join("fresh-world");
         fs::create_dir_all(&state).unwrap();
+        let readiness_root = root.join("native-transcripts");
+        let readiness_state = state.clone();
+        std::thread::spawn(move || {
+            let mut reported = 0;
+            while readiness_state.exists() {
+                let starts = fs::read_to_string(readiness_state.join("claude-session-starts"))
+                    .unwrap_or_default()
+                    .lines()
+                    .count();
+                while reported < starts {
+                    let endpoint = fs::read_dir(&readiness_root).ok().and_then(|entries| {
+                        entries.flatten().map(|entry| entry.path()).find(|path| {
+                            path.file_name().is_some_and(|name| {
+                                name.to_string_lossy().starts_with("claude-ready-")
+                            })
+                        })
+                    });
+                    let Some(endpoint) = endpoint else { break };
+                    let payload =
+                        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::ClaudeReady)
+                            .expect("fixture Claude readiness payload");
+                    let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+                    frame.extend_from_slice(&payload);
+                    std::os::unix::net::UnixDatagram::unbound()
+                        .and_then(|sender| sender.send_to(&frame, endpoint))
+                        .expect("fixture SessionStart reports typed Claude readiness");
+                    reported += 1;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
         let claude_root = root.join("native-transcripts/claude/projects/-home-li-primary");
         fs::create_dir_all(&claude_root).unwrap();
         let herdr = format!(
@@ -2763,6 +2818,7 @@ case "$*" in
         done
         printf '%s' "$(cat "$S/title")" > "$S/name"
         printf '{{"type":"custom-title","customTitle":"%s","sessionId":"%s"}}\n' "$(cat "$S/title")" "$(cat "$S/session")" >> '{claude_root}/'"$(cat "$S/session")"'.jsonl'
+        printf '%s\n' "$(cat "$S/session")" >> "$S/claude-session-starts"
         printf '%s\n' '{{"result":{{}}}}'
         ;;
     esac ;;
@@ -3050,37 +3106,41 @@ fn a_sleeping_codex_address_wakes_fresh_to_a_new_thread_and_binds_to_it() {
         .store
         .reserve_launch_attempt(&composed, Origin::Unbound)
         .unwrap();
-    assert!(fixture
-        .nexus
-        .store
-        .record_native_launch_intent(NativeLaunchIntent {
-            launch_request_id: profile.launch_request_id.clone(),
-            prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
-            harness_kind: HarnessKind::Codex,
-            model_name: profile.model_name.clone(),
-            effort: profile.effort.clone(),
-            system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
-            prompt_sha256_vector: composed.part_hashes(),
-        })
-        .unwrap());
-    assert!(fixture
-        .nexus
-        .store
-        .record_native_launch_binding(NativeLaunchBinding {
-            launch_request_id: profile.launch_request_id.clone(),
-            flow_id: old.flow_id.clone(),
-            native_session_id: old_thread.clone(),
-            harness_kind: HarnessKind::Codex,
-            herdr_pane_binding: signal_flow::HerdrPaneBinding {
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_intent(NativeLaunchIntent {
                 launch_request_id: profile.launch_request_id.clone(),
-                herdr_session_name: "fixture-session".into(),
-                herdr_agent_name: composed.launch_agent_name(),
-                herdr_workspace_id: "w1".into(),
-                herdr_pane_id: "w1:p3".into(),
-                herdr_terminal_id: "term-old".into(),
-            },
-        })
-        .unwrap());
+                prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: HarnessKind::Codex,
+                model_name: profile.model_name.clone(),
+                effort: profile.effort.clone(),
+                system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: composed.part_hashes(),
+            })
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_binding(NativeLaunchBinding {
+                launch_request_id: profile.launch_request_id.clone(),
+                flow_id: old.flow_id.clone(),
+                native_session_id: old_thread.clone(),
+                harness_kind: HarnessKind::Codex,
+                herdr_pane_binding: signal_flow::HerdrPaneBinding {
+                    launch_request_id: profile.launch_request_id.clone(),
+                    herdr_session_name: "fixture-session".into(),
+                    herdr_agent_name: composed.launch_agent_name(),
+                    herdr_workspace_id: "w1".into(),
+                    herdr_pane_id: "w1:p3".into(),
+                    herdr_terminal_id: "term-old".into(),
+                },
+            })
+            .unwrap()
+    );
     let mut old_node = old.clone();
     old_node.herdr_route_selection = HerdrRouteSelection::Available(HerdrRoute {
         herdr_session_name: "fixture-session".into(),
@@ -3807,8 +3867,8 @@ fn a_codex_first_turn_starts_after_the_tui_attached_and_a_long_turn_refuses_noth
 #[test]
 fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
     use super::send_tool::ReadsClientFrames;
-    use crate::store::send_call::KeepsSendCalls;
     use crate::DispatchesSerially;
+    use crate::store::send_call::KeepsSendCalls;
     let mut fixture = NexusFixture::new();
     let recipient = address(Layer::Primary);
     fixture
@@ -3876,8 +3936,8 @@ fn a_refused_codex_start_archives_its_idle_thread_and_starts_no_turn() {
 /// first turn pending on a send call; nothing settled. Returns the
 /// sender's profile and the state directory of the fakes.
 fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
-    use crate::store::opened_thread::RecordsOpenedThreads;
     use crate::store::RecordsCreatedLaunchPane;
+    use crate::store::opened_thread::RecordsOpenedThreads;
     let recipient = address(Layer::Secondary);
     fixture
         .nexus
@@ -3901,36 +3961,42 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
         .store
         .reserve_launch_attempt(&composed, Origin::Unbound)
         .unwrap();
-    assert!(fixture
-        .nexus
-        .store
-        .record_native_launch_intent(NativeLaunchIntent {
-            launch_request_id: setup.sender.launch_request_id.clone(),
-            prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
-            harness_kind: HarnessKind::Codex,
-            model_name: setup.sender.model_name.clone(),
-            effort: setup.sender.effort.clone(),
-            system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
-            prompt_sha256_vector: composed.part_hashes(),
-        })
-        .unwrap());
-    assert!(fixture
-        .nexus
-        .store
-        .record_created_launch_pane(signal_flow::HerdrPaneBinding {
-            launch_request_id: setup.sender.launch_request_id.clone(),
-            herdr_session_name: "fixture-session".into(),
-            herdr_agent_name: composed.launch_agent_name(),
-            herdr_workspace_id: "w7".into(),
-            herdr_pane_id: "w7:p1".into(),
-            herdr_terminal_id: "term-fresh".into(),
-        })
-        .unwrap());
-    assert!(fixture
-        .nexus
-        .store
-        .record_opened_thread(&setup.sender.launch_request_id, FRESH_THREAD)
-        .unwrap());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_native_launch_intent(NativeLaunchIntent {
+                launch_request_id: setup.sender.launch_request_id.clone(),
+                prompt_sha256: composed.first_prompt_payload.prompt_sha256.clone(),
+                harness_kind: HarnessKind::Codex,
+                model_name: setup.sender.model_name.clone(),
+                effort: setup.sender.effort.clone(),
+                system_prompt_sha256: composed.system_prompt.system_prompt_sha256.clone(),
+                prompt_sha256_vector: composed.part_hashes(),
+            })
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_created_launch_pane(signal_flow::HerdrPaneBinding {
+                launch_request_id: setup.sender.launch_request_id.clone(),
+                herdr_session_name: "fixture-session".into(),
+                herdr_agent_name: composed.launch_agent_name(),
+                herdr_workspace_id: "w7".into(),
+                herdr_pane_id: "w7:p1".into(),
+                herdr_terminal_id: "term-fresh".into(),
+            })
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .nexus
+            .store
+            .record_opened_thread(&setup.sender.launch_request_id, FRESH_THREAD)
+            .unwrap()
+    );
     // The app-server the restarted Nexus meets: the send-tool probe; the
     // connection that resumes the thread, to which the pending call is
     // replayed; and the account that archives the thread.
@@ -3980,10 +4046,10 @@ fn interrupted_launch(fixture: &mut NexusFixture) -> FirstTurnSend {
 #[test]
 fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_settled_at_restart() {
     use super::send_tool::ReadsClientFrames;
-    use crate::launching::ReconcilesInterruptedLaunches;
-    use crate::store::send_call::KeepsSendCalls;
-    use crate::store::RecordsLaunchOutcome;
     use crate::DispatchesSerially;
+    use crate::launching::ReconcilesInterruptedLaunches;
+    use crate::store::RecordsLaunchOutcome;
+    use crate::store::send_call::KeepsSendCalls;
     let mut fixture = NexusFixture::new();
     let setup = interrupted_launch(&mut fixture);
     let state = setup.world.state.clone();
@@ -4053,8 +4119,8 @@ fn a_launch_interrupted_with_its_first_call_pending_is_refused_archived_and_sett
 /// a sender.
 #[test]
 fn a_launch_whose_address_another_flow_holds_sends_nothing() {
-    use crate::store::send_call::KeepsSendCalls;
     use crate::store::RecordsLaunchOutcome;
+    use crate::store::send_call::KeepsSendCalls;
     let mut fixture = NexusFixture::new();
     let setup = interrupted_launch(&mut fixture);
     assert_eq!(
@@ -4215,12 +4281,14 @@ fn an_interrupted_launch_pane_running_a_replacement_session_is_never_closed() {
     );
     assert_eq!(cleanup(&fixture).thread_step, CleanupStep::Done);
     assert_eq!(cleanup(&fixture).pane_step, CleanupStep::Pending);
-    assert!(fixture
-        .nexus
-        .store
-        .recoverable_launch_pane(&launch)
-        .unwrap()
-        .is_some());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .recoverable_launch_pane(&launch)
+            .unwrap()
+            .is_some()
+    );
 
     // A replacement reporting no session, its foreground process resuming
     // another thread.
@@ -4295,12 +4363,14 @@ fn an_interrupted_launch_whose_cleanup_fails_is_settled_and_its_cleanup_resumed(
     assert_eq!(cleanup.thread_step, CleanupStep::Pending, "archive refused");
     assert_eq!(cleanup.pane_step, CleanupStep::Pending, "Herdr unreadable");
     assert!(!cleanup.is_complete());
-    assert!(fixture
-        .nexus
-        .store
-        .recoverable_launch_pane(&launch)
-        .unwrap()
-        .is_some());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .recoverable_launch_pane(&launch)
+            .unwrap()
+            .is_some()
+    );
 
     // The next start: the archive succeeds, and Herdr's snapshot shows
     // neither the pane nor its binding.
@@ -4397,7 +4467,9 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     assert_eq!(stored(&fixture, Layer::Secondary).queue.len(), 1);
 
     // The Nexus exits: the store as it lies on disk opens in a new one.
-    let app_server = fixture.nexus.codex_endpoints.endpoints[0].client_path.clone();
+    let app_server = fixture.nexus.codex_endpoints.endpoints[0]
+        .client_path
+        .clone();
     let written = fixture.directory.path().join("flow.sema");
     let mut restarted = NexusFixture::with_store(|store| {
         fs::copy(&written, store).expect("the store as written");
@@ -4446,8 +4518,8 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
 /// The sender seat c1a0de, Awake at { Mind flow Secondary }, holding a
 /// lock on { Mind flow Primary }.
 fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
-    use crate::store::metaflow::MutatesMetaflows;
     use crate::store::SeedsConfiguration;
+    use crate::store::metaflow::MutatesMetaflows;
     let settings = crate::store::DefaultConfiguration {
         home: fixture.directory.path().join("home"),
         runtime_directory: fixture.directory.path().join("runtime"),
@@ -4505,12 +4577,14 @@ fn sender_holding_a_lock(fixture: &NexusFixture) -> Address {
         matches!(locked, signal_flow::Response::Locked(_)),
         "{locked:?}"
     );
-    assert!(fixture
-        .nexus
-        .store
-        .stored_metaflow_lock(&recipient)
-        .unwrap()
-        .is_some());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .stored_metaflow_lock(&recipient)
+            .unwrap()
+            .is_some()
+    );
     recipient
 }
 
@@ -4563,12 +4637,14 @@ fn a_sender_observe_reports_gone_is_exited_and_its_lock_released() {
     );
     let node = fixture.nexus.store.flow_node(CLAUDE_SEAT).unwrap().unwrap();
     assert_eq!(node.flow_lifecycle, FlowLifecycle::Exited);
-    assert!(fixture
-        .nexus
-        .store
-        .stored_metaflow_lock(&recipient)
-        .unwrap()
-        .is_none());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .stored_metaflow_lock(&recipient)
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// A Maintained metaflow whose flow exits with its pane gone is owed a
@@ -4820,8 +4896,8 @@ fn a_primary_whose_declared_secondary_sleeps_starts_its_requirements_first() {
 /// session changes nothing.
 #[test]
 fn a_reported_session_end_exits_the_flow_and_owes_a_maintained_successor() {
-    use crate::store::successor::OwesSuccessors;
     use crate::store::NamesLiveFlow;
+    use crate::store::successor::OwesSuccessors;
     for (session, ends) in [("another-session", false), (CLAUDE_SESSION, true)] {
         let fixture = NexusFixture::new();
         claude_seat(&fixture, 40_000);
@@ -4980,11 +5056,13 @@ fn a_metaflow_put_asleep_for_an_ended_flow_retracts_its_sender_locks() {
     use crate::store::metaflow::SleepsMetaflows;
     let fixture = NexusFixture::new();
     let recipient = sender_holding_a_lock(&fixture);
-    assert!(fixture
-        .nexus
-        .store
-        .sleep_metaflow(&address(Layer::Secondary), CLAUDE_SEAT)
-        .unwrap());
+    assert!(
+        fixture
+            .nexus
+            .store
+            .sleep_metaflow(&address(Layer::Secondary), CLAUDE_SEAT)
+            .unwrap()
+    );
     assert_eq!(stored(&fixture, Layer::Secondary).state, State::Asleep);
     assert!(
         fixture

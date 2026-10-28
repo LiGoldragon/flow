@@ -33,7 +33,7 @@
 //! writes one tab-separated line on stderr (event, datom, the CLI's exit
 //! code, the CLI's whole output) for whoever reads it.
 
-use flow_native::{ClaudeReadiness, DigestsPrompt, ReadsClaudePaste};
+use flow_native::{DigestsPrompt, ReadsClaudePaste};
 use std::{
     env,
     io::Read,
@@ -144,8 +144,10 @@ impl ReportsOwnedClaudeLifecycle for HarnessHook {
                     let readiness = match &self.readiness_socket {
                         None => Err("readiness-unconfigured"),
                         Some(socket) => {
-                            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&ClaudeReadiness)
-                                .map_err(|_| "readiness-encoding-refused");
+                            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(
+                                &signal_flow::Response::ClaudeReady,
+                            )
+                            .map_err(|_| "readiness-encoding-refused");
                             payload.and_then(|payload| {
                                 let length = u32::try_from(payload.len())
                                     .map_err(|_| "readiness-frame-refused")?;
@@ -332,7 +334,6 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{ChoosesHookCall, HarnessHook, HookCall, ReportsOwnedClaudeLifecycle};
-    use flow_native::ClaudeReadiness;
 
     fn hook(input: serde_json::Value, flow_id: Option<&str>) -> HarnessHook {
         HarnessHook {
@@ -529,13 +530,16 @@ mod tests {
         };
 
         assert_eq!(hook.lifecycle_run(), "lifecycle-idle");
-        let mut event = [0_u8; 64];
+        let expected =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::ClaudeReady).unwrap();
+        let mut event = vec![0_u8; expected.len() + 4];
         let received = readiness.recv(&mut event).unwrap();
         let length = u32::from_be_bytes(event[..4].try_into().unwrap()) as usize;
         assert_eq!(received, length + 4);
         assert_eq!(
-            rkyv::from_bytes::<ClaudeReadiness, rkyv::rancor::Error>(&event[4..received]).unwrap(),
-            ClaudeReadiness
+            rkyv::from_bytes::<signal_flow::Response, rkyv::rancor::Error>(&event[4..received])
+                .unwrap(),
+            signal_flow::Response::ClaudeReady
         );
         assert_eq!(
             std::fs::read_to_string(log).unwrap().trim_end(),

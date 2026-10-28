@@ -5,12 +5,6 @@
 
 use sha2::{Digest, Sha256};
 
-/// The unit Signal emitted after Claude's typed lifecycle report has been
-/// accepted. It carries readiness only; process and session identity are
-/// proved independently by the launch owner.
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClaudeReadiness;
-
 /// Claude Code's record of text that reached its composer as one paste.
 ///
 /// Claude Code 2.1.294 writes it in one of two exact shapes (witnessed in

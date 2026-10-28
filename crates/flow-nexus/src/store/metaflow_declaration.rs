@@ -119,7 +119,9 @@ impl EngineRecord for StoredMetaMetaflowConfigurationV5 {
     }
 }
 impl MemoryDefinition for StoredMetaMetaflowConfigurationV5 {
-    fn memory_version() -> MemoryVersion { MemoryVersion::new(5) }
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(5)
+    }
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v5")
     }
@@ -128,16 +130,18 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV5> for StoredMetaMetaflowConfig
     type Refusal = std::convert::Infallible;
     fn upgrade_from(previous: StoredMetaMetaflowConfigurationV5) -> Decision<Self, Self::Refusal> {
         let previous = previous.metaflow;
-        Decision::Ready(Self { metaflow: ConfigureMetaflow {
-            address: previous.address,
-            system_modules: previous.system_modules,
-            user_modules: previous.user_modules,
-            tool_set: previous.tool_set,
-            continuity: previous.continuity,
-            purpose: previous.purpose,
-            records: previous.records,
-            requires: previous.requires,
-        }})
+        Decision::Ready(Self {
+            metaflow: ConfigureMetaflow {
+                address: previous.address,
+                system_modules: previous.system_modules,
+                user_modules: previous.user_modules,
+                tool_set: previous.tool_set,
+                continuity: previous.continuity,
+                purpose: previous.purpose,
+                records: previous.records,
+                requires: previous.requires,
+            },
+        })
     }
 }
 
@@ -482,10 +486,10 @@ impl ReadsMetaflowDeclarations for FlowStore {
 mod tests {
     use super::{
         AvailabilityV3, ConfigureMetaflowV1, ConfigureMetaflowV2, ConfigureMetaflowV3,
-        ConfigureMetaflowV4, ConfigureMetaflowV5, FlowKindV4,
-        StoredMetaMetaflowConfiguration, StoredMetaMetaflowConfigurationV1,
-        StoredMetaMetaflowConfigurationV2, StoredMetaMetaflowConfigurationV3,
-        StoredMetaMetaflowConfigurationV4, StoredMetaMetaflowConfigurationV5,
+        ConfigureMetaflowV4, ConfigureMetaflowV5, FlowKindV4, StoredMetaMetaflowConfiguration,
+        StoredMetaMetaflowConfigurationV1, StoredMetaMetaflowConfigurationV2,
+        StoredMetaMetaflowConfigurationV3, StoredMetaMetaflowConfigurationV4,
+        StoredMetaMetaflowConfigurationV5,
     };
     use meta_signal_flow::Continuity;
     use sema_engine::{Decision, UpgradeFrom};

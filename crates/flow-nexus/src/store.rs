@@ -75,6 +75,7 @@ use signal_flow::{
     NativeLaunchIntent, NativeTranscriptBoundary, Origin, Process, PromptDeliveryIntent,
     PromptDeliveryResult, Query, RecipientResolutionRejection, RegistrationAcknowledgement,
     Remembering, ReplaceRejection, Replaced, Request, Response, RouteReadiness, StartRejection,
+    StopRejection,
 };
 
 /// Applies the meta wire's index cursor to an already ordered snapshot.
@@ -2570,11 +2571,11 @@ impl EngineRecord for StoredLaunchOutcome {
 
 impl MemoryDefinition for StoredLaunchOutcome {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(10)
+        MemoryVersion::new(11)
     }
 
     fn schema_hash() -> SchemaHash {
-        SchemaHash::for_label("flow-nexus-launch-outcome-v10")
+        SchemaHash::for_label("flow-nexus-launch-outcome-v11")
     }
 }
 
@@ -2720,6 +2721,103 @@ impl UpgradeFrom<StoredLaunchOutcomeV9> for StoredLaunchOutcome {
     }
 }
 
+/// The launch outcome archived before pane-close refusals carried the exact
+/// identity, bounded-stop, or Herdr-close failure.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+struct StoredLaunchOutcomeV10 {
+    launch_request_id: String,
+    launch_outcome: LaunchOutcomeV10,
+}
+impl EngineRecord for StoredLaunchOutcomeV10 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(self.launch_request_id.clone())
+    }
+}
+impl MemoryDefinition for StoredLaunchOutcomeV10 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(10)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-launch-outcome-v10")
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum StopRejectionV38 {
+    UnknownFlow,
+    AlreadyStopped,
+    RouteUnavailable,
+    CloseRefused,
+    PersistenceRefused,
+}
+
+impl From<StopRejectionV38> for StopRejection {
+    fn from(rejection: StopRejectionV38) -> Self {
+        match rejection {
+            StopRejectionV38::UnknownFlow => Self::UnknownFlow,
+            StopRejectionV38::AlreadyStopped => Self::AlreadyStopped,
+            StopRejectionV38::RouteUnavailable => Self::RouteUnavailable,
+            StopRejectionV38::CloseRefused => {
+                Self::CloseRefused(signal_flow::PaneCloseFailure::IdentityUnavailable)
+            }
+            StopRejectionV38::PersistenceRefused => Self::PersistenceRefused,
+        }
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum ReplaceRejectionV38 {
+    PredecessorAbsent,
+    UnknownPredecessor,
+    PredecessorStopped,
+    LaunchRefused(StartRejection),
+    ReapRefused(StopRejectionV38),
+    Locked,
+}
+
+impl From<ReplaceRejectionV38> for ReplaceRejection {
+    fn from(rejection: ReplaceRejectionV38) -> Self {
+        match rejection {
+            ReplaceRejectionV38::PredecessorAbsent => Self::PredecessorAbsent,
+            ReplaceRejectionV38::UnknownPredecessor => Self::UnknownPredecessor,
+            ReplaceRejectionV38::PredecessorStopped => Self::PredecessorStopped,
+            ReplaceRejectionV38::LaunchRefused(rejection) => Self::LaunchRefused(rejection),
+            ReplaceRejectionV38::ReapRefused(rejection) => Self::ReapRefused(rejection.into()),
+            ReplaceRejectionV38::Locked => Self::Locked,
+        }
+    }
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+enum LaunchOutcomeV10 {
+    Started(LaunchedRecord),
+    Replaced(ReplacedRecord),
+    StartRejected(StartRejection),
+    ReplaceRejected(ReplaceRejectionV38),
+}
+
+impl From<LaunchOutcomeV10> for LaunchOutcome {
+    fn from(outcome: LaunchOutcomeV10) -> Self {
+        match outcome {
+            LaunchOutcomeV10::Started(launched) => Self::Started(launched),
+            LaunchOutcomeV10::Replaced(replaced) => Self::Replaced(replaced),
+            LaunchOutcomeV10::StartRejected(rejection) => Self::StartRejected(rejection),
+            LaunchOutcomeV10::ReplaceRejected(rejection) => Self::ReplaceRejected(rejection.into()),
+        }
+    }
+}
+
+impl UpgradeFrom<StoredLaunchOutcomeV10> for StoredLaunchOutcome {
+    type Refusal = EndedAddressOutcome;
+
+    fn upgrade_from(previous: StoredLaunchOutcomeV10) -> Decision<Self, Self::Refusal> {
+        Decision::Ready(Self {
+            launch_request_id: previous.launch_request_id,
+            launch_outcome: previous.launch_outcome.into(),
+        })
+    }
+}
+
 /// The launch outcome archived before signal-flow removed the two
 /// composition refusals that belonged to Simplified and presentation
 /// launches. Those refusals have no current meaning and become Unrecorded.
@@ -2795,7 +2893,7 @@ enum ReplaceRejectionV34 {
     UnknownPredecessor,
     PredecessorStopped,
     LaunchRefused(StartRejectionV34),
-    ReapRefused(signal_flow::StopRejection),
+    ReapRefused(StopRejectionV38),
     Locked,
 }
 
@@ -2852,7 +2950,7 @@ impl From<ReplaceRejectionV34> for ReplaceRejection {
             ReplaceRejectionV34::UnknownPredecessor => Self::UnknownPredecessor,
             ReplaceRejectionV34::PredecessorStopped => Self::PredecessorStopped,
             ReplaceRejectionV34::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV34::ReapRefused(rejection) => Self::ReapRefused(rejection),
+            ReplaceRejectionV34::ReapRefused(rejection) => Self::ReapRefused(rejection.into()),
             ReplaceRejectionV34::Locked => Self::Locked,
         }
     }
@@ -2997,7 +3095,7 @@ enum ReplaceRejectionV32 {
     UnknownPredecessor,
     PredecessorStopped,
     LaunchRefused(StartRejectionV32),
-    ReapRefused(signal_flow::StopRejection),
+    ReapRefused(StopRejectionV38),
     Locked,
 }
 
@@ -3033,7 +3131,7 @@ impl From<ReplaceRejectionV32> for ReplaceRejection {
             ReplaceRejectionV32::UnknownPredecessor => Self::UnknownPredecessor,
             ReplaceRejectionV32::PredecessorStopped => Self::PredecessorStopped,
             ReplaceRejectionV32::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV32::ReapRefused(rejection) => Self::ReapRefused(rejection),
+            ReplaceRejectionV32::ReapRefused(rejection) => Self::ReapRefused(rejection.into()),
             ReplaceRejectionV32::Locked => Self::Locked,
         }
     }
@@ -3137,7 +3235,7 @@ enum ReplaceRejectionV30 {
     UnknownPredecessor,
     PredecessorStopped,
     LaunchRefused(StartRejectionV30),
-    ReapRefused(signal_flow::StopRejection),
+    ReapRefused(StopRejectionV38),
 }
 
 impl From<ContextRefusalV30> for signal_flow::ContextRefusal {
@@ -3185,7 +3283,7 @@ impl From<ReplaceRejectionV30> for ReplaceRejection {
             ReplaceRejectionV30::UnknownPredecessor => Self::UnknownPredecessor,
             ReplaceRejectionV30::PredecessorStopped => Self::PredecessorStopped,
             ReplaceRejectionV30::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV30::ReapRefused(rejection) => Self::ReapRefused(rejection),
+            ReplaceRejectionV30::ReapRefused(rejection) => Self::ReapRefused(rejection.into()),
         }
     }
 }
@@ -3273,7 +3371,7 @@ enum ReplaceRejectionV22 {
     UnknownPredecessor,
     PredecessorStopped,
     LaunchRefused(StartRejectionV22),
-    ReapRefused(signal_flow::StopRejection),
+    ReapRefused(StopRejectionV38),
 }
 
 /// A kept outcome that refused a Start for an ended Address. No metaflow
@@ -3317,7 +3415,7 @@ impl TryFrom<ReplaceRejectionV22> for ReplaceRejectionV30 {
             ReplaceRejectionV22::LaunchRefused(rejection) => {
                 Self::LaunchRefused(rejection.try_into()?)
             }
-            ReplaceRejectionV22::ReapRefused(rejection) => Self::ReapRefused(rejection),
+            ReplaceRejectionV22::ReapRefused(rejection) => Self::ReapRefused(rejection.into()),
         })
     }
 }
@@ -3426,7 +3524,7 @@ enum ReplaceRejectionV18 {
     UnknownPredecessor,
     PredecessorStopped,
     LaunchRefused(StartRejectionV18),
-    ReapRefused(signal_flow::StopRejection),
+    ReapRefused(StopRejectionV38),
 }
 
 impl From<StartRejectionV18> for StartRejectionV22 {
@@ -3464,7 +3562,7 @@ impl From<ReplaceRejectionV18> for ReplaceRejectionV22 {
             ReplaceRejectionV18::UnknownPredecessor => Self::UnknownPredecessor,
             ReplaceRejectionV18::PredecessorStopped => Self::PredecessorStopped,
             ReplaceRejectionV18::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV18::ReapRefused(rejection) => Self::ReapRefused(rejection),
+            ReplaceRejectionV18::ReapRefused(rejection) => Self::ReapRefused(rejection.into()),
         }
     }
 }
@@ -3546,7 +3644,7 @@ enum ReplaceRejectionV17 {
     UnknownPredecessor,
     PredecessorStopped,
     LaunchRefused(StartRejectionV17),
-    ReapRefused(signal_flow::StopRejection),
+    ReapRefused(StopRejectionV38),
 }
 
 impl From<StartRejectionV17> for StartRejectionV22 {
@@ -3581,7 +3679,7 @@ impl From<ReplaceRejectionV17> for ReplaceRejectionV22 {
             ReplaceRejectionV17::UnknownPredecessor => Self::UnknownPredecessor,
             ReplaceRejectionV17::PredecessorStopped => Self::PredecessorStopped,
             ReplaceRejectionV17::LaunchRefused(rejection) => Self::LaunchRefused(rejection.into()),
-            ReplaceRejectionV17::ReapRefused(rejection) => Self::ReapRefused(rejection),
+            ReplaceRejectionV17::ReapRefused(rejection) => Self::ReapRefused(rejection.into()),
         }
     }
 }
@@ -4228,8 +4326,10 @@ impl UpgradesFlowFamilies for Engine {
         attempts: TableReference<StoredLaunchAttempt>,
         quarantine: TableReference<QuarantinedLaunchOutcome>,
     ) -> Result<TableReference<StoredLaunchOutcome>, StoreError> {
-        // A store before Simplified and its presentation path were removed
-        // holds v9 rows. A store before required metaflows holds v8 rows; a 0.40 store before CompositionRefusal holds v7 rows, a 0.35.22
+        // A store before pane-close failures were typed holds v10 rows. A
+        // store before Simplified and its presentation path were removed holds
+        // v9 rows. A store before required metaflows holds v8 rows; a 0.40
+        // store before CompositionRefusal holds v7 rows, a 0.35.22
         // to 0.39 store v6 rows, a 0.35.6 to 0.35.21 store v5
         // rows, a 0.35.3 to 0.35.5 store v4 rows, a 0.35.2 store v3 rows and
         // a 0.34 store v2 rows; the
@@ -4252,6 +4352,14 @@ impl UpgradesFlowFamilies for Engine {
         let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
+        match self.upgrade_table::<StoredLaunchOutcomeV10, StoredLaunchOutcome>(descriptor.clone())
+        {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => return Err(refused(refusal.key())),
+            UpgradeOutcome::Failed(failure) if admission(&failure) => {}
+            UpgradeOutcome::Failed(failure) => return Err(failed(failure)),
+        }
         match self.upgrade_table::<StoredLaunchOutcomeV9, StoredLaunchOutcome>(descriptor.clone()) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
@@ -5156,7 +5264,8 @@ impl OpensFlowStore for FlowStore {
         .with_predecessor::<StoredLaunchOutcomeV6>()
         .with_predecessor::<StoredLaunchOutcomeV7>()
         .with_predecessor::<StoredLaunchOutcomeV8>()
-        .with_predecessor::<StoredLaunchOutcomeV9>();
+        .with_predecessor::<StoredLaunchOutcomeV9>()
+        .with_predecessor::<StoredLaunchOutcomeV10>();
         let replacements_descriptor = TableDescriptor::<Replacement>::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -5435,7 +5544,8 @@ impl OpensFlowStore for FlowStore {
         .with_predecessor::<StoredLaunchOutcomeV6>()
         .with_predecessor::<StoredLaunchOutcomeV7>()
         .with_predecessor::<StoredLaunchOutcomeV8>()
-        .with_predecessor::<StoredLaunchOutcomeV9>();
+        .with_predecessor::<StoredLaunchOutcomeV9>()
+        .with_predecessor::<StoredLaunchOutcomeV10>();
         let replacements = engine.register_table(TableDescriptor::new(
             FLOW_REPLACEMENT_TABLE_NAME,
             FamilyName::new("flow-nexus-replacement"),
@@ -9878,6 +9988,7 @@ mod tests {
     use super::{LaunchOutcomeV4, ReplaceRejectionV18, StartRejectionV18, StoredLaunchOutcomeV4};
     use super::{LaunchOutcomeV5, ReplaceRejectionV22, StartRejectionV22, StoredLaunchOutcomeV5};
     use super::{LaunchOutcomeV7, ReplaceRejectionV32, StartRejectionV32, StoredLaunchOutcomeV7};
+    use super::{LaunchOutcomeV10, ReplaceRejectionV38, StopRejectionV38, StoredLaunchOutcomeV10};
     use super::{LaunchedRecord, ReplacedRecord};
     use super::{LaysOutDefaults, SeedsConfiguration};
     use crate::store::RegistersBindings;
@@ -12849,9 +12960,8 @@ mod tests {
         }
     }
 
-    /// The immediately preceding launch-outcome shape keeps required
-    /// addresses exactly and turns only the removed composition refusals
-    /// into Unrecorded.
+    /// The immediately preceding B12 shape keeps required addresses exactly
+    /// and turns only the removed composition refusals into Unrecorded.
     #[test]
     fn v9_launch_outcomes_preserve_requirements_and_remove_old_refusals() {
         let fixture = StoreFixture::new();
@@ -12881,7 +12991,7 @@ mod tests {
                 .register_table(TableDescriptor::new(
                     TableName::new("flow_nexus_launch_outcomes"),
                     FamilyName::new("flow-nexus-launch-outcome"),
-                    SchemaHash::for_label("flow-nexus-launch-outcome-v9"),
+                    StoredLaunchOutcomeV9::schema_hash(),
                 ))
                 .expect("v9 outcome family registers");
             for row in rows {
@@ -12906,6 +13016,51 @@ mod tests {
             Some(LaunchOutcome::StartRejected(
                 StartRejection::CompositionRefused(signal_flow::CompositionRefusal::Unrecorded)
             ))
+        );
+    }
+
+    #[test]
+    fn v10_generic_close_refusal_upgrades_once_to_identity_unavailable() {
+        let fixture = StoreFixture::new();
+        {
+            let mut engine = Engine::open(EngineOpen::new(fixture.path(), SchemaVersion::new(1)))
+                .expect("outcome store opens");
+            let outcomes = engine
+                .register_table(TableDescriptor::new(
+                    TableName::new("flow_nexus_launch_outcomes"),
+                    FamilyName::new("flow-nexus-launch-outcome"),
+                    StoredLaunchOutcomeV10::schema_hash(),
+                ))
+                .expect("v10 outcome family registers");
+            engine
+                .assert(Assertion::new(
+                    outcomes,
+                    StoredLaunchOutcomeV10 {
+                        launch_request_id: "v10-close".into(),
+                        launch_outcome: LaunchOutcomeV10::ReplaceRejected(
+                            ReplaceRejectionV38::ReapRefused(StopRejectionV38::CloseRefused),
+                        ),
+                    },
+                ))
+                .expect("v10 outcome persists");
+        }
+        let expected = LaunchOutcome::ReplaceRejected(ReplaceRejection::ReapRefused(
+            StopRejection::CloseRefused(signal_flow::PaneCloseFailure::IdentityUnavailable),
+        ));
+        let store = fixture.store();
+        assert_eq!(
+            store
+                .launch_outcome("v10-close")
+                .expect("upgraded outcome reads"),
+            Some(expected.clone())
+        );
+        drop(store);
+        assert_eq!(
+            fixture
+                .store()
+                .launch_outcome("v10-close")
+                .expect("reopened outcome reads"),
+            Some(expected)
         );
     }
 
@@ -13262,7 +13417,7 @@ mod tests {
             StoredLaunchOutcomeV6 {
                 launch_request_id: "v6-reap".into(),
                 launch_outcome: LaunchOutcomeV6::ReplaceRejected(ReplaceRejectionV30::ReapRefused(
-                    StopRejection::CloseRefused,
+                    StopRejectionV38::CloseRefused,
                 )),
             },
         ];
@@ -13306,7 +13461,7 @@ mod tests {
             (
                 "v6-reap",
                 LaunchOutcome::ReplaceRejected(ReplaceRejection::ReapRefused(
-                    StopRejection::CloseRefused,
+                    StopRejection::CloseRefused(signal_flow::PaneCloseFailure::IdentityUnavailable),
                 )),
             ),
         ] {
@@ -13510,7 +13665,7 @@ mod tests {
                 StoredLaunchOutcomeV2 {
                     launch_request_id: "old-reap-rejection".into(),
                     launch_outcome: LaunchOutcomeV2::ReplaceRejected(
-                        ReplaceRejectionV17::ReapRefused(StopRejection::CloseRefused),
+                        ReplaceRejectionV17::ReapRefused(StopRejectionV38::CloseRefused),
                     ),
                 },
             ],
@@ -13545,7 +13700,7 @@ mod tests {
             (
                 "old-reap-rejection",
                 LaunchOutcome::ReplaceRejected(ReplaceRejection::ReapRefused(
-                    StopRejection::CloseRefused,
+                    StopRejection::CloseRefused(signal_flow::PaneCloseFailure::IdentityUnavailable),
                 )),
             ),
         ];

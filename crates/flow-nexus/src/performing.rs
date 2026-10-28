@@ -4,6 +4,7 @@
 //! answer is one generated `Outcome`. The launch, stop, retire and delivery
 //! paths decide what to do next; this is the only place they act.
 
+use crate::RunningNexus;
 use crate::codex::{
     AccountsOpenedThread, OpensCodexThread, SelectsCodexEndpoint, SubmitsBoundCodexPart,
 };
@@ -29,7 +30,6 @@ use crate::store::{
 use crate::store::{ManagesMetaflowState, ReadsFlowRows};
 use crate::title::TitleRefused;
 use crate::waking::PerformsWakeAndDrain;
-use crate::RunningNexus;
 use signal_flow::{
     HarnessKind, LaunchAttemptReservation, NativeLaunchFailure, NativeLaunchRefusal,
     NativeLaunchStage, Response, StartRejection,
@@ -494,8 +494,10 @@ impl Performs for RunningNexus {
             }
             Operation::Release(flow_id) => self.release(&flow_id),
             Operation::Close(node) => match self.herdr.close(&node) {
-                true => Outcome::Closed,
-                false => Outcome::Failed(Failed_Data::HerdrRefused),
+                signal_flow::PaneCloseOutcome::Closed => Outcome::Closed,
+                signal_flow::PaneCloseOutcome::Refused(failure) => {
+                    Outcome::Failed(Failed_Data::PaneCloseRefused(failure))
+                }
             },
             Operation::Wake(address) => self.wake(address),
             Operation::Drain(address) => self.drain(address),
@@ -609,9 +611,11 @@ impl PerformsInParts for RunningNexus {
                         self.herdr.pane_presence(&node),
                         crate::herdr::PanePresence::Present | crate::herdr::PanePresence::Bare
                     )
-                    && !self.herdr.close(&node)
+                    && let signal_flow::PaneCloseOutcome::Refused(failure) = self.herdr.close(&node)
                 {
-                    eprintln!("flow-nexus: flow {flow_id} exited; its pane was not closed");
+                    eprintln!(
+                        "flow-nexus: flow {flow_id} exited; its pane was not closed: {failure:?}"
+                    );
                 }
                 recorded
             }

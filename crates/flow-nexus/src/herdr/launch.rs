@@ -2096,26 +2096,6 @@ impl RunsFlowOwnedClaude for HerdrCli {
                 pane.herdr_pane_id.clone(),
                 PathBuf::from(configured_program),
             );
-        #[cfg(test)]
-        {
-            // The fixture command records the exact typed argv but runs no
-            // Claude process or hook. Emit the same typed readiness frame
-            // that the hook test independently proves, at this exact fake
-            // launch boundary.
-            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&flow_native::ClaudeReadiness)
-                .map_err(|_| {
-                    SpawnFailure::Unattempted("fixture Claude readiness type is unavailable".into())
-                })?;
-            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
-            frame.extend_from_slice(&payload);
-            std::os::unix::net::UnixDatagram::unbound()
-                .and_then(|sender| sender.send_to(&frame, &readiness_path))
-                .map_err(|error| {
-                    SpawnFailure::Unattempted(format!(
-                        "fixture Claude readiness could not report: {error}"
-                    ))
-                })?;
-        }
         // `herdr pane run` is a status-only command: unlike the query
         // commands, success is deliberately silent.  Its exit status is the
         // complete acknowledgement that the line and Enter were accepted.
@@ -2413,20 +2393,21 @@ pub(crate) trait ObservesBoundPane {
 }
 
 trait DecodesClaudeReadiness {
-    fn decode_claude_readiness(&self) -> Result<flow_native::ClaudeReadiness, String>;
+    fn decode_claude_readiness(&self) -> Result<signal_flow::Response, String>;
 }
 
 impl DecodesClaudeReadiness for [u8] {
-    fn decode_claude_readiness(&self) -> Result<flow_native::ClaudeReadiness, String> {
+    fn decode_claude_readiness(&self) -> Result<signal_flow::Response, String> {
         let length_bytes: [u8; 4] = self
             .get(..4)
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(|| "Flow-owned Claude readiness frame has no length".to_owned())?;
         let payload_length = usize::try_from(u32::from_be_bytes(length_bytes))
             .map_err(|_| "Flow-owned Claude readiness length is invalid".to_owned())?;
-        let expected_length = rkyv::to_bytes::<rkyv::rancor::Error>(&flow_native::ClaudeReadiness)
-            .map_err(|_| "Flow-owned Claude readiness type is unavailable".to_owned())?
-            .len();
+        let expected_length =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::ClaudeReady)
+                .map_err(|_| "Flow-owned Claude readiness type is unavailable".to_owned())?
+                .len();
         if payload_length != expected_length {
             return Err("Flow-owned Claude readiness payload length is not canonical".into());
         }
@@ -2434,8 +2415,10 @@ impl DecodesClaudeReadiness for [u8] {
             .get(4..)
             .filter(|payload| payload.len() == payload_length)
             .ok_or_else(|| "Flow-owned Claude readiness frame length differs".to_owned())?;
-        rkyv::from_bytes::<flow_native::ClaudeReadiness, rkyv::rancor::Error>(payload)
-            .map_err(|_| "Flow-owned Claude readiness payload is invalid".to_owned())
+        match rkyv::from_bytes::<signal_flow::Response, rkyv::rancor::Error>(payload) {
+            Ok(signal_flow::Response::ClaudeReady) => Ok(signal_flow::Response::ClaudeReady),
+            _ => Err("Flow-owned Claude readiness payload is invalid".to_owned()),
+        }
     }
 }
 
@@ -2468,7 +2451,9 @@ impl ObservesBoundPane for HerdrCli {
                 .map_err(|_| "Flow-owned Claude readiness ownership is unavailable".to_owned())?
                 .remove(&pane.herdr_pane_id)
                 .ok_or_else(|| "Flow-owned Claude readiness endpoint is absent".to_owned())?;
-            let mut readiness_report = [0_u8; 64];
+            let frame_limit = usize::try_from(self.limits.frame)
+                .map_err(|_| "Flow-owned Claude readiness frame limit is invalid".to_owned())?;
+            let mut readiness_report = vec![0_u8; frame_limit];
             let timeout = u64::try_from(self.timings.launch_rest_wait)
                 .map_err(|_| "Flow-owned Claude readiness timeout is invalid".to_owned())?;
             readiness
@@ -3408,7 +3393,40 @@ printf '%s\n' "$alias"
             path: flow_id.clone(),
         }
         .install(&flow_id_script);
+        let readiness_runtime = root.path().join("native-transcripts");
         let adapter = HerdrCli::at(executable, flows);
+        let owned_command = root.path().join("owned-command");
+        std::thread::spawn(move || {
+            for _ in 0..2000 {
+                if let Ok(entries) = fs::read_dir(&readiness_runtime) {
+                    for entry in entries.flatten() {
+                        if entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("claude-ready-")
+                        {
+                            let launched = fs::read_to_string(&owned_command)
+                                .is_ok_and(|command| command.contains("--session-id"));
+                            if let (true, Ok(sender)) =
+                                (launched, std::os::unix::net::UnixDatagram::unbound())
+                            {
+                                let payload = rkyv::to_bytes::<rkyv::rancor::Error>(
+                                    &signal_flow::Response::ClaudeReady,
+                                )
+                                .expect("fixture Claude readiness payload");
+                                let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+                                frame.extend_from_slice(&payload);
+                                sender
+                                    .send_to(&frame, entry.path())
+                                    .expect("fixture SessionStart reports typed Claude readiness");
+                                return;
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
         (root, adapter)
     }
 
@@ -3429,7 +3447,8 @@ printf '%s\n' "$alias"
             .get(&pane.herdr_pane_id)
             .map(|(_, path)| path.clone())
             .expect("fixture readiness endpoint");
-        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&flow_native::ClaudeReadiness).unwrap();
+        let payload =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::ClaudeReady).unwrap();
         let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
         frame.extend_from_slice(&payload);
         std::os::unix::net::UnixDatagram::unbound()
@@ -3446,6 +3465,11 @@ printf '%s\n' "$alias"
         assert!([0, 0, 0, 1].decode_claude_readiness().is_err());
         assert!([0, 0, 0, 1, 7].decode_claude_readiness().is_err());
         assert!([0, 0, 0, 0, 7].decode_claude_readiness().is_err());
+        let other =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::Reported).unwrap();
+        let mut framed_other = (other.len() as u32).to_be_bytes().to_vec();
+        framed_other.extend_from_slice(&other);
+        assert!(framed_other.decode_claude_readiness().is_err());
     }
 
     fn registration_of(

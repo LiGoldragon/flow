@@ -4459,7 +4459,10 @@ fn a_send_committed_before_its_reply_keeps_its_one_request_and_wake_across_a_res
     });
     let call = ToolCall::read_tool_call(params).expect("the call reads");
     // The earlier Nexus commits the call; its answer never leaves.
-    let committed = fixture.nexus.handle_send_call(call);
+    let committed = fixture
+        .nexus
+        .configured_effects(&fixture.nexus.configured_use().unwrap())
+        .handle_send_call(call);
     let SendOutcome::Accepted(accepted) = &committed else {
         panic!("the call is committed with a logical identity: {committed:?}")
     };

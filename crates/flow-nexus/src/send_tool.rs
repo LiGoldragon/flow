@@ -54,7 +54,7 @@ use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
 };
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
-use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
+use crate::{ConfiguredEffects, HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
@@ -344,20 +344,17 @@ trait RefusesSendCall {
 }
 
 impl RefusesSendCall for RunningNexus {}
+impl RefusesSendCall for ConfiguredEffects<'_> {}
 
-impl HandlesSendCall for RunningNexus {
-    fn handle_send_call<N: ToolCallCarrying>(
-        &self,
-        configured: &crate::ConfiguredUse,
-        input: N,
-    ) -> SendOutcome {
+impl HandlesSendCall for ConfiguredEffects<'_> {
+    fn handle_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
         let call = input.tool_call();
         let outcome = {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.handle_held_send_call(configured, call)
+            self.handle_held_send_call(call)
         };
         if let SendOutcome::Accepted(accepted) = &outcome
             && accepted.send_acceptance.delivery_state == signal_flow::DeliveryState::Queued
@@ -367,11 +364,7 @@ impl HandlesSendCall for RunningNexus {
         outcome
     }
 
-    fn handle_held_send_call<N: ToolCallCarrying>(
-        &self,
-        configured: &crate::ConfiguredUse,
-        input: N,
-    ) -> SendOutcome {
+    fn handle_held_send_call<N: ToolCallCarrying>(&self, input: N) -> SendOutcome {
         let call = input.tool_call();
         let outcome = (|| {
             if call.tool_name != SendTool::tool_name() {
@@ -386,13 +379,13 @@ impl HandlesSendCall for RunningNexus {
                 Self::refused(SendRefusal::Store)
             };
             // The sender is read again for every call, a replayed one included.
-            let root_thread = configured.codex_endpoints.root_thread(&key.thread_id);
-            let sender = match self.store.thread_sender(&root_thread) {
+            let root_thread = self.configured.codex_endpoints.root_thread(&key.thread_id);
+            let sender = match self.operational.thread_sender(&root_thread) {
                 Ok(Ok(sender)) => sender,
                 Ok(Err(refusal)) => return Self::refused(refusal),
                 Err(error) => return store_refused(error),
             };
-            let sender_flow_id = match self.store.list_metaflows() {
+            let sender_flow_id = match self.operational.list_metaflows() {
                 Ok(metaflows) => metaflows
                     .into_iter()
                     .find_map(|metaflow| (metaflow.address == sender).then_some(metaflow.state)),
@@ -400,9 +393,9 @@ impl HandlesSendCall for RunningNexus {
             };
             let sender_flow_id = match sender_flow_id {
                 Some(flow_ethos::State::Awake(flow_id)) => Some(flow_id),
-                _ => match self.store.thread_launch(&root_thread) {
+                _ => match self.operational.thread_launch(&root_thread) {
                     Ok(Some(launch_request_id)) => {
-                        match self.store.launch_attempt(&launch_request_id) {
+                        match self.operational.launch_attempt(&launch_request_id) {
                             Ok(Some(attempt)) => attempt
                                 .native_launch_binding_option
                                 .map(|binding| binding.flow_id),
@@ -428,7 +421,7 @@ impl HandlesSendCall for RunningNexus {
                 flow_id: sender_flow_id,
             };
             let content_sha256 = call.content_sha256();
-            match self.store.send_call(key) {
+            match self.operational.send_call(key) {
                 Ok(Some(recorded)) if recorded.content_sha256 == content_sha256 => {
                     return recorded.send_outcome;
                 }
@@ -440,7 +433,7 @@ impl HandlesSendCall for RunningNexus {
             // replay is answered the same.
             let refused_kept = |refusal: SendRefusal, content_sha256: String| {
                 let outcome = SendOutcome::Refused(refusal);
-                match self.store.record_send_call(SendCall {
+                match self.operational.record_send_call(SendCall {
                     tool_call_key: key.clone(),
                     content_sha256,
                     send_outcome: outcome.clone(),
@@ -470,12 +463,12 @@ impl HandlesSendCall for RunningNexus {
             let message = arguments.message();
             if let Some(signal_flow::Refusal::Oversized(size)) = message.oversized_refusal(
                 &sender.address,
-                configured.snapshot.limits.send_body as usize,
+                self.configured.snapshot.limits.send_body as usize,
             ) {
                 return refused_kept(SendRefusal::Oversized(size), content_sha256);
             }
             let outcome = self
-                .store
+                .operational
                 .accept_tool_send(
                     key,
                     &content_sha256,
@@ -493,7 +486,12 @@ impl HandlesSendCall for RunningNexus {
             }
             outcome
         })();
-        self.journal_send_invocation(&call, outcome)
+        {
+            let invocation = call.send_invocation(outcome.clone());
+            let datom = invocation.datomize(Vec::new()).protosize().compact();
+            eprintln!("flow-nexus: {datom}");
+            outcome
+        }
     }
 }
 
@@ -662,7 +660,7 @@ impl RespondsToSendCalls for RunningNexus {
             .cloned()
             .and_then(ToolCall::read_tool_call::<serde_json::Value>)
         {
-            Some(call) => self.handle_send_call(configured, call),
+            Some(call) => self.configured_effects(configured).handle_send_call(call),
             None => Self::refused(SendRefusal::Malformed),
         };
         let answered = subscription.answer(id, outcome.tool_response());
@@ -833,7 +831,9 @@ impl ServesLaunchCalls for RunningNexus {
             .cloned()
             .and_then(ToolCall::read_tool_call::<serde_json::Value>)
         {
-            Some(call) => self.handle_held_send_call(configured, call),
+            Some(call) => self
+                .configured_effects(configured)
+                .handle_held_send_call(call),
             None => Self::refused(SendRefusal::Malformed),
         };
         let answered = responder.subscription.answer(id, outcome.tool_response());

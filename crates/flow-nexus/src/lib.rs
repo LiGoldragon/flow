@@ -48,6 +48,7 @@ pub mod herdr;
 pub mod launching;
 pub mod observe_agent;
 mod observe_sends;
+mod operational;
 pub mod peer;
 pub mod performing;
 pub mod reporting;
@@ -220,6 +221,40 @@ impl ConfiguredUse {
             },
             herdr,
         }
+    }
+}
+
+/// Capability-limited receiver for one configured external effect. It owns no
+/// provider and exposes no raw Nexus or configuration store.
+pub(crate) struct ConfiguredEffects<'a> {
+    pub(crate) configured: &'a ConfiguredUse,
+    pub(crate) operational: operational::OperationalStore<'a>,
+    pub(crate) dispatch_gate: &'a Mutex<()>,
+    wake_due: Box<dyn Fn(signal_flow::Address) + 'a>,
+    rest_ended_awake: Box<dyn Fn(&signal_flow::Address) + 'a>,
+}
+
+impl RunningNexus {
+    pub(crate) fn configured_effects<'a>(
+        &'a self,
+        configured: &'a ConfiguredUse,
+    ) -> ConfiguredEffects<'a> {
+        ConfiguredEffects {
+            configured,
+            operational: operational::OperationalStore::new(&self.store),
+            dispatch_gate: &self.dispatch_gate,
+            wake_due: Box::new(move |address| self.wake_due(address)),
+            rest_ended_awake: Box::new(move |address| self.rest_ended_awake(address)),
+        }
+    }
+}
+
+impl ConfiguredEffects<'_> {
+    pub(crate) fn wake_due(&self, address: signal_flow::Address) {
+        (self.wake_due)(address)
+    }
+    pub(crate) fn rest_ended_awake(&self, address: &signal_flow::Address) {
+        (self.rest_ended_awake)(address)
     }
 }
 

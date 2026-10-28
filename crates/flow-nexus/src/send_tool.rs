@@ -50,9 +50,7 @@ use crate::sending::{AdmitsSendPayload, MintsId};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::opened_thread::RecordsOpenedThreads;
 use crate::store::send_call::KeepsSendCalls;
-use crate::store::{
-    ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
-};
+use crate::store::{NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt};
 use crate::waking::{RestsEndedAwake, SleepsAndWakesSeats};
 use crate::{HoldsStopRequest, RunningNexus, store::AnnouncesLaunchChanges};
 use datom_codec::Datomizable;

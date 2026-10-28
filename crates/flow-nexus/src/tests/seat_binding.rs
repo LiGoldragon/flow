@@ -155,6 +155,26 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
         Response::Bound("877549".into())
     );
     assert_eq!(fixture.nexus.sending_address(&subagent).unwrap(), address);
+    fixture
+        .nexus
+        .store
+        .seed_bound_process_without_flow_id_for_test(&address, &subagent)
+        .unwrap();
+    assert!(matches!(
+        fixture.nexus.sending_sender(&subagent),
+        Err(response) if *response == Response::Refused(Refusal::Unidentified(subagent.clone()))
+    ));
+    assert_eq!(
+        fixture.nexus.bind_seat(address.clone(), Some(&subagent)),
+        Response::Bound("877549".into())
+    );
+    assert_eq!(
+        fixture.nexus.sending_sender(&subagent).unwrap(),
+        meta_signal_flow::Sender {
+            address: address.clone(),
+            flow_id: "877549".into(),
+        }
+    );
     // Message's authenticated Identify bridge uses the same root-aware
     // kernel caller resolution as direct Flow Send, never a claimed seat.
     use crate::metaflow::DispatchesMetaflowPeer;

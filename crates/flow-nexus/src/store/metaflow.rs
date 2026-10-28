@@ -4,8 +4,8 @@ use super::logical_delivery::{RecordsLogicalDeliveries, VerifiedDeliveryLock};
 use super::*;
 use crate::sending::AdmitsSendPayload;
 use signal_flow::{
-    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Recipient, Refusal, SentBy,
-    StartRejection, Unknown_Data,
+    Bind_Data, Deliver_Data, FlowId, LaunchProfile, Lock_Data, Recipient, Refusal, StartRejection,
+    Unknown_Data,
 };
 
 /// Materializes working state for a configured Address, never policy.
@@ -134,15 +134,26 @@ impl MutatesMetaflows for FlowStore {
             return Ok(Response::Refused(Refusal::Taken(address)));
         }
         let existing = self.stored_metaflow(&address)?;
+        let existing_binding = self.stored_metaflow_process(&address)?;
         if let Some(stored) = existing.as_ref()
-            && let Some(previous) = self.bound_process(&address)?
+            && let Some(previous) = existing_binding.as_ref()
         {
-            if previous == *peer
+            if previous.process == *peer
                 && let MetaflowState::Awake(id) = &stored.metaflow.state
             {
+                if previous.flow_id_option.as_ref() != Some(id) {
+                    self.engine.mutate(sema_engine::Mutation::new(
+                        self.metaflow_processes,
+                        StoredMetaflowProcess {
+                            process: peer.clone(),
+                            address: address.clone(),
+                            flow_id_option: Some(id.clone()),
+                        },
+                    ))?;
+                }
                 return Ok(Response::Bound(id.clone()));
             }
-            if FlowStore::process_is_live(&previous) {
+            if FlowStore::process_is_live(&previous.process) {
                 return Ok(Response::Refused(Refusal::Taken(address)));
             }
         }
@@ -152,7 +163,7 @@ impl MutatesMetaflows for FlowStore {
         };
         let flow_id = launched.unwrap_or_else(|| format!("flow-{:016x}", state.next_flow_number));
         let new_metaflow = existing.is_none();
-        let new_binding = self.bound_process(&address)?.is_none();
+        let new_binding = existing_binding.is_none();
         let mut metaflow = existing.map(|row| row.metaflow).unwrap_or(Metaflow {
             address: address.clone(),
             state: MetaflowState::Asleep,
@@ -297,8 +308,7 @@ impl MutatesMetaflows for FlowStore {
         }
         self.accept_logical_delivery(
             &request.lock.address,
-            SentBy::Sender(request.lock.sender.clone()),
-            Some(sender),
+            sender,
             request.delivery,
             request.message,
             Some(VerifiedDeliveryLock {
@@ -634,14 +644,27 @@ impl QueuesFlowRequest for FlowStore {
         if self.stored_metaflow(address)?.is_none() {
             return Ok(false);
         }
+        let sender_address = match &request.sent_by {
+            SentBy::Sender(address) => address.clone(),
+            SentBy::Flow | SentBy::Unknown => Address {
+                aspect: Aspect::Mind,
+                topic: "historical".into(),
+                layer: Layer::Secondary,
+            },
+        };
         let response = self.accept_logical_delivery(
             address,
-            request.sent_by,
-            None,
+            meta_signal_flow::Sender {
+                address: sender_address,
+                flow_id: "historical-fixture".into(),
+            },
             request.delivery,
             request.message,
             None,
         )?;
+        if let Response::SendAccepted(accepted) = &response {
+            self.strip_logical_sender_for_test(&accepted.logical_delivery_id)?;
+        }
         Ok(matches!(response, Response::SendAccepted(_)))
     }
 }

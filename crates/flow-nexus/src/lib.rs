@@ -3685,8 +3685,10 @@ mod tests {
             .store
             .accept_logical_delivery(
                 &recipient,
-                signal_flow::SentBy::Sender(sender.clone()),
-                None,
+                meta_signal_flow::Sender {
+                    address: sender.clone(),
+                    flow_id: "fixture-sender".into(),
+                },
                 signal_flow::Delivery::Queue,
                 signal_flow::Message::Soft(signal_flow::Request::Order(
                     "resume from durable state".into(),

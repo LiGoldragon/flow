@@ -3007,8 +3007,10 @@ mod tests {
         let first = match store
             .accept_logical_delivery(
                 &address(),
-                SentBy::Sender(source.clone()),
-                None,
+                meta_signal_flow::Sender {
+                    address: source.clone(),
+                    flow_id: "historical-flow".into(),
+                },
                 flow_ethos::Delivery::Queue,
                 flow_ethos::Message::Soft(Request::Order("historical unsigned".into())),
                 None,
@@ -3018,14 +3020,14 @@ mod tests {
             signal_flow::Response::SendAccepted(value) => value.logical_delivery_id,
             other => panic!("{other:?}"),
         };
+        store.strip_logical_sender_for_test(&first).unwrap();
         let second = match store
             .accept_logical_delivery(
                 &address(),
-                SentBy::Sender(source.clone()),
-                Some(meta_signal_flow::Sender {
+                meta_signal_flow::Sender {
                     address: source,
                     flow_id: "signed-flow".into(),
-                }),
+                },
                 flow_ethos::Delivery::Queue,
                 flow_ethos::Message::HardAbrupt(Request::Question("current signed".into())),
                 None,

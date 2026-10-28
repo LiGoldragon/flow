@@ -159,11 +159,23 @@ pub trait LaunchesFlows {
     fn settled(&self, profile: &LaunchProfile, origin: &Origin) -> Option<Response>;
     /// Records what a Start-path response settles, completing a replacement.
     fn settle(&self, launch_request_id: &str, response: Response) -> Response;
+    fn settle_configured(
+        &self,
+        configured: &ConfiguredUse,
+        launch_request_id: &str,
+        response: Response,
+    ) -> Response;
     /// Starts the successor through the Start path, then replaces.
     fn replace(&self, profile: LaunchProfile, origin: Origin) -> Response;
     /// Stops the predecessor, then closes its pane; only then is the
     /// successor routable.
     fn reap(&self, replacement: Replacement, launched: Launched) -> Response;
+    fn reap_configured(
+        &self,
+        configured: &ConfiguredUse,
+        replacement: Replacement,
+        launched: Launched,
+    ) -> Response;
     /// Answers once: the outcome, else the pending attempt.
     fn launch_status(&self, launch_request_id: &str) -> Response;
     /// Everything a new launch does after Reserve, from the native intent
@@ -616,20 +628,36 @@ impl LaunchesFlows for RunningNexus {
     }
 
     fn settle(&self, launch_request_id: &str, response: Response) -> Response {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return response,
+        };
+        self.settle_configured(&configured, launch_request_id, response)
+    }
+
+    fn settle_configured(
+        &self,
+        configured: &ConfiguredUse,
+        launch_request_id: &str,
+        response: Response,
+    ) -> Response {
         let replacement = match self.store.replacement(launch_request_id) {
             Ok(replacement) => replacement,
             Err(_) => return response,
         };
         match response {
             Response::Started(started) => match replacement {
-                Some(replacement) => self.reap(replacement, started),
+                Some(replacement) => self.reap_configured(configured, replacement, started),
                 None => {
                     // A Started flow stays Started; a failed outcome write
                     // only leaves LaunchStatus to answer from the attempt.
-                    let _ = self.perform(Self::settled_as(
-                        launch_request_id,
-                        LaunchOutcome::Started(LaunchedRecord::from(&started)),
-                    ));
+                    let _ = self.perform_configured(
+                        configured,
+                        Self::settled_as(
+                            launch_request_id,
+                            LaunchOutcome::Started(LaunchedRecord::from(&started)),
+                        ),
+                    );
                     Response::Started(started)
                 }
             },
@@ -644,13 +672,17 @@ impl LaunchesFlows for RunningNexus {
                     None => LaunchOutcome::StartRejected(rejection),
                 };
                 if reserved {
-                    let _ = self.perform(Self::settled_as(launch_request_id, outcome.clone()));
+                    let _ = self.perform_configured(
+                        configured,
+                        Self::settled_as(launch_request_id, outcome.clone()),
+                    );
                 } else {
                     // Nothing was reserved: the request never became a
                     // launch, and it may be sent again.
-                    let _ = self.perform(Operation::Record(Record_Data::Withdrawn(
-                        launch_request_id.into(),
-                    )));
+                    let _ = self.perform_configured(
+                        configured,
+                        Operation::Record(Record_Data::Withdrawn(launch_request_id.into())),
+                    );
                 }
                 outcome.response(&self.store)
             }
@@ -748,6 +780,15 @@ impl LaunchesFlows for RunningNexus {
                 ));
             }
         };
+        self.reap_configured(&configured, replacement, launched)
+    }
+
+    fn reap_configured(
+        &self,
+        configured: &ConfiguredUse,
+        replacement: Replacement,
+        launched: Launched,
+    ) -> Response {
         let refuse = |rejection: ReplaceRejection| {
             let _ = self.perform_configured(
                 &configured,

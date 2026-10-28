@@ -246,15 +246,48 @@ pub trait Dispatches {
     ) -> meta_signal_flow::Response;
 }
 
+impl RunningNexus {
+    fn dispatch_start_configured(
+        &self,
+        configured: &ConfiguredUse,
+        profile: signal_flow::LaunchProfile,
+        origin: signal_flow::Origin,
+    ) -> signal_flow::Response {
+        let launch_request_id = profile.launch_request_id.clone();
+        if let Some(settled) = self.settled(&profile, &origin) {
+            return settled;
+        }
+        match self.admission_refusal(&profile) {
+            Ok(None) => {}
+            Ok(Some(rejection)) => return signal_flow::Response::StartRejected(rejection),
+            Err(_) => {
+                return signal_flow::Response::StartRejected(
+                    signal_flow::StartRejection::LaunchPersistenceRefused,
+                );
+            }
+        }
+        let response = self.start_configured(configured, profile, origin);
+        self.settle_configured(configured, &launch_request_id, response)
+    }
+}
+
 impl Dispatches for RunningNexus {
     /// A query no calling process stands behind, taken as a connection
     /// takes it: a new Primary's Secondary is started first, off the gate.
     fn dispatch(&self, query: Query) -> Response {
         match query {
-            Query::Start(profile) => match self.requirements_first(&profile) {
-                Ok(()) => self.dispatch_from(Query::Start(profile), Origin::Unbound),
-                Err(rejection) => Response::StartRejected(rejection),
-            },
+            Query::Start(profile) => {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => {
+                        return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+                    }
+                };
+                match self.requirements_first_configured(&configured, &profile) {
+                    Ok(()) => self.dispatch_start_configured(&configured, profile, Origin::Unbound),
+                    Err(rejection) => Response::StartRejected(rejection),
+                }
+            }
             Query::Launch(launch) => match self.declared_launch(launch, None) {
                 Ok(query) => self.dispatch(query),
                 Err(refusal) => *refusal,
@@ -266,21 +299,13 @@ impl Dispatches for RunningNexus {
     fn dispatch_from(&self, query: Query, origin: Origin) -> Response {
         match query {
             Query::Start(profile) => {
-                let launch_request_id = profile.launch_request_id.clone();
-                if let Some(settled) = self.settled(&profile, &origin) {
-                    return settled;
-                }
-                // A caller's new launch is admitted before anything of it is
-                // written: a camelCase topic, and a Primary's Secondary Awake.
-                match self.admission_refusal(&profile) {
-                    Ok(None) => {}
-                    Ok(Some(rejection)) => return Response::StartRejected(rejection),
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
                     Err(_) => {
                         return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
                     }
-                }
-                let response = self.start(profile, origin);
-                self.settle(&launch_request_id, response)
+                };
+                self.dispatch_start_configured(&configured, profile, origin)
             }
             // Off the gate: the replacement takes it under the metaflow's
             // lock.
@@ -1268,9 +1293,20 @@ impl ServesConnection for Connection {
                     nexus.declared_launch(launch, self.process.as_ref())
                 };
                 match declared {
-                    Ok(Query::Start(profile)) => match nexus.requirements_first(&profile) {
-                        Ok(()) => nexus.dispatch_serially(Query::Start(profile), origin),
-                        Err(rejection) => Response::StartRejected(rejection),
+                    Ok(Query::Start(profile)) => match nexus.configured_use() {
+                        Ok(configured) => {
+                            match nexus.requirements_first_configured(&configured, &profile) {
+                                Ok(()) => {
+                                    let _turn = nexus
+                                        .dispatch_gate
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    nexus.dispatch_start_configured(&configured, profile, origin)
+                                }
+                                Err(rejection) => Response::StartRejected(rejection),
+                            }
+                        }
+                        Err(_) => Response::StartRejected(StartRejection::LaunchPersistenceRefused),
                     },
                     Ok(query) => nexus.dispatch_serially(query, origin),
                     Err(refusal) => *refusal,
@@ -1281,9 +1317,20 @@ impl ServesConnection for Connection {
             // A new Primary's Secondary starts first, off the gate.
             Query::Start(profile) => {
                 let origin = nexus.origin_of(self.peer.peer_process());
-                match nexus.requirements_first(&profile) {
-                    Ok(()) => nexus.dispatch_serially(Query::Start(profile), origin),
-                    Err(rejection) => Response::StartRejected(rejection),
+                match nexus.configured_use() {
+                    Ok(configured) => {
+                        match nexus.requirements_first_configured(&configured, &profile) {
+                            Ok(()) => {
+                                let _turn = nexus
+                                    .dispatch_gate
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                nexus.dispatch_start_configured(&configured, profile, origin)
+                            }
+                            Err(rejection) => Response::StartRejected(rejection),
+                        }
+                    }
+                    Err(_) => Response::StartRejected(StartRejection::LaunchPersistenceRefused),
                 }
             }
             query @ Query::Replace(_) => {

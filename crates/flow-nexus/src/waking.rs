@@ -535,11 +535,27 @@ pub(crate) trait StartsRequirementsFirst {
         &self,
         profile: &LaunchProfile,
     ) -> Result<(), signal_flow::StartRejection>;
+    fn requirements_first_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        profile: &LaunchProfile,
+    ) -> Result<(), signal_flow::StartRejection>;
 }
 
 impl StartsRequirementsFirst for RunningNexus {
     fn requirements_first(
         &self,
+        profile: &LaunchProfile,
+    ) -> Result<(), signal_flow::StartRejection> {
+        let configured = self
+            .configured_use()
+            .map_err(|_| signal_flow::StartRejection::LaunchPersistenceRefused)?;
+        self.requirements_first_configured(&configured, profile)
+    }
+
+    fn requirements_first_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
         profile: &LaunchProfile,
     ) -> Result<(), signal_flow::StartRejection> {
         use crate::launching::NamesTopic;
@@ -625,25 +641,22 @@ impl StartsRequirementsFirst for RunningNexus {
             let WakePlan::Fresh(fresh) = self.wake_plan(&metaflow) else {
                 return Err(signal_flow::StartRejection::RequirementUnmet(required));
             };
-            let configured = self
-                .configured_use()
-                .map_err(|_| signal_flow::StartRejection::LaunchPersistenceRefused)?;
-            let flow_id = self
-                .start_fresh(&configured, &metaflow, fresh, "")
-                .map_err(|failure| {
-                    eprintln!(
-                        "flow-nexus: required metaflow {:?} {} {:?} did not start: {failure:?}",
-                        required.aspect, required.topic, required.layer
-                    );
-                    signal_flow::StartRejection::RequirementUnmet(required.clone())
-                })?;
+            let flow_id =
+                self.start_fresh(configured, &metaflow, fresh, "")
+                    .map_err(|failure| {
+                        eprintln!(
+                            "flow-nexus: required metaflow {:?} {} {:?} did not start: {failure:?}",
+                            required.aspect, required.topic, required.layer
+                        );
+                        signal_flow::StartRejection::RequirementUnmet(required.clone())
+                    })?;
             {
                 let _turn = self
                     .dispatch_gate
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if self.perform_configured(
-                    &configured,
+                    configured,
                     Operation::Record(Record_Data::Awoken(Record_Data_Awoken_Data {
                         address: required.clone(),
                         flow_id,
@@ -748,6 +761,7 @@ trait WakesInParts {
     /// Writes the context size the flow's native transcript shows now, the
     /// size a Compact of the flow is judged by.
     fn record_context_at_stop(&self, flow_id: &str);
+    fn record_context_at_stop_configured(&self, configured: &crate::ConfiguredUse, flow_id: &str);
     /// Refuses a wake while a pane already runs this flow's native session:
     /// SessionLive when one does, HerdrUnreadable when Herdr is unreadable.
     fn refuse_live_session(
@@ -2386,24 +2400,35 @@ impl WakesInParts for RunningNexus {
             eprintln!("flow-nexus: flow {flow_id} stopped with configuration unreadable");
             return;
         };
+        self.record_context_at_stop_configured(&configured, flow_id);
+    }
+
+    fn record_context_at_stop_configured(&self, configured: &crate::ConfiguredUse, flow_id: &str) {
         let Ok(Some(node)) = self.store.flow_node(flow_id) else {
             return;
         };
         if node.harness_kind != HarnessKind::Claude {
             return;
         }
-        let Some(tokens) = self.claude_transcript(&node).and_then(|transcript| {
-            transcript.context_tokens(configured.snapshot.limits.context_tail as u64)
-        }) else {
+        let Some(tokens) = configured
+            .herdr
+            .native_transcript_root(&HarnessKind::Claude, "")
+            .ok()
+            .and_then(|root| root.session_transcript(&node.session_id))
+            .and_then(|transcript| {
+                transcript.context_tokens(configured.snapshot.limits.context_tail as u64)
+            })
+        else {
             eprintln!("flow-nexus: flow {flow_id} stopped with no context size readable");
             return;
         };
-        if self.perform(Operation::Record(Record_Data::Context(
-            Record_Data_Context_Data {
+        if self.perform_configured(
+            configured,
+            Operation::Record(Record_Data::Context(Record_Data_Context_Data {
                 flow_id: flow_id.to_owned(),
                 tokens,
-            },
-        ))) != Outcome::Recorded
+            })),
+        ) != Outcome::Recorded
         {
             eprintln!("flow-nexus: flow {flow_id} context size not recorded");
         }
@@ -2653,7 +2678,7 @@ impl WakesInParts for RunningNexus {
             Ok(configured) => configured,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        self.record_context_at_stop(flow_id);
+        self.record_context_at_stop_configured(&configured, flow_id);
         // A Codex seat's rest is its app-server's, and a Claude seat whose
         // transcript records its main turn's end_turn has ended its turn
         // whatever its screen shows (background agents keep Herdr at
@@ -2667,7 +2692,8 @@ impl WakesInParts for RunningNexus {
         {
             let node = self.store.flow_node(flow_id).ok().flatten();
             if !node.as_ref().is_some_and(|node| {
-                node.harness_kind == HarnessKind::Codex || self.claude_main_turn_ended(node)
+                node.harness_kind == HarnessKind::Codex
+                    || self.claude_main_turn_ended_configured(&configured, node)
             }) {
                 configured.herdr.rested(route);
             }
@@ -2756,12 +2782,14 @@ impl WakesInParts for RunningNexus {
                 if refresh_due && !native_resting && !flow_owned_resting {
                     return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
                 }
-                let claude_main_ready = self.claude_main_turn_ended(&node)
+                let claude_main_ready = self.claude_main_turn_ended_configured(&configured, &node)
                     && (flow_owned_resting
                         || matches!(
-                            self.delivery_target(flow_id)
+                            self.delivery_target_with(flow_id, &configured.snapshot)
                                 .ok()
-                                .and_then(|target| self.writable_state(&target).ok()),
+                                .and_then(|target| self
+                                    .writable_state_with(&configured.herdr, &target, false, true)
+                                    .ok()),
                             Some(AgentState::Working | AgentState::Idle | AgentState::Done)
                         ));
                 if !native_resting && !claude_main_ready {

@@ -5,14 +5,14 @@
 ; it reaps.
 
 Memory
-[ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection ]
+[ signal_flow:[ LaunchRequestId StartRejection ReplaceRejection LaunchOutcomeArchive ]
   meta_signal_flow:[ Harness Timings Limits ]
   flow_nexus:[ LaunchedRecord ReplacedRecord ] ]
 [ LaunchOutcome.[ Started.LaunchedRecord
                   Replaced.ReplacedRecord
                   StartRejected.StartRejection
                   ReplaceRejected.ReplaceRejection
-                  Archived.String ]
+                  Archived.LaunchOutcomeArchive ]
   Replacement.{ LaunchRequestId Predecessor.String }
   HarnessRecord.{ Harness }
   TimingRecord.{ Timings }

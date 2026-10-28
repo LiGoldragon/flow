@@ -13,8 +13,16 @@ the harness installation's `LeftOut` union the launch override, or the
 declaration when no override is present. Module tools, flags, environment and
 settings produce the lean launch, while kept module environment is explicitly
 unset. The retired leave-out family is mapped into declarations on the staged
-store generation before its table is removed. Pins signal-flow 38.0.0 and
-meta-signal-flow 48.0.0.
+store generation before its table is removed. Pins signal-flow 41.0.0 and
+meta-signal-flow 55.0.0. The cumulative launch-outcome family advances from
+v11 to v12. Every historical `LeaveOutRefused` start or replacement outcome
+moves byte-for-byte into the durable archived-outcome family before conversion,
+with its key, originating family and version, and `LegacyLeaveOutRefusal`.
+A repeated launch and `LaunchStatus` return that archive reference explicitly.
+No retired refusal is recast as a live persistence failure. The archive family
+advances from v1 to v2 so earlier missing or ambiguous v8 rows gain the same
+provenance, and staged activation makes archival and the remaining family
+upgrades one durable change.
 
 Batch 13 makes every harness installation configured data. The privileged
 contract carries an arbitrary `Harnesses` family and Nexus v3 carries the

@@ -377,8 +377,15 @@ impl HandlesSendCall for RunningNexus {
                 );
                 Self::refused(SendRefusal::Store)
             };
+            let configuration = match self.store.committed_configuration_snapshot() {
+                Ok(Some(committed)) => committed.snapshot,
+                Ok(None) => return Self::refused(SendRefusal::Store),
+                Err(error) => return store_refused(error),
+            };
+            let codex_endpoints = crate::codex::CodexEndpoints::configured(&configuration)
+                .with_texts(configuration.texts.clone());
             // The sender is read again for every call, a replayed one included.
-            let root_thread = self.codex_endpoints.root_thread(&key.thread_id);
+            let root_thread = codex_endpoints.root_thread(&key.thread_id);
             let sender = match self.store.thread_sender(&root_thread) {
                 Ok(Ok(sender)) => sender,
                 Ok(Err(refusal)) => return Self::refused(refusal),
@@ -460,7 +467,7 @@ impl HandlesSendCall for RunningNexus {
             };
             let message = arguments.message();
             if let Some(signal_flow::Refusal::Oversized(size)) =
-                message.oversized_refusal(&sender.address, self.limits.send_body as usize)
+                message.oversized_refusal(&sender.address, configuration.limits.send_body as usize)
             {
                 return refused_kept(SendRefusal::Oversized(size), content_sha256);
             }

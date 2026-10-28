@@ -6,7 +6,7 @@ use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
 use crate::waking::RestsEndedAwake;
-use crate::{store::metaflow::MutatesMetaflows, RunningNexus};
+use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
@@ -95,7 +95,16 @@ impl IdentifiesThread for RunningNexus {
             }
             SendServerTrust::Trusted => {}
         }
-        let root_thread = self.codex_endpoints.root_thread(&native_session_id);
+        let Some(configuration) = self
+            .store
+            .committed_configuration_snapshot()?
+            .map(|view| view.snapshot)
+        else {
+            return Ok(Response::Refused(Refusal::NotConfigured));
+        };
+        let endpoints = crate::codex::CodexEndpoints::configured(&configuration)
+            .with_texts(configuration.texts);
+        let root_thread = endpoints.root_thread(&native_session_id);
         match self.store.thread_metaflow(&root_thread)? {
             Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))

@@ -6,8 +6,8 @@
 //! reports it, or a Codex agent that reports no session and whose pane
 //! resumes it in its foreground.
 
-use super::waking::SpawnedProcess;
 use super::NexusFixture;
+use super::waking::SpawnedProcess;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::sending::{BindsSeats, IdentifiesSender};
 use crate::store::metaflow::SleepsMetaflows;
@@ -39,16 +39,23 @@ impl NexusFixture {
 
     /// A rollout whose session meta names `thread` in `session`.
     fn rollout(&self, thread: &str, session: &str) {
-        let root = self.directory.path().join("native-transcripts/codex-next");
-        fs::create_dir_all(&root).unwrap();
-        fs::write(
-            root.join(format!("rollout-2026-10-19T12-50-44-{thread}.jsonl")),
-            format!(
-                "{}\n",
-                serde_json::json!({"type":"session_meta","payload":{"id":thread,"session_id":session}})
-            ),
-        )
-        .unwrap();
+        let content = format!(
+            "{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":thread,"session_id":session}})
+        );
+        for root in [
+            self.directory.path().join("native-transcripts/codex-next"),
+            self.directory
+                .path()
+                .join("configured-codex-next-home/sessions"),
+        ] {
+            fs::create_dir_all(&root).unwrap();
+            fs::write(
+                root.join(format!("rollout-2026-10-19T12-50-44-{thread}.jsonl")),
+                &content,
+            )
+            .unwrap();
+        }
     }
 
     /// A `flow-id` stand-in holding the one claim of the root thread.
@@ -78,7 +85,10 @@ fn unreported_codex(pane: &str) -> serde_json::Value {
 fn command_of(thread: &str) -> (SpawnedProcess, signal_flow::Process) {
     let command = SpawnedProcess(
         std::process::Command::new("sleep")
-            .arg("30")
+            // SpawnedProcess owns termination. Keep the process alive past
+            // a loaded full-workspace run so kernel identity remains the
+            // subject of every assertion.
+            .arg("300")
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_SESSION")
             .env("CODEX_THREAD_ID", thread)
@@ -104,6 +114,31 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
             },
         ]))
         .unwrap();
+    // Sender identification reads the committed harness generation rather
+    // than the Nexus's startup adapter. Point that generation at the rollout
+    // tree this fixture owns.
+    let mut harnesses = fixture
+        .nexus
+        .store
+        .configuration_snapshot()
+        .unwrap()
+        .unwrap()
+        .configured_harnesses;
+    harnesses
+        .iter_mut()
+        .find(|harness| harness.harness_kind == signal_flow::HarnessKind::Codex)
+        .unwrap()
+        .home = fixture
+        .directory
+        .path()
+        .join("configured-codex-next-home")
+        .to_string_lossy()
+        .into_owned();
+    fixture
+        .nexus
+        .store
+        .configure_change(meta_signal_flow::ConfigurationChange::Harnesses(harnesses))
+        .unwrap();
     // One running session: the fixture's Herdr shows the same agents in
     // every session it is asked for.
     fixture.list_herdr_sessions(&[(
@@ -126,7 +161,7 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
     // The TUI in the seat's pane resumes the root thread.
     let tui = SpawnedProcess(
         std::process::Command::new("sh")
-            .args(["-c", "sleep 30; :", "codex", "resume", ROOT])
+            .args(["-c", "sleep 300; :", "codex", "resume", ROOT])
             .spawn()
             .unwrap(),
     );
@@ -183,7 +218,7 @@ fn a_codex_subagent_binds_its_flows_seat_which_herdr_reports_no_session_for() {
 
 #[test]
 fn a_known_claude_seat_binds_from_root_and_child_without_codex_marks() {
-    use super::waking::{claude_agent, claude_seat, metaflow, CLAUDE_SEAT};
+    use super::waking::{CLAUDE_SEAT, claude_agent, claude_seat, metaflow};
     use super::{ControlsHerdrSnapshot, MarkedProcess};
     use crate::store::metaflow::SeedsMetaflow;
     use crate::store::{ReadsFlowRows, RegistersFlowIdentity};

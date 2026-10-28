@@ -122,7 +122,15 @@ impl IdentifiesSender for RunningNexus {
         let Some(thread) = (CallerProcess { process_id }).codex_thread(&app_servers) else {
             return Err(unidentified());
         };
-        let root_thread = self.codex_endpoints.root_thread(&thread);
+        let configuration = self
+            .store
+            .committed_configuration_snapshot()
+            .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?
+            .ok_or_else(|| Box::new(Response::Refused(Refusal::NotConfigured)))?
+            .snapshot;
+        let endpoints = crate::codex::CodexEndpoints::configured(&configuration)
+            .with_texts(configuration.texts);
+        let root_thread = endpoints.root_thread(&thread);
         match self.store.thread_sender(&root_thread) {
             Ok(Ok(address)) => Ok(address),
             Ok(Err(_)) => Err(unidentified()),
@@ -446,27 +454,31 @@ impl LaunchesDeclared for RunningNexus {
                 )));
             }
         }
-        let Some(declaration) = self
+        let configuration = self
             .store
-            .metaflow_declaration(&address)
+            .committed_configuration_snapshot()
             .map_err(store_refused)?
+            .ok_or_else(|| Box::new(Response::Refused(Refusal::NotConfigured)))?
+            .snapshot;
+        let Some(declaration) = configuration
+            .configured_metaflows
+            .iter()
+            .find(|declaration| declaration.address == address)
+            .cloned()
         else {
             return Err(Box::new(Response::StartRejected(
                 StartRejection::Undeclared,
             )));
         };
-        let Some(model_name) = self
-            .store
-            .configured_model(&address)
-            .map_err(store_refused)?
+        let Some(model) = configuration
+            .configured_models
+            .iter()
+            .find(|model| model.layer == address.layer && model.aspect == address.aspect)
         else {
             return Err(Box::new(Response::Refused(Refusal::NotConfigured)));
         };
-        let effort = self
-            .store
-            .configured_effort(&address)
-            .map_err(store_refused)?
-            .ok_or_else(|| Box::new(Response::Refused(Refusal::NotConfigured)))?;
+        let model_name = model.model_name.clone();
+        let effort = model.effort.clone();
         // A Launch addressed to an Awake metaflow refreshes it: the flow it
         // is Awake as is replaced by the launch, never typed into.
         let predecessor = self.live_awake_flow(&address);
@@ -491,7 +503,7 @@ impl LaunchesDeclared for RunningNexus {
             instruction_prompt: crate::composition::with_purpose_configured(
                 &launch.instruction_prompt,
                 &declaration.purpose,
-                &self.texts,
+                &configuration.texts,
             ),
         };
         Ok(match predecessor {
@@ -877,6 +889,15 @@ impl CompletesDirectSends for RunningNexus {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
         use std::time::{Duration, Instant};
+        let send_wait = match self.store.committed_configuration_snapshot() {
+            Ok(Some(committed)) => committed.snapshot.timings.send_wait,
+            Ok(None) => {
+                return Response::Refused(Refusal::NotConfigured).into();
+            }
+            Err(error) => {
+                return Response::Refused(Refusal::Store(error.to_string())).into();
+            }
+        };
         // A configured sleeping recipient starts through the existing
         // fresh Curriculum composition. The Address lease prevents another
         // wake or submission while this direct operation owns its request.
@@ -892,7 +913,7 @@ impl CompletesDirectSends for RunningNexus {
         };
         // This budget bounds waiting, not evidence. Expiry is uncertainty,
         // never proof of absence and never permission for a new attempt.
-        let deadline = Instant::now() + Duration::from_millis(self.timings.send_wait as u64);
+        let deadline = Instant::now() + Duration::from_millis(send_wait as u64);
         let changes = self.store.launch_changes.clone();
         loop {
             let seen = changes.current();

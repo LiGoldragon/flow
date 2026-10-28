@@ -1606,17 +1606,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let root = tempfile::tempdir().unwrap();
-        let replacement_program = root.path().join("claude");
-        std::fs::write(&replacement_program, "#!/bin/sh\nsleep 60\n").unwrap();
-        let mut permissions = std::fs::metadata(&replacement_program)
-            .unwrap()
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&replacement_program, permissions).unwrap();
-        let mut replacement = Command::new(&replacement_program)
-            .args(["--session-id", "native-session"])
-            .spawn()
-            .unwrap();
+        let mut replacement = Command::new("sleep").arg("60").spawn().unwrap();
 
         let mut original = Command::new("sleep").arg("0.01").spawn().unwrap();
         let original_start = super::process_start(original.id()).unwrap();

@@ -550,10 +550,24 @@ impl RespondsToSendCalls for RunningNexus {
         inbox: mpsc::Receiver<ResponderSignal>,
     ) {
         let mut generation = 0;
-        let first_wait = Duration::from_millis(self.timings.send_tool_first_wait as u64);
-        let longest_wait = Duration::from_millis(self.timings.send_tool_longest_wait as u64);
-        let mut wait = first_wait;
+        let mut wait = Duration::ZERO;
         loop {
+            // A reconnect is a new external operation.  It takes the next
+            // complete committed generation; an already-open subscription
+            // keeps the generation with which this iteration began.
+            let Ok(Some(committed)) = self.store.committed_configuration_snapshot() else {
+                eprintln!("flow-nexus: send tool for thread {thread}: configuration unavailable");
+                return;
+            };
+            let first_wait =
+                Duration::from_millis(committed.snapshot.timings.send_tool_first_wait as u64);
+            let longest_wait =
+                Duration::from_millis(committed.snapshot.timings.send_tool_longest_wait as u64);
+            if wait.is_zero() {
+                wait = first_wait;
+            } else {
+                wait = wait.min(longest_wait);
+            }
             generation += 1;
             match adapter.subscribe_thread(thread, generation, &signals, &inbox) {
                 Err(SubscriptionEnd::Stopped) => return,
@@ -718,6 +732,12 @@ impl ServesLaunchCalls for RunningNexus {
         let Some(mut responder) = taken else {
             return work();
         };
+        let Ok(Some(committed)) = self.store.committed_configuration_snapshot() else {
+            responder.subscription.close();
+            return work();
+        };
+        let serving_slice =
+            Duration::from_millis(committed.snapshot.timings.send_tool_serving_slice as u64);
         let mut open = true;
         let outcome = std::thread::scope(|scope| {
             let running = scope.spawn(work);
@@ -729,8 +749,7 @@ impl ServesLaunchCalls for RunningNexus {
                 }
             }
             while open && !running.is_finished() {
-                let deadline = Instant::now()
-                    + Duration::from_millis(self.timings.send_tool_serving_slice as u64);
+                let deadline = Instant::now() + serving_slice;
                 match responder
                     .subscription
                     .next_event(&responder.inbox, Some(deadline))
@@ -826,11 +845,15 @@ impl ServesLaunchCalls for RunningNexus {
         let Some(mut responder) = taken else {
             return;
         };
+        let Ok(Some(committed)) = self.store.committed_configuration_snapshot() else {
+            responder.subscription.close();
+            return;
+        };
         for request in std::mem::take(&mut responder.subscription.early) {
             let _ = self.answer_launch_call(&mut responder, request);
         }
-        let deadline =
-            Instant::now() + Duration::from_millis(self.timings.send_tool_serving_slice as u64);
+        let deadline = Instant::now()
+            + Duration::from_millis(committed.snapshot.timings.send_tool_serving_slice as u64);
         while let Ok(ProxyEvent::Reply(Ok(message))) = responder
             .subscription
             .next_event(&responder.inbox, Some(deadline))
@@ -886,6 +909,9 @@ pub(crate) trait RefusesInterruptedCalls {
 impl RefusesInterruptedCalls for RunningNexus {
     fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls {
         let mut tally = InterruptedCalls::default();
+        let Ok(Some(committed)) = self.store.committed_configuration_snapshot() else {
+            return tally;
+        };
         let (signals, inbox) = mpsc::channel();
         let mut subscription = match adapter.subscribe_thread(thread, 1, &signals, &inbox) {
             Ok(subscription) => subscription,
@@ -918,8 +944,8 @@ impl RefusesInterruptedCalls for RunningNexus {
         let mut open = early
             .into_iter()
             .all(|request| answer(&mut subscription, request));
-        let deadline =
-            Instant::now() + Duration::from_millis(self.timings.send_tool_replay_window as u64);
+        let deadline = Instant::now()
+            + Duration::from_millis(committed.snapshot.timings.send_tool_replay_window as u64);
         while open {
             match subscription.next_event(&inbox, Some(deadline)) {
                 Ok(ProxyEvent::Reply(Ok(message))) => open = answer(&mut subscription, message),

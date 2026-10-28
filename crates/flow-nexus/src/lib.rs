@@ -342,26 +342,57 @@ impl Dispatches for RunningNexus {
         query: meta_signal_flow::Query,
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Response {
-        let configured_response = |result: Result<meta_signal_flow::ConfigureOutcome, store::StoreError>| {
-            match result {
+        let configured_response =
+            |result: Result<meta_signal_flow::ConfigureOutcome, store::StoreError>| match result {
                 Ok(outcome) => meta_signal_flow::Response::Configured(outcome),
-                Err(store::StoreError::DuplicateConfigurationEntry) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::DuplicateEntry),
-                Err(store::StoreError::ModelServedTwice(model)) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::ModelServedTwice(model)),
-                Err(store::StoreError::UnknownHarnessModule(module)) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::UnknownHarnessModule(module)),
-                Err(store::StoreError::IrremovableHarnessModule(module)) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::Irremovable(module)),
-                Err(store::StoreError::UnknownConfigurationEntry) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::UnknownEntry),
-                Err(store::StoreError::TopicRefused(topic)) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::TopicRefused(topic)),
-                Err(store::StoreError::TimingOutOfRange) => meta_signal_flow::Response::ConfigureRejected(meta_signal_flow::ConfigureRejection::TimingOutOfRange),
-                Err(error) => meta_signal_flow::Response::Refused(meta_signal_flow::StoreRefusal::Store(error.to_string())),
-            }
-        };
-        match query {
-            meta_signal_flow::Query::Configuration => match self.complete_configuration_snapshot() {
-                Ok(snapshot) => meta_signal_flow::Response::Configuration(snapshot),
+                Err(store::StoreError::DuplicateConfigurationEntry) => {
+                    meta_signal_flow::Response::ConfigureRejected(
+                        meta_signal_flow::ConfigureRejection::DuplicateEntry,
+                    )
+                }
+                Err(store::StoreError::ModelServedTwice(model)) => {
+                    meta_signal_flow::Response::ConfigureRejected(
+                        meta_signal_flow::ConfigureRejection::ModelServedTwice(model),
+                    )
+                }
+                Err(store::StoreError::UnknownHarnessModule(module)) => {
+                    meta_signal_flow::Response::ConfigureRejected(
+                        meta_signal_flow::ConfigureRejection::UnknownHarnessModule(module),
+                    )
+                }
+                Err(store::StoreError::IrremovableHarnessModule(module)) => {
+                    meta_signal_flow::Response::ConfigureRejected(
+                        meta_signal_flow::ConfigureRejection::Irremovable(module),
+                    )
+                }
+                Err(store::StoreError::UnknownConfigurationEntry) => {
+                    meta_signal_flow::Response::ConfigureRejected(
+                        meta_signal_flow::ConfigureRejection::UnknownEntry,
+                    )
+                }
+                Err(store::StoreError::TopicRefused(topic)) => {
+                    meta_signal_flow::Response::ConfigureRejected(
+                        meta_signal_flow::ConfigureRejection::TopicRefused(topic),
+                    )
+                }
+                Err(store::StoreError::TimingOutOfRange) => {
+                    meta_signal_flow::Response::ConfigureRejected(
+                        meta_signal_flow::ConfigureRejection::TimingOutOfRange,
+                    )
+                }
                 Err(error) => meta_signal_flow::Response::Refused(
                     meta_signal_flow::StoreRefusal::Store(error.to_string()),
                 ),
-            },
+            };
+        match query {
+            meta_signal_flow::Query::Configuration => {
+                match self.complete_configuration_snapshot() {
+                    Ok(snapshot) => meta_signal_flow::Response::Configuration(snapshot),
+                    Err(error) => meta_signal_flow::Response::Refused(
+                        meta_signal_flow::StoreRefusal::Store(error.to_string()),
+                    ),
+                }
+            }
             // A declared family replaces the committed family whole; keyed
             // operations change one row under the same validation.
             meta_signal_flow::Query::Configure(change) => {
@@ -852,19 +883,24 @@ impl OpensRunningNexus for RunningNexus {
                 "flow-nexus: models selected by both Codex endpoints are unavailable: {overlap:?}"
             );
         }
-        let source_root = PathBuf::from(&snapshot.configured_nexus.source_root);
         // The socket this Nexus serves: a changed one takes effect only on
         // restart, so the store's value at open is the one being served.
         let ordinary_socket = PathBuf::from(&start.ordinary_socket_path);
+        let herdr_owned = std::sync::Arc::new(herdr::HerdrOwnedResources::default());
         Ok(Self {
             runtime: start.clone(),
             store,
             codex_endpoints: codex_endpoints.clone(),
-            herdr: herdr::HerdrCli::default()
-                .with_installations(&snapshot.configured_nexus, &snapshot.configured_harnesses)
-                .with_codex_endpoints(codex_endpoints)
-                .with_runtime_settings(snapshot.timings.clone(), snapshot.limits.clone())
-                .with_ordinary_socket(&ordinary_socket),
+            // The production view is strict from the first effect. Later
+            // configuration views share this one ownership registry; a
+            // missing original pane/backend identity is never reconstructed
+            // from current configuration.
+            herdr: herdr::HerdrCli::configured_view(
+                &snapshot,
+                codex_endpoints,
+                &ordinary_socket,
+                herdr_owned,
+            ),
             // A launch's context is composed by the Curriculum Nexus at the
             // socket the configuration names, read as the Nexus opens.
             composer: LaunchComposer::with_context_limits_and_texts(

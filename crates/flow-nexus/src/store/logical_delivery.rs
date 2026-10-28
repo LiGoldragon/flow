@@ -525,12 +525,13 @@ pub(crate) trait RecordsLogicalDeliveries {
     fn accept_logical_delivery(
         &self,
         address: &Address,
-        sent_by: SentBy,
-        sender_option: Option<meta_signal_flow::Sender>,
+        sender: meta_signal_flow::Sender,
         delivery: Delivery,
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
     ) -> Result<Response, StoreError>;
+    #[cfg(test)]
+    fn strip_logical_sender_for_test(&self, id: &str) -> Result<(), StoreError>;
     #[cfg(test)]
     fn transition_logical_delivery(
         &self,
@@ -773,8 +774,7 @@ impl RecordsLogicalDeliveries for FlowStore {
     fn accept_logical_delivery(
         &self,
         address: &Address,
-        sent_by: SentBy,
-        sender_option: Option<meta_signal_flow::Sender>,
+        sender: meta_signal_flow::Sender,
         delivery: Delivery,
         message: Message,
         held_lock: Option<VerifiedDeliveryLock>,
@@ -811,6 +811,7 @@ impl RecordsLogicalDeliveries for FlowStore {
         let next = allocation.cursor;
         let create = !allocation.existing;
         let id = format!("logical-delivery-{next:020}");
+        let sent_by = SentBy::Sender(sender.address.clone());
         stored.metaflow.queue.push(QueueEntry {
             logical_delivery_id: id.clone(),
             sent_by: sent_by.clone(),
@@ -841,10 +842,7 @@ impl RecordsLogicalDeliveries for FlowStore {
                 self.logical_deliveries.current,
                 CurrentLogicalDelivery {
                     snapshot: snapshot.clone(),
-                    sender_identity: sender_option.map_or(
-                        LogicalSenderIdentity::MissingHistoricalSender,
-                        LogicalSenderIdentity::Sender,
-                    ),
+                    sender_identity: LogicalSenderIdentity::Sender(sender),
                 },
             )
             .assert(
@@ -868,6 +866,23 @@ impl RecordsLogicalDeliveries for FlowStore {
             delivery_cursor: next,
             delivery_state: DeliveryState::Queued,
         }))
+    }
+    #[cfg(test)]
+    fn strip_logical_sender_for_test(&self, id: &str) -> Result<(), StoreError> {
+        let rows = self.engine.match_records(QueryPlan::key(
+            self.logical_deliveries.current,
+            RecordKey::new(id),
+        ))?;
+        let [current] = rows.records() else {
+            return Err(StoreError::StateInvariant);
+        };
+        let mut historical = current.clone();
+        historical.sender_option = None;
+        self.engine.mutate(sema_engine::Mutation::new(
+            self.logical_deliveries.current,
+            historical,
+        ))?;
+        Ok(())
     }
     #[cfg(test)]
     fn transition_logical_delivery(

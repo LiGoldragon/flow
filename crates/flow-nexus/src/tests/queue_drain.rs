@@ -224,8 +224,10 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
         .store
         .accept_logical_delivery(
             &target,
-            SentBy::Sender(sender.clone()),
-            None,
+            meta_signal_flow::Sender {
+                address: sender.clone(),
+                flow_id: "fixture-sender".into(),
+            },
             Delivery::Queue,
             Message::Soft(Request::Notice("cursor witness".into())),
             None,

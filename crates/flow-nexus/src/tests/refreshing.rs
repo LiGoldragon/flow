@@ -758,10 +758,11 @@ fn an_abrupt_wake_send_to_a_busy_seat_is_queued_never_refused() {
     }
 }
 
-/// A Send between Primaries and from a Secondary to its Primary is queued
-/// like any other: no route refuses it.
+/// A Primary accepts only its own Secondary. A current admission always has
+/// an authenticated Sender, so neither a Primary nor another topic's
+/// Secondary can enter its queue unsigned.
 #[test]
-fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
+fn a_send_to_a_primary_refuses_every_sender_but_its_own_secondary() {
     use crate::store::logical_delivery::RecordsLogicalDeliveries as _;
     let fixture = NexusFixture::new();
     let primary = |topic: &str| Address {
@@ -786,19 +787,43 @@ fn a_send_to_a_primary_is_accepted_from_a_primary_and_from_a_secondary() {
                 .store
                 .accept_logical_delivery(
                     &target,
-                    SentBy::Sender(sender.clone()),
-                    None,
+                    meta_signal_flow::Sender {
+                        address: sender.clone(),
+                        flow_id: "authenticated-sender".into(),
+                    },
                     Delivery::Queue,
                     Message::Soft(request),
                     None,
                 )
-                .expect("accepted");
-            assert!(
-                matches!(response, Response::SendAccepted(_)),
-                "{sender:?}: {response:?}"
-            );
+                .expect("admission is decided before mutating the queue");
+            if sender == seat_address() {
+                assert!(
+                    matches!(response, Response::SendAccepted(_)),
+                    "{response:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        response,
+                        Response::Refused(Refusal::PrimaryRequiresOwnSecondary(_))
+                    ),
+                    "{sender:?}: {response:?}"
+                );
+            }
         }
     }
+    assert_eq!(
+        fixture
+            .nexus
+            .store
+            .metaflow(&target)
+            .unwrap()
+            .unwrap()
+            .queue
+            .len(),
+        2,
+        "only the own Secondary's two requests enter"
+    );
 }
 
 /// A Launch addressed to a metaflow Awake as a live flow, from any caller,

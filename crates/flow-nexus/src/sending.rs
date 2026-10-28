@@ -27,7 +27,9 @@ use crate::metaflow::IdentifiesPeerProcess;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
-use crate::store::metaflow::{PreparesDeclaredMetaflow, SleepsMetaflows, TakesLaunchAddress};
+use crate::store::metaflow::{
+    MutatesMetaflows, PreparesDeclaredMetaflow, SleepsMetaflows, TakesLaunchAddress,
+};
 use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
 use crate::store::queue_delivery::AccountsQueueDelivery;
 use crate::store::send_call::KeepsSendCalls;
@@ -35,7 +37,7 @@ use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::sent::NamesCodexAppServers;
 use crate::store::{
     ExistingSeatAdoption, FlowStore, ManagesMetaflowState, NamesConfiguredModel, NamesLiveFlow,
-    ReadsFlowMemory, ReadsFlowRows, RegistersExistingFlow,
+    ProcessSenderResolution, ReadsFlowMemory, ReadsFlowRows, RegistersExistingFlow,
 };
 use crate::waking::{
     HoldsWakingMetaflows, PerformsWakeAndDrain, ReconcilesQueueDelivery, RestsEndedAwake,
@@ -44,9 +46,9 @@ use crate::waking::{
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use signal_flow::{
-    Address, Aspect, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data, LaunchProfile, Layer,
-    Message, Process, Recipient, Refusal, Request, Response, SendPayloadSize, SendRequest, SentBy,
-    StartRejection, Unknown_Data,
+    Address, Aspect, Bind_Data, Caller, Delivery, HarnessKind, HerdrRoute, Launch_Data,
+    LaunchProfile, Layer, Message, Process, Recipient, Refusal, Request, Response, SendPayloadSize,
+    SendRequest, StartRejection, Unknown_Data,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -118,8 +120,9 @@ impl IdentifiesSender for RunningNexus {
     ) -> Result<meta_signal_flow::Sender, Box<Response>> {
         let unidentified = || Box::new(Response::Refused(Refusal::Unidentified(peer.clone())));
         match self.store.identify_process_sender(peer.clone()) {
-            Ok(Some(sender)) => return Ok(sender),
-            Ok(None) => {}
+            Ok(ProcessSenderResolution::Sender(sender)) => return Ok(sender),
+            Ok(ProcessSenderResolution::UnauthenticatedBinding) => return Err(unidentified()),
+            Ok(ProcessSenderResolution::NoBinding) => {}
             Err(error) => {
                 return Err(Box::new(Response::Refused(Refusal::Store(
                     error.to_string(),
@@ -365,8 +368,7 @@ impl SendsRequests for RunningNexus {
             let direct = direct_lease.is_some();
             let admitted = self.store.accept_logical_delivery(
                 &recipient,
-                SentBy::Sender(sender.address.clone()),
-                Some(sender),
+                sender,
                 delivery.clone(),
                 send.message,
                 None,
@@ -756,8 +758,33 @@ impl BindsSeats for RunningNexus {
         // carry a Codex thread or resume command.
         match self.identify_peer_process_configured(configured, peer.clone()) {
             Ok(Response::Identified(known)) if known == address => {
-                if let Some(flow_id) = self.live_awake_flow(&address) {
-                    return Response::Bound(flow_id);
+                match self.store.identify_process_sender(peer.clone()) {
+                    Ok(ProcessSenderResolution::Sender(sender)) => {
+                        return Response::Bound(sender.flow_id);
+                    }
+                    Ok(ProcessSenderResolution::UnauthenticatedBinding) => {
+                        return self
+                            .store
+                            .bind_metaflow(
+                                Bind_Data {
+                                    process: peer.clone(),
+                                    address,
+                                },
+                                peer,
+                                None,
+                            )
+                            .unwrap_or_else(|error| {
+                                Response::Refused(Refusal::Store(error.to_string()))
+                            });
+                    }
+                    Ok(ProcessSenderResolution::NoBinding) => {
+                        if let Some(flow_id) = self.live_awake_flow(&address) {
+                            return Response::Bound(flow_id);
+                        }
+                    }
+                    Err(error) => {
+                        return Response::Refused(Refusal::Store(error.to_string()));
+                    }
                 }
             }
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),

@@ -110,6 +110,10 @@ Curriculum serves that schema.
   (`Refused.TopicRefused.«topic»`); a topic's capitals are never lowered. A
   new Primary needs its Secondary Awake (`NoSecondary`).
 - A simplified Claude flow always starts with an explicit empty tool set.
+- Flow pins Curriculum 2d74e77 and consumes its `OmittedModules` evidence.
+  A requested module Curriculum cannot find is left out of the composed
+  context and does not refuse the launch; every other requested module and
+  the omitted identities are verified against the request before launch.
 - Curriculum is asked for the remembered flows' raw records; a remembered
   flow that logged none contributes nothing and refuses nothing, and a
   module's dependencies read as `type:subject` or `type-subject`, one ID.

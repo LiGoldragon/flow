@@ -14,8 +14,8 @@
 //! The production composer is the Curriculum Nexus, asked over the socket
 //! the Nexus's configuration names (`CurriculumNexusPath`),
 //! with `ComposeStartup` from its schema, copied byte for byte into
-//! `ethos/curriculum.ethos` from Curriculum 91acf293 (schema SHA-256
-//! 26011a94…48e28), whose selection names the flows a launch remembers
+//! `ethos/curriculum.ethos` from Curriculum 2d74e772 (schema SHA-256
+//! 3f6d7afd…1b46d), whose selection names the flows a launch remembers
 //! and whose composition carries their raw records. Its answer names no
 //! metaflow, so the metaflow check is Flow's own: the request carries the
 //! launch's Address, and the composed launch keeps it with the identities
@@ -265,13 +265,30 @@ impl VerifiesContext for VerifiedContext {
         };
         let system_rows = placed(StartupPlacement::System);
         let user_rows = placed(StartupPlacement::User);
-        let present = |identities: &[String], placed: &[ContextProvenance]| {
-            identities
-                .iter()
-                .all(|identity| placed.iter().any(|row| &row.module_identity == identity))
+        let omitted = &composition.omitted_modules;
+        let requested = request
+            .system_modules
+            .iter()
+            .chain(&request.user_modules)
+            .collect::<std::collections::BTreeSet<_>>();
+        let unique_omissions = omitted.iter().collect::<std::collections::BTreeSet<_>>();
+        if unique_omissions.len() != omitted.len()
+            || omitted.iter().any(|identity| !requested.contains(identity))
+            || omitted.iter().any(|identity| {
+                rows.iter()
+                    .any(|row| row.module_identity == identity.as_str())
+            })
+        {
+            return Err(ContextRefusal::PayloadMismatch);
+        }
+        let present_or_omitted = |identities: &[String], placed: &[ContextProvenance]| {
+            identities.iter().all(|identity| {
+                omitted.contains(identity)
+                    || placed.iter().any(|row| &row.module_identity == identity)
+            })
         };
-        if !present(&request.system_modules, &system_rows)
-            || !present(&request.user_modules, &user_rows)
+        if !present_or_omitted(&request.system_modules, &system_rows)
+            || !present_or_omitted(&request.user_modules, &user_rows)
         {
             return Err(ContextRefusal::ModuleMissing);
         }
@@ -331,7 +348,7 @@ impl ReadsVerifiedContext for VerifiedContext {
 
 /// A composer for tests: each identity's body is held in memory and
 /// rendered as Curriculum renders it. An identity it does not hold is
-/// rejected, as Curriculum rejects one outside its repositories.
+/// returned as an omission while every available identity is composed.
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct FixtureComposer {
@@ -364,15 +381,25 @@ impl ComposesFlowContext for FixtureComposer {
         let request = input.context_request();
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let mut rows = Vec::new();
+        let mut omitted_modules = Vec::new();
+        let mut available_system = Vec::new();
+        let mut available_user = Vec::new();
         for (identities, placement) in [
             (&request.system_modules, StartupPlacement::System),
             (&request.user_modules, StartupPlacement::User),
         ] {
-            for (ordinal, identity) in identities.iter().enumerate() {
-                let body = self
-                    .bodies
-                    .get(identity)
-                    .ok_or(ContextRefusal::ComposerRejected)?;
+            let available = if placement == StartupPlacement::System {
+                &mut available_system
+            } else {
+                &mut available_user
+            };
+            for identity in identities {
+                let Some(body) = self.bodies.get(identity) else {
+                    omitted_modules.push(identity.clone());
+                    continue;
+                };
+                let ordinal = available.len();
+                available.push(identity.clone());
                 rows.push(ContextProvenance {
                     module_identity: identity.clone(),
                     repository_name: "fixture-context".into(),
@@ -404,8 +431,8 @@ impl ComposesFlowContext for FixtureComposer {
             }
             text
         };
-        let system_text = rendered(&request.system_modules);
-        let user_text = rendered(&request.user_modules);
+        let system_text = rendered(&available_system);
+        let user_text = rendered(&available_user);
         // A remembered flow that logged no record composes nothing.
         let records_text = request
             .remembered_flows
@@ -420,6 +447,7 @@ impl ComposesFlowContext for FixtureComposer {
             system_text,
             user_text,
             records_text,
+            omitted_modules,
             context_provenance_vector: rows,
         })
     }
@@ -549,12 +577,46 @@ mod tests {
     }
 
     #[test]
-    fn an_identity_the_composer_does_not_hold_is_rejected() {
+    fn identities_the_composer_does_not_hold_are_named_and_the_rest_is_verified() {
         let mut request = request();
-        request.user_modules.push("unknown-module".into());
+        request.user_modules.insert(1, "unknown-module".into());
+        request.user_modules.push("another-unknown-module".into());
+        let composition = fixture().compose_flow_context(&request).unwrap();
         assert_eq!(
-            fixture().compose_flow_context(&request),
-            Err(ContextRefusal::ComposerRejected)
+            composition.omitted_modules,
+            vec!["unknown-module", "another-unknown-module"]
+        );
+        assert!(composition.user_text.contains("Main flow body."));
+        assert!(composition.user_text.contains("Knowledge body."));
+        assert!(!composition.user_text.contains("unknown-module"));
+        assert!(VerifiedContext::verified(&request, composition).is_ok());
+    }
+
+    #[test]
+    fn omission_evidence_must_be_requested_unique_and_absent() {
+        let request = request();
+        let composition = fixture().compose_flow_context(&request).unwrap();
+        assert!(composition.omitted_modules.is_empty());
+
+        let mut unrequested = composition.clone();
+        unrequested.omitted_modules.push("unknown-module".into());
+        assert_eq!(
+            VerifiedContext::verified(&request, unrequested),
+            Err(ContextRefusal::PayloadMismatch)
+        );
+
+        let mut present = composition.clone();
+        present.omitted_modules.push("knowledge-flow".into());
+        assert_eq!(
+            VerifiedContext::verified(&request, present),
+            Err(ContextRefusal::PayloadMismatch)
+        );
+
+        let mut duplicate = composition;
+        duplicate.omitted_modules = vec!["knowledge-flow".into(), "knowledge-flow".into()];
+        assert_eq!(
+            VerifiedContext::verified(&request, duplicate),
+            Err(ContextRefusal::PayloadMismatch)
         );
     }
 

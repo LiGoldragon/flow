@@ -1455,19 +1455,31 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_identity_the_composer_rejects_refuses_the_launch() {
+    fn an_identity_the_composer_reports_omitted_does_not_refuse_the_launch() {
         let mut profile = fixture_profile();
         profile.user_modules.push("unknown-module".into());
-        assert_eq!(
-            fixture_composer().compose(
+        let composed = fixture_composer()
+            .compose(
                 crate::composition::HarnessedProfile {
                     remembered_flows: Vec::new(),
                     harness_kind: HarnessKind::Codex,
-                    launch_profile: profile.clone()
+                    launch_profile: profile.clone(),
                 },
                 Vec::<signal_flow::LeaveOut>::new(),
-            ),
-            Err(CompositionError::Context(ContextRefusal::ComposerRejected))
+            )
+            .unwrap();
+        assert_eq!(composed.launch_profile.user_modules, profile.user_modules);
+        assert!(
+            !composed
+                .first_prompt_payload
+                .first_prompt_body
+                .contains("unknown-module")
+        );
+        assert!(
+            composed
+                .first_prompt_payload
+                .first_prompt_body
+                .contains("Knowledge body.")
         );
     }
 

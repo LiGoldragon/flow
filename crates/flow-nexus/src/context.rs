@@ -455,8 +455,8 @@ impl ComposesFlowContext for FixtureComposer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposesFlowContext, ContextRequest, FixtureComposer, ReadsVerifiedContext, SelectsStartup,
-        VerifiedContext, VerifiesContext, CONTEXT_OPENING,
+        CONTEXT_OPENING, ComposesFlowContext, ContextRequest, FixtureComposer,
+        ReadsVerifiedContext, SelectsStartup, VerifiedContext, VerifiesContext,
     };
     use crate::generated::curriculum::Target;
     use signal_flow::{Address, Aspect, ContextRefusal, HarnessKind, Layer};
@@ -551,10 +551,12 @@ mod tests {
         let composition = fixture().compose_flow_context(&effective).unwrap();
         let verified = VerifiedContext::verified(&requested, composition).unwrap();
         assert!(verified.system_text().contains("Knowledge body."));
-        assert!(!verified
-            .user_segments()
-            .concat()
-            .contains("Knowledge body."));
+        assert!(
+            !verified
+                .user_segments()
+                .concat()
+                .contains("Knowledge body.")
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::store::send_outcome::RecordsSendOutcomes;
 use crate::store::send_server::{NamesThreadMetaflow, SendServerTrust, TrustsSendServers};
 use crate::store::{FlowStore, ManagesMetaflowState, ReadsFlowMemory, StoreError};
 use crate::waking::RestsEndedAwake;
-use crate::{RunningNexus, store::metaflow::MutatesMetaflows};
+use crate::{ConfiguredUse, RunningNexus, store::metaflow::MutatesMetaflows};
 use datom_codec::Datomizable;
 use protos::{Compactable, Protosizable};
 use sha2::{Digest, Sha256};
@@ -35,15 +35,22 @@ pub(crate) trait IdentifiesPeerProcess {
     /// live Herdr snapshot still showing its binding, and the metaflow must
     /// be Awake as it. The process must still run with the start the
     /// kernel gave Message, before and after its marks are read.
+    fn identify_peer_process_configured(
+        &self,
+        configured: &ConfiguredUse,
+        process: Process,
+    ) -> Result<Response, StoreError>;
+
+    #[cfg(test)]
     fn identify_peer_process(&self, process: Process) -> Result<Response, StoreError>;
 }
 
 impl IdentifiesPeerProcess for RunningNexus {
-    fn identify_peer_process(&self, process: Process) -> Result<Response, StoreError> {
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => return Ok(Response::Refused(Refusal::NotConfigured)),
-        };
+    fn identify_peer_process_configured(
+        &self,
+        configured: &ConfiguredUse,
+        process: Process,
+    ) -> Result<Response, StoreError> {
         match self.store.identify_process(process.clone())? {
             Response::Refused(Refusal::Unidentified(_)) => {}
             identified => return Ok(identified),
@@ -65,11 +72,20 @@ impl IdentifiesPeerProcess for RunningNexus {
             return unidentified();
         };
         match self.store.metaflow_awake_as(&caller.flow_id)? {
-            Some(metaflow) if !self.rest_ended_awake(&configured, &metaflow.address) => {
+            Some(metaflow) if !self.rest_ended_awake(configured, &metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))
             }
             _ => unidentified(),
         }
+    }
+
+    #[cfg(test)]
+    fn identify_peer_process(&self, process: Process) -> Result<Response, StoreError> {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Ok(Response::Refused(Refusal::NotConfigured)),
+        };
+        self.identify_peer_process_configured(&configured, process)
     }
 }
 
@@ -83,11 +99,22 @@ pub(crate) trait IdentifiesThread {
     /// live Codex flow whose thread Flow recorded at its Start; any other
     /// thread is Unidentified. The shared app-server is never bound, and the
     /// process's environment is never read.
+    fn identify_thread_configured(
+        &self,
+        configured: &ConfiguredUse,
+        request: IdentifyThread_Data,
+    ) -> Result<Response, StoreError>;
+
+    #[cfg(test)]
     fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Response, StoreError>;
 }
 
 impl IdentifiesThread for RunningNexus {
-    fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Response, StoreError> {
+    fn identify_thread_configured(
+        &self,
+        configured: &ConfiguredUse,
+        request: IdentifyThread_Data,
+    ) -> Result<Response, StoreError> {
         let IdentifyThread_Data {
             process,
             native_session_id,
@@ -99,36 +126,50 @@ impl IdentifiesThread for RunningNexus {
             }
             SendServerTrust::Trusted => {}
         }
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => return Ok(Response::Refused(Refusal::NotConfigured)),
-        };
         let root_thread = configured.codex_endpoints.root_thread(&native_session_id);
         match self.store.thread_metaflow(&root_thread)? {
-            Some(metaflow) if !self.rest_ended_awake(&configured, &metaflow.address) => {
+            Some(metaflow) if !self.rest_ended_awake(configured, &metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))
             }
             _ => Ok(Response::Refused(Refusal::Unidentified(process))),
         }
     }
+
+    #[cfg(test)]
+    fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Response, StoreError> {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Ok(Response::Refused(Refusal::NotConfigured)),
+        };
+        self.identify_thread_configured(&configured, request)
+    }
 }
 
 pub(crate) trait DispatchesMetaflowPeer {
+    fn dispatch_metaflow_peer_configured(
+        &self,
+        configured: &ConfiguredUse,
+        query: Query,
+        peer: Option<&Process>,
+    ) -> MetaflowAnswer;
+
+    #[cfg(test)]
     fn dispatch_metaflow_peer(&self, query: Query, peer: Option<&Process>) -> MetaflowAnswer;
 }
 
 impl DispatchesMetaflowPeer for RunningNexus {
-    fn dispatch_metaflow_peer(&self, query: Query, peer: Option<&Process>) -> MetaflowAnswer {
+    fn dispatch_metaflow_peer_configured(
+        &self,
+        configured: &ConfiguredUse,
+        query: Query,
+        peer: Option<&Process>,
+    ) -> MetaflowAnswer {
         let _turn = self
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(peer) = peer else {
             return Response::Refused(Refusal::NotMessage).into();
-        };
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => return Response::Refused(Refusal::NotConfigured).into(),
         };
         let now = match std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -166,7 +207,9 @@ impl DispatchesMetaflowPeer for RunningNexus {
                     Ok(address) => Response::Identified(address),
                     Err(response) => *response,
                 }),
-                Query::IdentifyThread(request) => self.identify_thread(request),
+                Query::IdentifyThread(request) => {
+                    self.identify_thread_configured(configured, request)
+                }
                 Query::Lock(request) => self.store.lock_metaflow(request, now),
                 Query::Deliver(request) => {
                     let digest_text = request.datomize(Vec::new()).protosize().compact();
@@ -232,5 +275,14 @@ impl DispatchesMetaflowPeer for RunningNexus {
         result
             .unwrap_or_else(|error| Response::Refused(Refusal::Store(error.to_string())))
             .into()
+    }
+
+    #[cfg(test)]
+    fn dispatch_metaflow_peer(&self, query: Query, peer: Option<&Process>) -> MetaflowAnswer {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Response::Refused(Refusal::NotConfigured).into(),
+        };
+        self.dispatch_metaflow_peer_configured(&configured, query, peer)
     }
 }

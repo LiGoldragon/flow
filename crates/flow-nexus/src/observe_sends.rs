@@ -44,10 +44,13 @@ impl ObservesLogicalSends for RunningNexus {
             }
         }
         if let Some(thread) = &forwarded.native_session_id_option {
-            match self.identify_thread(signal_flow::IdentifyThread_Data {
-                process: forwarded.process.clone(),
-                native_session_id: thread.clone(),
-            }) {
+            match self.identify_thread_configured(
+                configured,
+                signal_flow::IdentifyThread_Data {
+                    process: forwarded.process.clone(),
+                    native_session_id: thread.clone(),
+                },
+            ) {
                 Ok(Response::Identified(address)) => Ok(address),
                 Ok(refusal) => Err(Box::new(refusal)),
                 Err(error) => Err(Box::new(Response::Refused(Refusal::Store(
@@ -55,7 +58,7 @@ impl ObservesLogicalSends for RunningNexus {
                 )))),
             }
         } else {
-            self.sending_address(&configured, &forwarded.process)
+            self.sending_address(configured, &forwarded.process)
         }
     }
 

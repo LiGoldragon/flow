@@ -28,10 +28,13 @@ use std::{
 /// Answers and streams a flow's agent state.
 pub trait ObservesAgent {
     /// The state now: the opening frame of the subscription.
+    fn agent_observation_configured(&self, configured: &ConfiguredUse, flow_id: &str) -> Response;
+    #[cfg(test)]
     fn agent_observation(&self, flow_id: &str) -> Response;
     /// Sends the state now, then each change, ending after Gone.
     fn observe_agent(
         &self,
+        next_configured: &dyn Fn() -> Result<ConfiguredUse, String>,
         flow_id: &str,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String>;
@@ -115,18 +118,14 @@ impl FindsObservableFlow for RunningNexus {
 }
 
 impl ObservesAgent for RunningNexus {
-    fn agent_observation(&self, flow_id: &str) -> Response {
+    fn agent_observation_configured(&self, configured: &ConfiguredUse, flow_id: &str) -> Response {
         let Some((node, _)) = self.observable(flow_id) else {
             return AgentState::Gone.observed_of(flow_id);
-        };
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => return AgentState::Unknown.observed_of(flow_id),
         };
         let agent_state = match configured.herdr.pane_agent(&node) {
             PaneAgent::Present { agent_state, .. } => agent_state,
             PaneAgent::Absent => {
-                self.exited_as_witnessed(&configured, flow_id);
+                self.exited_as_witnessed(configured, flow_id);
                 AgentState::Gone
             }
             PaneAgent::Unreadable => AgentState::Unknown,
@@ -134,12 +133,22 @@ impl ObservesAgent for RunningNexus {
         agent_state.observed_of(flow_id)
     }
 
+    #[cfg(test)]
+    fn agent_observation(&self, flow_id: &str) -> Response {
+        match self.configured_use() {
+            Ok(configured) => self.agent_observation_configured(&configured, flow_id),
+            Err(_) => AgentState::Unknown.observed_of(flow_id),
+        }
+    }
+
     fn observe_agent(
         &self,
+        next_configured: &dyn Fn() -> Result<ConfiguredUse, String>,
         flow_id: &str,
         send: &mut dyn FnMut(&Response) -> Result<(), String>,
     ) -> Result<(), String> {
-        let opening = self.agent_observation(flow_id);
+        let configured = next_configured()?;
+        let opening = self.agent_observation_configured(&configured, flow_id);
         send(&opening)?;
         let Response::AgentObserved(AgentObservation {
             agent_state: mut last,
@@ -154,7 +163,7 @@ impl ObservesAgent for RunningNexus {
         let Some((_, route)) = self.observable(flow_id) else {
             return send(&AgentState::Gone.observed_of(flow_id));
         };
-        let configured = self.configured_use().map_err(|error| error.to_string())?;
+        let configured = next_configured()?;
         let socket = configured
             .herdr
             .session_socket(&route.herdr_session_name)
@@ -163,7 +172,7 @@ impl ObservesAgent for RunningNexus {
         loop {
             // Each event is a new item for a long-lived observer and takes
             // the then-current committed generation whole.
-            let configured = self.configured_use().map_err(|error| error.to_string())?;
+            let configured = next_configured()?;
             let poll_milliseconds = configured.snapshot.timings.agent_observe_poll;
             let event = events.next_event(
                 &|| self.stopping.requested(),
@@ -171,7 +180,7 @@ impl ObservesAgent for RunningNexus {
             )?;
             // Configuration may have committed while the event source was
             // blocked; processing this new item uses the new whole view.
-            let configured = self.configured_use().map_err(|error| error.to_string())?;
+            let configured = next_configured()?;
             let Some(event) = event else {
                 // Herdr closed the subscription: the session is gone. The
                 // pane is read once more before the flow is recorded ended.

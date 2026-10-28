@@ -465,7 +465,13 @@ impl Dispatches for RunningNexus {
             Query::Observe(ObserveSelection::Launch(launch_request_id)) => {
                 self.launch_status(&launch_request_id)
             }
-            Query::Observe(ObserveSelection::Agent(flow_id)) => self.agent_observation(&flow_id),
+            Query::Observe(ObserveSelection::Agent(flow_id)) => match self.configured_use() {
+                Ok(configured) => self.agent_observation_configured(&configured, &flow_id),
+                Err(_) => Response::AgentObserved(signal_flow::AgentObservation {
+                    flow_id,
+                    agent_state: signal_flow::AgentState::Unknown,
+                }),
+            },
             // Off the gate: the refresh takes it for each of its steps.
             Query::Refresh(address) => {
                 use crate::waking::RefreshesMetaflows;
@@ -1341,8 +1347,11 @@ impl ServesConnection for Connection {
             }
             Query::Observe(ObserveSelection::Agent(flow_id)) => {
                 let peer = &mut self.peer;
-                return nexus
-                    .observe_agent(&flow_id, &mut |response| peer.write_response(response));
+                return nexus.observe_agent(
+                    &|| nexus.configured_use().map_err(|error| error.to_string()),
+                    &flow_id,
+                    &mut |response| peer.write_response(response),
+                );
             }
             Query::ObserveSends(cursor) => {
                 let Some(process) = self.process.as_ref() else {
@@ -1418,14 +1427,37 @@ impl ServesConnection for Connection {
                 // A queued request is durable: the recipient's wake is read
                 // from Flow's records after the answer, whether or not the
                 // answer reached the sender, off the dispatch gate.
-                let answer = nexus.dispatch_metaflow_peer(query, self.process.as_ref());
+                let configured = match nexus.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => {
+                        return self.peer.write_response(&Response::Refused(
+                            signal_flow::Refusal::NotConfigured,
+                        ));
+                    }
+                };
+                let answer = nexus.dispatch_metaflow_peer_configured(
+                    &configured,
+                    query,
+                    self.process.as_ref(),
+                );
                 return self.peer.write_response(&answer.response);
             }
             Query::Deliver(request) => {
                 let address = request.lock.address.clone();
                 let delivery = request.delivery.clone();
-                let answer =
-                    nexus.dispatch_metaflow_peer(Query::Deliver(request), self.process.as_ref());
+                let configured = match nexus.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => {
+                        return self.peer.write_response(&Response::Refused(
+                            signal_flow::Refusal::NotConfigured,
+                        ));
+                    }
+                };
+                let answer = nexus.dispatch_metaflow_peer_configured(
+                    &configured,
+                    Query::Deliver(request),
+                    self.process.as_ref(),
+                );
                 let accepted = matches!(answer.response, Response::SendAccepted(_));
                 let written = self.peer.write_response(&answer.response);
                 drop(self);

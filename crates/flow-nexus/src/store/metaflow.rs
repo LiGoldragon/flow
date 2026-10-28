@@ -118,7 +118,8 @@ impl MutatesMetaflows for FlowStore {
             let Some(configuration) = self.configuration_snapshot()? else {
                 return Ok(Response::Refused(Refusal::NotConfigured));
             };
-            let expected = fs::canonicalize(&configuration.configured_nexus.message_nexus_binary).ok();
+            let expected =
+                fs::canonicalize(&configuration.configured_nexus.message_nexus_binary).ok();
             if expected.is_none() || FlowStore::process_executable(peer) != expected {
                 return Ok(Response::Refused(Refusal::NotMessage));
             }

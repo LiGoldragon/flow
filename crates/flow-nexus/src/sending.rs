@@ -111,7 +111,7 @@ impl IdentifiesSender for RunningNexus {
         peer: &Process,
     ) -> Result<Address, Box<Response>> {
         let unidentified = || Box::new(Response::Refused(Refusal::Unidentified(peer.clone())));
-        match self.identify_peer_process(peer.clone()) {
+        match self.identify_peer_process_configured(configured, peer.clone()) {
             Ok(Response::Identified(address)) => return Ok(address),
             Ok(_) => {}
             Err(error) => {
@@ -703,7 +703,7 @@ impl BindsSeats for RunningNexus {
         // A seat Flow already knows binds idempotently through the same
         // kernel-authenticated resolver as Send. Claude children do not
         // carry a Codex thread or resume command.
-        match self.identify_peer_process(peer.clone()) {
+        match self.identify_peer_process_configured(configured, peer.clone()) {
             Ok(Response::Identified(known)) if known == address => {
                 if let Some(flow_id) = self.live_awake_flow(&address) {
                     return Response::Bound(flow_id);

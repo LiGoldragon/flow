@@ -35,6 +35,7 @@ use address_hold::HoldsLaunchAddress;
 use created_pane::StoredLaunchPane;
 pub use created_pane::{ReadsCreatedLaunchPane, RecordsCreatedLaunchPane};
 use flow_ethos::State as MetaflowState;
+use harness::UpgradesHarnesses;
 use logical_delivery::{
     DeclaresLogicalDeliveryTables, LogicalDeliveryTables, RecordsLogicalDeliveries,
 };
@@ -49,7 +50,6 @@ use send_outcome::{DeclaresSendOutcomeTables, SendOutcomeTables};
 use staged_upgrade::{StagedUpgrade, StagesUpgrade, UpgradeScope};
 use texts::RegistersTextsTable;
 use timings_limits::RegistersTimingAndLimitTables;
-use harness::UpgradesHarnesses;
 
 use delivery::{DeliveryConfiguration, DeliveryTables, RecordsDeliveries};
 use std::{
@@ -65,10 +65,10 @@ use meta_signal_flow::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, DatabaseMarker, Decision, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation,
-    MemoryDefinition, MemoryUpgrades, MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash,
-    SchemaVersion, TableDescriptor, TableName, TableReference, TableRegistration, UpgradeFrom,
-    UpgradeOutcome,
+    Assertion, DatabaseMarker, Decision, Engine, EngineOpen, EngineRecord, FamilyName,
+    KeyedMutation, MemoryDefinition, MemoryUpgrades, MemoryVersion, QueryPlan, RecordKey,
+    Retraction, SchemaHash, SchemaVersion, TableDescriptor, TableName, TableReference,
+    TableRegistration, UpgradeFrom, UpgradeOutcome,
 };
 use signal_flow::{
     Address, Aspect, Caller, CallerResolutionRejection, ComposedLaunch, EndpointSelection,
@@ -5288,8 +5288,6 @@ impl ConfiguresOnlyStore for ConfigurationOnlyStore {
     fn remove_entry(&self, key: EntryKey) -> Result<ConfigureOutcome, StoreError> {
         FlowStore::remove_meta_entry(&self.engine, &self.meta_configuration_tables, key)
     }
-
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5364,7 +5362,6 @@ pub trait RecordsPendingThread {
 pub trait ConfirmsStartedFlow {
     fn confirm_started(&self, flow_id: &str) -> Result<Response, StoreError>;
 }
-
 
 pub trait RegistersFlowIdentity {
     /// Registers a flow whose role is not known (the meta RegisterFlow).
@@ -6497,7 +6494,6 @@ impl ConfirmsStartedFlow for FlowStore {
         self.confirm_start(flow_id)
     }
 }
-
 
 trait RegistersBindings {
     fn register_flow_as(
@@ -9638,7 +9634,10 @@ pub(crate) trait ReadsFlowMemory {
         match entry {
             ConfigurationEntry::ModelEntry(entry) => {
                 let mut rows = snapshot.configured_models;
-                match rows.iter().position(|row| row.layer == entry.layer && row.aspect == entry.aspect) {
+                match rows
+                    .iter()
+                    .position(|row| row.layer == entry.layer && row.aspect == entry.aspect)
+                {
                     Some(index) => rows[index] = entry,
                     None => rows.push(entry),
                 }
@@ -9646,27 +9645,48 @@ pub(crate) trait ReadsFlowMemory {
             }
             ConfigurationEntry::ThresholdEntry(entry) => {
                 let mut rows = snapshot.configured_thresholds;
-                match rows.iter().position(|row| row.model_name == entry.model_name) {
+                match rows
+                    .iter()
+                    .position(|row| row.model_name == entry.model_name)
+                {
                     Some(index) => rows[index] = entry,
                     None => rows.push(entry),
                 }
-                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Thresholds(rows))
+                FlowStore::configure_meta_change(
+                    engine,
+                    tables,
+                    ConfigurationChange::Thresholds(rows),
+                )
             }
             ConfigurationEntry::HarnessEntry(entry) => {
                 let mut rows = snapshot.configured_harnesses;
-                match rows.iter().position(|row| row.harness_name == entry.harness_name) {
+                match rows
+                    .iter()
+                    .position(|row| row.harness_name == entry.harness_name)
+                {
                     Some(index) => rows[index] = entry,
                     None => rows.push(entry),
                 }
-                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Harnesses(rows))
+                FlowStore::configure_meta_change(
+                    engine,
+                    tables,
+                    ConfigurationChange::Harnesses(rows),
+                )
             }
             ConfigurationEntry::SendServerEntry(entry) => {
                 let mut rows = snapshot.configured_send_servers;
-                match rows.iter().position(|row| row.codex_app_server_binary == entry.codex_app_server_binary) {
+                match rows
+                    .iter()
+                    .position(|row| row.codex_app_server_binary == entry.codex_app_server_binary)
+                {
                     Some(index) => rows[index] = entry,
                     None => rows.push(entry),
                 }
-                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::SendServers(rows))
+                FlowStore::configure_meta_change(
+                    engine,
+                    tables,
+                    ConfigurationChange::SendServers(rows),
+                )
             }
             ConfigurationEntry::MetaflowEntry(entry) => {
                 let mut rows = snapshot.configured_metaflows;
@@ -9674,7 +9694,11 @@ pub(crate) trait ReadsFlowMemory {
                     Some(index) => rows[index] = entry,
                     None => rows.push(entry),
                 }
-                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Metaflows(rows))
+                FlowStore::configure_meta_change(
+                    engine,
+                    tables,
+                    ConfigurationChange::Metaflows(rows),
+                )
             }
         }
     }
@@ -9691,32 +9715,62 @@ pub(crate) trait ReadsFlowMemory {
                 let mut rows = snapshot.configured_models;
                 let before = rows.len();
                 rows.retain(|row| row.layer != key.layer || row.aspect != key.aspect);
-                if rows.len() == before { return Err(StoreError::UnknownConfigurationEntry); }
+                if rows.len() == before {
+                    return Err(StoreError::UnknownConfigurationEntry);
+                }
                 FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Models(rows))?
             }
             EntryKey::ThresholdKey(key) => {
                 let mut rows = snapshot.configured_thresholds;
-                let before = rows.len(); rows.retain(|row| row.model_name != key);
-                if rows.len() == before { return Err(StoreError::UnknownConfigurationEntry); }
-                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Thresholds(rows))?
+                let before = rows.len();
+                rows.retain(|row| row.model_name != key);
+                if rows.len() == before {
+                    return Err(StoreError::UnknownConfigurationEntry);
+                }
+                FlowStore::configure_meta_change(
+                    engine,
+                    tables,
+                    ConfigurationChange::Thresholds(rows),
+                )?
             }
             EntryKey::HarnessKey(key) => {
                 let mut rows = snapshot.configured_harnesses;
-                let before = rows.len(); rows.retain(|row| row.harness_name != key);
-                if rows.len() == before { return Err(StoreError::UnknownConfigurationEntry); }
-                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Harnesses(rows))?
+                let before = rows.len();
+                rows.retain(|row| row.harness_name != key);
+                if rows.len() == before {
+                    return Err(StoreError::UnknownConfigurationEntry);
+                }
+                FlowStore::configure_meta_change(
+                    engine,
+                    tables,
+                    ConfigurationChange::Harnesses(rows),
+                )?
             }
             EntryKey::SendServerKey(key) => {
                 let mut rows = snapshot.configured_send_servers;
-                let before = rows.len(); rows.retain(|row| row.codex_app_server_binary != key);
-                if rows.len() == before { return Err(StoreError::UnknownConfigurationEntry); }
-                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::SendServers(rows))?
+                let before = rows.len();
+                rows.retain(|row| row.codex_app_server_binary != key);
+                if rows.len() == before {
+                    return Err(StoreError::UnknownConfigurationEntry);
+                }
+                FlowStore::configure_meta_change(
+                    engine,
+                    tables,
+                    ConfigurationChange::SendServers(rows),
+                )?
             }
             EntryKey::MetaflowKey(key) => {
                 let mut rows = snapshot.configured_metaflows;
-                let before = rows.len(); rows.retain(|row| row.address != key);
-                if rows.len() == before { return Err(StoreError::UnknownConfigurationEntry); }
-                FlowStore::configure_meta_change(engine, tables, ConfigurationChange::Metaflows(rows))?
+                let before = rows.len();
+                rows.retain(|row| row.address != key);
+                if rows.len() == before {
+                    return Err(StoreError::UnknownConfigurationEntry);
+                }
+                FlowStore::configure_meta_change(
+                    engine,
+                    tables,
+                    ConfigurationChange::Metaflows(rows),
+                )?
             }
         };
         match outcome {
@@ -10503,10 +10557,10 @@ mod tests {
     }
 
     use super::{
-        AppliesFlowQuery, ConfigurationOnlyStore, ConfirmsStartedFlow,
-        DerivesNativeOwnerProof, FlowStore, LaunchOutcome, LaunchOutcomeV2, ManagesMetaflowState,
-        NativeOwnerEnvironment, NativeOwnerProof, NativeOwnerState, OpensFlowStore, ReadsFlowRoles,
-        ReadsFlowStore, ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
+        AppliesFlowQuery, ConfigurationOnlyStore, ConfirmsStartedFlow, DerivesNativeOwnerProof,
+        FlowStore, LaunchOutcome, LaunchOutcomeV2, ManagesMetaflowState, NativeOwnerEnvironment,
+        NativeOwnerProof, NativeOwnerState, OpensFlowStore, ReadsFlowRoles, ReadsFlowStore,
+        ReadsLaunchAttempt, RecordsLaunchOutcome, RecordsNativeLaunchBinding,
         RecordsNativeLaunchIntent, RecordsPendingThread, RecordsPromptDeliveryIntent,
         RecordsPromptDeliveryResult, RecordsRegistrationAcknowledgement, RegistersExistingFlow,
         RegistersFlowIdentity, ReservesLaunchAttempt, ReservesPendingStart,

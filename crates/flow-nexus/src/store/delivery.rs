@@ -399,8 +399,6 @@ impl RecordsDeliveries for FlowStore {
         }
         Ok(settled)
     }
-
-
 }
 
 #[cfg(test)]

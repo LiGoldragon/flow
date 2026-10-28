@@ -307,7 +307,7 @@ impl WritesSeat for Address {
 pub trait WatchesCompactions {
     /// Reads the Claude flow's transcript past the last reading for
     /// compactions its harness made on its own, and raises each.
-    fn watch_claude_compactions(&self, flow_id: &str);
+    fn watch_claude_compactions(&self, configured: &ConfiguredUse, flow_id: &str);
     /// The flow's harness goes on in a new session: its transcript is the
     /// new session's, read from its start.
     fn session_rebound(&self, flow_id: &str);
@@ -335,11 +335,7 @@ pub trait WatchesCompactions {
 }
 
 impl WatchesCompactions for RunningNexus {
-    fn watch_claude_compactions(&self, flow_id: &str) {
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            _ => return,
-        };
+    fn watch_claude_compactions(&self, configured: &ConfiguredUse, flow_id: &str) {
         let floor = compaction_floor(configured.snapshot.timings.compaction_watch_margin as u64);
         let Ok(Some(node)) = self.store.flow_node(flow_id) else {
             return;
@@ -357,7 +353,7 @@ impl WatchesCompactions for RunningNexus {
             let first = known.is_none();
             let transcript = match known {
                 Some((transcript, _)) => Some(transcript),
-                None => self.claude_transcript(&node),
+                None => self.claude_transcript_configured(configured, &node),
             };
             let Some(transcript) = transcript else {
                 return;
@@ -424,12 +420,9 @@ impl WatchesCompactions for RunningNexus {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&node.flow_id);
                 if !asked {
-                    let texts = match self.configured_use() {
-                        Ok(configured) => configured.snapshot.texts,
-                        _ => return,
-                    };
+                    let texts = &configured.snapshot.texts;
                     let pre_tokens = self.store.context_size(&node.flow_id).ok().flatten();
-                    self.raise_compaction(&node, &item, pre_tokens, &texts);
+                    self.raise_compaction(&node, &item, pre_tokens, texts);
                 }
             }
         }

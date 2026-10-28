@@ -935,22 +935,14 @@ impl OpensBoundCodexSession for CodexAdapter {
         let mut config = serde_json::Map::new();
         for leave_out in &launch.left_out {
             let (key, value) = match leave_out.as_str() {
-                "AgentsMd" => {
-                    ("project_doc_max_bytes", serde_json::json!(0))
-                }
-                "Skills" => {
-                    ("skills.include_instructions", serde_json::json!(false))
-                }
+                "AgentsMd" => ("project_doc_max_bytes", serde_json::json!(0)),
+                "Skills" => ("skills.include_instructions", serde_json::json!(false)),
                 "CollaborationMode" => (
                     "include_collaboration_mode_instructions",
                     serde_json::json!(false),
                 ),
-                "EnvironmentContext" => {
-                    ("include_environment_context", serde_json::json!(false))
-                }
-                "Permissions" => {
-                    ("include_permissions_instructions", serde_json::json!(false))
-                }
+                "EnvironmentContext" => ("include_environment_context", serde_json::json!(false)),
+                "Permissions" => ("include_permissions_instructions", serde_json::json!(false)),
                 "DeveloperInstructions" => {
                     // The multi-agent role and mode developer messages
                     // codex 0.161.0-alpha.2 sends a v2 multi-agent model
@@ -1018,10 +1010,7 @@ impl OpensBoundCodexSession for CodexAdapter {
                 "{method} readback differs from the launch's model or effort"
             )));
         }
-        if launch
-            .left_out
-            .contains(&"AgentsMd".to_owned())
-        {
+        if launch.left_out.contains(&"AgentsMd".to_owned()) {
             let sources = response
                 .get("instructionSources")
                 .and_then(serde_json::Value::as_array)
@@ -2117,7 +2106,9 @@ mod tests {
                     ]),
                 },
             ],
-            harnesses: crate::herdr::fixture_harnesses(std::path::Path::new("/home/test/native-transcripts")),
+            harnesses: crate::herdr::fixture_harnesses(std::path::Path::new(
+                "/home/test/native-transcripts",
+            )),
             timeout: Duration::from_secs(10),
             workspace_root: PathBuf::from("/home/test/primary"),
             limits: crate::store::timings_limits::seed_limits().expect("authored limits seed"),

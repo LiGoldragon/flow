@@ -116,7 +116,7 @@ impl RecordsReports for RunningNexus {
         // Every report of a Claude flow has its transcript read for a
         // compaction its harness made on its own; SessionStart follows one
         // at once.
-        crate::compacting::WatchesCompactions::watch_claude_compactions(self, flow_id);
+        crate::compacting::WatchesCompactions::watch_claude_compactions(self, configured, flow_id);
         match event {
             // The flow's own Claude session ended: it has exited, its locks
             // go with it, and a Maintained metaflow is owed its successor.

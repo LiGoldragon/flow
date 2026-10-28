@@ -464,9 +464,10 @@ impl HandlesSendCall for RunningNexus {
                 return Self::refused(SendRefusal::Store);
             };
             let message = arguments.message();
-            if let Some(signal_flow::Refusal::Oversized(size)) =
-                message.oversized_refusal(&sender.address, configuration.limits.send_body as usize)
-            {
+            if let Some(signal_flow::Refusal::Oversized(size)) = message.oversized_refusal(
+                &sender.address,
+                configured.snapshot.limits.send_body as usize,
+            ) {
                 return refused_kept(SendRefusal::Oversized(size), content_sha256);
             }
             let outcome = self
@@ -553,14 +554,14 @@ impl RespondsToSendCalls for RunningNexus {
             // A reconnect is a new external operation.  It takes the next
             // complete committed generation; an already-open subscription
             // keeps the generation with which this iteration began.
-            let Ok(Some(committed)) = self.store.committed_configuration_snapshot() else {
+            let Ok(configured) = self.configured_use() else {
                 eprintln!("flow-nexus: send tool for thread {thread}: configuration unavailable");
                 return;
             };
             let first_wait =
-                Duration::from_millis(committed.snapshot.timings.send_tool_first_wait as u64);
+                Duration::from_millis(configured.snapshot.timings.send_tool_first_wait as u64);
             let longest_wait =
-                Duration::from_millis(committed.snapshot.timings.send_tool_longest_wait as u64);
+                Duration::from_millis(configured.snapshot.timings.send_tool_longest_wait as u64);
             if wait.is_zero() {
                 wait = first_wait;
             } else {
@@ -730,12 +731,12 @@ impl ServesLaunchCalls for RunningNexus {
         let Some(mut responder) = taken else {
             return work();
         };
-        let Ok(Some(committed)) = self.store.committed_configuration_snapshot() else {
+        let Ok(configured) = self.configured_use() else {
             responder.subscription.close();
             return work();
         };
         let serving_slice =
-            Duration::from_millis(committed.snapshot.timings.send_tool_serving_slice as u64);
+            Duration::from_millis(configured.snapshot.timings.send_tool_serving_slice as u64);
         let mut open = true;
         let outcome = std::thread::scope(|scope| {
             let running = scope.spawn(work);
@@ -843,7 +844,7 @@ impl ServesLaunchCalls for RunningNexus {
         let Some(mut responder) = taken else {
             return;
         };
-        let Ok(Some(committed)) = self.store.committed_configuration_snapshot() else {
+        let Ok(configured) = self.configured_use() else {
             responder.subscription.close();
             return;
         };
@@ -851,7 +852,7 @@ impl ServesLaunchCalls for RunningNexus {
             let _ = self.answer_launch_call(&mut responder, request);
         }
         let deadline = Instant::now()
-            + Duration::from_millis(committed.snapshot.timings.send_tool_serving_slice as u64);
+            + Duration::from_millis(configured.snapshot.timings.send_tool_serving_slice as u64);
         while let Ok(ProxyEvent::Reply(Ok(message))) = responder
             .subscription
             .next_event(&responder.inbox, Some(deadline))
@@ -907,7 +908,7 @@ pub(crate) trait RefusesInterruptedCalls {
 impl RefusesInterruptedCalls for RunningNexus {
     fn refuse_interrupted_calls(&self, thread: &str, adapter: &CodexAdapter) -> InterruptedCalls {
         let mut tally = InterruptedCalls::default();
-        let Ok(Some(committed)) = self.store.committed_configuration_snapshot() else {
+        let Ok(configured) = self.configured_use() else {
             return tally;
         };
         let (signals, inbox) = mpsc::channel();
@@ -943,7 +944,7 @@ impl RefusesInterruptedCalls for RunningNexus {
             .into_iter()
             .all(|request| answer(&mut subscription, request));
         let deadline = Instant::now()
-            + Duration::from_millis(committed.snapshot.timings.send_tool_replay_window as u64);
+            + Duration::from_millis(configured.snapshot.timings.send_tool_replay_window as u64);
         while open {
             match subscription.next_event(&inbox, Some(deadline)) {
                 Ok(ProxyEvent::Reply(Ok(message))) => open = answer(&mut subscription, message),
@@ -991,7 +992,7 @@ impl RefusesInterruptedCalls for RunningNexus {
 /// on a thread of its own with the sender that stops it.
 #[derive(Default)]
 pub struct SendToolResponders {
-    responders: BTreeMap<String, mpsc::Sender<ResponderSignal>>,
+    responders: BTreeMap<String, (sema_engine::DatabaseMarker, mpsc::Sender<ResponderSignal>)>,
     /// Threads whose flow names no model a Codex endpoint serves, each
     /// logged once.
     unserved: BTreeSet<String>,
@@ -1001,7 +1002,11 @@ pub struct SendToolResponders {
 pub trait KeepsSendToolResponders {
     /// The live Codex threads Flow holds, each with the adapter of the
     /// endpoint its flow's model selects.
-    fn wanted(&mut self, nexus: &RunningNexus) -> BTreeMap<String, CodexAdapter>;
+    fn wanted(
+        &mut self,
+        nexus: &RunningNexus,
+        configured: &crate::ConfiguredUse,
+    ) -> BTreeMap<String, CodexAdapter>;
     /// Starts a responder for each wanted thread that has none and stops
     /// each responder whose thread is no longer wanted.
     fn pass<'scope, 'env>(&mut self, nexus: &'env RunningNexus, scope: &'scope Scope<'scope, 'env>);
@@ -1009,7 +1014,11 @@ pub trait KeepsSendToolResponders {
 }
 
 impl KeepsSendToolResponders for SendToolResponders {
-    fn wanted(&mut self, nexus: &RunningNexus) -> BTreeMap<String, CodexAdapter> {
+    fn wanted(
+        &mut self,
+        nexus: &RunningNexus,
+        configured: &crate::ConfiguredUse,
+    ) -> BTreeMap<String, CodexAdapter> {
         let nodes = match nexus.store.flow_nodes() {
             Ok(nodes) => nodes,
             Err(error) => {
@@ -1030,7 +1039,12 @@ impl KeepsSendToolResponders for SendToolResponders {
                 .role(&node.flow_id)
                 .ok()
                 .flatten()
-                .and_then(|role| nexus.codex_endpoints.adapter_for(&role.model_name).ok());
+                .and_then(|role| {
+                    configured
+                        .codex_endpoints
+                        .adapter_for(&role.model_name)
+                        .ok()
+                });
             match adapter {
                 Some(adapter) => {
                     wanted.insert(node.session_id, adapter);
@@ -1053,9 +1067,17 @@ impl KeepsSendToolResponders for SendToolResponders {
         nexus: &'env RunningNexus,
         scope: &'scope Scope<'scope, 'env>,
     ) {
-        let wanted = self.wanted(nexus);
-        self.responders.retain(|thread, stop| {
-            let keep = wanted.contains_key(thread);
+        let configured = match nexus.configured_use() {
+            Ok(configured) => configured,
+            Err(error) => {
+                eprintln!("flow-nexus: send tool configuration unreadable: {error}");
+                self.stop_all();
+                return;
+            }
+        };
+        let wanted = self.wanted(nexus, &configured);
+        self.responders.retain(|thread, (generation, stop)| {
+            let keep = wanted.contains_key(thread) && generation == &configured.generation;
             if !keep {
                 let _ = stop.send(ResponderSignal::Stop);
             }
@@ -1066,13 +1088,16 @@ impl KeepsSendToolResponders for SendToolResponders {
                 continue;
             }
             let (signals, inbox) = mpsc::channel();
-            self.responders.insert(thread.clone(), signals.clone());
+            self.responders.insert(
+                thread.clone(),
+                (configured.generation.clone(), signals.clone()),
+            );
             scope.spawn(move || nexus.respond_for(&thread, &adapter, signals, inbox));
         }
     }
 
     fn stop_all(&mut self) {
-        for stop in self.responders.values() {
+        for (_, stop) in self.responders.values() {
             let _ = stop.send(ResponderSignal::Stop);
         }
         self.responders.clear();

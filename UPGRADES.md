@@ -2450,3 +2450,9 @@ Pins meta-signal-flow 56.0.0. Existing harness rows upgrade from v1 to v2 by add
 # Batch 11: reports by session and notifications
 
 The ordinary signal contract is signal-flow 37.0.0 and the privileged contract is meta-signal-flow 51.0.0. A harness report identifies either a Flow or a native session; the Nexus resolves session reporters against the adopted seats it holds. Claude's Notification hook records `Notified` events. The flow-events family upgrades from v4 to v5 without changing any archived event.
+
+# Batch 18: committed configuration per operation
+
+Every external operation now selects one complete committed configuration generation and carries that immutable view through its nested effects. The next queued item or external operation selects the then-current generation. Configuration replacement therefore takes effect without a Nexus restart and cannot mix model, harness, text, timing, limit, composer, endpoint, or socket families within one operation.
+
+Resources remain owned across generations: new I/O uses the current configured backend, while lifecycle cleanup uses the exact backend and process authority recorded when the resource was created. Missing or mismatched ownership is a typed refusal; it never falls back to the current backend.

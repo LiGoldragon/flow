@@ -447,7 +447,14 @@ impl Dispatches for RunningNexus {
     ) -> meta_signal_flow::Response {
         let configured_response =
             |result: Result<meta_signal_flow::ConfigureOutcome, store::StoreError>| match result {
-                Ok(outcome) => meta_signal_flow::Response::Configured(outcome),
+                Ok(outcome) => {
+                    if outcome == meta_signal_flow::ConfigureOutcome::Replaced {
+                        // Long-lived services reconcile their client views
+                        // before their next item on the new generation.
+                        self.store.launch_changes.announce();
+                    }
+                    meta_signal_flow::Response::Configured(outcome)
+                }
                 Err(store::StoreError::DuplicateConfigurationEntry) => {
                     meta_signal_flow::Response::ConfigureRejected(
                         meta_signal_flow::ConfigureRejection::DuplicateEntry,

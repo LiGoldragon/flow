@@ -98,7 +98,7 @@ impl FindsDeliveryTarget for RunningNexus {
 }
 
 impl RunningNexus {
-    fn delivery_target_with(
+    pub(crate) fn delivery_target_with(
         &self,
         flow_id: &str,
         configuration: &crate::store::StoredConfigurationSnapshot,
@@ -236,7 +236,7 @@ impl RunningNexus {
         }
     }
 
-    fn writable_state_with(
+    pub(crate) fn writable_state_with(
         &self,
         herdr: &HerdrCli,
         target: &DeliveryTarget,
@@ -322,6 +322,26 @@ pub trait DeliversMessages {
     fn read_pane(&self, flow_id: &str) -> Response;
 }
 
+impl RunningNexus {
+    /// Delivers one queued item with the configuration generation selected
+    /// by that item's drain boundary.
+    pub(crate) fn deliver_with_view(
+        &self,
+        view: &crate::herdr::HerdrOperationView,
+        request: DeliveryRequest,
+    ) -> Response {
+        let target = match self.checked_delivery_target(&view.configuration.snapshot, &request) {
+            Ok(target) => target,
+            Err(refusal) => return Response::DeliveryRejected(refusal),
+        };
+        let _lease = self.pane_leases.hold(&target.route);
+        match LeasedDelivery::new(self, &view.herdr, &request, &target).run() {
+            Ok(delivery) => Response::Delivered(delivery),
+            Err(rejection) => Response::DeliveryRejected(rejection),
+        }
+    }
+}
+
 impl DeliversMessages for RunningNexus {
     fn deliver(&self, request: DeliveryRequest) -> Response {
         match self.store.delivery(&request.delivery_id) {
@@ -337,15 +357,7 @@ impl DeliversMessages for RunningNexus {
                 return Response::DeliveryRejected(DeliveryRejection::PersistenceRefused);
             }
         };
-        let target = match self.checked_delivery_target(&view.configuration.snapshot, &request) {
-            Ok(target) => target,
-            Err(refusal) => return Response::DeliveryRejected(refusal),
-        };
-        let _lease = self.pane_leases.hold(&target.route);
-        match LeasedDelivery::new(self, &view.herdr, &request, &target).run() {
-            Ok(delivery) => Response::Delivered(delivery),
-            Err(rejection) => Response::DeliveryRejected(rejection),
-        }
+        self.deliver_with_view(&view, request)
     }
 
     fn vet(&self, request: &DeliveryRequest) -> Response {

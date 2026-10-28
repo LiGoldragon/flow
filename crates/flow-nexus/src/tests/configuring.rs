@@ -5,6 +5,9 @@
 //! generation, so a replacement is served by the next operation without a
 //! Nexus restart.
 
+use crate::codex::SelectsCodexEndpoint;
+use crate::composition::{LaunchComposer, OpensLaunchComposer};
+use crate::context::{ContextComposer, FixtureComposer};
 use crate::generated::operation::{Operation, Outcome};
 use crate::performing::Performs;
 use crate::store::metaflow::MutatesMetaflows;
@@ -634,6 +637,76 @@ fn an_operation_view_stays_on_a_while_the_next_operation_takes_b() {
     assert_eq!(after_refusal.generation, refused_generation);
     assert_eq!(after_refusal.snapshot, b.snapshot);
     assert_eq!(after_refusal.herdr.executable, b.herdr.executable);
+}
+
+#[test]
+fn a_paused_launch_keeps_a_and_the_next_launch_composes_with_b() {
+    let fixture = ConfiguredStore::new();
+    let mut nexus = fixture.open();
+    let profile = super::model::seat(Aspect::Mind, Layer::Primary, TERRA, "paused-launch-a");
+    let mut composer = FixtureComposer::default();
+    for identity in profile
+        .system_modules
+        .iter()
+        .chain(profile.user_modules.iter())
+    {
+        composer
+            .bodies
+            .insert(identity.clone(), format!("{identity} body"));
+    }
+    nexus.composer = LaunchComposer::with_context(ContextComposer::Fixture(composer));
+    assert_eq!(
+        nexus.dispatch_meta(meta_signal_flow::Query::ConfigureEntry(
+            ConfigurationEntry::ModelEntry(ConfigureModel {
+                layer: Layer::Primary,
+                aspect: Aspect::Mind,
+                model_name: TERRA.into(),
+                effort: "medium-a".into(),
+            }),
+        )),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let a = nexus
+        .configured_use()
+        .expect("launch A selects a generation");
+    let a_executable = a
+        .codex_endpoints
+        .adapter_for(TERRA)
+        .expect("A endpoint")
+        .executable;
+
+    let mut harness_b = ConfiguredStore::harness("codex", HarnessKind::Codex, &[TERRA, SOL, LUNA]);
+    harness_b.executable = "/configured/codex-b".into();
+    assert_eq!(
+        nexus.dispatch_meta(meta_signal_flow::Query::ConfigureEntry(
+            ConfigurationEntry::HarnessEntry(harness_b),
+        )),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let b = nexus.configured_use().expect("the next launch selects B");
+    let b_executable = b
+        .codex_endpoints
+        .adapter_for(TERRA)
+        .expect("B endpoint")
+        .executable;
+    assert_ne!(a.generation, b.generation);
+    assert_ne!(a_executable, b_executable);
+
+    assert!(matches!(
+        nexus.perform_configured(&a, Operation::Compose(profile.clone())),
+        Outcome::Composed(_)
+    ));
+    assert!(matches!(
+        nexus.perform_configured(&b, Operation::Compose(profile)),
+        Outcome::Composed(_)
+    ));
+    assert_eq!(
+        a.codex_endpoints
+            .adapter_for(TERRA)
+            .expect("paused A still has its endpoint")
+            .executable,
+        a_executable
+    );
 }
 
 #[test]

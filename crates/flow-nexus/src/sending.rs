@@ -122,15 +122,10 @@ impl IdentifiesSender for RunningNexus {
         let Some(thread) = (CallerProcess { process_id }).codex_thread(&app_servers) else {
             return Err(unidentified());
         };
-        let configuration = self
-            .store
-            .committed_configuration_snapshot()
-            .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?
-            .ok_or_else(|| Box::new(Response::Refused(Refusal::NotConfigured)))?
-            .snapshot;
-        let endpoints = crate::codex::CodexEndpoints::configured(&configuration)
-            .with_texts(configuration.texts);
-        let root_thread = endpoints.root_thread(&thread);
+        let configured = self
+            .configured_use()
+            .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?;
+        let root_thread = configured.codex_endpoints.root_thread(&thread);
         match self.store.thread_sender(&root_thread) {
             Ok(Ok(address)) => Ok(address),
             Ok(Err(_)) => Err(unidentified()),
@@ -871,9 +866,19 @@ impl CompletesDirectSends for RunningNexus {
             )));
         }
         let flow_id = self.live_awake_flow(address);
+        let configured = self.configured_use().map_err(|error| {
+            failed(SendFailureReason::Refused(Refusal::Store(
+                error.to_string(),
+            )))
+        })?;
+        let model_is_configured = configured
+            .snapshot
+            .configured_models
+            .iter()
+            .any(|model| model.layer == address.layer && model.aspect == address.aspect);
         if flow_id.is_none()
             && (!matches!(self.store.metaflow_declaration(address), Ok(Some(_)))
-                || !matches!(self.store.configured_model(address), Ok(Some(_))))
+                || !model_is_configured)
         {
             return Err(failed(SendFailureReason::RecipientUnavailable(
                 address.clone(),
@@ -902,11 +907,8 @@ impl CompletesDirectSends for RunningNexus {
         use crate::store::AnnouncesLaunchChanges;
         use signal_flow::{DeliveryState, SendFailure, SendFailureReason, SendReceipt};
         use std::time::{Duration, Instant};
-        let send_wait = match self.store.committed_configuration_snapshot() {
-            Ok(Some(committed)) => committed.snapshot.timings.send_wait,
-            Ok(None) => {
-                return Response::Refused(Refusal::NotConfigured).into();
-            }
+        let send_wait = match self.configured_use() {
+            Ok(configured) => configured.snapshot.timings.send_wait,
             Err(error) => {
                 return Response::Refused(Refusal::Store(error.to_string())).into();
             }

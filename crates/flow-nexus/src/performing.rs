@@ -313,7 +313,7 @@ impl RunningNexus {
                 }
             }
             Operation::Reserve(reserve) => self.reserve(configured, reserve),
-            Operation::Record(record) => self.record(record),
+            Operation::Record(record) => self.record(configured, record),
             Operation::Register(Register_Data { flow_node, caller }) => {
                 match self.store.register_flow_in_role(flow_node, caller) {
                     Ok(FlowRegistration::Registered(node)) => Outcome::Registered(*node),
@@ -537,8 +537,8 @@ impl RunningNexus {
                     Outcome::Failed(Failed_Data::PaneCloseRefused(failure))
                 }
             },
-            Operation::Wake(address) => self.wake(address),
-            Operation::Drain(address) => self.drain(address),
+            Operation::Wake(address) => self.wake_configured(configured, address),
+            Operation::Drain(address) => self.drain_configured(configured, address),
         }
     }
 }
@@ -550,7 +550,7 @@ trait PerformsInParts {
     /// the id exists before any harness runs. An attempt that already
     /// existed reserves nothing again: it is not spawned again.
     fn reserve(&self, configured: &ConfiguredUse, reserve: Reserve_Data) -> Outcome;
-    fn record(&self, record: Record_Data) -> Outcome;
+    fn record(&self, configured: &ConfiguredUse, record: Record_Data) -> Outcome;
     /// Gives back what Reserve took for a launch that was then refused: the
     /// flow held in Memory, then the FlowId claim. Both are needed for
     /// Released; a failure of either is reported to the Nexus log.
@@ -613,7 +613,7 @@ impl PerformsInParts for RunningNexus {
         }
     }
 
-    fn record(&self, record: Record_Data) -> Outcome {
+    fn record(&self, configured: &ConfiguredUse, record: Record_Data) -> Outcome {
         match record {
             Record_Data::Intent(intent) => {
                 self.store.record_native_launch_intent(intent).recorded()
@@ -641,11 +641,9 @@ impl PerformsInParts for RunningNexus {
             // no pane lease: an exit is recorded where a write may already
             // hold it, and nothing more is typed into an exited flow.
             Record_Data::Exited(flow_id) => {
-                let configured = self.configured_use().ok();
                 let node = self.store.flow_node(&flow_id).ok().flatten();
                 let recorded = self.store.record_exited(&flow_id).recorded();
                 if recorded == Outcome::Recorded
-                    && let Some(configured) = configured
                     && let Some(node) = node
                     && matches!(
                         configured.herdr.pane_presence(&node),

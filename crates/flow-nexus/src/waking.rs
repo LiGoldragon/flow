@@ -514,8 +514,10 @@ pub trait SleepsAndWakesSeats {
 pub trait PerformsWakeAndDrain {
     /// Performed off the dispatch gate; see the module documentation.
     fn wake(&self, address: Address) -> Outcome;
+    fn wake_configured(&self, configured: &crate::ConfiguredUse, address: Address) -> Outcome;
     /// Performed under the dispatch gate.
     fn drain(&self, address: Address) -> Outcome;
+    fn drain_configured(&self, configured: &crate::ConfiguredUse, address: Address) -> Outcome;
     /// Hands over as many queued requests as can be settled now, oldest
     /// first. It stops at the first hand-over whose native receipt is not
     /// yet established, or at any refusal; work behind that request stays
@@ -623,25 +625,31 @@ impl StartsRequirementsFirst for RunningNexus {
             let WakePlan::Fresh(fresh) = self.wake_plan(&metaflow) else {
                 return Err(signal_flow::StartRejection::RequirementUnmet(required));
             };
-            let flow_id = self.start_fresh(&metaflow, fresh, "").map_err(|failure| {
-                eprintln!(
-                    "flow-nexus: required metaflow {:?} {} {:?} did not start: {failure:?}",
-                    required.aspect, required.topic, required.layer
-                );
-                signal_flow::StartRejection::RequirementUnmet(required.clone())
-            })?;
+            let configured = self
+                .configured_use()
+                .map_err(|_| signal_flow::StartRejection::LaunchPersistenceRefused)?;
+            let flow_id = self
+                .start_fresh(&configured, &metaflow, fresh, "")
+                .map_err(|failure| {
+                    eprintln!(
+                        "flow-nexus: required metaflow {:?} {} {:?} did not start: {failure:?}",
+                        required.aspect, required.topic, required.layer
+                    );
+                    signal_flow::StartRejection::RequirementUnmet(required.clone())
+                })?;
             {
                 let _turn = self
                     .dispatch_gate
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if self.perform(Operation::Record(Record_Data::Awoken(
-                    Record_Data_Awoken_Data {
+                if self.perform_configured(
+                    &configured,
+                    Operation::Record(Record_Data::Awoken(Record_Data_Awoken_Data {
                         address: required.clone(),
                         flow_id,
                         delivered: 0,
-                    },
-                ))) != Outcome::Recorded
+                    })),
+                ) != Outcome::Recorded
                 {
                     return Err(signal_flow::StartRejection::LaunchPersistenceRefused);
                 }
@@ -666,10 +674,26 @@ pub(crate) enum FreshRefusal {
 /// while the launch settles.
 pub(crate) trait StartsUnbound {
     fn start_unbound(&self, profile: LaunchProfile) -> Result<FlowId, FreshRefusal>;
+    fn start_unbound_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        profile: LaunchProfile,
+    ) -> Result<FlowId, FreshRefusal>;
 }
 
 impl StartsUnbound for RunningNexus {
     fn start_unbound(&self, profile: LaunchProfile) -> Result<FlowId, FreshRefusal> {
+        let configured = self
+            .configured_use()
+            .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?;
+        self.start_unbound_configured(&configured, profile)
+    }
+
+    fn start_unbound_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        profile: LaunchProfile,
+    ) -> Result<FlowId, FreshRefusal> {
         let launch_request_id = profile.launch_request_id.clone();
         let response = {
             let _turn = self
@@ -678,7 +702,7 @@ impl StartsUnbound for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // The Nexus starts this flow itself: no calling flow is its
             // origin.
-            let response = self.start(profile, Origin::Unbound);
+            let response = self.start_configured(configured, profile, Origin::Unbound);
             self.settle(&launch_request_id, response)
         };
         // A send tool call made by the flow's first turn cannot wake its
@@ -699,9 +723,14 @@ impl StartsUnbound for RunningNexus {
 /// The steps a wake takes.
 trait WakesInParts {
     /// The body of `wake`, every early exit a typed refusal.
-    fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal>;
+    fn waken(
+        &self,
+        configured: &crate::ConfiguredUse,
+        address: &Address,
+    ) -> Result<FlowId, WakeRefusal>;
     fn start_fresh(
         &self,
+        configured: &crate::ConfiguredUse,
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
@@ -709,14 +738,24 @@ trait WakesInParts {
     /// Types text into a live flow's pane under its lease, as Flow's own
     /// write: no Priority head, since it is not a Message. A refusal is
     /// logged by its reason.
-    fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), HandOverRefusal>;
+    fn hand_over(
+        &self,
+        configured: &crate::ConfiguredUse,
+        flow_id: &str,
+        text: &str,
+    ) -> Result<(), HandOverRefusal>;
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile>;
     /// Writes the context size the flow's native transcript shows now, the
     /// size a Compact of the flow is judged by.
     fn record_context_at_stop(&self, flow_id: &str);
     /// Refuses a wake while a pane already runs this flow's native session:
     /// SessionLive when one does, HerdrUnreadable when Herdr is unreadable.
-    fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal>;
+    fn refuse_live_session(
+        &self,
+        configured: &crate::ConfiguredUse,
+        node: &FlowNode,
+        sessions: &[String],
+    ) -> Result<(), WakeRefusal>;
     /// The body of `settle_stopped`: waits, boundedly and off the dispatch
     /// gate, for Herdr to show the seat resting, then drains it.
     fn settle_rested(&self, flow_id: &str) -> AtStop;
@@ -761,11 +800,26 @@ trait WakesInParts {
 pub(crate) trait ReadsClaudeDelivery {
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf>;
     fn claude_main_turn_ended(&self, node: &FlowNode) -> bool;
+    fn claude_main_turn_ended_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        node: &FlowNode,
+    ) -> bool;
     fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor>;
+    fn claude_delivery_cursor_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        node: &FlowNode,
+    ) -> Option<NativeTranscriptCursor>;
     /// What the flow's transcript after the attempt's cursor shows of its
     /// request; Unreadable when the attempt is no longer the flow's own
     /// session's.
     fn claude_delivery_history(&self, attempt: &QueueDeliveryAttempt) -> ClaudeQueuedHistory;
+    fn claude_delivery_history_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        attempt: &QueueDeliveryAttempt,
+    ) -> ClaudeQueuedHistory;
 }
 
 impl ReadsClaudeDelivery for RunningNexus {
@@ -779,14 +833,42 @@ impl ReadsClaudeDelivery for RunningNexus {
     }
 
     fn claude_main_turn_ended(&self, node: &FlowNode) -> bool {
+        let Ok(configured) = self.configured_use() else {
+            return false;
+        };
+        self.claude_main_turn_ended_configured(&configured, node)
+    }
+
+    fn claude_main_turn_ended_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        node: &FlowNode,
+    ) -> bool {
         node.harness_kind == HarnessKind::Claude
-            && self
-                .claude_transcript(node)
+            && configured
+                .herdr
+                .native_transcript_root(&HarnessKind::Claude, "")
+                .ok()
+                .and_then(|root| root.session_transcript(&node.session_id))
                 .is_some_and(|transcript| transcript.main_turn_ended(&node.session_id))
     }
 
     fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor> {
-        let cursor = match self.claude_transcript(node) {
+        let configured = self.configured_use().ok()?;
+        self.claude_delivery_cursor_configured(&configured, node)
+    }
+
+    fn claude_delivery_cursor_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        node: &FlowNode,
+    ) -> Option<NativeTranscriptCursor> {
+        let cursor = match configured
+            .herdr
+            .native_transcript_root(&HarnessKind::Claude, "")
+            .ok()?
+            .session_transcript(&node.session_id)
+        {
             Some(transcript) => transcript.claude_cursor()?,
             None => return None,
         };
@@ -798,6 +880,17 @@ impl ReadsClaudeDelivery for RunningNexus {
     }
 
     fn claude_delivery_history(&self, attempt: &QueueDeliveryAttempt) -> ClaudeQueuedHistory {
+        let Ok(configured) = self.configured_use() else {
+            return ClaudeQueuedHistory::Unreadable;
+        };
+        self.claude_delivery_history_configured(&configured, attempt)
+    }
+
+    fn claude_delivery_history_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        attempt: &QueueDeliveryAttempt,
+    ) -> ClaudeQueuedHistory {
         let NativeHistoryAnchor::ClaudeTranscript(cursor) = &attempt.history_anchor else {
             return ClaudeQueuedHistory::Unreadable;
         };
@@ -810,7 +903,12 @@ impl ReadsClaudeDelivery for RunningNexus {
             }
             _ => return ClaudeQueuedHistory::Unreadable,
         };
-        let Some(transcript) = self.claude_transcript(&node) else {
+        let Some(transcript) = configured
+            .herdr
+            .native_transcript_root(&HarnessKind::Claude, "")
+            .ok()
+            .and_then(|root| root.session_transcript(&node.session_id))
+        else {
             return ClaudeQueuedHistory::Unreadable;
         };
         let Some(text) = attempt.prompt_text(&self.store) else {
@@ -935,6 +1033,11 @@ pub enum Reconciled {
 pub(crate) trait ReconcilesQueueDelivery {
     /// Under the dispatch gate.
     fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled;
+    fn reconcile_delivery_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        attempt: &QueueDeliveryAttempt,
+    ) -> Reconciled;
     /// Records the receipt and settles the request.
     fn settle_received(
         &self,
@@ -1038,6 +1141,14 @@ impl ReconcilesQueueDelivery for RunningNexus {
             Ok(configured) => configured,
             Err(_) => return Reconciled::Refused,
         };
+        self.reconcile_delivery_configured(&configured, attempt)
+    }
+
+    fn reconcile_delivery_configured(
+        &self,
+        configured: &crate::ConfiguredUse,
+        attempt: &QueueDeliveryAttempt,
+    ) -> Reconciled {
         match &attempt.phase {
             QueueDeliveryPhase::ReceiptRecorded(_) => {
                 return if self
@@ -1068,21 +1179,23 @@ impl ReconcilesQueueDelivery for RunningNexus {
             return Reconciled::Refused;
         };
         let found = match attempt.harness_kind {
-            HarnessKind::Claude => match self.claude_delivery_history(attempt) {
-                // A Claude seat takes input while its turn runs, into its
-                // own queue: the next request need not wait.
-                ClaudeQueuedHistory::Received(receipt) => {
-                    Ok((receipt.turn_id, receipt.row, SeatAfter::Resting))
+            HarnessKind::Claude => {
+                match self.claude_delivery_history_configured(configured, attempt) {
+                    // A Claude seat takes input while its turn runs, into its
+                    // own queue: the next request need not wait.
+                    ClaudeQueuedHistory::Received(receipt) => {
+                        Ok((receipt.turn_id, receipt.row, SeatAfter::Resting))
+                    }
+                    // Text typed into a Claude pane may sit in its composer or
+                    // its input queue unrecorded: absence after typing is
+                    // never proven from the transcript.
+                    ClaudeQueuedHistory::Unseen => Err(Undecided::AbsenceUnprovable),
+                    ClaudeQueuedHistory::Pending => Err(Undecided::PendingInHarness),
+                    ClaudeQueuedHistory::Ambiguous => Err(Undecided::Ambiguous),
+                    ClaudeQueuedHistory::Unreadable => Err(Undecided::HistoryUnreadable),
+                    ClaudeQueuedHistory::Replaced => Err(Undecided::HistoryReplaced),
                 }
-                // Text typed into a Claude pane may sit in its composer or
-                // its input queue unrecorded: absence after typing is
-                // never proven from the transcript.
-                ClaudeQueuedHistory::Unseen => Err(Undecided::AbsenceUnprovable),
-                ClaudeQueuedHistory::Pending => Err(Undecided::PendingInHarness),
-                ClaudeQueuedHistory::Ambiguous => Err(Undecided::Ambiguous),
-                ClaudeQueuedHistory::Unreadable => Err(Undecided::HistoryUnreadable),
-                ClaudeQueuedHistory::Replaced => Err(Undecided::HistoryReplaced),
-            },
+            }
             HarnessKind::Codex => {
                 let NativeHistoryAnchor::CodexTurns(anchor) = &attempt.history_anchor else {
                     return self.undecided(attempt, Undecided::HistoryUnreadable);
@@ -1738,7 +1851,15 @@ impl RefreshesMetaflows for RunningNexus {
 
 impl PerformsWakeAndDrain for RunningNexus {
     fn wake(&self, address: Address) -> Outcome {
-        match self.waken(&address) {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
+        };
+        self.wake_configured(&configured, address)
+    }
+
+    fn wake_configured(&self, configured: &crate::ConfiguredUse, address: Address) -> Outcome {
+        match self.waken(configured, &address) {
             Ok(flow_id) => Outcome::Woken(flow_id),
             Err(refusal) => {
                 eprintln!(
@@ -1758,6 +1879,10 @@ impl PerformsWakeAndDrain for RunningNexus {
             Ok(configured) => configured,
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
         };
+        self.drain_configured(&configured, address)
+    }
+
+    fn drain_configured(&self, configured: &crate::ConfiguredUse, address: Address) -> Outcome {
         let flow_id = match self.store.metaflow(&address) {
             Ok(Some(Metaflow {
                 state: flow_ethos::State::Awake(flow_id),
@@ -1776,7 +1901,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         let mut drained = Vec::new();
         match self.store.outstanding_delivery(&address) {
             Ok(None) => {}
-            Ok(Some(attempt)) => match self.reconcile_delivery(&attempt) {
+            Ok(Some(attempt)) => match self.reconcile_delivery_configured(configured, &attempt) {
                 Reconciled::Settled(queued, SeatAfter::Resting) => drained.push(queued),
                 Reconciled::Settled(queued, SeatAfter::InItsTurn) => {
                     if attempt.flow_id == flow_id
@@ -1850,7 +1975,8 @@ impl PerformsWakeAndDrain for RunningNexus {
             let resting = match node.harness_kind {
                 HarnessKind::Codex => self.codex_resting(&flow_id),
                 HarnessKind::Claude => {
-                    self.turn_end_recorded(&flow_id) || self.claude_main_turn_ended(&node)
+                    self.turn_end_recorded(&flow_id)
+                        || self.claude_main_turn_ended_configured(configured, &node)
                 }
             };
             if !resting {
@@ -1866,10 +1992,12 @@ impl PerformsWakeAndDrain for RunningNexus {
         };
         // Native history is anchored before any native input.
         let (anchor, model) = match node.harness_kind {
-            HarnessKind::Claude => match self.claude_delivery_cursor(&node) {
-                Some(cursor) => (NativeHistoryAnchor::ClaudeTranscript(cursor), None),
-                None => return refused(drained, Failed_Data::HerdrRefused),
-            },
+            HarnessKind::Claude => {
+                match self.claude_delivery_cursor_configured(configured, &node) {
+                    Some(cursor) => (NativeHistoryAnchor::ClaudeTranscript(cursor), None),
+                    None => return refused(drained, Failed_Data::HerdrRefused),
+                }
+            }
             HarnessKind::Codex => {
                 let model = match self.store.role(&flow_id) {
                     Ok(Some(role)) => role.model_name,
@@ -1908,12 +2036,22 @@ impl PerformsWakeAndDrain for RunningNexus {
         let message = render_message(&oldest, sender);
         let text = message.pane_text().as_str().to_owned();
         if !matches!(oldest.message, signal_flow::Message::Soft(_)) {
-            let result = self.deliver(meta_signal_flow::DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: attempt.attempt_id.clone(),
-                flow_id: flow_id.clone(),
-                message,
-            });
+            let view = crate::herdr::HerdrOperationView {
+                configuration: crate::store::CommittedConfigurationSnapshot {
+                    generation: configured.generation.clone(),
+                    snapshot: configured.snapshot.clone(),
+                },
+                herdr: configured.herdr.clone(),
+            };
+            let result = self.deliver_with_view(
+                &view,
+                meta_signal_flow::DeliveryRequest {
+                    gate: meta_signal_flow::Gate::Kept,
+                    delivery_id: attempt.attempt_id.clone(),
+                    flow_id: flow_id.clone(),
+                    message,
+                },
+            );
             let proved_absent = matches!(&result,
                 meta_signal_flow::Response::DeliveryRejected(rejected)
                     if matches!(rejected,
@@ -1935,7 +2073,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                 // Placement, interruption and submission are attempt evidence,
                 // never a native USER receipt or a terminal Delivered outcome.
                 let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
-                return match self.reconcile_delivery(&attempt) {
+                return match self.reconcile_delivery_configured(configured, &attempt) {
                     Reconciled::Settled(entry, _) => {
                         drained.push(entry);
                         Outcome::Drained(drained)
@@ -1964,7 +2102,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                 );
             }
             let _ = self.store.mark_delivery_uncertain(&attempt.attempt_id);
-            return match self.reconcile_delivery(&attempt) {
+            return match self.reconcile_delivery_configured(configured, &attempt) {
                 Reconciled::Settled(entry, _) => {
                     self.codex_turns.delivered(&node.session_id);
                     drained.push(entry);
@@ -1973,7 +2111,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                 _ => Outcome::AwaitingReceipt(oldest.logical_delivery_id),
             };
         }
-        if let Err(refusal) = self.hand_over(&flow_id, &text) {
+        if let Err(refusal) = self.hand_over(&configured, &flow_id, &text) {
             // Herdr refused before any of the text reached the pane.
             return if self
                 .store
@@ -1995,7 +2133,8 @@ impl PerformsWakeAndDrain for RunningNexus {
         // The receipt may already be in the transcript; otherwise the
         // seat's UserPromptSubmit report, or the next reconciliation,
         // settles it. Typed once, it is never typed again.
-        if let ClaudeQueuedHistory::Received(receipt) = self.claude_delivery_history(&attempt)
+        if let ClaudeQueuedHistory::Received(receipt) =
+            self.claude_delivery_history_configured(configured, &attempt)
             && let Reconciled::Settled(entry, _) =
                 self.settle_received(&attempt, receipt.turn_id, receipt.row, SeatAfter::InItsTurn)
         {
@@ -2047,7 +2186,11 @@ impl PerformsWakeAndDrain for RunningNexus {
 }
 
 impl WakesInParts for RunningNexus {
-    fn waken(&self, address: &Address) -> Result<FlowId, WakeRefusal> {
+    fn waken(
+        &self,
+        configured: &crate::ConfiguredUse,
+        address: &Address,
+    ) -> Result<FlowId, WakeRefusal> {
         let metaflow = {
             let _turn = self
                 .dispatch_gate
@@ -2082,12 +2225,12 @@ impl WakesInParts for RunningNexus {
             if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection {
                 sessions.push(route.herdr_session_name.clone());
             }
-            self.refuse_live_session(&node, &sessions)?;
+            self.refuse_live_session(configured, &node, &sessions)?;
         }
         let WakePlan::Fresh(fresh) = plan else {
             return Err(WakeRefusal::Unplaceable);
         };
-        let flow_id = match self.start_fresh(&metaflow, fresh, "") {
+        let flow_id = match self.start_fresh(configured, &metaflow, fresh, "") {
             Ok(flow_id) => flow_id,
             Err(FreshRefusal::Failed(failure)) => {
                 return Err(WakeRefusal::FreshNotStarted(failure));
@@ -2120,16 +2263,17 @@ impl WakesInParts for RunningNexus {
             .dispatch_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match self.perform(Operation::Record(Record_Data::Awoken(
-            Record_Data_Awoken_Data {
+        match self.perform_configured(
+            configured,
+            Operation::Record(Record_Data::Awoken(Record_Data_Awoken_Data {
                 address: address.clone(),
                 flow_id: flow_id.clone(),
                 // Starting the seat delivers no queued request. The durable
                 // queue is handed over through the ordinary drain path once
                 // the seat is Awake.
                 delivered: 0,
-            },
-        ))) {
+            })),
+        ) {
             Outcome::Recorded => Ok(flow_id),
             _ => {
                 eprintln!("flow-nexus: flow {flow_id} woke but is not recorded Awake");
@@ -2140,14 +2284,12 @@ impl WakesInParts for RunningNexus {
 
     fn start_fresh(
         &self,
+        configured: &crate::ConfiguredUse,
         metaflow: &Metaflow,
         fresh: FreshContext,
         text: &str,
     ) -> Result<FlowId, FreshRefusal> {
         let address = &metaflow.address;
-        let configured = self
-            .configured_use()
-            .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?;
         // Model, effort and wording are one committed generation.
         let model = match configured
             .snapshot
@@ -2191,20 +2333,22 @@ impl WakesInParts for RunningNexus {
         let profile = seat.fresh_profile();
         self.requirements_first(&profile)
             .map_err(FreshRefusal::Rejected)?;
-        self.start_unbound(profile)
+        self.start_unbound_configured(&configured, profile)
     }
 
-    fn hand_over(&self, flow_id: &str, text: &str) -> Result<(), HandOverRefusal> {
-        let configured = self
-            .configured_use()
-            .map_err(|_| HandOverRefusal::Refused)?;
+    fn hand_over(
+        &self,
+        configured: &crate::ConfiguredUse,
+        flow_id: &str,
+        text: &str,
+    ) -> Result<(), HandOverRefusal> {
         let handed = (|| {
             let target = self
-                .delivery_target(flow_id)
+                .delivery_target_with(flow_id, &configured.snapshot)
                 .map_err(HandOverRefusal::Target)?;
             let _lease = self.pane_leases.hold(&target.route);
             let agent_state = self
-                .writable_state(&target)
+                .writable_state_with(&configured.herdr, &target, false, true)
                 .map_err(HandOverRefusal::Pane)?;
             let observe = matches!(agent_state, AgentState::Idle | AgentState::Done);
             match configured.herdr.place(&target.route, text, observe) {
@@ -2265,10 +2409,12 @@ impl WakesInParts for RunningNexus {
         }
     }
 
-    fn refuse_live_session(&self, node: &FlowNode, sessions: &[String]) -> Result<(), WakeRefusal> {
-        let configured = self
-            .configured_use()
-            .map_err(|_| WakeRefusal::HerdrUnreadable)?;
+    fn refuse_live_session(
+        &self,
+        configured: &crate::ConfiguredUse,
+        node: &FlowNode,
+        sessions: &[String],
+    ) -> Result<(), WakeRefusal> {
         let mut checked = HashSet::new();
         for herdr_session_name in sessions {
             if !checked.insert(herdr_session_name) {

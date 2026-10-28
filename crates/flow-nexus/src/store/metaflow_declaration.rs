@@ -23,7 +23,7 @@ pub(super) const META_METAFLOW_CONFIGURATION_TABLE_NAME: TableName =
 pub(super) const META_METAFLOW_CONFIGURATION_FAMILY: &str =
     "flow-nexus-meta-metaflow-configuration";
 pub(super) const META_METAFLOW_CONFIGURATION_SCHEMA: &str =
-    "flow-nexus-meta-metaflow-configuration-v6";
+    "flow-nexus-meta-metaflow-configuration-v7";
 
 /// One declared metaflow, keyed by its Address.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -39,11 +39,65 @@ impl EngineRecord for StoredMetaMetaflowConfiguration {
 
 impl MemoryDefinition for StoredMetaMetaflowConfiguration {
     fn memory_version() -> MemoryVersion {
-        MemoryVersion::new(6)
+        MemoryVersion::new(7)
     }
 
     fn schema_hash() -> SchemaHash {
         SchemaHash::for_label(META_METAFLOW_CONFIGURATION_SCHEMA)
+    }
+}
+
+/// A declaration archived after the single regular launch path landed and
+/// before module omissions moved into the declaration itself.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConfigureMetaflowV6 {
+    pub(super) address: Address,
+    pub(super) system_modules: Vec<String>,
+    pub(super) user_modules: Vec<String>,
+    pub(super) tool_set: signal_flow::ToolSet,
+    pub(super) continuity: Continuity,
+    pub(super) purpose: String,
+    pub(super) records: Vec<String>,
+    pub(super) requires: Vec<Address>,
+}
+
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
+pub(super) struct StoredMetaMetaflowConfigurationV6 {
+    pub(super) metaflow: ConfigureMetaflowV6,
+}
+
+impl EngineRecord for StoredMetaMetaflowConfigurationV6 {
+    fn record_key(&self) -> RecordKey {
+        RecordKey::new(FlowStore::address_record_key(&self.metaflow.address))
+    }
+}
+
+impl MemoryDefinition for StoredMetaMetaflowConfigurationV6 {
+    fn memory_version() -> MemoryVersion {
+        MemoryVersion::new(6)
+    }
+    fn schema_hash() -> SchemaHash {
+        SchemaHash::for_label("flow-nexus-meta-metaflow-configuration-v6")
+    }
+}
+
+impl UpgradeFrom<StoredMetaMetaflowConfigurationV6> for StoredMetaMetaflowConfiguration {
+    type Refusal = std::convert::Infallible;
+    fn upgrade_from(previous: StoredMetaMetaflowConfigurationV6) -> Decision<Self, Self::Refusal> {
+        let previous = previous.metaflow;
+        Decision::Ready(Self {
+            metaflow: ConfigureMetaflow {
+                address: previous.address,
+                system_modules: previous.system_modules,
+                user_modules: previous.user_modules,
+                tool_set: previous.tool_set,
+                continuity: previous.continuity,
+                purpose: previous.purpose,
+                records: previous.records,
+                left_out: Vec::new(),
+                requires: previous.requires,
+            },
+        })
     }
 }
 
@@ -139,6 +193,7 @@ impl UpgradeFrom<StoredMetaMetaflowConfigurationV5> for StoredMetaMetaflowConfig
                 continuity: previous.continuity,
                 purpose: previous.purpose,
                 records: previous.records,
+                left_out: Vec::new(),
                 requires: previous.requires,
             },
         })
@@ -370,6 +425,7 @@ impl DescribesMetaflowDeclarationTable for StoredMetaMetaflowConfiguration {
         .with_predecessor::<StoredMetaMetaflowConfigurationV3>()
         .with_predecessor::<StoredMetaMetaflowConfigurationV4>()
         .with_predecessor::<StoredMetaMetaflowConfigurationV5>()
+        .with_predecessor::<StoredMetaMetaflowConfigurationV6>()
     }
 }
 
@@ -386,13 +442,27 @@ impl UpgradesMetaflowDeclarations for Engine {
         descriptor: TableDescriptor<StoredMetaMetaflowConfiguration>,
     ) -> Result<TableReference<StoredMetaMetaflowConfiguration>, StoreError> {
         // Try each archived declaration shape, newest first.
+        let from_v5 = descriptor.clone();
         let from_v4 = descriptor.clone();
         let from_v3 = descriptor.clone();
         let from_v2 = descriptor.clone();
         let from_v1 = descriptor.clone();
         match self
-            .upgrade_table::<StoredMetaMetaflowConfigurationV5, StoredMetaMetaflowConfiguration>(
+            .upgrade_table::<StoredMetaMetaflowConfigurationV6, StoredMetaMetaflowConfiguration>(
                 descriptor,
+            ) {
+            UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
+            UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),
+            UpgradeOutcome::Refused(refusal) => match *refusal.reason() {},
+            UpgradeOutcome::Failed(failure)
+                if failure.phase() == sema_engine::StoragePhase::Admission => {}
+            UpgradeOutcome::Failed(failure) => {
+                return Err(StoreError::MetaflowUpgrade(format!("{failure:?}")));
+            }
+        }
+        match self
+            .upgrade_table::<StoredMetaMetaflowConfigurationV5, StoredMetaMetaflowConfiguration>(
+                from_v5,
             ) {
             UpgradeOutcome::Upgraded(receipt) => return Ok(receipt.table()),
             UpgradeOutcome::AlreadyCurrent(table) => return Ok(table),

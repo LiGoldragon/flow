@@ -5052,11 +5052,13 @@ mod tests {
         };
         let sender = address(Aspect::Mind, "core", Layer::Secondary);
         let sibling = address(Aspect::Mind, "flow", Layer::Secondary);
+        let sibling_primary = address(Aspect::Mind, "flow", Layer::Primary);
         let field = address(Aspect::Field, "core", Layer::Secondary);
         let elsewhere = address(Aspect::Psyche, "flow", Layer::Secondary);
         for (held, state) in [
             (sender.clone(), flow_ethos::State::Awake("a001".into())),
             (sibling.clone(), flow_ethos::State::Asleep),
+            (sibling_primary.clone(), flow_ethos::State::Asleep),
             (field.clone(), flow_ethos::State::Asleep),
             (elsewhere.clone(), flow_ethos::State::Asleep),
             (
@@ -5107,6 +5109,29 @@ mod tests {
             send(Recipient::Up, Request::Result("done".into()), &peer),
             Response::SendAccepted(_)
         ));
+        assert_eq!(
+            send(
+                Recipient::Address(sibling_primary.clone()),
+                Request::Question("cross-topic Primary".into()),
+                &peer,
+            ),
+            Response::Refused(Refusal::PrimaryRequiresOwnSecondary(
+                signal_flow::PrimaryRouteRefused {
+                    sender_address: sender.clone(),
+                    target_address: sibling_primary.clone(),
+                }
+            ))
+        );
+        assert!(
+            fixture
+                .nexus
+                .store
+                .metaflow(&sibling_primary)
+                .unwrap()
+                .unwrap()
+                .queue
+                .is_empty()
+        );
         assert_eq!(
             fixture
                 .nexus

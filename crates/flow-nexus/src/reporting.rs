@@ -149,8 +149,8 @@ impl RecordsReports for RunningNexus {
                 // A launch sending its first message in parts waits on a
                 // Stop before its next part.
                 self.store.launch_changes.announce();
-                if self.correlated_stop(flow_id, stop) {
-                    self.settle_stopped(flow_id);
+                if self.correlated_stop_configured(configured, flow_id, stop) {
+                    self.settle_stopped_configured(configured, flow_id);
                 } else {
                     eprintln!(
                         "flow-nexus: a Stop reported for flow {flow_id} names session {:?}, not its own; it settles nothing",
@@ -160,7 +160,7 @@ impl RecordsReports for RunningNexus {
             }
             Event::PromptSubmitted(prompt) => {
                 if self.correlated_prompt(flow_id, prompt) {
-                    self.settle_submitted_prompt(flow_id, prompt);
+                    self.settle_submitted_prompt(configured, flow_id, prompt);
                 }
             }
             // A cleared session is not an exit: the harness goes on in the
@@ -171,7 +171,7 @@ impl RecordsReports for RunningNexus {
 
     #[cfg(test)]
     fn after_report(&self, flow_id: &FlowId, event: &Event) {
-        if let Ok(configured) = self.configured_use() {
+        if let Ok(configured) = self.test_configured_use() {
             self.after_report_configured(&configured, flow_id, event);
         }
     }

@@ -542,7 +542,7 @@ impl RunningNexus {
     /// Test-only convenience: production ingress always carries ConfiguredEffects.
     #[cfg(test)]
     pub(crate) fn perform_ingress(&self, operation: Operation) -> Outcome {
-        match self.configured_use() {
+        match self.test_configured_use() {
             Ok(configured) => self.configured_effects(&configured).perform(operation),
             Err(_) => Outcome::Failed(Failed_Data::StoreRefused),
         }

@@ -321,7 +321,7 @@ impl SettlesRestingCodexSeats for RunningNexus {
         // Settled as a Stop is: off the gate, which it takes, reading the
         // thread's turn again under it.
         if let Some(flow_id) = seat {
-            self.settle_stopped(&flow_id);
+            self.settle_stopped_configured(configured, &flow_id);
         }
     }
 
@@ -347,14 +347,14 @@ impl SettlesRestingCodexSeats for RunningNexus {
 
     #[cfg(test)]
     fn codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
-        if let Ok(configured) = self.configured_use() {
+        if let Ok(configured) = self.test_configured_use() {
             self.codex_events_configured(&configured, thread, events);
         }
     }
 
     #[cfg(test)]
     fn observe_codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
-        if let Ok(configured) = self.configured_use() {
+        if let Ok(configured) = self.test_configured_use() {
             self.observe_codex_events_configured(&configured, thread, events);
         }
     }

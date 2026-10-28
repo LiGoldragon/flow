@@ -81,7 +81,7 @@ impl IdentifiesPeerProcess for RunningNexus {
 
     #[cfg(test)]
     fn identify_peer_process(&self, process: Process) -> Result<Response, StoreError> {
-        let configured = match self.configured_use() {
+        let configured = match self.test_configured_use() {
             Ok(configured) => configured,
             Err(_) => return Ok(Response::Refused(Refusal::NotConfigured)),
         };
@@ -137,7 +137,7 @@ impl IdentifiesThread for RunningNexus {
 
     #[cfg(test)]
     fn identify_thread(&self, request: IdentifyThread_Data) -> Result<Response, StoreError> {
-        let configured = match self.configured_use() {
+        let configured = match self.test_configured_use() {
             Ok(configured) => configured,
             Err(_) => return Ok(Response::Refused(Refusal::NotConfigured)),
         };
@@ -279,7 +279,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
 
     #[cfg(test)]
     fn dispatch_metaflow_peer(&self, query: Query, peer: Option<&Process>) -> MetaflowAnswer {
-        let configured = match self.configured_use() {
+        let configured = match self.test_configured_use() {
             Ok(configured) => configured,
             Err(_) => return Response::Refused(Refusal::NotConfigured).into(),
         };

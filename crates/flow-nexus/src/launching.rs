@@ -1021,7 +1021,7 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
 
     #[cfg(test)]
     fn reconcile_interrupted_launches(&self) {
-        if let Ok(configured) = self.configured_use() {
+        if let Ok(configured) = self.test_configured_use() {
             self.reconcile_interrupted_launches_configured(&configured);
         }
     }
@@ -1078,7 +1078,7 @@ impl AbandonsRefusedLaunch for RunningNexus {
         harness_kind: &HarnessKind,
         reserved: Option<&str>,
     ) -> LaunchTeardown {
-        let Ok(configured) = self.configured_use() else {
+        let Ok(configured) = self.test_configured_use() else {
             return LaunchTeardown::Kept(PaneOwnership::Unknown);
         };
         self.abandon_refused_launch_configured(

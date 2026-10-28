@@ -32,6 +32,7 @@
 //! Delivery policy, never inferred from the answer. A Nexus checks that
 //! policy after admission and on restart.
 
+use crate::ConfiguredUse;
 use crate::caller::NamesRootThread;
 use crate::codex::{
     CodexAdapter, ExchangesOnSubscription, ProxyEvent, ResponderSignal, SelectsCodexEndpoint,
@@ -857,10 +858,10 @@ impl ServesLaunchCalls for ConfiguredEffects<'_> {
 }
 
 pub(crate) trait WakesDeferred {
-    fn wake_deferred(&self);
+    fn wake_deferred(&self, configured: &ConfiguredUse);
 }
 impl WakesDeferred for RunningNexus {
-    fn wake_deferred(&self) {
+    fn wake_deferred(&self, configured: &ConfiguredUse) {
         let wakes = std::mem::take(
             &mut *self
                 .launch_calls
@@ -869,7 +870,7 @@ impl WakesDeferred for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
         for target in wakes {
-            self.wake_due(target);
+            self.wake_due_configured(configured, target);
         }
     }
 }

@@ -411,11 +411,11 @@ impl SendsRequests for RunningNexus {
             return Response::Refused(Refusal::Store(error.to_string()));
         }
         if !asleep {
-            self.drain_all(address.clone());
+            self.drain_all_configured(configured, address.clone());
         }
         drop(turn);
         if asleep {
-            self.wake_due(address.clone());
+            self.wake_due_configured(configured, address.clone());
         }
         match self.store.metaflow(&address) {
             Ok(Some(metaflow)) if metaflow.queue.is_empty() => {
@@ -863,7 +863,7 @@ impl CompletesDirectSends for RunningNexus {
         if node.harness_kind != HarnessKind::Claude {
             return None;
         }
-        let transcript = self.claude_transcript(&node)?;
+        let transcript = self.claude_transcript_configured(configured, &node)?;
         let directory = transcript.parent()?.to_path_buf();
         let changes = self.store.launch_changes.clone();
         let mut watcher =
@@ -968,7 +968,7 @@ impl CompletesDirectSends for RunningNexus {
         let _receipt_watch = self.direct_receipt_watch(&configured, address);
         let outcome = {
             let _turn = self.dispatch_gate.lock().unwrap_or_else(|e| e.into_inner());
-            self.drain_all(address.clone())
+            self.drain_all_configured(configured, address.clone())
         };
         // This budget bounds waiting, not evidence. Expiry is uncertainty,
         // never proof of absence and never permission for a new attempt.

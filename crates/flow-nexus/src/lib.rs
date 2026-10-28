@@ -105,6 +105,14 @@ use store::{
 use waking::SleepsAndWakesSeats;
 use waking::{PerformsWakeAndDrain, RestsEndedAwake, SettlesStopsAtConfirmation};
 
+/// The running component. Configuration generation selection is an ingress
+/// authority, not an effect capability.
+///
+/// ```compile_fail
+/// fn effect_cannot_reacquire(nexus: &flow_nexus::RunningNexus) {
+///     let _ = nexus.configured_use();
+/// }
+/// ```
 pub struct RunningNexus {
     /// The exact typed runtime value that opened this Nexus.
     pub(crate) runtime: flow_ethos::Start,
@@ -170,6 +178,23 @@ impl SendToolIngress {
 }
 
 impl RunningNexus {
+    /// Startup is a true next-item boundary: the authority selects the
+    /// committed generation once for the recovery run.
+    pub fn recover_wakes_ingress(&self) {
+        if let Ok(configured) = self.configured_use() {
+            crate::waking::SleepsAndWakesSeats::recover_wakes_configured(self, &configured);
+        }
+    }
+
+    fn settle_stops_at_confirmation_ingress(&self) {
+        if let Ok(configured) = self.configured_use() {
+            crate::waking::SettlesStopsAtConfirmation::settle_stops_at_confirmation_configured(
+                self,
+                &configured,
+            );
+        }
+    }
+
     /// Selects the configuration generation for the send-tool service at
     /// root ingress and returns only the capability that can serve it.
     pub fn send_tool_ingress(&self) -> Option<SendToolIngress> {
@@ -188,7 +213,7 @@ impl RunningNexus {
         }
     }
 
-    pub(crate) fn configured_use(&self) -> Result<ConfiguredUse, store::StoreError> {
+    fn configured_use(&self) -> Result<ConfiguredUse, store::StoreError> {
         let committed = self
             .store
             .committed_configuration_snapshot()?
@@ -239,6 +264,13 @@ impl RunningNexus {
             composer,
             ordinary_socket_path: PathBuf::from(&self.runtime.ordinary_socket_path),
         })
+    }
+
+    /// Test fixtures cross module boundaries; production effects cannot
+    /// acquire a configuration generation.
+    #[cfg(test)]
+    pub(crate) fn test_configured_use(&self) -> Result<ConfiguredUse, store::StoreError> {
+        self.configured_use()
     }
 }
 
@@ -301,7 +333,7 @@ impl RunningNexus {
             codex_context_signal: Box::new(move |thread, signal| {
                 self.codex_context_signal_configured(configured, thread, signal)
             }),
-            wake_due: Box::new(move |address| self.wake_due(address)),
+            wake_due: Box::new(move |address| self.wake_due_configured(configured, address)),
             rest_ended_awake: Box::new(move |address| {
                 self.rest_ended_awake(configured, address);
             }),
@@ -428,7 +460,16 @@ impl Dispatches for RunningNexus {
             Query::Replace(profile) => match self.admission_refusal(&profile) {
                 Ok(None) => {
                     use crate::waking::RefreshesMetaflows;
-                    self.replace_held(profile, origin)
+                    match self.configured_use() {
+                        Ok(configured) => {
+                            self.replace_held_configured(&configured, profile, origin)
+                        }
+                        Err(_) => {
+                            Response::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
+                                StartRejection::LaunchPersistenceRefused,
+                            ))
+                        }
+                    }
                 }
                 Ok(Some(rejection)) => Response::ReplaceRejected(
                     signal_flow::ReplaceRejection::LaunchRefused(rejection),
@@ -475,7 +516,12 @@ impl Dispatches for RunningNexus {
             // Off the gate: the refresh takes it for each of its steps.
             Query::Refresh(address) => {
                 use crate::waking::RefreshesMetaflows;
-                self.refresh(&address)
+                match self.configured_use() {
+                    Ok(configured) => self.refresh_configured(&configured, &address),
+                    Err(_) => {
+                        Response::RefreshRejected(signal_flow::RefreshRejection::PersistenceRefused)
+                    }
+                }
             }
             Query::ResolveRecipient(flow_id) => {
                 let configured = match self.configured_use() {
@@ -1463,9 +1509,9 @@ impl ServesConnection for Connection {
                 drop(self);
                 if accepted {
                     if delivery == signal_flow::Delivery::Wake {
-                        nexus.wake_due(address);
+                        nexus.wake_due_configured(&configured, address);
                     } else {
-                        nexus.drain_awake(&address);
+                        nexus.drain_awake_configured(&configured, &address);
                     }
                 }
                 return written;
@@ -1486,9 +1532,9 @@ impl ServesConnection for Connection {
                 drop(self);
                 if let Some(pending) = answer.pending {
                     if pending.delivery == signal_flow::Delivery::Wake {
-                        nexus.wake_due(pending.address);
+                        nexus.wake_due_configured(&configured, pending.address);
                     } else {
-                        nexus.drain_awake(&pending.address);
+                        nexus.drain_awake_configured(&configured, &pending.address);
                     }
                 }
                 return written;
@@ -1560,39 +1606,36 @@ impl ServesConnection for Connection {
             // A launch's origin is the calling process, as Identify reads
             // it: its pane's bound flow and that flow's native session.
             // A new Primary's Secondary starts first, off the gate.
-            Query::Start(profile) => {
-                let configured = nexus.configured_use().ok();
-                let origin = configured.as_ref().map_or(Origin::Unbound, |configured| {
-                    nexus.origin_of_configured(configured, self.peer.peer_process())
-                });
-                match nexus.configured_use() {
-                    Ok(configured) => {
-                        match nexus.requirements_first_configured(&configured, &profile) {
-                            Ok(()) => {
-                                let _turn = nexus
-                                    .dispatch_gate
-                                    .lock()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                nexus.dispatch_start_configured(&configured, profile, origin)
-                            }
-                            Err(rejection) => Response::StartRejected(rejection),
+            Query::Start(profile) => match nexus.configured_use() {
+                Ok(configured) => {
+                    let origin = nexus.origin_of_configured(&configured, self.peer.peer_process());
+                    match nexus.requirements_first_configured(&configured, &profile) {
+                        Ok(()) => {
+                            let _turn = nexus
+                                .dispatch_gate
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            nexus.dispatch_start_configured(&configured, profile, origin)
                         }
+                        Err(rejection) => Response::StartRejected(rejection),
                     }
-                    Err(_) => Response::StartRejected(StartRejection::LaunchPersistenceRefused),
                 }
-            }
-            query @ Query::Replace(_) => {
-                let configured = nexus.configured_use().ok();
-                let origin = configured.as_ref().map_or(Origin::Unbound, |configured| {
-                    nexus.origin_of_configured(configured, self.peer.peer_process())
-                });
-                nexus.dispatch_serially(query, origin)
-            }
+                Err(_) => Response::StartRejected(StartRejection::LaunchPersistenceRefused),
+            },
+            query @ Query::Replace(_) => match nexus.configured_use() {
+                Ok(configured) => {
+                    let origin = nexus.origin_of_configured(&configured, self.peer.peer_process());
+                    nexus.dispatch_serially(query, origin)
+                }
+                Err(_) => Response::ReplaceRejected(signal_flow::ReplaceRejection::LaunchRefused(
+                    StartRejection::LaunchPersistenceRefused,
+                )),
+            },
             query => nexus.dispatch_serially(query, Origin::Unbound),
         };
         self.peer.write_response(&response)?;
         drop(self);
-        nexus.settle_stops_at_confirmation();
+        nexus.settle_stops_at_confirmation_ingress();
         Ok(())
     }
 
@@ -1611,7 +1654,7 @@ impl ServesConnection for Connection {
         };
         self.peer.write_meta_response(&response)?;
         drop(self);
-        nexus.settle_stops_at_confirmation();
+        nexus.settle_stops_at_confirmation_ingress();
         Ok(())
     }
 }
@@ -1932,7 +1975,9 @@ impl DispatchesSerially for RunningNexus {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.dispatch_from(query, origin)
         };
-        self.wake_deferred();
+        if let Ok(configured) = self.configured_use() {
+            self.wake_deferred(&configured);
+        }
         response
     }
 
@@ -1941,6 +1986,7 @@ impl DispatchesSerially for RunningNexus {
         query: meta_signal_flow::Query,
         resolver: Option<meta_signal_flow::ResolverIdentity>,
     ) -> meta_signal_flow::Response {
+        let configured = self.configured_use().ok();
         let withdrawing = match &query {
             meta_signal_flow::Query::Withdraw(withdraw) => Some(withdraw.address.clone()),
             _ => None,
@@ -1958,10 +2004,14 @@ impl DispatchesSerially for RunningNexus {
         // handed that request now, the gate given back.
         match (&response, withdrawing) {
             (meta_signal_flow::Response::QueueDeliveryResolved(resolved), _) => {
-                self.drain_awake(&resolved.address);
+                if let Some(configured) = &configured {
+                    self.drain_awake_configured(configured, &resolved.address);
+                }
             }
             (meta_signal_flow::Response::Withdrawn(_), Some(address)) => {
-                self.drain_awake(&address);
+                if let Some(configured) = &configured {
+                    self.drain_awake_configured(configured, &address);
+                }
             }
             _ => {}
         }

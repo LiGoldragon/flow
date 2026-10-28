@@ -195,7 +195,7 @@ pub trait RestsEndedAwake {
     /// either was done.
     fn rest_ended_awake(&self, configured: &ConfiguredUse, address: &Address) -> bool;
     /// The same for every metaflow, at the Nexus's start.
-    fn rest_every_ended_awake(&self);
+    fn rest_every_ended_awake(&self, configured: &ConfiguredUse);
 }
 
 impl RestsEndedAwake for RunningNexus {
@@ -246,15 +246,12 @@ impl RestsEndedAwake for RunningNexus {
         }
     }
 
-    fn rest_every_ended_awake(&self) {
-        let Ok(configured) = self.configured_use() else {
-            return;
-        };
+    fn rest_every_ended_awake(&self, configured: &ConfiguredUse) {
         let Ok(metaflows) = self.store.list_metaflows() else {
             return;
         };
         for metaflow in metaflows {
-            self.rest_ended_awake(&configured, &metaflow.address);
+            self.rest_ended_awake(configured, &metaflow.address);
         }
     }
 }
@@ -301,6 +298,7 @@ pub trait SettlesStopsAtConfirmation {
     /// Under the dispatch gate, as confirmation commits: notes the flow when
     /// the last event its harness reported is `Stopped`, or, for a Codex
     /// flow, when its thread is resting.
+    #[cfg(test)]
     fn note_stop_at_confirmation(&self, flow_id: &str);
     fn note_stop_at_confirmation_configured(
         &self,
@@ -308,12 +306,15 @@ pub trait SettlesStopsAtConfirmation {
         flow_id: &str,
     );
     /// Off the dispatch gate: settles every noted flow's Stop.
+    #[cfg(test)]
     fn settle_stops_at_confirmation(&self);
+    fn settle_stops_at_confirmation_configured(&self, configured: &ConfiguredUse);
 }
 
 impl SettlesStopsAtConfirmation for RunningNexus {
+    #[cfg(test)]
     fn note_stop_at_confirmation(&self, flow_id: &str) {
-        let Ok(configured) = self.configured_use() else {
+        let Ok(configured) = self.test_configured_use() else {
             return;
         };
         self.note_stop_at_confirmation_configured(&configured, flow_id)
@@ -328,19 +329,27 @@ impl SettlesStopsAtConfirmation for RunningNexus {
         // records, landed before confirmation stands as its turn end; a
         // Codex flow reports no Stop: its thread's rest, as its app-server's
         // events showed it, stands for one.
-        let claude_ended = self.turn_end_recorded(flow_id)
+        let claude_ended = self.turn_end_recorded_configured(configured, flow_id)
             || matches!(
                 self.store.flow_node(flow_id),
-                Ok(Some(node)) if self.claude_main_turn_ended(&node)
+                Ok(Some(node)) if self.claude_main_turn_ended_configured(configured, &node)
             );
         if claude_ended || self.codex_resting(flow_id) {
             self.stopped_at_confirmation.note(flow_id);
         }
     }
 
+    #[cfg(test)]
     fn settle_stops_at_confirmation(&self) {
+        let Ok(configured) = self.test_configured_use() else {
+            return;
+        };
+        self.settle_stops_at_confirmation_configured(&configured)
+    }
+
+    fn settle_stops_at_confirmation_configured(&self, configured: &ConfiguredUse) {
         for flow_id in self.stopped_at_confirmation.take() {
-            self.settle_stopped(&flow_id);
+            self.settle_stopped_configured(configured, &flow_id);
         }
     }
 }
@@ -499,12 +508,16 @@ pub trait SleepsAndWakesSeats {
     /// After a flow's turn ended (a Claude `Stopped` report, a Codex
     /// thread's rest): hands the oldest queued request to its resting seat;
     /// with nothing queued the seat stays Awake in its pane.
+    #[cfg(test)]
     fn settle_stopped(&self, flow_id: &str) -> AtStop;
+    fn settle_stopped_configured(&self, configured: &ConfiguredUse, flow_id: &str) -> AtStop;
     /// After a request was queued for `address`, or a queued one was
     /// answered again: holds the metaflow, and when Flow's records show it
     /// due a wake, wakes it and drains what arrived meanwhile. Nothing when
     /// a wake already runs or none is due, so asking twice wakes once.
+    #[cfg(test)]
     fn wake_due(&self, address: Address);
+    fn wake_due_configured(&self, configured: &ConfiguredUse, address: Address);
     /// After work was queued for `address`, or the owner's resolution of a
     /// hand-over committed: when the metaflow's Awake seat has queued work,
     /// records its flow Exited if Herdr shows its pane gone, which puts the
@@ -514,7 +527,9 @@ pub trait SleepsAndWakesSeats {
     /// the app-server reports resting), runs that same drain now. A seat not
     /// known resting waits for its turn end. Takes the dispatch gate, so
     /// the caller holds none.
+    #[cfg(test)]
     fn drain_awake(&self, address: &Address);
+    fn drain_awake_configured(&self, configured: &ConfiguredUse, address: &Address);
     /// Whether Flow's records show the metaflow due a wake: Asleep and
     /// holding work that wakes it.
     fn wake_is_due(&self, metaflow: &Metaflow) -> bool;
@@ -526,23 +541,29 @@ pub trait SleepsAndWakesSeats {
     fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan;
     /// At the Nexus's start: wakes every metaflow due a wake, as a wake the
     /// last Nexus did not start or did not finish left it.
+    #[cfg(test)]
     fn recover_wakes(&self);
+    fn recover_wakes_configured(&self, configured: &ConfiguredUse);
 }
 
 /// The bodies of the Wake and Drain operations; `perform` delegates to
 /// them.
 pub trait PerformsWakeAndDrain {
     /// Performed off the dispatch gate; see the module documentation.
+    #[cfg(test)]
     fn wake(&self, address: Address) -> Outcome;
     fn wake_configured(&self, configured: &crate::ConfiguredUse, address: Address) -> Outcome;
     /// Performed under the dispatch gate.
+    #[cfg(test)]
     fn drain(&self, address: Address) -> Outcome;
     fn drain_configured(&self, configured: &crate::ConfiguredUse, address: Address) -> Outcome;
     /// Hands over as many queued requests as can be settled now, oldest
     /// first. It stops at the first hand-over whose native receipt is not
     /// yet established, or at any refusal; work behind that request stays
     /// durable. The caller holds the dispatch gate.
+    #[cfg(test)]
     fn drain_all(&self, address: Address) -> Outcome;
+    fn drain_all_configured(&self, configured: &ConfiguredUse, address: Address) -> Outcome;
 }
 
 /// A declaration's required metaflows start first. Flow starts each one
@@ -675,7 +696,7 @@ impl StartsRequirementsFirst for RunningNexus {
                 }
             }
             self.drain_woken(configured, &required, lease);
-            self.settle_stops_at_confirmation();
+            self.settle_stops_at_confirmation_configured(configured);
         }
         Ok(())
     }
@@ -693,6 +714,7 @@ pub(crate) enum FreshRefusal {
 /// its origin. The start runs under the dispatch gate, which is released
 /// while the launch settles.
 pub(crate) trait StartsUnbound {
+    #[cfg(test)]
     fn start_unbound(&self, profile: LaunchProfile) -> Result<FlowId, FreshRefusal>;
     fn start_unbound_configured(
         &self,
@@ -702,9 +724,10 @@ pub(crate) trait StartsUnbound {
 }
 
 impl StartsUnbound for RunningNexus {
+    #[cfg(test)]
     fn start_unbound(&self, profile: LaunchProfile) -> Result<FlowId, FreshRefusal> {
         let configured = self
-            .configured_use()
+            .test_configured_use()
             .map_err(|_| FreshRefusal::Failed(Failed_Data::StoreRefused))?;
         self.start_unbound_configured(&configured, profile)
     }
@@ -729,7 +752,7 @@ impl StartsUnbound for RunningNexus {
         // target while this launch holds the dispatch gate. The gate is
         // released now, so deliver every deferred wake before interpreting
         // the launch result.
-        self.wake_deferred();
+        self.wake_deferred(configured);
         // The gate is released before the wait: the launch is settled by the
         // Nexus's own promoter, which needs the gate to do it.
         match response {
@@ -767,6 +790,7 @@ trait WakesInParts {
     fn last_launch_profile(&self, flow_id: &str) -> Option<LaunchProfile>;
     /// Writes the context size the flow's native transcript shows now, the
     /// size a Compact of the flow is judged by.
+    #[cfg(test)]
     fn record_context_at_stop(&self, flow_id: &str);
     fn record_context_at_stop_configured(&self, configured: &crate::ConfiguredUse, flow_id: &str);
     /// Refuses a wake while a pane already runs this flow's native session:
@@ -779,7 +803,9 @@ trait WakesInParts {
     ) -> Result<(), WakeRefusal>;
     /// The body of `settle_stopped`: waits, boundedly and off the dispatch
     /// gate, for Herdr to show the seat resting, then drains it.
+    #[cfg(test)]
     fn settle_rested(&self, flow_id: &str) -> AtStop;
+    fn settle_rested_configured(&self, configured: &ConfiguredUse, flow_id: &str) -> AtStop;
     /// Closes a resting seat's harness under the pane's lease and records
     /// its flow Stopped (its metaflow Asleep), under the dispatch gate the
     /// caller holds. The refusal names why the seat stays.
@@ -810,7 +836,7 @@ trait WakesInParts {
     /// already refused is not resumed; a new one is started in its place. A
     /// Replace whose launch was never recorded had started nothing, and is
     /// forgotten.
-    fn take_up_owed(&self, intent: SuccessorIntent) -> AtStop;
+    fn take_up_owed(&self, configured: &ConfiguredUse, intent: SuccessorIntent) -> AtStop;
     /// Settles the successor owed at `address` by its Replace's answer: a
     /// launch that has not settled, or a reap refused once the successor
     /// was confirmed, stays owed under the same request; any other answer
@@ -821,18 +847,21 @@ trait WakesInParts {
 }
 
 pub(crate) trait ReadsClaudeDelivery {
+    #[cfg(test)]
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf>;
     fn claude_transcript_configured(
         &self,
         configured: &crate::ConfiguredUse,
         node: &FlowNode,
     ) -> Option<std::path::PathBuf>;
+    #[cfg(test)]
     fn claude_main_turn_ended(&self, node: &FlowNode) -> bool;
     fn claude_main_turn_ended_configured(
         &self,
         configured: &crate::ConfiguredUse,
         node: &FlowNode,
     ) -> bool;
+    #[cfg(test)]
     fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor>;
     fn claude_delivery_cursor_configured(
         &self,
@@ -842,6 +871,7 @@ pub(crate) trait ReadsClaudeDelivery {
     /// What the flow's transcript after the attempt's cursor shows of its
     /// request; Unreadable when the attempt is no longer the flow's own
     /// session's.
+    #[cfg(test)]
     fn claude_delivery_history(&self, attempt: &QueueDeliveryAttempt) -> ClaudeQueuedHistory;
     fn claude_delivery_history_configured(
         &self,
@@ -851,8 +881,9 @@ pub(crate) trait ReadsClaudeDelivery {
 }
 
 impl ReadsClaudeDelivery for RunningNexus {
+    #[cfg(test)]
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf> {
-        let configured = self.configured_use().ok()?;
+        let configured = self.test_configured_use().ok()?;
         self.claude_transcript_configured(&configured, node)
     }
 
@@ -868,8 +899,9 @@ impl ReadsClaudeDelivery for RunningNexus {
             .session_transcript(&node.session_id)
     }
 
+    #[cfg(test)]
     fn claude_main_turn_ended(&self, node: &FlowNode) -> bool {
-        let Ok(configured) = self.configured_use() else {
+        let Ok(configured) = self.test_configured_use() else {
             return false;
         };
         self.claude_main_turn_ended_configured(&configured, node)
@@ -889,8 +921,9 @@ impl ReadsClaudeDelivery for RunningNexus {
                 .is_some_and(|transcript| transcript.main_turn_ended(&node.session_id))
     }
 
+    #[cfg(test)]
     fn claude_delivery_cursor(&self, node: &FlowNode) -> Option<NativeTranscriptCursor> {
-        let configured = self.configured_use().ok()?;
+        let configured = self.test_configured_use().ok()?;
         self.claude_delivery_cursor_configured(&configured, node)
     }
 
@@ -915,8 +948,9 @@ impl ReadsClaudeDelivery for RunningNexus {
         })
     }
 
+    #[cfg(test)]
     fn claude_delivery_history(&self, attempt: &QueueDeliveryAttempt) -> ClaudeQueuedHistory {
-        let Ok(configured) = self.configured_use() else {
+        let Ok(configured) = self.test_configured_use() else {
             return ClaudeQueuedHistory::Unreadable;
         };
         self.claude_delivery_history_configured(&configured, attempt)
@@ -968,16 +1002,26 @@ impl ReadsClaudeDelivery for RunningNexus {
 /// that session's own transcript, is taken for the flow's.
 pub(crate) trait CorrelatesNativeEvents {
     /// The flow's own Claude turn end.
-    fn correlated_stop(&self, flow_id: &str, stop: &NativeStop) -> bool;
+    fn correlated_stop_configured(
+        &self,
+        configured: &ConfiguredUse,
+        flow_id: &str,
+        stop: &NativeStop,
+    ) -> bool;
     /// A prompt the flow's own Claude session took.
     fn correlated_prompt(&self, flow_id: &str, prompt: &NativePrompt) -> bool;
     /// Of the flow's own Stops and submitted prompts, the last recorded is
     /// a Stop: a turn end landed with no prompt taken after it.
-    fn turn_end_recorded(&self, flow_id: &str) -> bool;
+    fn turn_end_recorded_configured(&self, configured: &ConfiguredUse, flow_id: &str) -> bool;
 }
 
 impl CorrelatesNativeEvents for RunningNexus {
-    fn correlated_stop(&self, flow_id: &str, stop: &NativeStop) -> bool {
+    fn correlated_stop_configured(
+        &self,
+        configured: &ConfiguredUse,
+        flow_id: &str,
+        stop: &NativeStop,
+    ) -> bool {
         let Ok(Some(node)) = self.store.flow_node(flow_id) else {
             return false;
         };
@@ -990,7 +1034,7 @@ impl CorrelatesNativeEvents for RunningNexus {
         let Some(transcript) = (node.harness_kind == HarnessKind::Claude
             && !node.session_id.is_empty()
             && session == node.session_id)
-            .then(|| self.claude_transcript(&node))
+            .then(|| self.claude_transcript_configured(configured, &node))
             .flatten()
         else {
             return false;
@@ -1012,7 +1056,7 @@ impl CorrelatesNativeEvents for RunningNexus {
         )
     }
 
-    fn turn_end_recorded(&self, flow_id: &str) -> bool {
+    fn turn_end_recorded_configured(&self, configured: &ConfiguredUse, flow_id: &str) -> bool {
         let Ok(Some(events)) = self.store.events(flow_id) else {
             return false;
         };
@@ -1020,7 +1064,9 @@ impl CorrelatesNativeEvents for RunningNexus {
             .iter()
             .rev()
             .find_map(|event| match event {
-                Event::Stopped(stop) => self.correlated_stop(flow_id, &stop).then_some(true),
+                Event::Stopped(stop) => self
+                    .correlated_stop_configured(configured, flow_id, &stop)
+                    .then_some(true),
                 Event::PromptSubmitted(prompt) => {
                     self.correlated_prompt(flow_id, &prompt).then_some(false)
                 }
@@ -1068,6 +1114,7 @@ pub enum Reconciled {
 /// `ReadQueueDeliveries`.
 pub(crate) trait ReconcilesQueueDelivery {
     /// Under the dispatch gate.
+    #[cfg(test)]
     fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled;
     fn reconcile_delivery_configured(
         &self,
@@ -1085,11 +1132,18 @@ pub(crate) trait ReconcilesQueueDelivery {
     /// A prompt the flow's own session took: settles the outstanding
     /// hand-over whose request it exactly is. Anything else, a task
     /// notification among them, settles nothing.
-    fn settle_submitted_prompt(&self, flow_id: &str, prompt: &NativePrompt);
+    fn settle_submitted_prompt(
+        &self,
+        configured: &ConfiguredUse,
+        flow_id: &str,
+        prompt: &NativePrompt,
+    );
     /// At the Nexus's start: reconciles every hand-over the last Nexus left
     /// outstanding, then settles every Claude seat whose own turn end was
     /// recorded and which holds work, as a Stop would.
+    #[cfg(test)]
     fn recover_deliveries(&self);
+    fn recover_deliveries_configured(&self, configured: &ConfiguredUse);
 }
 
 pub(crate) fn render_message(
@@ -1172,8 +1226,9 @@ impl RendersAttemptInput for QueueDeliveryAttempt {
 }
 
 impl ReconcilesQueueDelivery for RunningNexus {
+    #[cfg(test)]
     fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled {
-        let configured = match self.configured_use() {
+        let configured = match self.test_configured_use() {
             Ok(configured) => configured,
             Err(_) => return Reconciled::Refused,
         };
@@ -1316,7 +1371,12 @@ impl ReconcilesQueueDelivery for RunningNexus {
         }
     }
 
-    fn settle_submitted_prompt(&self, flow_id: &str, prompt: &NativePrompt) {
+    fn settle_submitted_prompt(
+        &self,
+        configured: &ConfiguredUse,
+        flow_id: &str,
+        prompt: &NativePrompt,
+    ) {
         let _turn = self
             .dispatch_gate
             .lock()
@@ -1345,10 +1405,18 @@ impl ReconcilesQueueDelivery for RunningNexus {
         // exact USER row has been durably recorded. Reconcile the transcript
         // after its pre-submit anchor; an unreadable or not-yet-written row
         // remains explicitly uncertain and cannot remove the logical entry.
-        let _ = self.reconcile_delivery(&attempt);
+        let _ = self.reconcile_delivery_configured(configured, &attempt);
     }
 
+    #[cfg(test)]
     fn recover_deliveries(&self) {
+        let Ok(configured) = self.test_configured_use() else {
+            return;
+        };
+        self.recover_deliveries_configured(&configured)
+    }
+
+    fn recover_deliveries_configured(&self, configured: &ConfiguredUse) {
         let seats = {
             let _turn = self
                 .dispatch_gate
@@ -1360,7 +1428,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
             };
             for metaflow in &metaflows {
                 if let Ok(Some(attempt)) = self.store.outstanding_delivery(&metaflow.address) {
-                    let reconciled = self.reconcile_delivery(&attempt);
+                    let reconciled = self.reconcile_delivery_configured(configured, &attempt);
                     eprintln!(
                         "flow-nexus: queued delivery {} reconciled at start: {reconciled:?}",
                         attempt.attempt_id
@@ -1376,12 +1444,12 @@ impl ReconcilesQueueDelivery for RunningNexus {
                 })
                 .filter(|flow_id| {
                     matches!(self.store.address_hold(flow_id), Ok(None))
-                        && self.turn_end_recorded(flow_id)
+                        && self.turn_end_recorded_configured(configured, flow_id)
                 })
                 .collect::<Vec<_>>()
         };
         for flow_id in seats {
-            self.settle_stopped(&flow_id);
+            self.settle_stopped_configured(configured, &flow_id);
         }
     }
 }
@@ -1405,8 +1473,16 @@ impl MarksUndecided for RunningNexus {
 }
 
 impl SleepsAndWakesSeats for RunningNexus {
+    #[cfg(test)]
     fn settle_stopped(&self, flow_id: &str) -> AtStop {
-        let at_stop = self.settle_rested(flow_id);
+        let Ok(configured) = self.test_configured_use() else {
+            return AtStop::Kept(KeptAtStop::StoreUnreadable);
+        };
+        self.settle_stopped_configured(&configured, flow_id)
+    }
+
+    fn settle_stopped_configured(&self, configured: &ConfiguredUse, flow_id: &str) -> AtStop {
+        let at_stop = self.settle_rested_configured(configured, flow_id);
         match &at_stop {
             AtStop::Kept(reason) => {
                 eprintln!("flow-nexus: flow {flow_id} kept at its Stop: {reason:?}");
@@ -1417,7 +1493,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             // sleeps until an Order, a Question or the living's words.
             AtStop::Refreshed(address) => {
                 eprintln!("flow-nexus: flow {flow_id} refreshed at its rest");
-                self.wake_due(address.clone());
+                self.wake_due_configured(configured, address.clone());
             }
             AtStop::Slept(_) => {
                 eprintln!("flow-nexus: flow {flow_id} slept at its rest");
@@ -1427,7 +1503,15 @@ impl SleepsAndWakesSeats for RunningNexus {
         at_stop
     }
 
+    #[cfg(test)]
     fn drain_awake(&self, address: &Address) {
+        let Ok(configured) = self.test_configured_use() else {
+            return;
+        };
+        self.drain_awake_configured(&configured, address)
+    }
+
+    fn drain_awake_configured(&self, configured: &ConfiguredUse, address: &Address) {
         let resting = {
             let _turn = self
                 .dispatch_gate
@@ -1448,9 +1532,6 @@ impl SleepsAndWakesSeats for RunningNexus {
             let Ok(Some(node)) = self.store.flow_node(&flow_id) else {
                 return;
             };
-            let Ok(configured) = self.configured_use() else {
-                return;
-            };
             // A seat whose pane is gone has ended: its flow is recorded
             // Exited, which puts the metaflow Asleep, and the wake that
             // follows starts a fresh flow.
@@ -1459,7 +1540,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 PanePresence::Absent | PanePresence::Bare
             ) {
                 let _ = self.perform_configured(
-                    &configured,
+                    configured,
                     Operation::Record(Record_Data::Exited(flow_id.clone())),
                 );
                 return;
@@ -1469,28 +1550,33 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .first()
                 .is_some_and(|entry| !matches!(entry.message, signal_flow::Message::Soft(_)))
             {
-                let _ = self.drain_all(address.clone());
+                let _ = self.drain_all_configured(configured, address.clone());
                 return;
             }
             let known_resting = match node.harness_kind {
                 HarnessKind::Codex => self.codex_resting(&flow_id),
-                HarnessKind::Claude => self.claude_main_turn_ended_configured(&configured, &node),
+                HarnessKind::Claude => self.claude_main_turn_ended_configured(configured, &node),
             };
             known_resting.then_some(flow_id)
         };
         if let Some(flow_id) = resting {
-            self.settle_stopped(&flow_id);
+            self.settle_stopped_configured(configured, &flow_id);
         }
     }
 
+    #[cfg(test)]
     fn wake_due(&self, address: Address) {
-        let Ok(configured) = self.configured_use() else {
+        let Ok(configured) = self.test_configured_use() else {
             return;
         };
+        self.wake_due_configured(&configured, address)
+    }
+
+    fn wake_due_configured(&self, configured: &ConfiguredUse, address: Address) {
         // Work queued for an Awake seat known resting is handed to it now,
         // as its turn's end would; one in a turn waits for the turn's end.
         // An Awake seat whose pane is gone is put Asleep, to wake below.
-        self.drain_awake(&address);
+        self.drain_awake_configured(configured, &address);
         let Some(lease) = self.waking.hold(&address) else {
             return;
         };
@@ -1499,7 +1585,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.rest_ended_awake(&configured, &address);
+            self.rest_ended_awake(configured, &address);
             matches!(
                 self.store.metaflow(&address),
                 Ok(Some(metaflow)) if self.wake_is_due(&metaflow)
@@ -1510,12 +1596,12 @@ impl SleepsAndWakesSeats for RunningNexus {
         }
         // A refused wake has logged its reason; its work stays queued.
         if let Outcome::Woken(_) = self
-            .configured_effects(&configured)
+            .configured_effects(configured)
             .perform(Operation::Wake(address.clone()))
         {
-            self.drain_woken(&configured, &address, lease);
+            self.drain_woken(configured, &address, lease);
         }
-        self.settle_stops_at_confirmation();
+        self.settle_stops_at_confirmation_configured(configured);
     }
 
     fn drain_woken(&self, configured: &ConfiguredUse, address: &Address, lease: WakingLease<'_>) {
@@ -1582,8 +1668,16 @@ impl SleepsAndWakesSeats for RunningNexus {
                 || matches!(self.store.successor_intent(&metaflow.address), Ok(Some(_))))
     }
 
+    #[cfg(test)]
     fn recover_wakes(&self) {
-        self.recover_deliveries();
+        let Ok(configured) = self.test_configured_use() else {
+            return;
+        };
+        self.recover_wakes_configured(&configured)
+    }
+
+    fn recover_wakes_configured(&self, configured: &ConfiguredUse) {
+        self.recover_deliveries_configured(configured);
         // A successor an earlier Nexus owed and did not see confirmed is
         // taken up again while its predecessor is still the flow the
         // metaflow is Awake as. A threshold refresh's predecessor is
@@ -1629,17 +1723,17 @@ impl SleepsAndWakesSeats for RunningNexus {
             (refreshes, owed)
         };
         for flow_id in refreshes {
-            self.settle_stopped(&flow_id);
+            self.settle_stopped_configured(configured, &flow_id);
         }
         for intent in owed {
             let predecessor = intent.predecessor.clone();
-            match self.take_up_owed(intent) {
+            match self.take_up_owed(configured, intent) {
                 AtStop::Refreshed(address) => {
                     eprintln!(
                         "flow-nexus: flow {predecessor} replaced by the successor it was owed"
                     );
                     // What queued meanwhile is handed to the successor.
-                    self.wake_due(address);
+                    self.wake_due_configured(configured, address);
                 }
                 kept => {
                     eprintln!(
@@ -1653,7 +1747,7 @@ impl SleepsAndWakesSeats for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.rest_every_ended_awake();
+            self.rest_every_ended_awake(configured);
             match self.store.list_metaflows() {
                 Ok(metaflows) => metaflows
                     .into_iter()
@@ -1667,7 +1761,7 @@ impl SleepsAndWakesSeats for RunningNexus {
             }
         };
         for address in due {
-            self.wake_due(address);
+            self.wake_due_configured(configured, address);
         }
     }
 }
@@ -1689,24 +1783,25 @@ pub trait RefreshesMetaflows {
     /// queue kept. The successor's context is what any wake composes: the
     /// metaflow's declaration, else the last launch's modules, remembering
     /// the ending flow.
-    fn refresh(&self, address: &Address) -> Response;
+    fn refresh_configured(&self, configured: &ConfiguredUse, address: &Address) -> Response;
     /// A Replace, as a Launch addressed to an Awake metaflow names one: a
     /// refresh whose successor is the profile's. Under the metaflow's lock
     /// the successor is started and confirmed, then the flow it replaces is
     /// reaped, given no turn; once the lock is released the queue is handed
     /// to the successor, oldest first. A metaflow another holds is refused
     /// Locked. Runs off the dispatch gate, taking it for the replacement.
-    fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response;
+    fn replace_held_configured(
+        &self,
+        configured: &ConfiguredUse,
+        profile: LaunchProfile,
+        origin: Origin,
+    ) -> Response;
 }
 
 impl RefreshesMetaflows for RunningNexus {
-    fn refresh(&self, address: &Address) -> Response {
+    fn refresh_configured(&self, configured: &ConfiguredUse, address: &Address) -> Response {
         use crate::store::metaflow_declaration::ReadsMetaflowDeclarations;
         use signal_flow::{RefreshRejection, Refreshed, Refusal, Unknown_Data};
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => return Response::RefreshRejected(RefreshRejection::PersistenceRefused),
-        };
         let turn = self
             .dispatch_gate
             .lock()
@@ -1714,7 +1809,7 @@ impl RefreshesMetaflows for RunningNexus {
         let Some(lock) = self.waking.hold(address) else {
             return Response::RefreshRejected(RefreshRejection::Locked);
         };
-        self.rest_ended_awake(&configured, address);
+        self.rest_ended_awake(configured, address);
         let metaflow = match self.store.metaflow(address) {
             Ok(Some(
                 metaflow @ Metaflow {
@@ -1736,10 +1831,6 @@ impl RefreshesMetaflows for RunningNexus {
         };
         let flow_ethos::State::Awake(flow_id) = metaflow.state.clone() else {
             return Response::RefreshRejected(RefreshRejection::NotAwake);
-        };
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
         };
         // A flow whose launch is not yet confirmed only holds its Address:
         // the launch that holds it is the owed successor's, still pending
@@ -1770,7 +1861,7 @@ impl RefreshesMetaflows for RunningNexus {
             // Exited, which puts the metaflow Asleep.
             PanePresence::Absent | PanePresence::Bare => {
                 let _ = self.perform_configured(
-                    &configured,
+                    configured,
                     Operation::Record(Record_Data::Exited(flow_id)),
                 );
                 return Response::RefreshRejected(RefreshRejection::NotAwake);
@@ -1800,13 +1891,13 @@ impl RefreshesMetaflows for RunningNexus {
             // wake, drain or delivery of the metaflow out meanwhile.
             drop(turn);
             let replaced = self.refresh_successor_first_configured(
-                &configured,
+                configured,
                 &flow_id,
                 &metaflow,
                 SuccessionCause::Ordered,
             );
             drop(lock);
-            self.wake_deferred();
+            self.wake_deferred(configured);
             return match replaced {
                 AtStop::Refreshed(_) => {
                     eprintln!(
@@ -1815,7 +1906,7 @@ impl RefreshesMetaflows for RunningNexus {
                     );
                     // What queued while the lock stood is handed to the
                     // successor, oldest first.
-                    self.wake_due(address.clone());
+                    self.wake_due_configured(configured, address.clone());
                     refreshed
                 }
                 // A refused successor answers the Replace's own rejection;
@@ -1841,7 +1932,7 @@ impl RefreshesMetaflows for RunningNexus {
                 _ => Response::RefreshRejected(RefreshRejection::PersistenceRefused),
             };
         }
-        if let Err(outcome) = self.close_at_rest(&configured, &flow_id, &node) {
+        if let Err(outcome) = self.close_at_rest(configured, &flow_id, &node) {
             return Response::RefreshRejected(match *outcome {
                 Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) => {
                     RefreshRejection::CloseRefused(failure)
@@ -1861,16 +1952,13 @@ impl RefreshesMetaflows for RunningNexus {
         refreshed
     }
 
-    fn replace_held(&self, profile: LaunchProfile, origin: Origin) -> Response {
+    fn replace_held_configured(
+        &self,
+        configured: &ConfiguredUse,
+        profile: LaunchProfile,
+        origin: Origin,
+    ) -> Response {
         use signal_flow::{ReplaceRejection, StartRejection};
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => {
-                return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
-                    StartRejection::LaunchPersistenceRefused,
-                ));
-            }
-        };
         let address = profile.address.clone();
         let response = {
             let _turn = self
@@ -1897,22 +1985,23 @@ impl RefreshesMetaflows for RunningNexus {
                     StartRejection::LaunchPersistenceRefused,
                 ));
             }
-            let response = self.replace_configured(&configured, profile, origin);
+            let response = self.replace_configured(configured, profile, origin);
             self.settle_owed(&address, &response);
             drop(lock);
             response
         };
-        self.wake_deferred();
+        self.wake_deferred(configured);
         // What queued for the metaflow is handed to the flow it is Awake as
         // now, oldest first.
-        self.wake_due(address);
+        self.wake_due_configured(configured, address);
         response
     }
 }
 
 impl PerformsWakeAndDrain for RunningNexus {
+    #[cfg(test)]
     fn wake(&self, address: Address) -> Outcome {
-        let configured = match self.configured_use() {
+        let configured = match self.test_configured_use() {
             Ok(configured) => configured,
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
         };
@@ -1933,10 +2022,11 @@ impl PerformsWakeAndDrain for RunningNexus {
         }
     }
 
+    #[cfg(test)]
     fn drain(&self, address: Address) -> Outcome {
         // One queued item is one effect. `drain_all` calls this again for the
         // next item, so a later committed generation takes effect there.
-        let configured = match self.configured_use() {
+        let configured = match self.test_configured_use() {
             Ok(configured) => configured,
             Err(_) => return Outcome::Failed(Failed_Data::StoreRefused),
         };
@@ -1991,7 +2081,7 @@ impl PerformsWakeAndDrain for RunningNexus {
                     {
                         return Outcome::Failed(Failed_Data::StoreRefused);
                     }
-                    return match self.drain(address) {
+                    return match self.drain_configured(configured, address) {
                         Outcome::Drained(mut following) => {
                             drained.append(&mut following);
                             Outcome::Drained(drained)
@@ -2036,7 +2126,7 @@ impl PerformsWakeAndDrain for RunningNexus {
             let resting = match node.harness_kind {
                 HarnessKind::Codex => self.codex_resting(&flow_id),
                 HarnessKind::Claude => {
-                    self.turn_end_recorded(&flow_id)
+                    self.turn_end_recorded_configured(configured, &flow_id)
                         || self.claude_main_turn_ended_configured(configured, &node)
                 }
             };
@@ -2206,7 +2296,15 @@ impl PerformsWakeAndDrain for RunningNexus {
         Outcome::AwaitingReceipt(oldest.logical_delivery_id)
     }
 
+    #[cfg(test)]
     fn drain_all(&self, address: Address) -> Outcome {
+        let Ok(configured) = self.test_configured_use() else {
+            return Outcome::Failed(Failed_Data::StoreRefused);
+        };
+        self.drain_all_configured(&configured, address)
+    }
+
+    fn drain_all_configured(&self, configured: &ConfiguredUse, address: Address) -> Outcome {
         let queued = match self.store.metaflow(&address) {
             Ok(Some(metaflow)) => metaflow.queue,
             Ok(None) => return Outcome::Failed(Failed_Data::NotAwake),
@@ -2215,7 +2313,7 @@ impl PerformsWakeAndDrain for RunningNexus {
         let mut removed = 0;
         let mut delivered = Vec::new();
         loop {
-            let outcome = self.drain(address.clone());
+            let outcome = self.drain_configured(configured, address.clone());
             match outcome {
                 Outcome::Drained(mut entries) => delivered.append(&mut entries),
                 Outcome::AwaitingReceipt(id) => return Outcome::AwaitingReceipt(id),
@@ -2258,7 +2356,7 @@ impl WakesInParts for RunningNexus {
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.rest_ended_awake(&configured, address);
+            self.rest_ended_awake(configured, address);
             match self.store.metaflow(address) {
                 Ok(Some(metaflow)) if metaflow.state == flow_ethos::State::Asleep => metaflow,
                 Ok(_) => return Err(WakeRefusal::NotAsleep),
@@ -2443,8 +2541,9 @@ impl WakesInParts for RunningNexus {
             .flatten()
     }
 
+    #[cfg(test)]
     fn record_context_at_stop(&self, flow_id: &str) {
-        let Ok(configured) = self.configured_use() else {
+        let Ok(configured) = self.test_configured_use() else {
             eprintln!("flow-nexus: flow {flow_id} stopped with configuration unreadable");
             return;
         };
@@ -2656,11 +2755,7 @@ impl WakesInParts for RunningNexus {
         )
     }
 
-    fn take_up_owed(&self, intent: SuccessorIntent) -> AtStop {
-        let configured = match self.configured_use() {
-            Ok(configured) => configured,
-            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
-        };
+    fn take_up_owed(&self, configured: &ConfiguredUse, intent: SuccessorIntent) -> AtStop {
         let address = intent.address.clone();
         let Some(lock) = self.waking.hold(&address) else {
             return AtStop::Kept(KeptAtStop::Waking);
@@ -2707,7 +2802,7 @@ impl WakesInParts for RunningNexus {
                         .dispatch_gate
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    self.replace_configured(&configured, profile, attempt.origin)
+                    self.replace_configured(configured, profile, attempt.origin)
                 };
                 self.settle_owed(&address, &response);
                 match response {
@@ -2716,23 +2811,28 @@ impl WakesInParts for RunningNexus {
                 }
             }
             cause => self.refresh_successor_first_configured(
-                &configured,
+                configured,
                 &intent.predecessor,
                 &metaflow,
                 cause,
             ),
         };
         drop(lock);
-        self.wake_deferred();
+        self.wake_deferred(configured);
         taken
     }
 
+    #[cfg(test)]
     fn settle_rested(&self, flow_id: &str) -> AtStop {
-        let configured = match self.configured_use() {
+        let configured = match self.test_configured_use() {
             Ok(configured) => configured,
             Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
         };
-        self.record_context_at_stop_configured(&configured, flow_id);
+        self.settle_rested_configured(&configured, flow_id)
+    }
+
+    fn settle_rested_configured(&self, configured: &ConfiguredUse, flow_id: &str) -> AtStop {
+        self.record_context_at_stop_configured(configured, flow_id);
         // A Codex seat's rest is its app-server's, and a Claude seat whose
         // transcript records its main turn's end_turn has ended its turn
         // whatever its screen shows (background agents keep Herdr at
@@ -2747,7 +2847,7 @@ impl WakesInParts for RunningNexus {
             let node = self.store.flow_node(flow_id).ok().flatten();
             if !node.as_ref().is_some_and(|node| {
                 node.harness_kind == HarnessKind::Codex
-                    || self.claude_main_turn_ended_configured(&configured, node)
+                    || self.claude_main_turn_ended_configured(configured, node)
             }) {
                 configured.herdr.rested(route);
             }
@@ -2836,7 +2936,7 @@ impl WakesInParts for RunningNexus {
                 if refresh_due && !native_resting && !flow_owned_resting {
                     return AtStop::Kept(KeptAtStop::NotResting(pane_agent));
                 }
-                let claude_main_ready = self.claude_main_turn_ended_configured(&configured, &node)
+                let claude_main_ready = self.claude_main_turn_ended_configured(configured, &node)
                     && (flow_owned_resting
                         || matches!(
                             self.delivery_target_with(flow_id, &configured.snapshot)
@@ -2879,7 +2979,7 @@ impl WakesInParts for RunningNexus {
                     SuccessionCause::Refresh,
                 );
                 drop(refreshing);
-                self.wake_deferred();
+                self.wake_deferred(configured);
                 return refreshed;
             }
             if !closable {
@@ -2888,13 +2988,13 @@ impl WakesInParts for RunningNexus {
             if let HerdrRouteSelection::Unavailable = &node.herdr_route_selection {
                 return AtStop::Kept(KeptAtStop::RefreshUnrouted);
             }
-            return match self.close_at_rest(&configured, flow_id, &node) {
+            return match self.close_at_rest(configured, flow_id, &node) {
                 Ok(()) => AtStop::Refreshed(address),
                 Err(outcome) => AtStop::Kept(KeptAtStop::RefreshRefused(outcome)),
             };
         }
         if !metaflow.queue.is_empty() {
-            return match self.perform_configured(&configured, Operation::Drain(address)) {
+            return match self.perform_configured(configured, Operation::Drain(address)) {
                 Outcome::Drained(mut typed) if !typed.is_empty() => {
                     AtStop::Drained(typed.remove(0))
                 }
@@ -2908,7 +3008,7 @@ impl WakesInParts for RunningNexus {
         match continuity {
             Continuity::Maintained => AtStop::Idle,
             Continuity::OnDemand if !closable => AtStop::Idle,
-            Continuity::OnDemand => match self.close_at_rest(&configured, flow_id, &node) {
+            Continuity::OnDemand => match self.close_at_rest(configured, flow_id, &node) {
                 Ok(()) => AtStop::Slept(address),
                 Err(outcome) => AtStop::Kept(KeptAtStop::SleepRefused(outcome)),
             },

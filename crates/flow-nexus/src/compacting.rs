@@ -327,6 +327,7 @@ pub trait WatchesCompactions {
     /// Raises a compaction made during continuous work once as a warning.
     fn raise_compaction(
         &self,
+        configured: &ConfiguredUse,
         node: &FlowNode,
         boundary: &str,
         pre_tokens: Option<i64>,
@@ -371,6 +372,7 @@ impl WatchesCompactions for RunningNexus {
         };
         for compaction in raised {
             self.raise_compaction(
+                configured,
                 &node,
                 &compaction.uuid,
                 compaction.pre_tokens,
@@ -422,7 +424,7 @@ impl WatchesCompactions for RunningNexus {
                 if !asked {
                     let texts = &configured.snapshot.texts;
                     let pre_tokens = self.store.context_size(&node.flow_id).ok().flatten();
-                    self.raise_compaction(&node, &item, pre_tokens, texts);
+                    self.raise_compaction(configured, &node, &item, pre_tokens, texts);
                 }
             }
         }
@@ -430,7 +432,7 @@ impl WatchesCompactions for RunningNexus {
 
     #[cfg(test)]
     fn codex_context_signal(&self, thread: &str, signal: CodexContextSignal) {
-        if let Ok(configured) = self.configured_use() {
+        if let Ok(configured) = self.test_configured_use() {
             self.codex_context_signal_configured(&configured, thread, signal);
         }
     }
@@ -445,6 +447,7 @@ impl WatchesCompactions for RunningNexus {
 
     fn raise_compaction(
         &self,
+        configured: &ConfiguredUse,
         node: &FlowNode,
         boundary: &str,
         pre_tokens: Option<i64>,
@@ -468,7 +471,7 @@ impl WatchesCompactions for RunningNexus {
             .flatten()
             .map(|metaflow| metaflow.address);
         let transcript = match node.harness_kind {
-            HarnessKind::Claude => self.claude_transcript(node),
+            HarnessKind::Claude => self.claude_transcript_configured(configured, node),
             HarnessKind::Codex => None,
         };
         let warning = CompactionWarning {

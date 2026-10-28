@@ -80,7 +80,7 @@ impl RecordsWitnessedExit for RunningNexus {
             address
         };
         if let Some(address) = address {
-            self.wake_due(address);
+            self.wake_due_configured(configured, address);
         }
     }
 }
@@ -135,7 +135,7 @@ impl ObservesAgent for RunningNexus {
 
     #[cfg(test)]
     fn agent_observation(&self, flow_id: &str) -> Response {
-        match self.configured_use() {
+        match self.test_configured_use() {
             Ok(configured) => self.agent_observation_configured(&configured, flow_id),
             Err(_) => AgentState::Unknown.observed_of(flow_id),
         }

@@ -168,7 +168,7 @@ fn main() -> ExitCode {
         // Work the last Nexus owed is taken up while the sockets serve:
         // queued deliveries are reconciled, every successor owed is started
         // or resumed, and every metaflow due a wake is woken.
-        scope.spawn(|| nexus.recover_wakes());
+        scope.spawn(|| nexus.recover_wakes_ingress());
         scope.spawn(|| {
             if signals.watch(&|| nexus.stop_requested()) {
                 nexus.stop(&sockets);

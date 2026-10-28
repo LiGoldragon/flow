@@ -485,7 +485,7 @@ impl RunningNexus {
 #[cfg(test)]
 impl crate::generated::starter::DerivesOrigin for RunningNexus {
     fn origin_of<N: CallerProcessing>(&self, input: N) -> signal_flow::Origin {
-        self.configured_use()
+        self.test_configured_use()
             .map_or(signal_flow::Origin::Unbound, |configured| {
                 self.origin_of_configured(&configured, input)
             })

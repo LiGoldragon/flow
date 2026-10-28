@@ -65,7 +65,7 @@ use meta_signal_flow::{
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sema_engine::{
-    Assertion, Decision, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation,
+    Assertion, DatabaseMarker, Decision, Engine, EngineOpen, EngineRecord, FamilyName, KeyedMutation,
     MemoryDefinition, MemoryUpgrades, MemoryVersion, QueryPlan, RecordKey, Retraction, SchemaHash,
     SchemaVersion, TableDescriptor, TableName, TableReference, TableRegistration, UpgradeFrom,
     UpgradeOutcome,
@@ -424,6 +424,15 @@ pub struct StoredConfigurationSnapshot {
     pub timings: meta_signal_flow::Timings,
     pub limits: meta_signal_flow::Limits,
     pub texts: meta_signal_flow::Texts,
+}
+
+/// One coherent committed view of every mutable configuration family.
+/// `generation` is the database marker shared by every row read into the
+/// snapshot, and names the configuration generation an operation uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedConfigurationSnapshot {
+    pub generation: DatabaseMarker,
+    pub snapshot: StoredConfigurationSnapshot,
 }
 
 pub use flow_defaults::{DefaultConfiguration, LaysOutDefaults, ReadsAnchors};
@@ -6351,6 +6360,16 @@ impl ManagesMetaflowState for FlowStore {
     }
 }
 
+impl FlowStore {
+    /// Reads every mutable configuration family from one database marker.
+    /// Callers keep this value for the duration of one logical effect.
+    pub(crate) fn committed_configuration_snapshot(
+        &self,
+    ) -> Result<Option<CommittedConfigurationSnapshot>, StoreError> {
+        Self::meta_committed_configuration_snapshot(&self.engine, &self.meta_configuration_tables)
+    }
+}
+
 impl AppliesFlowQuery for FlowStore {
     fn apply(&self, query: Query) -> Result<Response, StoreError> {
         match query {
@@ -9500,6 +9519,14 @@ pub(crate) trait ReadsFlowMemory {
         engine: &Engine,
         tables: &MetaConfigurationTables,
     ) -> Result<Option<StoredConfigurationSnapshot>, StoreError> {
+        Ok(Self::meta_committed_configuration_snapshot(engine, tables)?
+            .map(|committed| committed.snapshot))
+    }
+
+    fn meta_committed_configuration_snapshot(
+        engine: &Engine,
+        tables: &MetaConfigurationTables,
+    ) -> Result<Option<CommittedConfigurationSnapshot>, StoreError> {
         let nexus_rows = engine.match_records(QueryPlan::all(tables.nexus))?;
         let marker = nexus_rows.database_marker();
         let nexus = match nexus_rows.records() {
@@ -9584,17 +9611,20 @@ pub(crate) trait ReadsFlowMemory {
             [stored] if stored.record_key() == RecordKey::new("texts") => stored.texts.clone(),
             _ => return Err(StoreError::StateInvariant),
         };
-        Ok(Some(StoredConfigurationSnapshot {
-            configured_nexus: nexus,
-            configured_harnesses: harnesses,
-            configured_models: models,
-            configured_thresholds: thresholds,
-            configured_send_servers: send_servers,
-            configured_metaflows: metaflows,
-            configured_investigation: investigation,
-            timings,
-            limits,
-            texts,
+        Ok(Some(CommittedConfigurationSnapshot {
+            generation: marker,
+            snapshot: StoredConfigurationSnapshot {
+                configured_nexus: nexus,
+                configured_harnesses: harnesses,
+                configured_models: models,
+                configured_thresholds: thresholds,
+                configured_send_servers: send_servers,
+                configured_metaflows: metaflows,
+                configured_investigation: investigation,
+                timings,
+                limits,
+                texts,
+            },
         }))
     }
 

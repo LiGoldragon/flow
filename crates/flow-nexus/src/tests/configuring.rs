@@ -1,8 +1,9 @@
 //! Configure declares one configuration family whole: the declaration
 //! replaces the committed family in one commit and leaves every other row as
 //! it was, so the effective family is always the last declaration. A refused
-//! declaration changes nothing. The running Nexus keeps the Codex endpoints it
-//! opened with; the next open serves the replaced ones.
+//! declaration changes nothing. Each operation reads one coherent committed
+//! generation, so a replacement is served by the next operation without a
+//! Nexus restart.
 
 use crate::generated::operation::{Operation, Outcome};
 use crate::performing::Performs;
@@ -526,6 +527,55 @@ fn configuration_reads_the_exact_runtime_and_every_committed_family() {
     assert!(configured.timings.socket_timeout > 0);
     assert!(configured.limits.frame > 0);
     assert!(!configured.texts.launch_section.pending_launch.is_empty());
+}
+
+#[test]
+fn a_complete_configuration_read_names_its_one_committed_generation() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let before = nexus
+        .store
+        .committed_configuration_snapshot()
+        .expect("reads one committed view")
+        .expect("configured");
+    let replacement = ConfigureModel {
+        layer: Layer::Quaternary,
+        aspect: Aspect::Field,
+        model_name: "claude-generation-witness".into(),
+        effort: "low".into(),
+    };
+    assert_eq!(
+        nexus.dispatch_meta(meta_signal_flow::Query::ConfigureEntry(
+            ConfigurationEntry::ModelEntry(replacement.clone()),
+        )),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let after = nexus
+        .store
+        .committed_configuration_snapshot()
+        .expect("reads the next committed view")
+        .expect("configured");
+    assert_ne!(after.generation, before.generation);
+    assert!(after.snapshot.configured_models.contains(&replacement));
+
+    let refused_generation = after.generation;
+    assert_eq!(
+        nexus.dispatch_meta(meta_signal_flow::Query::ConfigureEntry(
+            ConfigurationEntry::HarnessEntry(ConfiguredStore::harness(
+                "overlapping-generation-witness",
+                HarnessKind::Claude,
+                &[TERRA],
+            )),
+        )),
+        MetaResponse::ConfigureRejected(ConfigureRejection::ModelServedTwice(TERRA.into()))
+    );
+    let after_refusal = nexus
+        .store
+        .committed_configuration_snapshot()
+        .expect("reads after refusal")
+        .expect("configured");
+    assert_eq!(after_refusal.generation, refused_generation);
+    assert_eq!(after_refusal.snapshot, after.snapshot);
 }
 
 #[test]

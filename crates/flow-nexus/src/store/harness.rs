@@ -167,7 +167,7 @@ pub(super) fn from_legacy_nexus(
         .collect::<std::collections::BTreeSet<_>>();
     let claude_models = models
         .iter()
-        .map(|model| model.native.clone())
+        .map(|model| model.model_name.clone())
         .filter(|model| !codex_models.contains(model))
         .collect::<Vec<_>>();
     let claude_home = std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_else(|_| {

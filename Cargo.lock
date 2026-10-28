@@ -477,8 +477,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "meta-signal-flow"
-version = "52.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=24263c66b11a86a1b0f3390f9c8863f285681441#24263c66b11a86a1b0f3390f9c8863f285681441"
+version = "53.0.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-flow?rev=e2a7ba2a764f8d333f6babd93597044d0d7238d0#e2a7ba2a764f8d333f6babd93597044d0d7238d0"
 dependencies = [
  "datom-codec",
  "ethos-zero 17.0.0",
@@ -858,8 +858,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "38.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=7450ab294d63c162e505cecf69a85191338c5255#7450ab294d63c162e505cecf69a85191338c5255"
+version = "39.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=03f4eb1a7bae49c16435695957c273d3d3afb440#03f4eb1a7bae49c16435695957c273d3d3afb440"
 dependencies = [
  "datom-codec",
  "ethos-zero 17.0.0",

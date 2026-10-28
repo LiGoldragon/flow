@@ -58,7 +58,7 @@ pub trait WritesPane {
 
     fn pane_agent(&self, node: &FlowNode) -> PaneAgent;
     /// The pane's visible screen exactly as Herdr reads it.
-    fn screen(&self, route: &HerdrRoute) -> Option<String>;
+    fn screen(&self, route: &HerdrRoute, harness_kind: &HarnessKind) -> Option<String>;
     /// Whether the composer holds no text of its own: `None` when the screen
     /// could not be read or shows no composer.
     /// The text the composer holds, empty when it holds none of its own:

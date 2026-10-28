@@ -6,7 +6,8 @@
 
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::RunningNexus;
-use crate::composition::{ComposesLaunch, FreshSeat, RendersQueuedWork};
+use crate::composition::{ComposesLaunch, FreshSeat};
+use crate::delivery::body::RendersNativeContent;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::generated::operation::{Operation, Outcome};
 use crate::generated::starter::ProfilesFreshSeat;

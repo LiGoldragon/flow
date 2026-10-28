@@ -3099,6 +3099,14 @@ enum ReplaceRejectionV32 {
     Locked,
 }
 
+fn unrecorded_secondary() -> signal_flow::Address {
+    signal_flow::Address {
+        aspect: signal_flow::Aspect::Psyche,
+        topic: "unrecorded".into(),
+        layer: signal_flow::Layer::Secondary,
+    }
+}
+
 impl From<StartRejectionV32> for StartRejection {
     fn from(rejection: StartRejectionV32) -> Self {
         match rejection {

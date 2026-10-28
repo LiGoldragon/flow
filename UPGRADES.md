@@ -1,5 +1,27 @@
 # Flow 0.40.0 (unreleased, branch flow-0.40)
 
+Batch 13 makes every harness installation configured data. The privileged
+contract carries an arbitrary `Harnesses` family and Nexus v3 carries the
+flows root, Flow executables and default Herdr session. A fresh store has no
+harness; configured model service, executable/home/socket, pane profile and
+composer data are read from the committed harness snapshot. The Nexus family
+upgrades v2 to v3 and the new harness family is v1. Default Codex endpoints
+leave Flow. Pins signal-flow 39.0.0 and meta-signal-flow 53.0.0. The timing
+singleton advances from v1 to v2 with `stop_wait`; an archived v1 value
+supplies its former `launch_rest_wait` for the new field. Both waits are
+range-checked before configuration is committed.
+Pane closure now carries `IdentityUnavailable`, `IdentityMismatch`,
+`StopTimedOut`, or `HerdrCloseFailed` through ordinary and privileged
+replies. Launch outcomes advance from v10 to v11; an archived v10 generic
+close refusal upgrades to `IdentityUnavailable`, the exact fact the old
+record did not preserve. The earlier v9 path remains the upgrade from the
+pre-Batch-12 Simplified and presentation shape.
+The store migration reads frozen v8 launch outcomes with the corresponding
+launch attempts in one typed context snapshot. A unique attempt supplies the
+Address for `RequirementUnmet`; a missing or conflicting attempt moves the
+exact old outcome archive into the durable quarantined-outcome family with a
+typed reason. The staged store is activated only after every family opens.
+
 Batch 12 removes the Simplified launch path and its reply binding. Every launch uses
 one regular shape; a module header may place it in the system or user prompt, and
 presentation instructions arrive through Curriculum context modules. The metaflow
@@ -11,26 +33,7 @@ their exact Layer; PowerLevel and binding role claims are gone. Role and flow
 families advance one version, upgrading High, Medium, Low and UltraLow to
 Primary, Secondary, Tertiary and Quaternary. Fresh meta aspects are Psyche,
 Mind and Field, and an unbound pane is admitted by process. Pins signal-flow
-36.0.0 and meta-signal-flow 50.0.0.Batch 13 makes every harness installation configured data. The privileged
-contract carries an arbitrary `Harnesses` family and Nexus v3 carries the
-flows root, Flow executables and default Herdr session. A fresh store has no
-harness; configured model service, executable/home/socket, pane profile and
-composer data are read from the committed harness snapshot. The Nexus family
-upgrades v2 to v3 and the new harness family is v1. Default Codex endpoints
-leave Flow. Pins signal-flow 39.0.0 and meta-signal-flow 49.0.0. The timing
-singleton advances from v1 to v2 with `stop_wait`; an archived v1 value
-supplies its former `launch_rest_wait` for the new field. Both waits are
-range-checked before configuration is committed.
-Pane closure now carries `IdentityUnavailable`, `IdentityMismatch`,
-`StopTimedOut`, or `HerdrCloseFailed` through ordinary and privileged
-replies. Launch outcomes advance from v9 to v10; an archived generic close
-refusal upgrades to `IdentityUnavailable`, the exact fact the old record did
-not preserve.
-The store migration reads frozen v8 launch outcomes with the corresponding
-launch attempts in one typed context snapshot. A unique attempt supplies the
-Address for `RequirementUnmet`; a missing or conflicting attempt moves the
-exact old outcome archive into the durable quarantined-outcome family with a
-typed reason. The staged store is activated only after every family opens.
+36.0.0 and meta-signal-flow 50.0.0.
 
 Batch 9 makes every operational timing and size/count limit in the overnight
 audit configured data. Fresh stores seed the `Timings` and `Limits` singleton

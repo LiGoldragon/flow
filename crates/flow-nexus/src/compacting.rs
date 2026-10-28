@@ -328,8 +328,8 @@ pub trait WatchesCompactions {
 
 impl WatchesCompactions for RunningNexus {
     fn watch_claude_compactions(&self, flow_id: &str) {
-        let configuration = match self.store.committed_configuration_snapshot() {
-            Ok(Some(committed)) => committed.snapshot,
+        let configuration = match self.configured_use() {
+            Ok(configured) => configured.snapshot,
             _ => return,
         };
         let floor = compaction_floor(configuration.timings.compaction_watch_margin as u64);
@@ -410,8 +410,8 @@ impl WatchesCompactions for RunningNexus {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&node.flow_id);
                 if !asked {
-                    let texts = match self.store.committed_configuration_snapshot() {
-                        Ok(Some(committed)) => committed.snapshot.texts,
+                    let texts = match self.configured_use() {
+                        Ok(configured) => configured.snapshot.texts,
                         _ => return,
                     };
                     let pre_tokens = self.store.context_size(&node.flow_id).ok().flatten();
@@ -503,8 +503,7 @@ impl FindsCodexFlow for RunningNexus {
 mod tests {
     use super::{
         ClaudeCompaction, CodexContextSignal, CompactionWarning, ReadsClaudeCompactions,
-        ReadsCodexContextSignal, RendersCompactionWarning, WritesTranscriptTime,
-        compaction_floor,
+        ReadsCodexContextSignal, RendersCompactionWarning, WritesTranscriptTime, compaction_floor,
     };
     use signal_flow::{Address, Aspect, HarnessKind, Layer};
     use std::io::Write;

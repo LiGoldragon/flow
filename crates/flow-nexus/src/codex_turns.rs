@@ -26,11 +26,11 @@
 //! The state is memory only. A Nexus that starts again reads each live
 //! thread's status from its responder's `thread/resume`.
 
+use crate::RunningNexus;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::waking::{HoldsWakingMetaflows, NotesStopsAtConfirmation, SleepsAndWakesSeats};
-use crate::RunningNexus;
 use signal_flow::{Address, FlowId, FlowNode, HarnessKind};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -285,8 +285,8 @@ impl SettlesRestingCodexSeats for RunningNexus {
         if events.is_empty() {
             return;
         }
-        let remembered_turns = match self.store.committed_configuration_snapshot() {
-            Ok(Some(committed)) => committed.snapshot.limits.remembered_turns as usize,
+        let remembered_turns = match self.configured_use() {
+            Ok(configured) => configured.snapshot.limits.remembered_turns as usize,
             _ => return,
         };
         let seat = {
@@ -310,8 +310,8 @@ impl SettlesRestingCodexSeats for RunningNexus {
     }
 
     fn observe_codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
-        let remembered_turns = match self.store.committed_configuration_snapshot() {
-            Ok(Some(committed)) => committed.snapshot.limits.remembered_turns as usize,
+        let remembered_turns = match self.configured_use() {
+            Ok(configured) => configured.snapshot.limits.remembered_turns as usize,
             _ => return,
         };
         for event in events {

@@ -723,7 +723,12 @@ trait WakesInParts {
     /// Closes a resting seat's harness under the pane's lease and records
     /// its flow Stopped (its metaflow Asleep), under the dispatch gate the
     /// caller holds. The refusal names why the seat stays.
-    fn close_at_rest(&self, flow_id: &str, node: &FlowNode) -> Result<(), Box<Outcome>>;
+    fn close_at_rest(
+        &self,
+        configured: &crate::ConfiguredUse,
+        flow_id: &str,
+        node: &FlowNode,
+    ) -> Result<(), Box<Outcome>>;
     /// Replaces a resting seat owed a successor. The caller has released
     /// the dispatch gate and holds the metaflow's waking lease, so no wake
     /// or drain runs meanwhile: the successor is started and confirmed
@@ -765,7 +770,9 @@ pub(crate) trait ReadsClaudeDelivery {
 
 impl ReadsClaudeDelivery for RunningNexus {
     fn claude_transcript(&self, node: &FlowNode) -> Option<std::path::PathBuf> {
-        self.herdr
+        self.configured_use()
+            .ok()?
+            .herdr
             .native_transcript_root(&HarnessKind::Claude, "")
             .ok()?
             .session_transcript(&node.session_id)
@@ -1292,14 +1299,20 @@ impl SleepsAndWakesSeats for RunningNexus {
             let Ok(Some(node)) = self.store.flow_node(&flow_id) else {
                 return;
             };
+            let Ok(configured) = self.configured_use() else {
+                return;
+            };
             // A seat whose pane is gone has ended: its flow is recorded
             // Exited, which puts the metaflow Asleep, and the wake that
             // follows starts a fresh flow.
             if matches!(
-                self.herdr.pane_presence(&node),
+                configured.herdr.pane_presence(&node),
                 PanePresence::Absent | PanePresence::Bare
             ) {
-                let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id.clone())));
+                let _ = self.perform_configured(
+                    &configured,
+                    Operation::Record(Record_Data::Exited(flow_id.clone())),
+                );
                 return;
             }
             if metaflow
@@ -1562,6 +1575,10 @@ impl RefreshesMetaflows for RunningNexus {
         let flow_ethos::State::Awake(flow_id) = metaflow.state.clone() else {
             return Response::RefreshRejected(RefreshRejection::NotAwake);
         };
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
+        };
         // A flow whose launch is not yet confirmed only holds its Address:
         // the launch that holds it is the owed successor's, still pending
         // or ambiguous, or a waking still running.
@@ -1585,19 +1602,22 @@ impl RefreshesMetaflows for RunningNexus {
         };
         // The recorded route is read first: a Herdr that cannot be read
         // shows no pane, and is never taken for one gone.
-        match self.herdr.pane_presence(&node) {
+        match configured.herdr.pane_presence(&node) {
             PanePresence::Present => {}
             // A flow whose pane is gone has ended on its own: it is recorded
             // Exited, which puts the metaflow Asleep.
             PanePresence::Absent | PanePresence::Bare => {
-                let _ = self.perform(Operation::Record(Record_Data::Exited(flow_id)));
+                let _ = self.perform_configured(
+                    &configured,
+                    Operation::Record(Record_Data::Exited(flow_id)),
+                );
                 return Response::RefreshRejected(RefreshRejection::NotAwake);
             }
             PanePresence::Unknown => {
                 return Response::RefreshRejected(RefreshRejection::HerdrUnavailable);
             }
         }
-        let node = self.herdr.refresh_route(node);
+        let node = configured.herdr.refresh_route(node);
         let continuity = match self.store.continuity(address) {
             Ok(continuity) => continuity,
             Err(error) => return Response::Refused(Refusal::Store(error.to_string())),
@@ -1655,7 +1675,7 @@ impl RefreshesMetaflows for RunningNexus {
                 _ => Response::RefreshRejected(RefreshRejection::PersistenceRefused),
             };
         }
-        if let Err(outcome) = self.close_at_rest(&flow_id, &node) {
+        if let Err(outcome) = self.close_at_rest(&configured, &flow_id, &node) {
             return Response::RefreshRejected(match *outcome {
                 Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) => {
                     RefreshRejection::CloseRefused(failure)
@@ -2272,18 +2292,26 @@ impl WakesInParts for RunningNexus {
         Ok(())
     }
 
-    fn close_at_rest(&self, flow_id: &str, node: &FlowNode) -> Result<(), Box<Outcome>> {
+    fn close_at_rest(
+        &self,
+        configured: &crate::ConfiguredUse,
+        flow_id: &str,
+        node: &FlowNode,
+    ) -> Result<(), Box<Outcome>> {
         let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
             return Err(Box::new(Outcome::Failed(Failed_Data::HerdrRefused)));
         };
         let closed = {
             let _lease = self.pane_leases.hold(route);
-            self.perform(Operation::Close(node.clone()))
+            self.perform_configured(configured, Operation::Close(node.clone()))
         };
         if closed != Outcome::Closed {
             return Err(Box::new(closed));
         }
-        let recorded = self.perform(Operation::Record(Record_Data::Stopped(flow_id.to_owned())));
+        let recorded = self.perform_configured(
+            configured,
+            Operation::Record(Record_Data::Stopped(flow_id.to_owned())),
+        );
         if recorded != Outcome::Recorded {
             return Err(Box::new(recorded));
         }
@@ -2305,13 +2333,18 @@ impl WakesInParts for RunningNexus {
         let WakePlan::Fresh(fresh) = self.wake_plan(&lineage) else {
             return AtStop::Kept(KeptAtStop::RefreshUnplaceable);
         };
-        let model = match self.store.configured_model(&address) {
-            Ok(Some(model)) => model,
-            Ok(None) | Err(_) => return AtStop::Kept(KeptAtStop::RefreshUnplaceable),
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return AtStop::Kept(KeptAtStop::RefreshUnplaceable),
         };
-        let effort = match self.store.configured_effort(&address) {
-            Ok(Some(effort)) => effort,
-            Ok(None) | Err(_) => return AtStop::Kept(KeptAtStop::RefreshUnplaceable),
+        let model = match configured
+            .snapshot
+            .configured_models
+            .iter()
+            .find(|model| model.layer == address.layer && model.aspect == address.aspect)
+        {
+            Some(model) => model,
+            None => return AtStop::Kept(KeptAtStop::RefreshUnplaceable),
         };
         // The intent names the replacement's launch request, so a Nexus
         // that takes it up again resumes that launch; a launch already
@@ -2357,14 +2390,18 @@ impl WakesInParts for RunningNexus {
         let seat = FreshSeat {
             address: address.clone(),
             launch_request_id: launch_request_id.clone(),
-            model_name: model,
-            effort,
+            model_name: model.model_name.clone(),
+            effort: model.effort.clone(),
             herdr_session_name: fresh.herdr_session_name,
             system_modules: fresh.system_modules,
             user_modules: fresh.user_modules,
             left_out_option: fresh.left_out_option,
             tool_set: fresh.tool_set,
-            prompt: crate::composition::with_purpose_configured("", &fresh.purpose, &self.texts),
+            prompt: crate::composition::with_purpose_configured(
+                "",
+                &fresh.purpose,
+                &configured.snapshot.texts,
+            ),
         };
         let mut profile = seat.fresh_profile();
         profile.flow_id_option = Some(flow_id.to_owned());
@@ -2466,6 +2503,10 @@ impl WakesInParts for RunningNexus {
     }
 
     fn settle_rested(&self, flow_id: &str) -> AtStop {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return AtStop::Kept(KeptAtStop::StoreUnreadable),
+        };
         self.record_context_at_stop(flow_id);
         // A Codex seat's rest is its app-server's, and a Claude seat whose
         // transcript records its main turn's end_turn has ended its turn
@@ -2476,13 +2517,13 @@ impl WakesInParts for RunningNexus {
         // taken.
         if let Ok(Some(node)) = self.store.flow_node(flow_id)
             && let HerdrRouteSelection::Available(route) =
-                &self.herdr.refresh_route(node).herdr_route_selection
+                &configured.herdr.refresh_route(node).herdr_route_selection
         {
             let node = self.store.flow_node(flow_id).ok().flatten();
             if !node.as_ref().is_some_and(|node| {
                 node.harness_kind == HarnessKind::Codex || self.claude_main_turn_ended(node)
             }) {
-                self.herdr.rested(route);
+                configured.herdr.rested(route);
             }
         }
         let turn = self
@@ -2514,11 +2555,11 @@ impl WakesInParts for RunningNexus {
                 // route through the managed-agent roster would erase the
                 // only pane Flow is responsible for stopping.
                 if node.harness_kind == HarnessKind::Claude
-                    && self.herdr.flow_owned_claude_session_is_running(&node)
+                    && configured.herdr.flow_owned_claude_session_is_running(&node)
                 {
                     node
                 } else {
-                    self.herdr.refresh_route(node)
+                    configured.herdr.refresh_route(node)
                 }
             }
             Ok(None) => return AtStop::Kept(KeptAtStop::UnknownFlow),
@@ -2548,7 +2589,7 @@ impl WakesInParts for RunningNexus {
                 true
             }
             HarnessKind::Claude => {
-                let pane_agent = self.herdr.pane_agent(&node);
+                let pane_agent = configured.herdr.pane_agent(&node);
                 let native_resting = matches!(
                     &pane_agent,
                     PaneAgent::Present { agent_state, .. } if Self::rests_at(agent_state)
@@ -2560,7 +2601,8 @@ impl WakesInParts for RunningNexus {
                 // process Flow owns and can now stop. Claude may flush the
                 // final transcript row only after the hook returns, so that
                 // file cannot be the hook's own readiness prerequisite.
-                let flow_owned_resting = self.herdr.flow_owned_claude_session_is_running(&node);
+                let flow_owned_resting =
+                    configured.herdr.flow_owned_claude_session_is_running(&node);
                 // Closing a seat ends whatever runs in it: one whose main
                 // turn ended while its background agents run shows Working,
                 // and is refreshed only once Herdr shows it resting. The
@@ -2603,18 +2645,18 @@ impl WakesInParts for RunningNexus {
                 return refreshed;
             }
             if !closable {
-                return AtStop::Kept(KeptAtStop::NotResting(self.herdr.pane_agent(&node)));
+                return AtStop::Kept(KeptAtStop::NotResting(configured.herdr.pane_agent(&node)));
             }
             if let HerdrRouteSelection::Unavailable = &node.herdr_route_selection {
                 return AtStop::Kept(KeptAtStop::RefreshUnrouted);
             }
-            return match self.close_at_rest(flow_id, &node) {
+            return match self.close_at_rest(&configured, flow_id, &node) {
                 Ok(()) => AtStop::Refreshed(address),
                 Err(outcome) => AtStop::Kept(KeptAtStop::RefreshRefused(outcome)),
             };
         }
         if !metaflow.queue.is_empty() {
-            return match self.perform(Operation::Drain(address)) {
+            return match self.perform_configured(&configured, Operation::Drain(address)) {
                 Outcome::Drained(mut typed) if !typed.is_empty() => {
                     AtStop::Drained(typed.remove(0))
                 }
@@ -2628,7 +2670,7 @@ impl WakesInParts for RunningNexus {
         match continuity {
             Continuity::Maintained => AtStop::Idle,
             Continuity::OnDemand if !closable => AtStop::Idle,
-            Continuity::OnDemand => match self.close_at_rest(flow_id, &node) {
+            Continuity::OnDemand => match self.close_at_rest(&configured, flow_id, &node) {
                 Ok(()) => AtStop::Slept(address),
                 Err(outcome) => AtStop::Kept(KeptAtStop::SleepRefused(outcome)),
             },

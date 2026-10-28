@@ -325,7 +325,11 @@ fn configure_nexus_replaces_only_the_nexus_value_and_keeps_every_other_row() {
         configure(&nexus, ConfigurationChange::Nexus(replaced.clone())),
         MetaResponse::Configured(ConfigureOutcome::Replaced)
     );
-    assert_eq!(snapshot(&nexus).configured_nexus, replaced, "the whole value replaced");
+    assert_eq!(
+        snapshot(&nexus).configured_nexus,
+        replaced,
+        "the whole value replaced"
+    );
     assert_eq!(other_rows(&nexus), before, "no other row changed");
     // The same declaration again writes nothing.
     assert_eq!(
@@ -430,7 +434,11 @@ fn each_keyed_family_changes_one_entry_and_removes_that_entry() {
         )),
         MetaResponse::ConfigureRejected(ConfigureRejection::ModelServedTwice(TERRA.into()))
     );
-    assert_eq!(snapshot(&nexus), before_refusal, "a refused key writes nothing");
+    assert_eq!(
+        snapshot(&nexus),
+        before_refusal,
+        "a refused key writes nothing"
+    );
     let model = ConfigureModel {
         layer: Layer::Quaternary,
         aspect: Aspect::Field,
@@ -576,6 +584,56 @@ fn a_complete_configuration_read_names_its_one_committed_generation() {
         .expect("configured");
     assert_eq!(after_refusal.generation, refused_generation);
     assert_eq!(after_refusal.snapshot, after.snapshot);
+}
+
+#[test]
+fn an_operation_view_stays_on_a_while_the_next_operation_takes_b() {
+    let fixture = ConfiguredStore::new();
+    let nexus = fixture.open();
+    let a = nexus.configured_use().expect("operation A takes its view");
+    let a_snapshot = a.snapshot.clone();
+
+    let mut nexus_b = a_snapshot.configured_nexus.clone();
+    nexus_b.executables.herdr = "/configured/herdr-b".into();
+    nexus_b.curriculum_nexus_path = "/configured/curriculum-b.sock".into();
+    nexus_b.lease += 1;
+    assert_eq!(
+        configure(&nexus, ConfigurationChange::Nexus(nexus_b.clone())),
+        MetaResponse::Configured(ConfigureOutcome::Replaced)
+    );
+    let b = nexus.configured_use().expect("the next operation takes B");
+
+    assert_ne!(a.generation, b.generation);
+    assert_eq!(
+        a.snapshot, a_snapshot,
+        "paused A remains one immutable view"
+    );
+    assert_ne!(a.herdr.executable, b.herdr.executable);
+    assert_eq!(
+        b.herdr.executable,
+        std::path::PathBuf::from("/configured/herdr-b")
+    );
+    assert_eq!(b.snapshot.configured_nexus, nexus_b);
+    assert_eq!(
+        a.codex_endpoints.endpoints[0].client_path, b.codex_endpoints.endpoints[0].client_path,
+        "an independently unchanged family is shared by both complete views"
+    );
+
+    let refused_generation = b.generation;
+    assert_eq!(
+        nexus.dispatch_meta(meta_signal_flow::Query::ConfigureEntry(
+            ConfigurationEntry::HarnessEntry(ConfiguredStore::harness(
+                "overlapping-operation-b",
+                HarnessKind::Claude,
+                &[TERRA],
+            )),
+        )),
+        MetaResponse::ConfigureRejected(ConfigureRejection::ModelServedTwice(TERRA.into()))
+    );
+    let after_refusal = nexus.configured_use().expect("view after refusal");
+    assert_eq!(after_refusal.generation, refused_generation);
+    assert_eq!(after_refusal.snapshot, b.snapshot);
+    assert_eq!(after_refusal.herdr.executable, b.herdr.executable);
 }
 
 #[test]

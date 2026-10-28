@@ -40,6 +40,10 @@ pub(crate) trait IdentifiesPeerProcess {
 
 impl IdentifiesPeerProcess for RunningNexus {
     fn identify_peer_process(&self, process: Process) -> Result<Response, StoreError> {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Ok(Response::Refused(Refusal::NotConfigured)),
+        };
         match self.store.identify_process(process.clone())? {
             Response::Refused(Refusal::Unidentified(_)) => {}
             identified => return Ok(identified),
@@ -50,7 +54,7 @@ impl IdentifiesPeerProcess for RunningNexus {
         }
         let Some(pane) = u32::try_from(process.pid)
             .ok()
-            .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
+            .and_then(|process_id| CallerProcess { process_id }.caller_pane(&configured.herdr))
         else {
             return unidentified();
         };
@@ -95,16 +99,11 @@ impl IdentifiesThread for RunningNexus {
             }
             SendServerTrust::Trusted => {}
         }
-        let Some(configuration) = self
-            .store
-            .committed_configuration_snapshot()?
-            .map(|view| view.snapshot)
-        else {
-            return Ok(Response::Refused(Refusal::NotConfigured));
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Ok(Response::Refused(Refusal::NotConfigured)),
         };
-        let endpoints = crate::codex::CodexEndpoints::configured(&configuration)
-            .with_texts(configuration.texts);
-        let root_thread = endpoints.root_thread(&native_session_id);
+        let root_thread = configured.codex_endpoints.root_thread(&native_session_id);
         match self.store.thread_metaflow(&root_thread)? {
             Some(metaflow) if !self.rest_ended_awake(&metaflow.address) => {
                 Ok(Response::Identified(metaflow.address))
@@ -127,6 +126,10 @@ impl DispatchesMetaflowPeer for RunningNexus {
         let Some(peer) = peer else {
             return Response::Refused(Refusal::NotMessage).into();
         };
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Response::Refused(Refusal::NotConfigured).into(),
+        };
         let now = match std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
@@ -145,7 +148,7 @@ impl DispatchesMetaflowPeer for RunningNexus {
             // Awake as that flow, so the flow's own Stop drains its queue.
             let launched = u32::try_from(peer.pid)
                 .ok()
-                .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
+                .and_then(|process_id| CallerProcess { process_id }.caller_pane(&configured.herdr))
                 .and_then(|pane| self.bound_caller(&pane).ok())
                 .map(|caller| caller.flow_id);
             return match self.store.bind_metaflow(binding, peer, launched) {

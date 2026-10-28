@@ -11,9 +11,9 @@
 //! metaflow Asleep and retracts every lock it holds as a sender, and a
 //! Maintained metaflow so ended is woken into its successor.
 
+use crate::herdr::HerdrCli;
 use crate::herdr::pane::ReadsAgentStatus;
 use crate::herdr::pane::{PaneAgent, WritesPane};
-use crate::herdr::HerdrCli;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::{HoldsStopRequest, RunningNexus};
 use signal_flow::{
@@ -117,7 +117,11 @@ impl ObservesAgent for RunningNexus {
         let Some((node, _)) = self.observable(flow_id) else {
             return AgentState::Gone.observed_of(flow_id);
         };
-        let agent_state = match self.herdr.pane_agent(&node) {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return AgentState::Unknown.observed_of(flow_id),
+        };
+        let agent_state = match configured.herdr.pane_agent(&node) {
             PaneAgent::Present { agent_state, .. } => agent_state,
             PaneAgent::Absent => {
                 self.exited_as_witnessed(flow_id);
@@ -148,29 +152,29 @@ impl ObservesAgent for RunningNexus {
         let Some((_, route)) = self.observable(flow_id) else {
             return send(&AgentState::Gone.observed_of(flow_id));
         };
-        let socket = self
+        let configured = self.configured_use().map_err(|error| error.to_string())?;
+        let socket = configured
             .herdr
             .session_socket(&route.herdr_session_name)
             .ok_or("Herdr session socket not found")?;
         let mut events = HerdrEvents::subscribe(&socket, &route.herdr_pane_id)?;
         loop {
-            let poll_milliseconds = self
-                .store
-                .committed_configuration_snapshot()
-                .map_err(|error| error.to_string())?
-                .ok_or("Flow configuration is absent")?
-                .snapshot
-                .timings
-                .agent_observe_poll;
-            let Some(event) = events.next_event(
+            // Each event is a new item for a long-lived observer and takes
+            // the then-current committed generation whole.
+            let configured = self.configured_use().map_err(|error| error.to_string())?;
+            let poll_milliseconds = configured.snapshot.timings.agent_observe_poll;
+            let event = events.next_event(
                 &|| self.stopping.requested(),
                 std::time::Duration::from_millis(poll_milliseconds as u64),
-            )?
-            else {
+            )?;
+            // Configuration may have committed while the event source was
+            // blocked; processing this new item uses the new whole view.
+            let configured = self.configured_use().map_err(|error| error.to_string())?;
+            let Some(event) = event else {
                 // Herdr closed the subscription: the session is gone. The
                 // pane is read once more before the flow is recorded ended.
                 if let Some((node, _)) = self.observable(flow_id)
-                    && matches!(self.herdr.pane_agent(&node), PaneAgent::Absent)
+                    && matches!(configured.herdr.pane_agent(&node), PaneAgent::Absent)
                 {
                     self.exited_as_witnessed(flow_id);
                 }

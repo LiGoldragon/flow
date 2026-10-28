@@ -454,12 +454,8 @@ impl LaunchesDeclared for RunningNexus {
                 )));
             }
         }
-        let configuration = self
-            .store
-            .committed_configuration_snapshot()
-            .map_err(store_refused)?
-            .ok_or_else(|| Box::new(Response::Refused(Refusal::NotConfigured)))?
-            .snapshot;
+        let configured = self.configured_use().map_err(store_refused)?;
+        let configuration = &configured.snapshot;
         let Some(declaration) = configuration
             .configured_metaflows
             .iter()
@@ -484,13 +480,13 @@ impl LaunchesDeclared for RunningNexus {
         let predecessor = self.live_awake_flow(&address);
         let herdr_session_name = caller
             .and_then(|process| u32::try_from(process.pid).ok())
-            .and_then(|process_id| CallerProcess { process_id }.caller_pane(&self.herdr))
+            .and_then(|process_id| CallerProcess { process_id }.caller_pane(&configured.herdr))
             .map(|pane| pane.herdr_session_name)
             .unwrap_or_else(|| DEFAULT_HERDR_SESSION.to_owned());
         let profile = LaunchProfile {
             launch_request_id: "launch".minted_id(),
-            system_modules: declaration.system_modules,
-            user_modules: declaration.user_modules,
+            system_modules: declaration.system_modules.clone(),
+            user_modules: declaration.user_modules.clone(),
             address: address.clone(),
             model_name,
             effort,
@@ -498,7 +494,7 @@ impl LaunchesDeclared for RunningNexus {
             remembering: launch.remembering,
             herdr_session_name,
             left_out_option: None,
-            tool_set: declaration.tool_set,
+            tool_set: declaration.tool_set.clone(),
             // The declaration's purpose is composed ahead of the brief.
             instruction_prompt: crate::composition::with_purpose_configured(
                 &launch.instruction_prompt,
@@ -525,7 +521,11 @@ trait FindsSeat {
     /// caller's thread, with the Codex thread the seat runs. A Codex agent
     /// Herdr reports no session for runs the thread its pane's foreground
     /// resumes.
-    fn seat_of(&self, caller: CallerProcess) -> Option<(SeenSeat, Option<String>)>;
+    fn seat_of(
+        &self,
+        configured: &crate::ConfiguredUse,
+        caller: CallerProcess,
+    ) -> Option<(SeenSeat, Option<String>)>;
 }
 
 /// A Codex agent's thread, when Herdr reports no session for it.
@@ -534,6 +534,7 @@ trait ReadsUnreportedThread {
     /// the agent reports no session; None otherwise.
     fn unreported_thread(
         &self,
+        configured: &crate::ConfiguredUse,
         herdr_session_name: &str,
         agent: &serde_json::Value,
     ) -> Option<String>;
@@ -542,6 +543,7 @@ trait ReadsUnreportedThread {
 impl ReadsUnreportedThread for RunningNexus {
     fn unreported_thread(
         &self,
+        configured: &crate::ConfiguredUse,
         herdr_session_name: &str,
         agent: &serde_json::Value,
     ) -> Option<String> {
@@ -555,7 +557,7 @@ impl ReadsUnreportedThread for RunningNexus {
             herdr_pane_id: text("pane_id")?.to_owned(),
             herdr_terminal_id: text("terminal_id")?.to_owned(),
         };
-        let threads = self.herdr.foreground_threads(&route)?;
+        let threads = configured.herdr.foreground_threads(&route)?;
         let mut threads = threads.into_iter();
         match (threads.next(), threads.next()) {
             (Some(thread), None) => Some(thread),
@@ -565,9 +567,14 @@ impl ReadsUnreportedThread for RunningNexus {
 }
 
 impl FindsSeat for RunningNexus {
-    fn seat_of(&self, caller: CallerProcess) -> Option<(SeenSeat, Option<String>)> {
+    fn seat_of(
+        &self,
+        configured: &crate::ConfiguredUse,
+        caller: CallerProcess,
+    ) -> Option<(SeenSeat, Option<String>)> {
         let agents_of = |session: &str| -> Vec<serde_json::Value> {
-            self.herdr
+            configured
+                .herdr
                 .session_snapshot(session)
                 .and_then(|snapshot| {
                     snapshot
@@ -577,7 +584,7 @@ impl FindsSeat for RunningNexus {
                 })
                 .unwrap_or_default()
         };
-        if let Some(pane) = caller.caller_pane(&self.herdr) {
+        if let Some(pane) = caller.caller_pane(&configured.herdr) {
             let agent = agents_of(&pane.herdr_session_name)
                 .into_iter()
                 .find(|agent| {
@@ -588,14 +595,14 @@ impl FindsSeat for RunningNexus {
                 return None;
             }
             let app_servers = self.store.codex_app_servers().ok()?;
-            let caller_thread = self
+            let caller_thread = configured
                 .codex_endpoints
                 .root_thread(&caller.codex_thread(&app_servers)?);
             let seat_thread = agent
                 .pointer("/agent_session/value")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
-                .or_else(|| self.unreported_thread(&pane.herdr_session_name, &agent))?;
+                .or_else(|| self.unreported_thread(configured, &pane.herdr_session_name, &agent))?;
             if seat_thread != caller_thread {
                 return None;
             }
@@ -609,11 +616,11 @@ impl FindsSeat for RunningNexus {
             ));
         }
         let app_servers = self.store.codex_app_servers().ok()?;
-        let thread = self
+        let thread = configured
             .codex_endpoints
             .root_thread(&caller.codex_thread(&app_servers)?);
         let mut seats = Vec::new();
-        for session in self.herdr.herdr_sessions()? {
+        for session in configured.herdr.herdr_sessions()? {
             for agent in agents_of(&session.name) {
                 let runs_thread = match agent
                     .pointer("/agent_session/value")
@@ -621,7 +628,8 @@ impl FindsSeat for RunningNexus {
                 {
                     Some(reported) => reported == thread,
                     None => {
-                        self.unreported_thread(&session.name, &agent).as_deref()
+                        self.unreported_thread(configured, &session.name, &agent)
+                            .as_deref()
                             == Some(thread.as_str())
                     }
                 };
@@ -655,6 +663,10 @@ impl BindsSeats for RunningNexus {
         let Some(peer) = peer else {
             return Response::Refused(Refusal::Unidentified(Process { pid: 0, started: 0 }));
         };
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => return Response::Refused(Refusal::NotConfigured),
+        };
         let unidentified = || Response::Refused(Refusal::Unidentified(peer.clone()));
         if !FlowStore::process_is_live(peer) {
             return unidentified();
@@ -674,7 +686,7 @@ impl BindsSeats for RunningNexus {
         let Some(process_id) = u32::try_from(peer.pid).ok() else {
             return unidentified();
         };
-        let Some((seat, thread)) = self.seat_of(CallerProcess { process_id }) else {
+        let Some((seat, thread)) = self.seat_of(&configured, CallerProcess { process_id }) else {
             return unidentified();
         };
         let text = |pointer: &str| {
@@ -706,11 +718,12 @@ impl BindsSeats for RunningNexus {
             return unidentified();
         };
         let herdr_agent_name = text("/name").unwrap_or_default();
-        let model_name = self
-            .store
-            .configured_model(&address)
-            .ok()
-            .flatten()
+        let model_name = configured
+            .snapshot
+            .configured_models
+            .iter()
+            .find(|model| model.layer == address.layer && model.aspect == address.aspect)
+            .map(|model| model.model_name.clone())
             .unwrap_or_default();
         if model_name.is_empty() || thread.as_deref() != Some(native_session_id.as_str()) {
             return unidentified();
@@ -721,7 +734,7 @@ impl BindsSeats for RunningNexus {
             herdr_pane_id: herdr_pane_id.clone(),
             herdr_terminal_id: herdr_terminal_id.clone(),
         };
-        let Some(mut foreground) = self.herdr.foreground_processes(&route) else {
+        let Some(mut foreground) = configured.herdr.foreground_processes(&route) else {
             return unidentified();
         };
         foreground.retain(|process| {
@@ -742,7 +755,7 @@ impl BindsSeats for RunningNexus {
         else {
             return unidentified();
         };
-        let Ok(flow_id) = self
+        let Ok(flow_id) = configured
             .herdr
             .claim_flow_identity(&harness_kind, &native_session_id)
         else {

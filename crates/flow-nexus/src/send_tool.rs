@@ -377,15 +377,12 @@ impl HandlesSendCall for RunningNexus {
                 );
                 Self::refused(SendRefusal::Store)
             };
-            let configuration = match self.store.committed_configuration_snapshot() {
-                Ok(Some(committed)) => committed.snapshot,
-                Ok(None) => return Self::refused(SendRefusal::Store),
+            let configured = match self.configured_use() {
+                Ok(configured) => configured,
                 Err(error) => return store_refused(error),
             };
-            let codex_endpoints = crate::codex::CodexEndpoints::configured(&configuration)
-                .with_texts(configuration.texts.clone());
             // The sender is read again for every call, a replayed one included.
-            let root_thread = codex_endpoints.root_thread(&key.thread_id);
+            let root_thread = configured.codex_endpoints.root_thread(&key.thread_id);
             let sender = match self.store.thread_sender(&root_thread) {
                 Ok(Ok(sender)) => sender,
                 Ok(Err(refusal)) => return Self::refused(refusal),
@@ -414,7 +411,8 @@ impl HandlesSendCall for RunningNexus {
                 },
             };
             let sender_flow_id = sender_flow_id.or_else(|| {
-                self.herdr
+                configured
+                    .herdr
                     .claim_flow_identity(&HarnessKind::Codex, &root_thread)
                     .ok()
             });

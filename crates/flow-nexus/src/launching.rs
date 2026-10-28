@@ -29,7 +29,7 @@ use crate::store::{
 use crate::store::{AnswersLaunchOutcome, LaunchedRecord, ReplacedRecord};
 use crate::waking::{RestsEndedAwake, SettlesStopsAtConfirmation, WakePolicy};
 use crate::{
-    RunningNexus,
+    ConfiguredUse, RunningNexus,
     herdr::{PaneOwnership, PanePresence, launch::AcceptsLaunchRegistration},
     store::{
         LaunchInspectionRecords, LaunchOutcome, ReadsFlowRows, ReadsLaunchAttempt,
@@ -147,6 +147,14 @@ impl AdmitsLaunch for RunningNexus {
 pub trait LaunchesFlows {
     /// Runs or resumes the launch a profile names, for its origin.
     fn start(&self, profile: LaunchProfile, origin: Origin) -> Response;
+    /// Runs Start using the one configuration generation selected at the
+    /// external operation boundary.
+    fn start_configured(
+        &self,
+        configured: &ConfiguredUse,
+        profile: LaunchProfile,
+        origin: Origin,
+    ) -> Response;
     /// The recorded outcome of a request already settled, or None.
     fn settled(&self, profile: &LaunchProfile, origin: &Origin) -> Option<Response>;
     /// Records what a Start-path response settles, completing a replacement.
@@ -162,6 +170,7 @@ pub trait LaunchesFlows {
     /// to the confirmed receipt.
     fn launch_reserved(
         &self,
+        configured: &ConfiguredUse,
         launch: ComposedLaunch,
         origin: Origin,
         reserved: Option<String>,
@@ -169,10 +178,27 @@ pub trait LaunchesFlows {
 }
 
 impl LaunchesFlows for RunningNexus {
-    fn start(&self, mut profile: LaunchProfile, origin: Origin) -> Response {
-        profile.model_name = match self.store.configured_model(&profile.address) {
-            Ok(Some(model)) => model,
-            Ok(None) | Err(_) => {
+    fn start(&self, profile: LaunchProfile, origin: Origin) -> Response {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => {
+                return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
+            }
+        };
+        self.start_configured(&configured, profile, origin)
+    }
+
+    fn start_configured(
+        &self,
+        configured: &ConfiguredUse,
+        mut profile: LaunchProfile,
+        origin: Origin,
+    ) -> Response {
+        profile.model_name = match configured.snapshot.configured_models.iter().find(|model| {
+            model.layer == profile.address.layer && model.aspect == profile.address.aspect
+        }) {
+            Some(model) => model.model_name.clone(),
+            None => {
                 return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
             }
         };
@@ -199,8 +225,10 @@ impl LaunchesFlows for RunningNexus {
                     .as_ref()
                     .is_some_and(|intent| intent.harness_kind == HarnessKind::Codex)
             {
-                let launch = match self.perform(Operation::Compose(attempt.launch_profile.clone()))
-                {
+                let launch = match self.perform_configured(
+                    configured,
+                    Operation::Compose(attempt.launch_profile.clone()),
+                ) {
                     Outcome::Composed(launch) => launch,
                     outcome => return Self::composition_refused(outcome),
                 };
@@ -211,10 +239,12 @@ impl LaunchesFlows for RunningNexus {
                 // The thread Spawn opened and recorded is the one the pane's
                 // TUI attached to; a remote-resumed TUI reports no session.
                 let observed = match self.store.opened_thread(&launch_request_id) {
-                    Ok(Some(thread)) => self
+                    Ok(Some(thread)) => configured
                         .herdr
                         .observe_attached_codex_binding(&launch, &pane, &thread),
-                    Ok(None) => self.herdr.observe_native_binding(&launch, &pane, None),
+                    Ok(None) => configured
+                        .herdr
+                        .observe_native_binding(&launch, &pane, None),
                     Err(_) => {
                         return Response::StartRejected(StartRejection::LaunchPersistenceRefused);
                     }
@@ -264,11 +294,14 @@ impl LaunchesFlows for RunningNexus {
                 let Some(intent) = attempt.prompt_delivery_intent_option.clone() else {
                     return Response::LaunchPending(attempt);
                 };
-                return match self.herdr.observe_native_target_receipt(&intent) {
+                return match configured.herdr.observe_native_target_receipt(&intent) {
                     Ok(StartupProgress::Received(receipt)) => {
-                        if self.perform(Operation::Record(Record_Data::Delivered(
-                            signal_flow::PromptDeliveryResult::Observed(receipt),
-                        ))) != Outcome::Recorded
+                        if self.perform_configured(
+                            configured,
+                            Operation::Record(Record_Data::Delivered(
+                                signal_flow::PromptDeliveryResult::Observed(receipt),
+                            )),
+                        ) != Outcome::Recorded
                         {
                             return Response::StartRejected(
                                 StartRejection::LaunchPersistenceRefused,
@@ -302,16 +335,19 @@ impl LaunchesFlows for RunningNexus {
             Ok(Some(rejection)) => return Response::StartRejected(rejection),
             Err(_) => return persistence(),
         }
-        let launch = match self.perform(Operation::Compose(profile)) {
+        let launch = match self.perform_configured(configured, Operation::Compose(profile)) {
             Outcome::Composed(launch) => launch,
             outcome => return Self::composition_refused(outcome),
         };
         // A Claude launch's FlowId is claimed here, before its harness
         // exists; the harness is spawned with it.
-        let reserved = match self.perform(Operation::Reserve(Reserve_Data {
-            composed_launch: launch.clone(),
-            origin: origin.clone(),
-        })) {
+        let reserved = match self.perform_configured(
+            configured,
+            Operation::Reserve(Reserve_Data {
+                composed_launch: launch.clone(),
+                origin: origin.clone(),
+            }),
+        ) {
             Outcome::Reserved(Reserved_Data {
                 launch_attempt_reservation: LaunchAttemptReservation::Reserved(_),
                 flow_id_option,
@@ -339,11 +375,11 @@ impl LaunchesFlows for RunningNexus {
         // and its seat is told it in its system prompt. A Codex seat is
         // told it when Bind has claimed it, before its first turn.
         let launch = match &reserved {
-            Some(flow_id) => self.composer.carry_flow_id(&launch, flow_id),
+            Some(flow_id) => configured.composer.carry_flow_id(&launch, flow_id),
             None => launch,
         };
         let harness_kind = launch.harness_kind.clone();
-        let response = self.launch_reserved(launch, origin, reserved.clone());
+        let response = self.launch_reserved(configured, launch, origin, reserved.clone());
         // The launch's own responder ends with it, whatever it came to.
         self.close_launch_responder();
         // A launch refused after its pane exists leaves nothing running: its
@@ -351,9 +387,14 @@ impl LaunchesFlows for RunningNexus {
         // it gives back the flow it held and the FlowId it claimed; the
         // refusal stands whatever either does.
         if let Response::StartRejected(_) = &response {
-            self.abandon_refused_launch(&launch_request_id, &harness_kind, reserved.as_deref());
+            self.abandon_refused_launch_configured(
+                configured,
+                &launch_request_id,
+                &harness_kind,
+                reserved.as_deref(),
+            );
             if let Some(flow_id) = reserved {
-                let _ = self.perform(Operation::Release(flow_id));
+                let _ = self.perform_configured(configured, Operation::Release(flow_id));
             }
         }
         response
@@ -361,6 +402,7 @@ impl LaunchesFlows for RunningNexus {
 
     fn launch_reserved(
         &self,
+        configured: &ConfiguredUse,
         launch: ComposedLaunch,
         origin: Origin,
         reserved: Option<String>,
@@ -375,11 +417,14 @@ impl LaunchesFlows for RunningNexus {
             system_prompt_sha256: launch.system_prompt.system_prompt_sha256.clone(),
             prompt_sha256_vector: launch.part_hashes(),
         };
-        if self.perform(Operation::Record(Record_Data::Intent(native_intent))) != Outcome::Recorded
+        if self.perform_configured(
+            configured,
+            Operation::Record(Record_Data::Intent(native_intent)),
+        ) != Outcome::Recorded
         {
             return persistence();
         }
-        let pane = match self.perform(Operation::Open(launch.clone())) {
+        let pane = match self.perform_configured(configured, Operation::Open(launch.clone())) {
             Outcome::Opened(pane) => pane,
             outcome => return Self::native_refused(NativeLaunchStage::Open, outcome),
         };
@@ -402,22 +447,28 @@ impl LaunchesFlows for RunningNexus {
         // A Codex Spawn names the thread it opened, idle and titled, that
         // the TUI attached to; Bind requires that thread, and Submit gives
         // it its first turn.
-        let opened = match self.perform(Operation::Spawn(pane_launch.clone())) {
-            Outcome::Spawned(opened) => opened,
-            Outcome::Failed(Failed_Data::SpawnRefused(refusal)) => {
-                return Response::StartRejected(StartRejection::HarnessSpawnRefused(refusal));
-            }
-            outcome => return Self::native_refused(NativeLaunchStage::Spawn, outcome),
-        };
-        let binding = match self.perform(Operation::Bind(PaneLaunch {
-            native_session_id_option: opened,
-            ..pane_launch
-        })) {
+        let opened =
+            match self.perform_configured(configured, Operation::Spawn(pane_launch.clone())) {
+                Outcome::Spawned(opened) => opened,
+                Outcome::Failed(Failed_Data::SpawnRefused(refusal)) => {
+                    return Response::StartRejected(StartRejection::HarnessSpawnRefused(refusal));
+                }
+                outcome => return Self::native_refused(NativeLaunchStage::Spawn, outcome),
+            };
+        let binding = match self.perform_configured(
+            configured,
+            Operation::Bind(PaneLaunch {
+                native_session_id_option: opened,
+                ..pane_launch
+            }),
+        ) {
             Outcome::Bound(binding) => binding,
             outcome => return Self::native_refused(NativeLaunchStage::Bind, outcome),
         };
-        if self.perform(Operation::Record(Record_Data::Binding(binding.clone())))
-            != Outcome::Recorded
+        if self.perform_configured(
+            configured,
+            Operation::Record(Record_Data::Binding(binding.clone())),
+        ) != Outcome::Recorded
         {
             return persistence();
         }
@@ -435,7 +486,7 @@ impl LaunchesFlows for RunningNexus {
             origin,
             flow_lifecycle: FlowLifecycle::Pending,
         };
-        if !self.herdr.validate_registration(&node) {
+        if !configured.herdr.validate_registration(&node) {
             return Response::StartRejected(StartRejection::RegistrationRefused(
                 RegistrationRefusal::RouteUnverified,
             ));
@@ -446,10 +497,13 @@ impl LaunchesFlows for RunningNexus {
             layer: launch.launch_profile.address.layer.clone(),
             model_name: launch.launch_profile.model_name.clone(),
         };
-        let registered = match self.perform(Operation::Register(Register_Data {
-            flow_node: node,
-            caller,
-        })) {
+        let registered = match self.perform_configured(
+            configured,
+            Operation::Register(Register_Data {
+                flow_node: node,
+                caller,
+            }),
+        ) {
             Outcome::Registered(node) => node,
             Outcome::Failed(Failed_Data::ConflictingBinding) => {
                 return Response::StartRejected(StartRejection::RegistrationRefused(
@@ -471,9 +525,10 @@ impl LaunchesFlows for RunningNexus {
         // The acknowledgement takes the seat's Address in the same write, so
         // the seat is identified before its first prompt; an Address taken
         // meanwhile refuses it.
-        if self.perform(Operation::Record(Record_Data::Acknowledgement(
-            acknowledgement.clone(),
-        ))) != Outcome::Recorded
+        if self.perform_configured(
+            configured,
+            Operation::Record(Record_Data::Acknowledgement(acknowledgement.clone())),
+        ) != Outcome::Recorded
         {
             return match self.store.launch_address_refusal(&launch.launch_profile) {
                 Ok(Some(rejection)) => Response::StartRejected(rejection),
@@ -482,15 +537,18 @@ impl LaunchesFlows for RunningNexus {
         }
         // The claimed Flow names its own pane before any prompt: a new pane
         // never keeps a title another Flow left behind.
-        match self.perform(Operation::Title(Title_Data {
-            composed_launch: launch.clone(),
-            native_launch_binding: binding.clone(),
-        })) {
+        match self.perform_configured(
+            configured,
+            Operation::Title(Title_Data {
+                composed_launch: launch.clone(),
+                native_launch_binding: binding.clone(),
+            }),
+        ) {
             Outcome::Titled => {}
             outcome => return Self::native_refused(NativeLaunchStage::Naming, outcome),
         }
         let mut delivery_intent =
-            match self
+            match configured
                 .herdr
                 .accept_registration(&launch, &binding, &acknowledgement)
             {
@@ -507,16 +565,20 @@ impl LaunchesFlows for RunningNexus {
             };
         // A later part waits for a Stop reported after this one.
         delivery_intent.stops_reported = self.stops_reported(&binding.flow_id);
-        if self.perform(Operation::Record(Record_Data::Delivery(
-            delivery_intent.clone(),
-        ))) != Outcome::Recorded
+        if self.perform_configured(
+            configured,
+            Operation::Record(Record_Data::Delivery(delivery_intent.clone())),
+        ) != Outcome::Recorded
         {
             return Response::StartRejected(StartRejection::IntentPersistenceRefused);
         }
-        match self.perform(Operation::Submit(Submit_Data {
-            composed_launch: launch,
-            prompt_delivery_intent: delivery_intent.clone(),
-        })) {
+        match self.perform_configured(
+            configured,
+            Operation::Submit(Submit_Data {
+                composed_launch: launch,
+                prompt_delivery_intent: delivery_intent.clone(),
+            }),
+        ) {
             Outcome::Submitted(_) => self.confirmed(&binding.flow_id),
             outcome => Self::native_refused(NativeLaunchStage::Confirm, outcome),
         }
@@ -597,9 +659,19 @@ impl LaunchesFlows for RunningNexus {
     }
 
     fn replace(&self, mut profile: LaunchProfile, origin: Origin) -> Response {
-        profile.model_name = match self.store.configured_model(&profile.address) {
-            Ok(Some(model)) => model,
-            Ok(None) | Err(_) => {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => {
+                return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
+                    StartRejection::LaunchPersistenceRefused,
+                ));
+            }
+        };
+        profile.model_name = match configured.snapshot.configured_models.iter().find(|model| {
+            model.layer == profile.address.layer && model.aspect == profile.address.aspect
+        }) {
+            Some(model) => model.model_name.clone(),
+            None => {
                 return Response::ReplaceRejected(ReplaceRejection::LaunchRefused(
                     StartRejection::LaunchPersistenceRefused,
                 ));
@@ -621,7 +693,7 @@ impl LaunchesFlows for RunningNexus {
                 if let Some(settled) = self.settled(&profile, &origin) {
                     return Self::as_replacement(settled);
                 }
-                let response = self.start(profile, origin);
+                let response = self.start_configured(&configured, profile, origin);
                 return Self::as_replacement(self.settle(&launch_request_id, response));
             }
             Ok(None) => {}
@@ -653,23 +725,37 @@ impl LaunchesFlows for RunningNexus {
             Ok(Some(_)) => {}
             Err(_) => return persistence(),
         }
-        if self.perform(Operation::Record(Record_Data::Replacing(Replacement {
-            launch_request_id: launch_request_id.clone(),
-            predecessor,
-        }))) != Outcome::Recorded
+        if self.perform_configured(
+            &configured,
+            Operation::Record(Record_Data::Replacing(Replacement {
+                launch_request_id: launch_request_id.clone(),
+                predecessor,
+            })),
+        ) != Outcome::Recorded
         {
             return persistence();
         }
-        let response = self.start(profile, origin);
+        let response = self.start_configured(&configured, profile, origin);
         Self::as_replacement(self.settle(&launch_request_id, response))
     }
 
     fn reap(&self, replacement: Replacement, launched: Launched) -> Response {
+        let configured = match self.configured_use() {
+            Ok(configured) => configured,
+            Err(_) => {
+                return Response::ReplaceRejected(ReplaceRejection::ReapRefused(
+                    StopRejection::PersistenceRefused,
+                ));
+            }
+        };
         let refuse = |rejection: ReplaceRejection| {
-            let _ = self.perform(Self::settled_as(
-                &replacement.launch_request_id,
-                LaunchOutcome::ReplaceRejected(rejection.clone()),
-            ));
+            let _ = self.perform_configured(
+                &configured,
+                Self::settled_as(
+                    &replacement.launch_request_id,
+                    LaunchOutcome::ReplaceRejected(rejection.clone()),
+                ),
+            );
             Response::ReplaceRejected(rejection)
         };
         let node = match self.store.flow_node(&replacement.predecessor) {
@@ -684,9 +770,10 @@ impl LaunchesFlows for RunningNexus {
         // The predecessor stops receiving first: Stopped is what
         // ResolveRecipient and Deliver refuse.
         if node.flow_lifecycle != FlowLifecycle::Stopped
-            && self.perform(Operation::Record(Record_Data::Stopped(
-                replacement.predecessor.clone(),
-            ))) != Outcome::Recorded
+            && self.perform_configured(
+                &configured,
+                Operation::Record(Record_Data::Stopped(replacement.predecessor.clone())),
+            ) != Outcome::Recorded
         {
             return refuse(ReplaceRejection::ReapRefused(
                 StopRejection::PersistenceRefused,
@@ -696,7 +783,7 @@ impl LaunchesFlows for RunningNexus {
         // a pane that exists is closed, and its failed close refuses. When
         // Herdr cannot be read the pane may still be open: the reap is
         // refused as retryable and the successor stays unroutable.
-        match self.herdr.pane_presence(&node) {
+        match configured.herdr.pane_presence(&node) {
             PanePresence::Absent => {}
             PanePresence::Unknown => {
                 return refuse(ReplaceRejection::ReapRefused(
@@ -704,7 +791,7 @@ impl LaunchesFlows for RunningNexus {
                 ));
             }
             PanePresence::Present | PanePresence::Bare => {
-                match self.perform(Operation::Close(node)) {
+                match self.perform_configured(&configured, Operation::Close(node)) {
                     Outcome::Closed => {}
                     Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) => {
                         return refuse(ReplaceRejection::ReapRefused(StopRejection::CloseRefused(
@@ -925,11 +1012,36 @@ pub(crate) trait AbandonsRefusedLaunch {
         harness_kind: &HarnessKind,
         reserved: Option<&str>,
     ) -> LaunchTeardown;
+    fn abandon_refused_launch_configured(
+        &self,
+        configured: &ConfiguredUse,
+        launch_request_id: &str,
+        harness_kind: &HarnessKind,
+        reserved: Option<&str>,
+    ) -> LaunchTeardown;
 }
 
 impl AbandonsRefusedLaunch for RunningNexus {
     fn abandon_refused_launch(
         &self,
+        launch_request_id: &str,
+        harness_kind: &HarnessKind,
+        reserved: Option<&str>,
+    ) -> LaunchTeardown {
+        let Ok(configured) = self.configured_use() else {
+            return LaunchTeardown::Kept(PaneOwnership::Unknown);
+        };
+        self.abandon_refused_launch_configured(
+            &configured,
+            launch_request_id,
+            harness_kind,
+            reserved,
+        )
+    }
+
+    fn abandon_refused_launch_configured(
+        &self,
+        configured: &ConfiguredUse,
         launch_request_id: &str,
         harness_kind: &HarnessKind,
         reserved: Option<&str>,
@@ -951,11 +1063,13 @@ impl AbandonsRefusedLaunch for RunningNexus {
             let HerdrRouteSelection::Available(route) = &node.herdr_route_selection else {
                 return LaunchTeardown::Kept(PaneOwnership::Unknown);
             };
-            match self.herdr.pane_ownership(&node) {
+            match configured.herdr.pane_ownership(&node) {
                 PaneOwnership::Absent => {}
                 PaneOwnership::Owned | PaneOwnership::Bare => {
                     let _lease = self.pane_leases.hold(&route);
-                    if self.perform(Operation::Close(node.clone())) != Outcome::Closed {
+                    if self.perform_configured(configured, Operation::Close(node.clone()))
+                        != Outcome::Closed
+                    {
                         eprintln!(
                             "flow-nexus: refused launch {launch_request_id} left flow {} Pending: its pane was not closed",
                             node.flow_id
@@ -971,9 +1085,10 @@ impl AbandonsRefusedLaunch for RunningNexus {
                     return LaunchTeardown::Kept(kept);
                 }
             }
-            if self.perform(Operation::Record(Record_Data::Stopped(
-                node.flow_id.clone(),
-            ))) != Outcome::Recorded
+            if self.perform_configured(
+                configured,
+                Operation::Record(Record_Data::Stopped(node.flow_id.clone())),
+            ) != Outcome::Recorded
             {
                 eprintln!(
                     "flow-nexus: refused launch {launch_request_id}: flow {} not recorded Stopped",
@@ -991,7 +1106,8 @@ impl AbandonsRefusedLaunch for RunningNexus {
         let session_id = match harness_kind {
             HarnessKind::Codex => self.store.opened_thread(launch_request_id).ok().flatten(),
             HarnessKind::Claude => reserved.and_then(|flow_id| {
-                self.herdr
+                configured
+                    .herdr
                     .claimed_native_identity(flow_id, &HarnessKind::Claude)
                     .ok()
             }),
@@ -1011,10 +1127,10 @@ impl AbandonsRefusedLaunch for RunningNexus {
             origin: Origin::Unbound,
             flow_lifecycle: FlowLifecycle::Pending,
         };
-        let teardown = match self.herdr.pane_ownership(&node) {
+        let teardown = match configured.herdr.pane_ownership(&node) {
             PaneOwnership::Absent => LaunchTeardown::TakenDown,
             PaneOwnership::Owned | PaneOwnership::Bare => {
-                if self.perform(Operation::Close(node)) == Outcome::Closed {
+                if self.perform_configured(configured, Operation::Close(node)) == Outcome::Closed {
                     LaunchTeardown::TakenDown
                 } else {
                     LaunchTeardown::CloseFailed

@@ -109,12 +109,6 @@ pub struct RunningNexus {
     pub codex_endpoints: CodexEndpoints,
     pub herdr: herdr::HerdrCli,
     pub composer: LaunchComposer,
-    /// The committed timing configuration captured with the startup snapshot.
-    pub timings: meta_signal_flow::Timings,
-    /// The committed size and count limits captured with the startup snapshot.
-    pub limits: meta_signal_flow::Limits,
-    /// Authored wording captured with the committed startup snapshot.
-    pub texts: meta_signal_flow::Texts,
     /// Serializes dispatch; see `dispatch_serially`.
     pub dispatch_gate: Mutex<()>,
     /// The exclusive hold on each pane Flow is writing; see
@@ -304,16 +298,29 @@ impl Dispatches for RunningNexus {
                 self.refresh(&address)
             }
             Query::ResolveRecipient(flow_id) => {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(error) => {
+                        return Response::Refused(signal_flow::Refusal::Store(error.to_string()));
+                    }
+                };
                 match self.store.apply(Query::ResolveRecipient(flow_id)) {
                     Ok(Response::RecipientResolved(node)) => Response::RecipientResolved(
-                        self.herdr
-                            .refresh_route(self.herdr.claude_daemon.refreshed(node)),
+                        configured
+                            .herdr
+                            .refresh_route(configured.herdr.claude_daemon.refreshed(node)),
                     ),
                     Ok(response) => response,
                     Err(error) => Response::Refused(signal_flow::Refusal::Store(error.to_string())),
                 }
             }
             Query::Stop(flow_id) => {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(error) => {
+                        return Response::Refused(signal_flow::Refusal::Store(error.to_string()));
+                    }
+                };
                 let node = match self.store.flow_node(&flow_id) {
                     Ok(Some(node)) => node,
                     Ok(None) => {
@@ -335,7 +342,7 @@ impl Dispatches for RunningNexus {
                     return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
                 };
                 if !matches!(
-                    self.herdr.pane_presence(&node),
+                    configured.herdr.pane_presence(&node),
                     herdr::PanePresence::Present | herdr::PanePresence::Bare
                 ) {
                     return Response::StopRejected(signal_flow::StopRejection::RouteUnavailable);
@@ -343,7 +350,7 @@ impl Dispatches for RunningNexus {
                 // No write is left half-typed into a pane as it closes.
                 let closed = {
                     let _lease = self.pane_leases.hold(&route);
-                    self.perform(Operation::Close(node.clone()))
+                    self.perform_configured(&configured, Operation::Close(node.clone()))
                 };
                 if let Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) = closed {
                     return Response::StopRejected(signal_flow::StopRejection::CloseRefused(
@@ -474,13 +481,22 @@ impl Dispatches for RunningNexus {
                 configured_response(self.store.remove_entry(key))
             }
             meta_signal_flow::Query::ConsumeReset(request) => self
-                .codex_endpoints
-                .endpoints
-                .first()
-                .and_then(|endpoint| endpoint.model_names.first())
-                .ok_or(())
-                .and_then(|model| self.codex_endpoints.adapter_for(model).map_err(|_| ()))
-                .and_then(|adapter| adapter.consume_reset_credit(&request).map_err(|_| ()))
+                .configured_use()
+                .map_err(|_| ())
+                .and_then(|configured| {
+                    let model = configured
+                        .codex_endpoints
+                        .endpoints
+                        .first()
+                        .and_then(|endpoint| endpoint.model_names.first())
+                        .ok_or(())?;
+                    configured
+                        .codex_endpoints
+                        .adapter_for(model)
+                        .map_err(|_| ())?
+                        .consume_reset_credit(&request)
+                        .map_err(|_| ())
+                })
                 .map(meta_signal_flow::Response::ResetConsumed)
                 .unwrap_or(meta_signal_flow::Response::ResetRejected(
                     meta_signal_flow::ResetRejection::AdapterUnavailable,
@@ -497,6 +513,14 @@ impl Dispatches for RunningNexus {
             // first. Privileged, because it changes what Flow holds of a
             // flow without that flow acting.
             meta_signal_flow::Query::Retire(request) => {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => {
+                        return meta_signal_flow::Response::RetireRejected(
+                            meta_signal_flow::RetireRejection::StoreRefused,
+                        );
+                    }
+                };
                 let flow_id = request.flow_id;
                 let node = match self.store.flow_node(&flow_id) {
                     Ok(Some(node)) => node,
@@ -544,13 +568,13 @@ impl Dispatches for RunningNexus {
                 }
                 if let HerdrRouteSelection::Available(route) = &node.herdr_route_selection
                     && matches!(
-                        self.herdr.pane_presence(&node),
+                        configured.herdr.pane_presence(&node),
                         herdr::PanePresence::Present | herdr::PanePresence::Bare
                     )
                 {
                     let closed = {
                         let _lease = self.pane_leases.hold(&route);
-                        self.perform(Operation::Close(node.clone()))
+                        self.perform_configured(&configured, Operation::Close(node.clone()))
                     };
                     if let Outcome::Failed(Failed_Data::PaneCloseRefused(failure)) = closed {
                         return meta_signal_flow::Response::RetireRejected(
@@ -865,7 +889,15 @@ impl Dispatches for RunningNexus {
                 self.withdraw(withdraw)
             }
             meta_signal_flow::Query::RegisterFlow(flow_node) => {
-                if !self.herdr.validate_registration(&flow_node) {
+                let configured = match self.configured_use() {
+                    Ok(configured) => configured,
+                    Err(_) => {
+                        return meta_signal_flow::Response::FlowRegistrationRejected(
+                            meta_signal_flow::FlowRegistrationRejection::UnknownOrUnclaimedIdentity,
+                        );
+                    }
+                };
+                if !configured.herdr.validate_registration(&flow_node) {
                     return meta_signal_flow::Response::FlowRegistrationRejected(
                         meta_signal_flow::FlowRegistrationRejection::UnknownOrUnclaimedIdentity,
                     );
@@ -981,9 +1013,6 @@ impl OpensRunningNexus for RunningNexus {
                 snapshot.limits.clone(),
                 texts.clone(),
             ),
-            timings: snapshot.timings.clone(),
-            limits: snapshot.limits.clone(),
-            texts,
             dispatch_gate: Mutex::new(()),
             pane_leases: delivery::lease::PaneLeases::default(),
             waking: waking::WakingMetaflows::default(),
@@ -1071,9 +1100,13 @@ impl ServesConnection for Connection {
     }
 
     fn serve_ordinary(mut self, nexus: &RunningNexus) -> Result<(), String> {
-        let query = self
-            .peer
-            .read_query_with_limit(nexus.limits.frame as usize)?;
+        let frame_limit = nexus
+            .configured_use()
+            .map_err(|error| error.to_string())?
+            .snapshot
+            .limits
+            .frame;
+        let query = self.peer.read_query_with_limit(frame_limit as usize)?;
         let response = match query {
             // Reads of launch state never wait behind a running launch.
             Query::LaunchStatus(launch_request_id) => nexus.launch_status(&launch_request_id),
@@ -1232,9 +1265,13 @@ impl ServesConnection for Connection {
     }
 
     fn serve_meta(mut self, nexus: &RunningNexus) -> Result<(), String> {
-        let query = self
-            .peer
-            .read_meta_query_with_limit(nexus.limits.frame as usize)?;
+        let frame_limit = nexus
+            .configured_use()
+            .map_err(|error| error.to_string())?
+            .snapshot
+            .limits
+            .frame;
+        let query = self.peer.read_meta_query_with_limit(frame_limit as usize)?;
         // The peer is read from the kernel; nothing in the query names it.
         let peer = self.peer.peer_process();
         let response = match nexus.meta_refusal(peer) {
@@ -1307,7 +1344,11 @@ pub trait ListensOnSocket {
 
 impl ListensOnSocket for RunningNexus {
     fn socket_timeout(&self) -> Duration {
-        Duration::from_millis(self.timings.socket_timeout as u64)
+        self.configured_use()
+            .map(|configured| {
+                Duration::from_millis(configured.snapshot.timings.socket_timeout as u64)
+            })
+            .unwrap_or(Duration::ZERO)
     }
 
     fn stopping(&self) -> bool {
@@ -1518,9 +1559,12 @@ impl ReconcilesListedFlows for RunningNexus {
         if !node.flow_lifecycle.is_live() {
             return node;
         }
-        match self.herdr.pane_presence(&node) {
+        let Ok(configured) = self.configured_use() else {
+            return node;
+        };
+        match configured.herdr.pane_presence(&node) {
             herdr::PanePresence::Present => {
-                let mut node = self.herdr.refresh_route(node);
+                let mut node = configured.herdr.refresh_route(node);
                 node.flow_lifecycle = FlowLifecycle::Active;
                 node
             }
@@ -2656,9 +2700,6 @@ mod tests {
                         ][..],
                     ),
                 )),
-                timings: crate::store::timings_limits::seed_timings().expect("timings seed"),
-                limits: crate::store::timings_limits::seed_limits().expect("limits seed"),
-                texts: crate::store::texts::seed_texts().expect("texts seed"),
                 dispatch_gate: std::sync::Mutex::new(()),
                 pane_leases: crate::delivery::lease::PaneLeases::default(),
                 waking: crate::waking::WakingMetaflows::default(),

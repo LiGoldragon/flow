@@ -893,14 +893,13 @@ impl LaunchesFlows for RunningNexus {
 /// queue of a target a recorded call reached is left as it is: its wake is
 /// the Nexus's start's `recover_wakes`, or the next request queued for it.
 pub trait ReconcilesInterruptedLaunches {
+    fn reconcile_interrupted_launches_configured(&self, configured: &ConfiguredUse);
+    #[cfg(test)]
     fn reconcile_interrupted_launches(&self);
 }
 
 impl ReconcilesInterruptedLaunches for RunningNexus {
-    fn reconcile_interrupted_launches(&self) {
-        let Ok(configured) = self.configured_use() else {
-            return;
-        };
+    fn reconcile_interrupted_launches_configured(&self, configured: &ConfiguredUse) {
         use crate::codex::{AccountsOpenedThread, SelectsCodexEndpoint};
         use crate::send_tool::RefusesInterruptedCalls;
         use crate::store::launch_cleanup::{
@@ -955,9 +954,9 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
                     _ => continue,
                 }
             };
-            if unsettled && let Ok(configured) = self.configured_use() {
+            if unsettled {
                 self.settle_configured(
-                    &configured,
+                    configured,
                     &launch_request_id,
                     Response::StartRejected(StartRejection::NativeLaunchRefused(
                         NativeLaunchRefusal {
@@ -996,7 +995,12 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
                 }
             }
             if cleanup.step(CleanupPart::Pane) == CleanupStep::Pending {
-                match self.abandon_refused_launch(&launch_request_id, &HarnessKind::Codex, None) {
+                match self.abandon_refused_launch_configured(
+                    configured,
+                    &launch_request_id,
+                    &HarnessKind::Codex,
+                    None,
+                ) {
                     LaunchTeardown::TakenDown => {
                         if let Err(error) = self
                             .store
@@ -1012,6 +1016,13 @@ impl ReconcilesInterruptedLaunches for RunningNexus {
                     ),
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    fn reconcile_interrupted_launches(&self) {
+        if let Ok(configured) = self.configured_use() {
+            self.reconcile_interrupted_launches_configured(&configured);
         }
     }
 }
@@ -1043,6 +1054,7 @@ pub(crate) trait AbandonsRefusedLaunch {
     /// later reconciliation. A flow it registered is recorded Stopped once
     /// its pane is closed or Herdr shows it gone; otherwise it stays as it
     /// was, for Stop to finish.
+    #[cfg(test)]
     fn abandon_refused_launch(
         &self,
         launch_request_id: &str,
@@ -1059,6 +1071,7 @@ pub(crate) trait AbandonsRefusedLaunch {
 }
 
 impl AbandonsRefusedLaunch for RunningNexus {
+    #[cfg(test)]
     fn abandon_refused_launch(
         &self,
         launch_request_id: &str,

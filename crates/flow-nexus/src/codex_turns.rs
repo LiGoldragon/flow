@@ -26,11 +26,11 @@
 //! The state is memory only. A Nexus that starts again reads each live
 //! thread's status from its responder's `thread/resume`.
 
-use crate::RunningNexus;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::waking::{HoldsWakingMetaflows, NotesStopsAtConfirmation, SleepsAndWakesSeats};
+use crate::{ConfiguredUse, RunningNexus};
 use signal_flow::{Address, FlowId, FlowNode, HarnessKind};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -261,10 +261,24 @@ pub trait SettlesRestingCodexSeats {
     /// Off the dispatch gate, from a responder: applies the events under
     /// the gate, then settles the Codex flow on the thread once if they
     /// left it resting with work queued.
+    fn codex_events_configured(
+        &self,
+        configured: &ConfiguredUse,
+        thread: &str,
+        events: Vec<TurnEvent>,
+    );
+    #[cfg(test)]
     fn codex_events(&self, thread: &str, events: Vec<TurnEvent>);
     /// Under the dispatch gate, as a launch holding it reads its own
     /// connection: applies the events, and notes the flow on the thread to
     /// be settled once the gate is given back when they left it resting.
+    fn observe_codex_events_configured(
+        &self,
+        configured: &ConfiguredUse,
+        thread: &str,
+        events: Vec<TurnEvent>,
+    );
+    #[cfg(test)]
     fn observe_codex_events(&self, thread: &str, events: Vec<TurnEvent>);
     /// The live Codex flow on `thread`, when there is exactly one.
     fn codex_flow_on(&self, thread: &str) -> Option<FlowNode>;
@@ -281,14 +295,16 @@ pub trait SettlesRestingCodexSeats {
 }
 
 impl SettlesRestingCodexSeats for RunningNexus {
-    fn codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
+    fn codex_events_configured(
+        &self,
+        configured: &ConfiguredUse,
+        thread: &str,
+        events: Vec<TurnEvent>,
+    ) {
         if events.is_empty() {
             return;
         }
-        let remembered_turns = match self.configured_use() {
-            Ok(configured) => configured.snapshot.limits.remembered_turns as usize,
-            _ => return,
-        };
+        let remembered_turns = configured.snapshot.limits.remembered_turns as usize;
         let seat = {
             let _turn = self
                 .dispatch_gate
@@ -309,11 +325,13 @@ impl SettlesRestingCodexSeats for RunningNexus {
         }
     }
 
-    fn observe_codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
-        let remembered_turns = match self.configured_use() {
-            Ok(configured) => configured.snapshot.limits.remembered_turns as usize,
-            _ => return,
-        };
+    fn observe_codex_events_configured(
+        &self,
+        configured: &ConfiguredUse,
+        thread: &str,
+        events: Vec<TurnEvent>,
+    ) {
+        let remembered_turns = configured.snapshot.limits.remembered_turns as usize;
         for event in events {
             self.codex_turns.observe(thread, event, remembered_turns);
         }
@@ -324,6 +342,20 @@ impl SettlesRestingCodexSeats for RunningNexus {
         {
             // An unconfirmed seat is noted by its confirmation instead.
             self.stopped_at_confirmation.note(&node.flow_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
+        if let Ok(configured) = self.configured_use() {
+            self.codex_events_configured(&configured, thread, events);
+        }
+    }
+
+    #[cfg(test)]
+    fn observe_codex_events(&self, thread: &str, events: Vec<TurnEvent>) {
+        if let Ok(configured) = self.configured_use() {
+            self.observe_codex_events_configured(&configured, thread, events);
         }
     }
 

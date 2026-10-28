@@ -71,7 +71,7 @@ use context::{CurriculumComposer, OpensCurriculumComposer};
 use delivery::{DeliversMessages, lease::LeasesPanes};
 use generated::operation::{Failed_Data, Operation, Outcome, Record_Data};
 use generated::starter::DerivesOrigin;
-use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch};
+use launching::{AdmitsLaunch, LaunchesFlows, ObservesLaunch, ReconcilesInterruptedLaunches};
 use observe_agent::ObservesAgent;
 use observe_sends::ObservesLogicalSends;
 use peer::{AdmitsMetaPeer, NamesMetaPeer, ResolvesPeer};
@@ -181,6 +181,13 @@ impl RunningNexus {
         self.stopping.requested()
     }
 
+    /// Reconciles launch recovery from the root startup ingress.
+    pub fn reconcile_interrupted_launches_ingress(&self) {
+        if let Ok(configured) = self.configured_use() {
+            self.reconcile_interrupted_launches_configured(&configured);
+        }
+    }
+
     pub(crate) fn configured_use(&self) -> Result<ConfiguredUse, store::StoreError> {
         let committed = self
             .store
@@ -285,9 +292,11 @@ impl RunningNexus {
             dispatch_gate: &self.dispatch_gate,
             launch_calls: &self.launch_calls,
             stopping: &self.stopping,
-            codex_events: Box::new(move |thread, events| self.codex_events(thread, events)),
+            codex_events: Box::new(move |thread, events| {
+                self.codex_events_configured(configured, thread, events)
+            }),
             observe_codex_events: Box::new(move |thread, events| {
-                self.observe_codex_events(thread, events)
+                self.observe_codex_events_configured(configured, thread, events)
             }),
             codex_context_signal: Box::new(move |thread, signal| {
                 self.codex_context_signal_configured(configured, thread, signal)
@@ -1341,7 +1350,8 @@ impl ServesConnection for Connection {
                         signal_flow::Refusal::Unidentified(Process { pid: 0, started: 0 }),
                     ));
                 };
-                let sender = match nexus.observation_sender(process, None) {
+                let configured = nexus.configured_use().map_err(|error| error.to_string())?;
+                let sender = match nexus.observation_sender(&configured, process, None) {
                     Ok(sender) => sender,
                     Err(refusal) => return self.peer.write_response(&refusal),
                 };
@@ -1353,7 +1363,9 @@ impl ServesConnection for Connection {
                         .peer
                         .write_response(&Response::Refused(signal_flow::Refusal::NotMessage));
                 };
-                let sender = match nexus.observation_sender(process, Some(&forwarded)) {
+                let configured = nexus.configured_use().map_err(|error| error.to_string())?;
+                let sender = match nexus.observation_sender(&configured, process, Some(&forwarded))
+                {
                     Ok(sender) => sender,
                     Err(refusal) => return self.peer.write_response(&refusal),
                 };
@@ -1381,7 +1393,7 @@ impl ServesConnection for Connection {
                 if response == Response::Reported
                     && let Some(flow_id) = flow_id
                 {
-                    nexus.after_report(&flow_id, &event);
+                    nexus.after_report_configured(&configured, &flow_id, &event);
                 }
                 return Ok(());
             }

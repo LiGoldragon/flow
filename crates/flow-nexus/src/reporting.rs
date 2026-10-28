@@ -42,6 +42,8 @@ pub trait RecordsReports {
     /// oldest queued request or sleeps when nothing waits for it (see
     /// `waking`). Runs after the
     /// hook has its answer, so the harness never waits on it.
+    fn after_report_configured(&self, configured: &ConfiguredUse, flow_id: &FlowId, event: &Event);
+    #[cfg(test)]
     fn after_report(&self, flow_id: &FlowId, event: &Event);
     fn read_events(&self, request: meta_signal_flow::ReadEvents_Data)
     -> meta_signal_flow::Response;
@@ -107,10 +109,7 @@ impl RecordsReports for RunningNexus {
         }
     }
 
-    fn after_report(&self, flow_id: &FlowId, event: &Event) {
-        let Ok(configured) = self.configured_use() else {
-            return;
-        };
+    fn after_report_configured(&self, configured: &ConfiguredUse, flow_id: &FlowId, event: &Event) {
         if let Event::Started(Some(session)) = event {
             self.follow_cleared_session(flow_id, session);
         }
@@ -167,6 +166,13 @@ impl RecordsReports for RunningNexus {
             // A cleared session is not an exit: the harness goes on in the
             // session the next Started names.
             Event::Started(_) | Event::ToolUsed(_) | Event::Notified(_) | Event::Cleared(_) => {}
+        }
+    }
+
+    #[cfg(test)]
+    fn after_report(&self, flow_id: &FlowId, event: &Event) {
+        if let Ok(configured) = self.configured_use() {
+            self.after_report_configured(&configured, flow_id, event);
         }
     }
 

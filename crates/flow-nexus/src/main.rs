@@ -152,7 +152,7 @@ fn main() -> ExitCode {
     // A Codex launch the last Nexus left mid-way, its first turn perhaps
     // pending on a send call, is refused and settled before anything is
     // served.
-    nexus.reconcile_interrupted_launches();
+    nexus.reconcile_interrupted_launches_ingress();
     // Every thread borrows the Nexus inside this scope, so when a stop has
     // ended them all the Nexus drops here and its store closes cleanly.
     let send_tool_ingress = nexus.send_tool_ingress();

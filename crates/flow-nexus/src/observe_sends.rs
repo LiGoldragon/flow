@@ -4,13 +4,14 @@ use crate::sending::IdentifiesSender;
 use crate::store::AnnouncesLaunchChanges;
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::MutatesMetaflows;
-use crate::{HoldsStopRequest, RunningNexus};
+use crate::{ConfiguredUse, HoldsStopRequest, RunningNexus};
 use signal_flow::{Address, ObserveSender_Data, Process, Refusal, Response};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) trait ObservesLogicalSends {
     fn observation_sender(
         &self,
+        configured: &ConfiguredUse,
         peer: &Process,
         forwarded: Option<&ObserveSender_Data>,
     ) -> Result<Address, Box<Response>>;
@@ -26,14 +27,12 @@ pub(crate) trait ObservesLogicalSends {
 impl ObservesLogicalSends for RunningNexus {
     fn observation_sender(
         &self,
+        configured: &ConfiguredUse,
         peer: &Process,
         forwarded: Option<&ObserveSender_Data>,
     ) -> Result<Address, Box<Response>> {
-        let configured = self
-            .configured_use()
-            .map_err(|error| Box::new(Response::Refused(Refusal::Store(error.to_string()))))?;
         let Some(forwarded) = forwarded else {
-            return self.sending_address(&configured, peer);
+            return self.sending_address(configured, peer);
         };
         match self.store.message_peer(peer) {
             Ok(true) => {}

@@ -6227,7 +6227,8 @@ impl OpensFlowStore for FlowStore {
                 QueueDeliveryPhase::Prepared
                 | QueueDeliveryPhase::Settled(_)
                 | QueueDeliveryPhase::Absent(_)
-                | QueueDeliveryPhase::Resolved(_) => {
+                | QueueDeliveryPhase::Resolved(_)
+                | QueueDeliveryPhase::TransportOverlimit(_) => {
                     return Err(StoreError::StateInvariant);
                 }
             }
@@ -9099,7 +9100,7 @@ pub(crate) trait ReadsFlowMemory {
             ),
             "flow_nexus_queue_delivery_attempts" => (
                 "flow-nexus-queue-delivery-attempt",
-                "flow-nexus-queue-delivery-attempt-v6",
+                "flow-nexus-queue-delivery-attempt-v7",
             ),
             _ => return None,
         };
@@ -9338,6 +9339,10 @@ pub(crate) trait ReadsFlowMemory {
                 (
                     "flow-nexus-queue-delivery-attempt",
                     <queue_delivery::QueueDeliveryAttemptV5 as MemoryDefinition>::schema_hash(),
+                ),
+                (
+                    "flow-nexus-queue-delivery-attempt",
+                    <queue_delivery::QueueDeliveryAttemptV6 as MemoryDefinition>::schema_hash(),
                 ),
             ],
             "flow_nexus_flow_events" => &[

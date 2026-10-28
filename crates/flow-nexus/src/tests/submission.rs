@@ -10,8 +10,8 @@ use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
 use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use meta_signal_flow::{
-    Body, Delivery, DeliveryGrade, DeliveryRejection, DeliveryRequest, InterruptWitness, Letter,
-    Message, Query as MetaQuery, Response as MetaResponse,
+    Body, Delivery, DeliveryGrade, DeliveryRejection, InterruptWitness, Letter, Message,
+    Query as MetaQuery, Response as MetaResponse,
 };
 use signal_flow::{FlowLifecycle, HarnessKind};
 use std::fs;
@@ -85,17 +85,15 @@ impl FixtureComposer {
 
 impl NexusFixture {
     fn deliver_soft(&self, delivery_id: &str, text: &str) -> MetaResponse {
-        self.nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: delivery_id.into(),
-                flow_id: "908786".into(),
-                message: Message::Soft(Letter {
-                    kind: meta_signal_flow::Kind::Notice,
-                    sender: super::fixture_sender(),
-                    body: Body::Words(text.into()),
-                }),
-            }))
+        self.nexus.deliver_cohort(
+            delivery_id.into(),
+            "908786".into(),
+            vec![Message::Soft(Letter {
+                kind: meta_signal_flow::Kind::Notice,
+                sender: super::fixture_sender(),
+                body: Body::Words(text.into()),
+            })],
+        )
     }
 
     /// Makes the fixture composer keep what `agent prompt` types, as a
@@ -256,15 +254,15 @@ fn delivered(delivery_id: &str, delivery_grade: DeliveryGrade) -> MetaResponse {
 fn a_letter_herdr_calls_prompted_but_the_composer_still_holds_is_not_presented() {
     let fixture = NexusFixture::new();
     fixture.resting_recipient(Composer::SubmitsOnEnter);
-    // This configured Codex installation has no submit key: its ordinary
-    // line placement submits itself. The fixture deliberately keeps the
-    // line, so the claimed prompt event cannot prove submission.
+    // Herdr answered agent_prompted after a state change; the composer
+    // kept the letter until Flow pressed the submit key once itself. The
+    // reaction Herdr saw was not this letter's, so it is Transported.
     assert_eq!(
         fixture.deliver_soft("stuck-1", "when you rest"),
-        delivered("stuck-1", DeliveryGrade::Uncertain)
+        delivered("stuck-1", DeliveryGrade::Transported)
     );
-    assert_eq!(fixture.key_presses(), ["ctrl+u backspace"]);
-    assert!(fixture.composer_holds().is_some());
+    assert_eq!(fixture.key_presses(), ["enter"]);
+    assert_eq!(fixture.composer_holds(), None);
 }
 
 #[test]
@@ -275,9 +273,11 @@ fn a_letter_that_will_not_submit_is_taken_back_and_parked() {
         fixture.deliver_soft("stuck-2", "first line\nsecond line"),
         MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
     );
-    // No submit key is configured; the configured line-by-line retraction
-    // takes the stuck two-line letter back out.
-    assert_eq!(fixture.key_presses(), ["ctrl+u backspace ctrl+u backspace"]);
+    // One submit, then a kill-line and a join for each line of the letter.
+    assert_eq!(
+        fixture.key_presses(),
+        ["enter", "ctrl+u backspace ctrl+u backspace"]
+    );
     assert_eq!(fixture.composer_holds(), None, "the pane is free again");
     // Nothing of a taken-back letter is kept: Message may deliver it again
     // under the same DeliveryId, and this time it submits.
@@ -324,7 +324,7 @@ fn a_letter_seen_leaving_the_composer_is_presented_with_no_key_pressed() {
 }
 
 /// Herdr's `agent_prompt_stalled` follows typed input: the letter may sit
-/// in the composer. With no configured submit key the result is uncertain.
+/// in the composer. It is submitted there too, and the pane is let go.
 #[test]
 fn a_stalled_prompt_left_in_the_composer_is_submitted() {
     let fixture = NexusFixture::new();
@@ -336,10 +336,10 @@ fn a_stalled_prompt_left_in_the_composer_is_submitted() {
     fixture.register_with(FlowLifecycle::Active);
     assert_eq!(
         fixture.deliver_soft("stalled-1", "when you rest"),
-        delivered("stalled-1", DeliveryGrade::Uncertain)
+        delivered("stalled-1", DeliveryGrade::Transported)
     );
-    assert_eq!(fixture.key_presses(), ["ctrl+u backspace"]);
-    assert!(fixture.composer_holds().is_some());
+    assert_eq!(fixture.key_presses(), ["enter"]);
+    assert_eq!(fixture.composer_holds(), None);
 }
 
 fn hard_abrupt(text: &str) -> Message {
@@ -368,14 +368,11 @@ fn an_interrupt_restored_prompt_is_resubmitted_without_claiming_its_syntax() {
     );
     fixture.register_under(FixtureComposer::Codex);
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: "hard-restored".into(),
-                flow_id: "908786".into(),
-                message: hard_abrupt("stop"),
-            })),
+        fixture.nexus.deliver_cohort(
+            "hard-restored".into(),
+            "908786".into(),
+            vec![hard_abrupt("stop")],
+        ),
         MetaResponse::Delivered(Delivery {
             delivery_id: "hard-restored".into(),
             flow_id: "908786".into(),
@@ -408,14 +405,11 @@ fn claudes_interrupt_restored_prompt_is_resubmitted_not_retracted() {
     );
     fixture.register_under(FixtureComposer::Claude);
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: "claude-restored".into(),
-                flow_id: "908786".into(),
-                message: hard_abrupt("stop"),
-            })),
+        fixture.nexus.deliver_cohort(
+            "claude-restored".into(),
+            "908786".into(),
+            vec![hard_abrupt("stop")],
+        ),
         MetaResponse::Delivered(Delivery {
             delivery_id: "claude-restored".into(),
             flow_id: "908786".into(),
@@ -448,14 +442,11 @@ fn a_prompt_claudes_interrupt_put_back_is_submitted_again_and_the_hard_abrupt_fo
     fixture.interrupt_restores(FixtureComposer::Claude, "why are you not answering me");
     fixture.register_under(FixtureComposer::Claude);
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: "claude-cancelled".into(),
-                flow_id: "908786".into(),
-                message: hard_abrupt("stop"),
-            })),
+        fixture.nexus.deliver_cohort(
+            "claude-cancelled".into(),
+            "908786".into(),
+            vec![hard_abrupt("stop")],
+        ),
         MetaResponse::Delivered(Delivery {
             delivery_id: "claude-cancelled".into(),
             flow_id: "908786".into(),
@@ -491,14 +482,11 @@ fn a_cancelled_prompt_that_will_not_submit_is_left_in_place() {
     fixture.interrupt_restores_with(FixtureComposer::Claude, "half a thought of my own", true);
     fixture.register_under(FixtureComposer::Claude);
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: "claude-stuck".into(),
-                flow_id: "908786".into(),
-                message: hard_abrupt("stop"),
-            })),
+        fixture.nexus.deliver_cohort(
+            "claude-stuck".into(),
+            "908786".into(),
+            vec![hard_abrupt("stop")],
+        ),
         MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
     );
     assert_eq!(fixture.key_presses(), ["esc esc", "enter"]);
@@ -526,14 +514,11 @@ fn a_draft_already_in_claudes_composer_refuses_a_hard_abrupt_before_any_key() {
     .expect("fixture draft");
     fixture.register_under(FixtureComposer::Claude);
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: "claude-draft".into(),
-                flow_id: "908786".into(),
-                message: hard_abrupt("stop"),
-            })),
+        fixture.nexus.deliver_cohort(
+            "claude-draft".into(),
+            "908786".into(),
+            vec![hard_abrupt("stop")],
+        ),
         MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
     );
     assert!(fixture.key_presses().is_empty(), "no interrupt");
@@ -564,14 +549,11 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
     });
 
     assert!(matches!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: "native-letter-shaped-prompt".into(),
-                flow_id: "908786".into(),
-                message,
-            })),
+        fixture.nexus.deliver_cohort(
+            "native-letter-shaped-prompt".into(),
+            "908786".into(),
+            vec![message],
+        ),
         MetaResponse::Delivered(_)
     ));
     assert_eq!(fixture.key_presses(), ["esc esc", "enter", "enter"]);
@@ -580,7 +562,7 @@ fn a_native_input_matching_a_letter_shaped_prompt_is_submitted_again_never_retra
 }
 
 #[test]
-fn a_cancelled_codex_prompt_is_preserved_when_no_resubmit_key_is_configured() {
+fn a_prompt_codexs_interrupt_put_back_is_submitted_again() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.current_agent()],
@@ -589,15 +571,12 @@ fn a_cancelled_codex_prompt_is_preserved_when_no_resubmit_key_is_configured() {
     fixture.interrupt_restores(FixtureComposer::Codex, "half a thought of my own");
     fixture.register_under(FixtureComposer::Codex);
     assert!(matches!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: "hard-cancelled".into(),
-                flow_id: "908786".into(),
-                message: hard_abrupt("stop"),
-            })),
-        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
+        fixture.nexus.deliver_cohort(
+            "hard-cancelled".into(),
+            "908786".into(),
+            vec![hard_abrupt("stop")],
+        ),
+        MetaResponse::Delivered(_)
     ));
     assert_eq!(fixture.key_presses(), ["esc", "enter"]);
     assert_eq!(

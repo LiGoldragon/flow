@@ -9,24 +9,28 @@
 
 use super::waking::{
     CLAUDE_SEAT, CLAUDE_SESSION, address, append_main_rows, claude_agent, claude_seat, claude_stop,
-    end_turn, stored, working_claude_agent,
+    claude_transcript, end_turn, stored, working_claude_agent,
 };
 use super::{ControlsHerdrSnapshot, NexusFixture, PromptFixture};
 use crate::Dispatches;
-use crate::delivery::body::{RendersPaneText, ShowsPaneText};
 use crate::generated::operation::Outcome;
 use crate::reporting::RecordsReports;
+use crate::store::delivery::{LeaseStep, PaneLease, RecordsDeliveries};
 use crate::store::logical_delivery::RecordsLogicalDeliveries;
 use crate::store::metaflow::SeedsMetaflow;
-use crate::store::queue_delivery::AccountsQueueDelivery;
+use crate::store::queue_delivery::{
+    AccountsQueueDelivery, NativeHistoryAnchor, NativeTranscriptCursor, PrepareQueueDelivery,
+};
 use crate::waking::{PerformsWakeAndDrain, ReconcilesQueueDelivery, SettlesStopsAtConfirmation};
+use datom_codec::Datomizable;
 use flow_ethos::State;
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{
-    ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution, QueueDeliveryStanding,
-    QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data, ResolverIdentity,
-    Response as MetaResponse, Sender, Undecided,
+    DeliveryRequest, ProcessIdentity, Query as MetaQuery, QueueDeliveryResolution,
+    QueueDeliveryStanding, QueueResolutionOutcome, ResolveQueueDeliveryRejected_Data,
+    ResolverIdentity, Response as MetaResponse, Undecided,
 };
+use protos::{Compactable, Protosizable};
 use signal_flow::{
     Address, Aspect, Delivery, Event, Layer, Message, Metaflow, NativePrompt, NativeStop,
     QueueEntry, Report_Data, Request, Response, SentBy,
@@ -54,21 +58,71 @@ fn from_core(body: &str) -> TestRequest {
     }
 }
 
-/// The text a hand-over types for one queued request.
-fn typed_text(request: &TestRequest) -> String {
-    crate::waking::render_message(
-        &queue_entry(request),
-        Sender {
-            address: match &request.sent_by {
-                SentBy::Sender(address) => address.clone(),
-                SentBy::Unknown | SentBy::Flow => panic!("queue fixture has a sender"),
-            },
-            flow_id: "e167d8".into(),
+/// The canonical vector payload a hand-over types.
+fn expected_message(request: &TestRequest) -> meta_signal_flow::Message {
+    let SentBy::Sender(address) = &request.sent_by else {
+        panic!("typed fixture has sender")
+    };
+    let (kind, body) = match &request.request {
+        Request::Order(text) => (
+            meta_signal_flow::Kind::Order,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Question(text) => (
+            meta_signal_flow::Kind::Question,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Result(text) => (
+            meta_signal_flow::Kind::Result,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Notice(text) => (
+            meta_signal_flow::Kind::Notice,
+            meta_signal_flow::Body::Words(text.clone()),
+        ),
+        Request::Psyche(said) => (
+            meta_signal_flow::Kind::Psyche,
+            meta_signal_flow::Body::Psyche(meta_signal_flow::PsycheWords {
+                first_string: said.context.clone(),
+                second_string: said.verbatim.clone(),
+            }),
+        ),
+        Request::Psyches(saids) => (
+            meta_signal_flow::Kind::Psyche,
+            meta_signal_flow::Body::Psyches(
+                saids
+                    .iter()
+                    .map(|said| meta_signal_flow::PsycheWords {
+                        first_string: said.context.clone(),
+                        second_string: said.verbatim.clone(),
+                    })
+                    .collect(),
+            ),
+        ),
+    };
+    let letter = meta_signal_flow::Letter {
+        kind,
+        sender: meta_signal_flow::Sender {
+            address: address.clone(),
+            flow_id: "fixture-sender".into(),
         },
-    )
-    .pane_text()
-    .as_str()
-    .to_owned()
+        body,
+    };
+    match request.delivery {
+        _ => meta_signal_flow::Message::Soft(letter),
+    }
+}
+fn typed_text(request: &TestRequest) -> String {
+    queue_payload(std::slice::from_ref(request))
+}
+fn queue_payload(requests: &[TestRequest]) -> String {
+    requests
+        .iter()
+        .map(expected_message)
+        .collect::<Vec<_>>()
+        .datomize(Vec::new())
+        .protosize()
+        .compact()
 }
 
 fn parse_queue_payload(text: &str) -> Vec<meta_signal_flow::Message> {
@@ -99,7 +153,13 @@ fn queue_entry(request: &TestRequest) -> QueueEntry {
 /// The fixture Claude seat Awake at the Secondary address, holding `queue`.
 fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
     claude_seat(fixture, 40_000);
-    let queue_for_senders = queue.clone();
+    let sender_rows = queue
+        .iter()
+        .filter_map(|request| match &request.sent_by {
+            SentBy::Sender(address) => Some((request.logical_delivery_id.clone(), address.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     fixture.nexus.store.seed_metaflow(Metaflow {
         address: address(Layer::Secondary),
         state: State::Awake(CLAUDE_SEAT.into()),
@@ -114,34 +174,28 @@ fn seat(fixture: &NexusFixture, queue: Vec<TestRequest>) {
             })
             .collect(),
     });
-    for request in queue_for_senders {
-        let SentBy::Sender(sender) = request.sent_by else {
-            panic!("queue fixture has a sender")
-        };
+    for (id, address) in sender_rows {
         fixture
             .nexus
             .store
             .seed_logical_delivery_sender(
-                &request.logical_delivery_id,
-                Sender {
-                    address: sender,
-                    flow_id: "e167d8".into(),
+                &id,
+                meta_signal_flow::Sender {
+                    address,
+                    flow_id: "fixture-sender".into(),
                 },
             )
-            .expect("queue fixture sender");
+            .unwrap();
     }
 }
 
 /// A report as the hook sends it: recorded, answered, then acted on.
 fn report(fixture: &NexusFixture, event: Event) {
     assert_eq!(
-        fixture.nexus.report(
-            &fixture.nexus.configured_use().expect("configured fixture"),
-            Report_Data {
-                reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
-                event: event.clone(),
-            }
-        ),
+        fixture.nexus.report(Report_Data {
+            flow_id: CLAUDE_SEAT.into(),
+            event: event.clone(),
+        }),
         Response::Reported
     );
     fixture.nexus.after_report(&CLAUDE_SEAT.to_owned(), &event);
@@ -280,49 +334,10 @@ fn logical_delivery_snapshots_are_sender_filtered_replayable_and_idempotent() {
     assert!(filtered.delivery_snapshot_vector.is_empty());
 }
 
-#[test]
-fn abrupt_queue_admission_is_durable_without_waking() {
-    let fixture = NexusFixture::new();
-    let target = address(Layer::Secondary);
-    fixture.nexus.store.seed_metaflow(Metaflow {
-        address: target.clone(),
-        state: State::Asleep,
-        past: vec![],
-        queue: vec![],
-    });
-    for message in [
-        Message::HardAbrupt(Request::Order("hard held".into())),
-        Message::MiddleAbrupt(Request::Order("middle held".into())),
-    ] {
-        let response = fixture
-            .nexus
-            .store
-            .accept_logical_delivery(
-                &target,
-                SentBy::Sender(Address {
-                    aspect: Aspect::Psyche,
-                    topic: "core".into(),
-                    layer: Layer::Secondary,
-                }),
-                None,
-                Delivery::Queue,
-                message,
-                None,
-            )
-            .expect("abrupt queue admission persists");
-        assert!(matches!(response, Response::SendAccepted(_)));
-    }
-    let stored = stored(&fixture, Layer::Secondary);
-    assert_eq!(stored.state, State::Asleep);
-    assert_eq!(stored.queue.len(), 2);
-    assert!(matches!(stored.queue[0].message, Message::HardAbrupt(_)));
-    assert!(matches!(stored.queue[1].message, Message::MiddleAbrupt(_)));
-}
-
 /// The seat's main turn ended while a background agent still runs: its
 /// sidechain rows follow the main `end_turn` and Herdr shows Working. Its
-/// its own Stop hands over its oldest request; the Prompted fixture records
-/// the exact native user row. A foreign Stop does nothing.
+/// own Stop hands over its whole queue as one payload. A foreign Stop does
+/// nothing.
 #[test]
 fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
     let fixture = NexusFixture::new();
@@ -350,25 +365,25 @@ fn a_claude_main_end_turn_with_a_running_sidechain_drains_on_its_own_stop() {
 
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
-    assert_eq!(typed_count(&fixture, "second-request-body"), 0);
+    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
     assert!(
         fixture
             .typed()
             .unwrap_or_default()
             .contains("Psyche core Secondary")
     );
-    assert_eq!(queue(&fixture), vec![second]);
+    assert_eq!(queue(&fixture), vec![], "both in one payload");
     assert_eq!(
         stored(&fixture, Layer::Secondary).state,
         State::Awake(CLAUDE_SEAT.into())
     );
 }
 
-/// An unprovable first hand-over stays Uncertain and is not replayed, while
-/// the second request is delivered and receipted. DeliverAll does not claim
-/// the whole cohort finished until a late exact receipt settles the first.
+/// Two queued requests go into the pane at one turn end as one payload,
+/// in order, each typed once; both leave the queue at once, and the one
+/// exact receipt of the payload settles them both.
 #[test]
-fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
+fn two_queued_claude_requests_go_in_one_payload_and_settle_on_its_receipt() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![working_claude_agent(&fixture)],
@@ -399,52 +414,38 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
         ]
     ));
 
-    // The same turn end again: the unresolved logical request remains
-    // uncertain in its journal but is parked out of the active queue.
+    // Another turn end types nothing again.
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![second.clone()]);
-    assert!(matches!(
-        standings(&fixture).as_slice(),
-        [
-            QueueDeliveryStanding::Uncertain(Some(Undecided::AbsenceUnprovable)),
-            QueueDeliveryStanding::Uncertain(_),
-        ]
-    ));
 
-    // The exact prompt in another session is not this seat's receipt.
+    let payload = queue_payload(&[first.clone(), second.clone()]);
+    // The exact payload in another session is not this seat's receipt.
     report(
         &fixture,
         submitted(
             "0ther000-0000-4000-8000-000000000009",
             "elsewhere",
-            &typed_text(&first),
+            &payload,
         ),
     );
-    assert_eq!(queue(&fixture), vec![second.clone()]);
+    assert_eq!(standings(&fixture).len(), 2);
 
     append_main_rows(
         &fixture,
         &[
-            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-second",
-            "message":{"content":format!("\n\n<pasted_content id=\"04ef\">\n{}\n</pasted_content id=\"04ef\">\n", typed_text(&second))}}),
-            end_turn("second-received"),
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-both",
+            "message":{"content":format!("\n\n<pasted_content id=\"04ef\">\n{payload}\n</pasted_content id=\"04ef\">\n")}}),
         ],
     );
-    report(&fixture, claude_stop(&fixture));
-    assert_eq!(
-        queue(&fixture),
-        vec![],
-        "the exact native receipt settles the later hand-over"
-    );
-    let SentBy::Sender(first_sender) = first.sent_by.clone() else {
-        panic!("first queued request has a sender")
+    report(&fixture, submitted(CLAUDE_SESSION, "prompt-both", &payload));
+    let SentBy::Sender(sender) = first.sent_by.clone() else {
+        panic!("queued request has a sender")
     };
     let settled = fixture
         .nexus
         .store
-        .read_logical_delivery_snapshots(&first_sender, None)
+        .read_logical_delivery_snapshots(&sender, None)
         .unwrap();
     for request in [&first, &second] {
         assert!(settled.delivery_snapshot_vector.iter().any(|snapshot| {
@@ -462,6 +463,161 @@ fn two_queued_claude_requests_drain_in_order_once_each_on_their_receipts() {
     ));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1, "no replay");
     assert_eq!(typed_count(&fixture, "second-request-body"), 1, "no replay");
+}
+
+/// The public meta operation names only a durable delivery reference. When
+/// that reference froze several messages, its one native vector parks and
+/// settles every exact member, including after the store is read again.
+#[test]
+fn public_deliver_parks_and_settles_the_entire_frozen_cohort() {
+    use std::os::unix::fs::MetadataExt;
+
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![claude_agent(&fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    let first = from_core("public-first-request");
+    let second = from_core("public-second-request");
+    seat(&fixture, vec![first.clone(), second.clone()]);
+    append_main_rows(&fixture, &[end_turn("before-public-deliver")]);
+    let transcript = claude_transcript(&fixture);
+    let metadata = std::fs::metadata(&transcript).unwrap();
+    let prepared = fixture
+        .nexus
+        .store
+        .prepare_oldest_delivery(
+            &address(Layer::Secondary),
+            CLAUDE_SEAT,
+            CLAUDE_SESSION,
+            signal_flow::HarnessKind::Claude,
+            NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                offset: metadata.len(),
+            }),
+        )
+        .unwrap();
+    let PrepareQueueDelivery::Prepared(attempt) = prepared else {
+        panic!("oldest delivery was prepared: {prepared:?}")
+    };
+
+    let delivered = fixture
+        .nexus
+        .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+            delivery_id: attempt.attempt_id.clone(),
+        }));
+    assert!(
+        matches!(delivered, MetaResponse::Delivered(_)),
+        "{delivered:?}"
+    );
+    let payload = fixture.typed().expect("one native vector was typed");
+    assert_eq!(
+        parse_queue_payload(&payload),
+        vec![expected_message(&first), expected_message(&second)]
+    );
+    assert!(queue(&fixture).is_empty());
+    assert!(matches!(
+        standings(&fixture).as_slice(),
+        [
+            QueueDeliveryStanding::Uncertain(_),
+            QueueDeliveryStanding::Uncertain(_)
+        ]
+    ));
+
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-public",
+        "message":{"content":payload}}),
+        ],
+    );
+    report(
+        &fixture,
+        submitted(CLAUDE_SESSION, "prompt-public", &fixture.typed().unwrap()),
+    );
+    assert!(standings(&fixture).is_empty(), "one receipt settled both");
+    assert!(queue(&fixture).is_empty());
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(typed_count(&fixture, "public-first-request"), 1);
+    assert_eq!(typed_count(&fixture, "public-second-request"), 1);
+}
+
+/// A crash after the native vector was typed but before its whole-cohort
+/// commit leaves the pane lease and prepared reference. Retrying the public
+/// operation completes that exact cohort as Uncertain without typing again;
+/// its one native receipt then settles every member.
+#[test]
+fn public_deliver_recovers_a_leased_prepared_cohort_without_retyping() {
+    use std::os::unix::fs::MetadataExt;
+
+    let fixture = NexusFixture::new();
+    let first = from_core("leased-first-request");
+    let second = from_core("leased-second-request");
+    seat(&fixture, vec![first.clone(), second.clone()]);
+    let transcript = claude_transcript(&fixture);
+    let metadata = std::fs::metadata(&transcript).unwrap();
+    let prepared = fixture
+        .nexus
+        .store
+        .prepare_oldest_delivery(
+            &address(Layer::Secondary),
+            CLAUDE_SEAT,
+            CLAUDE_SESSION,
+            signal_flow::HarnessKind::Claude,
+            NativeHistoryAnchor::ClaudeTranscript(NativeTranscriptCursor {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                offset: metadata.len(),
+            }),
+        )
+        .unwrap();
+    let PrepareQueueDelivery::Prepared(attempt) = prepared else {
+        panic!("oldest delivery was prepared: {prepared:?}")
+    };
+    fixture
+        .nexus
+        .store
+        .record_lease_step(PaneLease {
+            delivery_id: attempt.attempt_id.clone(),
+            flow_id: CLAUDE_SEAT.into(),
+            herdr_pane_id: "w1:p3".into(),
+            lease_step: LeaseStep::Submitted,
+        })
+        .unwrap();
+
+    assert!(matches!(
+        fixture
+            .nexus
+            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
+                delivery_id: attempt.attempt_id.clone(),
+            })),
+        MetaResponse::Delivered(meta_signal_flow::Delivery {
+            delivery_grade: meta_signal_flow::DeliveryGrade::Uncertain,
+            ..
+        })
+    ));
+    assert_eq!(
+        fixture.typed(),
+        None,
+        "recovery never types the vector again"
+    );
+    assert!(queue(&fixture).is_empty());
+    assert_eq!(standings(&fixture).len(), 2);
+
+    let payload = queue_payload(&[first, second]);
+    append_main_rows(
+        &fixture,
+        &[
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-leased",
+        "message":{"content":payload.clone()}}),
+        ],
+    );
+    report(
+        &fixture,
+        submitted(CLAUDE_SESSION, "prompt-leased", &payload),
+    );
+    assert!(standings(&fixture).is_empty());
 }
 
 /// Admission measures each complete typed message. Once accepted, the
@@ -484,15 +640,7 @@ fn a_large_accepted_cohort_reaches_the_native_boundary_as_one_vector() {
     seat(&fixture, vec![first.clone(), second.clone()]);
     append_main_rows(&fixture, &[end_turn("before")]);
 
-    assert!(
-        !matches!(
-            fixture.nexus.drain_all(address(Layer::Secondary)),
-            Outcome::Drained(_)
-        ),
-        "DeliverAll cannot report the cohort complete while the first delivery is uncertain"
-    );
-    assert_eq!(typed_count(&fixture, "first-request-body"), 1, "no replay");
-    assert!(queue(&fixture).is_empty());
+    report(&fixture, claude_stop(&fixture));
 
     let captured = fixture.typed().expect("the full cohort reached Herdr");
     assert_eq!(captured, expected_text);
@@ -504,10 +652,67 @@ fn a_large_accepted_cohort_reaches_the_native_boundary_as_one_vector() {
     assert_eq!(standings(&fixture).len(), 2, "one cohort attempt");
 }
 
+/// A cohort accepted by an older limit is remeasured at dispatch. It ends
+/// whole and durably instead of remaining at the head of the runnable queue
+/// forever or reaching the native adapter in pieces.
+#[test]
+fn an_already_accepted_native_overlimit_cohort_fails_whole_without_pane_io() {
+    let fixture = NexusFixture::new();
+    fixture.accept_pane_operations(
+        vec![working_claude_agent(&fixture)],
+        PromptFixture::PromptedUnrecorded("w1:p3"),
+    );
+    let first = from_core(&"a".repeat(66_000));
+    let second = from_core(&"b".repeat(66_000));
+    let expected_text = queue_payload(&[first.clone(), second.clone()]);
+    assert!(expected_text.len() > crate::sending::MAX_NATIVE_COHORT_BYTES);
+    // `seat` is the predecessor-store boundary: these rows already exist,
+    // so current admission cannot retroactively refuse their trigger.
+    seat(&fixture, vec![first.clone(), second.clone()]);
+    append_main_rows(&fixture, &[end_turn("before")]);
+
+    report(&fixture, claude_stop(&fixture));
+
+    assert_eq!(fixture.typed(), None, "nothing reached the pane");
+    assert!(
+        queue(&fixture).is_empty(),
+        "the terminal cohort is not runnable"
+    );
+    assert_eq!(
+        standings(&fixture),
+        vec![QueueDeliveryStanding::TransportOverlimit(
+            signal_flow::SendPayloadSize {
+                actual_bytes: expected_text.len() as i64,
+                maximum_bytes: crate::sending::MAX_NATIVE_COHORT_BYTES as i64,
+            }
+        )]
+    );
+    let sender = match &first.sent_by {
+        SentBy::Sender(sender) => sender,
+        _ => unreachable!(),
+    };
+    let observed = fixture
+        .nexus
+        .store
+        .read_logical_delivery_snapshots(sender, None)
+        .unwrap();
+    for request in [&first, &second] {
+        assert!(observed.delivery_snapshot_vector.iter().any(|snapshot| {
+            snapshot.logical_delivery_id == request.logical_delivery_id
+                && matches!(
+                    snapshot.delivery_state,
+                    signal_flow::DeliveryState::Failed(signal_flow::Refusal::Oversized(_))
+                )
+        }));
+    }
+    report(&fixture, claude_stop(&fixture));
+    assert_eq!(fixture.typed(), None, "terminal work does not replay");
+}
+
 /// A background task's notification takes the main turn before the typed
-/// request: its prompt is no receipt, the request waits in Claude Code's
+/// payload: its prompt is no receipt, the payload waits in Claude Code's
 /// input queue, and the turn end after the notification finds it pending.
-/// When a later row takes it, it settles and the next is handed over.
+/// When a later row takes it, both requests it carried settle.
 #[test]
 fn a_task_notification_that_takes_the_turn_first_settles_nothing() {
     let fixture = NexusFixture::new();
@@ -521,17 +726,22 @@ fn a_task_notification_that_takes_the_turn_first_settles_nothing() {
     append_main_rows(&fixture, &[end_turn("before")]);
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
+    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
 
     let notification = "<task-notification>\n<status>completed</status>\n</task-notification>";
     report(
         &fixture,
         submitted(CLAUDE_SESSION, "prompt-notice", notification),
     );
-    assert_eq!(queue(&fixture), vec![first.clone(), second.clone()]);
+    assert_eq!(
+        standings(&fixture).len(),
+        2,
+        "the notification settles nothing"
+    );
 
     let queued = format!(
         "<pasted_content id=\"q1\">\n{}\n</pasted_content id=\"q1\">",
-        typed_text(&first)
+        queue_payload(&[first.clone(), second.clone()])
     );
     append_main_rows(
         &fixture,
@@ -544,14 +754,17 @@ fn a_task_notification_that_takes_the_turn_first_settles_nothing() {
         ],
     );
     report(&fixture, claude_stop(&fixture));
-    assert_eq!(queue(&fixture), vec![first.clone(), second.clone()]);
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
-    assert_eq!(typed_count(&fixture, "second-request-body"), 0);
-    assert_eq!(
-        standings(&fixture),
-        vec![QueueDeliveryStanding::Uncertain(Some(
-            Undecided::PendingInHarness
-        ))]
+    assert_eq!(typed_count(&fixture, "second-request-body"), 1);
+    assert!(
+        matches!(
+            standings(&fixture).as_slice(),
+            [
+                QueueDeliveryStanding::Uncertain(_),
+                QueueDeliveryStanding::Uncertain(_)
+            ]
+        ),
+        "held in Claude Code's input queue, nothing settles"
     );
 
     append_main_rows(
@@ -559,25 +772,25 @@ fn a_task_notification_that_takes_the_turn_first_settles_nothing() {
         &[
             serde_json::json!({"type":"queue-operation","operation":"dequeue",
                 "sessionId":CLAUDE_SESSION}),
-            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-first",
+            serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-both",
                 "message":{"content":queued}}),
-            end_turn("first-answered"),
+            end_turn("both-answered"),
         ],
     );
     report(&fixture, claude_stop(&fixture));
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(
-        queue(&fixture),
-        vec![second],
-        "the first settled; the second typed"
+    assert!(queue(&fixture).is_empty());
+    assert!(
+        standings(&fixture).is_empty(),
+        "both settled on the one receipt"
     );
 }
 
-/// The Nexus stopped between typing a request and recording its receipt.
-/// While it was down the seat took the request and finished its turn. At
-/// the next start the transcript settles the request, which is never typed
-/// again, and the seat's recorded turn end hands it the next.
+/// The Nexus stopped between typing a payload and recording its receipt.
+/// While it was down the seat took the payload and finished its turn. At
+/// the next start the transcript settles both requests it carried, and
+/// neither is typed again.
 #[test]
 fn a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_typing() {
     let fixture = NexusFixture::new();
@@ -598,7 +811,7 @@ fn a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_t
             serde_json::json!({"type":"user","sessionId":CLAUDE_SESSION,"uuid":"u-first",
             "message":{"content":format!(
                 "\n\n<pasted_content id=\"04ee\">\n{}\n</pasted_content id=\"04ee\">\n",
-                typed_text(&first)
+                queue_payload(&[first.clone(), second.clone()])
             )}}),
             end_turn("first-answered"),
         ],
@@ -612,7 +825,8 @@ fn a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_t
             .recover_outstanding_deliveries()
             .unwrap()
             .len(),
-        1
+        2,
+        "the attempt of each request the one payload carried"
     );
     fixture.nexus.recover_deliveries();
     assert_eq!(
@@ -621,7 +835,11 @@ fn a_hand_over_a_crash_left_unreceived_is_reconciled_at_start_without_a_second_t
         "never again"
     );
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![second]);
+    assert!(queue(&fixture).is_empty());
+    assert!(
+        standings(&fixture).is_empty(),
+        "the one payload settled both"
+    );
 }
 
 /// A hand-over Herdr refuses before any text reaches the pane is proved
@@ -674,20 +892,6 @@ fn a_claude_turn_end_recorded_before_confirmation_is_honoured_at_it() {
         past: vec![],
         queue: vec![queue_entry(&first)],
     });
-    fixture
-        .nexus
-        .store
-        .seed_logical_delivery_sender(
-            &first.logical_delivery_id,
-            Sender {
-                address: match &first.sent_by {
-                    SentBy::Sender(address) => address.clone(),
-                    _ => unreachable!(),
-                },
-                flow_id: "e167d8".into(),
-            },
-        )
-        .unwrap();
     append_main_rows(&fixture, &[end_turn("first-turn")]);
     report(&fixture, claude_stop(&fixture));
     report(&fixture, foreign_stop());
@@ -735,13 +939,10 @@ fn a_foreign_stop_before_confirmation_is_not_a_turn_end() {
         ],
     );
     assert_eq!(
-        fixture.nexus.report(
-            &fixture.nexus.configured_use().expect("configured fixture"),
-            Report_Data {
-                reporter: signal_flow::Reporter::Flow(CLAUDE_SEAT.into()),
-                event: foreign_stop(),
-            }
-        ),
+        fixture.nexus.report(Report_Data {
+            flow_id: CLAUDE_SEAT.into(),
+            event: foreign_stop(),
+        }),
         Response::Reported
     );
     {
@@ -861,7 +1062,7 @@ fn an_uncertain_hand_over_cannot_be_resolved_delivered_without_a_native_receipt(
         ),
         MetaResponse::ResolveQueueDeliveryRejected(ResolveQueueDeliveryRejected_Data::NotOldest,)
     );
-    assert_eq!(queue(&fixture), vec![second.clone()]);
+    assert_eq!(queue(&fixture), vec![]);
     assert!(matches!(
         standings(&fixture).as_slice(),
         [
@@ -908,7 +1109,7 @@ fn a_parked_absence_unprovable_hand_over_is_never_replayed_by_owner_resolution()
         "parked delivery is not replayed"
     );
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![second]);
+    assert_eq!(queue(&fixture), vec![]);
     assert!(matches!(
         standings(&fixture).as_slice(),
         [
@@ -1018,5 +1219,5 @@ fn a_resting_claude_seat_does_not_advance_after_unwitnessed_delivered_resolution
     );
     assert_eq!(typed_count(&fixture, "first-request-body"), 1);
     assert_eq!(typed_count(&fixture, "second-request-body"), 1);
-    assert_eq!(queue(&fixture), vec![second]);
+    assert_eq!(queue(&fixture), vec![]);
 }

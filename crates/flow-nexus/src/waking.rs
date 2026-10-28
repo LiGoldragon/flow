@@ -89,6 +89,7 @@ use crate::herdr::{LocatesNativeTranscripts, PanePresence, ReadsHerdrPanes, Read
 use crate::launching::LaunchesFlows;
 use crate::performing::Performs;
 use crate::send_tool::{ServesLaunchCalls, WakesDeferred};
+use crate::sending::MAX_NATIVE_COHORT_BYTES;
 use crate::store::address_hold::HoldsLaunchAddress;
 use crate::store::context::JudgesThreshold;
 use crate::store::events::RecordsHarnessEvents;
@@ -1225,6 +1226,34 @@ impl RendersAttemptInput for QueueDeliveryAttempt {
     }
 }
 
+impl RunningNexus {
+    fn typed_queue_message(&self, entry: &QueueEntry) -> Option<meta_signal_flow::Message> {
+        let sender = self
+            .store
+            .logical_delivery_sender(&entry.logical_delivery_id)
+            .ok()??;
+        Some(entry.message.typed_pane_message(sender))
+    }
+
+    pub(crate) fn typed_queue_cohort(
+        &self,
+        entries: &[QueueEntry],
+    ) -> Option<Vec<meta_signal_flow::Message>> {
+        entries
+            .iter()
+            .map(|entry| self.typed_queue_message(entry))
+            .collect()
+    }
+
+    pub(crate) fn typed_attempt_text(&self, attempt: &QueueDeliveryAttempt) -> Option<String> {
+        let meta_signal_flow::QueueEvidence::Logical(entry) = &attempt.queue_evidence else {
+            return None;
+        };
+        let messages = self.typed_queue_cohort(std::slice::from_ref(entry))?;
+        Some(messages.datomize(Vec::new()).protosize().compact())
+    }
+}
+
 impl ReconcilesQueueDelivery for RunningNexus {
     #[cfg(test)]
     fn reconcile_delivery(&self, attempt: &QueueDeliveryAttempt) -> Reconciled {
@@ -1264,6 +1293,7 @@ impl ReconcilesQueueDelivery for RunningNexus {
                     meta_signal_flow::QueueResolutionOutcome::Absent => Reconciled::Absent,
                 };
             }
+            QueueDeliveryPhase::TransportOverlimit(_) => return Reconciled::Refused,
             QueueDeliveryPhase::Prepared | QueueDeliveryPhase::Uncertain(_) => {}
         }
         let Some(text) = attempt.prompt_text(&self.store) else {
@@ -2115,14 +2145,19 @@ impl PerformsWakeAndDrain for RunningNexus {
         if matches!(self.store.past_threshold(&flow_id), Ok(true)) {
             return Outcome::Drained(drained);
         }
-        let oldest = match self.store.metaflow(&address) {
-            Ok(Some(metaflow)) => metaflow.queue.into_iter().next(),
+        let queue = match self.store.metaflow(&address) {
+            Ok(Some(metaflow)) => metaflow.queue,
             _ => return Outcome::Failed(Failed_Data::StoreRefused),
         };
-        let Some(oldest) = oldest else {
+        let Some(oldest) = queue.first().cloned() else {
             return Outcome::Drained(drained);
         };
-        if matches!(oldest.message, signal_flow::Message::Soft(_)) {
+        let simplified = self
+            .last_launch_profile(&flow_id)
+            .is_some_and(|profile| profile.flow_kind == signal_flow::FlowKind::Simplified);
+        let cohort: Vec<QueueEntry> = if simplified { vec![oldest.clone()] } else { queue };
+        let soft = |entry: &QueueEntry| matches!(entry.message, signal_flow::Message::Soft(_));
+        if cohort.iter().all(soft) {
             let resting = match node.harness_kind {
                 HarnessKind::Codex => self.codex_resting(&flow_id),
                 HarnessKind::Claude => {
@@ -2164,13 +2199,10 @@ impl PerformsWakeAndDrain for RunningNexus {
                 }
             }
         };
-        let sender = match self
-            .store
-            .logical_delivery_sender(&oldest.logical_delivery_id)
-        {
-            Ok(Some(sender)) => sender,
-            Ok(None) | Err(_) => return refused(drained, Failed_Data::StoreRefused),
+        let Some(messages) = self.typed_queue_cohort(&cohort) else {
+            return refused(drained, Failed_Data::StoreRefused);
         };
+        let text = messages.datomize(Vec::new()).protosize().compact();
         let attempt = match self.store.prepare_oldest_delivery(
             &address,
             &flow_id,
@@ -2184,9 +2216,28 @@ impl PerformsWakeAndDrain for RunningNexus {
                 return refused(drained, Failed_Data::StoreRefused);
             }
         };
-        let message = render_message(&oldest, sender);
-        let text = message.pane_text().as_str().to_owned();
-        if !matches!(oldest.message, signal_flow::Message::Soft(_)) {
+        if text.len() > MAX_NATIVE_COHORT_BYTES {
+            let size = signal_flow::SendPayloadSize {
+                actual_bytes: i64::try_from(text.len()).unwrap_or(i64::MAX),
+                maximum_bytes: MAX_NATIVE_COHORT_BYTES as i64,
+            };
+            return match self.store.fail_transport_overlimit(&attempt.attempt_id, size) {
+                Ok(failed) => Outcome::Drained(failed),
+                Err(_) => refused(drained, Failed_Data::StoreRefused),
+            };
+        }
+        let absent = |observation: String| {
+            self.store
+                .mark_delivery_absent(
+                    &attempt.attempt_id,
+                    AbsenceRecord {
+                        proof: AbsenceProof::HandOverRefused,
+                        observation,
+                    },
+                )
+                .unwrap_or(false)
+        };
+        if !cohort.iter().all(soft) {
             let view = crate::herdr::HerdrOperationView {
                 configuration: crate::store::CommittedConfigurationSnapshot {
                     generation: configured.generation.clone(),
@@ -2194,15 +2245,13 @@ impl PerformsWakeAndDrain for RunningNexus {
                 },
                 herdr: configured.herdr.clone(),
             };
-            let result = self.deliver_with_view(
+            let result = self.deliver_cohort_with_view(
                 configured,
                 &view,
-                meta_signal_flow::DeliveryRequest {
-                    gate: meta_signal_flow::Gate::Kept,
-                    delivery_id: attempt.attempt_id.clone(),
-                    flow_id: flow_id.clone(),
-                    message,
-                },
+                attempt.attempt_id.clone(),
+                &flow_id,
+                messages.clone(),
+                false,
             );
             let proved_absent = matches!(&result,
                 meta_signal_flow::Response::DeliveryRejected(rejected)

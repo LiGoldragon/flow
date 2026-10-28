@@ -9,9 +9,8 @@ use crate::fixture_executable::{FixtureExecutable, InstallsScript};
 use crate::{Dispatches, peer::AdmitsMetaPeer};
 use meta_signal_flow::{
     Body, BodyRefusal, CommandGrade, CommandOutcome, CommandRejection, CommandRequest, Delivery,
-    DeliveryGrade, DeliveryRejection, DeliveryRequest, HarnessCommand, InterruptWitness, Letter,
-    Message, PaneRead_Data, Query as MetaQuery, ReadPaneRejected_Data, Response as MetaResponse,
-    Sender,
+    DeliveryGrade, DeliveryRejection, HarnessCommand, InterruptWitness, Letter, Message,
+    Query as MetaQuery, Response as MetaResponse,
 };
 use signal_flow::{AgentObservation, AgentState, FlowLifecycle, ObserveSelection, Query, Response};
 use std::fs;
@@ -26,31 +25,8 @@ fn letter(text: &str) -> Letter {
 
 impl NexusFixture {
     fn deliver(&self, delivery_id: &str, message: Message) -> MetaResponse {
-        self.deliver_with_gate(delivery_id, message, meta_signal_flow::Gate::Kept)
-    }
-
-    fn deliver_with_gate(
-        &self,
-        delivery_id: &str,
-        message: Message,
-        gate: meta_signal_flow::Gate,
-    ) -> MetaResponse {
         self.nexus
-            .dispatch_meta(MetaQuery::Deliver(DeliveryRequest {
-                gate,
-                delivery_id: delivery_id.into(),
-                flow_id: "908786".into(),
-                message,
-            }))
-    }
-
-    fn vet_with_gate(&self, message: Message, gate: meta_signal_flow::Gate) -> MetaResponse {
-        self.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
-            gate,
-            delivery_id: "vet".into(),
-            flow_id: "908786".into(),
-            message,
-        }))
+            .deliver_cohort(delivery_id.into(), "908786".into(), vec![message])
     }
 
     fn blocked_agent(&self) -> serde_json::Value {
@@ -110,7 +86,7 @@ impl NexusFixture {
         self.nexus.store.seed_role(signal_flow::Caller {
             flow_id: "908786".into(),
             aspect: signal_flow::Aspect::Psyche,
-            layer: signal_flow::Layer::Secondary,
+            power_level: signal_flow::PowerLevel::Medium,
             model_name: "claude-opus-5-5".into(),
         });
         self.nexus.store.seed_metaflow(signal_flow::Metaflow {
@@ -128,140 +104,18 @@ impl NexusFixture {
             .configure_change(meta_signal_flow::ConfigurationChange::Thresholds(vec![
                 meta_signal_flow::ConfigureThreshold {
                     model_name: "claude-opus-5-5".into(),
-                    refresh_tokens: refresh,
+                    refresh,
                 },
             ]))
             .expect("threshold configured");
     }
 
     fn command(&self, harness_command: HarnessCommand) -> MetaResponse {
-        self.command_with_gate(harness_command, meta_signal_flow::Gate::Kept)
-    }
-
-    fn command_with_gate(
-        &self,
-        harness_command: HarnessCommand,
-        gate: meta_signal_flow::Gate,
-    ) -> MetaResponse {
         self.nexus.dispatch_meta(MetaQuery::Command(CommandRequest {
-            gate,
             flow_id: "908786".into(),
             harness_command,
         }))
     }
-}
-
-/// A Herdr-facing operation reads the next committed configuration once.
-/// Replacing Herdr after one operation sends every read and write of the
-/// next operation to the replacement, never the adapter cached at open.
-#[test]
-fn pane_operations_use_the_next_committed_herdr_view_whole() {
-    use crate::store::ManagesMetaflowState as _;
-    let fixture = NexusFixture::new();
-    let log_a = fixture.accept_pane_operations(
-        vec![fixture.settled_agent()],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    fixture.register_with(FlowLifecycle::Active);
-    assert!(matches!(
-        fixture.command(HarnessCommand::Line("through-a".into())),
-        MetaResponse::Commanded(_)
-    ));
-
-    let herdr_b = fixture.directory.path().join("herdr-fixture-b");
-    let log_b = fixture.directory.path().join("herdr-operations-b.log");
-    let typed_b = fixture.directory.path().join("pane-typed-b.txt");
-    let body_a = fs::read_to_string(&fixture.snapshot_program).expect("Herdr A fixture");
-    FixtureExecutable {
-        path: herdr_b.clone(),
-    }
-    .install(
-        &body_a
-            .replace(
-                fixture
-                    .directory
-                    .path()
-                    .join("herdr-operations.log")
-                    .to_string_lossy()
-                    .as_ref(),
-                log_b.to_string_lossy().as_ref(),
-            )
-            .replace(
-                fixture
-                    .directory
-                    .path()
-                    .join("pane-typed.txt")
-                    .to_string_lossy()
-                    .as_ref(),
-                typed_b.to_string_lossy().as_ref(),
-            ),
-    );
-    let mut nexus = fixture
-        .nexus
-        .store
-        .configuration_snapshot()
-        .expect("configuration read")
-        .expect("configuration present")
-        .configured_nexus;
-    nexus.executables.herdr = herdr_b.to_string_lossy().into_owned();
-    fixture
-        .nexus
-        .store
-        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(nexus))
-        .expect("Herdr B committed");
-    // A is now unusable. A cached adapter would fail the next operation.
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install("#!/bin/sh\nexit 64\n");
-
-    assert!(matches!(
-        fixture.command(HarnessCommand::Line("through-b".into())),
-        MetaResponse::Commanded(_)
-    ));
-    assert!(matches!(
-        fixture.command(HarnessCommand::Keys(vec!["ctrl+x".into()])),
-        MetaResponse::Commanded(_)
-    ));
-    assert!(matches!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::ReadPane("908786".into())),
-        MetaResponse::PaneRead(_)
-    ));
-    assert!(
-        fs::read_to_string(log_a)
-            .unwrap_or_default()
-            .contains("through-a")
-    );
-    let b = fs::read_to_string(log_b).expect("Herdr B operations");
-    assert!(b.contains("through-b"), "{b}");
-    assert!(b.contains("ctrl+x"), "{b}");
-
-    let mut unavailable = fixture
-        .nexus
-        .store
-        .configuration_snapshot()
-        .expect("configuration read")
-        .expect("configuration present")
-        .configured_nexus;
-    unavailable.executables.herdr = fixture
-        .directory
-        .path()
-        .join("missing-herdr-c")
-        .to_string_lossy()
-        .into_owned();
-    fixture
-        .nexus
-        .store
-        .configure_change(meta_signal_flow::ConfigurationChange::Nexus(unavailable))
-        .expect("unavailable Herdr committed");
-    assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::ReadPane("908786".into())),
-        MetaResponse::ReadPaneRejected(ReadPaneRejected_Data::HerdrUnavailable)
-    );
 }
 
 #[test]
@@ -323,97 +177,6 @@ fn a_blocked_recipient_is_refused_at_every_tier() {
 }
 
 #[test]
-fn forced_delivery_types_past_a_blocked_state() {
-    let fixture = NexusFixture::new();
-    let log = fixture.accept_pane_operations(
-        vec![fixture.blocked_agent()],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    fixture.register_with(FlowLifecycle::Active);
-    assert!(matches!(
-        fixture.deliver_with_gate(
-            "forced-blocked",
-            Message::Soft(letter("answer the dialog")),
-            meta_signal_flow::Gate::Forced,
-        ),
-        MetaResponse::Delivered(_)
-    ));
-    assert_eq!(prompts(&log).len(), 1);
-}
-
-#[test]
-fn vet_applies_the_delivery_gate_without_typing_or_leasing() {
-    use crate::store::context::RecordsContextSize as _;
-    use crate::store::delivery::RecordsDeliveries as _;
-
-    let fixture = NexusFixture::new();
-    let log = fixture.accept_pane_operations(
-        vec![fixture.blocked_agent()],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    fixture.register_with(FlowLifecycle::Active);
-    assert_eq!(
-        fixture.vet_with_gate(middle_abrupt("note"), meta_signal_flow::Gate::Kept),
-        MetaResponse::DeliveryRejected(DeliveryRejection::RecipientBlocked)
-    );
-    assert_eq!(
-        fixture.vet_with_gate(middle_abrupt("note"), meta_signal_flow::Gate::Forced),
-        MetaResponse::Vetted("908786".into())
-    );
-
-    let body = fs::read_to_string(&fixture.snapshot_program)
-        .expect("Herdr fixture")
-        .replace(
-            "\"agent_status\":\"blocked\"",
-            "\"agent_status\":\"working\"",
-        );
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&body);
-    assert_eq!(
-        fixture.vet_with_gate(Message::Soft(letter("later")), meta_signal_flow::Gate::Kept),
-        MetaResponse::DeliveryRejected(DeliveryRejection::RecipientWorking)
-    );
-
-    let body = fs::read_to_string(&fixture.snapshot_program)
-        .expect("Herdr fixture")
-        .replace("\"agent_status\":\"working\"", "\"agent_status\":\"idle\"");
-    FixtureExecutable {
-        path: fixture.snapshot_program.clone(),
-    }
-    .install(&body);
-    fixture.at_secondary_refreshing_at(200_000);
-    fixture
-        .nexus
-        .store
-        .record_context_size("908786", 200_000)
-        .expect("context size recorded");
-    assert_eq!(
-        fixture.vet_with_gate(middle_abrupt("note"), meta_signal_flow::Gate::Kept),
-        MetaResponse::DeliveryRejected(DeliveryRejection::PastThreshold)
-    );
-    assert_eq!(
-        fixture.vet_with_gate(middle_abrupt("note"), meta_signal_flow::Gate::Forced),
-        MetaResponse::Vetted("908786".into())
-    );
-    assert!(prompts(&log).is_empty());
-    assert!(!fixture.operations().contains("agent prompt"));
-    assert_eq!(
-        fixture.nexus.store.delivery("vet").expect("delivery read"),
-        None
-    );
-    assert!(
-        fixture
-            .nexus
-            .store
-            .settle_interrupted_deliveries()
-            .expect("lease read")
-            .is_empty()
-    );
-}
-
-#[test]
 fn a_draft_in_the_composer_is_never_appended_to() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
@@ -422,10 +185,6 @@ fn a_draft_in_the_composer_is_never_appended_to() {
     );
     fixture.show_composer("\u{1b}[1m›\u{1b}[0m half a thought");
     fixture.register_with(FlowLifecycle::Active);
-    assert_eq!(
-        fixture.vet_with_gate(middle_abrupt("a note"), meta_signal_flow::Gate::Forced),
-        MetaResponse::DeliveryRejected(DeliveryRejection::ComposerOccupied)
-    );
     assert_eq!(
         fixture.send("a note"),
         Sent::Refused(DeliveryRejection::ComposerOccupied)
@@ -593,12 +352,9 @@ fn bodies_carrying_commands_or_keys_are_refused_and_nothing_is_typed() {
             "{text:?}"
         );
         assert_eq!(
-            fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: "vet".into(),
-                flow_id: "908786".into(),
-                message: middle_abrupt(text),
-            })),
+            fixture
+                .nexus
+                .vet_cohort_for_test("908786", &[middle_abrupt(text)]),
             MetaResponse::DeliveryRejected(DeliveryRejection::BodyRefused(refusal)),
             "{text:?}"
         );
@@ -616,12 +372,9 @@ fn a_path_and_a_later_command_line_are_ordinary_text() {
         );
         fixture.register_with(FlowLifecycle::Active);
         assert_eq!(
-            fixture.nexus.dispatch_meta(MetaQuery::Vet(DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: "vet".into(),
-                flow_id: "908786".into(),
-                message: middle_abrupt(text),
-            })),
+            fixture
+                .nexus
+                .vet_cohort_for_test("908786", &[middle_abrupt(text)]),
             MetaResponse::Vetted("908786".into())
         );
         assert_eq!(
@@ -761,7 +514,6 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Command(CommandRequest {
-                gate: meta_signal_flow::Gate::Kept,
                 flow_id: "908786".into(),
                 harness_command: HarnessCommand::Interrupt,
             })),
@@ -775,7 +527,6 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         fixture
             .nexus
             .dispatch_meta(MetaQuery::Command(CommandRequest {
-                gate: meta_signal_flow::Gate::Kept,
                 flow_id: "908786".into(),
                 harness_command: HarnessCommand::Compact,
             })),
@@ -800,7 +551,6 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         resting
             .nexus
             .dispatch_meta(MetaQuery::Command(CommandRequest {
-                gate: meta_signal_flow::Gate::Kept,
                 flow_id: "908786".into(),
                 harness_command: HarnessCommand::Interrupt,
             })),
@@ -808,85 +558,6 @@ fn commands_interrupt_a_working_agent_and_compact_through_the_writer() {
         "nothing to interrupt, and no Escape into a resting agent"
     );
     assert!(!resting.operations().contains("send-keys"));
-}
-
-#[test]
-fn line_keys_clear_and_read_pane_use_the_exact_bound_pane() {
-    let fixture = NexusFixture::new();
-    let log = fixture.accept_pane_operations(
-        vec![fixture.settled_agent()],
-        PromptFixture::Prompted("w1:p3"),
-    );
-    fixture.register_with(FlowLifecycle::Active);
-
-    assert!(matches!(
-        fixture.command(HarnessCommand::Line("owner line".into())),
-        MetaResponse::Commanded(CommandOutcome {
-            command_grade: CommandGrade::Observed,
-            ..
-        })
-    ));
-    assert!(matches!(
-        fixture.command(HarnessCommand::Keys(vec!["enter".into()])),
-        MetaResponse::Commanded(_)
-    ));
-    assert!(matches!(
-        fixture.command(HarnessCommand::Clear),
-        MetaResponse::Commanded(_)
-    ));
-    assert!(fixture.operations().contains("pane send-keys w1:p3 enter"));
-    assert!(fixture.operations().contains("pane send-keys w1:p3 ctrl+u"));
-    assert!(prompts(&log).iter().any(|line| line.contains("owner line")));
-
-    assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::ReadPane("908786".into())),
-        MetaResponse::PaneRead(PaneRead_Data {
-            flow_id: "908786".into(),
-            agent_state: AgentState::Idle,
-            screen: "❯ \n› \n".into(),
-        })
-    );
-    assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::ReadPane("unknown".into())),
-        MetaResponse::ReadPaneRejected(ReadPaneRejected_Data::UnknownFlow)
-    );
-}
-
-#[test]
-fn blocked_commands_follow_their_gate() {
-    for command in [HarnessCommand::Line("answer".into()), HarnessCommand::Clear] {
-        let fixture = NexusFixture::new();
-        fixture.accept_pane_operations(
-            vec![fixture.blocked_agent()],
-            PromptFixture::Prompted("w1:p3"),
-        );
-        fixture.register_with(FlowLifecycle::Active);
-        assert_eq!(
-            fixture.command(command),
-            MetaResponse::CommandRejected(CommandRejection::RecipientBlocked)
-        );
-    }
-
-    for command in [
-        HarnessCommand::Line("answer".into()),
-        HarnessCommand::Keys(vec!["enter".into()]),
-        HarnessCommand::Clear,
-    ] {
-        let fixture = NexusFixture::new();
-        fixture.accept_pane_operations(
-            vec![fixture.blocked_agent()],
-            PromptFixture::Prompted("w1:p3"),
-        );
-        fixture.register_with(FlowLifecycle::Active);
-        assert!(matches!(
-            fixture.command_with_gate(command, meta_signal_flow::Gate::Forced),
-            MetaResponse::Commanded(_)
-        ));
-    }
 }
 
 /// Compaction is an emergency measure: a Compact is refused, before any
@@ -931,11 +602,6 @@ fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
     assert!(prompts(&log).is_empty(), "nothing reached the pane");
     assert!(!fixture.operations().contains("send-keys"));
 
-    assert!(matches!(
-        fixture.command_with_gate(HarnessCommand::Compact, meta_signal_flow::Gate::Forced,),
-        MetaResponse::Commanded(_)
-    ));
-
     fixture
         .nexus
         .store
@@ -952,8 +618,6 @@ fn compact_is_refused_below_the_refresh_threshold_and_placed_at_it() {
     assert_eq!(
         prompts(&log),
         vec![
-            "--session messaging-build agent prompt w1:p3 /compact --wait --until working --until idle --until done --until blocked --timeout 10000"
-                .to_owned(),
             "--session messaging-build agent prompt w1:p3 /compact --wait --until working --until idle --until done --until blocked --timeout 10000"
                 .to_owned()
         ]
@@ -993,40 +657,37 @@ fn the_meta_socket_admits_the_owner_and_refuses_an_unreadable_peer() {
     let fixture = NexusFixture::new();
     fixture.set_agents(vec![]);
     assert_eq!(
-        fixture
-            .nexus
-            .meta_refusal(&fixture.nexus.configured_use().unwrap(), None),
+        fixture.nexus.meta_refusal(None),
         Some(meta_signal_flow::MetaRefusal::PeerUnknown)
     );
     // This test process runs in no flow's pane: it is the owner.
     let own = crate::caller::CallerProcess {
         process_id: std::process::id(),
     };
-    assert_eq!(
-        fixture
-            .nexus
-            .meta_refusal(&fixture.nexus.configured_use().unwrap(), Some(own)),
-        None
-    );
+    assert_eq!(fixture.nexus.meta_refusal(Some(own)), None);
 }
 
 #[test]
-fn a_flow_in_the_configured_meta_aspects_is_admitted_to_the_meta_socket() {
+fn a_flow_outside_meta_aspects_is_refused_the_meta_socket() {
     let fixture = NexusFixture::new();
     super::bind_existing_caller(&fixture, "a001", "pane-1");
     fixture.set_agents(vec![super::codex_agent_in("pane-1", "terminal-pane-1")]);
     let peer = PanePeer::spawn("pane-1");
-    let refusal = fixture.nexus.meta_refusal(
-        &fixture.nexus.configured_use().unwrap(),
-        Some(crate::caller::CallerProcess {
+    let refusal = fixture
+        .nexus
+        .meta_refusal(Some(crate::caller::CallerProcess {
             process_id: peer.0.id(),
-        }),
+        }));
+    assert_eq!(
+        refusal,
+        Some(meta_signal_flow::MetaRefusal::PeerNotAuthorized(
+            super::mind_live()
+        ))
     );
-    assert_eq!(refusal, None);
 }
 
 #[test]
-fn a_flow_whose_role_flow_does_not_know_is_admitted_by_process() {
+fn a_flow_whose_role_flow_does_not_know_is_not_taken_for_the_owner() {
     let fixture = NexusFixture::new();
     fixture.accept_pane_operations(
         vec![fixture.current_agent()],
@@ -1036,13 +697,12 @@ fn a_flow_whose_role_flow_does_not_know_is_admitted_by_process() {
     fixture.register_with(FlowLifecycle::Active);
     let peer = PanePeer::spawn("w1:p3");
     assert_eq!(
-        fixture.nexus.meta_refusal(
-            &fixture.nexus.configured_use().unwrap(),
-            Some(crate::caller::CallerProcess {
+        fixture
+            .nexus
+            .meta_refusal(Some(crate::caller::CallerProcess {
                 process_id: peer.0.id(),
-            })
-        ),
-        None
+            })),
+        Some(meta_signal_flow::MetaRefusal::PeerUnknown)
     );
 }
 
@@ -1095,24 +755,12 @@ fn a_deliver_into_a_flow_past_its_threshold_is_refused() {
         .record_context_size("908786", 200_000)
         .expect("context size recorded");
     assert_eq!(
-        fixture
-            .nexus
-            .dispatch_meta(MetaQuery::Deliver(meta_signal_flow::DeliveryRequest {
-                gate: meta_signal_flow::Gate::Kept,
-                delivery_id: "delivery-past".into(),
-                flow_id: "908786".into(),
-                message: middle_abrupt("one more thing"),
-            })),
+        fixture.nexus.deliver_cohort(
+            "delivery-past".into(),
+            "908786".into(),
+            vec![middle_abrupt("one more thing")],
+        ),
         MetaResponse::DeliveryRejected(meta_signal_flow::DeliveryRejection::PastThreshold)
     );
     assert!(prompts(&log).is_empty(), "nothing reached the pane");
-
-    assert!(matches!(
-        fixture.deliver_with_gate(
-            "delivery-forced-past",
-            middle_abrupt("owner override"),
-            meta_signal_flow::Gate::Forced,
-        ),
-        MetaResponse::Delivered(_)
-    ));
 }

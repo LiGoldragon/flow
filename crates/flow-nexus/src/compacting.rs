@@ -21,7 +21,6 @@
 //!
 //! The warning is a journal line at warning priority.
 
-use crate::RunningNexus;
 use crate::generated::operation::{Operation, Outcome, Record_Data, Record_Data_Context_Data};
 use crate::performing::Performs;
 use crate::store::compaction::{Compaction, Investigation, RecordsCompactions};
@@ -29,6 +28,7 @@ use crate::store::context::RecordsContextSize;
 use crate::store::metaflow::SleepsMetaflows;
 use crate::store::{NamesLiveFlow, ReadsFlowRows};
 use crate::waking::ReadsClaudeDelivery;
+use crate::{ConfiguredUse, RunningNexus};
 use signal_flow::{Address, Aspect, FlowNode, HarnessKind, Layer};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -311,7 +311,15 @@ pub trait WatchesCompactions {
     /// The flow's harness goes on in a new session: its transcript is the
     /// new session's, read from its start.
     fn session_rebound(&self, flow_id: &str);
-    /// A Codex thread's app-server reported a context signal.
+    /// A Codex thread's app-server reported a context signal, under the
+    /// immutable configuration selected by the app-server event ingress.
+    fn codex_context_signal_configured(
+        &self,
+        configured: &ConfiguredUse,
+        thread: &str,
+        signal: CodexContextSignal,
+    );
+    #[cfg(test)]
     fn codex_context_signal(&self, thread: &str, signal: CodexContextSignal);
     /// A Compact was typed into the flow: its next Codex compaction is the
     /// one asked for.
@@ -383,18 +391,24 @@ impl WatchesCompactions for RunningNexus {
             .remove(flow_id);
     }
 
-    fn codex_context_signal(&self, thread: &str, signal: CodexContextSignal) {
+    fn codex_context_signal_configured(
+        &self,
+        configured: &ConfiguredUse,
+        thread: &str,
+        signal: CodexContextSignal,
+    ) {
         let Some(node) = self.codex_flow_on_thread(thread) else {
             return;
         };
         match signal {
             CodexContextSignal::TokenUsage(tokens) => {
-                if self.perform_ingress(Operation::Record(Record_Data::Context(
-                    Record_Data_Context_Data {
+                if self.perform_configured(
+                    configured,
+                    Operation::Record(Record_Data::Context(Record_Data_Context_Data {
                         flow_id: node.flow_id.clone(),
                         tokens,
-                    },
-                ))) != Outcome::Recorded
+                    })),
+                ) != Outcome::Recorded
                 {
                     eprintln!(
                         "flow-nexus: flow {} context size not recorded",
@@ -418,6 +432,13 @@ impl WatchesCompactions for RunningNexus {
                     self.raise_compaction(&node, &item, pre_tokens, &texts);
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    fn codex_context_signal(&self, thread: &str, signal: CodexContextSignal) {
+        if let Ok(configured) = self.configured_use() {
+            self.codex_context_signal_configured(&configured, thread, signal);
         }
     }
 

@@ -65,7 +65,6 @@
 //! [`WakingMetaflows`], so a second request starts no second wake and a
 //! turn end does not drain the waking seat.
 
-use crate::RunningNexus;
 use crate::claude::{
     ClaudeQueuedHistory, ClaudeTranscriptCursor, LocatesClaudeTranscript, MeasuresClaudeContext,
     ReadsClaudeTurns,
@@ -105,6 +104,7 @@ use crate::store::{
     ManagesMetaflowState, NamesLiveFlow, ReadsFlowRoles, ReadsFlowRows, ReadsLaunchAttempt,
     RecordsFlowLifecycle,
 };
+use crate::{ConfiguredUse, RunningNexus};
 use flow_native::DigestsPrompt;
 use meta_signal_flow::{AbsenceProof, Continuity, Undecided};
 use signal_flow::{
@@ -517,7 +517,7 @@ pub trait SleepsAndWakesSeats {
     /// Types what arrived during a wake into the woken flow, oldest first,
     /// until the queue is seen empty under the gate; the hold is released
     /// there.
-    fn drain_woken(&self, address: &Address, lease: WakingLease<'_>);
+    fn drain_woken(&self, configured: &ConfiguredUse, address: &Address, lease: WakingLease<'_>);
     /// Which way an Asleep metaflow is woken.
     fn wake_plan(&self, metaflow: &Metaflow) -> WakePlan;
     /// At the Nexus's start: wakes every metaflow due a wake, as a wake the
@@ -670,7 +670,7 @@ impl StartsRequirementsFirst for RunningNexus {
                     return Err(signal_flow::StartRejection::LaunchPersistenceRefused);
                 }
             }
-            self.drain_woken(&required, lease);
+            self.drain_woken(configured, &required, lease);
             self.settle_stops_at_confirmation();
         }
         Ok(())
@@ -1480,6 +1480,9 @@ impl SleepsAndWakesSeats for RunningNexus {
     }
 
     fn wake_due(&self, address: Address) {
+        let Ok(configured) = self.configured_use() else {
+            return;
+        };
         // Work queued for an Awake seat known resting is handed to it now,
         // as its turn's end would; one in a turn waits for the turn's end.
         // An Awake seat whose pane is gone is put Asleep, to wake below.
@@ -1502,19 +1505,25 @@ impl SleepsAndWakesSeats for RunningNexus {
             return;
         }
         // A refused wake has logged its reason; its work stays queued.
-        if let Outcome::Woken(_) = self.perform_ingress(Operation::Wake(address.clone())) {
-            self.drain_woken(&address, lease);
+        if let Outcome::Woken(_) = self
+            .configured_effects(&configured)
+            .perform(Operation::Wake(address.clone()))
+        {
+            self.drain_woken(&configured, &address, lease);
         }
         self.settle_stops_at_confirmation();
     }
 
-    fn drain_woken(&self, address: &Address, lease: WakingLease<'_>) {
+    fn drain_woken(&self, configured: &ConfiguredUse, address: &Address, lease: WakingLease<'_>) {
         loop {
             let _turn = self
                 .dispatch_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match self.perform_ingress(Operation::Drain(address.clone())) {
+            match self
+                .configured_effects(configured)
+                .perform(Operation::Drain(address.clone()))
+            {
                 Outcome::Drained(typed) if typed.is_empty() => {
                     drop(lease);
                     return;

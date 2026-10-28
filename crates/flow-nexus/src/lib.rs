@@ -109,9 +109,9 @@ pub struct RunningNexus {
     /// The exact typed runtime value that opened this Nexus.
     pub(crate) runtime: flow_ethos::Start,
     pub(crate) store: FlowStore,
-    pub(crate) codex_endpoints: CodexEndpoints,
-    pub(crate) herdr: herdr::HerdrCli,
-    pub(crate) composer: LaunchComposer,
+    codex_endpoints: CodexEndpoints,
+    herdr: herdr::HerdrCli,
+    composer: LaunchComposer,
     /// Serializes dispatch; see `dispatch_serially`.
     pub(crate) dispatch_gate: Mutex<()>,
     /// The exclusive hold on each pane Flow is writing; see
@@ -143,13 +143,20 @@ pub struct RunningNexus {
 pub(crate) struct ConfiguredUse {
     pub(crate) generation: sema_engine::DatabaseMarker,
     pub(crate) snapshot: store::StoredConfigurationSnapshot,
-    pub(crate) codex_endpoints: CodexEndpoints,
-    pub(crate) herdr: herdr::HerdrCli,
-    pub(crate) composer: LaunchComposer,
+    codex_endpoints: CodexEndpoints,
+    herdr: herdr::HerdrCli,
+    composer: LaunchComposer,
     ordinary_socket_path: PathBuf,
 }
 
 /// The root-selected immutable capability for the send-tool service.
+/// Its provider and raw configuration remain behind the ingress boundary.
+///
+/// ```compile_fail
+/// fn read_provider(ingress: flow_nexus::SendToolIngress) {
+///     let _raw_configuration = ingress.0;
+/// }
+/// ```
 pub struct SendToolIngress(ConfiguredUse);
 
 impl SendToolIngress {
@@ -283,7 +290,7 @@ impl RunningNexus {
                 self.observe_codex_events(thread, events)
             }),
             codex_context_signal: Box::new(move |thread, signal| {
-                self.codex_context_signal(thread, signal)
+                self.codex_context_signal_configured(configured, thread, signal)
             }),
             wake_due: Box::new(move |address| self.wake_due(address)),
             rest_ended_awake: Box::new(move |address| {
@@ -519,8 +526,10 @@ impl Dispatches for RunningNexus {
                         signal_flow::PaneCloseFailure::IdentityUnavailable,
                     ));
                 }
-                if self.perform_ingress(Operation::Record(Record_Data::Stopped(flow_id.clone())))
-                    != Outcome::Recorded
+                if self.perform_configured(
+                    &configured,
+                    Operation::Record(Record_Data::Stopped(flow_id.clone())),
+                ) != Outcome::Recorded
                 {
                     return Response::StopRejected(signal_flow::StopRejection::PersistenceRefused);
                 }
@@ -758,8 +767,10 @@ impl Dispatches for RunningNexus {
                         );
                     }
                 }
-                if self.perform_ingress(Operation::Record(Record_Data::Retired(flow_id.clone())))
-                    != Outcome::Recorded
+                if self.perform_configured(
+                    &configured,
+                    Operation::Record(Record_Data::Retired(flow_id.clone())),
+                ) != Outcome::Recorded
                 {
                     return meta_signal_flow::Response::RetireRejected(
                         meta_signal_flow::RetireRejection::StoreRefused,

@@ -1298,7 +1298,11 @@ fn a_queued_order_wakes_fresh_then_drains_the_whole_queue() {
     assert_eq!(woken.queue, queue.clone().unsent());
     woken.queue.push(Request::Order("D".into()).unsent());
     fixture.nexus.store.seed_metaflow(woken);
-    fixture.nexus.drain_woken(&at, lease);
+    fixture.nexus.drain_woken(
+        &fixture.nexus.configured_use().expect("configured fixture"),
+        &at,
+        lease,
+    );
     assert!(!fixture.nexus.waking.is_waking(&at), "the hold is released");
 
     assert_eq!(world.claude_starts(), 1, "{}", world.calls());
@@ -4610,7 +4614,9 @@ fn a_terminal_sender_retracts_its_locks() {
         let fixture = NexusFixture::new();
         let recipient = sender_holding_a_lock(&fixture);
         assert_eq!(
-            fixture.nexus.perform_ingress(Operation::Record(end.clone())),
+            fixture
+                .nexus
+                .perform_ingress(Operation::Record(end.clone())),
             Outcome::Recorded,
             "{end:?}"
         );
